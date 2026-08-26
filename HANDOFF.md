@@ -166,13 +166,54 @@ typed-error minification, and obsolete native cold-size target. The in-browser
 suite passed 1,000 tests and reproduced only the same two inherited UI
 failures. There are no new failures.
 
-The remaining architectural blocker is narrower but real: the SW still reaches
-`controller-turn-semantics.js` through `kernel-turn-live-factories.js`, and that
-owner still supplies the turn driver, legacy dispatcher/registry and feature
-orchestration. The next retained work must move one of those real closures to
-its controller owner and delete its old import in the same checkpoint. Do not
-resume per-domain allowlist churn or introduce a generic bridge merely to alter
-bundle telemetry.
+The remaining aggregate is now classified as fixed migration residue rather
+than an ordinary feature-growth edge. The SW still reaches
+`controller-turn-semantics.js` through `kernel-turn-live-factories.js`, but the
+path is closed over an explicit 17-tool compatibility list and fixed
+orchestrators; it does not import the growing catalog or provider registry.
+The controller-only feature fixture proves that adding a real tool policy,
+schema, implementation and ownership row adds zero SW inputs and leaves
+normalized authority code byte-identical.
+
+Deleting this residue has one honest executable boundary. It must move all of
+the following together, then physically delete the compatibility path:
+
+- the 17 frozen document/web, site-client, headless-execution, workspace,
+  toolbox, review and A2A implementations plus registry execution;
+- composer and attachment shaping, Goal continuation semantics, scheduler and
+  memory orchestration, reviewer orchestration, and actor result shaping;
+- their orchestrator and isolated-actor execution paths, using the same
+  controller semantic owners.
+
+The corresponding fixed authority interfaces must cover exact document
+conversion, session-scoped web request and cache custody, site-client
+registry/runtime/capture custody, sandbox and headless-run custody, exact
+workspace file reads/writes, toolbox records, reviewer actor grants, A2A run
+grants, goal persistence/events, alarms, confirmation, audit, replay and
+cancellation. A smaller tool-family cut cannot delete the aggregate, while a
+single catch-all bridge would be the prohibited generic browser/storage/fetch
+proxy. Do not retain import shuffles, interface-only bags or per-family
+preparation as architectural progress.
+
+This is therefore a deliberate stop point for the aggregate itself unless the
+project accepts that complete cross-root cut. The primary feature-growth
+objective is already enforced: ordinary controller features do not change the
+SW input ledger or normalized authority code, the legacy list cannot grow, and
+new authority classes still require a manifest and ledger review. The fixed
+semantic residue remains ownership debt and must not be described as fully
+migrated.
+
+The latest verification also repairs Bun's root-relative test resolver after
+disposable-worktree runs. A cached absolute module path can no longer point
+focused tests into a deleted measurement tree. This changes no extension input
+or packaged byte. Store-Chrome telemetry remains 1,297,009 bundled SW bytes,
+445 staged inputs and a 347,857-byte minified cold graph; the accepted Home
+cold-start measurements therefore remain the production baseline by identical
+artifact content. Post-repair verification passes all 63 focused ownership,
+protocol, backpressure, runtime and feature-growth tests plus the complete Bun
+suite, typecheck, lint, checked-file coverage and the dweb boundary. The
+packaged-import check still stops only at its inherited 300 KB cold-graph
+budget; this checkpoint does not relax that obsolete policy gate.
 
 ## Completion condition
 
