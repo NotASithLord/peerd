@@ -7,10 +7,12 @@ import {
   controllerHostsPodTool,
   controllerHostsRepositoryTool,
   controllerHostsVmTool,
+  controllerHostsNotebookTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
   executeControllerVmTool,
+  executeControllerNotebookTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -497,6 +499,39 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             });
             const value = await executeControllerVmTool(
               request.toolName, request.args, vmAuthority,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsNotebookTool(request.toolName)) {
+            const notebookAuthority = Object.freeze({
+              readNotebook: (/** @type {string} */ notebookId) => rpc('turn.notebook.read', {
+                ...binding, notebookId,
+              }),
+              listNotebooks: () => rpc('turn.notebook.list', binding),
+              setDefaultNotebook: (/** @type {string} */ notebookId) =>
+                rpc('turn.notebook.set-default', { ...binding, notebookId }),
+              runNotebook: (/** @type {string} */ code, /** @type {number} */ timeoutMs,
+                /** @type {string|undefined} */ notebookId) => rpc('turn.notebook.run', {
+                ...binding, code, timeoutMs, notebookId,
+              }),
+              writeFile: (/** @type {string} */ path, /** @type {string} */ content,
+                /** @type {string|undefined} */ notebookId) =>
+                rpc('turn.notebook.write-file', { ...binding, path, content, notebookId }),
+              readFile: (/** @type {string} */ path,
+                /** @type {string|undefined} */ notebookId) =>
+                rpc('turn.notebook.read-file', { ...binding, path, notebookId }),
+              destroyNotebook: (/** @type {string} */ notebookId) =>
+                rpc('turn.notebook.destroy', { ...binding, notebookId }),
+            });
+            const value = await executeControllerNotebookTool(
+              request.toolName, request.args, notebookAuthority, { signal: options.signal },
             );
             execution = {
               protocol: request.protocol,

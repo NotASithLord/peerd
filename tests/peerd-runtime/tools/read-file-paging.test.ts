@@ -25,7 +25,7 @@ const split = (content: string) => {
 
 const jsCtx = (file: string) => ({
   session: { sessionId: 'chat-1' },
-  jsClient: { readFile: async (_path: string) => file },
+  notebookAuthority: { readFile: async (_path: string) => file },
 });
 const appCtx = (file: string) => ({
   session: { sessionId: 'chat-1' },

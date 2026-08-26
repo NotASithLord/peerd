@@ -18,16 +18,11 @@ export const jsReadFileTool = composeTool("js_read_file", {
 
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string') return { ok: false, error: 'path_required' };
-    // why: jsClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const jsClient = /** @type {{ readFile?: (path: string, opts: { sessionId?: string, notebookId?: string }) => Promise<string> } | undefined} */ (
-      /** @type {any} */ (ctx).jsClient);
-    if (!jsClient?.readFile) return { ok: false, error: 'js_not_available' };
+    const authority = /** @type {{ readFile?: (path:string,notebookId?:string)=>Promise<string> }} */ (
+      /** @type {any} */ (ctx).notebookAuthority);
+    if (!authority?.readFile) return { ok: false, error: 'js_not_available' };
     try {
-      const content = await jsClient.readFile(args.path, {
-        sessionId: ctx.session?.sessionId,
-        notebookId: args.notebook,
-      });
+      const content = await authority.readFile(args.path, args.notebook);
       // Self-paging (the infinite-reread fix): the OPFS file IS the durable
       // backing, so a big read returns a bounded slice and the footer points
       // back at THIS tool with a new offset — no spill store, and no need for a

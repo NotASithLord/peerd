@@ -20,6 +20,7 @@ import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 import { createVmToolAuthority } from './vm-tool-authority.js';
+import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -544,6 +545,19 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.domainState.authority ??= createVmToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx,
+    });
+    return entry;
+  };
+  const notebookExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'notebook', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createNotebookToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
   };
@@ -1343,6 +1357,62 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('VM destroy authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.destroyVm(value.vmId));
+        }
+        case 'turn.notebook.read': {
+          const entry = notebookExecutionEntry(
+            run, value, ['js_notebook', 'js_delete'], ['notebookId'],
+          );
+          if (!entry) return failed('Notebook read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readNotebook(value.notebookId));
+        }
+        case 'turn.notebook.list': {
+          const entry = notebookExecutionEntry(run, value, ['js_notebook'], []);
+          if (!entry) return failed('Notebook list authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.listNotebooks());
+        }
+        case 'turn.notebook.set-default': {
+          const entry = notebookExecutionEntry(
+            run, value, ['js_notebook'], ['notebookId'],
+          );
+          if (!entry) return failed('Notebook default authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'control', () =>
+            entry.domainState.authority.setDefaultNotebook(value.notebookId));
+        }
+        case 'turn.notebook.run': {
+          const entry = notebookExecutionEntry(
+            run, value, ['js_notebook'], ['code', 'timeoutMs', 'notebookId'],
+          );
+          if (!entry) return failed('Notebook run authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.runNotebook(
+              value.code, value.timeoutMs, value.notebookId,
+            ));
+        }
+        case 'turn.notebook.write-file': {
+          const entry = notebookExecutionEntry(
+            run, value, ['js_write_file'], ['path', 'content', 'notebookId'],
+          );
+          if (!entry) return failed('Notebook file-write authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.writeFile(
+              value.path, value.content, value.notebookId,
+            ));
+        }
+        case 'turn.notebook.read-file': {
+          const entry = notebookExecutionEntry(
+            run, value, ['js_read_file'], ['path', 'notebookId'],
+          );
+          if (!entry) return failed('Notebook file-read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readFile(value.path, value.notebookId));
+        }
+        case 'turn.notebook.destroy': {
+          const entry = notebookExecutionEntry(run, value, ['js_delete'], ['notebookId']);
+          if (!entry) return failed('Notebook destroy authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.destroyNotebook(value.notebookId));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

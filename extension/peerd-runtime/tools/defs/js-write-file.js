@@ -24,16 +24,11 @@ export const jsWriteFileTool = composeTool("js_write_file", {
     if (args.content.length > MAX_FILE_CONTENT_CHARS) {
       return { ok: false, error: `content_too_large: ${args.content.length} > ${MAX_FILE_CONTENT_CHARS}` };
     }
-    // why: jsClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const jsClient = /** @type {{ writeFile?: (path: string, content: string, opts: { sessionId?: string, notebookId?: string }) => Promise<unknown> } | undefined} */ (
-      /** @type {any} */ (ctx).jsClient);
-    if (!jsClient?.writeFile) return { ok: false, error: 'js_not_available' };
+    const authority = /** @type {{ writeFile?: (path:string,content:string,notebookId?:string)=>Promise<unknown> }} */ (
+      /** @type {any} */ (ctx).notebookAuthority);
+    if (!authority?.writeFile) return { ok: false, error: 'js_not_available' };
     try {
-      await jsClient.writeFile(args.path, args.content, {
-        sessionId: ctx.session?.sessionId,
-        notebookId: args.notebook,
-      });
+      await authority.writeFile(args.path, args.content, args.notebook);
     } catch (e) {
       return { ok: false, error: `write_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

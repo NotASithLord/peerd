@@ -41,15 +41,9 @@ export const jsNotebookTool = composeTool("js_notebook", {
     if (typeof args?.code !== 'string' || args.code.length === 0) {
       return { ok: false, error: 'code_required' };
     }
-    // why: jsClient / jsRegistry ride the opaque ctx contract (not on the
-    // ToolContext typedef); narrow to the surface this tool touches.
-    const jsClient = /** @type {{ eval?: (code: string, opts: { timeoutMs: number, sessionId?: string, notebookId?: string, signal?: AbortSignal }) => Promise<EvalResult> } | undefined} */ (
-      /** @type {any} */ (ctx).jsClient);
-    const jsRegistry = /** @type {{ get: (id: string) => Promise<unknown>, list: () => Promise<Array<{ id: string, name: string }>>, setDefaultForSession: (sessionId: string, id: string) => Promise<unknown> } | undefined} */ (
-      /** @type {any} */ (ctx).jsRegistry);
-    if (!jsClient || typeof jsClient.eval !== 'function') {
-      return { ok: false, error: 'js_not_available' };
-    }
+    const authority = /** @type {{ readNotebook?: (id:string)=>Promise<unknown>, listNotebooks?: ()=>Promise<Array<{id:string,name:string}>>, setDefaultNotebook?: (id:string)=>Promise<unknown>, runNotebook?: (code:string,timeoutMs:number,notebookId?:string)=>Promise<EvalResult> }} */ (
+      /** @type {any} */ (ctx).notebookAuthority);
+    if (!authority?.runNotebook) return { ok: false, error: 'js_not_available' };
     if (ctx.abortSignal?.aborted) {
       return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
     }
@@ -58,30 +52,25 @@ export const jsNotebookTool = composeTool("js_notebook", {
     let targetNotebookId;
     if (typeof args.notebook === 'string' && args.notebook.trim().length > 0) {
       const want = args.notebook.trim();
-      if (!jsRegistry) return { ok: false, error: 'js_registry_unavailable' };
+      if (!authority.readNotebook || !authority.listNotebooks || !authority.setDefaultNotebook) {
+        return { ok: false, error: 'js_registry_unavailable' };
+      }
       if (want.startsWith('notebook-')) {
-        const rec = await jsRegistry.get(want);
+        const rec = await authority.readNotebook(want);
         if (!rec) return { ok: false, error: `notebook_not_found: ${want}` };
         targetNotebookId = want;
       } else {
-        const all = await jsRegistry.list();
+        const all = await authority.listNotebooks();
         const lower = want.toLowerCase();
         const found = all.find((s) => s.name.toLowerCase() === lower);
         if (!found) return { ok: false, error: `notebook_not_found: ${want}` };
         targetNotebookId = found.id;
       }
-      if (ctx.session?.sessionId) {
-        try { await jsRegistry.setDefaultForSession(ctx.session.sessionId, targetNotebookId); }
-        catch (e) { console.debug('[js_notebook] MRU bump failed', e); }
-      }
+      try { await authority.setDefaultNotebook(targetNotebookId); }
+      catch (e) { console.debug('[js_notebook] MRU bump failed', e); }
     }
     try {
-      const result = await jsClient.eval(args.code, {
-        timeoutMs,
-        sessionId: ctx.session?.sessionId,
-        notebookId: targetNotebookId,
-        signal: ctx.abortSignal,
-      });
+      const result = await authority.runNotebook(args.code, timeoutMs, targetNotebookId);
       if (result.stopped) {
         return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
       }

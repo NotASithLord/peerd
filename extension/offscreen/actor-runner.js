@@ -857,6 +857,61 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'notebook-read-request') {
+          await relayExactToolMessage(m, 'notebook-read-response', () =>
+            sendToSW('notebook/read', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              notebookId: m.notebookId,
+            }));
+          return;
+        }
+        if (m.type === 'notebook-list-request') {
+          await relayExactToolMessage(m, 'notebook-list-response', () =>
+            sendToSW('notebook/list', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'notebook-set-default-request') {
+          await relayExactToolMessage(m, 'notebook-set-default-response', () =>
+            sendToSW('notebook/set-default', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              notebookId: m.notebookId,
+            }));
+          return;
+        }
+        if (m.type === 'notebook-run-request') {
+          await relayExactToolMessage(m, 'notebook-run-response', () =>
+            sendToSW('notebook/run', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              code: m.code, timeoutMs: m.timeoutMs, notebookId: m.notebookId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'notebook-write-file-request') {
+          await relayExactToolMessage(m, 'notebook-write-file-response', () =>
+            sendToSW('notebook/write-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              path: m.path, content: m.content, notebookId: m.notebookId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'notebook-read-file-request') {
+          await relayExactToolMessage(m, 'notebook-read-file-response', () =>
+            sendToSW('notebook/read-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              path: m.path, notebookId: m.notebookId,
+            }));
+          return;
+        }
+        if (m.type === 'notebook-destroy-request') {
+          await relayExactToolMessage(m, 'notebook-destroy-response', () =>
+            sendToSW('notebook/destroy', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              notebookId: m.notebookId,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {
