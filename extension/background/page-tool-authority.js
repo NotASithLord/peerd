@@ -88,3 +88,6 @@ export const createPageToolAuthority = ({ call, ctx, signal }) => {
     },
   });
 };
+
+export const bindPageToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
+  state.authority ??= createPageToolAuthority(input);

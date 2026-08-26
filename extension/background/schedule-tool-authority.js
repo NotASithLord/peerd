@@ -90,3 +90,6 @@ export const createScheduleToolAuthority = ({ call, ctx, signal }) => {
     },
   });
 };
+
+export const bindScheduleToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
+  state.authority ??= createScheduleToolAuthority(input);

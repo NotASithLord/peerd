@@ -77,3 +77,8 @@ export const createPersistenceToolAuthority = ({ call, ctx }) => {
     },
   });
 };
+
+export const bindPersistenceToolAuthority = (
+  /** @type {any} */ state, /** @type {any} */ input,
+) =>
+  state.authority ??= createPersistenceToolAuthority(input);

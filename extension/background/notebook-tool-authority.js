@@ -99,3 +99,6 @@ export const createNotebookToolAuthority = ({ call, ctx, signal }) => {
     },
   });
 };
+
+export const bindNotebookToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
+  state.authority ??= createNotebookToolAuthority(input);

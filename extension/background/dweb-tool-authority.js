@@ -83,3 +83,6 @@ export const createDwebToolAuthority = ({ call, ctx, signal }) => {
     },
   });
 };
+
+export const bindDwebToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
+  state.authority ??= createDwebToolAuthority(input);
