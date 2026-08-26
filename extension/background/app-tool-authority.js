@@ -177,3 +177,6 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
     },
   });
 };
+
+export const bindAppToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
+  state.authority ??= createAppToolAuthority(input);

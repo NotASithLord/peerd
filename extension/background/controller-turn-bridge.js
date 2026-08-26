@@ -18,15 +18,15 @@ import {
 } from '../shared/controller-tool-manifest.js';
 import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
-import { createRepositoryToolAuthority } from './repository-tool-authority.js';
-import { createVmToolAuthority } from './vm-tool-authority.js';
-import { createNotebookToolAuthority } from './notebook-tool-authority.js';
-import { createAppToolAuthority } from './app-tool-authority.js';
-import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
-import { createPageToolAuthority } from './page-tool-authority.js';
-import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
-import { createScheduleToolAuthority } from './schedule-tool-authority.js';
-import { createDwebToolAuthority } from './dweb-tool-authority.js';
+import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
+import { bindVmToolAuthority } from './vm-tool-authority.js';
+import { bindNotebookToolAuthority } from './notebook-tool-authority.js';
+import { bindAppToolAuthority } from './app-tool-authority.js';
+import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
+import { bindPageToolAuthority } from './page-tool-authority.js';
+import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
+import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
+import { bindDwebToolAuthority } from './dweb-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -535,7 +535,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'repository', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createRepositoryToolAuthority({
+    bindRepositoryToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -549,7 +549,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'vm', tools, fields, optional);
     if (!entry) return null;
-    entry.domainState.authority ??= createVmToolAuthority({
+    bindVmToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx,
     });
     return entry;
@@ -562,7 +562,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'notebook', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createNotebookToolAuthority({
+    bindNotebookToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -575,7 +575,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'app', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createAppToolAuthority({
+    bindAppToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -588,7 +588,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'persistence', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createPersistenceToolAuthority({
+    bindPersistenceToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx,
     });
     return entry;
@@ -600,7 +600,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'page', tools, []);
     if (!entry) return null;
-    entry.domainState.authority ??= createPageToolAuthority({
+    bindPageToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -613,7 +613,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'introspection', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createIntrospectionToolAuthority({
+    bindIntrospectionToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx,
     });
     return entry;
@@ -626,7 +626,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'schedule', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createScheduleToolAuthority({
+    bindScheduleToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -639,7 +639,7 @@ export const makeControllerTurnBridge = ({
   ) => {
     const entry = domainExecutionEntry(run, value, 'dweb', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createDwebToolAuthority({
+    bindDwebToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;

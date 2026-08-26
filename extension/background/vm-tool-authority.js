@@ -138,3 +138,6 @@ export const createVmToolAuthority = ({ call, ctx }) => {
     },
   });
 };
+
+export const bindVmToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
+  state.authority ??= createVmToolAuthority(input);

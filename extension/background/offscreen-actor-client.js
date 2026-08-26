@@ -18,15 +18,15 @@ import { controllerToolDomain, CONTROLLER_TOOL_MANIFEST } from '/shared/controll
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
-import { createRepositoryToolAuthority } from './repository-tool-authority.js';
-import { createVmToolAuthority } from './vm-tool-authority.js';
-import { createNotebookToolAuthority } from './notebook-tool-authority.js';
-import { createAppToolAuthority } from './app-tool-authority.js';
-import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
-import { createPageToolAuthority } from './page-tool-authority.js';
-import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
-import { createScheduleToolAuthority } from './schedule-tool-authority.js';
-import { createDwebToolAuthority } from './dweb-tool-authority.js';
+import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
+import { bindVmToolAuthority } from './vm-tool-authority.js';
+import { bindNotebookToolAuthority } from './notebook-tool-authority.js';
+import { bindAppToolAuthority } from './app-tool-authority.js';
+import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
+import { bindPageToolAuthority } from './page-tool-authority.js';
+import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
+import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
+import { bindDwebToolAuthority } from './dweb-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -413,6 +413,20 @@ export const makeOffscreenActorClient = ({
       && controllerToolDomain(entry.toolName) === domain
       && toolNames.includes(entry.toolName) ? entry : null;
   };
+  const repositoryEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'repository', tools, fields);
+    if (!entry) return null;
+    bindRepositoryToolAuthority(entry.domainState, {
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
+    });
+    return entry;
+  };
   const vmEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
@@ -421,7 +435,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'vm', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createVmToolAuthority({
+    bindVmToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
     });
     return entry;
@@ -434,7 +448,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'notebook', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createNotebookToolAuthority({
+    bindNotebookToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
@@ -448,7 +462,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'app', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createAppToolAuthority({
+    bindAppToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
@@ -462,7 +476,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'persistence', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createPersistenceToolAuthority({
+    bindPersistenceToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
     });
     return entry;
@@ -474,7 +488,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'page', tools, []);
     if (!entry) return null;
-    entry.domainState.authority ??= createPageToolAuthority({
+    bindPageToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
@@ -488,7 +502,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'introspection', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createIntrospectionToolAuthority({
+    bindIntrospectionToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
     });
     return entry;
@@ -501,7 +515,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'schedule', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createScheduleToolAuthority({
+    bindScheduleToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
@@ -515,7 +529,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const entry = domainEntry(grant, msg, 'dweb', tools, fields);
     if (!entry) return null;
-    entry.domainState.authority ??= createDwebToolAuthority({
+    bindDwebToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
@@ -1300,12 +1314,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['pod_destroy'], ['podId']);
+      const entry = repositoryEntry(grant, msg, ['pod_destroy'], ['podId']);
       if (!entry) return { ok: false, error: 'repository/read-pod: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/read-pod', 'read', () =>
         entry.domainState.authority.readPod(msg.podId));
     },
@@ -1314,12 +1324,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['pod_destroy'], ['podId']);
+      const entry = repositoryEntry(grant, msg, ['pod_destroy'], ['podId']);
       if (!entry) return { ok: false, error: 'repository/destroy-pod: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/destroy-pod', 'commit', () =>
         entry.domainState.authority.destroyPod(msg.podId));
     },
@@ -1328,12 +1334,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_history'], []);
+      const entry = repositoryEntry(grant, msg, ['repo_history'], []);
       if (!entry) return { ok: false, error: 'repository/read-status: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/read-status', 'read', () =>
         entry.domainState.authority.readStatus());
     },
@@ -1342,12 +1344,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_history'], ['depth']);
+      const entry = repositoryEntry(grant, msg, ['repo_history'], ['depth']);
       if (!entry) return { ok: false, error: 'repository/read-history: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/read-history', 'read', () =>
         entry.domainState.authority.readHistory(msg.depth));
     },
@@ -1356,14 +1354,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(
-        grant, msg, 'repository', ['repo_history', 'repo_remote'], [],
-      );
+      const entry = repositoryEntry(grant, msg, ['repo_history', 'repo_remote'], []);
       if (!entry) return { ok: false, error: 'repository/read-remote: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/read-remote', 'read', () =>
         entry.domainState.authority.readRemote());
     },
@@ -1372,12 +1364,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_history'], ['from', 'to']);
+      const entry = repositoryEntry(grant, msg, ['repo_history'], ['from', 'to']);
       if (!entry) return { ok: false, error: 'repository/read-diff: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/read-diff', 'read', () =>
         entry.domainState.authority.readDiff(msg.from, msg.to));
     },
@@ -1386,12 +1374,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['to']);
+      const entry = repositoryEntry(grant, msg, ['repo_version'], ['to']);
       if (!entry) return { ok: false, error: 'repository/confirm-restore: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/confirm-restore', 'control', () =>
         entry.domainState.authority.confirmRestore(msg.to));
     },
@@ -1400,12 +1384,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['message']);
+      const entry = repositoryEntry(grant, msg, ['repo_version'], ['message']);
       if (!entry) return { ok: false, error: 'repository/checkpoint: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/checkpoint', 'commit', () =>
         entry.domainState.authority.checkpoint(msg.message));
     },
@@ -1414,12 +1394,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['name']);
+      const entry = repositoryEntry(grant, msg, ['repo_version'], ['name']);
       if (!entry) return { ok: false, error: 'repository/branch: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/branch', 'commit', () =>
         entry.domainState.authority.branch(msg.name));
     },
@@ -1428,12 +1404,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['name']);
+      const entry = repositoryEntry(grant, msg, ['repo_version'], ['name']);
       if (!entry) return { ok: false, error: 'repository/checkout: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/checkout', 'commit', () =>
         entry.domainState.authority.checkout(msg.name));
     },
@@ -1442,12 +1414,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['to']);
+      const entry = repositoryEntry(grant, msg, ['repo_version'], ['to']);
       if (!entry) return { ok: false, error: 'repository/restore: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/restore', 'commit', () =>
         entry.domainState.authority.restore(msg.to));
     },
@@ -1456,14 +1424,10 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], [
+      const entry = repositoryEntry(grant, msg, ['repo_remote'], [
         'op', 'target', 'branch',
       ]);
       if (!entry) return { ok: false, error: 'repository/confirm-remote: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/confirm-remote', 'control', () =>
         entry.domainState.authority.confirmRemote(msg.op, msg.target, msg.branch));
     },
@@ -1472,12 +1436,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], ['url']);
+      const entry = repositoryEntry(grant, msg, ['repo_remote'], ['url']);
       if (!entry) return { ok: false, error: 'repository/link: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/link', 'commit', () =>
         entry.domainState.authority.link(msg.url));
     },
@@ -1486,12 +1446,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], ['target']);
+      const entry = repositoryEntry(grant, msg, ['repo_remote'], ['target']);
       if (!entry) return { ok: false, error: 'repository/fetch: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/fetch', 'commit', () =>
         entry.domainState.authority.fetch(msg.target));
     },
@@ -1500,12 +1456,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], ['target', 'branch']);
+      const entry = repositoryEntry(grant, msg, ['repo_remote'], ['target', 'branch']);
       if (!entry) return { ok: false, error: 'repository/push: authority mismatch', outcomeKnown: true };
-      entry.domainState.authority ??= createRepositoryToolAuthority({
-        call: entry.prepared.call, ctx: entry.prepared.ctx,
-        signal: /** @type {any} */ (grant).relaySignal,
-      });
       return runDomainEffect(entry, 'repository/push', 'resource', () =>
         entry.domainState.authority.push(msg.target, msg.branch));
     },

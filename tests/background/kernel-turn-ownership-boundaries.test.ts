@@ -34,6 +34,22 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('shares exact domain authority bindings across orchestrator and actor relays', () => {
+    const sources = [
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ].map((entry) => readFileSync(join(EXTENSION_ROOT, entry), 'utf8'));
+    for (const domain of [
+      'Repository', 'Vm', 'Notebook', 'App', 'Persistence',
+      'Page', 'Introspection', 'Schedule', 'Dweb',
+    ]) {
+      for (const source of sources) {
+        expect(source).toContain(`bind${domain}ToolAuthority`);
+        expect(source).not.toContain(`create${domain}ToolAuthority`);
+      }
+    }
+  });
+
   it('keeps the semantic owner free of authority and host dependencies', async () => {
     const modules = await modulesFor('peerd-runtime/controller-turn-semantics.js');
     const forbiddenPrefixes = [

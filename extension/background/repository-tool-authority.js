@@ -215,3 +215,10 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
     },
   });
 };
+
+// why: orchestrator and isolated-actor relays must reuse one exact authority
+// binding instead of rebuilding domain custody in each route table.
+export const bindRepositoryToolAuthority = (
+  /** @type {any} */ state, /** @type {any} */ input,
+) =>
+  state.authority ??= createRepositoryToolAuthority(input);

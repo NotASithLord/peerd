@@ -149,3 +149,8 @@ export const createIntrospectionToolAuthority = ({ call, ctx }) => {
     },
   });
 };
+
+export const bindIntrospectionToolAuthority = (
+  /** @type {any} */ state, /** @type {any} */ input,
+) =>
+  state.authority ??= createIntrospectionToolAuthority(input);
