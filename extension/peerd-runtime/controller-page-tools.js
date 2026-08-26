@@ -1,0 +1,62 @@
+// @ts-check
+
+// why: tool definitions, code-run shaping and the choice of exact page
+// capability belong to the controller. The injected authority object exposes
+// only one-use, named operations already pinned to the admitted call.
+import { openTabTool } from './tools/defs/open-tab.js';
+import { readPageTool } from './tools/defs/read-page.js';
+import { snapshotTool } from './tools/defs/snapshot.js';
+import { readStateTool } from './tools/defs/read-state.js';
+import { watchChangesTool } from './tools/defs/watch-changes.js';
+import { queryDomTool } from './tools/defs/query-dom.js';
+import { pageEvalTool } from './tools/defs/page-eval.js';
+import { pageExecTool } from './tools/defs/page-exec.js';
+import { pageKeysTool } from './tools/defs/page-keys.js';
+import { navigateTool } from './tools/defs/navigate.js';
+import { typeTool } from './tools/defs/type.js';
+import { clickTool } from './tools/defs/click.js';
+import { loginTool } from './tools/defs/login.js';
+import { pageCodeTool } from './tools/defs/page-code.js';
+import { captureTool } from './tools/web/screenshot.js';
+import { viewTool } from './tools/web/view.js';
+
+export const CONTROLLER_PAGE_TOOL_NAMES = Object.freeze([
+  'open_tab', 'read_page', 'snapshot', 'read_state', 'watch_changes',
+  'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type',
+  'click', 'login', 'page_code', 'capture', 'view',
+]);
+
+const tools = Object.freeze({
+  open_tab: openTabTool,
+  read_page: readPageTool,
+  snapshot: snapshotTool,
+  read_state: readStateTool,
+  watch_changes: watchChangesTool,
+  query_dom: queryDomTool,
+  page_eval: pageEvalTool,
+  page_exec: pageExecTool,
+  page_keys: pageKeysTool,
+  navigate: navigateTool,
+  type: typeTool,
+  click: clickTool,
+  login: loginTool,
+  page_code: pageCodeTool,
+  capture: captureTool,
+  view: viewTool,
+});
+
+export const controllerHostsPageTool = (/** @type {unknown} */ name) =>
+  typeof name === 'string' && Object.hasOwn(tools, name);
+
+/**
+ * @param {string} name
+ * @param {unknown} args
+ * @param {Record<string,Function>} authority
+ */
+export const executeControllerPageTool = async (name, args, authority) => {
+  const tool = tools[/** @type {keyof typeof tools} */ (name)];
+  if (!tool) throw Object.assign(new Error('controller page tool is unavailable'), {
+    code: 'controller-page-tool-unavailable', outcomeKnown: true,
+  });
+  return tool.execute(args, /** @type {any} */ ({ pageAuthority: authority }));
+};

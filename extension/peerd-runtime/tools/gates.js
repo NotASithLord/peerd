@@ -39,7 +39,7 @@
 // Deep import of the PURE matcher (not the /peerd-egress/index.js barrel,
 // which pulls in vault/storage + the browser polyfill and would make this
 // module unimportable under the bun test runner). Same pattern as
-// composer/resolvers.js and tools/defs/dom-helpers.js.
+// composer/resolvers.js and browser-authority/dom-helpers.js.
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain,
@@ -174,7 +174,7 @@ export const actorTierGate = (tool, args, ctx) => {
   // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
   // refuses HERE, at the gate, not just at execute-time. PR #119: surface-aware —
   // a code-surface web actor's set is {snapshot, read_page, page_code}, so a
-  // discrete click/type/navigate FROM THE MODEL refuses here too (the page/call
+  // discrete click/type/navigate FROM THE MODEL refuses here too (the fixed page-program
   // route's inner dispatch builds a tools-surface ctx, which stays allowed).
   if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing, ctx.actorSurface)) {
     const scope = ctx.backing === 'api' ? 'API integration (no tab or DOM)' : `${ctx.actorType ?? 'unknown'}`;

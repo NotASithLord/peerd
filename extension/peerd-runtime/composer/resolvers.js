@@ -34,7 +34,7 @@ import {
   originOfUrl,
   resolveTargetTab,
   scriptingTarget,
-} from '../tools/defs/dom-helpers.js';
+} from '../browser-authority/dom-helpers.js';
 import { BrowserAutomationPolicyError } from '../tools/browser-automation-policy.js';
 
 export { originOfUrl };

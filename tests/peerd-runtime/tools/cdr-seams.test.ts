@@ -21,7 +21,7 @@
 import { describe, test, expect } from 'bun:test';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 import { fetchUrlTool } from '../../../extension/peerd-runtime/tools/defs/fetch-url.js';
-import { readPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
+import { readPageTool } from '../../../extension/background/page-authority/read-page.js';
 
 const ZW = '​';
 const SOFT_HYPHEN = '­';

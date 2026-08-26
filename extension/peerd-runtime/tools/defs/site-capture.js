@@ -17,7 +17,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // tab backing only (an API actor has no tab to observe; it derives by probing).
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { browserDocumentIdentity, originOfUrl, resolveTargetTab } from './dom-helpers.js';
+import { browserDocumentIdentity, originOfUrl, resolveTargetTab } from '../../browser-authority/dom-helpers.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const siteCaptureTool = composeTool("site_capture", {

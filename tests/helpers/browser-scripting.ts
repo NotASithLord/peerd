@@ -1,4 +1,4 @@
-import { liveDocumentLocationInjected } from '../../extension/peerd-runtime/tools/defs/dom-helpers.js';
+import { liveDocumentLocationInjected } from '../../extension/peerd-runtime/browser-authority/dom-helpers.js';
 import { hasPasswordFieldInjected } from '../../extension/peerd-runtime/dom/walk-injected.js';
 
 export const TEST_DOCUMENT_ID = 'test-public-document';

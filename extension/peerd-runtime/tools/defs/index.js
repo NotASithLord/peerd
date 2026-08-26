@@ -9,18 +9,6 @@
 // the agent through all five in order.
 
 import { inspectTool }               from './inspect.js';
-import { readPageTool }              from './read-page.js';
-import { snapshotTool }              from './snapshot.js';
-import { readStateTool }             from './read-state.js';
-import { watchChangesTool }          from './watch-changes.js';
-import { queryDomTool }              from './query-dom.js';
-import { pageEvalTool }              from './page-eval.js';
-import { pageExecTool }              from './page-exec.js';
-import { pageKeysTool }              from './page-keys.js';
-import { clickTool }                 from './click.js';
-import { loginTool }                 from './login.js';
-import { typeTool }                  from './type.js';
-import { navigateTool }              from './navigate.js';
 import { readPdfTool }               from './read-pdf.js';
 import { readDocTool }               from './read-doc.js';
 import { fetchUrlTool }              from './fetch-url.js';
@@ -31,10 +19,8 @@ import { siteClientReadTool }        from './site-client-read.js';
 import { siteClientWriteTool }       from './site-client-write.js';
 import { siteCaptureTool }           from './site-capture.js';
 import { actorListTool }             from './actor-list.js';
-import { openTabTool }               from './open-tab.js';
 import { sandboxCreateTool }          from './sandbox-create.js';
 import { scriptTool }                  from './script.js';
-import { pageCodeTool }               from './page-code.js';
 import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
@@ -55,24 +41,10 @@ import { a2aRunTool }                  from './a2a-run.js';
 export {
   // inspect
   inspectTool,
-  // DOM
-  readPageTool,
-  snapshotTool,
-  readStateTool,
-  watchChangesTool,
-  queryDomTool,
-  pageEvalTool,
-  pageExecTool,
-  pageKeysTool,
-  clickTool,
-  loginTool,
-  typeTool,
-  navigateTool,
   readPdfTool,
   readDocTool,
   // sessions
   actorListTool,
-  openTabTool,
   // site clients (DESIGN-19 — per-origin derived API clients; web-actor-only)
   siteClientRunTool,
   siteClientReadTool,
@@ -83,7 +55,6 @@ export {
   // engine (Notebook)
   scriptTool,
   readRunCacheTool,
-  pageCodeTool,
   // engine (Pod)
   // engine (App)
   // edit (SEARCH/REPLACE — primary write path)
@@ -120,22 +91,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   // tabs + API integrations) that collapsed vm_list/js_list/app_list/list_tabs/
   // list_integrations into one columnar result keyed by `type`.
   actorListTool,
-  openTabTool,
-  // DOM
-  readPageTool,
-  snapshotTool,
-  readStateTool,
-  watchChangesTool,
-  queryDomTool,
-  pageEvalTool,
-  pageExecTool,
-  pageKeysTool,
-  navigateTool,
-  typeTool,
-  clickTool,
-  // login (Tier 0) — INITIATES a user-gesture sign-in; web-actor-only (hidden from
-  // main in exposure.js, allowed for kind:'web'). Holds no secret, fills no password.
-  loginTool,
   readPdfTool,
   // read_doc — the OFFICE-format sibling of read_pdf (Word/Excel/PowerPoint/
   // OpenDocument/RTF/EPUB/CSV). Registered + hidden from main (actor-only, like
@@ -145,10 +100,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
   // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
   fetchUrlTool,
-  // the web actor's CODE-REPL action surface (PR #119 A/B arm) — registered +
-  // hidden from main; allowed ONLY for a code-surface web actor
-  // (WEB_ACTOR_CODE_TOOLS in exposure.js).
-  pageCodeTool,
   // fetch_url's spill-and-page read side — same exposure (web actor only; the
   // cache holds fetched page content).
   readWebCacheTool,

@@ -5,12 +5,13 @@ import { describe, it, expect } from '../../framework.js';
 import {
   pageKeysTool,
   _parseKeySequenceForTests,
-} from '/peerd-runtime/tools/defs/page-keys.js';
-import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+} from '/background/page-authority/page-keys.js';
+import { pageKeysTool as controllerPageKeysTool } from '/peerd-runtime/tools/defs/page-keys.js';
+import { controllerHostsPageTool } from '/peerd-runtime/controller-page-tools.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
-/** @typedef {import('/peerd-runtime/tools/defs/page-keys.js').KeyEvent} KeyEvent */
+/** @typedef {import('/background/page-authority/page-keys.js').KeyEvent} KeyEvent */
 /** @param {import('/shared/tool-types.js').ToolResult} r @returns {string} */
 const okContent = (r) => /** @type {import('/shared/tool-types.js').ToolResultOk} */ (r).content;
 /** @param {import('/shared/tool-types.js').ToolResult} r @returns {string} */
@@ -179,15 +180,14 @@ describe('page_keys — outer tool', () => {
     expect(errOf(r)).toBe('browser_target_unverified');
   });
 
-  it('is registered in BUILTIN_TOOLS with DOM primitive + write side-effect', () => {
-    const found = BUILTIN_TOOLS.find(t => t.name === 'page_keys');
-    expect(!!found).toBe(true);
-    expect(found?.primitive).toBe('tab');
-    expect(found?.sideEffect).toBe('write');
+  it('is registered only in the controller catalog with DOM write metadata', () => {
+    expect(controllerHostsPageTool('page_keys')).toBe(true);
+    expect(controllerPageKeysTool.primitive).toBe('tab');
+    expect(controllerPageKeysTool.sideEffect).toBe('write');
   });
 
   it('origin gate returns the active tab origin', () => {
-    const origins = pageKeysTool.origins({ keys: 'a' }, /** @type {ToolContext} */ ({
+    const origins = controllerPageKeysTool.origins({ keys: 'a' }, /** @type {ToolContext} */ ({
       activeTab: { origin: 'https://gmail.com' },
     }));
     expect(origins).toEqual(['https://gmail.com']);

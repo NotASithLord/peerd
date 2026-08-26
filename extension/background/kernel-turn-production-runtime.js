@@ -1,9 +1,10 @@
 // @ts-check
 
 import { createKernelTurnRuntime } from './kernel-turn-runtime.js';
+import { KERNEL_PAGE_PROGRAM_ROUTE_NAMES } from '../shared/kernel-feature-route-inventory.js';
 
 export const KERNEL_TURN_RELAY_ROUTE_NAMES = Object.freeze([
-  'a2a/call', 'actors/call', 'page/call', 'site-fetch/call',
+  'a2a/call', 'actors/call', 'site-fetch/call', ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
 ]);
 
 const requiredFunction = (/** @type {Record<string,any>} */ value, /** @type {string} */ key) => {

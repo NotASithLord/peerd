@@ -483,6 +483,74 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('executes page_code through exact page-run authority', async () => {
+    const pageDescriptor = authorityDescriptor('page_code');
+    let legacy = 0;
+    let genericExecutor = 0;
+    const registrations: any[] = [];
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [pageDescriptor], refreshTools: async () => [pageDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-page-code-1', name: 'page_code' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-page-code-1',
+            partialJson: '{"code":"return await page.snapshot()"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-page-code-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              session: { sessionId: 'actor-web-1', kind: 'actor' },
+              jsOffscreenClient: {
+                execHeadless: async () => ({
+                  value: { title: 'Example' }, consoleOutput: [], durationMs: 4, error: null,
+                }),
+              },
+              scriptRuns: {
+                mintRunId: () => 'page-run-1',
+                register: (...args: any[]) => registrations.push(['register', ...args]),
+                release: (...args: any[]) => registrations.push(['release', ...args]),
+              },
+            },
+          },
+          args: call.args,
+          projection: {},
+          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+        }),
+        handleToolEffect: async () => ({
+          ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+      executeToolCall: async () => { genericExecutor += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    expect(registrations).toEqual([
+      ['register', 'page-run-1', expect.anything(), 'actor-web-1', { page: true }],
+      ['release', 'page-run-1'],
+    ]);
+    expect(legacy).toBe(0);
+    expect(genericExecutor).toBe(0);
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      result: expect.objectContaining({ ok: true, content: expect.stringContaining('Example') }),
+    }));
+  });
+
   test('retains preparation in the kernel and exposes only exact effect calls', async () => {
     const custody = Object.freeze({ private: true });
     const observed: any[] = [];

@@ -106,7 +106,6 @@ const KERNEL_ROUTE_OVERRIDES = new Set([
   'toolbox/record',
   'sw/web-fetch',
   'sw/web-fetch-abort',
-  'page/call',
   'site-fetch/call',
   'transfer/export',
   'transfer/import',
@@ -120,6 +119,7 @@ export const SEMANTIC_ROUTE_CLASSIFICATIONS = Object.freeze(
     ...row,
     placement: /** @type {'kernel'|'split'} */ (
       KERNEL_SOURCES.has(row.source) || KERNEL_ROUTE_OVERRIDES.has(row.route)
+        || row.route.startsWith('page-program/')
         || row.route.startsWith('dweb/')
         ? 'kernel' : 'split'
     ),

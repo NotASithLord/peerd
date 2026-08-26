@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "label": "types",
-  "message": "100% // @ts-check",
-  "color": "brightgreen",
+  "message": "99.9% // @ts-check",
+  "color": "green",
   "namedLogo": "typescript",
   "logoColor": "white"
 }

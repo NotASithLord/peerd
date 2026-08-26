@@ -5,7 +5,7 @@
 // not import the full catalog.
 
 import { getToolPolicy } from './policy.js';
-import { resolveToolOrigins } from './origins.js';
+import { resolveToolOrigins } from '../../tool-origin-policy.js';
 
 export { resolveToolOrigins };
 

@@ -261,8 +261,6 @@ export {
 // PR #119: the host-side handler for the web actor's code-REPL arm — turns a
 // page.<method> RPC (made inside the sealed worker) into the SAME gated tool
 // dispatch the tool-call web actor uses, pinned to the actor's owned tab.
-// resolvePageTab is the pure "adopt the first tab on page.goto" decision.
-export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
@@ -449,8 +447,9 @@ export {
 
 // --- web (capture wrapper) ----------------------------------------------
 export {
-  WEB_TOOLS, captureTool,
+  WEB_TOOLS,
 } from './tools/web/index.js';
+export { captureTool } from './tools/web/screenshot.js';
 
 // --- voice (lightweight control/UI surface) -----------------------------
 // The offscreen-only transcriber factory imports Moonshine and must never be
@@ -503,7 +502,7 @@ export {
   classifyBrowserAutomationTarget,
   isAddressableBrowserTab,
 } from './tools/browser-automation-policy.js';
-export { isDenylistedTab, liveDocumentLocationInjected } from './tools/defs/dom-helpers.js';
+export { isDenylistedTab, liveDocumentLocationInjected } from './browser-authority/dom-helpers.js';
 
 // --- lifecycle (the interruption/recovery contract's functional core) ---
 // Canonical operation states + the retry-class recovery decision, SW/actor

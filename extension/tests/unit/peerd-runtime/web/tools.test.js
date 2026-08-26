@@ -14,7 +14,7 @@
 // run by `bun test ./tests` (CI).
 
 import { describe, it, expect } from '../../../framework.js';
-import { captureTool } from '/peerd-runtime/tools/web/screenshot.js';
+import { captureTool } from '/background/page-authority/capture.js';
 import { browserProbeResult } from '../../../helpers/browser-scripting.js';
 
 const makeActivationEvent = () => {

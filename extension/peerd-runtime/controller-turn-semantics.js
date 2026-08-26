@@ -89,7 +89,6 @@ import {
 } from './actor/web-actor.js';
 import { describeLandingStop, landingStopCard, originPhrase } from './actor/origin-lock-report.js';
 import { makeToolboxParseCheck } from './toolbox/core.js';
-import { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
 import { WEB_TOOLS } from './tools/web/index.js';
 import { wrapUntrusted } from './tools/prompt-wrap.js';
 import { digestCapture } from './site-clients/digest.js';
@@ -175,7 +174,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   makeAutoMemory,
   makeCheapCall,
   makeInitOrchestrator,
-  makePageCallHandler,
   makeRequestReview,
   makeScheduler,
   makeSpawnActor,
@@ -203,7 +201,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   REASONING_BUDGET_TOKENS,
   REASONING_EFFORT_LEVELS,
   resolveManifestAllow,
-  resolvePageTab,
   resolveSiteUrl,
   resolveWebActorSurface,
   restrictCtxCapabilities,

@@ -10,6 +10,7 @@ import {
   controllerHostsNotebookTool,
   controllerHostsAppTool,
   controllerHostsPersistenceTool,
+  controllerHostsPageTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -17,6 +18,7 @@ import {
   executeControllerNotebookTool,
   executeControllerAppTool,
   executeControllerPersistenceTool,
+  executeControllerPageTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -618,6 +620,37 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             });
             const value = await executeControllerPersistenceTool(
               request.toolName, request.args, request.projection, persistenceAuthority,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsPageTool(request.toolName)) {
+            const pageAuthority = Object.freeze({
+              openProtectedBackgroundTab: () => rpc('turn.page.open-tab', binding),
+              readOwnedPage: () => rpc('turn.page.read', binding),
+              captureOwnedAccessibilityTree: () => rpc('turn.page.snapshot', binding),
+              readOwnedFrameworkState: () => rpc('turn.page.read-state', binding),
+              drainOwnedDomChanges: () => rpc('turn.page.watch-changes', binding),
+              queryOwnedDom: () => rpc('turn.page.query-dom', binding),
+              evaluateOwnedPageMainWorld: () => rpc('turn.page.evaluate-main', binding),
+              evaluateOwnedPageDebugger: () => rpc('turn.page.evaluate-debugger', binding),
+              readTrustedKeysAvailability: () => rpc('turn.page.keys-availability', binding),
+              navigateOwnedTab: () => rpc('turn.page.navigate', binding),
+              fillOwnedTarget: () => rpc('turn.page.fill', binding),
+              clickOwnedTarget: () => rpc('turn.page.click', binding),
+              performConfirmedOwnedLogin: () => rpc('turn.page.login', binding),
+              runOwnedPageProgram: () => rpc('turn.page.run-program', binding),
+              captureForegroundPixels: () => rpc('turn.page.capture-foreground', binding),
+              captureOwnedTabPixels: () => rpc('turn.page.capture-owned', binding),
+            });
+            const value = await executeControllerPageTool(
+              request.toolName, request.args, pageAuthority,
             );
             execution = {
               protocol: request.protocol,

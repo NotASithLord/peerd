@@ -10,7 +10,7 @@ describe('temporary legacy tool strangler', () => {
   test('is explicit, frozen, unique, and disjoint from controller ownership', () => {
     expect(Object.isFrozen(LEGACY_TOOL_ALLOWLIST)).toBe(true);
     expect(new Set(LEGACY_TOOL_ALLOWLIST).size).toBe(LEGACY_TOOL_ALLOWLIST.length);
-    expect(LEGACY_TOOL_ALLOWLIST).toHaveLength(47);
+    expect(LEGACY_TOOL_ALLOWLIST).toHaveLength(31);
     expect(LEGACY_TOOL_ALLOWLIST.filter((name) =>
       Object.hasOwn(CONTROLLER_TOOL_MANIFEST.tools, name))).toEqual([]);
   });

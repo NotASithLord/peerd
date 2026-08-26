@@ -6,9 +6,9 @@
 // suite (extension/tests/unit/peerd-runtime/dom-walk.test.js).
 
 import { describe, test, expect } from 'bun:test';
-import { snapshotTool } from '../../../extension/peerd-runtime/tools/defs/snapshot.js';
-import { clickTool, clickInjected } from '../../../extension/peerd-runtime/tools/defs/click.js';
-import { typeTool, typeInjected } from '../../../extension/peerd-runtime/tools/defs/type.js';
+import { snapshotTool } from '../../../extension/background/page-authority/snapshot.js';
+import { clickTool, clickInjected } from '../../../extension/background/page-authority/click.js';
+import { typeTool, typeInjected } from '../../../extension/background/page-authority/type.js';
 import { createRefRegistry } from '../../../extension/peerd-runtime/dom/ref-registry.js';
 import {
   FORM_SUBMISSION_CODES,

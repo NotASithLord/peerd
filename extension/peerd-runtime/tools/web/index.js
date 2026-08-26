@@ -15,14 +15,5 @@
 // and submits same-origin forms via its DOM tools (type/click). These
 // capabilities stay off the orchestrator. The primitives (primitives.js) are intentionally NOT
 // re-exported here; they're internal to the wrappers (fetch_url + capture + view).
-export { captureTool } from './screenshot.js';
-export { viewTool } from './view.js';
-
-import { captureTool } from './screenshot.js';
-import { viewTool } from './view.js';
-
 /** @type {import('/shared/tool-types.js').Tool[]} */
-export const WEB_TOOLS = [
-  captureTool,
-  viewTool,
-];
+export const WEB_TOOLS = [];

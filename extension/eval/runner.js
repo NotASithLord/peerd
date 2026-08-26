@@ -138,7 +138,7 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
     // activity signal for the settle window.
     case 'turn/tool-result': om2w?.onToolResult(msg); bumpSettle(); break;
     // The CODE surface's real page actions: each settled page.* op inside a
-    // page_code call, announced by the SW page/call route ('page/op'). Without
+    // page_code call, announced by the SW page-program routes ('page/op'). Without
     // these a code-arm trajectory records as [navigate, answer] — no work for
     // the judge to see.
     case 'page/op': om2w?.onPageOp(msg); bumpSettle(); break;

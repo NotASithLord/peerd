@@ -111,6 +111,7 @@ import {
   webActorSourceProjectionRow,
 } from '/shared/web-actor-source-projection.js';
 import { providerEgressPolicy } from './provider-egress-manifest.js';
+import { createPageToolAuthority } from './page-tool-authority.js';
 
 const originOf = (/** @type {string} */ value) => {
   try { return new URL(value).origin; }
@@ -141,7 +142,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     applyComposer,
     buildMintInjection,
     buildTemporalBlock,
-    canonicalCodeTraceLabel,
     classifyAction,
     confirmActionsFromRecord,
     costOf,
@@ -182,7 +182,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     makeAutoMemory,
     makeCheapCall,
     makeInitOrchestrator,
-    makePageCallHandler,
     makeRequestReview,
     makeScheduler,
     makeSpawnActor,
@@ -211,7 +210,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     REASONING_EFFORT_LEVELS,
     registerTools,
     resolveManifestAllow,
-    resolvePageTab,
     resolveSiteUrl,
     resolveWebActorSurface,
     restrictCtxCapabilities,
@@ -2085,14 +2083,101 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       actorRecoveryGate, actorLifecycle: spawnActorCore,
     });
 
-    const pageCall = makePageCallHandler({
-      dispatchToolCall: /** @type {any} */ (dispatchToolCall),
-      buildActorContext: (/** @type {any} */ { sessionId, tabId }) => buildToolContext({
-        sessionId, activeTabId: tabId, exposure: EXPOSURE_ACTOR,
+    const pageProgramRoute = (/** @type {{
+     * toolName:string,method:string,tabMode:'adopt'|'owned'|'free',
+     * riskClass:'read'|'resource',invoke?:(authority:any)=>Promise<any>|any,
+     * }} */ {
+      toolName, method, tabMode, riskClass, invoke,
+    }) => async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
+      if (!deps.isOffscreenSender(sender)) {
+        return { ok: false, error: `${method}: unauthorized relay`, outcomeKnown: true };
+      }
+      if (deps.vault.isLocked()) return { ok: false, error: 'locked', outcomeKnown: true };
+      if (!message || typeof message !== 'object' || Array.isArray(message)
+          || !Object.keys(message).every(
+            (key) => ['args', 'ownerSessionId', 'runId'].includes(key),
+          ) || !message.args || typeof message.args !== 'object'
+          || Array.isArray(message.args)) {
+        return { ok: false, error: `${method}: invalid request`, outcomeKnown: true };
+      }
+      const { args, ownerSessionId, runId } = message;
+      if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
+        return { ok: false, error: `${method}: no owner`, outcomeKnown: true };
+      }
+      if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+          || scriptRuns.allows(runId, 'page') !== true
+          || scriptRuns.admitOp(runId, 'page') !== true) {
+        return {
+          ok: false, error: `${method}: unknown, finished, foreign or over-limit run`,
+          outcomeKnown: true,
+        };
+      }
+      const signal = scriptRuns.signalFor(runId);
+      if (signal?.aborted) return { ok: false, error: `${method}: aborted`, outcomeKnown: true };
+      const owner = await shared.sessions.get(ownerSessionId).catch(() => null);
+      if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web'
+          || owner.backing === 'api') {
+        return { ok: false, error: `${method}: not a tab-backed web actor`, outcomeKnown: true };
+      }
+      let tabId = webActorTabBindings.tabFor(ownerSessionId);
+      if (typeof tabId !== 'number' && tabMode === 'adopt') {
+        const adopted = await adoptWebTab(ownerSessionId, signal ?? undefined).catch(() => null);
+        tabId = adopted?.tabId;
+      }
+      if (signal?.aborted) return { ok: false, error: `${method}: aborted`, outcomeKnown: true };
+      if (typeof tabId !== 'number' && tabMode !== 'free') {
+        return {
+          ok: false,
+          error: `${method}: no page open yet — call page.goto(url) first to open your tab.`,
+          outcomeKnown: true,
+        };
+      }
+      const ctx = await buildToolContext({
+        sessionId: ownerSessionId, activeTabId: tabId, exposure: EXPOSURE_ACTOR,
         actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
         actorSurface: 'tools',
-      }),
-    });
+      });
+      const call = {
+        name: toolName,
+        args: { ...args, ...(typeof tabId === 'number' ? { tabId } : {}) },
+        id: `page-${runId}-${crypto.randomUUID()}`,
+      };
+      let result;
+      try {
+        if (typeof invoke === 'function') {
+          // why: the route and handler are exact, while the established policy
+          // shell still owns per-operation gates, confirmation, hooks, audit,
+          // lifecycle receipts and child-navigation attribution. The custom
+          // executor avoids re-registering controller-owned implementations in
+          // the SW registry; post-hook arguments are the only arguments used.
+          result = await dispatchToolCall(call, ctx, {
+            execute: (prepared) => invoke(createPageToolAuthority({
+              call: { ...call, args: prepared.args },
+              ctx: prepared.execCtx,
+              signal: signal ?? undefined,
+            })),
+          });
+        } else {
+          // why: these fixed routes cover only still-legacy non-page domains.
+          // The request cannot choose a tool name, and each route disappears
+          // with its owning domain checkpoint.
+          result = await dispatchToolCall(call, ctx);
+        }
+      } catch (cause) {
+        const replayable = riskClass === 'read';
+        result = {
+          ok: false,
+          error: cause instanceof Error ? cause.message : String(cause),
+          outcomeKnown: replayable || /** @type {any} */ (cause)?.outcomeKnown === true,
+          ...(replayable ? { retryable: true } : { retryable: false }),
+        };
+      }
+      shared.uiPorts.broadcast({
+        type: 'page/op', sessionId: ownerSessionId, tabId, method,
+        ok: result?.ok === true,
+      });
+      return result;
+    };
     const observeAppRuntime = async (/** @type {{sessionId:string,appId:string,signal?:AbortSignal}} */ request) => {
       const startedAt = performance.now();
       const ctx = await buildToolContext({
@@ -2469,51 +2554,67 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     };
     const relayRoutes = {
       'actors/call': actorsRoutes['actors/call'],
-      'page/call': async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
-        if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'page_call_unauthorized_relay' };
-        if (deps.vault.isLocked()) return { ok: false, error: 'locked' };
-        const { method, args, ownerSessionId, runId } = message;
-        if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
-          return { ok: false, error: 'page_call_no_owner' };
-        }
-        if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
-            || scriptRuns.allows(runId, 'page') !== true
-            || scriptRuns.admitOp(runId, 'page') !== true) {
-          return { ok: false, error: 'page_call_unknown_finished_foreign_or_over_limit_run' };
-        }
-        const signal = scriptRuns.signalFor(runId);
-        if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
-        const owner = await shared.sessions.get(ownerSessionId).catch(() => null);
-        if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
-        if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web'
-            || owner.backing === 'api') {
-          return { ok: false, error: 'page_call_not_web_actor' };
-        }
-        const decision = resolvePageTab(
-          webActorTabBindings.tabFor(ownerSessionId), String(method ?? ''),
-        );
-        if (decision.action === 'refuse') return { ok: false, error: decision.error };
-        let tabId;
-        if (decision.action === 'adopt') {
-          const adopted = await adoptWebTab(ownerSessionId, signal ?? undefined).catch(() => null);
-          if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
-          if (typeof adopted?.tabId !== 'number') {
-            return { ok: false, error: 'page_call_tab_open_failed' };
-          }
-          tabId = adopted.tabId;
-        } else tabId = decision.tabId;
-        if (signal?.aborted) return { ok: false, error: 'page_call_aborted' };
-        const outcome = await pageCall({
-          method: String(method ?? ''), args, sessionId: ownerSessionId, tabId,
-          signal: signal ?? undefined,
-        });
-        shared.uiPorts.broadcast({
-          type: 'page/op', sessionId: ownerSessionId, tabId,
-          method: canonicalCodeTraceLabel('page', method).method,
-          ok: outcome?.ok === true,
-        });
-        return outcome;
-      },
+      'page-program/navigate': pageProgramRoute({
+        toolName: 'navigate', method: 'goto', tabMode: 'adopt', riskClass: 'resource',
+        invoke: (authority) => authority.navigateOwnedTab(),
+      }),
+      'page-program/click': pageProgramRoute({
+        toolName: 'click', method: 'click', tabMode: 'owned', riskClass: 'resource',
+        invoke: (authority) => authority.clickOwnedTarget(),
+      }),
+      'page-program/fill': pageProgramRoute({
+        toolName: 'type', method: 'fill', tabMode: 'owned', riskClass: 'resource',
+        invoke: (authority) => authority.fillOwnedTarget(),
+      }),
+      'page-program/snapshot': pageProgramRoute({
+        toolName: 'snapshot', method: 'snapshot', tabMode: 'owned', riskClass: 'read',
+        invoke: (authority) => authority.captureOwnedAccessibilityTree(),
+      }),
+      'page-program/read': pageProgramRoute({
+        toolName: 'read_page', method: 'content', tabMode: 'owned', riskClass: 'read',
+        invoke: (authority) => authority.readOwnedPage(),
+      }),
+      'page-program/read-state': pageProgramRoute({
+        toolName: 'read_state', method: 'readState', tabMode: 'owned', riskClass: 'read',
+        invoke: (authority) => authority.readOwnedFrameworkState(),
+      }),
+      'page-program/watch-changes': pageProgramRoute({
+        toolName: 'watch_changes', method: 'watchChanges', tabMode: 'owned', riskClass: 'read',
+        invoke: (authority) => authority.drainOwnedDomChanges(),
+      }),
+      'page-program/query-dom': pageProgramRoute({
+        toolName: 'query_dom', method: 'query', tabMode: 'owned', riskClass: 'read',
+        invoke: (authority) => authority.queryOwnedDom(),
+      }),
+      'page-program/view': pageProgramRoute({
+        toolName: 'view', method: 'view', tabMode: 'owned', riskClass: 'read',
+        invoke: (authority) => authority.captureOwnedTabPixels(),
+      }),
+      'page-program/login': pageProgramRoute({
+        toolName: 'login', method: 'login', tabMode: 'owned', riskClass: 'resource',
+        invoke: (authority) => authority.performConfirmedOwnedLogin(),
+      }),
+      'page-program/read-pdf': pageProgramRoute({
+        toolName: 'read_pdf', method: 'readPdf', tabMode: 'owned', riskClass: 'read',
+      }),
+      'page-program/fetch': pageProgramRoute({
+        toolName: 'fetch_url', method: 'fetch', tabMode: 'free', riskClass: 'read',
+      }),
+      'page-program/read-document': pageProgramRoute({
+        toolName: 'read_doc', method: 'readDocument', tabMode: 'free', riskClass: 'read',
+      }),
+      'page-program/read-cache': pageProgramRoute({
+        toolName: 'read_web_cache', method: 'readCache', tabMode: 'free', riskClass: 'read',
+      }),
+      'page-program/site-client-read': pageProgramRoute({
+        toolName: 'site_client_read', method: 'readSiteClient', tabMode: 'free', riskClass: 'read',
+      }),
+      'page-program/site-client-write': pageProgramRoute({
+        toolName: 'site_client_write', method: 'writeSiteClient', tabMode: 'free', riskClass: 'resource',
+      }),
+      'page-program/site-capture': pageProgramRoute({
+        toolName: 'site_capture', method: 'captureSite', tabMode: 'owned', riskClass: 'read',
+      }),
       'site-fetch/call': async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
         if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'site_fetch_unauthorized_relay' };
         if (deps.vault.isLocked()) return { ok: false, error: 'locked' };

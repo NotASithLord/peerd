@@ -36,3 +36,8 @@ export {
   controllerHostsPersistenceTool,
   executeControllerPersistenceTool,
 } from './controller-persistence-tools.js';
+export {
+  CONTROLLER_PAGE_TOOL_NAMES,
+  controllerHostsPageTool,
+  executeControllerPageTool,
+} from './controller-page-tools.js';

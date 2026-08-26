@@ -43,8 +43,8 @@ import { disarmText, disarmMarkup } from '../../../extension/peerd-runtime/dom/c
 import { ugcWriteConfirm } from '../../../extension/peerd-runtime/actor/ugc-registry.js';
 import { inspectTabToolCall } from '../../../extension/peerd-runtime/tools/egress-heuristics.js';
 import { validateActorReply } from '../../../extension/peerd-runtime/actor/reply-schema.js';
-import { clickInjected } from '../../../extension/peerd-runtime/tools/defs/click.js';
-import { typeInjected } from '../../../extension/peerd-runtime/tools/defs/type.js';
+import { clickInjected } from '../../../extension/background/page-authority/click.js';
+import { typeInjected } from '../../../extension/background/page-authority/type.js';
 
 interface Case {
   payload: string;   // what the hostile page plants, or the hijacked actor emits

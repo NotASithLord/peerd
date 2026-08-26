@@ -19,7 +19,7 @@ import { draftAgentsMd, deriveChecklist, resolveWorkspaceKey } from './initializ
 // disarmText is PURE (not an IO surface), so importing it directly does not
 // break the module's dependency-injection rule.
 import { disarmText } from '../dom/cdr.js';
-import { resolveTargetTab, scriptingTarget } from '../tools/defs/dom-helpers.js';
+import { resolveTargetTab, scriptingTarget } from '../browser-authority/dom-helpers.js';
 import { BrowserAutomationPolicyError } from '../tools/browser-automation-policy.js';
 import { probeMemoryInitTabInjected } from '../../shared/memory-init-tab-probe.js';
 

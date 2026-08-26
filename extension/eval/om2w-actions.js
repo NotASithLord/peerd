@@ -55,7 +55,7 @@ export const pageActionFor = (name, input = {}) => {
 
 /**
  * The page-action mapping for one page.* op (the CODE surface's real actions,
- * announced by the SW page/call route as 'page/op' events). A page_code tool
+ * announced by the SW page-program routes as 'page/op' events). A page_code tool
  * call is ONE opaque tool_use; its factual page actions are these inner ops —
  * without them a code-arm trajectory records as [navigate, answer] and the
  * judge can't see the work. goto/click/fill act; snapshot/content perceive

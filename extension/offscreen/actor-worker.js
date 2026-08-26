@@ -14,6 +14,7 @@ import {
   controllerHostsNotebookTool,
   controllerHostsAppTool,
   controllerHostsPersistenceTool,
+  controllerHostsPageTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -21,6 +22,7 @@ import {
   executeControllerNotebookTool,
   executeControllerAppTool,
   executeControllerPersistenceTool,
+  executeControllerPageTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -129,6 +131,22 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'memory-write-response'
       || m.type === 'todo-read-response'
       || m.type === 'todo-replace-response'
+      || m.type === 'page-open-tab-response'
+      || m.type === 'page-read-response'
+      || m.type === 'page-snapshot-response'
+      || m.type === 'page-read-state-response'
+      || m.type === 'page-watch-changes-response'
+      || m.type === 'page-query-dom-response'
+      || m.type === 'page-evaluate-main-response'
+      || m.type === 'page-evaluate-debugger-response'
+      || m.type === 'page-keys-availability-response'
+      || m.type === 'page-navigate-response'
+      || m.type === 'page-fill-response'
+      || m.type === 'page-click-response'
+      || m.type === 'page-login-response'
+      || m.type === 'page-run-program-response'
+      || m.type === 'page-capture-foreground-response'
+      || m.type === 'page-capture-owned-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -555,6 +573,31 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           });
           result = await executeControllerPersistenceTool(
             prepared.toolName, prepared.args, prepared.projection, persistenceAuthority,
+          );
+        } else if (controllerHostsPageTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type) => authorityValue(actorToolRequest(
+            type, { executionId },
+          ));
+          const pageAuthority = Object.freeze({
+            openProtectedBackgroundTab: () => request('page-open-tab-request'),
+            readOwnedPage: () => request('page-read-request'),
+            captureOwnedAccessibilityTree: () => request('page-snapshot-request'),
+            readOwnedFrameworkState: () => request('page-read-state-request'),
+            drainOwnedDomChanges: () => request('page-watch-changes-request'),
+            queryOwnedDom: () => request('page-query-dom-request'),
+            evaluateOwnedPageMainWorld: () => request('page-evaluate-main-request'),
+            evaluateOwnedPageDebugger: () => request('page-evaluate-debugger-request'),
+            readTrustedKeysAvailability: () => request('page-keys-availability-request'),
+            navigateOwnedTab: () => request('page-navigate-request'),
+            fillOwnedTarget: () => request('page-fill-request'),
+            clickOwnedTarget: () => request('page-click-request'),
+            performConfirmedOwnedLogin: () => request('page-login-request'),
+            runOwnedPageProgram: () => request('page-run-program-request'),
+            captureForegroundPixels: () => request('page-capture-foreground-request'),
+            captureOwnedTabPixels: () => request('page-capture-owned-request'),
+          });
+          result = await executeControllerPageTool(
+            prepared.toolName, prepared.args, pageAuthority,
           );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,

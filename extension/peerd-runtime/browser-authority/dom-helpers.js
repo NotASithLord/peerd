@@ -12,28 +12,28 @@
 // the barrel pulls in vault/storage, which load the browser polyfill and
 // break this module's unit tests. composer/resolvers.js imports it the
 // same way for the same reason.
-import { originOfUrl } from '../metadata/origins.js';
+import { originOfUrl } from '../tool-origin-policy.js';
 import {
   isDenylistedTab,
   liveDocumentLocationInjected,
-} from '../../dom/browser-target-probe.js';
+} from '../dom/browser-target-probe.js';
 export {
   isDenylistedTab,
   liveDocumentLocationInjected,
-} from '../../dom/browser-target-probe.js';
+} from '../dom/browser-target-probe.js';
 // The one live look at the target document (issues 267 + 276). Deep import for
 // the same reason as above — dom/index.js is fine, but this file is unit-tested
 // without a browser and the barrel is wider than the one function needed.
-import { hasPasswordFieldInjected } from '../../dom/walk-injected.js';
+import { hasPasswordFieldInjected } from '../dom/walk-injected.js';
 import {
   BROWSER_TARGET_STAGES,
   BrowserAutomationPolicyError,
   BrowserNetworkGuardUnavailableError,
   classifyBrowserAutomationTarget,
   unverifiedBrowserTargetVerdict,
-} from '../browser-automation-policy.js';
-import { AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE } from '../../actor/auth-wait.js';
-export { AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE } from '../../actor/auth-wait.js';
+} from '../tools/browser-automation-policy.js';
+import { AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE } from '../actor/auth-wait.js';
+export { AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE } from '../actor/auth-wait.js';
 
 const authWaitError = () => Object.assign(
   new Error(`${AUTH_WAITING_FOR_USER_CODE}: ${AUTH_WAITING_FOR_USER_MESSAGE}`),
@@ -422,4 +422,4 @@ export const cdpUnavailableError = (ctx, gap, hint) => {
  * @param {string | undefined | null} url
  * @returns {string}
  */
-export { originOfUrl } from '../metadata/origins.js';
+export { originOfUrl } from '../tool-origin-policy.js';

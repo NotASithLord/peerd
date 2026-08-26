@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   KERNEL_DWEB_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
+  KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
 } from '../../extension/shared/kernel-feature-route-inventory.js';
 import {
@@ -123,14 +124,15 @@ describe('kernel executable owner', () => {
       options: gate('options'), home: gate('home'), app: gate('app'), relay: gate('relay'),
       engine: gate('engine'),
     });
-    const expected = new Map([
+    const expected = new Map<string, string>([
       ['pod/cancel-io', 'pod'], ['pod/get-meta', 'pod'], ['pod/git', 'pod'],
       ['pod/web-fetch', 'pod'], ['sw/web-fetch', 'webFetch'],
       ['sw/web-fetch-abort', 'webFetch'], ['export/artifact', 'artifactExport'],
       ['import/inspect', 'options'], ['import/apply', 'options'], ['apps/delete', 'home'],
       ['app/actor-chat', 'app'], ['app-code/observe', 'relay'],
       ['app-code/act', 'relay'], ['actors/call', 'relay'],
-      ['page/call', 'relay'], ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
+      ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES.map((route) => [route, 'relay'] as const),
+      ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
       ['script-run/abort', 'relay'], ['a2a/call', 'relay'],
       ['vm/tab-ready', 'engine'], ['js/tab-ready', 'engine'],
       ['pod/tab-adopt', 'engine'], ['app/tab-ready', 'engine'],

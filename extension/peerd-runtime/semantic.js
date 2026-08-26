@@ -4,7 +4,7 @@
 
 import { filterByRuntimeCapabilities } from './runtime-capabilities.js';
 import { TOOL_METADATA_ORDER, TOOL_METADATA_RECORDS } from './tools/metadata/catalog.js';
-import { resolveToolOrigins } from './tools/metadata/origins.js';
+import { resolveToolOrigins } from './tool-origin-policy.js';
 
 /** @template T @param {T} value @returns {T} */
 const deepFreeze = (value) => {

@@ -238,6 +238,26 @@ const PAGE_METHODS = {
 /** The page.* methods the actor may call (drives the worker stub + the prompt). */
 export const PAGE_API_METHODS = Object.freeze(codeClientMethods('page'));
 
+const PAGE_TOOL_ROUTES = Object.freeze({
+  navigate: 'page-program/navigate',
+  click: 'page-program/click',
+  type: 'page-program/fill',
+  snapshot: 'page-program/snapshot',
+  read_page: 'page-program/read',
+  read_state: 'page-program/read-state',
+  watch_changes: 'page-program/watch-changes',
+  query_dom: 'page-program/query-dom',
+  read_pdf: 'page-program/read-pdf',
+  view: 'page-program/view',
+  fetch_url: 'page-program/fetch',
+  read_doc: 'page-program/read-document',
+  read_web_cache: 'page-program/read-cache',
+  site_client_read: 'page-program/site-client-read',
+  site_client_write: 'page-program/site-client-write',
+  site_capture: 'page-program/site-capture',
+  login: 'page-program/login',
+});
+
 /**
  * Translate a `page.<method>(args)` call into the peerd tool call to dispatch.
  * Pure. Throws {@link PageApiError} on an unknown method or malformed args.
@@ -250,6 +270,18 @@ export const pageCallToToolCall = (call) => {
   const declared = typeof method === 'string' ? codeClientMethod('page', method) : null;
   if (!spec || !declared || declared.tool !== spec.tool) throw new PageApiError(`unknown page method: ${String(method)}`);
   return { name: spec.tool, args: spec.toArgs(call?.args ?? {}) };
+};
+
+/**
+ * Resolve one declared page method to its fixed SW relay route. The caller
+ * cannot supply a route or tool name; both come from the sealed manifest.
+ * @param {PageCall} call
+ */
+export const pageCallToRelay = (call) => {
+  const toolCall = pageCallToToolCall(call);
+  const route = PAGE_TOOL_ROUTES[/** @type {keyof typeof PAGE_TOOL_ROUTES} */ (toolCall.name)];
+  if (!route) throw new PageApiError(`page method has no fixed authority route: ${call.method}`);
+  return { route, args: toolCall.args };
 };
 
 /**
@@ -282,4 +314,48 @@ export const shapePageResult = (method, toolResult) => {
     throw new PageApiError(content ? `${code}: ${content}` : code);
   }
   return spec.shape(parseContent(toolResult.content));
+};
+
+/**
+ * Shape the raw exact-authority ToolResult into the page worker's response.
+ * @param {string} method
+ * @param {any} result
+ */
+export const shapePageCallOutcome = (method, result) => {
+  const structured = result?.structured && typeof result.structured === 'object'
+    ? result.structured : {};
+  const browserPolicies = Array.isArray(result?.browserPolicies)
+    ? result.browserPolicies
+    : result?.browserPolicy ? [result.browserPolicy]
+      : Array.isArray(structured.browserPolicies)
+        ? structured.browserPolicies
+        : structured.browserPolicy ? [structured.browserPolicy] : [];
+  const policyFields = browserPolicies.length ? { browserPolicies } : {};
+  const terminalFields = result?.endTurn === true ? {
+    endTurn: true,
+    endTurnContent: typeof result.endTurnContent === 'string'
+      ? result.endTurnContent
+      : typeof result.content === 'string' ? result.content : '',
+    ...(typeof result.endTurnOutcomeKind === 'string'
+      ? { endTurnOutcomeKind: result.endTurnOutcomeKind }
+      : typeof result.outcomeKind === 'string'
+        ? { endTurnOutcomeKind: result.outcomeKind } : {}),
+  } : {};
+  try {
+    return {
+      ok: true,
+      value: shapePageResult(method, result),
+      ...(Array.isArray(result?.images) && result.images.length
+        ? { images: result.images.slice(-1) } : {}),
+      ...policyFields,
+      ...terminalFields,
+    };
+  } catch (cause) {
+    return {
+      ok: false,
+      error: cause instanceof Error ? cause.message : String(cause),
+      ...policyFields,
+      ...terminalFields,
+    };
+  }
 };

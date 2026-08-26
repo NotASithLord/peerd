@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { openTabTool } from '../../../extension/peerd-runtime/tools/defs/open-tab.js';
+import { openTabTool } from '../../../extension/background/page-authority/open-tab.js';
 import { siteCaptureTool } from '../../../extension/peerd-runtime/tools/defs/site-capture.js';
-import { clickTool } from '../../../extension/peerd-runtime/tools/defs/click.js';
+import { clickTool } from '../../../extension/background/page-authority/click.js';
 import {
   BrowserAutomationPolicyError,
   BrowserNetworkGuardUnavailableError,

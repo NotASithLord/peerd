@@ -14,9 +14,10 @@
 import { describe, it, expect } from '../../framework.js';
 import { domWalkInjected, createRefRegistry } from '/peerd-runtime/index.js';
 import { hasPasswordFieldInjected } from '/peerd-runtime/dom/walk-injected.js';
-import { liveDocumentLocationInjected } from '/peerd-runtime/tools/defs/dom-helpers.js';
-import { snapshotTool, clickTool, typeTool } from '/peerd-runtime/tools/defs/index.js';
-import { clickInjected } from '/peerd-runtime/tools/defs/click.js';
+import { liveDocumentLocationInjected } from '/peerd-runtime/browser-authority/dom-helpers.js';
+import { snapshotTool } from '/background/page-authority/snapshot.js';
+import { clickTool, clickInjected } from '/background/page-authority/click.js';
+import { typeTool } from '/background/page-authority/type.js';
 import { TEST_TIME_ORIGIN } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */

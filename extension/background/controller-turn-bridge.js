@@ -23,6 +23,7 @@ import { createVmToolAuthority } from './vm-tool-authority.js';
 import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 import { createAppToolAuthority } from './app-tool-authority.js';
 import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
+import { createPageToolAuthority } from './page-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -586,6 +587,18 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.domainState.authority ??= createPersistenceToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx,
+    });
+    return entry;
+  };
+  const pageExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'page', tools, []);
+    if (!entry) return null;
+    entry.domainState.authority ??= createPageToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
   };
@@ -1563,6 +1576,102 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('todo replace authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.replaceTodos(value.version, value.todos));
+        }
+        case 'turn.page.open-tab': {
+          const entry = pageExecutionEntry(run, value, ['open_tab']);
+          if (!entry) return failed('page open authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.openProtectedBackgroundTab());
+        }
+        case 'turn.page.read': {
+          const entry = pageExecutionEntry(run, value, ['read_page']);
+          if (!entry) return failed('page read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readOwnedPage());
+        }
+        case 'turn.page.snapshot': {
+          const entry = pageExecutionEntry(run, value, ['snapshot']);
+          if (!entry) return failed('page snapshot authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.captureOwnedAccessibilityTree());
+        }
+        case 'turn.page.read-state': {
+          const entry = pageExecutionEntry(run, value, ['read_state']);
+          if (!entry) return failed('page state authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readOwnedFrameworkState());
+        }
+        case 'turn.page.watch-changes': {
+          const entry = pageExecutionEntry(run, value, ['watch_changes']);
+          if (!entry) return failed('page watch authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.drainOwnedDomChanges());
+        }
+        case 'turn.page.query-dom': {
+          const entry = pageExecutionEntry(run, value, ['query_dom']);
+          if (!entry) return failed('page query authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.queryOwnedDom());
+        }
+        case 'turn.page.evaluate-main': {
+          const entry = pageExecutionEntry(run, value, ['page_eval']);
+          if (!entry) return failed('page evaluation authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.evaluateOwnedPageMainWorld());
+        }
+        case 'turn.page.evaluate-debugger': {
+          const entry = pageExecutionEntry(run, value, ['page_exec']);
+          if (!entry) return failed('page debugger authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.evaluateOwnedPageDebugger());
+        }
+        case 'turn.page.keys-availability': {
+          const entry = pageExecutionEntry(run, value, ['page_keys']);
+          if (!entry) return failed('page keys authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readTrustedKeysAvailability());
+        }
+        case 'turn.page.navigate': {
+          const entry = pageExecutionEntry(run, value, ['navigate']);
+          if (!entry) return failed('page navigation authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.navigateOwnedTab());
+        }
+        case 'turn.page.fill': {
+          const entry = pageExecutionEntry(run, value, ['type']);
+          if (!entry) return failed('page fill authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.fillOwnedTarget());
+        }
+        case 'turn.page.click': {
+          const entry = pageExecutionEntry(run, value, ['click']);
+          if (!entry) return failed('page click authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.clickOwnedTarget());
+        }
+        case 'turn.page.login': {
+          const entry = pageExecutionEntry(run, value, ['login']);
+          if (!entry) return failed('page login authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.performConfirmedOwnedLogin());
+        }
+        case 'turn.page.run-program': {
+          const entry = pageExecutionEntry(run, value, ['page_code']);
+          if (!entry) return failed('page program authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.runOwnedPageProgram());
+        }
+        case 'turn.page.capture-foreground': {
+          const entry = pageExecutionEntry(run, value, ['capture']);
+          if (!entry) return failed('page foreground capture authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.captureForegroundPixels());
+        }
+        case 'turn.page.capture-owned': {
+          const entry = pageExecutionEntry(run, value, ['view']);
+          if (!entry) return failed('page owned capture authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.captureOwnedTabPixels());
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

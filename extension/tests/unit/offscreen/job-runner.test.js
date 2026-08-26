@@ -147,11 +147,11 @@ throw new Error('unrelated failure');`,
     let bothStarted;
     const started = new Promise((resolve) => { bothStarted = () => resolve(undefined); });
     const sendToSW = async (/** @type {string} */ type) => {
-      if (type === 'page/call' || type === 'site-fetch/call') {
+      if (type === 'page-program/snapshot' || type === 'site-fetch/call') {
         relays += 1;
         if (relays === 2) bothStarted?.();
         await barrier;
-        return type === 'page/call'
+        return type === 'page-program/snapshot'
           ? { ok: true, value: 'snapshot' }
           : { ok: true, value: { status: 200, body: 'ok', json: null } };
       }
@@ -289,7 +289,7 @@ throw new Error('unrelated failure');`,
     let bothAborting;
     const aborting = new Promise((resolve) => { bothAborting = () => resolve(undefined); });
     const deps = {
-      sendToSW: async (/** @type {string} */ type) => type === 'page/call'
+      sendToSW: async (/** @type {string} */ type) => type === 'page-program/snapshot'
         ? { ok: true, value: 'snapshot' }
         : { ok: true, value: { status: 200, body: 'ok', json: null } },
       abortRun: async () => {
@@ -973,7 +973,7 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(attempts.actors).toContain('not defined');
     expect(calls.filter((call) => call.type === 'sw/web-fetch').length).toBe(1);
     expect(calls.some((call) => [
-      'actor/spawn', 'actors/call', 'script/model-call', 'page/call',
+      'actor/spawn', 'actors/call', 'script/model-call', 'page-program/snapshot',
       'app-code/observe', 'app-code/act',
       'dweb/distributed/info', 'site-fetch/call', 'a2a/call',
     ].includes(call.type))).toBe(false);

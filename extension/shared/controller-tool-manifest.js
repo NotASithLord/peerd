@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '5e68bde5e0b3d14ea7ab6157a252d1c3f2e26d4cacc2a2c9ccb2a6a2295f333a',
+  digest: 'aca8a9b41b20144538770df22e0e47baa16160c09133a687eff26500c4471739',
   tools: {
     now: {
       projectionKeys: [],
@@ -165,6 +165,31 @@ const manifestSource = {
       projectionKeys: ['sessionId', 'activeTabOrigin', 'goalActive'], effects: [],
       argumentBytes: 256 * 1024,
     },
+    open_tab: { projectionKeys: [], effects: [], argumentBytes: 4 * 1024 },
+    read_page: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
+    snapshot: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
+    read_state: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
+    watch_changes: { projectionKeys: [], effects: [], resultBytes: 512 * 1024 },
+    query_dom: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
+    page_eval: {
+      projectionKeys: [], effects: [], argumentBytes: 256 * 1024,
+      resultBytes: 2 * 1024 * 1024,
+    },
+    page_exec: {
+      projectionKeys: [], effects: [], argumentBytes: 512 * 1024,
+      resultBytes: 2 * 1024 * 1024,
+    },
+    page_keys: { projectionKeys: [], effects: [], argumentBytes: 16 * 1024 },
+    navigate: { projectionKeys: [], effects: [], argumentBytes: 8 * 1024 },
+    type: { projectionKeys: [], effects: [], argumentBytes: 256 * 1024 },
+    click: { projectionKeys: [], effects: [], argumentBytes: 32 * 1024 },
+    login: { projectionKeys: [], effects: [], argumentBytes: 32 * 1024 },
+    page_code: {
+      projectionKeys: [], effects: [], argumentBytes: 1024 * 1024,
+      resultBytes: 8 * 1024 * 1024,
+    },
+    capture: { projectionKeys: [], effects: [], resultBytes: 8 * 1024 * 1024 },
+    view: { projectionKeys: [], effects: [], resultBytes: 8 * 1024 * 1024 },
   },
 };
 
@@ -196,6 +221,11 @@ const appTools = new Set([
 const persistenceTools = new Set([
   'read_memory', 'remember', 'todo_init', 'todo_check', 'todo_add',
 ]);
+const pageTools = new Set([
+  'open_tab', 'read_page', 'snapshot', 'read_state', 'watch_changes',
+  'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type',
+  'click', 'login', 'page_code', 'capture', 'view',
+]);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
@@ -206,4 +236,5 @@ export const controllerToolDomain = (/** @type {unknown} */ name) =>
             : notebookTools.has(name) ? 'notebook'
               : appTools.has(name) ? 'app'
                 : persistenceTools.has(name) ? 'persistence'
-                  : null;
+                  : pageTools.has(name) ? 'page'
+                    : null;

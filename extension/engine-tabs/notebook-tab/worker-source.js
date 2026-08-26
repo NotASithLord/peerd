@@ -372,7 +372,7 @@ globalThis.peerd.provider.call = () => {
 `}
 // --- page.* (web-actor page control) proxy — capability-gated (caps.page) ---
 // PR #119 code-REPL arm: each page.* call is ONE host round-trip; the host
-// relays it to the SW's 'page/call' route, which dispatches the SAME gated tool
+// relays it to a fixed SW page-program route, which runs the SAME gated tool policy
 // the tool-call web actor uses (denylist / confirm / audit unchanged) against
 // the ONE tab this actor owns. The host attaches the owner identity itself —
 // nothing this realm sends can choose the session or the tab.

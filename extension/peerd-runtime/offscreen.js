@@ -12,6 +12,7 @@ export {
   ACTORS_BRIDGE_GUARD_MS, ACTORS_RUN_MAX_OPS,
   ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS, actorsCallToOp,
 } from './actor/actors-api.js';
+export { pageCallToRelay, shapePageCallOutcome } from './actor/page-api.js';
 export { MAX_FILE_CONTENT_CHARS } from './tools/defs/js-write-file.js';
 export {
   chooseEngine, looksScanned, createOcrStore, PdfFetchError, PdfParseError,
