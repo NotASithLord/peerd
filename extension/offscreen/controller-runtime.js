@@ -1,6 +1,6 @@
 // @ts-check
 
-import { renderSystemPromptFromAssets } from '/peerd-runtime/controller.js';
+import { buildTemporalBlock, renderSystemPromptFromAssets } from '/peerd-runtime/controller.js';
 import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
 import { RUNTIME_DISPATCH_CAPABILITY } from '/shared/kernel-runtime-policy.js';
 import {
@@ -37,8 +37,17 @@ const renderPrompt = async (/** @type {unknown} */ payload) => {
       || typeof input.dwebBlock !== 'string' || input.dwebBlock.length > 16 * 1024) {
     return { ok: false, code: 'prompt-payload-invalid', outcomeKnown: true };
   }
+  const { temporalNowMs, ...promptContext } = input.ctx;
+  if (temporalNowMs !== undefined && !Number.isFinite(temporalNowMs)) {
+    return { ok: false, code: 'prompt-payload-invalid', outcomeKnown: true };
+  }
   try {
-    const prompt = renderSystemPromptFromAssets(input.ctx, {
+    const prompt = renderSystemPromptFromAssets({
+      ...promptContext,
+      ...(temporalNowMs === undefined ? {} : {
+        temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: temporalNowMs }),
+      }),
+    }, {
       template: input.template,
       dwebBlock: input.dwebBlock,
     });

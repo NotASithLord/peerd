@@ -140,7 +140,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     actorAllowedToolsFor,
     applyComposer,
     buildMintInjection,
-    buildTemporalBlock,
     classifyAction,
     confirmActionsFromRecord,
     createSkillRegistry,
@@ -1493,7 +1492,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       const systemPrompt = await deps.seams.renderSystemPrompt({
         actorType: kind, backing: record.backing, instanceId, actorSurface,
         schemaReply: deps.settingsStore.get().schemaValidatedReplies === true,
-        temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+        temporalNowMs: Date.now(),
         customSystemPrompt: record.customSystemPrompt,
         appRole: record.appRole,
         effectiveTools: tools.map((tool) => tool.name),
@@ -1910,7 +1909,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       }, options),
       renderSystemPromptForChild: (task, effectiveTools) => deps.seams.renderSystemPrompt({
         taskOverride: task, effectiveTools,
-        temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: Date.now() }),
+        temporalNowMs: Date.now(),
       }),
     });
     const spawnActor = async (/** @type {any} */ request) => {
@@ -2939,7 +2938,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     vault: deps.vault, VaultLockedError, sessionCache: deps.sessionCache,
     ensureActiveProvider, resolvePermission, sessions: shared.sessions,
     turnSlots: shared.turnSlots,
-    buildTemporalBlock, memory: shared.memory, browser: deps.browser,
+    memory: shared.memory, browser: deps.browser,
     skillRegistry, resolveManifestAllow, buildToolContext,
     projectToolDescriptors,
     settingsStore: deps.settingsStore,

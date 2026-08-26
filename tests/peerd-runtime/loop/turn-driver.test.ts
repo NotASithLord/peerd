@@ -10,12 +10,10 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  buildTemporalContext as buildTurnTemporalContext,
   makeTurnDriver,
   safeForegroundTabContext,
 } from '/peerd-runtime/loop/turn-driver.js';
 import { projectControllerToolSurface } from '/peerd-runtime/controller-tool-projection.js';
-import { buildTemporalContext } from '/peerd-runtime/loop/system-prompt.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 
@@ -38,19 +36,6 @@ test('makeTurnDriver returns the two entry points', () => {
 });
 
 describe('foreground tab prompt context', () => {
-  test('keeps the cold renderer byte-identical to the canonical renderer', () => {
-    const cases = [
-      {},
-      { temporalBlock: '<time>now</time>' },
-      { activeTab: { url: 'https://example.com', title: 'Example' } },
-      { protectedTab: 'private_network' as const },
-      { temporalBlock: '<time>now</time>', protectedTab: 'sensitive_site' as const },
-    ];
-    for (const value of cases) {
-      expect(buildTurnTemporalContext(value)).toBe(buildTemporalContext(value));
-    }
-  });
-
   test('uses only the public origin and drops hostile title/path bytes', () => {
     expect(safeForegroundTabContext({
       url: 'https://example.com/reset?token=secret',
@@ -261,7 +246,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       claim: () => ({ controller: turnAbortController, release: () => { releases++; } }),
       isBusy: () => false,
     },
-    buildTemporalBlock: () => '',
     memory: { loadAlwaysLoaded: async () => ({ text: '' }) },
     browser: { tabs: { query: async () => [] } },
     originOfTabUrl: () => '',

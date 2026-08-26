@@ -113,6 +113,11 @@ const makeContext = ({
   getSecret: async () => 'kernel-secret',
   safeFetch: async () => new Response('unused'),
   signal,
+  previousTurnAt: null,
+  turnNow: 1_700_000_000_000,
+  activeTabContext: null,
+  protectedTabContext: null,
+  recoveryBlock: '',
   reasoning: { enabled: false },
   oneShot: true,
   callModel: async function* () {

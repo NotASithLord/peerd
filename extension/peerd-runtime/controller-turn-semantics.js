@@ -17,7 +17,6 @@ import {
 } from './tools/exposure.js';
 import { applyComposer } from './composer/apply.js';
 import { buildMintInjection, resolveSiteUrl } from './site-clients/core.js';
-import { buildTemporalBlock } from './clock/context.js';
 import {
   canonicalCodeTraceLabel,
   DWEB_INBOUND_TOOL_NAMES,
@@ -100,7 +99,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   actorAllowedToolsFor,
   applyComposer,
   buildMintInjection,
-  buildTemporalBlock,
   canonicalCodeTraceLabel,
   classifyAction,
   confirmActionsFromRecord,

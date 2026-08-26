@@ -248,6 +248,27 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('renders volatile temporal and foreground context only in the sealed controller', async () => {
+    const authorityModules = await modulesFor('background/kernel-turn-live-factories.js');
+    for (const module of [
+      'peerd-runtime/clock/context.js',
+      'peerd-runtime/loop/system-prompt.js',
+    ]) expect(authorityModules.has(module), `authority graph imports ${module}`).toBe(false);
+
+    const controllerModules = await modulesFor('offscreen/controller-turn-runtime.js');
+    for (const module of [
+      'peerd-runtime/clock/context.js',
+      'peerd-runtime/loop/system-prompt.js',
+    ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
+
+    const driver = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+    );
+    expect(driver).not.toContain('buildTemporalBlock');
+    expect(driver).not.toContain('buildTemporalContext');
+    expect(driver).not.toContain('<active_tab>');
+  });
+
   it('hosts repository semantics only in controller and isolated-worker graphs', async () => {
     const repositorySemanticModules = new Set([
       'peerd-runtime/controller-repository-tools.js',

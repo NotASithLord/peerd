@@ -64,6 +64,8 @@ const context = (over: Record<string, unknown> = {}) => {
     toolDispatch: async () => ({ ok: true, content: 'legacy' }),
     getSystemPrompt: async () => 'PINNED', appendAudit: async () => {},
     enrichTrimSummary: () => {}, signal: new AbortController().signal,
+    previousTurnAt: null, turnNow: 1_700_000_000_000,
+    activeTabContext: null, protectedTabContext: null, recoveryBlock: '',
     reasoning: { enabled: false }, oneShot: true,
     callModel: async function* () {
       round += 1;

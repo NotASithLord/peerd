@@ -2,6 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
 import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
 import { runUserTurn as runDirectTurn } from '../../extension/peerd-runtime/loop/agent-loop.js';
+import {
+  buildTemporalBlock, buildTemporalContext,
+} from '../../extension/peerd-runtime/controller.js';
 import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import { hydrateToolDescriptors } from '../../extension/peerd-runtime/semantic.js';
@@ -156,6 +159,14 @@ const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]
   safeFetch: async () => new Response('unused'),
   signal: new AbortController().signal,
   now: () => 1_700_000_000_000,
+  previousTurnAt: null,
+  turnNow: 1_700_000_000_000,
+  activeTabContext: null,
+  protectedTabContext: null,
+  recoveryBlock: '',
+  contextMessage: buildTemporalContext({
+    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: 1_700_000_000_000 }),
+  }),
   reasoning: { enabled: false },
   callModel: async function* () {
     capture.push({ called: true });
@@ -184,7 +195,9 @@ describe('orchestrator controller turn boundary', () => {
       ctx: makeSimpleCtx(controllerSessions, controllerCalls),
       inspectOuter: (payload) => observedTransport.push(JSON.stringify(payload)),
       inspectModelRequest: (request, grant) => {
-        const token = request.nativeBody.messages[0].content[0].source.data;
+        const token = request.nativeBody.messages
+          .flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+          .find((block: any) => typeof block?.source?.data === 'string')?.source.data;
         expect(token).toStartWith('peerd-controller-opaque:');
         authorityMedia.push(grant.redeemOpaque(token));
       },

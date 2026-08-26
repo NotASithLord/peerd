@@ -78,7 +78,7 @@ relevant baseline.
 The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, `4dd2279`,
 `37c91a2`, `7ba4a2d`, `8379fbe`, `d3a99db`, `3f11140`, `7cc1084`, `6d97fd1`,
 the provider-failure ownership cut, and the current reasoning-policy ownership
-cut.
+and temporal-context ownership cuts.
 
 - The broad `kernel-transfer.js` aggregate and generic controller tool-effect
   lane are deleted. Orchestrator and isolated actors share exact per-domain
@@ -119,6 +119,12 @@ cut.
   reasoning budget or vocabulary. The same cut removes dead exposure and
   manifest projections from the temporary semantic aggregate. No authority
   operation or alternate execution path was added.
+- Temporal formatting and foreground/protected-tab prompt rendering now execute
+  only in the sealed controller. The SW retains the last-turn timestamp and
+  live tab/denylist custody, and forwards exact scalar values plus an
+  origin-only tab projection. The duplicated model-facing renderer and clock
+  formatter are deleted from the SW path; actor prompt rendering uses the same
+  controller-owned clock semantics.
 
 The representative tool-feature fixture now adds a real controller-owned tool
 policy (model-facing description and schema), implementation and ownership row
@@ -127,10 +133,10 @@ controller identity literals, the candidate has exactly the same SW inputs and
 byte-identical authority code. The complete fixture appears only in the
 controller graph.
 
-Store-Chrome telemetry for the latest staged checkpoint is 1,299,356 bundled
-SW bytes, 446 staged inputs and a 347,857-byte minified cold graph. The prior
-checkpoint was 1,300,133 bytes and 446 inputs with the same cold graph. The live
-`kernel-turn-live-factories.js` graph is 290 modules and contains no
+Store-Chrome telemetry for the latest staged checkpoint is 1,297,563 bundled
+SW bytes, 445 staged inputs and a 347,857-byte minified cold graph. The prior
+checkpoint was 1,299,356 bytes and 446 inputs with the same cold graph. The live
+`kernel-turn-live-factories.js` graph is 289 modules and contains no
 `peerd-provider` module. Provider selection, price projection and provider
 failure interpretation now occur in the sealed controller and isolated actor
 worker. The SW validates and folds the bounded price result and retains session
@@ -144,10 +150,10 @@ readiness: 3.61 seconds from browser launch, 685 ms from worker target, 133 ms
 from Home navigation, and 107 ms for a confirmed forced wake. The assessment
 was green and remains inside the accepted functional envelope.
 
-Latest reasoning-boundary verification: 131 focused turn/controller,
-feature-growth identity and ownership tests passed. Static typecheck and lint
+Latest temporal-boundary verification: 148 focused turn/controller,
+prompt-cache, feature-growth identity and ownership tests passed. Static typecheck and lint
 passed; Store packaging/posture passed. No full-suite or live browser rerun was
-required for this bounded pure semantic-policy cut. The preceding
+required for this bounded pure semantic-rendering cut. The preceding
 full Bun suite passed 7,511 tests and reproduced only the same five inherited failures:
 the session-support cutover, native-entry identity, test-only vault package,
 typed-error minification, and obsolete native cold-size target. The in-browser
