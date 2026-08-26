@@ -36,7 +36,6 @@ import { vmBootTool }                 from './vm-boot.js';
 import { vmImportTool }               from './vm-import.js';
 import { vmWriteFileTool }           from './vm-write-file.js';
 import { vmDeleteTool }               from './vm-delete.js';
-import { sandboxCreateTool }          from './sandbox-create.js';
 import { jsNotebookTool }                 from './js-notebook.js';
 import { scriptTool }                  from './script.js';
 import { pageCodeTool }               from './page-code.js';
@@ -114,7 +113,6 @@ export {
   siteClientWriteTool,
   siteCaptureTool,
   // engine (the one cross-kind create; per-kind ops below)
-  sandboxCreateTool,
   // engine (WebVM)
   vmBootTool,
   vmImportTool,
@@ -238,7 +236,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   // engine — sandbox_create is the one cross-kind bootstrap (it folded
   // vm_create/js_create/app_create); the per-kind ops below are all
   // actor-only (ACTOR_ONLY_TOOLS) and reach the model via the actors.
-  sandboxCreateTool,
   // engine (WebVM)
   vmBootTool,
   vmImportTool,
