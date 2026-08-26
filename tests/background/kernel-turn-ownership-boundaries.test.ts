@@ -12,6 +12,15 @@ const modulesFor = async (entry: string) => new Set(
 );
 
 describe('kernel turn ownership boundaries', () => {
+  it('keeps semantic aggregate barrels out of the service-worker graph', async () => {
+    const modules = await modulesFor('background/vault-kernel.js');
+    for (const module of [
+      'peerd-runtime/authority.js',
+      'peerd-runtime/background.js',
+      'peerd-runtime/kernel.js',
+    ]) expect(modules.has(module), `service worker imports ${module}`).toBe(false);
+  });
+
   it('keeps the semantic owner free of authority and host dependencies', async () => {
     const modules = await modulesFor('peerd-runtime/controller-turn-semantics.js');
     const forbiddenPrefixes = [

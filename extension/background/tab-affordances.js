@@ -22,7 +22,7 @@ import { decidePullIn } from './kernel-front-door.js';
 import {
   classifyBrowserAutomationTarget,
   pullInHintInjected,
-} from '/peerd-runtime/authority.js';
+} from '/peerd-runtime/kernel-browser.js';
 import { matchesDenylist } from '/peerd-egress/background.js';
 import { shouldFollowAgentTab } from './watch-mode.js';
 import { allowedDocumentTarget } from './page-activity.js';

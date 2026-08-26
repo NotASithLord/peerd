@@ -4,7 +4,7 @@ import {
   createMemoryStore,
   createSessionStore,
   makeTurnSlots,
-} from '/peerd-runtime/kernel.js';
+} from '/peerd-runtime/kernel-custody.js';
 import { createPageActivityReporter } from './page-activity.js';
 
 /** @param {Record<string,any>} deps */

@@ -14,7 +14,7 @@ import {
   normalizeEngine,
   normalizeVariant,
   saveUserHook,
-} from '/peerd-runtime/background.js';
+} from '/peerd-runtime/kernel-transfer.js';
 
 /** @param {Record<string,any>} deps */
 export const createKernelTransferLive = async (deps) => {
