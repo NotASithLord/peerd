@@ -10,10 +10,9 @@ import {
   toolExecutionResultAllowed,
 } from '../shared/tool-execution-protocol.js';
 import {
-  CONTROLLER_TOOL_MANIFEST,
-  controllerHostsTool,
-  controllerToolDomain,
-} from '../shared/controller-tool-manifest.js';
+  CONTROLLER_AUTHORITY_MANIFEST,
+  controllerAuthorityClassAllowed,
+} from '../shared/controller-authority-manifest.js';
 import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
@@ -172,7 +171,7 @@ export const makeControllerTurnBridge = ({
   prepareToolCall,
   settleToolCall,
   digestArgs = digestJson,
-  toolManifest = CONTROLLER_TOOL_MANIFEST,
+  toolManifest = CONTROLLER_AUTHORITY_MANIFEST,
   providerEgress,
   now = Date.now,
 }) => {
@@ -184,7 +183,7 @@ export const makeControllerTurnBridge = ({
     && typeof settleToolCall === 'function';
   if (!toolManifest || toolManifest.protocol !== TOOL_EXECUTION_PROTOCOL
       || typeof toolManifest.digest !== 'string' || !isRecord(toolManifest.tools)) {
-    throw new TypeError('controller-tool-manifest-invalid');
+    throw new TypeError('controller-authority-manifest-invalid');
   }
 
   const executionCustody = (/** @type {any} */ entry) => {
@@ -468,7 +467,6 @@ export const makeControllerTurnBridge = ({
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
     /** @type {string} */ domain,
-    /** @type {string[]} */ toolNames,
     /** @type {string[]} */ businessKeys,
     /** @type {string[]} */ optionalKeys = [],
   ) => {
@@ -477,7 +475,6 @@ export const makeControllerTurnBridge = ({
     ], optionalKeys)) return null;
     const entry = run.preparedExecutions.get(value.executionId);
     if (!entry || entry.open !== true || entry.domain !== domain
-        || !toolNames.includes(entry.call?.name)
         || value.argsDigest !== entry.argsDigest
         || value.turnGeneration !== run.turnGeneration) return null;
     return entry;
@@ -524,10 +521,9 @@ export const makeControllerTurnBridge = ({
   const repositoryExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'repository', tools, fields);
+    const entry = domainExecutionEntry(run, value, 'repository', fields);
     if (!entry) return null;
     bindRepositoryToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
@@ -537,11 +533,10 @@ export const makeControllerTurnBridge = ({
   const vmExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
     /** @type {string[]} */ optional = [],
   ) => {
-    const entry = domainExecutionEntry(run, value, 'vm', tools, fields, optional);
+    const entry = domainExecutionEntry(run, value, 'vm', fields, optional);
     if (!entry) return null;
     bindVmToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx,
@@ -551,10 +546,9 @@ export const makeControllerTurnBridge = ({
   const notebookExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'notebook', tools, fields);
+    const entry = domainExecutionEntry(run, value, 'notebook', fields);
     if (!entry) return null;
     bindNotebookToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
@@ -564,10 +558,9 @@ export const makeControllerTurnBridge = ({
   const appExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'app', tools, fields);
+    const entry = domainExecutionEntry(run, value, 'app', fields);
     if (!entry) return null;
     bindAppToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
@@ -577,10 +570,9 @@ export const makeControllerTurnBridge = ({
   const persistenceExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'persistence', tools, fields);
+    const entry = domainExecutionEntry(run, value, 'persistence', fields);
     if (!entry) return null;
     bindPersistenceToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx,
@@ -590,9 +582,8 @@ export const makeControllerTurnBridge = ({
   const pageExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'page', tools, []);
+    const entry = domainExecutionEntry(run, value, 'page', []);
     if (!entry) return null;
     bindPageToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
@@ -602,10 +593,9 @@ export const makeControllerTurnBridge = ({
   const introspectionExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'introspection', tools, fields);
+    const entry = domainExecutionEntry(run, value, 'introspection', fields);
     if (!entry) return null;
     bindIntrospectionToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx,
@@ -615,10 +605,9 @@ export const makeControllerTurnBridge = ({
   const scheduleExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'schedule', tools, fields);
+    const entry = domainExecutionEntry(run, value, 'schedule', fields);
     if (!entry) return null;
     bindScheduleToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
@@ -628,10 +617,9 @@ export const makeControllerTurnBridge = ({
   const dwebExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainExecutionEntry(run, value, 'dweb', tools, fields);
+    const entry = domainExecutionEntry(run, value, 'dweb', fields);
     if (!entry) return null;
     bindDwebToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
@@ -852,10 +840,10 @@ export const makeControllerTurnBridge = ({
         case 'turn.tool.prepare': {
           if (!protocolEnabled) return known({ mode: 'legacy' });
           const call = jsonUnwire(value.callJson, 'tool call');
-          if (!isRecord(call) || !issuedToolCall(run, call)) {
+          if (!isRecord(call) || !issuedToolCall(run, call)
+              || !controllerAuthorityClassAllowed(value.authorityClass)) {
             return failed('tool call was not issued by the pinned model stream', true);
           }
-          const issued = run.modelToolCalls.get(call.id);
           run.modelToolCalls.delete(call.id);
           const release = await acquireDispatch(
             run, dispatchIsConcurrencySafe(run, call.name),
@@ -872,6 +860,7 @@ export const makeControllerTurnBridge = ({
             toolName: call.name,
             executionId,
             modelArgsDigest,
+            authorityClass: value.authorityClass,
             deadlineAt,
             signal: run.signal,
           });
@@ -883,13 +872,8 @@ export const makeControllerTurnBridge = ({
             return failed(cause, true);
           }
           if (prepared === null) {
-            if (!legacyToolAllowed(call.name) && !controllerHostsTool(call.name)) {
-              release();
-              return failed('tool has no controller or legacy execution owner', true);
-            }
-            run.legacyToolCalls.set(call.id, issued);
             release();
-            return known({ mode: 'legacy' });
+            return failed('controller tool preparation unavailable', true);
           }
           if (!isRecord(prepared)) {
             release();
@@ -928,6 +912,7 @@ export const makeControllerTurnBridge = ({
             turnGeneration: run.turnGeneration,
             attempt: Number(attempt),
             toolName: call.name,
+            authorityClass: value.authorityClass,
             argsDigest,
             manifestDigest: prepared.manifestDigest,
             args: prepared.args,
@@ -943,13 +928,14 @@ export const makeControllerTurnBridge = ({
             deadlineAt, release, open: true, effectEntered: false, effectPending: 0,
             pendingIrreversible: 0, settledIrreversible: false,
             unknownIrreversible: false, policy: parsedRequest.policy,
-            domain: controllerToolDomain(call.name), domainCalls: new Set(), domainState: {},
+            domain: parsedRequest.authorityClass,
+            domainCalls: new Set(), domainState: {},
           });
           return known({ mode: 'execute', requestJson: jsonWire(request), deadlineAt });
         }
         case 'turn.goal.complete': {
           const entry = domainExecutionEntry(
-            run, value, 'local', ['complete_goal'], ['summary'],
+            run, value, 'local', ['summary'],
           );
           const expected = typeof entry?.call?.args?.summary === 'string'
             ? entry.call.args.summary.trim() : '';
@@ -964,7 +950,7 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.actor.spawn-sync':
         case 'turn.actor.spawn-async': {
-          const entry = domainExecutionEntry(run, value, 'actor', ['actor_create'], [
+          const entry = domainExecutionEntry(run, value, 'actor', [
             'task', 'allowRecursion',
           ], ['tools', 'maxSteps', 'maxDepth']);
           const args = entry?.call?.args;
@@ -1005,14 +991,14 @@ export const makeControllerTurnBridge = ({
           }));
         }
         case 'turn.actor.tasks': {
-          const entry = domainExecutionEntry(run, value, 'actor', ['actor_tasks'], [], []);
+          const entry = domainExecutionEntry(run, value, 'actor', [], []);
           if (!entry) return failed('actor tasks authority mismatch', true);
           const list = entry.custody?.ctx?.actorAuthority?.listTasks;
           return runDomainEffect(run, entry, operation, 'read', () =>
             typeof list === 'function' ? list() : []);
         }
         case 'turn.actor.cancel': {
-          const entry = domainExecutionEntry(run, value, 'actor', ['actor_cancel'], ['taskId']);
+          const entry = domainExecutionEntry(run, value, 'actor', ['taskId']);
           if (!entry || typeof value.taskId !== 'string' || !value.taskId
               || value.taskId !== entry.call?.args?.taskId) {
             return failed('actor cancel authority mismatch', true);
@@ -1023,7 +1009,7 @@ export const makeControllerTurnBridge = ({
               ? cancel(value.taskId) : { ok: false, error: 'async_actor_unavailable' });
         }
         case 'turn.actor.message': {
-          const entry = domainExecutionEntry(run, value, 'actor', ['message_actor'], [
+          const entry = domainExecutionEntry(run, value, 'actor', [
             'to', 'message', 'oneShot', 'awaitReply', 'degradeToAsync', 'awaitCapMs',
           ]);
           const args = entry?.call?.args;
@@ -1058,7 +1044,7 @@ export const makeControllerTurnBridge = ({
           }));
         }
         case 'turn.pod.resolve': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], ['podId']);
+          const entry = domainExecutionEntry(run, value, 'pod', ['podId']);
           if (!entry || value.podId !== entry.call?.args?.podId) {
             return failed('Pod resolution authority mismatch', true);
           }
@@ -1076,7 +1062,7 @@ export const makeControllerTurnBridge = ({
           return result;
         }
         case 'turn.pod.read-remote': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], ['podId']);
+          const entry = domainExecutionEntry(run, value, 'pod', ['podId']);
           const intent = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '')[0] : null;
           if (!entry || typeof value.podId !== 'string'
               || value.podId !== entry.domainState.podId
@@ -1092,7 +1078,7 @@ export const makeControllerTurnBridge = ({
           return result;
         }
         case 'turn.pod.confirm-git': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], ['op']);
+          const entry = domainExecutionEntry(run, value, 'pod', ['op']);
           const intents = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '') : [];
           const intent = intents.length === 1 ? intents[0] : null;
           const target = intent?.url ?? entry?.domainState?.remote?.url;
@@ -1122,7 +1108,7 @@ export const makeControllerTurnBridge = ({
           return result;
         }
         case 'turn.pod.exec': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], [
+          const entry = domainExecutionEntry(run, value, 'pod', [
             'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
           ]);
           const args = entry?.call?.args;
@@ -1153,7 +1139,7 @@ export const makeControllerTurnBridge = ({
           }));
         }
         case 'turn.pod.status': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_status'], [
+          const entry = domainExecutionEntry(run, value, 'pod', [
             'podId', 'jobId', 'stream', 'offset', 'limit',
           ]);
           const args = entry?.call?.args;
@@ -1171,7 +1157,7 @@ export const makeControllerTurnBridge = ({
           }));
         }
         case 'turn.pod.cancel': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_cancel'], [
+          const entry = domainExecutionEntry(run, value, 'pod', [
             'podId', 'jobId',
           ]);
           const args = entry?.call?.args;
@@ -1186,7 +1172,7 @@ export const makeControllerTurnBridge = ({
           }));
         }
         case 'turn.pod.read-file': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_read'], ['podId', 'path']);
+          const entry = domainExecutionEntry(run, value, 'pod', ['podId', 'path']);
           const args = entry?.call?.args;
           if (!entry || typeof value.path !== 'string' || value.path !== args?.path
               || value.podId !== args?.podId) {
@@ -1199,7 +1185,7 @@ export const makeControllerTurnBridge = ({
           }));
         }
         case 'turn.pod.write-file': {
-          const entry = domainExecutionEntry(run, value, 'pod', ['pod_write'], [
+          const entry = domainExecutionEntry(run, value, 'pod', [
             'podId', 'path', 'content',
           ]);
           const args = entry?.call?.args;
@@ -1217,32 +1203,32 @@ export const makeControllerTurnBridge = ({
           ));
         }
         case 'turn.repository.read-pod': {
-          const entry = repositoryExecutionEntry(run, value, ['pod_destroy'], ['podId']);
+          const entry = repositoryExecutionEntry(run, value, ['podId']);
           if (!entry) return failed('repository Pod read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readPod(value.podId));
         }
         case 'turn.repository.destroy-pod': {
-          const entry = repositoryExecutionEntry(run, value, ['pod_destroy'], ['podId']);
+          const entry = repositoryExecutionEntry(run, value, ['podId']);
           if (!entry) return failed('repository Pod destroy authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.destroyPod(value.podId));
         }
         case 'turn.repository.read-status': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_history'], []);
+          const entry = repositoryExecutionEntry(run, value, []);
           if (!entry) return failed('repository status authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readStatus());
         }
         case 'turn.repository.read-history': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_history'], ['depth']);
+          const entry = repositoryExecutionEntry(run, value, ['depth']);
           if (!entry) return failed('repository history authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readHistory(value.depth));
         }
         case 'turn.repository.read-remote': {
           const entry = repositoryExecutionEntry(
-            run, value, ['repo_history', 'repo_remote'], [],
+            run, value, [],
           );
           if (!entry) return failed('repository remote-read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
@@ -1250,91 +1236,91 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.repository.read-diff': {
           const entry = repositoryExecutionEntry(
-            run, value, ['repo_history'], ['from', 'to'],
+            run, value, ['from', 'to'],
           );
           if (!entry) return failed('repository diff authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readDiff(value.from, value.to));
         }
         case 'turn.repository.confirm-restore': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['to']);
+          const entry = repositoryExecutionEntry(run, value, ['to']);
           if (!entry) return failed('repository restore confirmation mismatch', true);
           return runDomainEffect(run, entry, operation, 'control', () =>
             entry.domainState.authority.confirmRestore(value.to));
         }
         case 'turn.repository.checkpoint': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['message']);
+          const entry = repositoryExecutionEntry(run, value, ['message']);
           if (!entry) return failed('repository checkpoint authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.checkpoint(value.message));
         }
         case 'turn.repository.branch': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['name']);
+          const entry = repositoryExecutionEntry(run, value, ['name']);
           if (!entry) return failed('repository branch authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.branch(value.name));
         }
         case 'turn.repository.checkout': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['name']);
+          const entry = repositoryExecutionEntry(run, value, ['name']);
           if (!entry) return failed('repository checkout authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.checkout(value.name));
         }
         case 'turn.repository.restore': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_version'], ['to']);
+          const entry = repositoryExecutionEntry(run, value, ['to']);
           if (!entry) return failed('repository restore authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.restore(value.to));
         }
         case 'turn.repository.confirm-remote': {
           const entry = repositoryExecutionEntry(
-            run, value, ['repo_remote'], ['op', 'target', 'branch'],
+            run, value, ['op', 'target', 'branch'],
           );
           if (!entry) return failed('repository remote confirmation mismatch', true);
           return runDomainEffect(run, entry, operation, 'control', () =>
             entry.domainState.authority.confirmRemote(value.op, value.target, value.branch));
         }
         case 'turn.repository.link': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_remote'], ['url']);
+          const entry = repositoryExecutionEntry(run, value, ['url']);
           if (!entry) return failed('repository link authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.link(value.url));
         }
         case 'turn.repository.fetch': {
-          const entry = repositoryExecutionEntry(run, value, ['repo_remote'], ['target']);
+          const entry = repositoryExecutionEntry(run, value, ['target']);
           if (!entry) return failed('repository fetch authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.fetch(value.target));
         }
         case 'turn.repository.push': {
           const entry = repositoryExecutionEntry(
-            run, value, ['repo_remote'], ['target', 'branch'],
+            run, value, ['target', 'branch'],
           );
           if (!entry) return failed('repository push authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.push(value.target, value.branch));
         }
         case 'turn.vm.read': {
-          const entry = vmExecutionEntry(run, value, ['vm_boot', 'vm_delete'], ['vmId']);
+          const entry = vmExecutionEntry(run, value, ['vmId']);
           if (!entry) return failed('VM read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readVm(value.vmId));
         }
         case 'turn.vm.list': {
-          const entry = vmExecutionEntry(run, value, ['vm_boot'], []);
+          const entry = vmExecutionEntry(run, value, []);
           if (!entry) return failed('VM list authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.listVms());
         }
         case 'turn.vm.set-default': {
-          const entry = vmExecutionEntry(run, value, ['vm_boot'], ['vmId']);
+          const entry = vmExecutionEntry(run, value, ['vmId']);
           if (!entry) return failed('VM default authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'control', () =>
             entry.domainState.authority.setDefaultVm(value.vmId));
         }
         case 'turn.vm.run': {
           const entry = vmExecutionEntry(
-            run, value, ['vm_boot'], ['command', 'timeoutMs'], ['vmId'],
+            run, value, ['command', 'timeoutMs'], ['vmId'],
           );
           if (!entry) return failed('VM run authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
@@ -1342,7 +1328,7 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.vm.import-file': {
           const entry = vmExecutionEntry(
-            run, value, ['vm_import'], ['url', 'path', 'maxBytes'],
+            run, value, ['url', 'path', 'maxBytes'],
           );
           if (!entry) return failed('VM import authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
@@ -1350,35 +1336,35 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.vm.write-text-file': {
           const entry = vmExecutionEntry(
-            run, value, ['vm_write_file'], ['path', 'content'],
+            run, value, ['path', 'content'],
           );
           if (!entry) return failed('VM file-write authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.writeTextFile(value.path, value.content));
         }
         case 'turn.vm.destroy': {
-          const entry = vmExecutionEntry(run, value, ['vm_delete'], ['vmId']);
+          const entry = vmExecutionEntry(run, value, ['vmId']);
           if (!entry) return failed('VM destroy authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.destroyVm(value.vmId));
         }
         case 'turn.notebook.read': {
           const entry = notebookExecutionEntry(
-            run, value, ['js_notebook', 'js_delete'], ['notebookId'],
+            run, value, ['notebookId'],
           );
           if (!entry) return failed('Notebook read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readNotebook(value.notebookId));
         }
         case 'turn.notebook.list': {
-          const entry = notebookExecutionEntry(run, value, ['js_notebook'], []);
+          const entry = notebookExecutionEntry(run, value, []);
           if (!entry) return failed('Notebook list authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.listNotebooks());
         }
         case 'turn.notebook.set-default': {
           const entry = notebookExecutionEntry(
-            run, value, ['js_notebook'], ['notebookId'],
+            run, value, ['notebookId'],
           );
           if (!entry) return failed('Notebook default authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'control', () =>
@@ -1386,7 +1372,7 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.notebook.run': {
           const entry = notebookExecutionEntry(
-            run, value, ['js_notebook'], ['code', 'timeoutMs', 'notebookId'],
+            run, value, ['code', 'timeoutMs', 'notebookId'],
           );
           if (!entry) return failed('Notebook run authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
@@ -1396,7 +1382,7 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.notebook.write-file': {
           const entry = notebookExecutionEntry(
-            run, value, ['js_write_file'], ['path', 'content', 'notebookId'],
+            run, value, ['path', 'content', 'notebookId'],
           );
           if (!entry) return failed('Notebook file-write authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
@@ -1406,21 +1392,21 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.notebook.read-file': {
           const entry = notebookExecutionEntry(
-            run, value, ['js_read_file'], ['path', 'notebookId'],
+            run, value, ['path', 'notebookId'],
           );
           if (!entry) return failed('Notebook file-read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readFile(value.path, value.notebookId));
         }
         case 'turn.notebook.destroy': {
-          const entry = notebookExecutionEntry(run, value, ['js_delete'], ['notebookId']);
+          const entry = notebookExecutionEntry(run, value, ['notebookId']);
           if (!entry) return failed('Notebook destroy authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.destroyNotebook(value.notebookId));
         }
         case 'turn.app.update': {
           const entry = appExecutionEntry(
-            run, value, ['app_update'], ['appId', 'name', 'html', 'tags', 'entryFile'],
+            run, value, ['appId', 'name', 'html', 'tags', 'entryFile'],
           );
           if (!entry) return failed('App update authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
@@ -1429,32 +1415,32 @@ export const makeControllerTurnBridge = ({
             ));
         }
         case 'turn.app.open': {
-          const entry = appExecutionEntry(run, value, ['app_open'], ['appId']);
+          const entry = appExecutionEntry(run, value, ['appId']);
           if (!entry) return failed('App open authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.openApp(value.appId));
         }
         case 'turn.app.search': {
-          const entry = appExecutionEntry(run, value, ['app_search'], ['query']);
+          const entry = appExecutionEntry(run, value, ['query']);
           if (!entry) return failed('App search authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.searchApps(value.query));
         }
         case 'turn.app.read': {
-          const entry = appExecutionEntry(run, value, ['app_delete'], ['appId']);
+          const entry = appExecutionEntry(run, value, ['appId']);
           if (!entry) return failed('App read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readApp(value.appId));
         }
         case 'turn.app.delete': {
-          const entry = appExecutionEntry(run, value, ['app_delete'], ['appId']);
+          const entry = appExecutionEntry(run, value, ['appId']);
           if (!entry) return failed('App delete authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.deleteApp(value.appId));
         }
         case 'turn.app.write-file': {
           const entry = appExecutionEntry(
-            run, value, ['app_write_file'], ['appId', 'path', 'content'],
+            run, value, ['appId', 'path', 'content'],
           );
           if (!entry) return failed('App file-write authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
@@ -1462,55 +1448,55 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.app.read-file': {
           const entry = appExecutionEntry(
-            run, value, ['app_read_file'], ['appId', 'path'],
+            run, value, ['appId', 'path'],
           );
           if (!entry) return failed('App file-read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readFile(value.appId, value.path));
         }
         case 'turn.app.list-files': {
-          const entry = appExecutionEntry(run, value, ['app_list_files'], ['appId']);
+          const entry = appExecutionEntry(run, value, ['appId']);
           if (!entry) return failed('App file-list authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.listFiles(value.appId));
         }
         case 'turn.app.delete-file': {
           const entry = appExecutionEntry(
-            run, value, ['app_delete_file'], ['appId', 'path'],
+            run, value, ['appId', 'path'],
           );
           if (!entry) return failed('App file-delete authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.deleteFile(value.appId, value.path));
         }
         case 'turn.app.observe': {
-          const entry = appExecutionEntry(run, value, ['app_observe'], []);
+          const entry = appExecutionEntry(run, value, []);
           if (!entry) return failed('App observe authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.observeRuntime());
         }
         case 'turn.app.act': {
-          const entry = appExecutionEntry(run, value, ['app_act'], ['action', 'params']);
+          const entry = appExecutionEntry(run, value, ['action', 'params']);
           if (!entry) return failed('App action authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.actRuntime(value.action, value.params));
         }
         case 'turn.app.run-code': {
           const entry = appExecutionEntry(
-            run, value, ['app_code'], ['code', 'timeoutMs'],
+            run, value, ['code', 'timeoutMs'],
           );
           if (!entry) return failed('App code authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.runCode(value.code, value.timeoutMs));
         }
         case 'turn.memory.read-scope': {
-          const entry = persistenceExecutionEntry(run, value, ['read_memory'], ['scope']);
+          const entry = persistenceExecutionEntry(run, value, ['scope']);
           if (!entry) return failed('memory read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readMemoryScope(value.scope));
         }
         case 'turn.memory.read-subtree': {
           const entry = persistenceExecutionEntry(
-            run, value, ['read_memory'], ['workspace', 'subpath'],
+            run, value, ['workspace', 'subpath'],
           );
           if (!entry) return failed('memory subtree authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
@@ -1518,7 +1504,7 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.memory.write': {
           const entry = persistenceExecutionEntry(
-            run, value, ['remember'], ['scope', 'body'],
+            run, value, ['scope', 'body'],
           );
           if (!entry) return failed('memory write authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
@@ -1526,7 +1512,7 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.todo.read': {
           const entry = persistenceExecutionEntry(
-            run, value, ['todo_init', 'todo_check', 'todo_add'], [],
+            run, value, [],
           );
           if (!entry) return failed('todo read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
@@ -1534,159 +1520,159 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.todo.replace': {
           const entry = persistenceExecutionEntry(
-            run, value, ['todo_init', 'todo_check', 'todo_add'], ['version', 'todos'],
+            run, value, ['version', 'todos'],
           );
           if (!entry) return failed('todo replace authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.replaceTodos(value.version, value.todos));
         }
         case 'turn.page.open-tab': {
-          const entry = pageExecutionEntry(run, value, ['open_tab']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page open authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.openProtectedBackgroundTab());
         }
         case 'turn.page.read': {
-          const entry = pageExecutionEntry(run, value, ['read_page']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readOwnedPage());
         }
         case 'turn.page.snapshot': {
-          const entry = pageExecutionEntry(run, value, ['snapshot']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page snapshot authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.captureOwnedAccessibilityTree());
         }
         case 'turn.page.read-state': {
-          const entry = pageExecutionEntry(run, value, ['read_state']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page state authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readOwnedFrameworkState());
         }
         case 'turn.page.watch-changes': {
-          const entry = pageExecutionEntry(run, value, ['watch_changes']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page watch authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.drainOwnedDomChanges());
         }
         case 'turn.page.query-dom': {
-          const entry = pageExecutionEntry(run, value, ['query_dom']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page query authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.queryOwnedDom());
         }
         case 'turn.page.evaluate-main': {
-          const entry = pageExecutionEntry(run, value, ['page_eval']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page evaluation authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.evaluateOwnedPageMainWorld());
         }
         case 'turn.page.evaluate-debugger': {
-          const entry = pageExecutionEntry(run, value, ['page_exec']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page debugger authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.evaluateOwnedPageDebugger());
         }
         case 'turn.page.keys-availability': {
-          const entry = pageExecutionEntry(run, value, ['page_keys']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page keys authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readTrustedKeysAvailability());
         }
         case 'turn.page.navigate': {
-          const entry = pageExecutionEntry(run, value, ['navigate']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page navigation authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.navigateOwnedTab());
         }
         case 'turn.page.fill': {
-          const entry = pageExecutionEntry(run, value, ['type']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page fill authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.fillOwnedTarget());
         }
         case 'turn.page.click': {
-          const entry = pageExecutionEntry(run, value, ['click']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page click authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.clickOwnedTarget());
         }
         case 'turn.page.login': {
-          const entry = pageExecutionEntry(run, value, ['login']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page login authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.performConfirmedOwnedLogin());
         }
         case 'turn.page.run-program': {
-          const entry = pageExecutionEntry(run, value, ['page_code']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page program authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.runOwnedPageProgram());
         }
         case 'turn.page.capture-foreground': {
-          const entry = pageExecutionEntry(run, value, ['capture']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page foreground capture authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.captureForegroundPixels());
         }
         case 'turn.page.capture-owned': {
-          const entry = pageExecutionEntry(run, value, ['view']);
+          const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page owned capture authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.captureOwnedTabPixels());
         }
         case 'turn.introspection.actor-roster': {
-          const entry = introspectionExecutionEntry(run, value, ['actor_list'], []);
+          const entry = introspectionExecutionEntry(run, value, []);
           if (!entry) return failed('actor roster authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readActorRoster());
         }
         case 'turn.introspection.provider-posture': {
-          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          const entry = introspectionExecutionEntry(run, value, []);
           if (!entry) return failed('provider posture authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readProviderPosture());
         }
         case 'turn.introspection.storage-snapshot': {
-          const entry = introspectionExecutionEntry(run, value, ['inspect'], ['prefix']);
+          const entry = introspectionExecutionEntry(run, value, ['prefix']);
           if (!entry) return failed('storage inspection authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readStorageSnapshot(value.prefix));
         }
         case 'turn.introspection.automatable-tabs': {
-          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          const entry = introspectionExecutionEntry(run, value, []);
           if (!entry) return failed('tab inspection authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readAutomatableTabs());
         }
         case 'turn.introspection.denylist-patterns': {
-          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          const entry = introspectionExecutionEntry(run, value, []);
           if (!entry) return failed('denylist inspection authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readDenylistPatterns());
         }
         case 'turn.introspection.audit-entries': {
-          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          const entry = introspectionExecutionEntry(run, value, []);
           if (!entry) return failed('audit inspection authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readAuditEntries());
         }
         case 'turn.introspection.installed-skill': {
-          const entry = introspectionExecutionEntry(run, value, ['load_skill'], ['name']);
+          const entry = introspectionExecutionEntry(run, value, ['name']);
           if (!entry) return failed('skill read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readInstalledSkill(value.name));
         }
         case 'turn.schedule.read-routines': {
-          const entry = scheduleExecutionEntry(run, value, ['schedule_list'], []);
+          const entry = scheduleExecutionEntry(run, value, []);
           if (!entry) return failed('schedule read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readRoutines());
         }
         case 'turn.schedule.arm-confirmed-routine': {
           const entry = scheduleExecutionEntry(
-            run, value, ['schedule_create'], ['prompt', 'every', 'dailyAt', 'mode'],
+            run, value, ['prompt', 'every', 'dailyAt', 'mode'],
           );
           if (!entry) return failed('schedule arm authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
@@ -1696,45 +1682,45 @@ export const makeControllerTurnBridge = ({
             }));
         }
         case 'turn.schedule.cancel-routine': {
-          const entry = scheduleExecutionEntry(run, value, ['schedule_cancel'], ['id']);
+          const entry = scheduleExecutionEntry(run, value, ['id']);
           if (!entry) return failed('schedule cancel authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.cancelRoutine(value.id));
         }
         case 'turn.dweb.discover-apps': {
-          const entry = dwebExecutionEntry(run, value, ['dweb_discover'], []);
+          const entry = dwebExecutionEntry(run, value, []);
           if (!entry) return failed('dweb discovery authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.discoverApps());
         }
         case 'turn.dweb.publish-confirmed-app': {
-          const entry = dwebExecutionEntry(run, value, ['dweb_share'], ['appId']);
+          const entry = dwebExecutionEntry(run, value, ['appId']);
           if (!entry) return failed('dweb publish authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.publishConfirmedApp(value.appId));
         }
         case 'turn.dweb.install-confirmed-app': {
-          const entry = dwebExecutionEntry(run, value, ['dweb_install'], ['uri', 'name']);
+          const entry = dwebExecutionEntry(run, value, ['uri', 'name']);
           if (!entry) return failed('dweb install authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.installConfirmedApp(value.uri, value.name));
         }
         case 'turn.dweb.read-peers': {
-          const entry = dwebExecutionEntry(run, value, ['dweb_peers'], []);
+          const entry = dwebExecutionEntry(run, value, []);
           if (!entry) return failed('dweb peer authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readPeers());
         }
         case 'turn.dweb.set-peer-blocked': {
           const entry = dwebExecutionEntry(
-            run, value, ['dweb_block'], ['did', 'block', 'reason'],
+            run, value, ['did', 'block', 'reason'],
           );
           if (!entry) return failed('dweb block authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.setPeerBlocked(value.did, value.block, value.reason));
         }
         case 'turn.dweb.set-discovery-enabled': {
-          const entry = dwebExecutionEntry(run, value, ['dweb_discovery'], ['enabled']);
+          const entry = dwebExecutionEntry(run, value, ['enabled']);
           if (!entry) return failed('dweb policy authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.setDiscoveryEnabled(value.enabled));
@@ -1803,13 +1789,11 @@ export const makeControllerTurnBridge = ({
               || !run.toolNames.has(call.name)) {
             return failed('tool grant mismatch', true);
           }
-          if (controllerHostsTool(call.name)) {
-            return {
-              ok: false, code: 'turn-controller-tool-legacy-dispatch-refused',
-              error: 'controller-owned tool requires finite execution', outcomeKnown: true,
-            };
+          if (!legacyToolAllowed(call.name)) {
+            return failed(Object.assign(new Error('controller tool cannot use legacy dispatch'), {
+              code: 'turn-controller-tool-legacy-dispatch-refused',
+            }), true);
           }
-          if (!legacyToolAllowed(call.name)) return failed('tool grant mismatch', true);
           if (!issuedToolCall(run, call)
               && !issuedToolCall(run, call, run.legacyToolCalls)) {
             return failed('tool call was not issued by the pinned model stream', true);

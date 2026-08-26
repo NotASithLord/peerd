@@ -18,6 +18,8 @@ import {
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
+  controllerAuthorityClassForTool,
+  controllerHostsTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -290,7 +292,16 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       throw error;
     };
     const executeActorTool = async (/** @type {any} */ call) => {
-      const prepared = await actorToolRequest('actor-tool-prepare-request', { call });
+      const authorityClass = controllerAuthorityClassForTool(call?.name);
+      if (authorityClass === null) {
+        return {
+          ok: false, error: 'actor tool has no controller authority class', outcomeKnown: true,
+          meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
+        };
+      }
+      const prepared = await actorToolRequest(
+        'actor-tool-prepare-request', { call, authorityClass },
+      );
       if (prepared?.ok !== true) {
         return {
           ok: false, error: prepared?.error ?? 'actor tool preparation failed',
@@ -730,15 +741,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         modelEgress,
       });
       const legacyToolDispatch = makeRelayedToolDispatch(requestTool);
-      const toolDispatch = (/** @type {any} */ call) => (
-        controllerHostsActorTool(call?.name)
-        || controllerHostsPodTool(call?.name)
-        || controllerHostsRepositoryTool(call?.name)
-        || controllerHostsVmTool(call?.name)
-        || controllerHostsNotebookTool(call?.name)
-        || controllerHostsAppTool(call?.name)
-        || controllerHostsPersistenceTool(call?.name)
-      )
+      const toolDispatch = (/** @type {any} */ call) => controllerHostsTool(call?.name)
         ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
       // summary. The SW's closure (over a policy-reduced live tab origin) can't

@@ -11,6 +11,7 @@ const DEFAULT_RESULT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_PENDING_EFFECTS = 4;
 const IDENTIFIER = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/;
 const TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+const AUTHORITY_CLASS = /^[a-z][a-z0-9-]{0,63}$/;
 const EFFECT_METHOD = /^[a-z][a-zA-Z0-9]{0,63}$/;
 const EFFECT_OPERATION = /^[a-z][a-z0-9.-]{0,127}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -244,14 +245,17 @@ export const parseToolExecutionRequest = (value, manifest) => {
       || !Number.isSafeInteger(input.turnGeneration) || Number(input.turnGeneration) < 0
       || !Number.isSafeInteger(input.attempt) || Number(input.attempt) < 0
       || typeof input.toolName !== 'string' || !TOOL_NAME.test(input.toolName)
+      || typeof input.authorityClass !== 'string'
+      || !AUTHORITY_CLASS.test(input.authorityClass)
       || typeof input.argsDigest !== 'string' || !DIGEST.test(input.argsDigest)
       || input.manifestDigest !== manifest.digest
       || Object.keys(input).some((key) => ![
         'protocol', 'executionId', 'runId', 'callId', 'sessionId',
-        'turnGeneration', 'attempt', 'toolName', 'argsDigest', 'manifestDigest',
+        'turnGeneration', 'attempt', 'toolName', 'authorityClass',
+        'argsDigest', 'manifestDigest',
         'args', 'projection',
       ].includes(key))) return null;
-  const policy = manifest.tools[input.toolName];
+  const policy = manifest.tools[input.authorityClass];
   const projection = record(input.projection);
   if (!policy || !bounded(input.args, policy.argumentBytes)
       || !projection || Object.keys(projection).some((key) => !policy.projectionKeys.includes(key))
@@ -265,6 +269,7 @@ export const parseToolExecutionRequest = (value, manifest) => {
     turnGeneration: input.turnGeneration,
     attempt: input.attempt,
     toolName: input.toolName,
+    authorityClass: input.authorityClass,
     argsDigest: input.argsDigest,
     manifestDigest: input.manifestDigest,
     args: input.args,

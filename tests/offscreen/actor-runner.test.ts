@@ -88,6 +88,7 @@ describe('actor worker startup proof', () => {
       } }));
       if (message.type === 'run') queueMicrotask(() => worker.emit('message', { data: {
         type: 'actor-tool-prepare-request', rid: 'prepare-1',
+        authorityClass: 'actor',
         call: { id: 'call-1', name: 'actor_tasks', args: {} },
       } }));
       if (message.type === 'actor-tool-prepare-response') {

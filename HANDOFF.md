@@ -24,29 +24,20 @@ may not.
 
 ## Migration sequence
 
-1. Move model execution end to end. Controller adapters shape requests, apply
-   retry/failover policy, decode streams and interpret responses. The kernel
-   resolves a compact provider authority manifest and owns fixed endpoints,
-   credential binding, authentication, request/response limits, stream lifetime
-   and cancellation. Apply the same path to orchestrator and isolated actors,
-   including model inventory and live context-window reads. Delete direct
-   adapter `getSecret`/`safeFetch` execution from the service-worker graph in
-   the same checkpoint.
-2. Introduce a frozen explicit allowlist for the temporary legacy tool lane.
-   A tool is controller-owned or legacy-owned, never both, and new tools cannot
-   enter the legacy lane.
-3. Before moving another tool domain, delete broad aggregate edges and
-   duplicate orchestrator/isolated-actor authority wiring. Each retained seam
-   checkpoint must remove superseded service-worker reachability and reduce
-   the actual package or the disposable fixed-authority projection; revert
-   preparation-only changes. Exact per-domain route modules may be shared, but
-   generic dispatch and opaque payload envelopes remain prohibited.
-4. Resume cohesive tool-domain relocation only after the projected authority
-   floor trends downward. When the allowlist reaches zero, delete
-   `turn.tool.dispatch`, the old
-   dispatcher/context aggregate, the temporary migration machinery, and every
-   synchronous service-worker import of the controller semantic root, provider
-   implementations, tool catalog/definitions, turn driver and actor semantics.
+1. Keep the completed model-egress and migrated-tool paths on their single
+   controller-semantics/exact-authority execution path. Do not add a fallback.
+2. Delete only genuine aggregate or compatibility ownership that still makes
+   ordinary semantic growth reachable from the service worker. The next target
+   remains the live turn composition path, not another tool-family count.
+3. Move the remaining semantic turn owner into the sealed controller and delete
+   `kernel-turn-live-factories.js`, `kernel-turn-runtime.js` semantic closures,
+   and `controller-turn-semantics.js` from the SW graph in the same executable
+   cut. Exact session, actor, confirmation, audit, replay, browser, engine,
+   repository, storage, alarm and egress custody stays in the kernel.
+4. Only after that ownership cut, finish the frozen legacy lane if its removal
+   is still necessary. When its allowlist reaches zero, delete
+   `turn.tool.dispatch`, its implementation aggregate and all temporary
+   compatibility machinery. New tools may never enter the legacy lane.
 
 ## Boundary rules
 
@@ -67,12 +58,14 @@ may not.
 
 ## Checkpoint evidence
 
-For every retained checkpoint record the semantic service-worker modules and
+For every retained checkpoint record semantic service-worker reachability and
 privileged context members removed, tools removed from the legacy allowlist,
-packaged Store-Chrome bytes and inputs, normalized authority graph telemetry,
-focused boundary/security results, and any inherited failure reproduced on the
-checkpoint baseline. Commit and push each retained checkpoint with a clean
-worktree before continuing.
+packaged Store-Chrome bytes and inputs as telemetry, normalized authority graph
+results, focused boundary/security results, and inherited failures reproduced
+on the checkpoint baseline. A checkpoint is architectural progress when it
+makes ownership simpler or makes feature-growth independence enforceable; byte
+reduction alone is not a reason to add indirection. Commit and push each
+retained checkpoint with a clean worktree before continuing.
 
 Major cutovers and completion also run the full static and Bun gates,
 in-browser verification, Store-Chrome package/posture checks, controller parity,
@@ -80,56 +73,58 @@ and fresh plus forced-wake cold-start measurements. Existing failures are debt,
 not an excuse to stop: inspect them and prove no-new-failures parity against the
 relevant baseline.
 
-## Current course-correction checkpoint
+## Current retained state
 
-The retained seam work is `2f92849` followed by `58ebb61`.
+The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, and `4dd2279`,
+followed by the staged fixed-authority-class checkpoint.
 
-- Both service-worker imports of `peerd-runtime/kernel-transfer.js` were
-  replaced by exact transfer, persistence, policy and self-sync custody leaves;
-  the aggregate module was deleted.
-- Orchestrator and isolated-actor relays now bind the same exact per-domain
-  authority implementations. Repeated repository-authority construction was
-  deleted from the actor route table. The remaining host adapters are
-  intentionally distinct: one binds turn-call custody, while the other binds
-  sender-pinned actor grants, relay quotas and run settlement. Collapsing those
-  lifecycle envelopes would require the prohibited generic callback/dispatcher
-  shape.
-- No authority operation or legacy tool was added or removed. The frozen legacy
-  allowlist remains at 17.
+- The broad `kernel-transfer.js` aggregate and generic controller tool-effect
+  lane are deleted. Orchestrator and isolated actors share exact per-domain
+  authority bindings while retaining their distinct lifecycle/grant envelopes.
+- `kernel-turn-runtime.js` no longer imports the semantic turn driver, goal
+  runner or todo implementation. It receives those owners from the one live
+  composition path.
+- Tool-name ownership now lives only in
+  `peerd-runtime/controller-tool-ownership.js`. The authority graph imports a
+  fixed class ledger (`local`, actor, Pod, repository, engine kinds,
+  persistence, page, introspection, scheduling and dweb) and exact named
+  operations. The deleted per-tool SW manifest and every redundant per-handler
+  tool-name list no longer authorize effects.
+- The frozen legacy allowlist remains at 17. No authority operation was added;
+  existing exact handlers still bind owner/session/run, class, arguments,
+  cancellation, replay and known/unknown outcome state.
 
-Measured from clean commits with Store posture verification:
+The representative tool-feature fixture adds a semantic tool name to an
+existing controller authority class. After normalizing only generated
+controller identity literals, the candidate has exactly the same SW inputs and
+byte-identical authority code. The fixture itself appears only in the
+controller graph.
 
-| Commit/artifact | Store SW bytes | Inputs | Minified cold graph |
-|---|---:|---:|---:|
-| `7ff9fae` decision point | 1,318,602 | 452 | 347,757 |
-| `58ebb61` actual | 1,317,300 | 451 | 347,757 |
-| `7ff9fae` authority-only projection | 1,101,421 | 362 | 347,757 |
-| `58ebb61` authority-only projection | 1,100,140 | 362 | 347,757 |
+Store-Chrome telemetry for the latest staged checkpoint is 1,305,599 bundled
+SW bytes, 449 inputs and a 347,757-byte minified cold graph. The preceding
+`4dd2279` package was 1,312,985 bytes with the same 449 inputs and cold graph.
+The SW ledger replaces `shared/controller-tool-manifest.js` with
+`shared/controller-authority-manifest.js`; the semantic ownership module is not
+an SW input. These numbers are observations, not optimization targets.
 
-The actual worker decreased by 1,302 bytes and one input; the projected fixed
-authority floor decreased by 1,281 bytes without adding an input. The exact
-input deleted is `peerd-runtime/kernel-transfer.js`. The current projection
-still removes 89 semantic inputs and 217,160 bundled bytes without removing a
-background authority handler or adding a projection input.
+The isolated Home harness (only the obsolete byte ceilings relaxed in the
+measurement worktree) passed complete route/event/port and actionable-vault
+readiness: 3.61 seconds from browser launch, 685 ms from worker target, 133 ms
+from Home navigation, and 107 ms for a confirmed forced wake. The assessment
+was green and remains inside the accepted functional envelope.
 
-The Home cold harness at `58ebb61`, run from an isolated measurement worktree
-with only the obsolete byte ceilings relaxed, reached full actionable readiness
-in 2.36 seconds from browser launch and 841 ms from worker target. A confirmed
-forced wake reached actionable readiness in 137 ms. Both route-readiness and
-timing assessments passed.
+Verification: 148 focused boundary/security tests passed; static typecheck,
+lint, tscheck coverage and the dweb boundary passed; Store packaging/posture
+passed. The full Bun suite passed 7,507 tests and reproduced only the same five
+inherited failures. The in-browser suite passed 1,000 tests and reproduced only
+the same two inherited UI failures. There are no new failures.
 
-Focused boundary/security verification passed 123 tests with no failures. The
-full Bun run passed 7,532 tests and reproduced only the five inherited failures;
-the in-browser run passed 1,000 tests and reproduced only its two inherited UI
-failures. Typecheck, lint, tscheck coverage, the dweb boundary, and both Store
-posture checks passed. The ordinary packaged-import command still stops at the
-inherited 300 KB Preview cold-graph ceiling rather than an import defect.
-
-Next work remains deletion-first at the three projected semantic roots:
-`kernel-turn-live-factories.js`, `kernel-turn-runtime.js`, and
-`controller-turn-semantics.js`. Do not count further allowlist churn as
-architectural progress unless the same checkpoint makes one of those real
-imports or its superseded aggregate closure disappear.
+The remaining architectural blocker is unchanged: the SW still reaches
+`controller-turn-semantics.js` through `kernel-turn-live-factories.js`, and that
+owner still supplies the turn driver, legacy dispatcher/registry and feature
+orchestration. The next retained work must remove that real semantic reachability
+or stop with the exact minimum executable cut. Do not resume per-domain
+allowlist churn or introduce a generic bridge merely to alter bundle telemetry.
 
 ## Completion condition
 

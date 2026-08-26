@@ -15,6 +15,8 @@ import {
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
+  controllerAuthorityClassForTool,
+  controllerHostsTool,
   executeControllerActorTool,
   executeControllerLocalTool,
   executeControllerPodTool,
@@ -30,7 +32,6 @@ import {
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
-import { controllerHostsTool } from '/shared/controller-tool-manifest.js';
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import {
   callModel as callProviderModel,
@@ -287,27 +288,29 @@ const runControllerTurnWith = async (payload, options) => {
         return hydrateToolDescriptors(projection, ctx.runtimeCapabilities);
       },
       toolDispatch: (/** @type {unknown} */ call) => withToolSlot(async () => {
+        const authorityClass = controllerAuthorityClassForTool(
+          /** @type {any} */ (call)?.name,
+        );
         const legacyDispatch = async () => parseJson(await rpc('turn.tool.dispatch', {
           callJson: JSON.stringify(call),
         }), 'tool result');
-        if (!controllerHostsTool(/** @type {any} */ (call)?.name)
-            && !legacyToolAllowed(/** @type {any} */ (call)?.name)) {
+        if (authorityClass === null && !legacyToolAllowed(/** @type {any} */ (call)?.name)) {
           throw Object.assign(new Error('tool has no execution owner'), {
             code: 'tool-execution-owner-missing', outcomeKnown: true,
           });
         }
-        const prepared = await rpc('turn.tool.prepare', {
-          callJson: JSON.stringify(call),
-        });
-        if (prepared?.mode === 'legacy') {
-          if (controllerHostsTool(/** @type {any} */ (call)?.name)) {
-            throw Object.assign(new Error('controller tool preparation unavailable'), {
-              code: 'controller-tool-preparation-unavailable', outcomeKnown: true,
-            });
-          }
+        if (authorityClass === null) {
           const result = await legacyDispatch();
           if (result?.outcomeKnown === false) nestedUnknown = true;
           return result;
+        }
+        const prepared = await rpc('turn.tool.prepare', {
+          callJson: JSON.stringify(call), authorityClass,
+        });
+        if (prepared?.mode === 'legacy') {
+          throw Object.assign(new Error('controller tool preparation unavailable'), {
+            code: 'controller-tool-preparation-unavailable', outcomeKnown: true,
+          });
         }
         if (prepared?.mode === 'result') {
           const result = parseJson(prepared.resultJson, 'tool result');
@@ -322,7 +325,8 @@ const runControllerTurnWith = async (payload, options) => {
         if (!isRecord(request) || typeof request.executionId !== 'string'
             || typeof request.argsDigest !== 'string'
             || !Number.isSafeInteger(request.turnGeneration)
-            || typeof request.toolName !== 'string') {
+            || typeof request.toolName !== 'string'
+            || request.authorityClass !== authorityClass) {
           throw new Error('kernel tool execution request is invalid');
         }
         let execution;

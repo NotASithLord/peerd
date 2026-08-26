@@ -45,6 +45,7 @@ const request = (over: Record<string, unknown> = {}) => ({
   turnGeneration: 3,
   attempt: 0,
   toolName: 'remember',
+  authorityClass: 'remember',
   argsDigest: 'b'.repeat(64),
   manifestDigest: digest,
   args: { fact: 'one' },
@@ -109,7 +110,7 @@ describe('tool execution protocol', () => {
     expect(parseToolExecutionRequest(request(), compiled)).toMatchObject({
       executionId: 'execution-1', runId: 'run-1', callId: 'tool-use-1',
       sessionId: 'session-1', turnGeneration: 3, attempt: 0,
-      toolName: 'remember', argsDigest: 'b'.repeat(64),
+      toolName: 'remember', authorityClass: 'remember', argsDigest: 'b'.repeat(64),
     });
     expect(parseToolExecutionRequest(request({ manifestDigest: 'c'.repeat(64) }), compiled))
       .toBeNull();

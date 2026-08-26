@@ -42,10 +42,9 @@ import {
   filterByRuntimeCapabilities, runtimeCapabilityPromptBlock, runtimeCapabilityRefusal,
 } from '../runtime-capabilities.js';
 import {
-  CONTROLLER_TOOL_MANIFEST,
-  controllerToolDomain,
-  controllerHostsTool,
-} from '../../shared/controller-tool-manifest.js';
+  CONTROLLER_AUTHORITY_MANIFEST,
+  controllerAuthorityClassAllowed,
+} from '../../shared/controller-authority-manifest.js';
 import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
 import { projectToolAuthority } from '../tools/metadata/descriptor.js';
 
@@ -579,46 +578,56 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   };
   const toolExecution = typeof prepareToolCall === 'function'
     && typeof settleToolCall === 'function' ? Object.freeze({
-      prepare: async (/** @type {any} */ call) => {
-        if (!controllerHostsTool(call?.name)) return null;
+      prepare: async (/** @type {any} */ call, /** @type {any} */ binding) => {
+        const authorityClass = binding?.authorityClass;
+        if (!controllerAuthorityClassAllowed(authorityClass)) return null;
         const toolContext = await getToolContext();
         const prepared = await prepareToolCall(call, toolContext);
         if (prepared?.prepared !== true) return { mode: 'result', result: prepared };
-        const projection = ['actor_create', 'message_actor'].includes(call?.name)
+        const projection = authorityClass === 'actor'
           ? {
               sessionId: toolContext.session?.sessionId,
               sessionDepth: toolContext.session?.depth ?? 0,
               sessionKind: toolContext.session?.kind ?? 'chat',
               inbound: toolContext.inbound === true,
             }
-            : controllerToolDomain(call?.name) === 'persistence'
+            : authorityClass === 'repository'
+              ? {
+                sessionId: toolContext.session?.sessionId,
+                actorType: toolContext.actorType,
+                actorInstanceId: toolContext.actorInstanceId,
+              }
+            : authorityClass === 'persistence'
               ? {
                 sessionId: toolContext.session?.sessionId,
                 activeTabOrigin: toolContext.activeTab?.origin,
                 goalActive: !!toolContext.todoStore,
               }
-              : call?.name === 'load_skill'
+              : authorityClass === 'introspection'
                 ? {
                   sessionId: toolContext.session?.sessionId,
                   messageCount: toolContext.session?.messageCount ?? 0,
                   trimCovered: toolContext.session?.trimCovered ?? 0,
                 }
-                : controllerToolDomain(call?.name) === 'dweb'
+                : authorityClass === 'dweb'
                   ? {
                     sessionId: toolContext.session?.sessionId,
                     dwebAvailable: toolContext.dweb != null,
                   }
-            : {};
+                  : ['pod', 'vm', 'notebook', 'app', 'page', 'schedule']
+                      .includes(authorityClass)
+                    ? { sessionId: toolContext.session?.sessionId }
+                    : {};
         return {
           mode: 'execute',
-          custody: prepared,
+          custody: { prepared, authorityClass },
           args: prepared.args,
           projection,
-          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
         };
       },
       settle: async (/** @type {any} */ custody, /** @type {any} */ reported) => {
-        const policy = CONTROLLER_TOOL_MANIFEST.tools[custody?.call?.name];
+        const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[custody?.authorityClass];
         if (!policy || !toolExecutionResultAllowed(reported, policy.resultBytes)) {
           throw new Error('tool execution result is invalid');
         }
@@ -631,7 +640,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
           outcomeKind: reported.outcomeKnown === true
             ? 'pre-effect-failure' : 'host-lost',
         };
-        return settleToolCall(custody, { result });
+        return settleToolCall(custody.prepared, { result });
       },
     }) : null;
   // why: the loop's concurrent-dispatch scheduler partitions a multi-tool

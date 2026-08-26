@@ -468,7 +468,7 @@ describe('inbound provenance — monotonic SW grant', () => {
         relayToken, call: { name: 'a2a_run', args: { code: 'await mesh.send(...)' } },
       }, OFFSCREEN);
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken, call: { name: 'dweb_peers', args: {} },
+        relayToken, authorityClass: 'dweb', call: { name: 'dweb_peers', args: {} },
       }, OFFSCREEN);
       const allowed = await client.routes['dweb/read-peers']({
         relayToken, executionId: prepared.executionId,
@@ -1161,7 +1161,7 @@ describe('controller-owned actor tools: exact isolated authority', () => {
     });
     const observed: any = await during(async (relayToken) => {
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'actor',
         call: { id: 'call-1', name: 'actor_cancel', args: { taskId: 'task-7' } },
       }, OFFSCREEN);
       const effect = await client.routes['actor/task-cancel']({
@@ -1216,7 +1216,7 @@ describe('controller-owned actor tools: exact isolated authority', () => {
     });
     const refused: any = await during(async (relayToken) => {
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'actor',
         call: { id: 'call-tamper', name: 'actor_cancel', args: { taskId: 'task-approved' } },
       }, OFFSCREEN);
       return client.routes['actor/task-cancel']({
@@ -1243,7 +1243,7 @@ describe('controller-owned actor tools: exact isolated authority', () => {
     });
     const effect: any = await during(async (relayToken) => {
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'actor',
         call: { id: 'call-2', name: 'message_actor', args: { to: 'web', message: 'go' } },
       }, OFFSCREEN);
       return client.routes['actor/message-deliver']({
@@ -1278,7 +1278,7 @@ describe('controller-owned Pod tools: exact isolated authority', () => {
     });
     const observed: any = await during(async (relayToken) => {
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'pod',
         call: {
           id: 'call-pod-write', name: 'pod_write',
           args: { podId: 'pod-1', path: 'main.js', content: 'approved' },
@@ -1350,7 +1350,7 @@ describe('controller-owned repository tools: exact isolated authority', () => {
     });
     const observed: any = await during(async (relayToken) => {
       const tamperedPrepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'persistence',
         call: {
           id: 'call-remember-tampered', name: 'remember',
           args: { scope: 'user', body: 'approved' },
@@ -1361,7 +1361,7 @@ describe('controller-owned repository tools: exact isolated authority', () => {
         scope: { kind: 'user', workspace: '', subpath: undefined }, body: 'altered',
       }, OFFSCREEN);
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'repository',
         call: { id: 'call-pod-destroy', name: 'pod_destroy', args: { podId: 'pod-1' } },
       }, OFFSCREEN);
       const read = await client.routes['repository/read-pod']({
@@ -1421,7 +1421,7 @@ describe('controller-owned App tools: exact isolated authority', () => {
     });
     const observed: any = await during(async (relayToken) => {
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'app',
         call: {
           id: 'call-app-write', name: 'app_write_file',
           args: { appId: 'app-1', path: 'main.js', content: 'approved' },
@@ -1486,7 +1486,7 @@ describe('controller-owned persistence tools: exact isolated authority', () => {
     });
     const observed: any = await during(async (relayToken) => {
       const tamperedPrepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'persistence',
         call: {
           id: 'call-remember-tampered', name: 'remember',
           args: { scope: 'user', body: 'approved' },
@@ -1497,7 +1497,7 @@ describe('controller-owned persistence tools: exact isolated authority', () => {
         scope: { kind: 'user', workspace: '', subpath: undefined }, body: 'altered',
       }, OFFSCREEN);
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'persistence',
         call: {
           id: 'call-remember', name: 'remember',
           args: { scope: 'user', body: 'approved' },
@@ -1568,7 +1568,7 @@ describe('controller-owned page tools: exact isolated authority', () => {
     });
     const observed: any = await during(async (relayToken) => {
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken,
+        relayToken, authorityClass: 'page',
         call: { id: 'call-page-code', name: 'page_code', args: { code: 'return 1' } },
       }, OFFSCREEN);
       const effect = await client.routes['page/run-program']({
@@ -1627,7 +1627,7 @@ describe('controller-owned introspection tools: exact isolated authority', () =>
         id: 'call-inspect-tabs', name: 'inspect', args: { kind: 'session_access' },
       };
       const prepared: any = await client.routes['actor/tool-prepare']({
-        relayToken, call,
+        relayToken, authorityClass: 'introspection', call,
       }, OFFSCREEN);
       const effect = await client.routes['introspection/automatable-tabs']({
         relayToken, executionId: prepared.executionId,
