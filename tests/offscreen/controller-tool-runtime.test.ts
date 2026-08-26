@@ -65,6 +65,41 @@ describe('controller tool runtime', () => {
     });
   });
 
+  test('plans sandbox creation through only sandbox-scoped effects', async () => {
+    const operations: Array<[string, any]> = [];
+    const result = await executeControllerToolCall(request({
+      executionId: 'execution-sandbox-1', callId: 'call-sandbox-1',
+      toolName: 'sandbox_create', args: { kind: 'webvm', name: 'builder' },
+      projection: { sessionId: 'session-now-1', dwebEnabled: false },
+    }), {
+      ...options('sandbox_create'),
+      kernelCall: async (operation: string, payload: any) => {
+        const decoded = JSON.parse(payload.json);
+        operations.push([operation, decoded]);
+        const value = operation === 'sandbox.record.mutate' && decoded.action === 'create'
+          ? { id: 'vm-1', name: 'builder' } : null;
+        return {
+          ok: true, outcomeKnown: true,
+          value: { json: JSON.stringify(value) },
+        };
+      },
+    });
+    expect(operations).toEqual([
+      ['sandbox.record.mutate', {
+        kind: 'webvm', action: 'create',
+        options: { name: 'builder', ownerSessionId: 'session-now-1' },
+      }],
+      ['sandbox.tab.ensure', { kind: 'webvm', id: 'vm-1' }],
+      ['sandbox.record.mutate', { kind: 'webvm', action: 'default', id: 'vm-1' }],
+    ]);
+    expect(result).toMatchObject({
+      ok: true, outcomeKnown: true, effectEntered: true,
+    });
+    expect(JSON.parse(result.value.content)).toEqual({
+      id: 'vm-1', name: 'builder', kind: 'webvm', isCurrent: true,
+    });
+  });
+
   test('rejects tools outside the compiled manifest', async () => {
     const result = await executeControllerToolCall(
       request({ toolName: 'remember' }),
