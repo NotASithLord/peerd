@@ -31,6 +31,7 @@ import {
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
+  reasoningForTurn,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -772,7 +773,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           maxSteps: program.maxSteps,
           oneShot: metadata.oneShot,
           signal: abort.signal,
-          reasoning: program.reasoning,
+          reasoning: reasoningForTurn(program),
           ...(contextWindow == null ? {} : { contextWindow }),
           inbound: metadata.inbound === true,
           preflightReply: metadata.preflightReply,

@@ -139,7 +139,8 @@ const makeEventQueue = () => {
 /** @param {Record<string, any>} ctx */
 const controllerCtx = (ctx) => {
   const keys = [
-    'userText', 'synthetic', 'resume', 'contextMessage', 'reasoning',
+    'userText', 'synthetic', 'resume', 'contextMessage',
+    'reasoningEnabled', 'reasoningEffort',
     'actorReply', 'contextWindow', 'oneShot', 'maxSteps', 'persistDeltas',
     'preflightReply', 'runtimeCapabilities', 'providerFailoverEnabled',
     'providerFallbacks', 'contextWindowOverrides', 'pricingOverrides',

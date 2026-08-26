@@ -98,6 +98,23 @@ const CONCURRENT_TOOLS = new Set(['actor_create']);
 const DISPATCH_DEADLINE_MS = 10 * 60_000;
 const UNKNOWN_TOOL_OUTCOME = 'outcome_unknown: Verify the target before retrying.';
 const UNKNOWN_TURN_OUTCOME = 'Turn outcome unknown. Check the session before retrying.';
+const REASONING_BUDGET_TOKENS = 2048;
+const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
+const DEFAULT_REASONING_EFFORT = 'medium';
+
+/**
+ * Model-facing reasoning policy belongs beside the semantic loop that consumes
+ * it. Authority sends only the user's bounded settings snapshot.
+ * @param {{ reasoningEnabled?: unknown, reasoningEffort?: unknown }} settings
+ */
+export const reasoningForTurn = (settings) => ({
+  enabled: settings.reasoningEnabled === true,
+  budgetTokens: REASONING_BUDGET_TOKENS,
+  effort: typeof settings.reasoningEffort === 'string'
+    && REASONING_EFFORT_LEVELS.includes(settings.reasoningEffort)
+    ? /** @type {'low'|'medium'|'high'|'xhigh'|'max'} */ (settings.reasoningEffort)
+    : DEFAULT_REASONING_EFFORT,
+});
 
 // Yield settled values in completion order. Each input promise MUST resolve
 // (the dispatcher below never rejects), so there is no rejection branch —
