@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { scheduleCreateTool } from '../../../extension/peerd-runtime/tools/defs/schedule-create.js';
+import { createScheduleToolAuthority } from '../../../extension/background/schedule-tool-authority.js';
 
 describe('schedule_create cancellation', () => {
   test('Stop during forced confirmation cannot arm a routine after a late yes', async () => {
@@ -7,7 +7,11 @@ describe('schedule_create cancellation', () => {
     let seenSignal: AbortSignal | undefined;
     let resolveConfirmation: (answer: 'yes_once') => void = () => {};
     let additions = 0;
-    const pending = scheduleCreateTool.execute({ prompt: 'check releases', every: '1h' }, {
+    const args = { prompt: 'check releases', every: '1h' };
+    const authority = createScheduleToolAuthority({
+      call: { name: 'schedule_create', args },
+      signal: controller.signal,
+      ctx: {
       abortSignal: controller.signal,
       permission: { confirmActions: false },
       session: { sessionId: 'chat-1' },
@@ -19,7 +23,11 @@ describe('schedule_create cancellation', () => {
         additions += 1;
         return { ok: true, routine: {} };
       },
-    } as any);
+      },
+    });
+    const pending = authority.armConfirmedRoutine({
+      prompt: 'check releases', every: '1h', dailyAt: undefined, mode: undefined,
+    });
 
     await Promise.resolve();
     expect(seenSignal).toBe(controller.signal);

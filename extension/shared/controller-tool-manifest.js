@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: 'f170b27046c943232459b1b7cb8e58c755773f9f0561b70a46d2527a5f380805',
+  digest: '4d28b80e5a9d510a724ba91cf32133cfb9c1e300388cc9d60b582fd7811726d7',
   tools: {
     now: {
       projectionKeys: [],
@@ -197,6 +197,9 @@ const manifestSource = {
       projectionKeys: ['sessionId', 'messageCount', 'trimCovered'], effects: [],
       resultBytes: 2 * 1024 * 1024,
     },
+    schedule_create: { projectionKeys: [], effects: [], argumentBytes: 64 * 1024 },
+    schedule_list: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
+    schedule_cancel: { projectionKeys: [], effects: [], argumentBytes: 4 * 1024 },
   },
 };
 
@@ -236,6 +239,7 @@ const pageTools = new Set([
 const introspectionTools = new Set([
   'actor_list', 'inspect', 'wait_until', 'load_skill',
 ]);
+const scheduleTools = new Set(['schedule_create', 'schedule_list', 'schedule_cancel']);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
@@ -248,4 +252,5 @@ export const controllerToolDomain = (/** @type {unknown} */ name) =>
                 : persistenceTools.has(name) ? 'persistence'
                   : pageTools.has(name) ? 'page'
                     : introspectionTools.has(name) ? 'introspection'
-                      : null;
+                      : scheduleTools.has(name) ? 'schedule'
+                        : null;

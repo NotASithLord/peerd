@@ -17,12 +17,12 @@ import { describeSchedule } from '../../loop/schedule.js';
 export const scheduleListTool = composeTool("schedule_list", {
 
   execute: async (_args, ctx) => {
-    const scheduleList = /** @type {(() => any[]) | undefined} */ (
-      /** @type {{ scheduleList?: unknown }} */ (ctx).scheduleList);
-    if (typeof scheduleList !== 'function') {
+    const authority = /** @type {{ readRoutines?:()=>Promise<any[]> }|undefined} */ (
+      /** @type {{ scheduleAuthority?: unknown }} */ (ctx).scheduleAuthority);
+    if (typeof authority?.readRoutines !== 'function') {
       return { ok: false, error: 'schedule_unavailable', content: 'Background scheduling is not available in this context.' };
     }
-    const routines = scheduleList() ?? [];
+    const routines = await authority.readRoutines() ?? [];
     if (routines.length === 0) {
       return { ok: true, content: 'No background routines registered.' };
     }

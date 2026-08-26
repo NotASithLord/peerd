@@ -20,9 +20,6 @@ import { toolboxWriteTool } from './defs/toolbox-write.js';
 import { toolboxListTool } from './defs/toolbox-list.js';
 import { toolboxDeleteTool } from './defs/toolbox-delete.js';
 import { requestReviewTool } from './defs/request-review.js';
-import { scheduleCreateTool } from './defs/schedule-create.js';
-import { scheduleListTool } from './defs/schedule-list.js';
-import { scheduleCancelTool } from './defs/schedule-cancel.js';
 import { dwebDiscoverTool } from './defs/dweb-discover.js';
 import { dwebShareTool } from './defs/dweb-share.js';
 import { dwebInstallTool } from './defs/dweb-install.js';
@@ -49,9 +46,6 @@ export const LEGACY_TOOL_IMPLEMENTATIONS = Object.freeze([
   toolboxListTool,
   toolboxDeleteTool,
   requestReviewTool,
-  scheduleCreateTool,
-  scheduleListTool,
-  scheduleCancelTool,
   dwebDiscoverTool,
   dwebShareTool,
   dwebInstallTool,

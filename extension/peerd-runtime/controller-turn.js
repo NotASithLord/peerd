@@ -46,3 +46,8 @@ export {
   controllerHostsIntrospectionTool,
   executeControllerIntrospectionTool,
 } from './controller-introspection-tools.js';
+export {
+  CONTROLLER_SCHEDULE_TOOL_NAMES,
+  controllerHostsScheduleTool,
+  executeControllerScheduleTool,
+} from './controller-schedule-tools.js';

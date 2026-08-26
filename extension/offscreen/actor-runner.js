@@ -1210,6 +1210,28 @@ export const runActor = async (job, {
             }));
           return;
         }
+        if (m.type === 'schedule-read-routines-request') {
+          await relayExactToolMessage(m, 'schedule-read-routines-response', () =>
+            sendToSW('schedule/read-routines', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'schedule-arm-confirmed-routine-request') {
+          await relayExactToolMessage(m, 'schedule-arm-confirmed-routine-response', () =>
+            sendToSW('schedule/arm-confirmed-routine', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              prompt: m.prompt, every: m.every, dailyAt: m.dailyAt, mode: m.mode,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'schedule-cancel-routine-request') {
+          await relayExactToolMessage(m, 'schedule-cancel-routine-response', () =>
+            sendToSW('schedule/cancel-routine', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId, id: m.id,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

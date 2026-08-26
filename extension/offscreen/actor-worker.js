@@ -16,6 +16,7 @@ import {
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
   controllerHostsIntrospectionTool,
+  controllerHostsScheduleTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -25,6 +26,7 @@ import {
   executeControllerPersistenceTool,
   executeControllerPageTool,
   executeControllerIntrospectionTool,
+  executeControllerScheduleTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -156,6 +158,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'introspection-denylist-patterns-response'
       || m.type === 'introspection-audit-entries-response'
       || m.type === 'introspection-installed-skill-response'
+      || m.type === 'schedule-read-routines-response'
+      || m.type === 'schedule-arm-confirmed-routine-response'
+      || m.type === 'schedule-cancel-routine-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -625,6 +630,19 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           result = await executeControllerIntrospectionTool(
             prepared.toolName, prepared.args, prepared.projection,
             introspectionAuthority, { signal: abort.signal },
+          );
+        } else if (controllerHostsScheduleTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
+            authorityValue(actorToolRequest(type, { executionId, ...value }));
+          const scheduleAuthority = Object.freeze({
+            readRoutines: () => request('schedule-read-routines-request'),
+            armConfirmedRoutine: (/** @type {any} */ routine) =>
+              request('schedule-arm-confirmed-routine-request', routine),
+            cancelRoutine: (/** @type {string} */ id) =>
+              request('schedule-cancel-routine-request', { id }),
+          });
+          result = await executeControllerScheduleTool(
+            prepared.toolName, prepared.args, scheduleAuthority, { signal: abort.signal },
           );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,

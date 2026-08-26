@@ -25,6 +25,7 @@ import { createAppToolAuthority } from './app-tool-authority.js';
 import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { createPageToolAuthority } from './page-tool-authority.js';
 import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
+import { createScheduleToolAuthority } from './schedule-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -488,6 +489,20 @@ export const makeOffscreenActorClient = ({
     if (!entry) return null;
     entry.domainState.authority ??= createIntrospectionToolAuthority({
       call: entry.prepared.call, ctx: entry.prepared.ctx,
+    });
+    return entry;
+  };
+  const scheduleEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'schedule', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createScheduleToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
   };
@@ -1943,6 +1958,29 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'introspection/installed-skill: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/installed-skill', 'read', () =>
         entry.domainState.authority.readInstalledSkill(msg.name));
+    },
+    'schedule/read-routines': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['schedule_list'], []);
+      if (!entry) return { ok: false, error: 'schedule/read-routines: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'schedule/read-routines', 'read', () =>
+        entry.domainState.authority.readRoutines());
+    },
+    'schedule/arm-confirmed-routine': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = scheduleEntry(
+        grantFor(msg, sender, boundGrant), msg, ['schedule_create'],
+        ['prompt', 'every', 'dailyAt', 'mode'],
+      );
+      if (!entry) return { ok: false, error: 'schedule/arm-confirmed-routine: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'schedule/arm-confirmed-routine', 'commit', () =>
+        entry.domainState.authority.armConfirmedRoutine({
+          prompt: msg.prompt, every: msg.every, dailyAt: msg.dailyAt, mode: msg.mode,
+        }));
+    },
+    'schedule/cancel-routine': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['schedule_cancel'], ['id']);
+      if (!entry) return { ok: false, error: 'schedule/cancel-routine: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'schedule/cancel-routine', 'commit', () =>
+        entry.domainState.authority.cancelRoutine(msg.id));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

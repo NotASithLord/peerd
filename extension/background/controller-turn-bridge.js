@@ -25,6 +25,7 @@ import { createAppToolAuthority } from './app-tool-authority.js';
 import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { createPageToolAuthority } from './page-tool-authority.js';
 import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
+import { createScheduleToolAuthority } from './schedule-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -613,6 +614,19 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.domainState.authority ??= createIntrospectionToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx,
+    });
+    return entry;
+  };
+  const scheduleExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'schedule', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createScheduleToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
   };
@@ -1728,6 +1742,29 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('skill read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readInstalledSkill(value.name));
+        }
+        case 'turn.schedule.read-routines': {
+          const entry = scheduleExecutionEntry(run, value, ['schedule_list'], []);
+          if (!entry) return failed('schedule read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readRoutines());
+        }
+        case 'turn.schedule.arm-confirmed-routine': {
+          const entry = scheduleExecutionEntry(
+            run, value, ['schedule_create'], ['prompt', 'every', 'dailyAt', 'mode'],
+          );
+          if (!entry) return failed('schedule arm authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.armConfirmedRoutine({
+              prompt: value.prompt, every: value.every,
+              dailyAt: value.dailyAt, mode: value.mode,
+            }));
+        }
+        case 'turn.schedule.cancel-routine': {
+          const entry = scheduleExecutionEntry(run, value, ['schedule_cancel'], ['id']);
+          if (!entry) return failed('schedule cancel authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.cancelRoutine(value.id));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);
