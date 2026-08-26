@@ -20,6 +20,7 @@ import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 import { createVmToolAuthority } from './vm-tool-authority.js';
+import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -416,6 +417,20 @@ export const makeOffscreenActorClient = ({
     if (!entry) return null;
     entry.domainState.authority ??= createVmToolAuthority({
       call: entry.prepared.call, ctx: entry.prepared.ctx,
+    });
+    return entry;
+  };
+  const notebookEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'notebook', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createNotebookToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
   };
@@ -1465,6 +1480,84 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'vm/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/destroy', 'commit', () =>
         entry.domainState.authority.destroyVm(msg.vmId));
+    },
+    'notebook/read': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = notebookEntry(
+        grant, msg, ['js_notebook', 'js_delete'], ['notebookId'],
+      );
+      if (!entry) return { ok: false, error: 'notebook/read: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'notebook/read', 'read', () =>
+        entry.domainState.authority.readNotebook(msg.notebookId));
+    },
+    'notebook/list': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = notebookEntry(grant, msg, ['js_notebook'], []);
+      if (!entry) return { ok: false, error: 'notebook/list: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'notebook/list', 'read', () =>
+        entry.domainState.authority.listNotebooks());
+    },
+    'notebook/set-default': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = notebookEntry(grant, msg, ['js_notebook'], ['notebookId']);
+      if (!entry) return { ok: false, error: 'notebook/set-default: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'notebook/set-default', 'control', () =>
+        entry.domainState.authority.setDefaultNotebook(msg.notebookId));
+    },
+    'notebook/run': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = notebookEntry(
+        grant, msg, ['js_notebook'], ['code', 'timeoutMs', 'notebookId'],
+      );
+      if (!entry) return { ok: false, error: 'notebook/run: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'notebook/run', 'resource', () =>
+        entry.domainState.authority.runNotebook(msg.code, msg.timeoutMs, msg.notebookId));
+    },
+    'notebook/write-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = notebookEntry(
+        grant, msg, ['js_write_file'], ['path', 'content', 'notebookId'],
+      );
+      if (!entry) return { ok: false, error: 'notebook/write-file: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'notebook/write-file', 'commit', () =>
+        entry.domainState.authority.writeFile(msg.path, msg.content, msg.notebookId));
+    },
+    'notebook/read-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = notebookEntry(
+        grant, msg, ['js_read_file'], ['path', 'notebookId'],
+      );
+      if (!entry) return { ok: false, error: 'notebook/read-file: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'notebook/read-file', 'read', () =>
+        entry.domainState.authority.readFile(msg.path, msg.notebookId));
+    },
+    'notebook/destroy': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = notebookEntry(grant, msg, ['js_delete'], ['notebookId']);
+      if (!entry) return { ok: false, error: 'notebook/destroy: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'notebook/destroy', 'commit', () =>
+        entry.domainState.authority.destroyNotebook(msg.notebookId));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

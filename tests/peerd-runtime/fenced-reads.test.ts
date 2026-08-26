@@ -18,7 +18,7 @@ const content = (r: unknown): string => (r as { content: string }).content;
 describe('js_read_file — fenced content', () => {
   const ctx = (content: string) => ({
     session: { sessionId: 's1' },
-    jsClient: { readFile: async () => content },
+    notebookAuthority: { readFile: async () => content },
   });
 
   test('the file body comes back inside the untrusted fence, origin naming the file', async () => {

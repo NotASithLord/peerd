@@ -11,10 +11,12 @@ import {
   controllerHostsPodTool,
   controllerHostsRepositoryTool,
   controllerHostsVmTool,
+  controllerHostsNotebookTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
   executeControllerVmTool,
+  executeControllerNotebookTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -99,6 +101,13 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'vm-import-file-response'
       || m.type === 'vm-write-text-file-response'
       || m.type === 'vm-destroy-response'
+      || m.type === 'notebook-read-response'
+      || m.type === 'notebook-list-response'
+      || m.type === 'notebook-set-default-response'
+      || m.type === 'notebook-run-response'
+      || m.type === 'notebook-write-file-response'
+      || m.type === 'notebook-read-file-response'
+      || m.type === 'notebook-destroy-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -409,6 +418,38 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           result = await executeControllerVmTool(
             prepared.toolName, prepared.args, vmAuthority,
           );
+        } else if (controllerHostsNotebookTool(prepared.toolName)) {
+          const notebookAuthority = Object.freeze({
+            readNotebook: (/** @type {string} */ notebookId) => authorityValue(actorToolRequest(
+              'notebook-read-request', { executionId, notebookId },
+            )),
+            listNotebooks: () => authorityValue(actorToolRequest(
+              'notebook-list-request', { executionId },
+            )),
+            setDefaultNotebook: (/** @type {string} */ notebookId) =>
+              authorityValue(actorToolRequest(
+                'notebook-set-default-request', { executionId, notebookId },
+              )),
+            runNotebook: (/** @type {string} */ code, /** @type {number} */ timeoutMs,
+              /** @type {string|undefined} */ notebookId) => authorityValue(actorToolRequest(
+              'notebook-run-request', { executionId, code, timeoutMs, notebookId },
+            )),
+            writeFile: (/** @type {string} */ path, /** @type {string} */ content,
+              /** @type {string|undefined} */ notebookId) => authorityValue(actorToolRequest(
+              'notebook-write-file-request', { executionId, path, content, notebookId },
+            )),
+            readFile: (/** @type {string} */ path,
+              /** @type {string|undefined} */ notebookId) => authorityValue(actorToolRequest(
+              'notebook-read-file-request', { executionId, path, notebookId },
+            )),
+            destroyNotebook: (/** @type {string} */ notebookId) =>
+              authorityValue(actorToolRequest(
+                'notebook-destroy-request', { executionId, notebookId },
+              )),
+          });
+          result = await executeControllerNotebookTool(
+            prepared.toolName, prepared.args, notebookAuthority, { signal: abort.signal },
+          );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
         });
@@ -471,6 +512,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         || controllerHostsPodTool(call?.name)
         || controllerHostsRepositoryTool(call?.name)
         || controllerHostsVmTool(call?.name)
+        || controllerHostsNotebookTool(call?.name)
       )
         ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling

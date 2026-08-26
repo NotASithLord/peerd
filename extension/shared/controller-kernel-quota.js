@@ -74,6 +74,13 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.vm.import-file': { tool: 'vm_import', riskClass: 'resource' },
   'turn.vm.write-text-file': { tool: 'vm_write_file', riskClass: 'commit' },
   'turn.vm.destroy': { tool: 'vm_delete', riskClass: 'commit' },
+  'turn.notebook.read': { tools: ['js_notebook', 'js_delete'], riskClass: 'read' },
+  'turn.notebook.list': { tool: 'js_notebook', riskClass: 'read' },
+  'turn.notebook.set-default': { tool: 'js_notebook', riskClass: 'control' },
+  'turn.notebook.run': { tool: 'js_notebook', riskClass: 'resource' },
+  'turn.notebook.write-file': { tool: 'js_write_file', riskClass: 'commit' },
+  'turn.notebook.read-file': { tool: 'js_read_file', riskClass: 'read' },
+  'turn.notebook.destroy': { tool: 'js_delete', riskClass: 'commit' },
 });
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
@@ -275,6 +282,13 @@ export const createControllerKernelQuota = (
     'turn.vm.import-file': toolBudget,
     'turn.vm.write-text-file': toolBudget,
     'turn.vm.destroy': toolBudget,
+    'turn.notebook.read': toolBudget,
+    'turn.notebook.list': toolBudget,
+    'turn.notebook.set-default': toolBudget,
+    'turn.notebook.run': toolBudget,
+    'turn.notebook.write-file': toolBudget,
+    'turn.notebook.read-file': toolBudget,
+    'turn.notebook.destroy': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
     'turn.finalize': 1,

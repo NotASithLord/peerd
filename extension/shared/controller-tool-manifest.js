@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '9dbaa7d7deab902b189c224077508891dc4ab6e2328f76039b0a9612ad845191',
+  digest: '924a33d92c8595479bd75586cf1543dea1bdf836b753c39ec92d0321115cb084',
   tools: {
     now: {
       projectionKeys: [],
@@ -99,6 +99,19 @@ const manifestSource = {
     vm_delete: {
       projectionKeys: ['sessionId'], effects: [],
     },
+    js_notebook: {
+      projectionKeys: ['sessionId'], effects: [], argumentBytes: 1024 * 1024,
+      resultBytes: 2 * 1024 * 1024,
+    },
+    js_write_file: {
+      projectionKeys: ['sessionId'], effects: [], argumentBytes: 1024 * 1024,
+    },
+    js_read_file: {
+      projectionKeys: ['sessionId'], effects: [], resultBytes: 2 * 1024 * 1024,
+    },
+    js_delete: {
+      projectionKeys: ['sessionId'], effects: [],
+    },
   },
 };
 
@@ -121,6 +134,7 @@ const actorTools = new Set(['actor_create', 'actor_tasks', 'actor_cancel', 'mess
 const podTools = new Set(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write']);
 const repositoryTools = new Set(['pod_destroy', 'repo_history', 'repo_version', 'repo_remote']);
 const vmTools = new Set(['vm_boot', 'vm_import', 'vm_write_file', 'vm_delete']);
+const notebookTools = new Set(['js_notebook', 'js_write_file', 'js_read_file', 'js_delete']);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
@@ -128,4 +142,5 @@ export const controllerToolDomain = (/** @type {unknown} */ name) =>
       : podTools.has(name) ? 'pod'
         : repositoryTools.has(name) ? 'repository'
           : vmTools.has(name) ? 'vm'
+            : notebookTools.has(name) ? 'notebook'
           : null;

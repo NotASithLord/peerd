@@ -21,3 +21,8 @@ export {
   controllerHostsVmTool,
   executeControllerVmTool,
 } from './controller-vm-tools.js';
+export {
+  CONTROLLER_NOTEBOOK_TOOL_NAMES,
+  controllerHostsNotebookTool,
+  executeControllerNotebookTool,
+} from './controller-notebook-tools.js';

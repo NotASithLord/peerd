@@ -50,7 +50,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
   test('Notebook keeps code exceptions in-band but returns package policy as a failure', async () => {
     const result = await jsNotebookTool.execute({ code: "import('https://example.test/mod.js')" }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      jsClient: { eval: async () => policyResult },
+      notebookAuthority: { runNotebook: async () => policyResult },
     } as any);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toBe(policyError);
@@ -60,10 +60,9 @@ describe('remote module package policy reaches the model as a tool failure', () 
     const controller = new AbortController();
     const result = await jsNotebookTool.execute({ code: 'while (true) {}' }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      abortSignal: controller.signal,
-      jsClient: {
-        eval: async (_code: string, options: { signal?: AbortSignal }) => {
-          expect(options.signal).toBe(controller.signal);
+      notebookAuthority: {
+        runNotebook: async () => {
+          expect(controller.signal.aborted).toBe(false);
           return { durationMs: 0, stopped: true };
         },
       },
@@ -78,7 +77,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
   test('Notebook busy is a non-code result and does not invite an automatic retry', async () => {
     const result = await jsNotebookTool.execute({ code: 'return 1;' }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      jsClient: { eval: async () => ({ errorCode: 'notebook_run_busy' }) },
+      notebookAuthority: { runNotebook: async () => ({ errorCode: 'notebook_run_busy' }) },
     } as any);
     expect(result.ok).toBe(true);
     expect(result.content).toContain('[BUSY]');
@@ -90,7 +89,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
   test('Notebook timeout is a non-code result with explicit retry guidance', async () => {
     const result = await jsNotebookTool.execute({ code: 'while (true) {}' }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      jsClient: { eval: async () => ({ errorCode: 'notebook_run_timeout' }) },
+      notebookAuthority: { runNotebook: async () => ({ errorCode: 'notebook_run_timeout' }) },
     } as any);
     expect(result.ok).toBe(true);
     expect(result.content).toContain('[TIMEOUT]');
@@ -109,7 +108,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
         ...policyResult,
         errorCode: UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
       }) },
-      jsClient: { eval: async () => ({
+      notebookAuthority: { runNotebook: async () => ({
         ...policyResult,
         errorCode: UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
       }) },

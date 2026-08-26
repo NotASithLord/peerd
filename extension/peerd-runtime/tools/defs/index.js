@@ -33,13 +33,9 @@ import { siteCaptureTool }           from './site-capture.js';
 import { actorListTool }             from './actor-list.js';
 import { openTabTool }               from './open-tab.js';
 import { sandboxCreateTool }          from './sandbox-create.js';
-import { jsNotebookTool }                 from './js-notebook.js';
 import { scriptTool }                  from './script.js';
 import { pageCodeTool }               from './page-code.js';
 import { appCodeTool }                from './app-code.js';
-import { jsWriteFileTool }            from './js-write-file.js';
-import { jsReadFileTool }             from './js-read-file.js';
-import { jsDeleteTool }               from './js-delete.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
 import { appSearchTool }              from './app-search.js';
@@ -99,13 +95,9 @@ export {
   // engine (the one cross-kind create; per-kind ops below)
   sandboxCreateTool,
   // engine (Notebook)
-  jsNotebookTool,
   scriptTool,
   readRunCacheTool,
   pageCodeTool,
-  jsWriteFileTool,
-  jsReadFileTool,
-  jsDeleteTool,
   // engine (Pod)
   // engine (App)
   appUpdateTool,
@@ -204,15 +196,11 @@ export const BUILTIN_TOOLS = Object.freeze([
   // actor-only (ACTOR_ONLY_TOOLS) and reach the model via the actors.
   sandboxCreateTool,
   // engine (Notebook)
-  jsNotebookTool,
   scriptTool,
   // script's value-spill read side — a MAIN-agent pager (script is a
   // main-agent tool); ownership is session-stamped and fencing rides the
   // record's stored flag (tools/defs/read-run-cache.js).
   readRunCacheTool,
-  jsWriteFileTool,
-  jsReadFileTool,
-  jsDeleteTool,
   // engine (Pod)
   // engine (App)
   appUpdateTool,
