@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { dwebShareTool } from '../../extension/peerd-runtime/tools/defs/dweb-share.js';
 import { dwebDiscoverTool } from '../../extension/peerd-runtime/tools/defs/dweb-discover.js';
 import { dwebInstallTool } from '../../extension/peerd-runtime/tools/defs/dweb-install.js';
+import { createDwebToolAuthority } from '../../extension/background/dweb-tool-authority.js';
 
 // A mock ctx with a spyable dweb service + confirm. confirmActions default ON
 // (so the dispatcher's gate owns the confirm and the tool does NOT double it).
@@ -21,22 +22,27 @@ const mkCtx = (over: any = {}) => {
   return { ctx, calls };
 };
 
+const execute = (tool: any, args: any, ctx: any) => tool.execute(args, {
+  session: ctx.session,
+  dwebAuthority: createDwebToolAuthority({ call: { name: tool.name, args }, ctx }),
+} as any);
+
 describe('dweb tools — share', () => {
   test('errors when the dweb is unavailable (store / off)', async () => {
-    const r = await dwebShareTool.execute({ appId: 'a1' }, { dweb: null } as any);
+    const r = await execute(dwebShareTool, { appId: 'a1' }, { dweb: null });
     expect(r).toMatchObject({ ok: false, error: 'dweb_unavailable', outcomeKind: 'pre-effect-failure' });
   });
 
   test('requires an appId', async () => {
     const { ctx } = mkCtx();
-    expect(await dwebShareTool.execute({}, ctx)).toMatchObject({
+    expect(await execute(dwebShareTool, {}, ctx)).toMatchObject({
       ok: false, error: 'appId_required', outcomeKind: 'pre-effect-failure',
     });
   });
 
   test('confirmActions ON: shares without a tool-level confirm (the gate owns it)', async () => {
     const { ctx, calls } = mkCtx();
-    const r = await dwebShareTool.execute({ appId: 'a1' }, ctx);
+    const r = await execute(dwebShareTool, { appId: 'a1' }, ctx);
     expect(calls.confirm.length).toBe(0);            // no double-confirm
     expect(calls.share).toEqual(['a1']);
     expect(r.ok).toBe(true);
@@ -45,7 +51,7 @@ describe('dweb tools — share', () => {
 
   test('confirmActions OFF: force-confirms; a decline blocks the publish', async () => {
     const { ctx, calls } = mkCtx({ permission: { mode: 'act', confirmActions: false }, confirmAnswer: 'no' });
-    const r = await dwebShareTool.execute({ appId: 'a1' }, ctx);
+    const r = await execute(dwebShareTool, { appId: 'a1' }, ctx);
     expect(calls.confirm.length).toBe(1);
     expect(calls.share.length).toBe(0);              // never published
     expect(r).toMatchObject({ ok: false, error: 'declined', outcomeKind: 'pre-effect-failure' });
@@ -53,7 +59,7 @@ describe('dweb tools — share', () => {
 
   test('confirmActions OFF + approve: publishes', async () => {
     const { ctx, calls } = mkCtx({ permission: { mode: 'act', confirmActions: false }, confirmAnswer: 'yes_once' });
-    const r = await dwebShareTool.execute({ appId: 'a1' }, ctx);
+    const r = await execute(dwebShareTool, { appId: 'a1' }, ctx);
     expect(calls.confirm.length).toBe(1);
     expect(calls.share).toEqual(['a1']);
     expect(r.ok).toBe(true);
@@ -68,7 +74,7 @@ describe('dweb tools — share', () => {
         }),
       },
     });
-    const result = await dwebShareTool.execute({ appId: 'a1' }, ctx);
+    const result = await execute(dwebShareTool, { appId: 'a1' }, ctx);
     expect(result.ok).toBe(true);
     expect(JSON.parse((result as any).content)).toMatchObject({
       shared: true,
@@ -83,7 +89,7 @@ describe('dweb tools — share', () => {
 describe('dweb tools — discover', () => {
   test('maps the heard apps (read-only, no confirm)', async () => {
     const { ctx, calls } = mkCtx();
-    const r = await dwebDiscoverTool.execute({}, ctx);
+    const r = await execute(dwebDiscoverTool, {}, ctx);
     expect(calls.discover).toBe(1);
     expect(calls.confirm.length).toBe(0);
     const out = JSON.parse((r as any).content);
@@ -97,7 +103,7 @@ describe('dweb tools — discover', () => {
 
 describe('dweb tools — install', () => {
   test('reports an unavailable dweb as a definitive pre-effect failure', async () => {
-    expect(await dwebInstallTool.execute({ uri: 'peerd://did/hash' }, { dweb: null } as any))
+    expect(await execute(dwebInstallTool, { uri: 'peerd://did/hash' }, { dweb: null }))
       .toMatchObject({
         ok: false, error: 'dweb_unavailable', outcomeKind: 'pre-effect-failure',
       });
@@ -105,21 +111,21 @@ describe('dweb tools — install', () => {
 
   test('requires a peerd:// uri', async () => {
     const { ctx } = mkCtx();
-    expect(await dwebInstallTool.execute({ uri: 'https://evil.example' }, ctx)).toMatchObject({
+    expect(await execute(dwebInstallTool, { uri: 'https://evil.example' }, ctx)).toMatchObject({
       ok: false, error: 'peerd_uri_required', outcomeKind: 'pre-effect-failure',
     });
   });
 
   test('confirmActions OFF: a decline blocks the install', async () => {
     const { ctx, calls } = mkCtx({ permission: { mode: 'act', confirmActions: false }, confirmAnswer: 'no' });
-    const r = await dwebInstallTool.execute({ uri: 'peerd://did/h1' }, ctx);
+    const r = await execute(dwebInstallTool, { uri: 'peerd://did/h1' }, ctx);
     expect(calls.install.length).toBe(0);
     expect(r).toMatchObject({ ok: false, error: 'declined', outcomeKind: 'pre-effect-failure' });
   });
 
   test('installs and returns the new app id', async () => {
     const { ctx, calls } = mkCtx();
-    const r = await dwebInstallTool.execute({ uri: 'peerd://did/h1', name: 'Pong' }, ctx);
+    const r = await execute(dwebInstallTool, { uri: 'peerd://did/h1', name: 'Pong' }, ctx);
     expect(calls.install[0]).toEqual({ uri: 'peerd://did/h1', name: 'Pong' });
     expect(JSON.parse((r as any).content)).toMatchObject({ installed: true, appId: 'app9', name: 'Pong' });
   });
@@ -132,7 +138,7 @@ describe('dweb tools — install', () => {
         }),
       },
     });
-    expect(await dwebInstallTool.execute({ uri: 'peerd://did/h1' }, ctx)).toMatchObject({
+    expect(await execute(dwebInstallTool, { uri: 'peerd://did/h1' }, ctx)).toMatchObject({
       ok: false, error: 'dweb-disabled', outcomeKind: 'pre-effect-failure',
     });
   });
@@ -145,7 +151,7 @@ describe('dweb tools — install', () => {
         }),
       },
     });
-    const result = await dwebInstallTool.execute({ uri: 'peerd://did/h1' }, ctx);
+    const result = await execute(dwebInstallTool, { uri: 'peerd://did/h1' }, ctx);
     expect(JSON.parse((result as any).content)).toMatchObject({
       installed: true, appId: 'app9', warning: 'audit-write-failed',
     });
