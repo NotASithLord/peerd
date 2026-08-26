@@ -29,6 +29,7 @@ import {
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
+  projectControllerToolSurface,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -826,6 +827,7 @@ const runControllerTurnWith = async (payload, options) => {
  * domain clients; no generic tool loader or effect dispatcher sits beside it.
  */
 export const createControllerTurnRuntime = () => Object.freeze({
+  projectTools: (/** @type {unknown} */ payload) => projectControllerToolSurface(payload),
   runControllerTurn: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
     runControllerTurnWith(payload, options),
 });

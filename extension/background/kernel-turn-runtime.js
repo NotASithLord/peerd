@@ -26,7 +26,7 @@ const formatGoalTodoBlock = (/** @type {unknown} */ value) => {
 
 /**
  * @param {Object} deps
- * @param {{runUserTurn:Function,renderSystemPrompt:Function,withRun:Function}} deps.seams
+ * @param {{runUserTurn:Function,renderSystemPrompt:Function,projectTurnTools:Function,withRun:Function}} deps.seams
  * @param {Record<string,any>} deps.turnDriverDeps
  * @param {Record<string,any>} deps.turnRouteDeps
  * @param {Record<string,any>} deps.sessionDeps
@@ -64,7 +64,9 @@ export const createKernelTurnRuntime = ({
       || !Number.isSafeInteger(goalMaxIterations) || goalMaxIterations < 1) {
     throw new TypeError('kernel-turn-runtime-config-invalid');
   }
-  for (const key of ['runUserTurn', 'renderSystemPrompt', 'withRun']) functionAt(seams, key);
+  for (const key of ['runUserTurn', 'renderSystemPrompt', 'projectTurnTools', 'withRun']) {
+    functionAt(seams, key);
+  }
   for (const key of ['beforeStart', 'hasUnresolvedSideEffects', 'onEvent', 'onRunEnd', 'bind']) {
     functionAt(goal, key);
   }
@@ -75,6 +77,7 @@ export const createKernelTurnRuntime = ({
     ...turnDriverDeps,
     runUserTurn: seams.runUserTurn,
     renderSystemPrompt: seams.renderSystemPrompt,
+    projectToolDescriptors: seams.projectTurnTools,
     goalActiveFor: (/** @type {string} */ sessionId) => goalRunner?.isActive(sessionId) ?? false,
   });
   if (typeof driver?.runAgentTurn !== 'function'

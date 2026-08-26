@@ -73,6 +73,7 @@ const makeControllerFactory = (calls: Record<string, any>, turnFailure: any = nu
         });
       },
       renderSystemPrompt: async () => 'PINNED-SYSTEM',
+      projectTurnTools: async () => [],
       withRun: async (operation: () => Promise<void>) => {
         calls.withRuns += 1;
         await operation();

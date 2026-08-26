@@ -40,6 +40,7 @@ describe('kernel turn production runtime', () => {
     const runtime = await createKernelTurnProductionRuntime({
       seams: {
         runUserTurn: async () => {}, renderSystemPrompt: async () => '',
+        projectTurnTools: async () => [],
         withRun: async (operation: () => Promise<void>) => operation(),
       },
       browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts, custody,

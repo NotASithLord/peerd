@@ -78,6 +78,12 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
     const turn = runtime.createControllerTurnRuntime();
     return turn.runControllerTurn(payload, options);
   },
+  'turn.tools.project': async (/** @type {unknown} */ payload) => {
+    let runtime;
+    try { runtime = await loadTurnRuntime(); }
+    catch (cause) { return loadFailure(cause); }
+    return runtime.createControllerTurnRuntime().projectTools(payload);
+  },
   [KERNEL_FEATURE_DISPATCH_CAPABILITY]: featureHost.dispatch,
 });
 

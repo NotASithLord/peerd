@@ -10,7 +10,6 @@ import {
 } from './actor/actors-api.js';
 import {
   actorAllowedToolsFor,
-  actorDescriptors,
   EXPOSURE_ACTOR,
   EXPOSURE_REVIEW,
   filterByDwebActive,
@@ -48,11 +47,6 @@ import { GOAL_MAX_ITERATIONS, makeGoalRunner } from './loop/goal-runner.js';
 import { finalActorTurnReply, finalAssistantText, makeSpawnActor, restrictCtxCapabilities } from './actor/spawn.js';
 import { formatDocBody } from './doc/format.js';
 import {
-  getTool,
-  getToolDescriptor,
-  listTools,
-  listToolDescriptors,
-  registerMetadataInventory,
   registerTool,
 } from './tools/registry.js';
 import { LEGACY_TOOL_IMPLEMENTATIONS } from './tools/legacy-implementations.js';
@@ -74,7 +68,6 @@ import {
   resolveManifestAllow,
 } from './tools/manifests.js';
 import { limitExceeded, normalizeTally } from './cost/accumulator.js';
-import { projectToolAuthority } from './tools/metadata/descriptor.js';
 import { filterByRuntimeCapabilities } from './runtime-capabilities.js';
 import { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 import {
@@ -100,29 +93,10 @@ let toolsRegistered = false;
 
 const registerTools = () => {
   if (toolsRegistered) return;
-  registerMetadataInventory();
   for (const tool of LEGACY_TOOL_IMPLEMENTATIONS) {
     registerTool(/** @type {any} */ (tool));
   }
   toolsRegistered = true;
-};
-
-const projectActorTurnTools = (/** @type {{
- * kind:string,
- * backing?:'tab'|'api',
- * actorSurface?:'code'|'tools',
- * toolManifest?:unknown,
- * runtimeCapabilities:ReturnType<typeof import('./runtime-capabilities.js').resolveRuntimeCapabilities>,
- * inbound?:boolean,
- * }} */ input) => {
-  const descriptors = filterByRuntimeCapabilities(filterDescriptorsByManifest(
-    actorDescriptors(listToolDescriptors(), input.kind, input.backing, input.actorSurface),
-    resolveManifestAllow(input.toolManifest),
-  ), input.runtimeCapabilities);
-  const inboundTools = new Set(DWEB_INBOUND_TOOL_NAMES);
-  return (input.inbound === true && input.kind === 'dweb'
-    ? descriptors.filter((descriptor) => inboundTools.has(descriptor.name)) : descriptors)
-    .map(projectToolAuthority);
 };
 
 // why: T1 makes semantic ownership explicit while preserving the one live call
@@ -135,7 +109,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   actorsCallToOp,
   askOutcome,
   actorAllowedToolsFor,
-  actorDescriptors,
   applyComposer,
   buildMintInjection,
   buildTemporalBlock,
@@ -158,14 +131,10 @@ export const createControllerTurnSemantics = () => Object.freeze({
   finalActorTurnReply,
   finalAssistantText,
   formatDocBody,
-  getTool,
-  getToolDescriptor,
   GOAL_MAX_ITERATIONS,
   isReadOnlyTool,
   limitExceeded,
   listProviders,
-  listTools,
-  listToolDescriptors,
   localStoreSource,
   mainAgentDescriptors,
   makeAutoMemory,
@@ -194,7 +163,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   pinActorCall,
   prepareToolCall,
   prepareUserAttachmentsWithDocs,
-  projectToolAuthority,
   registerTools,
   REASONING_BUDGET_TOKENS,
   REASONING_EFFORT_LEVELS,
@@ -217,6 +185,5 @@ export const createControllerTurnSemantics = () => Object.freeze({
   fenceWebActorSummary,
   installFetchTapInjected,
   landingStopCard,
-  projectActorTurnTools,
   wrapUntrusted,
 });

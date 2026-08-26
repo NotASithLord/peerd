@@ -157,7 +157,7 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
         }
         const candidate = makeController(clientDeps);
         if (['callSemantic', 'callTurn', 'callRuntime', 'callFeature',
-          'renderSystemPrompt', 'withRun', 'close']
+          'renderSystemPrompt', 'projectTurnTools', 'withRun', 'close']
           .some((name) => typeof candidate?.[name] !== 'function')) {
           try { candidate?.close?.(); } catch {}
           throw new TypeError('kernel-controller-client-invalid');
@@ -238,6 +238,9 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
       ),
       renderSystemPrompt: (/** @type {Record<string,unknown>} */ context) => useTurn(
         () => clientCall('renderSystemPrompt', context),
+      ),
+      projectTurnTools: (/** @type {Record<string,unknown>} */ context) => useTurn(
+        () => clientCall('projectTurnTools', context),
       ),
       withRun: (/** @type {()=>Promise<any>} */ operation) => useTurn(
         () => clientCall('withRun', operation),

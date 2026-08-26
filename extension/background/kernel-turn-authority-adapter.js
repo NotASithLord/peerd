@@ -138,7 +138,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     actorsCallToOp,
     askOutcome,
     actorAllowedToolsFor,
-    actorDescriptors,
     applyComposer,
     buildMintInjection,
     buildTemporalBlock,
@@ -167,16 +166,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     finalActorTurnReply,
     finalAssistantText,
     formatDocBody,
-    getTool,
-    getToolDescriptor,
     GOAL_MAX_ITERATIONS,
     installFetchTapInjected,
     isReadOnlyTool,
     landingStopCard,
     limitExceeded,
     listProviders,
-    listTools,
-    listToolDescriptors,
     localStoreSource,
     mainAgentDescriptors,
     makeAutoMemory,
@@ -205,8 +200,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     pinActorCall,
     prepareToolCall,
     prepareUserAttachmentsWithDocs,
-    projectActorTurnTools,
-    projectToolAuthority,
     REASONING_BUDGET_TOKENS,
     REASONING_EFFORT_LEVELS,
     registerTools,
@@ -223,6 +216,13 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     wrapUntrusted,
   } = semanticOwner;
   registerTools();
+  const projectToolDescriptors = async (/** @type {Record<string,unknown>} */ input) => {
+    const tools = await deps.seams.projectTurnTools(input);
+    if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool.name !== 'string')) {
+      throw new Error('controller tool projection is invalid');
+    }
+    return tools;
+  };
   const engine = deps.engine;
   const scriptRuns = deps.scriptRuns;
   const poisonedAppRuntimeTabs = new Set();
@@ -1490,8 +1490,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
             allowedTools: resolveManifestAllow(record.toolManifest),
             headlessAvailable: !deps.firefox,
           }) : undefined);
-      const tools = projectActorTurnTools({
-        kind,
+      const tools = await projectToolDescriptors({
+        surface: 'actor', actorType: kind,
         backing: record.backing,
         actorSurface,
         toolManifest: record.toolManifest,
@@ -1666,6 +1666,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
   };
 
   const makeActorRuntime = async (/** @type {Record<string,any>} */ shared) => {
+    const allToolDescriptors = await projectToolDescriptors({ surface: 'all' });
+    const toolDescriptorsByName = new Map(allToolDescriptors.map((tool) => [tool.name, tool]));
     const baseActorIsolation = actorIsolationCapability({
       offscreenWorker: !deps.firefox,
       backgroundPageWorker: deps.firefox && typeof globalThis.Worker === 'function',
@@ -1767,7 +1769,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       // for the existing reviewer grant until that grant becomes an authority
       // ledger at the final semantic-root deletion.
       reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(
-        name, listToolDescriptors(),
+        name, allToolDescriptors,
       ),
       pinActorCall, restrictCtxCapabilities,
       ownedTabFor: (/** @type {string} */ sessionId) => webActorTabBindings.tabFor(sessionId),
@@ -1846,7 +1848,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         isPersisted: (/** @type {string} */ sessionId) =>
           goalRunner?.isPersisted(sessionId) ?? Promise.resolve(false),
       },
-      settings: deps.settingsStore, listProviders, getTool,
+      settings: deps.settingsStore, listProviders,
+      getTool: (/** @type {string} */ name) => toolDescriptorsByName.get(name),
       appendAudit: deps.auditLog.append, postChatNote: deps.postChatNote, now: Date.now,
     });
     live.prewalk = prewalk;
@@ -1891,7 +1894,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     const spawnActorCore = makeSpawnActor({
       sessions: shared.sessions, appendAudit: deps.auditLog.append,
       getToolDescriptors: () => filterByRuntimeCapabilities(
-        mainAgentDescriptors(listToolDescriptors()), runtimeCapabilities,
+        mainAgentDescriptors(allToolDescriptors), runtimeCapabilities,
       ),
       turnSlots: shared.turnSlots,
       runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ options) => live.runActorIsolated({
@@ -1951,7 +1954,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     });
     const requestReview = makeRequestReview({
       spawnActor: /** @type {any} */ (spawnActor),
-      getToolDescriptors: () => listTools().map((tool) => ({
+      getToolDescriptors: () => allToolDescriptors.map((tool) => ({
         name: tool.name, sideEffect: tool.sideEffect,
       })),
       appendAudit: deps.auditLog.append,
@@ -1966,7 +1969,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         },
       },
       permissions: {
-        readOnlyTools: () => listTools()
+        readOnlyTools: () => allToolDescriptors
           .filter((tool) => classifyAction(tool) === ACTION_CLASSES.READ)
           .map((tool) => tool.name),
       },
@@ -2938,17 +2941,15 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     turnSlots: shared.turnSlots,
     buildTemporalBlock, memory: shared.memory, browser: deps.browser,
     skillRegistry, resolveManifestAllow, buildToolContext,
-    filterByDwebActive, filterByDwebEnabled, filterDescriptorsByManifest,
-    mainAgentDescriptors, listTools, settingsStore: deps.settingsStore,
-    listToolDescriptors,
-    DWEB_ENABLED: deps.dwebEnabled, filterByGoalActive,
+    projectToolDescriptors,
+    settingsStore: deps.settingsStore,
+    DWEB_ENABLED: deps.dwebEnabled,
     dwebEngagedSessions,
     markDwebEngaged: (/** @type {string} */ sessionId) => {
       if (sessionId) dwebEngagedSessions.add(sessionId);
     },
     dispatchToolCall, prepareToolCall, settleToolCall,
-    maybeNudgeDebuggerGrant, getTool, decideAction,
-    getToolDescriptor,
+    maybeNudgeDebuggerGrant, decideAction,
     listProviders, costOf, makeTurnCostTracker,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     postChatNote: deps.postChatNote,

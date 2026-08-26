@@ -65,3 +65,16 @@ export const resolveToolOrigins = (rule, args, ctx) => {
   }
   throw new TypeError(`unknown tool origin rule: ${String(rule.kind)}`);
 };
+
+/**
+ * Resolve either an in-process execution descriptor or its clone-safe
+ * controller projection. The authority host needs the same finite origin
+ * policy without importing model-facing tool metadata.
+ * @param {{origins?:(args:any,ctx:any)=>string[],originRule?:any}} tool
+ * @param {any} args
+ * @param {any} ctx
+ */
+export const resolveDeclaredToolOrigins = (tool, args, ctx) =>
+  typeof tool?.origins === 'function'
+    ? tool.origins(args, ctx) ?? []
+    : resolveToolOrigins(tool?.originRule, args, ctx);

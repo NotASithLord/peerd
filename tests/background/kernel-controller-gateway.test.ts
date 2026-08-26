@@ -35,6 +35,7 @@ const makeState = () => {
           return deps.handleFeatureKernelCall('read', {}, { authority: featureGrant });
         },
         renderSystemPrompt: async () => { promptCalls += 1; return 'prompt'; },
+        projectTurnTools: async () => [],
         withRun: async (operation: () => Promise<any>) => operation(),
         retire: () => { retired += 1; },
         close: () => { closed += 1; },

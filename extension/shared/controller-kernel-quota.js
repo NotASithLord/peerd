@@ -28,6 +28,7 @@ const MIB = 1024 * KIB;
 const HARD_TURN_STEPS = 100;
 const TURN_OUTER_BYTES = 2 * MIB;
 const PROMPT_OUTER_BYTES = 128 * KIB;
+const TOOL_PROJECTION_OUTER_BYTES = 64 * KIB;
 const GENERIC_OUTER_BYTES = SEMANTIC_DEMAND_MAX_BYTES;
 const TURN_VALUE_BYTES = 4 * MIB;
 const MODEL_EVENT_BYTES = 256 * KIB;
@@ -177,7 +178,8 @@ export const normalizeControllerCustody = (
 export const controllerOuterPayloadCap = (/** @type {string} */ capability) =>
   capability === 'turn.run' ? TURN_OUTER_BYTES
     : capability === 'prompt.render' ? PROMPT_OUTER_BYTES
-      : kernelFeatureOuterPayloadCap(capability) || GENERIC_OUTER_BYTES;
+      : capability === 'turn.tools.project' ? TOOL_PROJECTION_OUTER_BYTES
+        : kernelFeatureOuterPayloadCap(capability) || GENERIC_OUTER_BYTES;
 
 export const controllerPayloadAllowed = (/** @type {string} */ capability,
   /** @type {unknown} */ payload) => {

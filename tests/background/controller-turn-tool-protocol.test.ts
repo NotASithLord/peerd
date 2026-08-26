@@ -16,9 +16,9 @@ import {
 } from '../../extension/peerd-runtime/tools/dispatcher.js';
 import {
   clearTools,
-  registerMetadataInventory,
   registerTool,
 } from '../../extension/peerd-runtime/tools/registry.js';
+import { registerMetadataInventory } from '../../extension/peerd-runtime/tools/metadata-registry.js';
 import { toToolDescriptor, projectToolAuthority } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
 import { TOOL_EXECUTION_PROTOCOL } from '../../extension/shared/tool-execution-protocol.js';
@@ -156,8 +156,8 @@ describe('controller turn finite tool protocol', () => {
       }),
       bridgeHooks: {
         toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
-        prepareToolCall: async (call: any) => {
-          const prepared: any = await prepareRuntimeToolCall(call, toolContext);
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => {
+          const prepared: any = await prepareRuntimeToolCall(call, toolContext, binding.descriptor);
           return prepared?.prepared === true ? {
             mode: 'execute', custody: prepared, args: prepared.args,
             projection: {}, manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
@@ -209,8 +209,8 @@ describe('controller turn finite tool protocol', () => {
       }),
       bridgeHooks: {
         toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
-        prepareToolCall: async (call: any) => {
-          const prepared: any = await prepareRuntimeToolCall(call, toolContext);
+        prepareToolCall: async (call: any, _ctx: any, binding: any) => {
+          const prepared: any = await prepareRuntimeToolCall(call, toolContext, binding.descriptor);
           return prepared?.prepared === true ? {
             mode: 'execute', custody: prepared, args: prepared.args,
             projection: {}, manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,

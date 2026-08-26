@@ -29,7 +29,7 @@ export const listToolMetadata = () => TOOL_METADATA_ORDER.map((name) => {
 });
 
 const AUTHORITY_FIELDS = Object.freeze([
-  'primitive', 'sideEffect', 'dispatch', 'retryClass', 'dweb',
+  'primitive', 'sideEffect', 'originRule', 'dispatch', 'retryClass', 'dweb',
 ]);
 
 /**
@@ -44,7 +44,10 @@ export const hydrateToolDescriptors = (descriptors, runtimeCapabilities) => {
     const metadata = getToolMetadata(descriptor?.name);
     if (!metadata) throw new TypeError(`tool semantic metadata missing: ${descriptor?.name ?? ''}`);
     for (const field of AUTHORITY_FIELDS) {
-      if (descriptor[field] !== metadata[field]) {
+      const matches = field === 'originRule'
+        ? JSON.stringify(descriptor[field]) === JSON.stringify(metadata[field])
+        : descriptor[field] === metadata[field];
+      if (!matches) {
         throw new TypeError(`tool authority mismatch: ${descriptor.name}:${field}`);
       }
     }

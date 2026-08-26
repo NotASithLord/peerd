@@ -34,6 +34,7 @@ import {
 import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
 import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
+import { resolveDeclaredToolOrigins } from '../tool-origin-policy.js';
 
 /** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} ToolDescriptor */
 
@@ -47,7 +48,7 @@ import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
  * @returns {string[]}
  */
 const safeOrigins = (tool, args, ctx) => {
-  try { return tool.origins(args, ctx) ?? []; }
+  try { return resolveDeclaredToolOrigins(tool, args, ctx); }
   catch { return []; }
 };
 
@@ -373,10 +374,11 @@ const withToolMetadata = (ctx) => ({
 /**
  * @param {ToolCall} call
  * @param {DispatchContext} ctx
+ * @param {ToolDescriptor} [descriptor]
  * @returns {Promise<ToolResult | Record<string, any>>}
  */
-export const prepareToolCall = async (call, ctx) => {
-  const tool = getToolDescriptor(call.name);
+export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
+  const tool = descriptor?.name === call.name ? descriptor : getToolDescriptor(call.name);
   if (!tool) {
     return {
       ok: false,

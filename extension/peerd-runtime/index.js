@@ -294,13 +294,15 @@ export {
 // --- tools --------------------------------------------------------------
 export {
   registerTool,
-  registerMetadataInventory,
   getTool,
-  getToolDescriptor,
   listTools,
-  listToolDescriptors,
   clearTools,
 } from './tools/registry.js';
+export {
+  registerMetadataInventory,
+  getToolDescriptor,
+  listToolDescriptors,
+} from './tools/metadata-registry.js';
 export { dispatchToolCall } from './tools/dispatcher.js';
 export { GATES } from './tools/gates.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';

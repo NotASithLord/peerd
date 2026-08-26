@@ -54,6 +54,7 @@ import {
 } from '../permissions/policy.js';
 import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../actor/isolation.js';
 import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
+import { resolveDeclaredToolOrigins } from '../tool-origin-policy.js';
 
 /** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
@@ -298,7 +299,7 @@ export const exposureGate = (tool, args, ctx) => {
  * @returns {Omit<GateResult, 'name'>}
  */
 const originGate = (tool, args, ctx) => {
-  const origins = tool.origins(args, ctx) ?? [];
+  const origins = resolveDeclaredToolOrigins(tool, args, ctx);
   if (origins.length === 0) {
     return { allowed: true, reason: 'no origins touched' };
   }

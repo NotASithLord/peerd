@@ -5,14 +5,16 @@ import ts from 'typescript';
 import {
   clearTools,
   getTool,
+  listTools,
+  registerTool,
+} from '../../../extension/peerd-runtime/tools/registry.js';
+import {
   getToolDescriptor,
   listToolDescriptors,
-  listTools,
   registerMetadataInventory,
-  registerTool,
   resolveRegisteredToolOrigins,
   retryClassForRegisteredTool,
-} from '../../../extension/peerd-runtime/tools/registry.js';
+} from '../../../extension/peerd-runtime/tools/metadata-registry.js';
 import { TOOL_METADATA_ORDER } from '../../../extension/peerd-runtime/semantic.js';
 import {
   listToolPolicies,
@@ -34,7 +36,7 @@ describe('metadata registry', () => {
     for (const descriptor of listToolDescriptors()) {
       expect(Object.isFrozen(descriptor)).toBe(true);
       expect('execute' in descriptor).toBe(false);
-      expect('originRule' in descriptor).toBe(false);
+      expect(descriptor.originRule).toEqual(expect.any(Object));
     }
     expect(listTools()).toEqual([]);
   });
@@ -115,7 +117,7 @@ describe('metadata registry graph', () => {
   test('does not import tool executors or browser authority', async () => {
     const root = join(process.cwd(), 'extension');
     const result = await Bun.build({
-      entrypoints: [join(root, 'peerd-runtime', 'tools', 'registry.js')],
+      entrypoints: [join(root, 'peerd-runtime', 'tools', 'metadata-registry.js')],
       target: 'browser', format: 'esm', minify: true, metafile: true,
     });
     expect(result.success).toBe(true);

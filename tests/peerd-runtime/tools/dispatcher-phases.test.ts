@@ -8,9 +8,12 @@ import {
 import {
   clearTools,
   getTool,
-  registerMetadataInventory,
   registerTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
+import {
+  getToolDescriptor as getMetadataToolDescriptor,
+  registerMetadataInventory,
+} from '../../../extension/peerd-runtime/tools/metadata-registry.js';
 
 const tool = (over: Record<string, unknown> = {}) => ({
   name: 'phase_tool', description: 'phase tool', primitive: 'web', sideEffect: 'read',
@@ -130,6 +133,7 @@ describe('dispatcher phases', () => {
           },
         },
       }) as any,
+      getMetadataToolDescriptor('remote_tool'),
     );
 
     expect(prepared).toMatchObject({ prepared: true, args: { value: 1 } });
@@ -157,10 +161,14 @@ describe('dispatcher phases', () => {
       name: 'remote_only', primitive: 'web', sideEffect: 'read',
       originRule: { kind: 'none' },
     }]);
-    const result: any = await dispatchToolCall(
+    const prepared: any = await prepareToolCall(
       { id: 'call-missing', name: 'remote_only', args: {} } as any,
       context() as any,
+      getMetadataToolDescriptor('remote_only'),
     );
+    const result: any = prepared.prepared === true
+      ? await settleToolCall(prepared, await executePreparedToolCall(prepared))
+      : prepared;
     expect(result).toMatchObject({
       ok: false,
       error: 'tool_implementation_unavailable:remote_only',

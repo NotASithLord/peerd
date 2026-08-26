@@ -33,6 +33,7 @@
 
 import { originOf } from '/peerd-egress/background.js';
 import { DEFAULT_HOOK_MANIFEST } from '/shared/default-hook-manifest.js';
+import { resolveDeclaredToolOrigins } from '../../../tool-origin-policy.js';
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 
@@ -78,7 +79,7 @@ export const egressAllowlistHook = {
     /** @type {string[]} */
     let origins = [];
     try {
-      origins = tool?.origins?.(args, ctx) ?? [];
+      origins = resolveDeclaredToolOrigins(tool ?? {}, args, ctx);
     } catch (e) {
       // why: a throwing origins() means we cannot know what this call
       // touches. Block — never run a network action whose footprint we
