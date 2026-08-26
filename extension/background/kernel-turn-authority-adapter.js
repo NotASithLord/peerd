@@ -666,11 +666,16 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       permission,
       activeTab,
       onToolActivity: shared.pageActivity,
-      spawnActor: (/** @type {any} */ request) => live.spawnActor(request),
-      spawnActorAsync: (/** @type {any} */ request) => live.asyncActors.spawnActorAsync(request),
-      actorTasks: () => live.asyncActors.actorTasks(sessionId),
-      actorCancel: (/** @type {string} */ taskId) =>
-        live.asyncActors.actorCancel(sessionId, taskId),
+      actorAuthority: Object.freeze({
+        spawnSync: (/** @type {any} */ request) => live.spawnActor(request),
+        spawnAsync: (/** @type {any} */ request) => live.asyncActors.spawnActorAsync(request),
+        listTasks: () => live.asyncActors.actorTasks(sessionId),
+        cancelTask: (/** @type {string} */ taskId) =>
+          live.asyncActors.actorCancel(sessionId, taskId),
+        deliverMessage: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
+      }),
+      // why: script remains legacy-owned in this checkpoint and its sealed-code
+      // actor client still needs this one capability until that domain moves.
       messageActor: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
       scriptRuns,
       requestReview: (/** @type {any} */ request) => live.requestReview(request),
@@ -1757,6 +1762,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       providerEgress: deps.providerEgress,
       sessions: shared.sessions, buildToolContext,
       dispatchToolCall: /** @type {any} */ (dispatchToolCall),
+      prepareToolCall: /** @type {any} */ (prepareToolCall),
+      settleToolCall: /** @type {any} */ (settleToolCall),
       reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(name,
         listTools().map((tool) => ({ name: tool.name, sideEffect: tool.sideEffect }))),
       pinActorCall, restrictCtxCapabilities,

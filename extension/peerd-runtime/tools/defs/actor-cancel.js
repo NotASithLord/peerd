@@ -10,7 +10,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // why: ctx.actorCancel is the SW-bound cancel fn (scoped to this session),
 // injected outside the base ToolContext; narrow ctx to it at the use site. The
 // result shape mirrors makeAsyncActors' actorCancel (actor/async-actors.js).
-/** @typedef {{ actorCancel?: (taskId: string) => ({ ok: true, content: string } | { ok: false, error: string }) }} ActorCancelCtx */
+/** @typedef {{ actorCancel?: (taskId: string) => ({ ok: true, content: string } | { ok: false, error: string } | Promise<{ ok: true, content: string } | { ok: false, error: string }>) }} ActorCancelCtx */
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const actorCancelTool = composeTool("actor_cancel", {
@@ -24,7 +24,7 @@ export const actorCancelTool = composeTool("actor_cancel", {
     if (typeof args?.taskId !== 'string' || !args.taskId) {
       return { ok: false, error: 'taskId_required' };
     }
-    const res = sctx.actorCancel(args.taskId);
+    const res = await sctx.actorCancel(args.taskId);
     return res.ok ? { ok: true, content: res.content } : { ok: false, error: res.error };
   },
 });

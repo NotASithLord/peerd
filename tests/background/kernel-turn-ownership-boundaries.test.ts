@@ -48,6 +48,7 @@ describe('kernel turn ownership boundaries', () => {
     const forbiddenModules = new Set([
       'peerd-engine/app-manifest.js',
       'peerd-runtime/controller-turn-semantics.js',
+      'peerd-runtime/controller-actor-tools.js',
       'peerd-runtime/controller-tools.js',
       'peerd-runtime/semantic.js',
       'peerd-runtime/site-clients/digest.js',
@@ -57,6 +58,31 @@ describe('kernel turn ownership boundaries', () => {
     expect([...modules].filter((module) =>
       forbiddenModules.has(module)
         || forbiddenPrefixes.some((prefix) => module.startsWith(prefix)))).toEqual([]);
+  });
+
+  it('hosts actor tool semantics only in controller and isolated-worker graphs', async () => {
+    const actorSemanticModules = new Set([
+      'peerd-runtime/controller-actor-tools.js',
+      'peerd-runtime/tools/defs/actor-create.js',
+      'peerd-runtime/tools/defs/actor-tasks.js',
+      'peerd-runtime/tools/defs/actor-cancel.js',
+      'peerd-runtime/tools/defs/message-actor.js',
+    ]);
+    const authorityEntries = [
+      'background/kernel-turn-authority-adapter.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ];
+    for (const entry of authorityEntries) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => actorSemanticModules.has(module))).toEqual([]);
+    }
+
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      expect(modules.has('peerd-runtime/controller-actor-tools.js')).toBe(true);
+      for (const module of actorSemanticModules) expect(modules.has(module)).toBe(true);
+    }
   });
 
   it('composes one synchronous owner path without a protocol or dynamic fallback', () => {

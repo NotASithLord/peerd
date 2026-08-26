@@ -6,7 +6,11 @@
 // HERE and pull from an exact SW-owned inference stream; tool effects still relay
 // to the SW, which holds the key, engine clients, instance pin, and gate. The
 // untrusted instance/page output stays in this heap. Module worker → strict.
-import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
+import {
+  controllerHostsActorTool,
+  executeControllerActorTool,
+  runUserTurn,
+} from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import {
@@ -52,7 +56,18 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     modelPending.delete(m.rid);
     return;
   }
-  if (m.type === 'tool-response') { toolPending.get(m.rid)?.(m.reply); toolPending.delete(m.rid); return; }
+  if (m.type === 'tool-response'
+      || m.type === 'actor-tool-prepare-response'
+      || m.type === 'actor-spawn-sync-response'
+      || m.type === 'actor-spawn-async-response'
+      || m.type === 'actor-tasks-read-response'
+      || m.type === 'actor-task-cancel-response'
+      || m.type === 'actor-message-deliver-response'
+      || m.type === 'actor-tool-settle-response') {
+    toolPending.get(m.rid)?.(m.reply);
+    toolPending.delete(m.rid);
+    return;
+  }
   if (m.type === 'abort') {
     abort.abort();
     // Unwind a worker BLOCKED awaiting the SW (model OR tool) so it doesn't park
@@ -150,6 +165,104 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       toolPending.set(rid, resolve);
       self.postMessage({ type: 'tool-request', rid, runId, call });
     });
+    const actorToolRequest = (
+      /** @type {string} */ type, /** @type {Record<string,unknown>} */ payload,
+    ) => new Promise((resolve) => {
+      const rid = `ta-${++seq}`;
+      toolPending.set(rid, resolve);
+      self.postMessage({ type, rid, runId, ...payload });
+    });
+    const authorityValue = async (/** @type {Promise<any>} */ pending) => {
+      const reply = await pending;
+      if (reply?.ok === true) return reply.value;
+      const error = new Error(reply?.error ?? 'actor authority operation failed');
+      Object.assign(error, {
+        code: reply?.code ?? 'actor-authority-failed',
+        outcomeKnown: reply?.outcomeKnown === true,
+        retryable: reply?.retryable,
+      });
+      throw error;
+    };
+    const executeActorTool = async (/** @type {any} */ call) => {
+      const prepared = await actorToolRequest('actor-tool-prepare-request', { call });
+      if (prepared?.ok !== true) {
+        return {
+          ok: false, error: prepared?.error ?? 'actor tool preparation failed',
+          outcomeKnown: prepared?.outcomeKnown === true,
+          ...(prepared?.outcomeKnown === true ? {} : { retryable: false }),
+          meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
+        };
+      }
+      if (prepared.mode === 'result') return prepared.result;
+      if (prepared.mode !== 'execute' || typeof prepared.executionId !== 'string') {
+        return {
+          ok: false, error: 'actor tool preparation was invalid', outcomeKnown: true,
+          meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
+        };
+      }
+      const executionId = prepared.executionId;
+      const authority = Object.freeze({
+        spawnSync: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+          'actor-spawn-sync-request', {
+            executionId, task: request.task,
+            allowRecursion: request.allowRecursion === true,
+            ...(request.tools === undefined ? {} : { tools: request.tools }),
+            ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
+            ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
+          },
+        )),
+        spawnAsync: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+          'actor-spawn-async-request', {
+            executionId, task: request.task,
+            allowRecursion: request.allowRecursion === true,
+            ...(request.tools === undefined ? {} : { tools: request.tools }),
+            ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
+            ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
+          },
+        )),
+        listTasks: () => authorityValue(actorToolRequest(
+          'actor-tasks-read-request', { executionId },
+        )),
+        cancelTask: (/** @type {string} */ taskId) => authorityValue(actorToolRequest(
+          'actor-task-cancel-request', { executionId, taskId },
+        )),
+        message: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+          'actor-message-deliver-request', {
+            executionId, to: request.to, message: request.message,
+            oneShot: request.oneShot === true,
+            awaitReply: request.awaitReply === true,
+            degradeToAsync: request.degradeToAsync === true,
+            awaitCapMs: Number(request.awaitCapMs),
+          },
+        )),
+      });
+      let result;
+      try {
+        result = await executeControllerActorTool(
+          prepared.toolName, prepared.args, prepared.projection, authority,
+          { callId: prepared.callId, signal: abort.signal },
+        );
+      } catch (cause) {
+        const failure = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+        result = {
+          ok: false,
+          error: failure?.message ?? String(cause),
+          ...(typeof failure?.code === 'string' ? { code: failure.code } : {}),
+          outcomeKnown: failure?.outcomeKnown === true,
+          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
+        };
+      }
+      const settled = await actorToolRequest('actor-tool-settle-request', {
+        executionId, result,
+      });
+      if (settled?.ok === true) return settled.result;
+      return {
+        ok: false, error: settled?.error ?? 'actor tool settlement failed',
+        outcomeKnown: settled?.outcomeKnown === true,
+        ...(settled?.outcomeKnown === true ? {} : { retryable: false }),
+        meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
+      };
+    };
     try {
       // Seed the actor's PRIOR history — a bound actor is stateful across turns.
       const sessions = makeInMemorySessions({
@@ -182,7 +295,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           : {}),
         modelEgress,
       });
-      const toolDispatch = makeRelayedToolDispatch(requestTool);
+      const legacyToolDispatch = makeRelayedToolDispatch(requestTool);
+      const toolDispatch = (/** @type {any} */ call) => controllerHostsActorTool(call?.name)
+        ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
       // summary. The SW's closure (over a policy-reduced live tab origin) can't
       // cross postMessage, so rebuild it here from the pure fence fns using the

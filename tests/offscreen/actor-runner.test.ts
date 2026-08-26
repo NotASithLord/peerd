@@ -79,6 +79,63 @@ describe('actor worker startup proof', () => {
     expect(source).toContain('preflightReply: metadata.preflightReply');
   });
 
+  test('relays controller-owned actor tools only through exact named operations', async () => {
+    const worker = new FakeWorker();
+    worker.onPost = (message) => {
+      if (message.type === 'probe') queueMicrotask(() => worker.emit('message', { data: {
+        type: 'probe-response', protocol: ACTOR_WORKER_PROTOCOL,
+        rid: message.rid, canaryAbsent: true,
+      } }));
+      if (message.type === 'run') queueMicrotask(() => worker.emit('message', { data: {
+        type: 'actor-tool-prepare-request', rid: 'prepare-1',
+        call: { id: 'call-1', name: 'actor_tasks', args: {} },
+      } }));
+      if (message.type === 'actor-tool-prepare-response') {
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'actor-tasks-read-request', rid: 'read-1', executionId: 'exec-1',
+        } }));
+      }
+      if (message.type === 'actor-tasks-read-response') {
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'actor-tool-settle-request', rid: 'settle-1', executionId: 'exec-1',
+          result: { ok: true, content: 'No async spawned in this chat.' },
+        } }));
+      }
+      if (message.type === 'actor-tool-settle-response') {
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'done', result: { ok: true, finalText: 'done', newMessages: [] },
+        } }));
+      }
+    };
+    const relays: string[] = [];
+    const result = await runActor({ ...job, runId: 'exact-actor-tool' }, {
+      workerUrl: '/worker.js',
+      createWorker: () => {
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'ready', protocol: ACTOR_WORKER_PROTOCOL, realm: REALM,
+        } }));
+        return worker as unknown as Worker;
+      },
+      sendToSW: async (type) => {
+        relays.push(type);
+        if (type === 'actor/tool-prepare') return {
+          ok: true, mode: 'execute', executionId: 'exec-1',
+          toolName: 'actor_tasks', callId: 'call-1', args: {}, projection: {},
+        };
+        if (type === 'actor/tasks-read') return { ok: true, value: [] };
+        if (type === 'actor/tool-settle') return {
+          ok: true, result: { ok: true, content: 'No async spawned in this chat.' },
+        };
+        return { ok: false, outcomeKnown: true };
+      },
+    });
+    expect(relays).toEqual([
+      'actor/tool-prepare', 'actor/tasks-read', 'actor/tool-settle',
+    ]);
+    expect(relays).not.toContain('actor/tool-dispatch');
+    expect(result).toMatchObject({ ok: true, finalText: 'done', toolCalls: 1 });
+  });
+
   test('posts the run only after readiness and host-canary separation', async () => {
     const worker = new FakeWorker();
     worker.onPost = (message) => {

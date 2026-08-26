@@ -2,7 +2,11 @@
 // Lazy sealed-Worker handler for the orchestrator controller. The tiny prompt
 // runtime imports this fixed package-local module only after a turn.run commit.
 
-import { runUserTurn } from '/peerd-runtime/controller-turn.js';
+import {
+  controllerHostsActorTool,
+  executeControllerActorTool,
+  runUserTurn,
+} from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { controllerHostsTool } from '/shared/controller-tool-manifest.js';
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
@@ -314,7 +318,56 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
         }
         let execution;
         try {
-          execution = await executeToolCall(request, {
+          const binding = {
+            executionId: request.executionId,
+            argsDigest: request.argsDigest,
+            turnGeneration: request.turnGeneration,
+          };
+          if (controllerHostsActorTool(request.toolName)) {
+            const actorAuthority = Object.freeze({
+              spawnSync: (/** @type {any} */ actorRequest) => rpc('turn.actor.spawn-sync', {
+                ...binding,
+                task: actorRequest.task,
+                allowRecursion: actorRequest.allowRecursion === true,
+                ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
+                ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
+                ...(actorRequest.maxDepth === undefined ? {} : { maxDepth: actorRequest.maxDepth }),
+              }),
+              spawnAsync: (/** @type {any} */ actorRequest) => rpc('turn.actor.spawn-async', {
+                ...binding,
+                task: actorRequest.task,
+                allowRecursion: actorRequest.allowRecursion === true,
+                ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
+                ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
+                ...(actorRequest.maxDepth === undefined ? {} : { maxDepth: actorRequest.maxDepth }),
+              }),
+              listTasks: () => rpc('turn.actor.tasks', binding),
+              cancelTask: (/** @type {string} */ taskId) =>
+                rpc('turn.actor.cancel', { ...binding, taskId }),
+              message: (/** @type {any} */ actorRequest) => rpc('turn.actor.message', {
+                ...binding,
+                to: actorRequest.to,
+                message: actorRequest.message,
+                oneShot: actorRequest.oneShot === true,
+                awaitReply: actorRequest.awaitReply === true,
+                degradeToAsync: actorRequest.degradeToAsync === true,
+                awaitCapMs: Number(actorRequest.awaitCapMs),
+              }),
+            });
+            const value = await executeControllerActorTool(
+              request.toolName, request.args, request.projection, actorAuthority,
+              { callId: request.callId, signal: options.signal },
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else execution = await executeToolCall(request, {
             signal: options.signal,
             authority: {
               ownerId: runId,
@@ -331,17 +384,18 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
               effectPayload,
             }),
           });
-        } catch {
+        } catch (cause) {
+          const error = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
           execution = {
             protocol: request.protocol,
             executionId: request.executionId,
             argsDigest: request.argsDigest,
             ok: false,
-            code: 'tool-execution-host-lost',
-            error: 'Tool execution interrupted.',
-            outcomeKnown: true,
+            code: error?.code ?? 'tool-execution-host-lost',
+            error: error?.message ?? 'Tool execution interrupted.',
+            outcomeKnown: error?.outcomeKnown !== false,
             effectEntered: false,
-            retryable: true,
+            retryable: error?.retryable ?? error?.outcomeKnown !== false,
             phase: 'run',
           };
         }

@@ -67,10 +67,6 @@ import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
 import { toolboxDeleteTool }          from './toolbox-delete.js';
-import { actorCreateTool }          from './actor-create.js';
-import { actorTasksTool }          from './actor-tasks.js';
-import { actorCancelTool }         from './actor-cancel.js';
-import { messageActorTool }        from './message-actor.js';
 import { rememberTool }                from './remember.js';
 import { readMemoryTool }              from './read-memory.js';
 import { requestReviewTool }          from './request-review.js';
@@ -156,11 +152,6 @@ export {
   toolboxWriteTool,
   toolboxListTool,
   toolboxDeleteTool,
-  // actor (orchestration over sessions)
-  actorCreateTool,
-  actorTasksTool,
-  actorCancelTool,
-  messageActorTool,
   // memory (V1.5 — file-based AGENTS.md)
   rememberTool,
   readMemoryTool,
@@ -283,14 +274,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   toolboxWriteTool,
   toolboxListTool,
   toolboxDeleteTool,
-  // actor (orchestration over sessions)
-  actorCreateTool,
-  actorTasksTool,
-  actorCancelTool,
-  // actor (DESIGN-17 — message the agent that owns a tab-hosted instance).
-  // Registered always; the exposure gate refuses it on an actor session, so a
-  // actor can't recursively message another actor.
-  messageActorTool,
   // memory (V1.5 — file-based AGENTS.md)
   readMemoryTool,
   rememberTool,

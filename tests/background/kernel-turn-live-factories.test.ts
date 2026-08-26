@@ -653,19 +653,19 @@ describe('kernel live turn factories', () => {
       };
     });
     const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
-    const handle = await ctx.spawnActorAsync({
+    const handle = await ctx.actorAuthority.spawnAsync({
       task: 'research safely', parentSessionId: h.root.sessionId,
       parentDepth: 0, parentToolUseId: 'spawn-1',
     });
     expect(handle).toMatchObject({ ok: true, taskId: 'as-1' });
-    expect(ctx.actorTasks()).toEqual([
+    expect(ctx.actorAuthority.listTasks()).toEqual([
       expect.objectContaining({ taskId: 'as-1', status: 'running', childSessionId: expect.any(String) }),
     ]);
-    expect(ctx.actorCancel(handle.taskId)).toEqual({
+    expect(ctx.actorAuthority.cancelTask(handle.taskId)).toEqual({
       ok: true,
       content: expect.stringContaining('cancelled'),
     });
-    expect(ctx.actorTasks()[0].status).toBe('cancelled');
+    expect(ctx.actorAuthority.listTasks()[0].status).toBe('cancelled');
     releaseChild();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(h.broadcasts.some((message) => message.type === 'turn/spawned-start')).toBe(true);

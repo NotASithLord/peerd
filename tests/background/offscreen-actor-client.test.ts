@@ -1116,3 +1116,127 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
     expect(out.error).toContain('not wired');
   });
 });
+
+describe('controller-owned actor tools: exact isolated authority', () => {
+  test('admits, executes, and settles actor_cancel without entering legacy dispatch', async () => {
+    let legacyDispatches = 0;
+    let cancelledTask = '';
+    let settledResult: any = null;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', depth: 2, kind: 'spawned' },
+        actorAuthority: {
+          cancelTask: async (taskId: string) => {
+            cancelledTask = taskId;
+            return { ok: true, content: `cancelled ${taskId}` };
+          },
+        },
+      }),
+      dispatchToolCall: async () => { legacyDispatches += 1; return { ok: true }; },
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => {
+        settledResult = execution.result;
+        return { ...execution.result, settled: true };
+      },
+    });
+    const observed: any = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: { id: 'call-1', name: 'actor_cancel', args: { taskId: 'task-7' } },
+      }, OFFSCREEN);
+      const effect = await client.routes['actor/task-cancel']({
+        relayToken, executionId: prepared.executionId, taskId: 'task-7',
+      }, OFFSCREEN);
+      const duplicate = await client.routes['actor/task-cancel']({
+        relayToken, executionId: prepared.executionId, taskId: 'task-7',
+      }, OFFSCREEN);
+      const legacy = await client.routes['actor/tool-dispatch']({
+        relayToken,
+        call: { id: 'call-1', name: 'actor_cancel', args: { taskId: 'task-7' } },
+      }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: true, content: effect.value.content },
+      }, OFFSCREEN);
+      return { prepared, effect, duplicate, legacy, settled };
+    }, 'actor-1');
+
+    expect(observed.prepared).toMatchObject({
+      ok: true, mode: 'execute', toolName: 'actor_cancel', callId: 'call-1',
+      projection: { sessionId: 'actor-1', sessionDepth: 2, sessionKind: 'spawned' },
+    });
+    expect(observed.effect).toEqual({
+      ok: true, value: { ok: true, content: 'cancelled task-7' },
+    });
+    expect(observed.duplicate).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(observed.legacy).toMatchObject({ ok: false });
+    expect(observed.legacy.error).toContain('not legacy-owned');
+    expect(observed.settled).toEqual({
+      ok: true, result: { ok: true, content: 'cancelled task-7', settled: true },
+    });
+    expect(cancelledTask).toBe('task-7');
+    expect(settledResult).toEqual({ ok: true, content: 'cancelled task-7' });
+    expect(legacyDispatches).toBe(0);
+  });
+
+  test('refuses a controller attempt to alter admitted actor arguments', async () => {
+    let cancelled = false;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', depth: 2, kind: 'spawned' },
+        actorAuthority: {
+          cancelTask: async () => { cancelled = true; return { ok: true, content: 'cancelled' }; },
+        },
+      }),
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const refused: any = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: { id: 'call-tamper', name: 'actor_cancel', args: { taskId: 'task-approved' } },
+      }, OFFSCREEN);
+      return client.routes['actor/task-cancel']({
+        relayToken, executionId: prepared.executionId, taskId: 'task-altered',
+      }, OFFSCREEN);
+    }, 'actor-1');
+    expect(refused).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(cancelled).toBe(false);
+  });
+
+  test('preserves unknown outcome when actor message custody throws after admission', async () => {
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', depth: 1, kind: 'spawned' },
+        actorAuthority: {
+          deliverMessage: async () => { throw new Error('host vanished'); },
+        },
+      }),
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const effect: any = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: { id: 'call-2', name: 'message_actor', args: { to: 'web', message: 'go' } },
+      }, OFFSCREEN);
+      return client.routes['actor/message-deliver']({
+        relayToken, executionId: prepared.executionId,
+        to: 'web', message: 'go', oneShot: false, awaitReply: true,
+        degradeToAsync: false, awaitCapMs: 1000,
+      }, OFFSCREEN);
+    }, 'actor-1');
+    expect(effect).toMatchObject({
+      ok: false, error: 'host vanished', outcomeKnown: false, retryable: false,
+    });
+  });
+});
