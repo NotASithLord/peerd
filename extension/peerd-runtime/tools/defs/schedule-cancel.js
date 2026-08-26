@@ -14,13 +14,13 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 export const scheduleCancelTool = composeTool("schedule_cancel", {
 
   execute: async (args, ctx) => {
-    const scheduleRemove = /** @type {((id: string) => boolean) | undefined} */ (
-      /** @type {{ scheduleRemove?: unknown }} */ (ctx).scheduleRemove);
-    if (typeof scheduleRemove !== 'function') {
+    const authority = /** @type {{ cancelRoutine?:(id:string)=>Promise<boolean> }|undefined} */ (
+      /** @type {{ scheduleAuthority?: unknown }} */ (ctx).scheduleAuthority);
+    if (typeof authority?.cancelRoutine !== 'function') {
       return { ok: false, error: 'schedule_unavailable', content: 'Background scheduling is not available in this context.' };
     }
     if (typeof args?.id !== 'string' || !args.id) return { ok: false, error: 'id_required' };
-    const removed = scheduleRemove(args.id);
+    const removed = await authority.cancelRoutine(args.id);
     return removed
       ? { ok: true, content: `Removed routine ${args.id}.` }
       : { ok: false, error: 'not_found', content: `No routine with id ${args.id}.` };

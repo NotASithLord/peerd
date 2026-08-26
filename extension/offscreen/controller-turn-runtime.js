@@ -12,6 +12,7 @@ import {
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
   controllerHostsIntrospectionTool,
+  controllerHostsScheduleTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -21,6 +22,7 @@ import {
   executeControllerPersistenceTool,
   executeControllerPageTool,
   executeControllerIntrospectionTool,
+  executeControllerScheduleTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -680,6 +682,26 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             const value = await executeControllerIntrospectionTool(
               request.toolName, request.args, request.projection,
               introspectionAuthority, { signal: options.signal },
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsScheduleTool(request.toolName)) {
+            const scheduleAuthority = Object.freeze({
+              readRoutines: () => rpc('turn.schedule.read-routines', binding),
+              armConfirmedRoutine: (/** @type {any} */ routine) =>
+                rpc('turn.schedule.arm-confirmed-routine', { ...binding, ...routine }),
+              cancelRoutine: (/** @type {string} */ id) =>
+                rpc('turn.schedule.cancel-routine', { ...binding, id }),
+            });
+            const value = await executeControllerScheduleTool(
+              request.toolName, request.args, scheduleAuthority, { signal: options.signal },
             );
             execution = {
               protocol: request.protocol,

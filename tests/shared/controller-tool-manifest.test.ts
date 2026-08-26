@@ -12,6 +12,7 @@ import {
   CONTROLLER_PERSISTENCE_TOOL_NAMES,
   CONTROLLER_PAGE_TOOL_NAMES,
   CONTROLLER_INTROSPECTION_TOOL_NAMES,
+  CONTROLLER_SCHEDULE_TOOL_NAMES,
 } from '../../extension/peerd-runtime/controller-turn.js';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
@@ -37,6 +38,7 @@ describe('controller tool manifest', () => {
       'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type',
       'click', 'login', 'page_code', 'capture', 'view',
       'actor_list', 'inspect', 'wait_until', 'load_skill',
+      'schedule_create', 'schedule_list', 'schedule_cancel',
     ]);
     expect(hosted).toEqual([
       ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS),
@@ -49,6 +51,7 @@ describe('controller tool manifest', () => {
       ...CONTROLLER_PERSISTENCE_TOOL_NAMES,
       ...CONTROLLER_PAGE_TOOL_NAMES,
       ...CONTROLLER_INTROSPECTION_TOOL_NAMES,
+      ...CONTROLLER_SCHEDULE_TOOL_NAMES,
     ]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))

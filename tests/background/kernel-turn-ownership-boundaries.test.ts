@@ -313,6 +313,28 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('keeps scheduling tool semantics out of authority graphs', async () => {
+    const semanticModules = new Set([
+      'peerd-runtime/controller-schedule-tools.js',
+      'peerd-runtime/tools/defs/schedule-create.js',
+      'peerd-runtime/tools/defs/schedule-list.js',
+      'peerd-runtime/tools/defs/schedule-cancel.js',
+    ]);
+    for (const entry of [
+      'background/vault-kernel.js',
+      'background/kernel-turn-live-factories.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ]) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
+    }
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of semanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
   it('composes one synchronous owner path without a protocol or dynamic fallback', () => {
     const source = readFileSync(
       join(EXTENSION_ROOT, 'background/kernel-turn-live-factories.js'),
