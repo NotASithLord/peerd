@@ -6,3 +6,8 @@ export {
   controllerHostsActorTool,
   executeControllerActorTool,
 } from './controller-actor-tools.js';
+export {
+  CONTROLLER_POD_TOOL_NAMES,
+  controllerHostsPodTool,
+  executeControllerPodTool,
+} from './controller-pod-tools.js';

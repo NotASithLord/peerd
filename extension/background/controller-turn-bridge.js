@@ -17,6 +17,7 @@ import {
   controllerToolDomain,
 } from '../shared/controller-tool-manifest.js';
 import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
+import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -460,9 +461,10 @@ export const makeControllerTurnBridge = ({
       run.modelCandidates.some((/** @type {any} */ candidate) => candidate.provider === providerId),
     redeemOpaque: (/** @type {string} */ token) => redeemModelOpaque(run, token),
   });
-  const actorExecutionEntry = (
+  const domainExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
+    /** @type {string} */ domain,
     /** @type {string[]} */ toolNames,
     /** @type {string[]} */ businessKeys,
     /** @type {string[]} */ optionalKeys = [],
@@ -471,13 +473,13 @@ export const makeControllerTurnBridge = ({
       'executionId', 'argsDigest', 'turnGeneration', ...businessKeys,
     ], optionalKeys)) return null;
     const entry = run.preparedExecutions.get(value.executionId);
-    if (!entry || entry.open !== true || entry.domain !== 'actor'
+    if (!entry || entry.open !== true || entry.domain !== domain
         || !toolNames.includes(entry.call?.name)
         || value.argsDigest !== entry.argsDigest
         || value.turnGeneration !== run.turnGeneration) return null;
     return entry;
   };
-  const runActorEffect = async (
+  const runDomainEffect = async (
     /** @type {any} */ run,
     /** @type {any} */ entry,
     /** @type {string} */ operation,
@@ -485,7 +487,7 @@ export const makeControllerTurnBridge = ({
     /** @type {()=>Promise<any>|any} */ execute,
   ) => {
     if (entry.domainCalls.has(operation)) {
-      return failed('actor authority operation already used', true);
+      return failed('domain authority operation already used', true);
     }
     entry.domainCalls.add(operation);
     const replayable = riskClass === 'read' || riskClass === 'control';
@@ -505,7 +507,7 @@ export const makeControllerTurnBridge = ({
       }
       return {
         ok: false,
-        code: 'actor-authority-operation-lost',
+        code: 'domain-authority-operation-lost',
         error: cause instanceof Error ? cause.message : String(cause),
         outcomeKnown,
         retryable: outcomeKnown && detail?.retryable !== false,
@@ -821,7 +823,7 @@ export const makeControllerTurnBridge = ({
             deadlineAt, release, open: true, effectEntered: false, effectPending: 0,
             pendingIrreversible: 0, settledIrreversible: false,
             unknownIrreversible: false, policy: parsedRequest.policy,
-            domain: controllerToolDomain(call.name), domainCalls: new Set(),
+            domain: controllerToolDomain(call.name), domainCalls: new Set(), domainState: {},
             quota: createToolEffectQuota(parsedRequest.policy),
           });
           return known({ mode: 'execute', requestJson: jsonWire(request), deadlineAt });
@@ -915,7 +917,7 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.actor.spawn-sync':
         case 'turn.actor.spawn-async': {
-          const entry = actorExecutionEntry(run, value, ['actor_create'], [
+          const entry = domainExecutionEntry(run, value, 'actor', ['actor_create'], [
             'task', 'allowRecursion',
           ], ['tools', 'maxSteps', 'maxDepth']);
           const args = entry?.call?.args;
@@ -943,7 +945,7 @@ export const makeControllerTurnBridge = ({
           if (typeof spawn !== 'function') {
             return known({ ok: false, error: 'actor_orchestrator_unavailable', outcomeKnown: true });
           }
-          return runActorEffect(run, entry, operation, 'resource', () => spawn({
+          return runDomainEffect(run, entry, operation, 'resource', () => spawn({
             task: value.task,
             ...(value.tools === undefined ? {} : { tools: value.tools }),
             ...(value.maxSteps === undefined ? {} : { maxSteps: value.maxSteps }),
@@ -956,25 +958,25 @@ export const makeControllerTurnBridge = ({
           }));
         }
         case 'turn.actor.tasks': {
-          const entry = actorExecutionEntry(run, value, ['actor_tasks'], [], []);
+          const entry = domainExecutionEntry(run, value, 'actor', ['actor_tasks'], [], []);
           if (!entry) return failed('actor tasks authority mismatch', true);
           const list = entry.custody?.ctx?.actorAuthority?.listTasks;
-          return runActorEffect(run, entry, operation, 'read', () =>
+          return runDomainEffect(run, entry, operation, 'read', () =>
             typeof list === 'function' ? list() : []);
         }
         case 'turn.actor.cancel': {
-          const entry = actorExecutionEntry(run, value, ['actor_cancel'], ['taskId']);
+          const entry = domainExecutionEntry(run, value, 'actor', ['actor_cancel'], ['taskId']);
           if (!entry || typeof value.taskId !== 'string' || !value.taskId
               || value.taskId !== entry.call?.args?.taskId) {
             return failed('actor cancel authority mismatch', true);
           }
           const cancel = entry.custody?.ctx?.actorAuthority?.cancelTask;
-          return runActorEffect(run, entry, operation, 'control', () =>
+          return runDomainEffect(run, entry, operation, 'control', () =>
             typeof cancel === 'function'
               ? cancel(value.taskId) : { ok: false, error: 'async_actor_unavailable' });
         }
         case 'turn.actor.message': {
-          const entry = actorExecutionEntry(run, value, ['message_actor'], [
+          const entry = domainExecutionEntry(run, value, 'actor', ['message_actor'], [
             'to', 'message', 'oneShot', 'awaitReply', 'degradeToAsync', 'awaitCapMs',
           ]);
           const args = entry?.call?.args;
@@ -995,7 +997,7 @@ export const makeControllerTurnBridge = ({
           if (typeof messageActor !== 'function') {
             return known({ ok: false, error: 'message_actor is not enabled', outcomeKnown: true });
           }
-          return runActorEffect(run, entry, operation, 'resource', () => messageActor({
+          return runDomainEffect(run, entry, operation, 'resource', () => messageActor({
             to: value.to,
             message: value.message,
             oneShot: value.oneShot,
@@ -1007,6 +1009,165 @@ export const makeControllerTurnBridge = ({
             degradeToAsync: value.degradeToAsync,
             awaitCapMs: value.awaitCapMs,
           }));
+        }
+        case 'turn.pod.resolve': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], ['podId']);
+          if (!entry || value.podId !== entry.call?.args?.podId) {
+            return failed('Pod resolution authority mismatch', true);
+          }
+          const ctx = entry.custody?.ctx;
+          if (typeof ctx?.podClient?.resolveId !== 'function') {
+            return failed('pod_unavailable', true);
+          }
+          const result = /** @type {any} */ (await runDomainEffect(
+            run, entry, operation, 'read', () =>
+              ctx.podClient.resolveId({ sessionId: ctx.session?.sessionId, podId: value.podId }),
+          ));
+          if (result?.ok === true && typeof result.value === 'string') {
+            entry.domainState.podId = result.value;
+          }
+          return result;
+        }
+        case 'turn.pod.read-remote': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], ['podId']);
+          const intent = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '')[0] : null;
+          if (!entry || typeof value.podId !== 'string'
+              || value.podId !== entry.domainState.podId
+              || !intent || intent.url) {
+            return failed('Pod remote authority mismatch', true);
+          }
+          const readRemote = entry.custody?.ctx?.repositories?.getRemote;
+          const result = /** @type {any} */ (await runDomainEffect(
+            run, entry, operation, 'read', () => typeof readRemote === 'function'
+              ? readRemote({ kind: 'pod', id: value.podId }) : null,
+          ));
+          if (result?.ok === true) entry.domainState.remote = result.value;
+          return result;
+        }
+        case 'turn.pod.confirm-git': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], ['op']);
+          const intents = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '') : [];
+          const intent = intents.length === 1 ? intents[0] : null;
+          const target = intent?.url ?? entry?.domainState?.remote?.url;
+          if (!entry || typeof entry.domainState.podId !== 'string'
+              || !intent || value.op !== intent.op || typeof target !== 'string') {
+            return failed('Pod Git confirmation authority mismatch', true);
+          }
+          let origin;
+          try { origin = new URL(target).origin; }
+          catch { return failed('Pod Git remote is invalid', true); }
+          const confirm = entry.custody?.ctx?.confirm;
+          if (typeof confirm !== 'function') return known(false);
+          const result = /** @type {any} */ (await runDomainEffect(
+            run, entry, operation, 'control', () => confirm({
+            tool: 'pod_exec', kind: `git_${intent.op}`,
+            sideEffect: intent.op === 'push' ? 'mutate_external' : 'write',
+            origins: [origin],
+            summary: intent.op === 'push'
+              ? `Allow this one Pod job to push code and commit history to ${target}?`
+              : `Allow this one Pod job to ${intent.op} ${target} through peerd's audited Git transport?`,
+            }),
+          ));
+          if (result?.ok === true
+              && [true, 'yes_once', 'yes_session'].includes(result.value)) {
+            entry.domainState.remoteGitGrant = { op: intent.op, url: target };
+          }
+          return result;
+        }
+        case 'turn.pod.exec': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_exec'], [
+            'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
+          ]);
+          const args = entry?.call?.args;
+          let program;
+          let intents;
+          try {
+            program = parsePodShell(args?.command ?? '');
+            intents = podGitRemoteIntents(args?.command ?? '');
+          } catch { return failed('Pod command authority mismatch', true); }
+          const expectedTimeout = Math.min(300_000, Math.max(1, Number(args?.timeoutMs) || 30_000));
+          const expectedBackground = args?.background === true || program.background;
+          const expectedGrant = intents.length === 1
+            ? entry?.domainState?.remoteGitGrant ?? null : null;
+          if (!entry || intents.length > 1 || typeof entry.domainState.podId !== 'string'
+              || value.command !== args?.command || value.podId !== entry.domainState.podId
+              || value.timeoutMs !== expectedTimeout || value.background !== expectedBackground
+              || !sameClone(value.remoteGitGrant, expectedGrant)) {
+            return failed('Pod execution authority mismatch', true);
+          }
+          const execute = entry.custody?.ctx?.podClient?.exec;
+          if (typeof execute !== 'function') return failed('pod_unavailable', true);
+          return runDomainEffect(run, entry, operation, 'resource', () => execute(value.command, {
+            podId: value.podId,
+            timeoutMs: expectedTimeout,
+            background: expectedBackground,
+            remoteGitGrant: expectedGrant,
+            signal: expectedBackground ? undefined : run.signal,
+          }));
+        }
+        case 'turn.pod.status': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_status'], [
+            'podId', 'jobId', 'stream', 'offset', 'limit',
+          ]);
+          const args = entry?.call?.args;
+          if (!entry || value.podId !== args?.podId || value.jobId !== args?.jobId
+              || value.stream !== args?.stream || value.offset !== args?.offset
+              || value.limit !== args?.limit) {
+            return failed('Pod status authority mismatch', true);
+          }
+          const readStatus = entry.custody?.ctx?.podClient?.status;
+          if (typeof readStatus !== 'function') return failed('pod_unavailable', true);
+          return runDomainEffect(run, entry, operation, 'read', () => readStatus({
+            sessionId: entry.custody.ctx.session?.sessionId,
+            podId: value.podId, jobId: value.jobId, stream: value.stream,
+            offset: value.offset, limit: value.limit,
+          }));
+        }
+        case 'turn.pod.cancel': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_cancel'], [
+            'podId', 'jobId',
+          ]);
+          const args = entry?.call?.args;
+          if (!entry || typeof value.jobId !== 'string' || value.jobId !== args?.jobId
+              || value.podId !== args?.podId) {
+            return failed('Pod cancellation authority mismatch', true);
+          }
+          const cancel = entry.custody?.ctx?.podClient?.cancel;
+          if (typeof cancel !== 'function') return failed('pod_unavailable', true);
+          return runDomainEffect(run, entry, operation, 'control', () => cancel(value.jobId, {
+            sessionId: entry.custody.ctx.session?.sessionId, podId: value.podId,
+          }));
+        }
+        case 'turn.pod.read-file': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_read'], ['podId', 'path']);
+          const args = entry?.call?.args;
+          if (!entry || typeof value.path !== 'string' || value.path !== args?.path
+              || value.podId !== args?.podId) {
+            return failed('Pod file-read authority mismatch', true);
+          }
+          const readFile = entry.custody?.ctx?.podClient?.readFile;
+          if (typeof readFile !== 'function') return failed('pod_unavailable', true);
+          return runDomainEffect(run, entry, operation, 'read', () => readFile(value.path, {
+            sessionId: entry.custody.ctx.session?.sessionId, podId: value.podId,
+          }));
+        }
+        case 'turn.pod.write-file': {
+          const entry = domainExecutionEntry(run, value, 'pod', ['pod_write'], [
+            'podId', 'path', 'content',
+          ]);
+          const args = entry?.call?.args;
+          if (!entry || typeof value.path !== 'string' || typeof value.content !== 'string'
+              || value.path !== args?.path || value.content !== args?.content
+              || value.podId !== args?.podId) {
+            return failed('Pod file-write authority mismatch', true);
+          }
+          const writeFile = entry.custody?.ctx?.podClient?.writeFile;
+          if (typeof writeFile !== 'function') return failed('pod_unavailable', true);
+          return runDomainEffect(run, entry, operation, 'commit', () => writeFile(
+            value.path, value.content, {
+              sessionId: entry.custody.ctx.session?.sessionId, podId: value.podId,
+            },
+          ));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

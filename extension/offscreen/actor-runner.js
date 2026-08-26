@@ -618,6 +618,72 @@ export const runActor = async (job, {
             }));
           return;
         }
+        if (m.type === 'pod-resolve-request') {
+          await relayExactToolMessage(m, 'pod-resolve-response', () =>
+            sendToSW('pod/resolve', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId,
+            }));
+          return;
+        }
+        if (m.type === 'pod-read-remote-request') {
+          await relayExactToolMessage(m, 'pod-read-remote-response', () =>
+            sendToSW('pod/read-remote', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId,
+            }));
+          return;
+        }
+        if (m.type === 'pod-confirm-git-request') {
+          await relayExactToolMessage(m, 'pod-confirm-git-response', () =>
+            sendToSW('pod/confirm-git', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              op: m.op,
+            }));
+          return;
+        }
+        if (m.type === 'pod-exec-request') {
+          await relayExactToolMessage(m, 'pod-exec-response', () =>
+            sendToSW('pod/exec', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              command: m.command, podId: m.podId, timeoutMs: m.timeoutMs,
+              background: m.background, remoteGitGrant: m.remoteGitGrant,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'pod-status-request') {
+          await relayExactToolMessage(m, 'pod-status-response', () =>
+            sendToSW('pod/status', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId, jobId: m.jobId, stream: m.stream,
+              offset: m.offset, limit: m.limit,
+            }));
+          return;
+        }
+        if (m.type === 'pod-cancel-request') {
+          await relayExactToolMessage(m, 'pod-cancel-response', () =>
+            sendToSW('pod/cancel', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId, jobId: m.jobId,
+            }));
+          return;
+        }
+        if (m.type === 'pod-read-file-request') {
+          await relayExactToolMessage(m, 'pod-read-file-response', () =>
+            sendToSW('pod/read-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId, path: m.path,
+            }));
+          return;
+        }
+        if (m.type === 'pod-write-file-request') {
+          await relayExactToolMessage(m, 'pod-write-file-response', () =>
+            sendToSW('pod/write-file', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              podId: m.podId, path: m.path, content: m.content,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

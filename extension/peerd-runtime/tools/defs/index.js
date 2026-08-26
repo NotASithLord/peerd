@@ -44,11 +44,6 @@ import { appCodeTool }                from './app-code.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
-import { podExecTool }                from './pod-exec.js';
-import { podStatusTool }              from './pod-status.js';
-import { podCancelTool }              from './pod-cancel.js';
-import { podReadTool }                from './pod-read.js';
-import { podWriteTool }               from './pod-write.js';
 import { podDestroyTool }             from './pod-destroy.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
@@ -125,11 +120,6 @@ export {
   jsReadFileTool,
   jsDeleteTool,
   // engine (Pod)
-  podExecTool,
-  podStatusTool,
-  podCancelTool,
-  podReadTool,
-  podWriteTool,
   podDestroyTool,
   // engine (App)
   appUpdateTool,
@@ -246,11 +236,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   jsReadFileTool,
   jsDeleteTool,
   // engine (Pod)
-  podExecTool,
-  podStatusTool,
-  podCancelTool,
-  podReadTool,
-  podWriteTool,
   podDestroyTool,
   // engine (App)
   appUpdateTool,

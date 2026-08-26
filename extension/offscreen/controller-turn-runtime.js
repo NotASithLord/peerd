@@ -4,7 +4,9 @@
 
 import {
   controllerHostsActorTool,
+  controllerHostsPodTool,
   executeControllerActorTool,
+  executeControllerPodTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -357,6 +359,57 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             const value = await executeControllerActorTool(
               request.toolName, request.args, request.projection, actorAuthority,
               { callId: request.callId, signal: options.signal },
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsPodTool(request.toolName)) {
+            const podAuthority = Object.freeze({
+              resolve: (/** @type {any} */ podRequest) => rpc('turn.pod.resolve', {
+                ...binding, podId: podRequest?.podId,
+              }),
+              readRemote: (/** @type {string} */ podId) => rpc('turn.pod.read-remote', {
+                ...binding, podId,
+              }),
+              confirmGit: (/** @type {string} */ op) => rpc('turn.pod.confirm-git', {
+                ...binding, op,
+              }),
+              executeCommand: (/** @type {any} */ podRequest) => rpc('turn.pod.exec', {
+                ...binding,
+                command: podRequest.command,
+                podId: podRequest.podId,
+                timeoutMs: podRequest.timeoutMs,
+                background: podRequest.background === true,
+                remoteGitGrant: podRequest.remoteGitGrant ?? null,
+              }),
+              readStatus: (/** @type {any} */ podRequest) => rpc('turn.pod.status', {
+                ...binding,
+                podId: podRequest.podId,
+                jobId: podRequest.jobId,
+                stream: podRequest.stream,
+                offset: podRequest.offset,
+                limit: podRequest.limit,
+              }),
+              cancelJob: (/** @type {any} */ podRequest) => rpc('turn.pod.cancel', {
+                ...binding, podId: podRequest.podId, jobId: podRequest.jobId,
+              }),
+              readFile: (/** @type {any} */ podRequest) => rpc('turn.pod.read-file', {
+                ...binding, podId: podRequest.podId, path: podRequest.path,
+              }),
+              writeFile: (/** @type {any} */ podRequest) => rpc('turn.pod.write-file', {
+                ...binding, podId: podRequest.podId, path: podRequest.path,
+                content: podRequest.content,
+              }),
+            });
+            const value = await executeControllerPodTool(
+              request.toolName, request.args, request.projection, podAuthority,
+              { signal: options.signal },
             );
             execution = {
               protocol: request.protocol,

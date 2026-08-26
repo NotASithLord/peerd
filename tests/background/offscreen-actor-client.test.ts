@@ -1240,3 +1240,69 @@ describe('controller-owned actor tools: exact isolated authority', () => {
     });
   });
 });
+
+describe('controller-owned Pod tools: exact isolated authority', () => {
+  test('pins pod_write arguments and preserves unknown post-entry failure', async () => {
+    let writes = 0;
+    let legacyDispatches = 0;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'pod', instanceId: 'pod-1' }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-pod-1', kind: 'actor' },
+        podClient: {
+          writeFile: async () => { writes += 1; throw new Error('write receipt lost'); },
+        },
+      }),
+      dispatchToolCall: async () => { legacyDispatches += 1; return { ok: true }; },
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const observed: any = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: {
+          id: 'call-pod-write', name: 'pod_write',
+          args: { podId: 'pod-1', path: 'main.js', content: 'approved' },
+        },
+      }, OFFSCREEN);
+      const tampered = await client.routes['pod/write-file']({
+        relayToken, executionId: prepared.executionId,
+        podId: 'pod-1', path: 'main.js', content: 'altered',
+      }, OFFSCREEN);
+      const effect = await client.routes['pod/write-file']({
+        relayToken, executionId: prepared.executionId,
+        podId: 'pod-1', path: 'main.js', content: 'approved',
+      }, OFFSCREEN);
+      const legacy = await client.routes['actor/tool-dispatch']({
+        relayToken,
+        call: {
+          id: 'call-pod-write', name: 'pod_write',
+          args: { podId: 'pod-1', path: 'main.js', content: 'approved' },
+        },
+      }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: false, error: 'pod_write_failed: write receipt lost' },
+      }, OFFSCREEN);
+      return { prepared, tampered, effect, legacy, settled };
+    }, 'actor-pod-1');
+
+    expect(observed.prepared).toMatchObject({
+      ok: true, mode: 'execute', toolName: 'pod_write',
+      projection: { sessionId: 'actor-pod-1' },
+    });
+    expect(observed.tampered).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(observed.effect).toMatchObject({
+      ok: false, error: 'write receipt lost', outcomeKnown: false, retryable: false,
+    });
+    expect(observed.legacy.error).toContain('not legacy-owned');
+    expect(observed.settled).toMatchObject({
+      ok: true,
+      result: { ok: false, code: 'pod-outcome-unknown', outcomeKnown: false, retryable: false },
+    });
+    expect(writes).toBe(1);
+    expect(legacyDispatches).toBe(0);
+  });
+});

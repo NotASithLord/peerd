@@ -267,6 +267,70 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('executes pod_write through exact file authority and refuses generic execution', async () => {
+    const podWriteDescriptor = authorityDescriptor('pod_write');
+    let legacy = 0;
+    let genericExecutor = 0;
+    let write: any = null;
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [podWriteDescriptor], refreshTools: async () => [podWriteDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-pod-write-1', name: 'pod_write' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-pod-write-1',
+            partialJson: '{"podId":"pod-1","path":"main.js","content":"ok"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-pod-write-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              session: { sessionId: 'session-tool-protocol' },
+              podClient: {
+                writeFile: async (path: string, content: string, options: any) => {
+                  write = { path, content, options };
+                  return 'pod-1';
+                },
+              },
+            },
+          },
+          args: call.args,
+          projection: { sessionId: 'session-tool-protocol' },
+          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+        }),
+        handleToolEffect: async () => ({
+          ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+      executeToolCall: async () => { genericExecutor += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    expect(write).toEqual({
+      path: 'main.js', content: 'ok',
+      options: { sessionId: 'session-tool-protocol', podId: 'pod-1' },
+    });
+    expect(legacy).toBe(0);
+    expect(genericExecutor).toBe(0);
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      result: expect.objectContaining({ ok: true, content: expect.stringContaining('main.js') }),
+    }));
+  });
+
   test('retains preparation in the kernel and exposes only exact effect calls', async () => {
     const custody = Object.freeze({ private: true });
     const observed: any[] = [];
