@@ -46,6 +46,7 @@ import {
   controllerHostsTool,
 } from '../../shared/controller-tool-manifest.js';
 import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
+import { projectToolAuthority } from '../tools/metadata/descriptor.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
 
@@ -514,7 +515,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       isolation ? filterByActorIsolation(exposed, isolation) : exposed,
       runtimeCapabilities,
     )
-      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+      .map(projectToolAuthority);
     actorIsolationForModelStep = isolation;
     return descriptors;
   };
@@ -538,7 +539,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     return (toolContext.inbound === true && actorType === 'dweb'
       ? descriptors.filter((/** @type {any} */ tool) => inboundAllowed.has(tool.name))
       : descriptors)
-      .map((/** @type {any} */ t) => ({ name: t.name, description: t.description, schema: t.schema }));
+      .map(projectToolAuthority);
   };
   const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();
@@ -602,9 +603,20 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
           manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
         };
       },
-      effect: async () => ({
-        ok: false, code: 'tool-effect-denied', outcomeKnown: true,
-      }),
+      effect: async (
+        /** @type {any} */ custody,
+        /** @type {string} */ operation,
+        /** @type {any} */ payload,
+      ) => {
+        if (operation !== 'goal.end') {
+          return { ok: false, code: 'tool-effect-denied', outcomeKnown: true };
+        }
+        const complete = custody?.ctx?.completeGoalRun;
+        return {
+          ok: true, outcomeKnown: true,
+          value: { ended: typeof complete === 'function' && complete(payload.summary) === true },
+        };
+      },
       settle: async (/** @type {any} */ custody, /** @type {any} */ reported) => {
         const policy = CONTROLLER_TOOL_MANIFEST.tools[custody?.call?.name];
         if (!policy || !toolExecutionResultAllowed(reported, policy.resultBytes)) {
@@ -826,6 +838,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
       tools: toolDescriptors,
+      runtimeCapabilities,
       // why: the loop calls this before each model step, then re-renders the
       // system prompt against the isolation snapshot selected here. Mid-turn
       // exposure changes therefore update the prompt and tools together.

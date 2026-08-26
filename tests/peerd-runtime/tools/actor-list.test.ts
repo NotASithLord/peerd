@@ -8,6 +8,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { actorListTool } from '../../../extension/peerd-runtime/tools/defs/actor-list.js';
+import { getToolMetadata } from '../../../extension/peerd-runtime/semantic.js';
 
 // A ctx with every source wired. Each registry mirrors the real snapshot shape:
 // vm → { vms, currentVmId }, js → { notebooks, currentId }, app → { apps, currentId }.
@@ -199,7 +200,8 @@ describe('actor_list — unified actor catalog', () => {
     expect(actorListTool.sideEffect).toBe('read');
     expect(actorListTool.origins?.({}, {} as any)).toEqual([]);
     expect(actorListTool.name).toBe('actor_list');
-    expect(actorListTool.description).toContain('webvm | notebook | pod | app');
-    expect(actorListTool.description).toContain("a Pod's lifecycle");
+    const metadata = getToolMetadata(actorListTool.name);
+    expect(metadata.description).toContain('webvm | notebook | pod | app');
+    expect(metadata.description).toContain("a Pod's lifecycle");
   });
 });

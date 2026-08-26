@@ -8,6 +8,7 @@
 // heap. Module worker → strict.
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
+import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
 import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
 
@@ -104,7 +105,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           getSystemPrompt: () => program.systemPrompt,
           appendAudit: async () => {},
           onEvent: (/** @type {object} */ event) => self.postMessage({ type: 'loop-event', runId, event }),
-          tools: m.tools ?? [],
+          tools: hydrateToolDescriptors(
+            Array.isArray(m.tools) ? m.tools : [], m.runtimeCapabilities,
+          ),
           ...(fenceActorSummary ? { fenceActorSummary } : {}),
         },
         {

@@ -9,15 +9,17 @@ import {
 } from '../../extension/shared/controller-kernel-quota.js';
 import { executeControllerToolCall } from '../../extension/offscreen/controller-tool-runtime.js';
 import { CONTROLLER_TOOL_MANIFEST } from '../../extension/shared/controller-tool-manifest.js';
-import { nowTool } from '../../extension/peerd-runtime/clock/tools.js';
 import {
   prepareToolCall as prepareRuntimeToolCall,
   settleToolCall as settleRuntimeToolCall,
 } from '../../extension/peerd-runtime/tools/dispatcher.js';
 import {
   clearTools,
+  registerMetadataInventory,
   registerTool,
 } from '../../extension/peerd-runtime/tools/registry.js';
+import { toToolDescriptor, projectToolAuthority } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
+import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
 import {
   TOOL_EXECUTION_PROTOCOL,
   compileToolEffectManifest,
@@ -47,9 +49,10 @@ const manifestFor = (riskClass: 'read' | 'control' | 'commit' | 'resource') =>
     },
   });
 const TOOL_MANIFEST = manifestFor('commit');
-const descriptor = {
-  name: 'remember', description: 'Remember a fact.', schema: { type: 'object' },
-};
+const authorityDescriptor = (name: string) => projectToolAuthority(
+  toToolDescriptor(getToolPolicy(name)),
+);
+const descriptor = authorityDescriptor('remember');
 
 const makeSessions = () => {
   let session: any = {
@@ -149,19 +152,20 @@ const runHarness = async ({
   return { bridge, events, error };
 };
 
-afterEach(() => clearTools());
+afterEach(() => {
+  clearTools();
+  registerMetadataInventory([]);
+});
 
 describe('controller turn finite tool protocol', () => {
   test('executes now through real prepare, controller, and settle phases', async () => {
-    registerTool(nowTool);
+    registerMetadataInventory();
     let legacy = 0;
     const toolContext = {
       audit: async () => {}, hooks: [], session: { sessionId: 'session-tool-protocol' },
       permission: { mode: 'act', confirmActions: false },
     } as any;
-    const nowDescriptor = {
-      name: 'now', description: 'Current time.', schema: { type: 'object' },
-    };
+    const nowDescriptor = authorityDescriptor('now');
     const result = await runHarness({
       ctx: context({
         tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
@@ -379,9 +383,7 @@ describe('controller turn finite tool protocol', () => {
   test('keeps wait_until in the durable legacy lane', async () => {
     let legacy = 0;
     let executed = 0;
-    const waitDescriptor = {
-      name: 'wait_until', description: 'Wait.', schema: { type: 'object' },
-    };
+    const waitDescriptor = authorityDescriptor('wait_until');
     const result = await runHarness({
       ctx: context({
         tools: [waitDescriptor], refreshTools: async () => [waitDescriptor],
@@ -404,9 +406,7 @@ describe('controller turn finite tool protocol', () => {
   test('never falls back to legacy dispatch for a controller-hosted tool', async () => {
     let legacy = 0;
     let executed = 0;
-    const nowDescriptor = {
-      name: 'now', description: 'Current time.', schema: { type: 'object' },
-    };
+    const nowDescriptor = authorityDescriptor('now');
     const result = await runHarness({
       ctx: context({
         tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
@@ -438,9 +438,7 @@ describe('controller turn finite tool protocol', () => {
   test('the kernel rejects direct legacy dispatch of a controller-hosted tool', async () => {
     let bypass: any = null;
     let legacy = 0;
-    const nowDescriptor = {
-      name: 'now', description: 'Current time.', schema: { type: 'object' },
-    };
+    const nowDescriptor = authorityDescriptor('now');
     const result = await runHarness({
       ctx: context({
         tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],

@@ -125,7 +125,7 @@ const controllerCtx = (ctx) => {
   const keys = [
     'userText', 'synthetic', 'resume', 'contextMessage', 'reasoning',
     'actorReply', 'contextWindow', 'oneShot', 'maxSteps', 'persistDeltas',
-    'preflightReply',
+    'preflightReply', 'runtimeCapabilities',
   ];
   const out = /** @type {Record<string, unknown>} */ ({});
   for (const key of keys) if (ctx[key] !== undefined) out[key] = ctx[key];
@@ -321,6 +321,15 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
       .filter((/** @type {unknown} */ name) => typeof name === 'string'));
     run.classifications = classificationsFor(run, run.tools);
   };
+  const authorityTools = (/** @type {unknown} */ tools) => Array.isArray(tools)
+    ? tools.map((tool) => ({
+      name: tool?.name,
+      primitive: tool?.primitive,
+      sideEffect: tool?.sideEffect,
+      ...(tool?.dispatch === undefined ? {} : { dispatch: tool.dispatch }),
+      ...(tool?.retryClass === undefined ? {} : { retryClass: tool.retryClass }),
+      ...(tool?.dweb === undefined ? {} : { dweb: tool.dweb }),
+    })) : [];
   const dispatchIsConcurrencySafe = (/** @type {any} */ run, /** @type {string} */ name) => {
     let verdict = null;
     try { verdict = run.ctx.classifyToolCall?.(name) ?? null; } catch { verdict = null; }
@@ -565,7 +574,7 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
           );
           if (!session || args.provider !== session.provider || args.model !== session.model
               || typeof run.system !== 'string' || args.system !== run.system
-              || !sameClone(args.tools ?? [], run.tools)) {
+              || !sameClone(authorityTools(args.tools), run.tools)) {
             return failed('model/tool/system pin mismatch', true);
           }
           run.modelToolCalls.clear();

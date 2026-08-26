@@ -7,7 +7,7 @@ import {
 
 export const CONTROLLER_TOOL_MANIFEST = compileToolEffectManifest({
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: 'ae34d2d90539d067cb5afa4ac0ff317dcabea4a912779fef23a665c694e7c604',
+  digest: '81b7b8a5e79cfa98372778db825044c4faa6d2d8b5e651b363d6eb3f3abffc72',
   tools: {
     now: {
       projectionKeys: [],
@@ -16,6 +16,19 @@ export const CONTROLLER_TOOL_MANIFEST = compileToolEffectManifest({
       projectionBytes: 64,
       resultBytes: 4 * 1024,
       pendingEffects: 1,
+    },
+    complete_goal: {
+      projectionKeys: [],
+      effects: [{
+        method: 'endGoal', operation: 'goal.end', riskClass: 'control',
+        requestSchema: {
+          type: 'object', properties: { summary: { type: 'string' } },
+          required: ['summary'],
+        },
+        resultSchema: {
+          type: 'object', properties: { ended: { type: 'boolean' } }, required: ['ended'],
+        },
+      }],
     },
   },
 });

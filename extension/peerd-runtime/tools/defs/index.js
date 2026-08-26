@@ -74,7 +74,6 @@ import { messageActorTool }        from './message-actor.js';
 import { rememberTool }                from './remember.js';
 import { readMemoryTool }              from './read-memory.js';
 import { requestReviewTool }          from './request-review.js';
-import { completeGoalTool }            from './complete-goal.js';
 import { scheduleCreateTool }          from './schedule-create.js';
 import { scheduleListTool }            from './schedule-list.js';
 import { scheduleCancelTool }          from './schedule-cancel.js';
@@ -166,8 +165,6 @@ export {
   rememberTool,
   readMemoryTool,
   requestReviewTool,
-  // goal mode (Goal toggle — exposure-gated to active runs only)
-  completeGoalTool,
   // scheduling (background Routines — loop/scheduler.js)
   scheduleCreateTool,
   scheduleListTool,
@@ -301,7 +298,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   requestReviewTool,
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
   // exposure.js reveals them to the model ONLY while a goal run is active.
-  completeGoalTool,
   // scheduling — background Routines (loop/scheduler.js). Main-agent tools; not
   // exposure-gated, so the agent can set up / list / cancel standing tasks.
   scheduleCreateTool,

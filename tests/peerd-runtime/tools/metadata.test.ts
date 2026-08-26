@@ -3,12 +3,14 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 import {
-  composeTool,
   getToolMetadata,
   listToolMetadata,
   resolveToolOrigins,
   TOOL_METADATA_ORDER,
-} from '../../../extension/peerd-runtime/tools/metadata/index.js';
+} from '../../../extension/peerd-runtime/semantic.js';
+import { composeTool } from '../../../extension/peerd-runtime/tools/metadata/index.js';
+import { getToolPolicy } from '../../../extension/peerd-runtime/tools/metadata/policy.js';
+import { projectToolAuthority } from '../../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import {
   normalizeSiteOrigin,
   originOfUrl,
@@ -16,6 +18,7 @@ import {
 import {
   clearTools, listTools, registerTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
+import { CONTROLLER_TOOL_IMPLEMENTATIONS } from '../../../extension/peerd-runtime/controller-tools.js';
 
 const { BUILTIN_TOOLS } = await import(
   '../../../extension/peerd-runtime/tools/defs/index.js'
@@ -27,6 +30,10 @@ const { loadSkillTool } = await import(
 );
 
 const ALL_TOOLS = [...BUILTIN_TOOLS, ...CLOCK_TOOLS, ...WEB_TOOLS, loadSkillTool];
+const EXECUTION_TOOL_NAMES = new Set(ALL_TOOLS.map((tool) => tool.name));
+const CONTROLLER_ONLY_TOOL_NAMES = new Set(
+  Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS).filter((name) => !EXECUTION_TOOL_NAMES.has(name)),
+);
 const METADATA_KEYS = new Set([
   'name', 'primitive', 'description', 'schema', 'sideEffect',
   'dispatch', 'retryClass', 'dweb', 'originRule',
@@ -49,7 +56,10 @@ const sourceFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes:
 
 describe('tool metadata authority', () => {
   test('covers the exact production registry in production order', () => {
-    expect(TOOL_METADATA_ORDER).toEqual(ALL_TOOLS.map((tool) => tool.name));
+    expect(TOOL_METADATA_ORDER.filter((name) => !CONTROLLER_ONLY_TOOL_NAMES.has(name)))
+      .toEqual(ALL_TOOLS.map((tool) => tool.name));
+    expect(new Set([...EXECUTION_TOOL_NAMES, ...CONTROLLER_ONLY_TOOL_NAMES]))
+      .toEqual(new Set(TOOL_METADATA_ORDER));
     expect(new Set(TOOL_METADATA_ORDER).size).toBe(TOOL_METADATA_ORDER.length);
     expect(listToolMetadata().map((metadata) => metadata.name)).toEqual([...TOOL_METADATA_ORDER]);
   });
@@ -69,17 +79,17 @@ describe('tool metadata authority', () => {
     }
   });
 
-  test('full tools compose their descriptor and origins from the same record', () => {
+  test('execution tools compose only compact authority policy and origins', () => {
     for (const tool of ALL_TOOLS) {
-      const metadata = getToolMetadata(tool.name);
-      const { originRule, ...descriptor } = metadata;
+      const policy = getToolPolicy(tool.name);
+      const { originRule, ...descriptor } = policy;
       const actual = Object.fromEntries(Object.entries(tool).filter(
         ([key]) => key !== 'origins' && key !== 'execute',
       ));
       expect(actual).toEqual(descriptor);
       expect(tool.origins({ url: 'https://example.com/a' }, {
         activeTab: { origin: 'https://active.example' },
-      } as any)).toEqual(resolveToolOrigins(originRule, {
+      } as any)).toEqual(resolveToolOrigins(policy.originRule, {
         url: 'https://example.com/a',
       }, { activeTab: { origin: 'https://active.example' } }));
     }
@@ -90,7 +100,8 @@ describe('tool metadata authority', () => {
     try {
       clearTools();
       for (const tool of ALL_TOOLS) registerTool(tool as any);
-      expect(listTools().map((tool) => tool.name)).toEqual([...TOOL_METADATA_ORDER]);
+      expect(listTools().map((tool) => tool.name))
+        .toEqual(TOOL_METADATA_ORDER.filter((name) => !CONTROLLER_ONLY_TOOL_NAMES.has(name)));
     } finally {
       clearTools();
       for (const tool of previous) registerTool(tool);
@@ -100,6 +111,22 @@ describe('tool metadata authority', () => {
   test('composition refuses unknown metadata and missing execution', () => {
     expect(() => composeTool('missing-tool', { execute: async () => ({}) })).toThrow();
     expect(() => composeTool(TOOL_METADATA_ORDER[0], {})).toThrow();
+  });
+
+  test('authority projection is compact and rehydrates without widening', async () => {
+    const { hydrateToolDescriptors } = await import(
+      '../../../extension/peerd-runtime/semantic.js'
+    );
+    const projection = projectToolAuthority(ALL_TOOLS[0] as any);
+    expect(Object.keys(projection)).not.toContain('description');
+    expect(Object.keys(projection)).not.toContain('schema');
+    expect(hydrateToolDescriptors([projection])[0]).toMatchObject({
+      name: ALL_TOOLS[0].name,
+      description: getToolMetadata(ALL_TOOLS[0].name).description,
+      schema: getToolMetadata(ALL_TOOLS[0].name).schema,
+    });
+    expect(() => hydrateToolDescriptors([{ ...projection, sideEffect: 'write' }]))
+      .toThrow('tool authority mismatch');
   });
 });
 
@@ -175,7 +202,8 @@ describe('tool metadata anti-drift', () => {
       visit(parsed);
     }
     expect(rawDefinitions).toEqual([]);
-    expect(composed).toHaveLength(TOOL_METADATA_ORDER.length);
-    expect(new Set(composed)).toEqual(new Set(TOOL_METADATA_ORDER));
+    expect(composed).toHaveLength(TOOL_METADATA_ORDER.length - CONTROLLER_ONLY_TOOL_NAMES.size);
+    expect(new Set([...composed, ...CONTROLLER_ONLY_TOOL_NAMES]))
+      .toEqual(new Set(TOOL_METADATA_ORDER));
   });
 });

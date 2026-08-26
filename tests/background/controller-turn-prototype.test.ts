@@ -2,6 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
 import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
 import { runUserTurn as runDirectTurn } from '../../extension/peerd-runtime/loop/agent-loop.js';
+import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
+import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
+import { hydrateToolDescriptors } from '../../extension/peerd-runtime/semantic.js';
 
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -112,9 +115,7 @@ const runPrototype = async ({ ctx, captureEvents, inspectOuter, interceptKernel 
   }
 };
 
-const descriptor = {
-  name: 'read_fixture', description: 'Read the fixture.', schema: { type: 'object' },
-};
+const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('inspect')));
 
 const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]) => ({
   sessionId: 'session-1',
@@ -157,7 +158,10 @@ describe('orchestrator controller turn boundary', () => {
     const controllerSessions = makeSessions();
     const directCalls: any[] = [];
     const controllerCalls: any[] = [];
-    const directEvents = await drain(runDirectTurn(makeSimpleCtx(directSessions, directCalls) as any));
+    const directCtx: any = makeSimpleCtx(directSessions, directCalls);
+    directCtx.tools = hydrateToolDescriptors(directCtx.tools);
+    directCtx.refreshTools = async () => directCtx.tools;
+    const directEvents = await drain(runDirectTurn(directCtx as any));
     const observedTransport: string[] = [];
     const controllerEvents = await runPrototype({
       ctx: makeSimpleCtx(controllerSessions, controllerCalls),
@@ -189,7 +193,7 @@ describe('orchestrator controller turn boundary', () => {
           yield { type: 'message-stop', stopReason: 'end_turn' };
           return;
         }
-        yield { type: 'tool-use-start', id: 'tool-1', name: 'read_fixture' };
+        yield { type: 'tool-use-start', id: 'tool-1', name: descriptor.name };
         yield { type: 'tool-use-delta', id: 'tool-1', partialJson: '{"value":7}' };
         yield { type: 'tool-use-stop', id: 'tool-1' };
         yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -250,7 +254,7 @@ describe('orchestrator controller turn boundary', () => {
           return;
         }
         for (const id of ['write-1', 'write-2']) {
-          yield { type: 'tool-use-start', id, name: 'read_fixture' };
+          yield { type: 'tool-use-start', id, name: descriptor.name };
           yield { type: 'tool-use-delta', id, partialJson: '{}' };
           yield { type: 'tool-use-stop', id };
         }
@@ -267,7 +271,7 @@ describe('orchestrator controller turn boundary', () => {
     await runPrototype({
       ctx,
       inspectOuter: (payload) => {
-        payload.classifications.read_fixture = { actionClass: 'read', confirm: false };
+        payload.classifications[descriptor.name] = { actionClass: 'read', confirm: false };
       },
     });
     expect(maxActive).toBe(1);
@@ -289,7 +293,7 @@ describe('orchestrator controller turn boundary', () => {
           round += 1;
           if (round > 1) return;
           for (const id of ['write-1', 'write-2']) {
-            yield { type: 'tool-use-start', id, name: 'read_fixture' };
+            yield { type: 'tool-use-start', id, name: descriptor.name };
             yield { type: 'tool-use-delta', id, partialJson: '{}' };
             yield { type: 'tool-use-stop', id };
           }
@@ -305,7 +309,7 @@ describe('orchestrator controller turn boundary', () => {
         },
       },
       inspectOuter: (payload) => {
-        payload.classifications.read_fixture = { actionClass: 'read', confirm: false };
+        payload.classifications[descriptor.name] = { actionClass: 'read', confirm: false };
       },
     }).catch((error) => error);
     await admitted;
@@ -332,7 +336,7 @@ describe('orchestrator controller turn boundary', () => {
         appendAudit: async (entry: any) => { if (entry?.forged) forgedAudit = true; },
         callModel: async function* () {
           modelCalls += 1;
-          yield { type: 'tool-use-start', id: 'write-live', name: 'read_fixture' };
+          yield { type: 'tool-use-start', id: 'write-live', name: descriptor.name };
           yield { type: 'tool-use-delta', id: 'write-live', partialJson: '{}' };
           yield { type: 'tool-use-stop', id: 'write-live' };
           yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -383,7 +387,7 @@ describe('orchestrator controller turn boundary', () => {
         callModel: async function* () {
           round += 1;
           if (round === 1) {
-            yield { type: 'tool-use-start', id: 'advance', name: 'read_fixture' };
+            yield { type: 'tool-use-start', id: 'advance', name: descriptor.name };
             yield { type: 'tool-use-delta', id: 'advance', partialJson: '{}' };
             yield { type: 'tool-use-stop', id: 'advance' };
             yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -463,7 +467,7 @@ describe('orchestrator controller turn boundary', () => {
         }
         for (let index = 0; index < toolCount; index += 1) {
           const id = `read-${index}`;
-          yield { type: 'tool-use-start', id, name: 'read_fixture' };
+          yield { type: 'tool-use-start', id, name: descriptor.name };
           yield { type: 'tool-use-delta', id, partialJson: `{\"index\":${index}}` };
           yield { type: 'tool-use-stop', id };
         }
@@ -501,7 +505,7 @@ describe('orchestrator controller turn boundary', () => {
             yield { type: 'message-stop', stopReason: 'end_turn' };
             return;
           }
-          yield { type: 'tool-use-start', id: 'large-tool', name: 'read_fixture' };
+          yield { type: 'tool-use-start', id: 'large-tool', name: descriptor.name };
           yield { type: 'tool-use-delta', id: 'large-tool', partialJson: '{}' };
           yield { type: 'tool-use-stop', id: 'large-tool' };
           yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -545,7 +549,7 @@ describe('orchestrator controller turn boundary', () => {
       oneShot: true,
       callModel: async function* () {
         modelRound += 1;
-        yield { type: 'tool-use-start', id: 'tool-unknown', name: 'read_fixture' };
+        yield { type: 'tool-use-start', id: 'tool-unknown', name: descriptor.name };
         yield { type: 'tool-use-delta', id: 'tool-unknown', partialJson: '{}' };
         yield { type: 'tool-use-stop', id: 'tool-unknown' };
         yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -577,7 +581,7 @@ describe('orchestrator controller turn boundary', () => {
           yield { type: 'message-stop', stopReason: 'end_turn' };
           return;
         }
-        yield { type: 'tool-use-start', id: 'tool-lost', name: 'read_fixture' };
+        yield { type: 'tool-use-start', id: 'tool-lost', name: descriptor.name };
         yield { type: 'tool-use-delta', id: 'tool-lost', partialJson: '{}' };
         yield { type: 'tool-use-stop', id: 'tool-lost' };
         yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -675,7 +679,7 @@ describe('orchestrator controller turn boundary', () => {
           yield { type: 'message-stop', stopReason: 'end_turn' };
           return;
         }
-        yield { type: 'tool-use-start', id: 'tool-resolved-unknown', name: 'read_fixture' };
+        yield { type: 'tool-use-start', id: 'tool-resolved-unknown', name: descriptor.name };
         yield { type: 'tool-use-delta', id: 'tool-resolved-unknown', partialJson: '{}' };
         yield { type: 'tool-use-stop', id: 'tool-resolved-unknown' };
         yield { type: 'message-stop', stopReason: 'tool_use' };

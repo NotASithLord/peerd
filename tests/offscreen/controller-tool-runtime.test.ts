@@ -46,6 +46,25 @@ describe('controller tool runtime', () => {
     expect(value.dayOfWeek).toBeString();
   });
 
+  test('executes goal completion through only goal.end', async () => {
+    const operations: Array<[string, unknown]> = [];
+    const result = await executeControllerToolCall(request({
+      executionId: 'execution-goal-1', callId: 'call-goal-1',
+      toolName: 'complete_goal', args: { summary: 'done' },
+    }), {
+      ...options('complete_goal'),
+      kernelCall: async (operation: string, payload: unknown) => {
+        operations.push([operation, payload]);
+        return { ok: true, value: { ended: true }, outcomeKnown: true };
+      },
+    });
+    expect(operations).toEqual([['goal.end', { summary: 'done' }]]);
+    expect(result).toMatchObject({
+      ok: true, outcomeKnown: true, effectEntered: true,
+      value: { ok: true, content: 'Goal run ended. Summary: done' },
+    });
+  });
+
   test('rejects tools outside the compiled manifest', async () => {
     const result = await executeControllerToolCall(
       request({ toolName: 'remember' }),

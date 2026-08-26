@@ -13,7 +13,7 @@ import {
   resolveRegisteredToolOrigins,
   retryClassForRegisteredTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
-import { TOOL_METADATA_ORDER } from '../../../extension/peerd-runtime/tools/metadata/index.js';
+import { TOOL_METADATA_ORDER } from '../../../extension/peerd-runtime/semantic.js';
 import {
   listToolPolicies,
   TOOL_POLICY_ORDER,
@@ -55,7 +55,7 @@ describe('metadata registry', () => {
 
   test('compact policy stays exact with the rich descriptor catalog', async () => {
     const { listToolMetadata } = await import(
-      '../../../extension/peerd-runtime/tools/metadata/index.js'
+      '../../../extension/peerd-runtime/semantic.js'
     );
     const fields = ['name', 'primitive', 'sideEffect', 'originRule', 'dispatch', 'retryClass', 'dweb'];
     expect(TOOL_POLICY_ORDER).toEqual(TOOL_METADATA_ORDER);

@@ -3,6 +3,8 @@ import { makeControllerTurnBridge } from '../../extension/background/controller-
 import { connectDirectController } from '../../extension/background/direct-controller-client.js';
 import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
+import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
+import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -31,9 +33,7 @@ const makeSessions = () => {
   };
 };
 
-const descriptor = {
-  name: 'read_fixture', description: 'Read a fixture.', schema: { type: 'object' },
-};
+const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('inspect')));
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;
