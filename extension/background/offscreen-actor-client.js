@@ -14,7 +14,10 @@
 //
 // Pure shell — every IO injected — so it is unit-testable without a browser.
 
-import { controllerToolDomain, CONTROLLER_TOOL_MANIFEST } from '/shared/controller-tool-manifest.js';
+import {
+  CONTROLLER_AUTHORITY_MANIFEST,
+  controllerAuthorityClassAllowed,
+} from '/shared/controller-authority-manifest.js';
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
@@ -403,23 +406,20 @@ export const makeOffscreenActorClient = ({
     /** @type {any} */ grant,
     /** @type {any} */ msg,
     /** @type {string} */ domain,
-    /** @type {string[]} */ toolNames,
     /** @type {string[]} */ fields,
   ) => {
     const entry = grant?.actorExecutions.get(msg.executionId);
     return grant && !grant.relaySignal.aborted
       && exactKeys(msg, ['executionId', ...fields])
       && entry?.open === true
-      && controllerToolDomain(entry.toolName) === domain
-      && toolNames.includes(entry.toolName) ? entry : null;
+      && entry.authorityClass === domain ? entry : null;
   };
   const repositoryEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'repository', tools, fields);
+    const entry = domainEntry(grant, msg, 'repository', fields);
     if (!entry) return null;
     bindRepositoryToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -430,10 +430,9 @@ export const makeOffscreenActorClient = ({
   const vmEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'vm', tools, fields);
+    const entry = domainEntry(grant, msg, 'vm', fields);
     if (!entry) return null;
     bindVmToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -443,10 +442,9 @@ export const makeOffscreenActorClient = ({
   const notebookEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'notebook', tools, fields);
+    const entry = domainEntry(grant, msg, 'notebook', fields);
     if (!entry) return null;
     bindNotebookToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -457,10 +455,9 @@ export const makeOffscreenActorClient = ({
   const appEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'app', tools, fields);
+    const entry = domainEntry(grant, msg, 'app', fields);
     if (!entry) return null;
     bindAppToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -471,10 +468,9 @@ export const makeOffscreenActorClient = ({
   const persistenceEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'persistence', tools, fields);
+    const entry = domainEntry(grant, msg, 'persistence', fields);
     if (!entry) return null;
     bindPersistenceToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -484,9 +480,8 @@ export const makeOffscreenActorClient = ({
   const pageEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
   ) => {
-    const entry = domainEntry(grant, msg, 'page', tools, []);
+    const entry = domainEntry(grant, msg, 'page', []);
     if (!entry) return null;
     bindPageToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -497,10 +492,9 @@ export const makeOffscreenActorClient = ({
   const introspectionEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'introspection', tools, fields);
+    const entry = domainEntry(grant, msg, 'introspection', fields);
     if (!entry) return null;
     bindIntrospectionToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -510,10 +504,9 @@ export const makeOffscreenActorClient = ({
   const scheduleEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'schedule', tools, fields);
+    const entry = domainEntry(grant, msg, 'schedule', fields);
     if (!entry) return null;
     bindScheduleToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -524,10 +517,9 @@ export const makeOffscreenActorClient = ({
   const dwebEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
-    /** @type {string[]} */ tools,
     /** @type {string[]} */ fields,
   ) => {
-    const entry = domainEntry(grant, msg, 'dweb', tools, fields);
+    const entry = domainEntry(grant, msg, 'dweb', fields);
     if (!entry) return null;
     bindDwebToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
@@ -864,8 +856,9 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const call = msg.call;
-      const domain = controllerToolDomain(call?.name);
-      if (!grant || !exactKeys(msg, ['call']) || domain === null
+      const domain = msg.authorityClass;
+      if (!grant || !exactKeys(msg, ['call', 'authorityClass'])
+          || !controllerAuthorityClassAllowed(domain)
           || legacyToolAllowed(call?.name) || typeof prepareToolCall !== 'function'
           || typeof settleToolCall !== 'function') {
         return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
@@ -880,7 +873,7 @@ export const makeOffscreenActorClient = ({
       if (admittedContext.ok !== true) return admittedContext;
       const prepared = await prepareToolCall(call, admittedContext.ctx);
       if (prepared?.prepared !== true) return { ok: true, mode: 'result', result: prepared };
-      const policy = CONTROLLER_TOOL_MANIFEST.tools[call.name];
+      const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[domain];
       if (!policy || structuredClonePayloadBytes(prepared.args) > policy.argumentBytes) {
         return { ok: false, error: 'actor/tool-prepare: semantic arguments exceed authority limits' };
       }
@@ -888,7 +881,7 @@ export const makeOffscreenActorClient = ({
       grant.actorExecutions.set(executionId, {
         open: true, effectEntered: false, unknownIrreversible: false,
         domainCalls: new Set(), domainState: {}, prepared,
-        toolName: call.name,
+        toolName: call.name, authorityClass: domain,
       });
       const projection = domain === 'actor' ? {
         sessionId: admittedContext.ctx.session?.sessionId,
@@ -1117,7 +1110,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], ['podId']);
+      const entry = domainEntry(grant, msg, 'pod', ['podId']);
       if (!entry || msg.podId !== entry.prepared.call?.args?.podId) {
         return { ok: false, error: 'pod/resolve: authority mismatch', outcomeKnown: true };
       }
@@ -1138,7 +1131,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], ['podId']);
+      const entry = domainEntry(grant, msg, 'pod', ['podId']);
       const intent = entry ? podGitRemoteIntents(entry.prepared.call?.args?.command ?? '')[0] : null;
       if (!entry || typeof msg.podId !== 'string' || msg.podId !== entry.domainState.podId
           || !intent || intent.url) {
@@ -1156,7 +1149,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], ['op']);
+      const entry = domainEntry(grant, msg, 'pod', ['op']);
       const intents = entry ? podGitRemoteIntents(entry.prepared.call?.args?.command ?? '') : [];
       const intent = intents.length === 1 ? intents[0] : null;
       const target = intent?.url ?? entry?.domainState?.remote?.url;
@@ -1189,7 +1182,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], [
+      const entry = domainEntry(grant, msg, 'pod', [
         'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
       ]);
       const args = entry?.prepared?.call?.args;
@@ -1228,7 +1221,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_status'], [
+      const entry = domainEntry(grant, msg, 'pod', [
         'podId', 'jobId', 'stream', 'offset', 'limit',
       ]);
       const args = entry?.prepared?.call?.args;
@@ -1252,7 +1245,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_cancel'], ['podId', 'jobId']);
+      const entry = domainEntry(grant, msg, 'pod', ['podId', 'jobId']);
       const args = entry?.prepared?.call?.args;
       if (!entry || typeof msg.jobId !== 'string' || msg.jobId !== args?.jobId
           || msg.podId !== args?.podId) {
@@ -1271,7 +1264,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_read'], ['podId', 'path']);
+      const entry = domainEntry(grant, msg, 'pod', ['podId', 'path']);
       const args = entry?.prepared?.call?.args;
       if (!entry || typeof msg.path !== 'string' || msg.path !== args?.path
           || msg.podId !== args?.podId) {
@@ -1290,7 +1283,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['pod_write'], [
+      const entry = domainEntry(grant, msg, 'pod', [
         'podId', 'path', 'content',
       ]);
       const args = entry?.prepared?.call?.args;
@@ -1314,7 +1307,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['pod_destroy'], ['podId']);
+      const entry = repositoryEntry(grant, msg, ['podId']);
       if (!entry) return { ok: false, error: 'repository/read-pod: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-pod', 'read', () =>
         entry.domainState.authority.readPod(msg.podId));
@@ -1324,7 +1317,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['pod_destroy'], ['podId']);
+      const entry = repositoryEntry(grant, msg, ['podId']);
       if (!entry) return { ok: false, error: 'repository/destroy-pod: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/destroy-pod', 'commit', () =>
         entry.domainState.authority.destroyPod(msg.podId));
@@ -1334,7 +1327,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_history'], []);
+      const entry = repositoryEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'repository/read-status: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-status', 'read', () =>
         entry.domainState.authority.readStatus());
@@ -1344,7 +1337,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_history'], ['depth']);
+      const entry = repositoryEntry(grant, msg, ['depth']);
       if (!entry) return { ok: false, error: 'repository/read-history: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-history', 'read', () =>
         entry.domainState.authority.readHistory(msg.depth));
@@ -1354,7 +1347,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_history', 'repo_remote'], []);
+      const entry = repositoryEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'repository/read-remote: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-remote', 'read', () =>
         entry.domainState.authority.readRemote());
@@ -1364,7 +1357,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_history'], ['from', 'to']);
+      const entry = repositoryEntry(grant, msg, ['from', 'to']);
       if (!entry) return { ok: false, error: 'repository/read-diff: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-diff', 'read', () =>
         entry.domainState.authority.readDiff(msg.from, msg.to));
@@ -1374,7 +1367,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_version'], ['to']);
+      const entry = repositoryEntry(grant, msg, ['to']);
       if (!entry) return { ok: false, error: 'repository/confirm-restore: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/confirm-restore', 'control', () =>
         entry.domainState.authority.confirmRestore(msg.to));
@@ -1384,7 +1377,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_version'], ['message']);
+      const entry = repositoryEntry(grant, msg, ['message']);
       if (!entry) return { ok: false, error: 'repository/checkpoint: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/checkpoint', 'commit', () =>
         entry.domainState.authority.checkpoint(msg.message));
@@ -1394,7 +1387,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_version'], ['name']);
+      const entry = repositoryEntry(grant, msg, ['name']);
       if (!entry) return { ok: false, error: 'repository/branch: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/branch', 'commit', () =>
         entry.domainState.authority.branch(msg.name));
@@ -1404,7 +1397,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_version'], ['name']);
+      const entry = repositoryEntry(grant, msg, ['name']);
       if (!entry) return { ok: false, error: 'repository/checkout: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/checkout', 'commit', () =>
         entry.domainState.authority.checkout(msg.name));
@@ -1414,7 +1407,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_version'], ['to']);
+      const entry = repositoryEntry(grant, msg, ['to']);
       if (!entry) return { ok: false, error: 'repository/restore: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/restore', 'commit', () =>
         entry.domainState.authority.restore(msg.to));
@@ -1424,7 +1417,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_remote'], [
+      const entry = repositoryEntry(grant, msg, [
         'op', 'target', 'branch',
       ]);
       if (!entry) return { ok: false, error: 'repository/confirm-remote: authority mismatch', outcomeKnown: true };
@@ -1436,7 +1429,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_remote'], ['url']);
+      const entry = repositoryEntry(grant, msg, ['url']);
       if (!entry) return { ok: false, error: 'repository/link: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/link', 'commit', () =>
         entry.domainState.authority.link(msg.url));
@@ -1446,7 +1439,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_remote'], ['target']);
+      const entry = repositoryEntry(grant, msg, ['target']);
       if (!entry) return { ok: false, error: 'repository/fetch: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/fetch', 'commit', () =>
         entry.domainState.authority.fetch(msg.target));
@@ -1456,7 +1449,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['repo_remote'], ['target', 'branch']);
+      const entry = repositoryEntry(grant, msg, ['target', 'branch']);
       if (!entry) return { ok: false, error: 'repository/push: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/push', 'resource', () =>
         entry.domainState.authority.push(msg.target, msg.branch));
@@ -1466,7 +1459,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vm_boot', 'vm_delete'], ['vmId']);
+      const entry = vmEntry(grant, msg, ['vmId']);
       if (!entry) return { ok: false, error: 'vm/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/read', 'read', () =>
         entry.domainState.authority.readVm(msg.vmId));
@@ -1476,7 +1469,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vm_boot'], []);
+      const entry = vmEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'vm/list: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/list', 'read', () =>
         entry.domainState.authority.listVms());
@@ -1486,7 +1479,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vm_boot'], ['vmId']);
+      const entry = vmEntry(grant, msg, ['vmId']);
       if (!entry) return { ok: false, error: 'vm/set-default: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/set-default', 'control', () =>
         entry.domainState.authority.setDefaultVm(msg.vmId));
@@ -1496,7 +1489,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vm_boot'], ['command', 'timeoutMs', 'vmId']);
+      const entry = vmEntry(grant, msg, ['command', 'timeoutMs', 'vmId']);
       if (!entry) return { ok: false, error: 'vm/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/run', 'resource', () =>
         entry.domainState.authority.runVm(msg.command, msg.timeoutMs, msg.vmId));
@@ -1506,7 +1499,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vm_import'], ['url', 'path', 'maxBytes']);
+      const entry = vmEntry(grant, msg, ['url', 'path', 'maxBytes']);
       if (!entry) return { ok: false, error: 'vm/import-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/import-file', 'resource', () =>
         entry.domainState.authority.importFile(msg.url, msg.path, msg.maxBytes));
@@ -1516,7 +1509,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vm_write_file'], ['path', 'content']);
+      const entry = vmEntry(grant, msg, ['path', 'content']);
       if (!entry) return { ok: false, error: 'vm/write-text-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/write-text-file', 'commit', () =>
         entry.domainState.authority.writeTextFile(msg.path, msg.content));
@@ -1526,7 +1519,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vm_delete'], ['vmId']);
+      const entry = vmEntry(grant, msg, ['vmId']);
       if (!entry) return { ok: false, error: 'vm/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/destroy', 'commit', () =>
         entry.domainState.authority.destroyVm(msg.vmId));
@@ -1537,7 +1530,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = notebookEntry(
-        grant, msg, ['js_notebook', 'js_delete'], ['notebookId'],
+        grant, msg, ['notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/read', 'read', () =>
@@ -1548,7 +1541,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(grant, msg, ['js_notebook'], []);
+      const entry = notebookEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'notebook/list: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/list', 'read', () =>
         entry.domainState.authority.listNotebooks());
@@ -1558,7 +1551,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(grant, msg, ['js_notebook'], ['notebookId']);
+      const entry = notebookEntry(grant, msg, ['notebookId']);
       if (!entry) return { ok: false, error: 'notebook/set-default: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/set-default', 'control', () =>
         entry.domainState.authority.setDefaultNotebook(msg.notebookId));
@@ -1569,7 +1562,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = notebookEntry(
-        grant, msg, ['js_notebook'], ['code', 'timeoutMs', 'notebookId'],
+        grant, msg, ['code', 'timeoutMs', 'notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/run', 'resource', () =>
@@ -1581,7 +1574,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = notebookEntry(
-        grant, msg, ['js_write_file'], ['path', 'content', 'notebookId'],
+        grant, msg, ['path', 'content', 'notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/write-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/write-file', 'commit', () =>
@@ -1593,7 +1586,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = notebookEntry(
-        grant, msg, ['js_read_file'], ['path', 'notebookId'],
+        grant, msg, ['path', 'notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/read-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/read-file', 'read', () =>
@@ -1604,7 +1597,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(grant, msg, ['js_delete'], ['notebookId']);
+      const entry = notebookEntry(grant, msg, ['notebookId']);
       if (!entry) return { ok: false, error: 'notebook/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/destroy', 'commit', () =>
         entry.domainState.authority.destroyNotebook(msg.notebookId));
@@ -1614,7 +1607,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_update'], [
+      const entry = appEntry(grant, msg, [
         'appId', 'name', 'html', 'tags', 'entryFile',
       ]);
       if (!entry) return { ok: false, error: 'app/update: authority mismatch', outcomeKnown: true };
@@ -1628,7 +1621,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_open'], ['appId']);
+      const entry = appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/open: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/open', 'resource', () =>
         entry.domainState.authority.openApp(msg.appId));
@@ -1638,7 +1631,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_search'], ['query']);
+      const entry = appEntry(grant, msg, ['query']);
       if (!entry) return { ok: false, error: 'app/search: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/search', 'read', () =>
         entry.domainState.authority.searchApps(msg.query));
@@ -1648,7 +1641,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_delete'], ['appId']);
+      const entry = appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/read', 'read', () =>
         entry.domainState.authority.readApp(msg.appId));
@@ -1658,7 +1651,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_delete'], ['appId']);
+      const entry = appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/delete: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/delete', 'commit', () =>
         entry.domainState.authority.deleteApp(msg.appId));
@@ -1669,7 +1662,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = appEntry(
-        grant, msg, ['app_write_file'], ['appId', 'path', 'content'],
+        grant, msg, ['appId', 'path', 'content'],
       );
       if (!entry) return { ok: false, error: 'app/write-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/write-file', 'commit', () =>
@@ -1680,7 +1673,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_read_file'], ['appId', 'path']);
+      const entry = appEntry(grant, msg, ['appId', 'path']);
       if (!entry) return { ok: false, error: 'app/read-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/read-file', 'read', () =>
         entry.domainState.authority.readFile(msg.appId, msg.path));
@@ -1690,7 +1683,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_list_files'], ['appId']);
+      const entry = appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/list-files: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/list-files', 'read', () =>
         entry.domainState.authority.listFiles(msg.appId));
@@ -1700,7 +1693,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_delete_file'], ['appId', 'path']);
+      const entry = appEntry(grant, msg, ['appId', 'path']);
       if (!entry) return { ok: false, error: 'app/delete-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/delete-file', 'commit', () =>
         entry.domainState.authority.deleteFile(msg.appId, msg.path));
@@ -1710,7 +1703,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_observe'], []);
+      const entry = appEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'app/observe: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/observe', 'read', () =>
         entry.domainState.authority.observeRuntime());
@@ -1720,7 +1713,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_act'], ['action', 'params']);
+      const entry = appEntry(grant, msg, ['action', 'params']);
       if (!entry) return { ok: false, error: 'app/act: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/act', 'resource', () =>
         entry.domainState.authority.actRuntime(msg.action, msg.params));
@@ -1730,7 +1723,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['app_code'], ['code', 'timeoutMs']);
+      const entry = appEntry(grant, msg, ['code', 'timeoutMs']);
       if (!entry) return { ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/run-code', 'resource', () =>
         entry.domainState.authority.runCode(msg.code, msg.timeoutMs));
@@ -1740,7 +1733,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = persistenceEntry(grant, msg, ['read_memory'], ['scope']);
+      const entry = persistenceEntry(grant, msg, ['scope']);
       if (!entry) return { ok: false, error: 'memory/read-scope: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'memory/read-scope', 'read', () =>
         entry.domainState.authority.readMemoryScope(msg.scope));
@@ -1751,7 +1744,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = persistenceEntry(
-        grant, msg, ['read_memory'], ['workspace', 'subpath'],
+        grant, msg, ['workspace', 'subpath'],
       );
       if (!entry) return { ok: false, error: 'memory/read-subtree: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'memory/read-subtree', 'read', () =>
@@ -1762,7 +1755,7 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = persistenceEntry(grant, msg, ['remember'], ['scope', 'body']);
+      const entry = persistenceEntry(grant, msg, ['scope', 'body']);
       if (!entry) return { ok: false, error: 'memory/write: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'memory/write', 'commit', () =>
         entry.domainState.authority.writeMemory(msg.scope, msg.body));
@@ -1773,7 +1766,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = persistenceEntry(
-        grant, msg, ['todo_init', 'todo_check', 'todo_add'], [],
+        grant, msg, [],
       );
       if (!entry) return { ok: false, error: 'todo/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'todo/read', 'read', () =>
@@ -1785,159 +1778,159 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = persistenceEntry(
-        grant, msg, ['todo_init', 'todo_check', 'todo_add'], ['version', 'todos'],
+        grant, msg, ['version', 'todos'],
       );
       if (!entry) return { ok: false, error: 'todo/replace: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'todo/replace', 'commit', () =>
         entry.domainState.authority.replaceTodos(msg.version, msg.todos));
     },
     'page/open-tab': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['open_tab']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/open-tab: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/open-tab', 'resource', () =>
         entry.domainState.authority.openProtectedBackgroundTab());
     },
     'page/read': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['read_page']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/read', 'read', () =>
         entry.domainState.authority.readOwnedPage());
     },
     'page/snapshot': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['snapshot']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/snapshot: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/snapshot', 'read', () =>
         entry.domainState.authority.captureOwnedAccessibilityTree());
     },
     'page/read-state': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['read_state']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/read-state: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/read-state', 'read', () =>
         entry.domainState.authority.readOwnedFrameworkState());
     },
     'page/watch-changes': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['watch_changes']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/watch-changes: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/watch-changes', 'read', () =>
         entry.domainState.authority.drainOwnedDomChanges());
     },
     'page/query-dom': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['query_dom']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/query-dom: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/query-dom', 'read', () =>
         entry.domainState.authority.queryOwnedDom());
     },
     'page/evaluate-main': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_eval']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/evaluate-main: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/evaluate-main', 'resource', () =>
         entry.domainState.authority.evaluateOwnedPageMainWorld());
     },
     'page/evaluate-debugger': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_exec']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/evaluate-debugger: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/evaluate-debugger', 'resource', () =>
         entry.domainState.authority.evaluateOwnedPageDebugger());
     },
     'page/keys-availability': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_keys']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/keys-availability: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/keys-availability', 'read', () =>
         entry.domainState.authority.readTrustedKeysAvailability());
     },
     'page/navigate': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['navigate']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/navigate: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/navigate', 'resource', () =>
         entry.domainState.authority.navigateOwnedTab());
     },
     'page/fill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['type']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/fill: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/fill', 'resource', () =>
         entry.domainState.authority.fillOwnedTarget());
     },
     'page/click': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['click']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/click: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/click', 'resource', () =>
         entry.domainState.authority.clickOwnedTarget());
     },
     'page/login': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['login']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/login: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/login', 'resource', () =>
         entry.domainState.authority.performConfirmedOwnedLogin());
     },
     'page/run-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_code']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/run-program', 'resource', () =>
         entry.domainState.authority.runOwnedPageProgram());
     },
     'page/capture-foreground': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['capture']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/capture-foreground: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/capture-foreground', 'read', () =>
         entry.domainState.authority.captureForegroundPixels());
     },
     'page/capture-owned': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['view']);
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/capture-owned: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/capture-owned', 'read', () =>
         entry.domainState.authority.captureOwnedTabPixels());
     },
     'introspection/actor-roster': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['actor_list'], []);
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/actor-roster: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/actor-roster', 'read', () =>
         entry.domainState.authority.readActorRoster());
     },
     'introspection/provider-posture': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/provider-posture: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/provider-posture', 'read', () =>
         entry.domainState.authority.readProviderPosture());
     },
     'introspection/storage-snapshot': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], ['prefix']);
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['prefix']);
       if (!entry) return { ok: false, error: 'introspection/storage-snapshot: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/storage-snapshot', 'read', () =>
         entry.domainState.authority.readStorageSnapshot(msg.prefix));
     },
     'introspection/automatable-tabs': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/automatable-tabs: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/automatable-tabs', 'read', () =>
         entry.domainState.authority.readAutomatableTabs());
     },
     'introspection/denylist-patterns': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/denylist-patterns: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/denylist-patterns', 'read', () =>
         entry.domainState.authority.readDenylistPatterns());
     },
     'introspection/audit-entries': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/audit-entries: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/audit-entries', 'read', () =>
         entry.domainState.authority.readAuditEntries());
     },
     'introspection/installed-skill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['load_skill'], ['name']);
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['name']);
       if (!entry) return { ok: false, error: 'introspection/installed-skill: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/installed-skill', 'read', () =>
         entry.domainState.authority.readInstalledSkill(msg.name));
     },
     'schedule/read-routines': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['schedule_list'], []);
+      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'schedule/read-routines: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'schedule/read-routines', 'read', () =>
         entry.domainState.authority.readRoutines());
     },
     'schedule/arm-confirmed-routine': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = scheduleEntry(
-        grantFor(msg, sender, boundGrant), msg, ['schedule_create'],
+        grantFor(msg, sender, boundGrant), msg,
         ['prompt', 'every', 'dailyAt', 'mode'],
       );
       if (!entry) return { ok: false, error: 'schedule/arm-confirmed-routine: authority mismatch', outcomeKnown: true };
@@ -1947,45 +1940,45 @@ export const makeOffscreenActorClient = ({
         }));
     },
     'schedule/cancel-routine': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['schedule_cancel'], ['id']);
+      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['id']);
       if (!entry) return { ok: false, error: 'schedule/cancel-routine: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'schedule/cancel-routine', 'commit', () =>
         entry.domainState.authority.cancelRoutine(msg.id));
     },
     'dweb/discover-apps': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_discover'], []);
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'dweb/discover-apps: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/discover-apps', 'read', () =>
         entry.domainState.authority.discoverApps());
     },
     'dweb/publish-confirmed-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_share'], ['appId']);
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['appId']);
       if (!entry) return { ok: false, error: 'dweb/publish-confirmed-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/publish-confirmed-app', 'commit', () =>
         entry.domainState.authority.publishConfirmedApp(msg.appId));
     },
     'dweb/install-confirmed-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_install'], ['uri', 'name']);
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['uri', 'name']);
       if (!entry) return { ok: false, error: 'dweb/install-confirmed-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/install-confirmed-app', 'commit', () =>
         entry.domainState.authority.installConfirmedApp(msg.uri, msg.name));
     },
     'dweb/read-peers': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_peers'], []);
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'dweb/read-peers: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/read-peers', 'read', () =>
         entry.domainState.authority.readPeers());
     },
     'dweb/set-peer-blocked': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = dwebEntry(
-        grantFor(msg, sender, boundGrant), msg, ['dweb_block'], ['did', 'block', 'reason'],
+        grantFor(msg, sender, boundGrant), msg, ['did', 'block', 'reason'],
       );
       if (!entry) return { ok: false, error: 'dweb/set-peer-blocked: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/set-peer-blocked', 'commit', () =>
         entry.domainState.authority.setPeerBlocked(msg.did, msg.block, msg.reason));
     },
     'dweb/set-discovery-enabled': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['dweb_discovery'], ['enabled']);
+      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['enabled']);
       if (!entry) return { ok: false, error: 'dweb/set-discovery-enabled: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/set-discovery-enabled', 'commit', () =>
         entry.domainState.authority.setDiscoveryEnabled(msg.enabled));
@@ -1996,7 +1989,8 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
-      const policy = entry ? CONTROLLER_TOOL_MANIFEST.tools[entry.toolName] : null;
+      const policy = entry
+        ? CONTROLLER_AUTHORITY_MANIFEST.tools[entry.authorityClass] : null;
       if (!grant || !exactKeys(msg, ['executionId', 'result'])
           || !entry || entry.open !== true || !policy
           || structuredClonePayloadBytes(msg.result) > policy.resultBytes

@@ -61,3 +61,7 @@ export {
   controllerHostsDwebTool,
   executeControllerDwebTool,
 } from './controller-dweb-tools.js';
+export {
+  controllerAuthorityClassForTool,
+  controllerHostsTool,
+} from './controller-tool-ownership.js';

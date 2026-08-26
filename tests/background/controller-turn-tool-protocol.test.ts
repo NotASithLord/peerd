@@ -7,7 +7,9 @@ import {
   controllerOperationAllowedAfterCancel,
   createControllerKernelQuota,
 } from '../../extension/shared/controller-kernel-quota.js';
-import { CONTROLLER_TOOL_MANIFEST } from '../../extension/shared/controller-tool-manifest.js';
+import {
+  CONTROLLER_AUTHORITY_MANIFEST,
+} from '../../extension/shared/controller-authority-manifest.js';
 import {
   prepareToolCall as prepareRuntimeToolCall,
   settleToolCall as settleRuntimeToolCall,
@@ -19,37 +21,10 @@ import {
 } from '../../extension/peerd-runtime/tools/registry.js';
 import { toToolDescriptor, projectToolAuthority } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
-import {
-  TOOL_EXECUTION_PROTOCOL,
-  compileToolEffectManifest,
-} from '../../extension/shared/tool-execution-protocol.js';
+import { TOOL_EXECUTION_PROTOCOL } from '../../extension/shared/tool-execution-protocol.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
-const MANIFEST_DIGEST = 'a'.repeat(64);
 const PROTOCOL_FIXTURE_TOOL = 'request_review';
-const manifestFor = (riskClass: 'read' | 'control' | 'commit' | 'resource') =>
-  compileToolEffectManifest({
-    protocol: TOOL_EXECUTION_PROTOCOL,
-    digest: MANIFEST_DIGEST,
-    tools: {
-      request_review: {
-        projectionKeys: ['sessionId'],
-        effects: [{
-          method: 'writeMemory', operation: 'memory.write', riskClass,
-          requestSchema: {
-            type: 'object', properties: { fact: { type: 'string', maxLength: 64 } },
-            required: ['fact'],
-          },
-          resultSchema: {
-            type: 'object', properties: { stored: { type: 'boolean' } }, required: ['stored'],
-          },
-          maxCalls: 1, requestBytes: 256, resultBytes: 256,
-        }],
-        argumentBytes: 256, projectionBytes: 256, resultBytes: 4_096, pendingEffects: 1,
-      },
-    },
-  });
-const TOOL_MANIFEST = manifestFor('commit');
 const authorityDescriptor = (name: string) => projectToolAuthority(
   toToolDescriptor(getToolPolicy(name)),
 );
@@ -141,7 +116,7 @@ const runHarness = async ({
   });
   bridge = makeControllerTurnBridge({
     getClient, newId: () => `tool-protocol-${++sequence}`,
-    toolManifest: TOOL_MANIFEST,
+    toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
     providerEgress: makeScriptedProviderAuthority(() => ctx.callModel) as any,
     ...bridgeHooks,
   });
@@ -180,12 +155,12 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
-        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
         prepareToolCall: async (call: any) => {
           const prepared: any = await prepareRuntimeToolCall(call, toolContext);
           return prepared?.prepared === true ? {
             mode: 'execute', custody: prepared, args: prepared.args,
-            projection: {}, manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+            projection: {}, manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
           } : { mode: 'result', result: prepared };
         },
         settleToolCall: async ({ custody, result }: any) => settleRuntimeToolCall(custody, {
@@ -233,12 +208,12 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
-        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
         prepareToolCall: async (call: any) => {
           const prepared: any = await prepareRuntimeToolCall(call, toolContext);
           return prepared?.prepared === true ? {
             mode: 'execute', custody: prepared, args: prepared.args,
-            projection: {}, manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+            projection: {}, manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
           } : { mode: 'result', result: prepared };
         },
         settleToolCall: async ({ custody, result }: any) => settleRuntimeToolCall(custody, {
@@ -279,7 +254,7 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
-        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
         prepareToolCall: async (call: any) => ({
           mode: 'execute',
           custody: {
@@ -292,7 +267,7 @@ describe('controller turn finite tool protocol', () => {
               },
             },
           },
-          args: call.args, projection: {}, manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+          args: call.args, projection: {}, manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
         }),
         settleToolCall: async ({ result: execution }: any) => execution.value,
       },
@@ -331,7 +306,7 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
-        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
         prepareToolCall: async (call: any) => ({
           mode: 'execute',
           custody: {
@@ -347,7 +322,7 @@ describe('controller turn finite tool protocol', () => {
           },
           args: call.args,
           projection: { sessionId: 'session-tool-protocol' },
-          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
         }),
         settleToolCall: async ({ result: execution }: any) => execution.value,
       },
@@ -389,7 +364,7 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
-        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
         prepareToolCall: async (call: any) => ({
           mode: 'execute',
           custody: {
@@ -418,7 +393,7 @@ describe('controller turn finite tool protocol', () => {
           },
           args: call.args,
           projection: { actorType: 'app', actorInstanceId: 'app-1' },
-          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
         }),
         settleToolCall: async ({ result: execution }: any) => execution.value,
       },
@@ -458,7 +433,7 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
-        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
         prepareToolCall: async (call: any) => ({
           mode: 'execute',
           custody: {
@@ -483,7 +458,7 @@ describe('controller turn finite tool protocol', () => {
             sessionId: 'session-tool-protocol',
             activeTabOrigin: 'https://example.test', goalActive: false,
           },
-          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
         }),
         settleToolCall: async ({ result: execution }: any) => execution.value,
       },
@@ -528,7 +503,7 @@ describe('controller turn finite tool protocol', () => {
         },
       }),
       bridgeHooks: {
-        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
         prepareToolCall: async (call: any) => ({
           mode: 'execute',
           custody: {
@@ -548,7 +523,7 @@ describe('controller turn finite tool protocol', () => {
           },
           args: call.args,
           projection: {},
-          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
         }),
         settleToolCall: async ({ result: execution }: any) => execution.value,
       },
@@ -602,8 +577,8 @@ describe('controller turn finite tool protocol', () => {
     expect(result.error).toBeNull();
     const toolResult: any = result.events.find((event: any) => event.type === 'tool-result');
     expect(toolResult.result).toMatchObject({
-      ok: false,
-      code: 'controller-tool-preparation-unavailable',
+      ok: false, code: 'turn-kernel-call-failed',
+      error: 'controller tool preparation unavailable',
     });
     expect(legacy).toBe(0);
   });
@@ -632,8 +607,8 @@ describe('controller turn finite tool protocol', () => {
       },
     });
     expect(bypass).toMatchObject({
-      ok: false, code: 'turn-controller-tool-legacy-dispatch-refused',
-      outcomeKnown: true,
+      ok: false, code: 'turn-kernel-call-failed', outcomeKnown: true,
+      error: 'controller tool cannot use legacy dispatch',
     });
     expect(result.error).toBeNull();
     expect(legacy).toBe(0);
@@ -645,8 +620,8 @@ describe('controller turn finite tool protocol', () => {
       protocol: TOOL_EXECUTION_PROTOCOL,
       executionId: 'execution-1', runId: 'run-12345678', callId: 'call-1',
       sessionId: 'session:test', turnGeneration: 1, attempt: 0,
-      toolName: 'complete_goal', argsDigest: 'b'.repeat(64),
-      manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+      toolName: 'complete_goal', authorityClass: 'local', argsDigest: 'b'.repeat(64),
+      manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
       args: { summary: 'done' }, projection: {},
     };
     const prepare = { runId: request.runId, value: { callJson: '{}' } };
@@ -682,8 +657,8 @@ describe('controller turn finite tool protocol', () => {
       protocol: TOOL_EXECUTION_PROTOCOL,
       executionId: 'execution-1', runId: 'run-12345678', callId: 'call-1',
       sessionId: 'session:test', turnGeneration: 1, attempt: 0,
-      toolName: 'complete_goal', argsDigest: 'b'.repeat(64),
-      manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+      toolName: 'complete_goal', authorityClass: 'local', argsDigest: 'b'.repeat(64),
+      manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
       args: { summary: 'done' }, projection: {},
     };
     const prepare = { runId: request.runId, value: { callJson: '{}' } };

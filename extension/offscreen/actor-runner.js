@@ -568,6 +568,7 @@ export const runActor = async (job, {
           await relayExactToolMessage(m, 'actor-tool-prepare-response', () =>
             sendToSW('actor/tool-prepare', {
               ...(relayToken ? { relayToken } : {}), call: m.call,
+              authorityClass: m.authorityClass,
             }), { countCall: true });
           return;
         }

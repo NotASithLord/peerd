@@ -326,12 +326,12 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       if (goalControl) {
         const prepared = await ctx.toolExecution.prepare({
           id: 'goal-call', name: 'complete_goal', args: { summary: 'done' },
-        });
+        }, { authorityClass: 'local' });
         goalEffect = {
           ok: true,
           outcomeKnown: true,
           value: {
-            ended: prepared.custody.ctx.completeGoalRun('done') === true,
+            ended: prepared.custody.prepared.ctx.completeGoalRun('done') === true,
           },
         };
         await ctx.toolExecution.settle(prepared.custody, {

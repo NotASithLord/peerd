@@ -17,7 +17,7 @@ import {
   parseKernelFeatureCall,
 } from './kernel-feature-policy.js';
 import { RUNTIME_DISPATCH_CAPABILITY } from './kernel-runtime-policy.js';
-import { CONTROLLER_TOOL_MANIFEST } from './controller-tool-manifest.js';
+import { CONTROLLER_AUTHORITY_MANIFEST } from './controller-authority-manifest.js';
 import {
   parseToolExecutionRequest,
   toolEffectLossSemantics,
@@ -39,77 +39,77 @@ const MODEL_STREAM_EVENTS = 131_072;
 const MAX_CONCURRENT_KERNEL_CALLS = 256;
 const TURN_IDLE_DEADLINE_MS = 30 * 60_000;
 const DOMAIN_OPERATIONS = Object.freeze({
-  'turn.goal.complete': { tool: 'complete_goal', riskClass: 'control' },
-  'turn.actor.spawn-sync': { tool: 'actor_create', riskClass: 'resource' },
-  'turn.actor.spawn-async': { tool: 'actor_create', riskClass: 'resource' },
-  'turn.actor.tasks': { tool: 'actor_tasks', riskClass: 'read' },
-  'turn.actor.cancel': { tool: 'actor_cancel', riskClass: 'control' },
-  'turn.actor.message': { tool: 'message_actor', riskClass: 'resource' },
-  'turn.pod.resolve': { tool: 'pod_exec', riskClass: 'read' },
-  'turn.pod.read-remote': { tool: 'pod_exec', riskClass: 'read' },
-  'turn.pod.confirm-git': { tool: 'pod_exec', riskClass: 'control' },
-  'turn.pod.exec': { tool: 'pod_exec', riskClass: 'resource' },
-  'turn.pod.status': { tool: 'pod_status', riskClass: 'read' },
-  'turn.pod.cancel': { tool: 'pod_cancel', riskClass: 'control' },
-  'turn.pod.read-file': { tool: 'pod_read', riskClass: 'read' },
-  'turn.pod.write-file': { tool: 'pod_write', riskClass: 'commit' },
-  'turn.repository.read-pod': { tool: 'pod_destroy', riskClass: 'read' },
-  'turn.repository.destroy-pod': { tool: 'pod_destroy', riskClass: 'commit' },
-  'turn.repository.read-status': { tool: 'repo_history', riskClass: 'read' },
-  'turn.repository.read-history': { tool: 'repo_history', riskClass: 'read' },
-  'turn.repository.read-remote': { tools: ['repo_history', 'repo_remote'], riskClass: 'read' },
-  'turn.repository.read-diff': { tool: 'repo_history', riskClass: 'read' },
-  'turn.repository.confirm-restore': { tool: 'repo_version', riskClass: 'control' },
-  'turn.repository.checkpoint': { tool: 'repo_version', riskClass: 'commit' },
-  'turn.repository.branch': { tool: 'repo_version', riskClass: 'commit' },
-  'turn.repository.checkout': { tool: 'repo_version', riskClass: 'commit' },
-  'turn.repository.restore': { tool: 'repo_version', riskClass: 'commit' },
-  'turn.repository.confirm-remote': { tool: 'repo_remote', riskClass: 'control' },
-  'turn.repository.link': { tool: 'repo_remote', riskClass: 'commit' },
-  'turn.repository.fetch': { tool: 'repo_remote', riskClass: 'commit' },
-  'turn.repository.push': { tool: 'repo_remote', riskClass: 'resource' },
-  'turn.vm.read': { tools: ['vm_boot', 'vm_delete'], riskClass: 'read' },
-  'turn.vm.list': { tool: 'vm_boot', riskClass: 'read' },
-  'turn.vm.set-default': { tool: 'vm_boot', riskClass: 'control' },
-  'turn.vm.run': { tool: 'vm_boot', riskClass: 'resource' },
-  'turn.vm.import-file': { tool: 'vm_import', riskClass: 'resource' },
-  'turn.vm.write-text-file': { tool: 'vm_write_file', riskClass: 'commit' },
-  'turn.vm.destroy': { tool: 'vm_delete', riskClass: 'commit' },
-  'turn.notebook.read': { tools: ['js_notebook', 'js_delete'], riskClass: 'read' },
-  'turn.notebook.list': { tool: 'js_notebook', riskClass: 'read' },
-  'turn.notebook.set-default': { tool: 'js_notebook', riskClass: 'control' },
-  'turn.notebook.run': { tool: 'js_notebook', riskClass: 'resource' },
-  'turn.notebook.write-file': { tool: 'js_write_file', riskClass: 'commit' },
-  'turn.notebook.read-file': { tool: 'js_read_file', riskClass: 'read' },
-  'turn.notebook.destroy': { tool: 'js_delete', riskClass: 'commit' },
-  'turn.app.update': { tool: 'app_update', riskClass: 'commit' },
-  'turn.app.open': { tool: 'app_open', riskClass: 'resource' },
-  'turn.app.search': { tool: 'app_search', riskClass: 'read' },
-  'turn.app.read': { tool: 'app_delete', riskClass: 'read' },
-  'turn.app.delete': { tool: 'app_delete', riskClass: 'commit' },
-  'turn.app.write-file': { tool: 'app_write_file', riskClass: 'commit' },
-  'turn.app.read-file': { tool: 'app_read_file', riskClass: 'read' },
-  'turn.app.list-files': { tool: 'app_list_files', riskClass: 'read' },
-  'turn.app.delete-file': { tool: 'app_delete_file', riskClass: 'commit' },
-  'turn.app.observe': { tool: 'app_observe', riskClass: 'read' },
-  'turn.app.act': { tool: 'app_act', riskClass: 'resource' },
-  'turn.app.run-code': { tool: 'app_code', riskClass: 'resource' },
-  'turn.page.open-tab': { tool: 'open_tab', riskClass: 'resource' },
-  'turn.page.read': { tool: 'read_page', riskClass: 'read' },
-  'turn.page.snapshot': { tool: 'snapshot', riskClass: 'read' },
-  'turn.page.read-state': { tool: 'read_state', riskClass: 'read' },
-  'turn.page.watch-changes': { tool: 'watch_changes', riskClass: 'read' },
-  'turn.page.query-dom': { tool: 'query_dom', riskClass: 'read' },
-  'turn.page.evaluate-main': { tool: 'page_eval', riskClass: 'resource' },
-  'turn.page.evaluate-debugger': { tool: 'page_exec', riskClass: 'resource' },
-  'turn.page.keys-availability': { tool: 'page_keys', riskClass: 'read' },
-  'turn.page.navigate': { tool: 'navigate', riskClass: 'resource' },
-  'turn.page.fill': { tool: 'type', riskClass: 'resource' },
-  'turn.page.click': { tool: 'click', riskClass: 'resource' },
-  'turn.page.login': { tool: 'login', riskClass: 'resource' },
-  'turn.page.run-program': { tool: 'page_code', riskClass: 'resource' },
-  'turn.page.capture-foreground': { tool: 'capture', riskClass: 'read' },
-  'turn.page.capture-owned': { tool: 'view', riskClass: 'read' },
+  'turn.goal.complete': { authorityClass: 'local', riskClass: 'control' },
+  'turn.actor.spawn-sync': { authorityClass: 'actor', riskClass: 'resource' },
+  'turn.actor.spawn-async': { authorityClass: 'actor', riskClass: 'resource' },
+  'turn.actor.tasks': { authorityClass: 'actor', riskClass: 'read' },
+  'turn.actor.cancel': { authorityClass: 'actor', riskClass: 'control' },
+  'turn.actor.message': { authorityClass: 'actor', riskClass: 'resource' },
+  'turn.pod.resolve': { authorityClass: 'pod', riskClass: 'read' },
+  'turn.pod.read-remote': { authorityClass: 'pod', riskClass: 'read' },
+  'turn.pod.confirm-git': { authorityClass: 'pod', riskClass: 'control' },
+  'turn.pod.exec': { authorityClass: 'pod', riskClass: 'resource' },
+  'turn.pod.status': { authorityClass: 'pod', riskClass: 'read' },
+  'turn.pod.cancel': { authorityClass: 'pod', riskClass: 'control' },
+  'turn.pod.read-file': { authorityClass: 'pod', riskClass: 'read' },
+  'turn.pod.write-file': { authorityClass: 'pod', riskClass: 'commit' },
+  'turn.repository.read-pod': { authorityClass: 'repository', riskClass: 'read' },
+  'turn.repository.destroy-pod': { authorityClass: 'repository', riskClass: 'commit' },
+  'turn.repository.read-status': { authorityClass: 'repository', riskClass: 'read' },
+  'turn.repository.read-history': { authorityClass: 'repository', riskClass: 'read' },
+  'turn.repository.read-remote': { authorityClass: 'repository', riskClass: 'read' },
+  'turn.repository.read-diff': { authorityClass: 'repository', riskClass: 'read' },
+  'turn.repository.confirm-restore': { authorityClass: 'repository', riskClass: 'control' },
+  'turn.repository.checkpoint': { authorityClass: 'repository', riskClass: 'commit' },
+  'turn.repository.branch': { authorityClass: 'repository', riskClass: 'commit' },
+  'turn.repository.checkout': { authorityClass: 'repository', riskClass: 'commit' },
+  'turn.repository.restore': { authorityClass: 'repository', riskClass: 'commit' },
+  'turn.repository.confirm-remote': { authorityClass: 'repository', riskClass: 'control' },
+  'turn.repository.link': { authorityClass: 'repository', riskClass: 'commit' },
+  'turn.repository.fetch': { authorityClass: 'repository', riskClass: 'commit' },
+  'turn.repository.push': { authorityClass: 'repository', riskClass: 'resource' },
+  'turn.vm.read': { authorityClass: 'vm', riskClass: 'read' },
+  'turn.vm.list': { authorityClass: 'vm', riskClass: 'read' },
+  'turn.vm.set-default': { authorityClass: 'vm', riskClass: 'control' },
+  'turn.vm.run': { authorityClass: 'vm', riskClass: 'resource' },
+  'turn.vm.import-file': { authorityClass: 'vm', riskClass: 'resource' },
+  'turn.vm.write-text-file': { authorityClass: 'vm', riskClass: 'commit' },
+  'turn.vm.destroy': { authorityClass: 'vm', riskClass: 'commit' },
+  'turn.notebook.read': { authorityClass: 'notebook', riskClass: 'read' },
+  'turn.notebook.list': { authorityClass: 'notebook', riskClass: 'read' },
+  'turn.notebook.set-default': { authorityClass: 'notebook', riskClass: 'control' },
+  'turn.notebook.run': { authorityClass: 'notebook', riskClass: 'resource' },
+  'turn.notebook.write-file': { authorityClass: 'notebook', riskClass: 'commit' },
+  'turn.notebook.read-file': { authorityClass: 'notebook', riskClass: 'read' },
+  'turn.notebook.destroy': { authorityClass: 'notebook', riskClass: 'commit' },
+  'turn.app.update': { authorityClass: 'app', riskClass: 'commit' },
+  'turn.app.open': { authorityClass: 'app', riskClass: 'resource' },
+  'turn.app.search': { authorityClass: 'app', riskClass: 'read' },
+  'turn.app.read': { authorityClass: 'app', riskClass: 'read' },
+  'turn.app.delete': { authorityClass: 'app', riskClass: 'commit' },
+  'turn.app.write-file': { authorityClass: 'app', riskClass: 'commit' },
+  'turn.app.read-file': { authorityClass: 'app', riskClass: 'read' },
+  'turn.app.list-files': { authorityClass: 'app', riskClass: 'read' },
+  'turn.app.delete-file': { authorityClass: 'app', riskClass: 'commit' },
+  'turn.app.observe': { authorityClass: 'app', riskClass: 'read' },
+  'turn.app.act': { authorityClass: 'app', riskClass: 'resource' },
+  'turn.app.run-code': { authorityClass: 'app', riskClass: 'resource' },
+  'turn.page.open-tab': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.read': { authorityClass: 'page', riskClass: 'read' },
+  'turn.page.snapshot': { authorityClass: 'page', riskClass: 'read' },
+  'turn.page.read-state': { authorityClass: 'page', riskClass: 'read' },
+  'turn.page.watch-changes': { authorityClass: 'page', riskClass: 'read' },
+  'turn.page.query-dom': { authorityClass: 'page', riskClass: 'read' },
+  'turn.page.evaluate-main': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.evaluate-debugger': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.keys-availability': { authorityClass: 'page', riskClass: 'read' },
+  'turn.page.navigate': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.fill': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.click': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.login': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.run-program': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.capture-foreground': { authorityClass: 'page', riskClass: 'read' },
+  'turn.page.capture-owned': { authorityClass: 'page', riskClass: 'read' },
 });
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
@@ -206,10 +206,10 @@ export const controllerOperationAllowedAfterCancel = (
 /**
  * @param {string} capability
  * @param {unknown} outerPayload
- * @param {typeof CONTROLLER_TOOL_MANIFEST} [toolManifest]
+ * @param {typeof CONTROLLER_AUTHORITY_MANIFEST} [toolManifest]
  */
 export const createControllerKernelQuota = (
-  capability, outerPayload, toolManifest = CONTROLLER_TOOL_MANIFEST,
+  capability, outerPayload, toolManifest = CONTROLLER_AUTHORITY_MANIFEST,
 ) => {
   if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
     return createKernelFeatureEffectQuota(capability, outerPayload);
@@ -366,9 +366,7 @@ export const createControllerKernelQuota = (
     if (domainPolicy) {
       const execution = typeof value?.executionId === 'string'
         ? toolExecutions.get(value.executionId) : null;
-      const allowedTools = 'tools' in domainPolicy
-        ? domainPolicy.tools : [domainPolicy.tool];
-      if (!execution || !allowedTools.includes(execution.toolName)
+      if (!execution || execution.authorityClass !== domainPolicy.authorityClass
           || value?.argsDigest !== execution.argsDigest
           || value?.turnGeneration !== execution.turnGeneration) {
         return refusal('kernel-domain-authority-invalid');
@@ -461,9 +459,7 @@ export const createControllerKernelQuota = (
       const effect = record(record(payload)?.value);
       const execution = typeof effect?.executionId === 'string'
         ? toolExecutions.get(effect.executionId) : null;
-      const allowedTools = 'tools' in domainPolicy
-        ? domainPolicy.tools : [domainPolicy.tool];
-      if (!execution || !allowedTools.includes(execution.toolName)
+      if (!execution || execution.authorityClass !== domainPolicy.authorityClass
           || effect?.argsDigest !== execution.argsDigest
           || effect?.turnGeneration !== execution.turnGeneration) {
         return unknownPendingLoss();

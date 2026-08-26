@@ -52,17 +52,24 @@ describe('controller runtime build identity', () => {
     cpSync(join(process.cwd(), 'extension'), candidate, { recursive: true });
 
     writeFileSync(join(candidate, 'peerd-runtime/controller-feature-fixture.js'), [
-      '// Representative ordinary semantic feature: no authority imports or operations.',
-      "export const CONTROLLER_FEATURE_FIXTURE = Object.freeze({ name: 'fixture' });",
+      '// Representative ordinary tool feature: composes an existing authority class.',
+      "export const CONTROLLER_FEATURE_TOOL_NAMES = Object.freeze(['fixture_feature']);",
       '',
     ].join('\n'));
-    const turnRuntime = join(candidate, 'offscreen/controller-turn-runtime.js');
-    writeFileSync(turnRuntime, [
-      readFileSync(turnRuntime, 'utf8'),
-      "import { CONTROLLER_FEATURE_FIXTURE } from '/peerd-runtime/controller-feature-fixture.js';",
-      'void CONTROLLER_FEATURE_FIXTURE;',
-      '',
-    ].join('\n'));
+    const ownership = join(candidate, 'peerd-runtime/controller-tool-ownership.js');
+    writeFileSync(ownership, readFileSync(ownership, 'utf8')
+      .replace("import {\n", [
+        "import { CONTROLLER_FEATURE_TOOL_NAMES } from './controller-feature-fixture.js';",
+        'import {',
+      ].join('\n'))
+      .replace(
+        "  ['dweb', CONTROLLER_DWEB_TOOL_NAMES],\n];",
+        [
+          "  ['dweb', CONTROLLER_DWEB_TOOL_NAMES],",
+          "  ['local', CONTROLLER_FEATURE_TOOL_NAMES],",
+          '];',
+        ].join('\n'),
+      ));
 
     const baselineDigest = await writeControllerBuildIdentity(baseline);
     const candidateDigest = await writeControllerBuildIdentity(candidate);
@@ -90,6 +97,12 @@ describe('controller runtime build identity', () => {
     );
     expect(candidateBundle.inputs).toEqual(baselineBundle.inputs);
     expect(candidateBundle.inputs).not.toContain('peerd-runtime/controller-feature-fixture.js');
+
+    const controllerGraph = await collectStaticModuleGraph(
+      candidate, join(candidate, 'offscreen/controller-turn-runtime.js'),
+    );
+    expect([...controllerGraph].some((path) =>
+      path.endsWith('/peerd-runtime/controller-feature-fixture.js'))).toBe(true);
 
     expect(readFileSync(join(candidate, 'background/vault-kernel.js'), 'utf8'))
       .toBe(readFileSync(join(baseline, 'background/vault-kernel.js'), 'utf8'));
