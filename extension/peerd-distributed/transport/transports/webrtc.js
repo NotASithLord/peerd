@@ -30,6 +30,27 @@ const requireSignaling = (signaling) => {
   }
 };
 
+// Trickle candidates can fire while setLocalDescription() is still pending.
+// The remote side cannot route them until it has seen our offer/answer, so
+// hold that first burst and preserve signaling order: description, then ICE.
+/** @param {Signaling} signaling */
+const orderedCandidates = (signaling) => {
+  /** @type {any[]} */
+  const pending = [];
+  let descriptionSent = false;
+  return {
+    /** @param {any} candidate */
+    send(candidate) {
+      if (descriptionSent) signaling.send({ ice: candidate });
+      else pending.push(candidate);
+    },
+    flush() {
+      descriptionSent = true;
+      for (const candidate of pending.splice(0)) signaling.send({ ice: candidate });
+    },
+  };
+};
+
 // Close an abandoned peer's pc when the caller aborts — but ONLY while its
 // channel has not yet opened. why: a dial/accept that never pairs (a ghost
 // roster member, a symmetric-NAT peer, or a hostile peer that answers then
@@ -90,11 +111,12 @@ export const createWebrtcTransport = ({ RTCPeerConnection, iceServers = DEFAULT_
     async connect(peer, { signaling, sameMachine = false, iceServers: ice, signal } = {}) {
       requireSignaling(signaling);
       const sig = /** @type {Signaling} */ (signaling);
+      const candidates = orderedCandidates(sig);
       const p = createPeer({
         initiator: true,
         RTCPeerConnection,
         config: cfgFor(sameMachine, ice),
-        onCandidate: (c) => sig.send({ ice: c }),
+        onCandidate: candidates.send,
       });
       const off = sig.onRemote(async (msg) => {
         if (!msg) return;
@@ -116,6 +138,7 @@ export const createWebrtcTransport = ({ RTCPeerConnection, iceServers = DEFAULT_
       await p.pc.setLocalDescription(offer);
       // why non-null: setLocalDescription has resolved, so localDescription is set.
       sig.send({ type: 'offer', sdp: /** @type {RTCSessionDescription} */ (p.pc.localDescription).sdp });
+      candidates.flush();
       return p.channelReady;
     },
 
@@ -129,11 +152,12 @@ export const createWebrtcTransport = ({ RTCPeerConnection, iceServers = DEFAULT_
     async accept({ offer, signaling, sameMachine = false, iceServers: ice, signal } = {}) {
       requireSignaling(signaling);
       const sig = /** @type {Signaling} */ (signaling);
+      const candidates = orderedCandidates(sig);
       const p = createPeer({
         initiator: false,
         RTCPeerConnection,
         config: cfgFor(sameMachine, ice),
-        onCandidate: (c) => sig.send({ ice: c }),
+        onCandidate: candidates.send,
       });
       const off = sig.onRemote(async (msg) => {
         if (msg && 'ice' in msg) await p.addRemoteCandidate(msg.ice);
@@ -150,6 +174,7 @@ export const createWebrtcTransport = ({ RTCPeerConnection, iceServers = DEFAULT_
       await p.pc.setLocalDescription(answer);
       // why non-null: setLocalDescription has resolved, so localDescription is set.
       sig.send({ type: 'answer', sdp: /** @type {RTCSessionDescription} */ (p.pc.localDescription).sdp });
+      candidates.flush();
       return { channel: p.channelReady };
     },
   };
