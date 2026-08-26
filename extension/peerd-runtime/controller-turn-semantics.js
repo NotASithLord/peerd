@@ -44,7 +44,7 @@ import {
   settleToolCall,
 } from './tools/dispatcher.js';
 import { DOC_TEXT_MAX_CHARS, prepareUserAttachmentsWithDocs } from './loop/attachments.js';
-import { GOAL_MAX_ITERATIONS } from './loop/goal-runner.js';
+import { GOAL_MAX_ITERATIONS, makeGoalRunner } from './loop/goal-runner.js';
 import { finalActorTurnReply, finalAssistantText, makeSpawnActor, restrictCtxCapabilities } from './actor/spawn.js';
 import { formatDocBody } from './doc/format.js';
 import {
@@ -171,6 +171,7 @@ export const createControllerTurnSemantics = () => Object.freeze({
   makeAutoMemory,
   makeCheapCall,
   makeInitOrchestrator,
+  makeGoalRunner,
   makeRequestReview,
   makeScheduler,
   makeSpawnActor,

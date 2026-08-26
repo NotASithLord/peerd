@@ -82,6 +82,11 @@ describe('kernel turn production runtime', () => {
             maybeAutoResume: async () => {},
           };
         },
+        makeGoals: () => ({
+          start: async () => ({ ok: true }), stop: async () => {}, resume: async () => {},
+          activeStates: () => [],
+        }),
+        goalMaxIterations: 12,
         makeRouteDeps: (shared: any) => {
           seen.push(shared);
           return {

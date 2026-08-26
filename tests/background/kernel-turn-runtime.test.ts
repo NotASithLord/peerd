@@ -23,13 +23,14 @@ const makeKv = () => {
 };
 
 describe('kernel turn runtime assembly', () => {
-  test('keeps the live driver demand-loaded without pulling in the worker model loop', async () => {
+  test('keeps semantic turn and Goal implementations out of the authority runtime graph', async () => {
     const graph = [...await collectStaticModuleGraph(
       EXTENSION_DIR, join(EXTENSION_DIR, 'background/kernel-turn-runtime.js'),
     )].map((path) => path.slice(EXTENSION_DIR.length + 1));
-    expect(graph).toContain('peerd-runtime/loop/turn-driver.js');
-    expect(graph).toContain('peerd-runtime/loop/goal-runner.js');
-    expect(graph).toContain('peerd-runtime/todo/core.js');
+    expect(graph).not.toContain('peerd-runtime/loop/turn-driver.js');
+    expect(graph).not.toContain('peerd-runtime/loop/goal-runner.js');
+    expect(graph).not.toContain('peerd-runtime/todo/core.js');
+    expect(graph).not.toContain('peerd-runtime/kernel-turn.js');
     expect(graph).not.toContain('peerd-runtime/kernel.js');
     expect(graph).not.toContain('background/service-worker.js');
     expect(graph).not.toContain('peerd-runtime/loop/agent-loop.js');
@@ -90,6 +91,29 @@ describe('kernel turn runtime assembly', () => {
           maybeAutoResume: async () => {},
         };
       }) as any,
+      makeGoals: ((deps: any) => {
+        let active = false;
+        return {
+          start: async (request: any) => {
+            active = true;
+            await deps.withRun(async () => {
+              await deps.runTurn({
+                sessionId: request.sessionId, userText: request.goal,
+                synthetic: false, trusted: true,
+              });
+              active = false;
+              deps.onEvent({ phase: 'capped', active: false });
+              deps.onRunEnd(request.sessionId, { phase: 'capped' });
+            });
+            return { ok: true };
+          },
+          stop: async () => { active = false; },
+          resume: async () => {},
+          isActive: () => active,
+          activeStates: () => [],
+        };
+      }) as any,
+      goalMaxIterations: 12,
     });
 
     expect(driverDeps.runUserTurn).toBe(seams.runUserTurn);
@@ -141,6 +165,10 @@ describe('kernel turn runtime assembly', () => {
       makeDriver: (() => ({
         runAgentTurn: async () => ({ ok: true }), maybeAutoResume: async () => {},
       })) as any,
+      makeGoals: (() => ({
+        start: async () => ({ ok: true }), stop: async () => {}, resume: async () => {},
+      })) as any,
+      goalMaxIterations: 12,
     });
 
     await expect(runtime.actorCount()).rejects.toThrow('kernel-actor-count-invalid');

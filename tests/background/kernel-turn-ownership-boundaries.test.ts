@@ -18,7 +18,19 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/authority.js',
       'peerd-runtime/background.js',
       'peerd-runtime/kernel.js',
+      'peerd-runtime/kernel-turn.js',
     ]) expect(modules.has(module), `service worker imports ${module}`).toBe(false);
+  });
+
+  it('keeps the authority turn runtime independent from semantic turn implementations', async () => {
+    const modules = await modulesFor('background/kernel-turn-runtime.js');
+    for (const module of [
+      'peerd-runtime/kernel-turn.js',
+      'peerd-runtime/loop/turn-driver.js',
+      'peerd-runtime/loop/goal-runner.js',
+      'peerd-runtime/todo/core.js',
+    ]) expect(modules.has(module), `authority runtime imports ${module}`).toBe(false);
+    expect(existsSync(join(EXTENSION_ROOT, 'peerd-runtime/kernel-turn.js'))).toBe(false);
   });
 
   it('uses exact transfer custody leaves without a growing aggregate entry', async () => {

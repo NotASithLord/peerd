@@ -182,6 +182,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     makeAutoMemory,
     makeCheapCall,
     makeInitOrchestrator,
+    makeGoalRunner,
     makeRequestReview,
     makeScheduler,
     makeSpawnActor,
@@ -3073,5 +3074,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
 
   return Object.freeze({
     buildToolContext, makeActorRuntime, makeDriverDeps, makeRouteDeps, makeDriver,
+    makeGoals: makeGoalRunner, goalMaxIterations: GOAL_MAX_ITERATIONS,
   });
 };
