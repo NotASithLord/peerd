@@ -76,8 +76,8 @@ relevant baseline.
 ## Current retained state
 
 The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, `4dd2279`,
-`37c91a2`, `7ba4a2d`, `8379fbe`, `d3a99db`, and the current staged
-provider-pricing and dead actor-driver closure.
+`37c91a2`, `7ba4a2d`, `8379fbe`, `d3a99db`, `3f11140`, `7cc1084`, and the
+current prompt-composition ownership cut.
 
 - The broad `kernel-transfer.js` aggregate and generic controller tool-effect
   lane are deleted. Orchestrator and isolated actors share exact per-domain
@@ -100,6 +100,12 @@ provider-pricing and dead actor-driver closure.
   dweb tool narrowing is tested at the controller projection that actually
   serves isolated actors; the SW retains only the early custody refusal and
   actor-host availability state used by orchestrator tools.
+- Prewalk guidance, actor-host availability correction and runtime-capability
+  correction are now rendered by the sealed controller's system-prompt owner.
+  The SW supplies only the bounded persisted phase and host-capability
+  projections used for tool admission. It no longer imports or composes those
+  model-facing blocks. There is still one controller render path and no new
+  authority operation or compatibility path.
 
 The representative tool-feature fixture now adds a real controller-owned tool
 policy (model-facing description and schema), implementation and ownership row
@@ -108,10 +114,10 @@ controller identity literals, the candidate has exactly the same SW inputs and
 byte-identical authority code. The complete fixture appears only in the
 controller graph.
 
-Store-Chrome telemetry for the latest staged checkpoint is 1,302,049 bundled
-SW bytes, 447 staged inputs and a 347,857-byte minified cold graph. The
-preceding provider-pricing package was 1,304,247 bytes with the same
-staged-input and cold-graph counts. The live
+Store-Chrome telemetry for the latest staged checkpoint is 1,300,998 bundled
+SW bytes, 447 staged inputs and a 347,857-byte minified cold graph. The prior
+checkpoint was 1,302,049 bytes with the same staged-input and cold-graph
+counts. The live
 `kernel-turn-live-factories.js` graph remains at 291 modules after falling from
 292: `peerd-provider/pricing.js`, `metadata.js` and
 `semantic-metadata.js` are no longer reachable, leaving only the fixed provider
@@ -127,10 +133,12 @@ readiness: 3.61 seconds from browser launch, 685 ms from worker target, 133 ms
 from Home navigation, and 107 ms for a confirmed forced wake. The assessment
 was green and remains inside the accepted functional envelope.
 
-Verification: 197 focused boundary/security tests and the four controller
-identity/feature-growth tests passed; static typecheck, lint, tscheck coverage
-and the dweb boundary passed; Store packaging/posture passed. The full Bun
-suite passed 7,511 tests and reproduced only the same five inherited failures:
+Latest prompt-ownership verification: 146 focused prompt/turn/boundary tests
+passed, and the broader retained checkpoint set of 94 turn, ownership,
+controller identity and feature-growth tests passed. Static typecheck, lint and
+tscheck coverage passed; Store packaging/posture passed. No full-suite or live
+browser rerun was required for this bounded pure-composition cut. The preceding
+full Bun suite passed 7,511 tests and reproduced only the same five inherited failures:
 the session-support cutover, native-entry identity, test-only vault package,
 typed-error minification, and obsolete native cold-size target. The in-browser
 suite passed 1,000 tests and reproduced only the same two inherited UI

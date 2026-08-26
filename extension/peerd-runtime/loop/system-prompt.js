@@ -17,6 +17,9 @@ import {
   actorCodeSurfaceTools,
   codeClientReference,
 } from '../actor/capability-manifest.js';
+import { actorIsolationPromptBlock } from '../actor/isolation.js';
+import { runtimeCapabilityPromptBlock } from '../runtime-capabilities.js';
+import { PREWALK_NUDGE } from './prewalk.js';
 // DESIGN-17: the code-writing guidance belongs on the agent that WRITES the code
 // — the App/Notebook ACTOR — not the orchestrator's create-result. Reused
 // from the one source of truth (intra-module deep import is allowed).
@@ -113,6 +116,13 @@ const loadDwebBlock = async () => {
  * @param {string} [ctx.memoryBlock]
  *   Pre-built <memory>…</memory> block (memory.loadAlwaysLoaded), budget-trimmed
  *   upstream. Omit (or '') → the {{MEMORY_BLOCK}} placeholder collapses.
+ * @param {boolean} [ctx.prewalkPlanning]
+ *   Main-turn planning phase. The controller owns the model-facing nudge;
+ *   authority supplies only the persisted phase projection.
+ * @param {import('../actor/isolation.js').ActorIsolationCapability|null} [ctx.actorIsolation]
+ *   Current actor-host availability projection for main-turn routing guidance.
+ * @param {ReturnType<import('../runtime-capabilities.js').resolveRuntimeCapabilities>|null} [ctx.runtimeCapabilities]
+ *   Fixed host capability projection used to correct static tool guidance.
  * @param {string} [ctx.taskOverride]
  *   Selects the compact EPHEMERAL ACTOR profile. Its final assistant message
  *   is returned to the parent. Tool-specific lore appears only when the matching
@@ -197,6 +207,12 @@ export const renderSystemPromptFromAssets = (ctx, { template = '', dwebBlock = '
   // preamble tells the model these are layered preferences that cannot
   // override the rules above it.
   out += customInstructions;
+  const semanticSuffixes = [
+    ctx.prewalkPlanning === true ? PREWALK_NUDGE : '',
+    ctx.actorIsolation ? actorIsolationPromptBlock(ctx.actorIsolation) : '',
+    runtimeCapabilityPromptBlock(ctx.runtimeCapabilities),
+  ].filter(Boolean);
+  if (semanticSuffixes.length > 0) out += `\n\n${semanticSuffixes.join('\n\n')}`;
   // why: the ephemeral <active_tab> reorientation NO LONGER rides the system
   // string — it, like the temporal block, is per-turn-volatile and rides the
   // leading <context> message instead (design 01 — see buildTemporalContext for

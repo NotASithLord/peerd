@@ -24,17 +24,13 @@ import {
 import {
   ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
 } from '../errors.js';
-// The prewalk planning nudge (loop/prewalk.js) — appended to the system
-// prompt only while session.prewalk.phase === 'planning'. Pure text; the
-// swap/restore IO rides the injected reconcilePrewalk/maybePrewalkSwap deps.
-import { PREWALK_NUDGE } from './prewalk.js';
 import {
-  actorIsolationAvailable, actorIsolationForTurn, actorIsolationPromptBlock, actorIsolationRefusal,
+  actorIsolationAvailable, actorIsolationForTurn, actorIsolationRefusal,
   ACTOR_ISOLATION_UNAVAILABLE_TOOLS,
 } from '../actor/isolation.js';
 import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
-import { runtimeCapabilityPromptBlock, runtimeCapabilityRefusal } from '../runtime-capabilities.js';
+import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
 import {
   CONTROLLER_AUTHORITY_MANIFEST,
   controllerAuthorityClassAllowed,
@@ -312,10 +308,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     recoveryBlock = await Promise.resolve(drainRecoveryNotices(sessionId))
       .catch(() => '');
   }
-  const actorExecutionBlock = () => {
-    const isolation = actorIsolationForModelStep;
-    return isolation ? actorIsolationPromptBlock(isolation) : '';
-  };
   const runtimeCapabilities = getRuntimeCapabilities();
   const contextMessage = [
     buildTemporalContext({
@@ -324,35 +316,26 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     recoveryBlock,
   ].filter(Boolean).join('\n\n');
 
-  /** @type {string|null} */
-  let systemPromptBase = null;
-  const getSystemPrompt = async () => {
-    // Keep the ordinary system body turn-stable. A /system or prewalk change
-    // takes effect on the next turn, matching the original render-once
-    // behavior. Only the actor-execution suffix can change between steps.
-    if (systemPromptBase === null) {
-      const promptSession = await sessions.get(sessionId);
-      const prewalkBlock = promptSession?.prewalk?.phase === 'planning'
-        ? `\n\n${PREWALK_NUDGE}`
-        : '';
-      systemPromptBase = (await renderSystemPrompt({
-        memoryBlock,
-        // design 01: the MAIN system string must be byte-stable to cache, so the
-        // orchestrator's volatile temporal bytes ride a leading <context> message
-        // (contextMessage below) instead of the system block. An empty value
-        // collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
-        temporalBlock: '',
-        skillsBlock,
-        customSystemPrompt: promptSession?.customSystemPrompt,
-        appRole: promptSession?.appRole,
-      // why await: renderSystemPrompt is async. Concatenating the un-awaited
-      // promise would bake "[object Promise]" into the prompt.
-      })) + prewalkBlock;
-    }
-    const suffixes = [actorExecutionBlock(), runtimeCapabilityPromptBlock(runtimeCapabilities)]
-      .filter(Boolean);
-    return systemPromptBase + (suffixes.length > 0 ? `\n\n${suffixes.join('\n\n')}` : '');
-  };
+  // Snapshot session-authored prompt inputs once per turn. The controller
+  // owns all model-facing composition; authority supplies only bounded state
+  // projections. Actor-host availability remains live per model step so a
+  // failed boundary can immediately correct the next prompt and tool surface.
+  const promptSession = await sessions.get(sessionId);
+  const promptContext = Object.freeze({
+    memoryBlock,
+    // design 01: the MAIN system string must be byte-stable to cache, so the
+    // orchestrator's volatile temporal bytes ride a leading <context> message.
+    temporalBlock: '',
+    skillsBlock,
+    customSystemPrompt: promptSession?.customSystemPrompt,
+    appRole: promptSession?.appRole,
+    prewalkPlanning: promptSession?.prewalk?.phase === 'planning',
+    runtimeCapabilities,
+  });
+  const getSystemPrompt = () => renderSystemPrompt({
+    ...promptContext,
+    actorIsolation: actorIsolationForModelStep,
+  });
 
   // Tool descriptors passed to the provider — name, description, and
   // JSON-schema. The Anthropic adapter rewrites these into Anthropic's
