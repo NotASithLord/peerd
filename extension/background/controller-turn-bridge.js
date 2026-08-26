@@ -6,9 +6,7 @@
 
 import {
   TOOL_EXECUTION_PROTOCOL,
-  createToolEffectQuota,
   parseToolExecutionRequest,
-  toolEffectLossSemantics,
   toolExecutionResultAllowed,
 } from '../shared/tool-execution-protocol.js';
 import {
@@ -35,7 +33,6 @@ const ABORT_CLEANUP_OPERATIONS = new Set([
   'turn.tool.settle', 'turn.abort.finalize', 'turn.finalize',
 ]);
 const DIGEST = /^[a-f0-9]{64}$/;
-const EFFECT_OPERATION = /^[a-z][a-z0-9.-]{0,127}$/;
 const TURN_DEADLINE_MS = 30 * 60_000;
 
 /** @param {unknown} value @returns {value is Record<string, any>} */
@@ -160,8 +157,6 @@ const controllerCtx = (ctx) => {
  * @param {(call:Record<string,any>,ctx:Record<string,any>,binding:Record<string,any>)=>
  *   Promise<null|{mode:'result',result:unknown}|{mode:'execute',custody:unknown,args:unknown,
  *   projection:Record<string,unknown>,manifestDigest:string,attempt?:number}>} [deps.prepareToolCall]
- * @param {(input:{custody:unknown,operation:string,payload:unknown,call:Record<string,any>,
- *   ctx:Record<string,any>,binding:Record<string,any>})=>Promise<any>} [deps.handleToolEffect]
  * @param {(input:{custody:unknown,result:Record<string,any>,call:Record<string,any>,
  *   ctx:Record<string,any>,binding:Record<string,any>})=>Promise<any>} [deps.settleToolCall]
  * @param {(value:unknown)=>Promise<string>} [deps.digestArgs]
@@ -175,7 +170,6 @@ export const makeControllerTurnBridge = ({
   getClient,
   newId = () => crypto.randomUUID(),
   prepareToolCall,
-  handleToolEffect,
   settleToolCall,
   digestArgs = digestJson,
   toolManifest = CONTROLLER_TOOL_MANIFEST,
@@ -187,7 +181,7 @@ export const makeControllerTurnBridge = ({
   /** @type {Map<string, number>} */
   const sessionGenerations = new Map();
   const protocolEnabled = typeof prepareToolCall === 'function'
-    && typeof handleToolEffect === 'function' && typeof settleToolCall === 'function';
+    && typeof settleToolCall === 'function';
   if (!toolManifest || toolManifest.protocol !== TOOL_EXECUTION_PROTOCOL
       || typeof toolManifest.digest !== 'string' || !isRecord(toolManifest.tools)) {
     throw new TypeError('controller-tool-manifest-invalid');
@@ -950,96 +944,23 @@ export const makeControllerTurnBridge = ({
             pendingIrreversible: 0, settledIrreversible: false,
             unknownIrreversible: false, policy: parsedRequest.policy,
             domain: controllerToolDomain(call.name), domainCalls: new Set(), domainState: {},
-            quota: createToolEffectQuota(parsedRequest.policy),
           });
           return known({ mode: 'execute', requestJson: jsonWire(request), deadlineAt });
         }
-        case 'turn.tool.effect': {
-          const entry = run.preparedExecutions.get(value.executionId);
-          if (!entry || entry.open !== true || value.argsDigest !== entry.argsDigest
-              || value.turnGeneration !== run.turnGeneration
-              || entry.domain !== null
-              || typeof value.operation !== 'string'
-              || !EFFECT_OPERATION.test(value.operation)) {
-            return failed('tool effect grant mismatch', true);
-          }
-          if (run.signal.aborted || context.signal?.aborted || entry.deadlineAt <= now()) {
-            return failed('tool effect grant settled', true);
-          }
-          const effectPolicy = entry.policy.effects.find(
-            (/** @type {any} */ effect) => effect.operation === value.operation,
+        case 'turn.goal.complete': {
+          const entry = domainExecutionEntry(
+            run, value, 'local', ['complete_goal'], ['summary'],
           );
-          if (!effectPolicy) return known({
-            ok: false, code: 'tool-effect-denied', outcomeKnown: true,
-          });
-          if (entry.effectPending >= entry.quota.pendingCap) return known({
-            ok: false, code: 'tool-effect-concurrency-exhausted', outcomeKnown: true,
-          });
-          const admitted = entry.quota.admit(value.operation, value.effectPayload);
-          if (admitted.ok !== true) return known(admitted);
-          const replayable = effectPolicy.riskClass === 'read'
-            || effectPolicy.riskClass === 'control';
-          entry.effectEntered = true;
-          entry.effectPending += 1;
-          if (!replayable) entry.pendingIrreversible += 1;
-          let result;
-          try {
-            result = await handleToolEffect?.({
-              custody: entry.custody,
-              operation: value.operation,
-              payload: value.effectPayload,
-              call: entry.call,
-              ctx: run.ctx,
-              binding: entry.binding,
-            });
-          } catch (cause) {
-            const loss = toolEffectLossSemantics(effectPolicy.riskClass, 'during');
-            result = {
-              ok: false,
-              code: 'tool-effect-kernel-lost',
-              error: cause instanceof Error ? cause.message : String(cause),
-              outcomeKnown: loss.outcomeKnown,
-              retryable: loss.retryable,
-            };
+          const expected = typeof entry?.call?.args?.summary === 'string'
+            ? entry.call.args.summary.trim() : '';
+          const complete = entry?.custody?.ctx?.completeGoalRun;
+          if (!entry || typeof value.summary !== 'string' || value.summary !== expected
+              || typeof complete !== 'function') {
+            return failed('goal completion authority mismatch', true);
           }
-          entry.effectPending = Math.max(0, entry.effectPending - 1);
-          if (!replayable) {
-            entry.pendingIrreversible = Math.max(0, entry.pendingIrreversible - 1);
-          }
-          const observed = entry.quota.observe(value.operation, result);
-          if (observed.ok !== true) {
-            const loss = toolEffectLossSemantics(effectPolicy.riskClass, 'during');
-            if (!loss.outcomeKnown) {
-              entry.unknownIrreversible = true;
-              run.nestedUnknown = true;
-            }
-            return known({
-              ok: false,
-              code: observed.code,
-              outcomeKnown: loss.outcomeKnown,
-              retryable: loss.retryable,
-            });
-          }
-          if (result.outcomeKnown !== true && !replayable) {
-            entry.unknownIrreversible = true;
-            run.nestedUnknown = true;
-          }
-          if (!replayable && result.outcomeKnown === true
-              && (result.ok === true || result.retryable !== true)) {
-            entry.settledIrreversible = true;
-          }
-          if (entry.open !== true || run.signal.aborted
-              || context.signal?.aborted || entry.deadlineAt <= now()) {
-            const loss = toolEffectLossSemantics(
-              effectPolicy.riskClass, result.outcomeKnown === true ? 'after' : 'during',
-            );
-            if (!loss.outcomeKnown) run.nestedUnknown = true;
-            return known({
-              ok: false, code: 'tool-effect-grant-settled',
-              outcomeKnown: loss.outcomeKnown, retryable: loss.retryable,
-            });
-          }
-          return known(result);
+          return runDomainEffect(run, entry, operation, 'control', () => ({
+            ended: complete(value.summary) === true,
+          }));
         }
         case 'turn.actor.spawn-sync':
         case 'turn.actor.spawn-async': {

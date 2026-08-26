@@ -390,6 +390,41 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('keeps controller-local semantics out of authority graphs and has no generic effect lane', async () => {
+    const semanticModules = new Set([
+      'peerd-runtime/controller-local-tools.js',
+      'peerd-runtime/clock/execute.js',
+    ]);
+    for (const entry of [
+      'background/vault-kernel.js',
+      'background/kernel-turn-live-factories.js',
+      'background/controller-turn-bridge.js',
+    ]) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
+    }
+    const controllerModules = await modulesFor('offscreen/controller-turn-runtime.js');
+    for (const module of semanticModules) expect(controllerModules.has(module)).toBe(true);
+
+    const authoritySource = readFileSync(
+      join(EXTENSION_ROOT, 'background/controller-turn-bridge.js'), 'utf8',
+    );
+    const controllerSource = readFileSync(
+      join(EXTENSION_ROOT, 'offscreen/controller-turn-runtime.js'), 'utf8',
+    );
+    expect(authoritySource).toContain("case 'turn.goal.complete'");
+    expect(controllerSource).toContain("rpc('turn.goal.complete'");
+    for (const source of [authoritySource, controllerSource]) {
+      expect(source).not.toContain('turn.tool.effect');
+      expect(source).not.toContain('handleToolEffect');
+    }
+    for (const removed of [
+      'peerd-runtime/controller-tools.js',
+      'offscreen/controller-tool-runtime.js',
+      'offscreen/tool-execution-host.js',
+    ]) expect(existsSync(join(EXTENSION_ROOT, removed))).toBe(false);
+  });
+
   it('composes one synchronous owner path without a protocol or dynamic fallback', () => {
     const source = readFileSync(
       join(EXTENSION_ROOT, 'background/kernel-turn-live-factories.js'),

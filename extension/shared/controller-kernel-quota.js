@@ -39,6 +39,7 @@ const MODEL_STREAM_EVENTS = 131_072;
 const MAX_CONCURRENT_KERNEL_CALLS = 256;
 const TURN_IDLE_DEADLINE_MS = 30 * 60_000;
 const DOMAIN_OPERATIONS = Object.freeze({
+  'turn.goal.complete': { tool: 'complete_goal', riskClass: 'control' },
   'turn.actor.spawn-sync': { tool: 'actor_create', riskClass: 'resource' },
   'turn.actor.spawn-async': { tool: 'actor_create', riskClass: 'resource' },
   'turn.actor.tasks': { tool: 'actor_tasks', riskClass: 'read' },
@@ -272,9 +273,9 @@ export const createControllerKernelQuota = (
     'turn.model.observe-event': streamBudget,
     'turn.model.observe-failover': 8 * steps,
     'turn.tool.prepare': toolBudget,
-    'turn.tool.effect': 8 * toolBudget,
     'turn.tool.settle': toolBudget,
     'turn.tool.dispatch': toolBudget,
+    'turn.goal.complete': toolBudget,
     'turn.actor.spawn-sync': toolBudget,
     'turn.actor.spawn-async': toolBudget,
     'turn.actor.tasks': toolBudget,
@@ -449,9 +450,7 @@ export const createControllerKernelQuota = (
     const replayable = operation === 'turn.session.get'
       || operation === 'turn.prompt.get' || operation === 'turn.tools.refresh'
       || operation === 'turn.tool.prepare'
-      || domainPolicy?.riskClass === 'read' || domainPolicy?.riskClass === 'control'
-      || (operation === 'turn.tool.effect'
-        && pendingLoss(operation, payload).retryable === true);
+      || domainPolicy?.riskClass === 'read' || domainPolicy?.riskClass === 'control';
     custody.observe(result, replayable);
     return Object.freeze({ ok: true, outcomeKnown: true });
   };
@@ -471,20 +470,7 @@ export const createControllerKernelQuota = (
       }
       return toolEffectLossSemantics(domainPolicy.riskClass, 'during');
     }
-    if (operation !== 'turn.tool.effect') return unknownPendingLoss();
-    const effect = record(record(payload)?.value);
-    const execution = typeof effect?.executionId === 'string'
-      ? toolExecutions.get(effect.executionId) : null;
-    if (!execution || effect?.argsDigest !== execution.argsDigest
-        || effect?.turnGeneration !== execution.turnGeneration
-        || typeof effect?.operation !== 'string') {
-      return unknownPendingLoss();
-    }
-    const policy = execution.policy.effects.find(
-      (/** @type {any} */ candidate) => candidate.operation === effect.operation,
-    );
-    return policy ? toolEffectLossSemantics(policy.riskClass, 'during')
-      : unknownPendingLoss();
+    return unknownPendingLoss();
   };
 
   return Object.freeze({

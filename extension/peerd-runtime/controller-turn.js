@@ -2,6 +2,11 @@
 
 export { runUserTurn } from './loop/agent-loop.js';
 export {
+  CONTROLLER_LOCAL_TOOL_NAMES,
+  controllerHostsLocalTool,
+  executeControllerLocalTool,
+} from './controller-local-tools.js';
+export {
   CONTROLLER_ACTOR_TOOL_NAMES,
   controllerHostsActorTool,
   executeControllerActorTool,

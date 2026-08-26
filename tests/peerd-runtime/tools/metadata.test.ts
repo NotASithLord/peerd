@@ -18,7 +18,9 @@ import {
 import {
   clearTools, listTools, registerTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
-import { CONTROLLER_TOOL_IMPLEMENTATIONS } from '../../../extension/peerd-runtime/controller-tools.js';
+import {
+  CONTROLLER_LOCAL_TOOL_NAMES,
+} from '../../../extension/peerd-runtime/controller-local-tools.js';
 import { CONTROLLER_ACTOR_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-actor-tools.js';
 import { CONTROLLER_POD_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-pod-tools.js';
 import { CONTROLLER_REPOSITORY_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-repository-tools.js';
@@ -41,7 +43,7 @@ const ALL_TOOLS = [...BUILTIN_TOOLS, ...CLOCK_TOOLS, ...WEB_TOOLS, loadSkillTool
 const EXECUTION_TOOL_NAMES = new Set(ALL_TOOLS.map((tool) => tool.name));
 const CONTROLLER_ONLY_TOOL_NAMES = new Set(
   [
-    ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS),
+    ...CONTROLLER_LOCAL_TOOL_NAMES,
     ...CONTROLLER_ACTOR_TOOL_NAMES,
     ...CONTROLLER_POD_TOOL_NAMES,
     ...CONTROLLER_REPOSITORY_TOOL_NAMES,
@@ -224,7 +226,7 @@ describe('tool metadata anti-drift', () => {
     expect(new Set(composed).size).toBe(composed.length);
     // Actor definitions remain real controller-owned implementations and must
     // stay covered here even though the SW registry no longer imports them.
-    expect(new Set([...composed, ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS)]))
+    expect(new Set([...composed, ...CONTROLLER_LOCAL_TOOL_NAMES]))
       .toEqual(new Set(TOOL_METADATA_ORDER));
   });
 });

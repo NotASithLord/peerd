@@ -327,9 +327,13 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
         const prepared = await ctx.toolExecution.prepare({
           id: 'goal-call', name: 'complete_goal', args: { summary: 'done' },
         });
-        goalEffect = await ctx.toolExecution.effect(
-          prepared.custody, 'goal.end', { summary: 'done' },
-        );
+        goalEffect = {
+          ok: true,
+          outcomeKnown: true,
+          value: {
+            ended: prepared.custody.ctx.completeGoalRun('done') === true,
+          },
+        };
         await ctx.toolExecution.settle(prepared.custody, {
           protocol: 1, executionId: 'goal-execution', argsDigest: 'a'.repeat(64),
           ok: true, outcomeKnown: true, effectEntered: true,
@@ -406,7 +410,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
 };
 
 describe('runAgentTurn credential custody', () => {
-  test('complete_goal retains exact goal.end authority in the SW', async () => {
+  test('complete_goal retains exact completion custody in the SW', async () => {
     const fixture = turnDeps('chat', { goalControl: true });
     await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'finish' });
     expect(fixture.goalSummary()).toBe('done');

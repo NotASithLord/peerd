@@ -7,8 +7,11 @@ import { join } from 'node:path';
 import {
   CONTROLLER_BUILD_ENTRIES,
   CONTROLLER_OPTIONAL_BUILD_ENTRIES,
+  CONTROLLER_BUILD_STAMP_MODULES,
   controllerBuildDigest,
+  writeControllerBuildIdentity,
 } from '../../packaging/controller-build-identity.ts';
+import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
 import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 
@@ -38,6 +41,58 @@ describe('controller runtime build identity', () => {
     const relay = join(extension, 'offscreen/kernel-rich-relay-host.js');
     writeFileSync(relay, `${readFileSync(relay, 'utf8')}\n`);
     expect(await controllerBuildDigest(extension)).not.toBe(before);
+  });
+
+  test('controller-only feature growth leaves normalized SW authority unchanged', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-feature-growth-'));
+    roots.push(root);
+    const baseline = join(root, 'baseline');
+    const candidate = join(root, 'candidate');
+    cpSync(join(process.cwd(), 'extension'), baseline, { recursive: true });
+    cpSync(join(process.cwd(), 'extension'), candidate, { recursive: true });
+
+    writeFileSync(join(candidate, 'peerd-runtime/controller-feature-fixture.js'), [
+      '// Representative ordinary semantic feature: no authority imports or operations.',
+      "export const CONTROLLER_FEATURE_FIXTURE = Object.freeze({ name: 'fixture' });",
+      '',
+    ].join('\n'));
+    const turnRuntime = join(candidate, 'offscreen/controller-turn-runtime.js');
+    writeFileSync(turnRuntime, [
+      readFileSync(turnRuntime, 'utf8'),
+      "import { CONTROLLER_FEATURE_FIXTURE } from '/peerd-runtime/controller-feature-fixture.js';",
+      'void CONTROLLER_FEATURE_FIXTURE;',
+      '',
+    ].join('\n'));
+
+    const baselineDigest = await writeControllerBuildIdentity(baseline);
+    const candidateDigest = await writeControllerBuildIdentity(candidate);
+    expect(candidateDigest).not.toBe(baselineDigest);
+
+    // why: normalize the authored identity leaves before minification. Bun's
+    // identifier allocation may change when a literal changes, even though no
+    // authority source or input changed; the invariant intentionally excludes
+    // that build-identity-only churn.
+    for (const extension of [baseline, candidate]) {
+      for (const name of CONTROLLER_BUILD_STAMP_MODULES) {
+        const path = join(extension, 'shared', name);
+        writeFileSync(path, readFileSync(path, 'utf8').replace(
+          /(CONTROLLER_BUILD_DIGEST\s*=\s*['"])[a-f0-9]{64}(['"])/,
+          `$1${'0'.repeat(64)}$2`,
+        ));
+      }
+    }
+
+    const baselineBundle = await bundleChromeNativeKernel(
+      baseline, 'background/vault-kernel.js',
+    );
+    const candidateBundle = await bundleChromeNativeKernel(
+      candidate, 'background/vault-kernel.js',
+    );
+    expect(candidateBundle.inputs).toEqual(baselineBundle.inputs);
+    expect(candidateBundle.inputs).not.toContain('peerd-runtime/controller-feature-fixture.js');
+
+    expect(readFileSync(join(candidate, 'background/vault-kernel.js'), 'utf8'))
+      .toBe(readFileSync(join(baseline, 'background/vault-kernel.js'), 'utf8'));
   });
 
   test('binds the distributed custody protocol', async () => {

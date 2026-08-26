@@ -87,7 +87,7 @@ describe('production semantic controller slice', () => {
       'offscreen/kernel-runtime-host.js',
       'offscreen/kernel-administrative-host.js',
       'offscreen/kernel-support-host.js',
-      'offscreen/controller-tool-runtime.js',
+      'offscreen/controller-turn-runtime.js',
     ];
     for (const entry of governed) expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
 

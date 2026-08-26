@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { relative } from 'node:path';
-import { CONTROLLER_TOOL_IMPLEMENTATIONS } from '../../extension/peerd-runtime/controller-tools.js';
+import {
+  CONTROLLER_LOCAL_TOOL_NAMES,
+} from '../../extension/peerd-runtime/controller-local-tools.js';
 import {
   CONTROLLER_ACTOR_TOOL_NAMES,
   CONTROLLER_POD_TOOL_NAMES,
@@ -44,7 +46,7 @@ describe('controller tool manifest', () => {
       'dweb_block', 'dweb_discovery', 'dweb_guide',
     ]);
     expect(hosted).toEqual([
-      ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS),
+      ...CONTROLLER_LOCAL_TOOL_NAMES,
       ...CONTROLLER_ACTOR_TOOL_NAMES,
       ...CONTROLLER_POD_TOOL_NAMES,
       ...CONTROLLER_REPOSITORY_TOOL_NAMES,
@@ -58,8 +60,7 @@ describe('controller tool manifest', () => {
       ...CONTROLLER_DWEB_TOOL_NAMES,
     ]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
-    expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))
-      .toEqual(['goal.end']);
+    expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects).toEqual([]);
     expect(controllerHostsTool('now')).toBe(true);
     expect(controllerHostsTool('complete_goal')).toBe(true);
     expect(controllerHostsTool('wait_until')).toBe(true);

@@ -4,6 +4,7 @@
 
 import {
   controllerHostsActorTool,
+  controllerHostsLocalTool,
   controllerHostsPodTool,
   controllerHostsRepositoryTool,
   controllerHostsVmTool,
@@ -15,6 +16,7 @@ import {
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
   executeControllerActorTool,
+  executeControllerLocalTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
   executeControllerVmTool,
@@ -122,11 +124,8 @@ const isTurnPayload = (value) => {
  * @param {unknown} payload
  * @param {{ signal: AbortSignal, authority?: unknown,
  *   kernelCall?: (operation:string, payload:unknown)=>Promise<any> }} options
- * @param {((request:unknown,options:{signal:AbortSignal,authority:unknown,
- *   deadlineAt:number,kernelCall:(operation:string,payload:unknown)=>Promise<any>})=>
- *   Promise<any>)|undefined} executeToolCall
  */
-const runControllerTurnWith = async (payload, options, executeToolCall) => {
+const runControllerTurnWith = async (payload, options) => {
   if (!isTurnPayload(payload) || typeof options.kernelCall !== 'function') {
     return { ok: false, code: 'turn-payload-invalid', outcomeKnown: true };
   }
@@ -297,16 +296,6 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             code: 'tool-execution-owner-missing', outcomeKnown: true,
           });
         }
-        if (typeof executeToolCall !== 'function') {
-          if (controllerHostsTool(/** @type {any} */ (call)?.name)) {
-            throw Object.assign(new Error('controller tool executor unavailable'), {
-              code: 'controller-tool-executor-unavailable', outcomeKnown: true,
-            });
-          }
-          const result = await legacyDispatch();
-          if (result?.outcomeKnown === false) nestedUnknown = true;
-          return result;
-        }
         const prepared = await rpc('turn.tool.prepare', {
           callJson: JSON.stringify(call),
         });
@@ -343,7 +332,28 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             argsDigest: request.argsDigest,
             turnGeneration: request.turnGeneration,
           };
-          if (controllerHostsActorTool(request.toolName)) {
+          if (controllerHostsLocalTool(request.toolName)) {
+            const value = await executeControllerLocalTool(
+              request.toolName,
+              request.args,
+              Object.freeze({
+                completeGoal: async (/** @type {string} */ summary) => ({
+                  ok: true,
+                  outcomeKnown: true,
+                  value: await rpc('turn.goal.complete', { ...binding, summary }),
+                }),
+              }),
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: request.toolName === 'complete_goal',
+              value,
+            };
+          } else if (controllerHostsActorTool(request.toolName)) {
             const actorAuthority = Object.freeze({
               spawnSync: (/** @type {any} */ actorRequest) => rpc('turn.actor.spawn-sync', {
                 ...binding,
@@ -742,22 +752,8 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
               effectEntered: true,
               value,
             };
-          } else execution = await executeToolCall(request, {
-            signal: options.signal,
-            authority: {
-              ownerId: runId,
-              sessionId: input.sessionId,
-              target: `tool:${request.toolName}`,
-              replayClass: 'E',
-            },
-            deadlineAt: prepared.deadlineAt,
-            kernelCall: (operation, effectPayload) => rpc('turn.tool.effect', {
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              turnGeneration: request.turnGeneration,
-              operation,
-              effectPayload,
-            }),
+          } else throw Object.assign(new Error('controller tool executor unavailable'), {
+            code: 'controller-tool-executor-unavailable', outcomeKnown: true,
           });
         } catch (cause) {
           const error = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
@@ -766,7 +762,7 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             executionId: request.executionId,
             argsDigest: request.argsDigest,
             ok: false,
-            code: error?.code ?? 'tool-execution-host-lost',
+            code: error?.code ?? 'controller-tool-execution-failed',
             error: error?.message ?? 'Tool execution interrupted.',
             outcomeKnown: error?.outcomeKnown !== false,
             effectEntered: false,
@@ -822,15 +818,12 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
 };
 
 /**
- * Bind a lazy local tool executor without placing its implementation graph in
- * the default turn module. The plain export remains the compatibility path.
- * @param {{executeToolCall?:(request:unknown,options:{signal:AbortSignal,
- *   authority:unknown,deadlineAt:number,
- *   kernelCall:(operation:string,payload:unknown)=>Promise<any>})=>Promise<any>}} [deps]
+ * Bind the single controller turn path. Tool semantics import only their exact
+ * domain clients; no generic tool loader or effect dispatcher sits beside it.
  */
-export const createControllerTurnRuntime = ({ executeToolCall } = {}) => Object.freeze({
+export const createControllerTurnRuntime = () => Object.freeze({
   runControllerTurn: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
-    runControllerTurnWith(payload, options, executeToolCall),
+    runControllerTurnWith(payload, options),
 });
 
 export const runControllerTurn = (
@@ -838,4 +831,4 @@ export const runControllerTurn = (
   /** @type {{signal:AbortSignal,authority?:unknown,
    * kernelCall?:(operation:string,payload:unknown)=>Promise<any>}} */ options,
 ) =>
-  runControllerTurnWith(payload, options, undefined);
+  runControllerTurnWith(payload, options);
