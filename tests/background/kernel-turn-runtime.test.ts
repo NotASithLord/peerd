@@ -27,9 +27,10 @@ describe('kernel turn runtime assembly', () => {
     const graph = [...await collectStaticModuleGraph(
       EXTENSION_DIR, join(EXTENSION_DIR, 'background/kernel-turn-runtime.js'),
     )].map((path) => path.slice(EXTENSION_DIR.length + 1));
-    expect(graph).toContain('peerd-runtime/kernel.js');
     expect(graph).toContain('peerd-runtime/loop/turn-driver.js');
     expect(graph).toContain('peerd-runtime/loop/goal-runner.js');
+    expect(graph).toContain('peerd-runtime/todo/core.js');
+    expect(graph).not.toContain('peerd-runtime/kernel.js');
     expect(graph).not.toContain('background/service-worker.js');
     expect(graph).not.toContain('peerd-runtime/loop/agent-loop.js');
     expect(graph).not.toContain('offscreen/controller-turn-runtime.js');

@@ -5,7 +5,7 @@ import {
   GOAL_MAX_ITERATIONS,
   makeGoalRunner,
   makeTurnDriver,
-} from '../peerd-runtime/kernel.js';
+} from '../peerd-runtime/kernel-turn.js';
 
 const functionAt = (/** @type {Record<string, any>} */ value, /** @type {string} */ key) => {
   if (typeof value?.[key] !== 'function') {

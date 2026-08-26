@@ -1,6 +1,6 @@
 // @ts-check
 
-import { limitExceeded, normalizeTally, providerQuotaError } from '/peerd-runtime/kernel.js';
+import { limitExceeded, normalizeTally, providerQuotaError } from '/peerd-runtime/kernel-custody.js';
 
 const RESERVATION_TTL_MS = 120_000;
 const MAX_USAGE_TOKENS = 1_000_000_000;
