@@ -28,6 +28,7 @@ describe('controller tool manifest', () => {
       'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
       'app_update', 'app_open', 'app_search', 'app_delete',
       'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file',
+      'app_observe', 'app_act', 'app_code',
     ]);
     expect(hosted).toEqual([
       ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS),

@@ -445,6 +445,7 @@ export const makeOffscreenActorClient = ({
     if (!entry) return null;
     entry.domainState.authority ??= createAppToolAuthority({
       call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
   };
@@ -1668,6 +1669,36 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'app/delete-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/delete-file', 'commit', () =>
         entry.domainState.authority.deleteFile(msg.appId, msg.path));
+    },
+    'app/observe': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_observe'], []);
+      if (!entry) return { ok: false, error: 'app/observe: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/observe', 'read', () =>
+        entry.domainState.authority.observeRuntime());
+    },
+    'app/act': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_act'], ['action', 'params']);
+      if (!entry) return { ok: false, error: 'app/act: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/act', 'resource', () =>
+        entry.domainState.authority.actRuntime(msg.action, msg.params));
+    },
+    'app/run-code': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = appEntry(grant, msg, ['app_code'], ['code', 'timeoutMs']);
+      if (!entry) return { ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/run-code', 'resource', () =>
+        entry.domainState.authority.runCode(msg.code, msg.timeoutMs));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

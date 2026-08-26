@@ -29,7 +29,7 @@ const runtimeFactory = (onTransfer = (_authorization: symbol) => {}) =>
 const liveLoaders = () => ({
   loadEngineLive: async () => ({}),
   loadActorChatRelays: async () => ({}),
-  loadAppCallRelays: async () => ({}),
+  loadAppRuntimeRelays: async () => ({}),
   loadRelayRoutes: async () => ({}),
   loadTransferLive: async () => ({}),
   loadDwebRoutes: async () => ({}),
@@ -42,7 +42,7 @@ describe('kernel executable owner', () => {
     const demand = readFileSync(join(background, 'kernel-demand-plane.js'), 'utf8');
     expect(owner).not.toContain('loadRich');
     for (const loader of [
-      'loadEngineLive', 'loadActorChatRelays', 'loadAppCallRelays',
+      'loadEngineLive', 'loadActorChatRelays', 'loadAppRuntimeRelays',
       'loadRelayRoutes', 'loadTransferLive', 'loadDwebRoutes',
     ]) expect(demand).toContain(`${loader}:`);
   });
@@ -71,7 +71,7 @@ describe('kernel executable owner', () => {
         return engineLoads === 1 ? new Promise(() => {}) : Promise.resolve({});
       },
       loadActorChatRelays: async () => { calls.push('actor-chat'); return {}; },
-      loadAppCallRelays: async () => { calls.push('app-call'); return {}; },
+      loadAppRuntimeRelays: async () => { calls.push('app-runtime'); return {}; },
       loadRelayRoutes: async () => { calls.push('relay'); return {}; },
       loadTransferLive: async () => { calls.push('transfer'); return {}; },
       loadDwebRoutes: async () => {
@@ -94,17 +94,17 @@ describe('kernel executable owner', () => {
         options: 'chrome-extension://runtime/options/options.html',
       },
     });
-    expect(await control.routes['app/call']({}, relaySender)).toMatchObject({ ok: true });
+    expect(await control.routes['app-code/observe']({}, relaySender)).toMatchObject({ ok: true });
     expect(calls).toEqual([]);
     await runtimeDeps.actorChat.load();
-    await runtimeDeps.appCall.load();
+    await runtimeDeps.appRuntime.load();
     await runtimeDeps.relay.load();
     await runtimeDeps.transfer.load();
     await runtimeDeps.actorChat.load();
-    expect(calls).toEqual(['actor-chat', 'app-call', 'relay', 'transfer']);
+    expect(calls).toEqual(['actor-chat', 'app-runtime', 'relay', 'transfer']);
     expect(await control.routes['dweb/base/start']({}, homeSender))
       .toMatchObject({ ok: true, name: 'dweb/base/start' });
-    expect(calls).toEqual(['actor-chat', 'app-call', 'relay', 'transfer', 'dweb']);
+    expect(calls).toEqual(['actor-chat', 'app-runtime', 'relay', 'transfer', 'dweb']);
     const frozen = await runtimeDeps.engine.load().catch((cause: unknown) => cause);
     expect(frozen).toMatchObject({
       code: 'kernel-executable-engine-live-load-timeout',
@@ -128,7 +128,8 @@ describe('kernel executable owner', () => {
       ['pod/web-fetch', 'pod'], ['sw/web-fetch', 'webFetch'],
       ['sw/web-fetch-abort', 'webFetch'], ['export/artifact', 'artifactExport'],
       ['import/inspect', 'options'], ['import/apply', 'options'], ['apps/delete', 'home'],
-      ['app/actor-chat', 'app'], ['app/call', 'relay'], ['actors/call', 'relay'],
+      ['app/actor-chat', 'app'], ['app-code/observe', 'relay'],
+      ['app-code/act', 'relay'], ['actors/call', 'relay'],
       ['page/call', 'relay'], ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
       ['script-run/abort', 'relay'], ['a2a/call', 'relay'],
       ['vm/tab-ready', 'engine'], ['js/tab-ready', 'engine'],
@@ -198,8 +199,8 @@ describe('kernel executable owner', () => {
     expect(loads).toBe(0);
     expect(await owner.routes['pod/get-meta']({ podId: 'pod-1' }, 'trusted'))
       .toMatchObject({ ok: true, name: 'pod/get-meta', sender: 'trusted' });
-    expect(await owner.routes['app/call']({}, 'trusted'))
-      .toMatchObject({ ok: true, name: 'app/call' });
+    expect(await owner.routes['app-code/observe']({}, 'trusted'))
+      .toMatchObject({ ok: true, name: 'app-code/observe' });
     expect(loads).toBe(1);
   });
 
@@ -217,7 +218,7 @@ describe('kernel executable owner', () => {
     expect(dependencyLoads).toBe(0);
     await owner.routes['pod/get-meta']({}, 'trusted');
     expect(dependencyLoads).toBe(1);
-    await owner.routes['app/call']({}, 'trusted');
+    await owner.routes['app-code/act']({}, 'trusted');
     expect(dependencyLoads).toBe(1);
   });
 

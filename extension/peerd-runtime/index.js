@@ -263,8 +263,6 @@ export {
 // dispatch the tool-call web actor uses, pinned to the actor's owned tab.
 // resolvePageTab is the pure "adopt the first tab on page.goto" decision.
 export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
-export { makeAppCallHandler } from './actor/app-call-handler.js';
-export { appCallToToolCall, shapeAppResult, APP_API_METHODS } from './actor/app-api.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.

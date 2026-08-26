@@ -15,7 +15,6 @@ import {
 } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 import { ACTORS_API_ACCEPTED_METHODS, ACTORS_API_METHODS } from '../../extension/peerd-runtime/actor/actors-api.js';
 import { PAGE_API_METHODS } from '../../extension/peerd-runtime/actor/page-api.js';
-import { APP_API_METHODS } from '../../extension/peerd-runtime/actor/app-api.js';
 import { MESH_API_METHODS } from '../../extension/peerd-runtime/actor/a2a-api.js';
 
 describe('declarative code-capability contract', () => {
@@ -23,7 +22,7 @@ describe('declarative code-capability contract', () => {
     expect([...ACTORS_API_METHODS]).toEqual(codeClientMethods('actors'));
     expect([...ACTORS_API_ACCEPTED_METHODS]).toEqual(codeClientMethods('actors', true));
     expect([...PAGE_API_METHODS]).toEqual(codeClientMethods('page'));
-    expect([...APP_API_METHODS]).toEqual(codeClientMethods('app').filter((name) => name !== 'wait'));
+    expect(codeClientMethods('app').filter((name) => name !== 'wait')).toEqual(['observe', 'act']);
     expect([...MESH_API_METHODS]).toEqual(codeClientMethods('mesh'));
   });
 

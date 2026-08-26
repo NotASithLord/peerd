@@ -571,7 +571,7 @@ export const makeControllerTurnBridge = ({
     const entry = domainExecutionEntry(run, value, 'app', tools, fields);
     if (!entry) return null;
     entry.domainState.authority ??= createAppToolAuthority({
-      call: entry.call, ctx: entry.custody?.ctx,
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
   };
@@ -1491,6 +1491,26 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('App file-delete authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.deleteFile(value.appId, value.path));
+        }
+        case 'turn.app.observe': {
+          const entry = appExecutionEntry(run, value, ['app_observe'], []);
+          if (!entry) return failed('App observe authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.observeRuntime());
+        }
+        case 'turn.app.act': {
+          const entry = appExecutionEntry(run, value, ['app_act'], ['action', 'params']);
+          if (!entry) return failed('App action authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.actRuntime(value.action, value.params));
+        }
+        case 'turn.app.run-code': {
+          const entry = appExecutionEntry(
+            run, value, ['app_code'], ['code', 'timeoutMs'],
+          );
+          if (!entry) return failed('App code authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.runCode(value.code, value.timeoutMs));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

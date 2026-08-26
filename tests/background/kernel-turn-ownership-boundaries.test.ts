@@ -186,7 +186,7 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
-  it('hosts App lifecycle/file semantics only in controller and isolated-worker graphs', async () => {
+  it('hosts App semantics only in controller and isolated-worker graphs', async () => {
     const appSemanticModules = new Set([
       'peerd-runtime/controller-app-tools.js',
       'peerd-runtime/tools/defs/app-update.js',
@@ -197,6 +197,9 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/tools/defs/app-read-file.js',
       'peerd-runtime/tools/defs/app-list-files.js',
       'peerd-runtime/tools/defs/app-delete-file.js',
+      'peerd-runtime/tools/defs/app-observe.js',
+      'peerd-runtime/tools/defs/app-act.js',
+      'peerd-runtime/tools/defs/app-code.js',
     ]);
     const authorityEntries = [
       'background/kernel-turn-authority-adapter.js',

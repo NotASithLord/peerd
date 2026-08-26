@@ -10,10 +10,11 @@ import { wrapUntrusted } from '../prompt-wrap.js';
 /** @type {import('/shared/tool-types.js').Tool} */
 export const appObserveTool = composeTool("app_observe", {
   execute: async (_args, ctx) => {
-    const call = /** @type {any} */ (ctx).appAgentCall;
-    if (typeof call !== 'function') return { ok: false, error: 'app_playtest_not_available' };
+    const authority = /** @type {{ observeRuntime?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.observeRuntime) return { ok: false, error: 'app_playtest_not_available' };
     try {
-      const result = await call('observe', {}, /** @type {any} */ (ctx).abortSignal);
+      const result = await authority.observeRuntime();
       if (!result?.ok) return {
         ok: false,
         error: result?.error ?? 'app_observe_failed',

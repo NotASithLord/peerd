@@ -90,6 +90,9 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.app.read-file': { tool: 'app_read_file', riskClass: 'read' },
   'turn.app.list-files': { tool: 'app_list_files', riskClass: 'read' },
   'turn.app.delete-file': { tool: 'app_delete_file', riskClass: 'commit' },
+  'turn.app.observe': { tool: 'app_observe', riskClass: 'read' },
+  'turn.app.act': { tool: 'app_act', riskClass: 'resource' },
+  'turn.app.run-code': { tool: 'app_code', riskClass: 'resource' },
 });
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
@@ -307,6 +310,9 @@ export const createControllerKernelQuota = (
     'turn.app.read-file': toolBudget,
     'turn.app.list-files': toolBudget,
     'turn.app.delete-file': toolBudget,
+    'turn.app.observe': toolBudget,
+    'turn.app.act': toolBudget,
+    'turn.app.run-code': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
     'turn.finalize': 1,

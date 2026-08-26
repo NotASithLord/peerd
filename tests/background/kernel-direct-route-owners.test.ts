@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   makeKernelAppActorChatRoutes,
-  makeKernelAppCallRoutes,
+  makeKernelAppRuntimeRoutes,
 } from '../../extension/background/kernel-direct-route-owners.js';
 
 describe('kernel direct route owners', () => {
@@ -52,10 +52,10 @@ describe('kernel direct route owners', () => {
     });
   });
 
-  test('app/call binds a live run to the current App actor generation', async () => {
+  test('exact App-code routes bind a live run to the current App actor generation', async () => {
     const signal = new AbortController().signal;
     const calls: any[] = [];
-    const routes = makeKernelAppCallRoutes({
+    const routes = makeKernelAppRuntimeRoutes({
       isRelay: (sender: any) => sender?.url === 'offscreen',
       vault: { isLocked: () => false },
       scriptRuns: {
@@ -68,17 +68,32 @@ describe('kernel direct route owners', () => {
       }) },
       validateGeneration: async () => true,
       retireStale: async () => {},
-      callApp: async (request: any) => { calls.push(request); return { ok: true, value: 1 }; },
+      observeAppRuntime: async (request: any) => {
+        calls.push({ kind: 'observe', ...request }); return { ok: true, value: 1 };
+      },
+      actAppRuntime: async (request: any) => {
+        calls.push({ kind: 'act', ...request }); return { ok: true, value: 2 };
+      },
     });
-    const message = {
-      ownerSessionId: 'actor-1', runId: 'run-1', method: 'read', args: { path: 'x' },
-    };
-    expect(await routes['app/call'](message, { url: 'other' }))
-      .toEqual({ ok: false, error: 'app_call_unauthorized_relay' });
-    expect(await routes['app/call'](message, { url: 'offscreen' }))
+    const message = { ownerSessionId: 'actor-1', runId: 'run-1' };
+    expect(await routes['app-code/observe'](message, { url: 'other' }))
+      .toEqual({ ok: false, error: 'app_runtime_unauthorized_relay' });
+    expect(await routes['app-code/observe'](message, { url: 'offscreen' }))
       .toEqual({ ok: true, value: 1 });
+    expect(await routes['app-code/act']({
+      ...message, action: 'move', params: { x: 1 },
+    }, { url: 'offscreen' })).toEqual({ ok: true, value: 2 });
     expect(calls[0]).toMatchObject({
-      sessionId: 'actor-1', appId: 'app-1', method: 'read', signal,
+      kind: 'observe', sessionId: 'actor-1', appId: 'app-1', signal,
+    });
+    expect(calls[1]).toMatchObject({
+      kind: 'act', sessionId: 'actor-1', appId: 'app-1',
+      action: 'move', params: { x: 1 }, signal,
+    });
+    expect(await routes['app-code/act']({
+      ...message, action: '../../eval', params: {},
+    }, { url: 'offscreen' })).toMatchObject({
+      ok: false, error: 'app_runtime_action_invalid', outcomeKnown: true,
     });
   });
 
@@ -96,22 +111,25 @@ describe('kernel direct route owners', () => {
         kind: 'actor', actorType: 'app', actorSurface: 'code', instanceId: 'app-1',
       }) },
       retireStale: async () => { retired += 1; },
-      callApp: async () => { calls += 1; return { ok: true }; },
+      observeAppRuntime: async () => { calls += 1; return { ok: true }; },
+      actAppRuntime: async () => { calls += 1; return { ok: true }; },
     };
-    const message = { ownerSessionId: 'actor-1', runId: 'run-1', method: 'write' };
-    const stale = makeKernelAppCallRoutes({ ...base, validateGeneration: async () => false });
-    expect(await stale['app/call'](message, {})).toMatchObject({
-      ok: false, error: 'app_call_stale_actor_generation', outcomeKnown: true,
+    const message = { ownerSessionId: 'actor-1', runId: 'run-1' };
+    const stale = makeKernelAppRuntimeRoutes({ ...base, validateGeneration: async () => false });
+    expect(await stale['app-code/observe'](message, {})).toMatchObject({
+      ok: false, error: 'app_runtime_stale_actor_generation', outcomeKnown: true,
     });
     expect(retired).toBe(1);
     expect(calls).toBe(0);
 
-    const lost = makeKernelAppCallRoutes({
+    const lost = makeKernelAppRuntimeRoutes({
       ...base, validateGeneration: async () => true,
-      callApp: async () => { throw new Error('transport lost'); },
+      actAppRuntime: async () => { throw new Error('transport lost'); },
     });
-    expect(await lost['app/call'](message, {})).toMatchObject({
-      ok: false, code: 'app-call-outcome-unknown', outcomeKnown: false,
+    expect(await lost['app-code/act']({
+      ...message, action: 'write', params: {},
+    }, {})).toMatchObject({
+      ok: false, code: 'app-act-outcome-unknown', outcomeKnown: false,
     });
   });
 });

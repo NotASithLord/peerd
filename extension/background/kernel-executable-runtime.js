@@ -7,7 +7,7 @@ import {
 } from './kernel-engine-route-owners.js';
 import {
   makeKernelAppActorChatRoutes,
-  makeKernelAppCallRoutes,
+  makeKernelAppRuntimeRoutes,
 } from './kernel-direct-route-owners.js';
 import { makeKernelTransferRoutes } from './kernel-transfer-routes.js';
 import {
@@ -21,7 +21,6 @@ import {
   STARTUP_UNAVAILABLE_USER_FAILURE,
 } from '../shared/bounded-module-load.js';
 import { kernelUnknownOutcome } from './kernel-route-effect.js';
-import { makeAppCallHandler } from '../peerd-runtime/kernel-executable.js';
 
 const DEFAULT_FACTORIES = Object.freeze({
   makeKernelAppDeleteRoutes,
@@ -29,7 +28,7 @@ const DEFAULT_FACTORIES = Object.freeze({
   makeKernelPodRoutes,
   makeKernelWebFetchRoutes,
   makeKernelAppActorChatRoutes,
-  makeKernelAppCallRoutes,
+  makeKernelAppRuntimeRoutes,
   makeKernelTransferRoutes,
 });
 const SEALED_RELAY_ROUTES = new Set(['script/model-call', 'script-run/abort']);
@@ -37,7 +36,7 @@ const SEALED_RELAY_ROUTES = new Set(['script/model-call', 'script-run/abort']);
 /** @param {Record<string,any>} deps */
 export const createKernelExecutableRuntime = (deps) => {
   if (typeof deps.admit !== 'function' || !deps.engine || !deps.actorChat
-      || !deps.appCall || !deps.relay || !deps.transfer) {
+      || !deps.appRuntime || !deps.relay || !deps.transfer) {
     throw new TypeError('kernel-executable-runtime-config-invalid');
   }
   const factories = { ...DEFAULT_FACTORIES, ...deps.factories };
@@ -64,39 +63,6 @@ export const createKernelExecutableRuntime = (deps) => {
   };
   const isAllowed = (/** @type {string} */ route, /** @type {any} */ message,
     /** @type {any} */ sender) => deps.admit(route, message, sender) === true;
-  const loadAppCall = makeBoundedModuleLoader(async () => {
-    const appCall = typeof deps.appCall.load === 'function'
-      ? { ...deps.appCall, ...await deps.appCall.load() } : deps.appCall;
-    const makeHandler = factories.makeAppCallHandler ?? makeAppCallHandler;
-    if (typeof makeHandler !== 'function') {
-      throw new TypeError('kernel-app-call-handler-invalid');
-    }
-    return makeHandler({
-      dispatchToolCall: appCall.dispatchToolCall,
-      buildActorContext: appCall.buildActorContext,
-    });
-  }, {
-    timeoutMs: deps.appCallLoadTimeoutMs ?? 15_000,
-    loadCode: 'kernel-app-call-handler-load-failed',
-    timeoutCode: 'kernel-app-call-handler-load-timeout',
-  });
-  const callApp = async (/** @type {any} */ request) => {
-    let handler;
-    try { handler = await loadAppCall(); }
-    catch (cause) {
-      return {
-        ok: false,
-        error: STARTUP_UNAVAILABLE_USER_FAILURE,
-        code: /** @type {{code?:string}} */ (cause)?.code
-          ?? 'kernel-app-call-handler-load-failed',
-        outcomeKnown: true,
-        phase: 'startup',
-        retryable: true,
-      };
-    }
-    try { return await handler(request); }
-    catch { return kernelUnknownOutcome('app-call-outcome-unknown'); }
-  };
   const loadRelays = makeBoundedModuleLoader(async () => {
     const live = typeof deps.relay.load === 'function'
       ? await deps.relay.load() : deps.relay;
@@ -162,10 +128,11 @@ export const createKernelExecutableRuntime = (deps) => {
       isTrustedSender: (/** @type {any} */ sender) =>
         isAllowed('app/actor-chat', {}, sender),
     }),
-    ...factories.makeKernelAppCallRoutes({
-      ...deps.appCall,
-      isRelay: (/** @type {any} */ sender) => isAllowed('app/call', {}, sender),
-      callApp,
+    ...factories.makeKernelAppRuntimeRoutes({
+      ...deps.appRuntime,
+      isRelay: (/** @type {any} */ sender) =>
+        isAllowed('app-code/observe', {}, sender)
+        && isAllowed('app-code/act', {}, sender),
     }),
     ...relayRoutes,
   });

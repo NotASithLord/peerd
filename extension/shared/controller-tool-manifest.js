@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '08c7e3f5a2932a653451c160cd599ff9ba1f5e405c7624979272f2d56ee73fcd',
+  digest: '133314a427eaa646c683f56ef5b174463bca00f8f859fc2616d1dfe71d263f6b',
   tools: {
     now: {
       projectionKeys: [],
@@ -136,6 +136,16 @@ const manifestSource = {
     app_delete_file: {
       projectionKeys: ['sessionId'], effects: [],
     },
+    app_observe: {
+      projectionKeys: ['actorInstanceId'], effects: [], resultBytes: 2 * 1024 * 1024,
+    },
+    app_act: {
+      projectionKeys: ['actorInstanceId'], effects: [], resultBytes: 2 * 1024 * 1024,
+    },
+    app_code: {
+      projectionKeys: ['sessionId', 'actorInstanceId'], effects: [],
+      argumentBytes: 1024 * 1024, resultBytes: 2 * 1024 * 1024,
+    },
   },
 };
 
@@ -162,6 +172,7 @@ const notebookTools = new Set(['js_notebook', 'js_write_file', 'js_read_file', '
 const appTools = new Set([
   'app_update', 'app_open', 'app_search', 'app_delete',
   'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file',
+  'app_observe', 'app_act', 'app_code',
 ]);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>

@@ -23,10 +23,11 @@ export const appActTool = composeTool("app_act", {
     try { encoded = JSON.stringify(params); }
     catch { return { ok: false, error: 'app_action_params_not_serializable', outcomeKnown: true, outcomeKind: 'pre-effect-failure' }; }
     if (encoded.length > MAX_PARAMS_CHARS) return { ok: false, error: 'app_action_params_too_large', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
-    const call = /** @type {any} */ (ctx).appAgentCall;
-    if (typeof call !== 'function') return { ok: false, error: 'app_playtest_not_available' };
+    const authority = /** @type {{ actRuntime?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.actRuntime) return { ok: false, error: 'app_playtest_not_available' };
     try {
-      const result = await call('act', { action: args.action, params }, /** @type {any} */ (ctx).abortSignal);
+      const result = await authority.actRuntime(args.action, params);
       if (!result?.ok) {
         // appAgentCall crossed into the App document. A naked handler error is
         // not proof that the action failed before mutation: Apps routinely
