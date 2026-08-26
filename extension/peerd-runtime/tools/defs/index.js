@@ -80,8 +80,9 @@ export {
 };
 
 /**
- * Ordered list of V1 built-ins. The SW iterates this at boot to register
- * each tool.
+ * Ordered semantic inventory for universal consumers and tests. The temporary
+ * service-worker lane imports only tools/legacy-implementations.js so a moved
+ * tool cannot remain executable through this broad catalog barrel.
  */
 export const BUILTIN_TOOLS = Object.freeze([
   // inspect (one kind-discriminated tool: provider_config | storage |

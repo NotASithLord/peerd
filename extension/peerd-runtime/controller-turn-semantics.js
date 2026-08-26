@@ -22,7 +22,6 @@ import {
 import { applyComposer } from './composer/apply.js';
 import { buildMintInjection, resolveSiteUrl } from './site-clients/core.js';
 import { buildTemporalBlock } from './clock/context.js';
-import { CLOCK_TOOLS } from './clock/tools.js';
 import {
   canonicalCodeTraceLabel,
   DWEB_INBOUND_TOOL_NAMES,
@@ -56,8 +55,7 @@ import {
   registerMetadataInventory,
   registerTool,
 } from './tools/registry.js';
-import { BUILTIN_TOOLS } from './tools/defs/index.js';
-import { loadSkillTool } from './skills/load-skill-tool.js';
+import { LEGACY_TOOL_IMPLEMENTATIONS } from './tools/legacy-implementations.js';
 import { localStoreSource, mergeSources, skillRegistrySource } from './composer/command-sources.js';
 import { makeInitOrchestrator } from './memory/init-orchestrator.js';
 import { makeRequestReview } from './review/orchestrator.js';
@@ -89,7 +87,6 @@ import {
 } from './actor/web-actor.js';
 import { describeLandingStop, landingStopCard, originPhrase } from './actor/origin-lock-report.js';
 import { makeToolboxParseCheck } from './toolbox/core.js';
-import { WEB_TOOLS } from './tools/web/index.js';
 import { wrapUntrusted } from './tools/prompt-wrap.js';
 import { digestCapture } from './site-clients/digest.js';
 import { drainFetchTapInjected, installFetchTapInjected } from './dom/fetch-tap-injected.js';
@@ -104,7 +101,7 @@ let toolsRegistered = false;
 const registerTools = () => {
   if (toolsRegistered) return;
   registerMetadataInventory();
-  for (const tool of [...BUILTIN_TOOLS, ...CLOCK_TOOLS, ...WEB_TOOLS, loadSkillTool]) {
+  for (const tool of LEGACY_TOOL_IMPLEMENTATIONS) {
     registerTool(/** @type {any} */ (tool));
   }
   toolsRegistered = true;

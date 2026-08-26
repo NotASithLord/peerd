@@ -11,6 +11,7 @@ import {
   controllerHostsAppTool,
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
+  controllerHostsIntrospectionTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -19,6 +20,7 @@ import {
   executeControllerAppTool,
   executeControllerPersistenceTool,
   executeControllerPageTool,
+  executeControllerIntrospectionTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -651,6 +653,33 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             });
             const value = await executeControllerPageTool(
               request.toolName, request.args, pageAuthority,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsIntrospectionTool(request.toolName)) {
+            const introspectionAuthority = Object.freeze({
+              readActorRoster: () => rpc('turn.introspection.actor-roster', binding),
+              readProviderPosture: () => rpc('turn.introspection.provider-posture', binding),
+              readStorageSnapshot: (/** @type {string|undefined} */ prefix) =>
+                rpc('turn.introspection.storage-snapshot', { ...binding, prefix }),
+              readAutomatableTabs: () =>
+                rpc('turn.introspection.automatable-tabs', binding),
+              readDenylistPatterns: () =>
+                rpc('turn.introspection.denylist-patterns', binding),
+              readAuditEntries: () => rpc('turn.introspection.audit-entries', binding),
+              readInstalledSkill: (/** @type {string} */ name) =>
+                rpc('turn.introspection.installed-skill', { ...binding, name }),
+            });
+            const value = await executeControllerIntrospectionTool(
+              request.toolName, request.args, request.projection,
+              introspectionAuthority, { signal: options.signal },
             );
             execution = {
               protocol: request.protocol,

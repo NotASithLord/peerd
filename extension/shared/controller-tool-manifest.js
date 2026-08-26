@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: 'aca8a9b41b20144538770df22e0e47baa16160c09133a687eff26500c4471739',
+  digest: 'f170b27046c943232459b1b7cb8e58c755773f9f0561b70a46d2527a5f380805',
   tools: {
     now: {
       projectionKeys: [],
@@ -190,6 +190,13 @@ const manifestSource = {
     },
     capture: { projectionKeys: [], effects: [], resultBytes: 8 * 1024 * 1024 },
     view: { projectionKeys: [], effects: [], resultBytes: 8 * 1024 * 1024 },
+    actor_list: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
+    inspect: { projectionKeys: [], effects: [], resultBytes: 2 * 1024 * 1024 },
+    wait_until: { projectionKeys: [], effects: [], resultBytes: 4 * 1024 },
+    load_skill: {
+      projectionKeys: ['sessionId', 'messageCount', 'trimCovered'], effects: [],
+      resultBytes: 2 * 1024 * 1024,
+    },
   },
 };
 
@@ -226,6 +233,9 @@ const pageTools = new Set([
   'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type',
   'click', 'login', 'page_code', 'capture', 'view',
 ]);
+const introspectionTools = new Set([
+  'actor_list', 'inspect', 'wait_until', 'load_skill',
+]);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
   typeof name !== 'string' ? null
@@ -237,4 +247,5 @@ export const controllerToolDomain = (/** @type {unknown} */ name) =>
               : appTools.has(name) ? 'app'
                 : persistenceTools.has(name) ? 'persistence'
                   : pageTools.has(name) ? 'page'
-                    : null;
+                    : introspectionTools.has(name) ? 'introspection'
+                      : null;

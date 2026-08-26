@@ -126,7 +126,10 @@ const runPrototype = async ({
   }
 };
 
-const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('inspect')));
+// why: this suite exercises the temporary legacy-dispatch custody path. Keep
+// its fixture on a tool that is still explicitly legacy-owned as semantic
+// domains leave that lane.
+const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('read_pdf')));
 
 const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]) => ({
   sessionId: 'session-1',

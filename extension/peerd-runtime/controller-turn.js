@@ -41,3 +41,8 @@ export {
   controllerHostsPageTool,
   executeControllerPageTool,
 } from './controller-page-tools.js';
+export {
+  CONTROLLER_INTROSPECTION_TOOL_NAMES,
+  controllerHostsIntrospectionTool,
+  executeControllerIntrospectionTool,
+} from './controller-introspection-tools.js';

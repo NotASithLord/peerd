@@ -11,6 +11,7 @@ import {
   CONTROLLER_APP_TOOL_NAMES,
   CONTROLLER_PERSISTENCE_TOOL_NAMES,
   CONTROLLER_PAGE_TOOL_NAMES,
+  CONTROLLER_INTROSPECTION_TOOL_NAMES,
 } from '../../extension/peerd-runtime/controller-turn.js';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
@@ -35,6 +36,7 @@ describe('controller tool manifest', () => {
       'open_tab', 'read_page', 'snapshot', 'read_state', 'watch_changes',
       'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type',
       'click', 'login', 'page_code', 'capture', 'view',
+      'actor_list', 'inspect', 'wait_until', 'load_skill',
     ]);
     expect(hosted).toEqual([
       ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS),
@@ -46,13 +48,14 @@ describe('controller tool manifest', () => {
       ...CONTROLLER_APP_TOOL_NAMES,
       ...CONTROLLER_PERSISTENCE_TOOL_NAMES,
       ...CONTROLLER_PAGE_TOOL_NAMES,
+      ...CONTROLLER_INTROSPECTION_TOOL_NAMES,
     ]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))
       .toEqual(['goal.end']);
     expect(controllerHostsTool('now')).toBe(true);
     expect(controllerHostsTool('complete_goal')).toBe(true);
-    expect(controllerHostsTool('wait_until')).toBe(false);
+    expect(controllerHostsTool('wait_until')).toBe(true);
     expect(controllerHostsTool('__proto__')).toBe(false);
   });
 
@@ -65,13 +68,12 @@ describe('controller tool manifest', () => {
       .toBe(CONTROLLER_TOOL_MANIFEST.digest);
   });
 
-  test('the controller tool graph excludes the durable wait implementation', async () => {
+  test('the controller tool graph owns the wait implementation', async () => {
     const graph = await collectStaticModuleGraph(
-      EXTENSION_DIR, `${EXTENSION_DIR}/offscreen/controller-tool-runtime.js`,
+      EXTENSION_DIR, `${EXTENSION_DIR}/offscreen/controller-turn-runtime.js`,
     );
     const files = new Set([...graph].map((path) => relative(EXTENSION_DIR, path)));
-    expect(files.has('peerd-runtime/clock/execute.js')).toBe(true);
-    expect(files.has('peerd-runtime/clock/wait-execute.js')).toBe(false);
-    expect(files.has('peerd-runtime/clock/tools.js')).toBe(false);
+    expect(files.has('peerd-runtime/clock/wait-execute.js')).toBe(true);
+    expect(files.has('peerd-runtime/clock/tools.js')).toBe(true);
   });
 });

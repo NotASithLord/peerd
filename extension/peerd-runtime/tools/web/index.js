@@ -1,8 +1,8 @@
 // @ts-check
 // peerd-runtime/tools/web — public surface of the web wrappers.
 //
-// WEB_TOOLS is registered by the SW alongside BUILTIN_TOOLS and
-// CLOCK_TOOLS. Two tools live here: `capture` — a user-facing screenshot of the
+// WEB_TOOLS remains the universal web-wrapper inventory. Controller ownership
+// removed it from service-worker registration. Two tools live here: `capture` — a user-facing screenshot of the
 // active tab (its pixels are redacted before the model sees them) — and `view`,
 // an actor-only screenshot whose pixels DO reach the model as a vision input (so
 // it can reason about canvas/Figma/game pages the DOM tools go blind on); view's

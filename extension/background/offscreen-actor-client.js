@@ -24,6 +24,7 @@ import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 import { createAppToolAuthority } from './app-tool-authority.js';
 import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { createPageToolAuthority } from './page-tool-authority.js';
+import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -477,6 +478,19 @@ export const makeOffscreenActorClient = ({
     });
     return entry;
   };
+  const introspectionEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'introspection', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createIntrospectionToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+    });
+    return entry;
+  };
 
   const runDomainEffect = async (
     /** @type {any} */ entry,
@@ -844,6 +858,10 @@ export const makeOffscreenActorClient = ({
         sessionId: admittedContext.ctx.session?.sessionId,
         activeTabOrigin: admittedContext.ctx.activeTab?.origin,
         goalActive: !!admittedContext.ctx.todoStore,
+      } : call.name === 'load_skill' ? {
+        sessionId: admittedContext.ctx.session?.sessionId,
+        messageCount: admittedContext.ctx.session?.messageCount ?? 0,
+        trimCovered: admittedContext.ctx.session?.trimCovered ?? 0,
       } : { sessionId: admittedContext.ctx.session?.sessionId };
       return {
         ok: true, mode: 'execute', executionId,
@@ -1883,6 +1901,48 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'page/capture-owned: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/capture-owned', 'read', () =>
         entry.domainState.authority.captureOwnedTabPixels());
+    },
+    'introspection/actor-roster': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['actor_list'], []);
+      if (!entry) return { ok: false, error: 'introspection/actor-roster: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'introspection/actor-roster', 'read', () =>
+        entry.domainState.authority.readActorRoster());
+    },
+    'introspection/provider-posture': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      if (!entry) return { ok: false, error: 'introspection/provider-posture: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'introspection/provider-posture', 'read', () =>
+        entry.domainState.authority.readProviderPosture());
+    },
+    'introspection/storage-snapshot': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], ['prefix']);
+      if (!entry) return { ok: false, error: 'introspection/storage-snapshot: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'introspection/storage-snapshot', 'read', () =>
+        entry.domainState.authority.readStorageSnapshot(msg.prefix));
+    },
+    'introspection/automatable-tabs': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      if (!entry) return { ok: false, error: 'introspection/automatable-tabs: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'introspection/automatable-tabs', 'read', () =>
+        entry.domainState.authority.readAutomatableTabs());
+    },
+    'introspection/denylist-patterns': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      if (!entry) return { ok: false, error: 'introspection/denylist-patterns: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'introspection/denylist-patterns', 'read', () =>
+        entry.domainState.authority.readDenylistPatterns());
+    },
+    'introspection/audit-entries': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['inspect'], []);
+      if (!entry) return { ok: false, error: 'introspection/audit-entries: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'introspection/audit-entries', 'read', () =>
+        entry.domainState.authority.readAuditEntries());
+    },
+    'introspection/installed-skill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['load_skill'], ['name']);
+      if (!entry) return { ok: false, error: 'introspection/installed-skill: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'introspection/installed-skill', 'read', () =>
+        entry.domainState.authority.readInstalledSkill(msg.name));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

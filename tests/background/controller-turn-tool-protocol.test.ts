@@ -725,29 +725,6 @@ describe('controller turn finite tool protocol', () => {
     expect(executed).toBe(0);
   });
 
-  test('keeps wait_until in the durable legacy lane', async () => {
-    let legacy = 0;
-    let executed = 0;
-    const waitDescriptor = authorityDescriptor('wait_until');
-    const result = await runHarness({
-      ctx: context({
-        tools: [waitDescriptor], refreshTools: async () => [waitDescriptor],
-        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'waited' }; },
-        callModel: async function* () {
-          yield { type: 'tool-use-start', id: 'tool-wait-1', name: 'wait_until' };
-          yield { type: 'tool-use-delta', id: 'tool-wait-1', partialJson: '{"when":"1s"}' };
-          yield { type: 'tool-use-stop', id: 'tool-wait-1' };
-          yield { type: 'message-stop', stopReason: 'tool_use' };
-        },
-      }),
-      bridgeHooks: { prepareToolCall: async () => null },
-      executeToolCall: async () => { executed += 1; return {}; },
-    });
-    expect(result.error).toBeNull();
-    expect(legacy).toBe(1);
-    expect(executed).toBe(0);
-  });
-
   test('never falls back to legacy dispatch for a controller-hosted tool', async () => {
     let legacy = 0;
     let executed = 0;

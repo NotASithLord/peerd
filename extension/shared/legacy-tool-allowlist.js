@@ -5,8 +5,6 @@
 // legacy dispatcher. Every retained domain cutover removes names here in the
 // same commit, and the list is deleted with turn.tool.dispatch.
 export const LEGACY_TOOL_ALLOWLIST = Object.freeze([
-  'inspect',
-  'actor_list',
   'read_pdf',
   'read_doc',
   'fetch_url',
@@ -34,8 +32,6 @@ export const LEGACY_TOOL_ALLOWLIST = Object.freeze([
   'dweb_discovery',
   'dweb_guide',
   'a2a_run',
-  'wait_until',
-  'load_skill',
 ]);
 
 const allowed = new Set(LEGACY_TOOL_ALLOWLIST);

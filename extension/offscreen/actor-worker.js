@@ -15,6 +15,7 @@ import {
   controllerHostsAppTool,
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
+  controllerHostsIntrospectionTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -23,6 +24,7 @@ import {
   executeControllerAppTool,
   executeControllerPersistenceTool,
   executeControllerPageTool,
+  executeControllerIntrospectionTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -147,6 +149,13 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'page-run-program-response'
       || m.type === 'page-capture-foreground-response'
       || m.type === 'page-capture-owned-response'
+      || m.type === 'introspection-actor-roster-response'
+      || m.type === 'introspection-provider-posture-response'
+      || m.type === 'introspection-storage-snapshot-response'
+      || m.type === 'introspection-automatable-tabs-response'
+      || m.type === 'introspection-denylist-patterns-response'
+      || m.type === 'introspection-audit-entries-response'
+      || m.type === 'introspection-installed-skill-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -598,6 +607,24 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           });
           result = await executeControllerPageTool(
             prepared.toolName, prepared.args, pageAuthority,
+          );
+        } else if (controllerHostsIntrospectionTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
+            authorityValue(actorToolRequest(type, { executionId, ...value }));
+          const introspectionAuthority = Object.freeze({
+            readActorRoster: () => request('introspection-actor-roster-request'),
+            readProviderPosture: () => request('introspection-provider-posture-request'),
+            readStorageSnapshot: (/** @type {string|undefined} */ prefix) =>
+              request('introspection-storage-snapshot-request', { prefix }),
+            readAutomatableTabs: () => request('introspection-automatable-tabs-request'),
+            readDenylistPatterns: () => request('introspection-denylist-patterns-request'),
+            readAuditEntries: () => request('introspection-audit-entries-request'),
+            readInstalledSkill: (/** @type {string} */ name) =>
+              request('introspection-installed-skill-request', { name }),
+          });
+          result = await executeControllerIntrospectionTool(
+            prepared.toolName, prepared.args, prepared.projection,
+            introspectionAuthority, { signal: abort.signal },
           );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
