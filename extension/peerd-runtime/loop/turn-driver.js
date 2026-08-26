@@ -24,14 +24,10 @@ import {
 import {
   ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
 } from '../errors.js';
-// Pure policy helpers (not IO) — direct import is the gates.js precedent, and
-// keeps the actor turn setup readable. Flag-gated so they're inert when off.
-import { EXPOSURE_ACTOR, pinActorCall } from '../tools/exposure.js';
 // The prewalk planning nudge (loop/prewalk.js) — appended to the system
 // prompt only while session.prewalk.phase === 'planning'. Pure text; the
 // swap/restore IO rides the injected reconcilePrewalk/maybePrewalkSwap deps.
 import { PREWALK_NUDGE } from './prewalk.js';
-import { DWEB_INBOUND_TOOL_NAMES } from '../actor/capability-manifest.js';
 import {
   actorIsolationAvailable, actorIsolationForTurn, actorIsolationPromptBlock, actorIsolationRefusal,
   ACTOR_ISOLATION_UNAVAILABLE_TOOLS,
@@ -111,18 +107,6 @@ export const safeForegroundTabContext = (tab, denylist = []) => {
   };
 };
 
-/**
- * The positive inbound authority check. Kept pure/exported so
- * the hidden-tool forgery case is pinned without constructing a whole turn.
- * @param {{ isActor: boolean, inbound: boolean, actorType?: string, name?: string }} input
- */
-export const inboundActorCallAllowed = ({ isActor, inbound, actorType, name }) =>
-  !(isActor && inbound && actorType === 'dweb')
-  || (typeof name === 'string' && DWEB_INBOUND_TOOL_NAMES.includes(name));
-
-// pinActorCall moved to tools/exposure.js (shared with the offscreen actor tool
-// relay, a security seam — one implementation, no drift).
-
 export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
@@ -171,7 +155,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, display = null, oneShot = false, actorReply = null, actorSurface = null, captureTurnSnapshot = false, onBeforeRelease = null, turnLease = null }) => {
+const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, oneShot = false, actorReply = null, captureTurnSnapshot = false, onBeforeRelease = null, turnLease = null }) => {
   if (vault.isLocked()) throw new VaultLockedError();
   // why before session work: a cold background page starts fail-closed while
   // durable actor-host health loads. Sampling that sentinel would falsely tell
@@ -238,12 +222,12 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       }
     } catch (e) { console.warn('[turn] prewalk reconcile failed', e); }
   }
-  const isActor = turnSession?.kind === 'actor';
-  const isSpawned = turnSession?.kind === 'spawned';
+  const isActorSession = turnSession?.kind === 'actor';
+  const isSpawnedSession = turnSession?.kind === 'spawned';
   // Defensive backstop for auto-resume and any future caller: actor sessions
   // are driven only by the dedicated-worker host. Reaching this in-background
   // turn driver is a refusal, never a degraded execution mode.
-  if (isActor || isSpawned) {
+  if (isActorSession || isSpawnedSession) {
     auditLog.append({
       type: 'actor_background_turn_refused',
       sessionId,
@@ -264,34 +248,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // built the matching descriptor list. Dispatch still checks live state and
   // fails closed if the worker boundary changes after the model call starts.
   let actorIsolationForModelStep = effectiveActorIsolation();
-  /** @type {string|undefined} */
-  const actorType = isActor ? turnSession.actorType : undefined;
-  /** @type {string|undefined} */
-  const actorInstanceId = isActor ? turnSession.instanceId : undefined;
-  // DESIGN-18: a web actor's backing: 'api' (origin-owned, no tab/DOM) vs the
-  // default tab backing. Threaded to buildToolContext so the gate refuses DOM tools and
-  // the egress boundary scopes to the FIXED origin for an API actor.
-  /** @type {'tab'|'api'|undefined} */
-  const actorBacking = isActor ? turnSession.backing : undefined;
-  // DESIGN-17 P1 glass pane. When an actor turn was triggered by a LIVE
-  // message_actor (display set; absent on a boot redrain), re-emit its stream as
-  // a turn/actor-* family keyed to that tool_use card — the orchestrator renders
-  // the actor's work inline (the actor live-view, for an actor). The plain
-  // turn/* below are dropped anyway (an actor session is never the viewed chat);
-  // these carry the card correlation. fromIndex is the actor session length
-  // BEFORE this turn appends its message, so the card shows just THIS exchange —
-  // not the actor's whole accumulated history (it is a long-lived actor).
-  const actorDisplay = (display && isActor) ? display : null;
-  const displayFromIndex = actorDisplay ? (turnSession?.messages?.length ?? 0) : 0;
-  if (actorDisplay && uiConnected()) {
-    uiPorts.broadcast({
-      type: 'turn/actor-start',
-      parentToolUseId: actorDisplay.parentToolUseId,
-      sessionId, fromIndex: displayFromIndex,
-      kind: actorDisplay.kind, instanceId: actorDisplay.instanceId, name: actorDisplay.name,
-    });
-  }
-
   // Build the per-turn temporal block: absolute now + a coarse, plain-
   // words elapsed since the user's previous message (only when the gap
   // is non-trivial). prevTurnAt lives in chrome.storage.session
@@ -320,29 +276,21 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   let activeTabContext = null;
   /** @type {'private_network'|'sensitive_site'|null} */
   let protectedTabContext = null;
-  // why: an ACTOR has no user-workspace memory and no foreground-tab
-  // reorientation — its context is its INSTANCE, not the user's browsing. Pulling
-  // the user's current page + that origin's memory into an actor turn would be
-  // both wrong context AND a leak (esp. for an App actor rendering attacker
-  // content). So an actor turn skips the foreground query entirely.
-  if (!isActor) {
-    try {
-      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-      const safeTab = safeForegroundTabContext(activeTab, getDenylist());
-      activeTabContext = safeTab.activeTab;
-      protectedTabContext = safeTab.protectedTab;
-      const loaded = await memory.loadAlwaysLoaded({ workspace: safeTab.workspace });
-      memoryBlock = loaded.text;
-    } catch (e) {
-      console.warn('[sw] memory load failed', e);
-    }
+  try {
+    const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+    const safeTab = safeForegroundTabContext(activeTab, getDenylist());
+    activeTabContext = safeTab.activeTab;
+    protectedTabContext = safeTab.protectedTab;
+    const loaded = await memory.loadAlwaysLoaded({ workspace: safeTab.workspace });
+    memoryBlock = loaded.text;
+  } catch (e) {
+    console.warn('[sw] memory load failed', e);
   }
   // Progressive disclosure, cheap half: build the skill DESCRIPTIONS
   // block once per turn (names + one-line descriptions only — bodies stay
   // on disk until load_skill fetches one). Collapses to '' when no skills
-  // are installed, so the prompt placeholder costs nothing. An actor gets
-  // none — its prompt is the tuned, kind-specific block, not the user's skills.
-  const skillsBlock = isActor ? '' : await skillRegistry.describeForPrompt().catch((/** @type {any} */ e) => {
+  // are installed, so the prompt placeholder costs nothing.
+  const skillsBlock = await skillRegistry.describeForPrompt().catch((/** @type {any} */ e) => {
     console.error('[sw] skill descriptions failed', e);
     return '';
   });
@@ -351,31 +299,30 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // bytes ride a LEADING <context> message in the stream, NOT the cached system
   // block, so the main system string stays byte-stable and its prefix caches. Built
   // here (temporalBlock + the foreground tab), handed to the loop, prepended each
-  // step. An actor keeps its temporal block embedded in its own per-turn prompt
-  // (see getSystemPrompt), so it takes no context message — '' skips the injection.
+  // step.
   // Residual invalidator: memoryBlock (above) is keyed to the LIVE foreground
   // origin, so the system prefix is byte-stable per (session x foreground
   // workspace) — a mid-session origin switch re-renders the memory block and
   // costs one cache write before it caches again. Acceptable; the volatile
   // seconds-clock (the real per-turn bust) is what moved out.
   // Interruption-recovery notices ride the same per-turn context message:
-  // volatile, delivered once, never part of the cached system prefix. An
-  // actor turn skips them (notices are parented to the CHAT session).
+  // volatile, delivered once, never part of the cached system prefix.
   let recoveryBlock = '';
-  if (!isActor && typeof drainRecoveryNotices === 'function') {
+  if (typeof drainRecoveryNotices === 'function') {
     recoveryBlock = await Promise.resolve(drainRecoveryNotices(sessionId))
       .catch(() => '');
   }
   const actorExecutionBlock = () => {
-    if (isActor) return '';
     const isolation = actorIsolationForModelStep;
     return isolation ? actorIsolationPromptBlock(isolation) : '';
   };
   const runtimeCapabilities = getRuntimeCapabilities();
-  const contextMessage = isActor
-    ? ''
-    : [buildTemporalContext({ temporalBlock, activeTab: activeTabContext, protectedTab: protectedTabContext }), recoveryBlock]
-      .filter(Boolean).join('\n\n');
+  const contextMessage = [
+    buildTemporalContext({
+      temporalBlock, activeTab: activeTabContext, protectedTab: protectedTabContext,
+    }),
+    recoveryBlock,
+  ].filter(Boolean).join('\n\n');
 
   /** @type {string|null} */
   let systemPromptBase = null;
@@ -385,43 +332,24 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // behavior. Only the actor-execution suffix can change between steps.
     if (systemPromptBase === null) {
       const promptSession = await sessions.get(sessionId);
-      const actorToolContext = isActor ? await getToolContext() : null;
-      const prewalkBlock = !isActor && promptSession?.prewalk?.phase === 'planning'
+      const prewalkBlock = promptSession?.prewalk?.phase === 'planning'
         ? `\n\n${PREWALK_NUDGE}`
         : '';
       systemPromptBase = (await renderSystemPrompt({
         memoryBlock,
         // design 01: the MAIN system string must be byte-stable to cache, so the
         // orchestrator's volatile temporal bytes ride a leading <context> message
-        // (contextMessage below) instead of the system block. An ACTOR re-renders
-        // its system prompt per turn and keeps embedding the block. Relocating it
-        // there too would need offscreen-worker plumbing and is deferred. '' for the
-        // main path collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
-        temporalBlock: isActor ? temporalBlock : '',
+        // (contextMessage below) instead of the system block. An empty value
+        // collapses the {{TEMPORAL_BLOCK}} placeholder cleanly.
+        temporalBlock: '',
         skillsBlock,
         customSystemPrompt: promptSession?.customSystemPrompt,
         appRole: promptSession?.appRole,
-        // DESIGN-17: an actor gets a kind-specific tuned block appended. The base
-        // template, including all security and defense text, survives verbatim.
-        // DESIGN-18: backing distinguishes a tab-backed web actor (DOM lore) from an
-        // API actor (fetch-only origin lore). Both are actorType:'web'. instanceId lets
-        // an API actor's lore name the ONE origin it owns.
-        // PR #119: a tab web actor's action surface ('tools'|'code'), resolved by
-        // buildToolContext from the setting. The prompt teaches page.* for 'code'.
-        // #241: schemaReply rides the SAME stamp. buildToolContext sets it from the
-        // setting that arms the reply validator, so an actor is never told to emit
-        // the envelope by a build that wouldn't validate it (or vice versa).
-        ...(isActor ? {
-          actorType, backing: actorBacking, instanceId: actorInstanceId,
-          actorSurface: actorToolContext.actorSurface, schemaReply: actorToolContext.schemaReply,
-          effectiveTools: toolDescriptors.map((/** @type {any} */ tool) => tool.name),
-          inbound: actorToolContext.inbound === true,
-        } : {}),
       // why await: renderSystemPrompt is async. Concatenating the un-awaited
       // promise would bake "[object Promise]" into the prompt.
       })) + prewalkBlock;
     }
-    const suffixes = [actorExecutionBlock(), isActor ? '' : runtimeCapabilityPromptBlock(runtimeCapabilities)]
+    const suffixes = [actorExecutionBlock(), runtimeCapabilityPromptBlock(runtimeCapabilities)]
       .filter(Boolean);
     return systemPromptBase + (suffixes.length > 0 ? `\n\n${suffixes.join('\n\n')}` : '');
   };
@@ -446,17 +374,10 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const manifestSession = await sessions.get(sessionId);
   const turnPermission = await resolvePermission(manifestSession);
 
-  const toolContextArgs = isActor
-    ? {
-      exposure: EXPOSURE_ACTOR, sessionId, activeTabId, synthetic, trusted,
-      actorInstanceId, actorType, actorBacking,
-      lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
-      ...(actorSurface ? { actorSurface } : {}),
-    }
-    : {
-      exposure: 'main', sessionId, activeTabId, synthetic, trusted,
-      lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
-    };
+  const toolContextArgs = {
+    exposure: 'main', sessionId, activeTabId, synthetic, trusted,
+    lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
+  };
   /** @type {Promise<any>|null} */
   let toolContextReady = null;
   const getToolContext = () => {
@@ -490,44 +411,13 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     actorIsolationForModelStep = isolation;
     return descriptors;
   };
-  // DESIGN-17: an actor sees a FIXED set — its own kind's toolset (no
-  // progressive disclosure; the actor gate is the wall). REPLACE both the
-  // initial descriptors AND the per-step refresh below — otherwise the actor
-  // would lose all its instance tools on step 2+. Intersected with the actor's
-  // inherited tool MANIFEST (sessionToolAllow, above) so the list is honest: a
-  // browse-only chat's web actor is shown only the read DOM tools, matching the
-  // gate (which refuses click/type for it). null manifest passes through unchanged.
-  const refreshActorTools = async () => {
-    const toolContext = await getToolContext();
-    if (typeof projectToolDescriptors !== 'function') {
-      throw new TypeError('controller tool projection unavailable');
-    }
-    const descriptors = await projectToolDescriptors({
-      surface: 'actor', actorType, backing: actorBacking,
-      actorSurface: toolContext.actorSurface,
-      toolManifest: manifestSession?.toolManifest,
-      runtimeCapabilities, inbound: toolContext.inbound === true,
-    });
-    currentToolDescriptorsByName = new Map(descriptors.map(
-      (/** @type {any} */ descriptor) => [descriptor.name, descriptor],
-    ));
-    return descriptors;
-  };
-  const refreshTools = isActor ? refreshActorTools : refreshMainTools;
+  const refreshTools = refreshMainTools;
   const toolDescriptors = await refreshTools();
   const toolDispatch = async (/** @type {any} */ call) => {
     const capabilityRefusal = runtimeCapabilityRefusal(String(call?.name ?? ''), getRuntimeCapabilities());
     if (capabilityRefusal) return capabilityRefusal;
-    const actorToolContext = isActor ? await getToolContext() : null;
-    // The descriptor filter is model guidance. A remote-peer wake may use only
-    // the positive inbound dweb subset even if it forges a hidden tool name.
-    if (!inboundActorCallAllowed({
-      isActor, inbound: actorToolContext?.inbound === true, actorType, name: call?.name,
-    })) {
-      return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
-    }
     const isolation = effectiveActorIsolation();
-    if (!isActor && isolation && !actorIsolationAvailable(isolation)
+    if (isolation && !actorIsolationAvailable(isolation)
         && ACTOR_ISOLATION_UNAVAILABLE_TOOLS.has(String(call?.name ?? ''))) {
       const refusal = actorIsolationRefusal(isolation);
       return {
@@ -535,11 +425,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
       };
     }
-    const toolContext = actorToolContext ?? await getToolContext();
-    // DESIGN-17 per-instance pin: force an actor's instance-target arg to its
-    // BOUND instance before dispatch, so it can only ever touch its own (the gate
-    // is the backstop). Runs first — before the gate chain sees the args.
-    if (isActor) pinActorCall(call, actorType, actorInstanceId);
+    const toolContext = await getToolContext();
     // Engagement trigger: any dweb tool call marks the session dweb-engaged, so
     // refreshMainTools reveals the SECONDARY dweb tools on the next step. The
     // entry tools (discover/share/install) are dweb_* too, so the first one the
@@ -554,7 +440,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     // applies at the next turn's reconcile). Awaited so the phase write can't
     // race this turn's remaining dispatches; a gate failure never breaks the
     // tool result. Main turns only — actors have no prewalk state.
-    if (!isActor && typeof maybePrewalkSwap === 'function') {
+    if (typeof maybePrewalkSwap === 'function') {
       try { await maybePrewalkSwap({ sessionId, name: call?.name, ok: /** @type {any} */ (result)?.ok === true }); }
       catch (e) { console.warn('[turn] prewalk swap gate failed', e); }
     }
@@ -658,9 +544,8 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // AbortController (same clean-abort path as Stop / steer-live, so the
   // loop unwinds through its existing branch — persists partial, yields
   // stopReason='aborted').
-  // why: reuse the record resolved at turn start (also the kind source) — a
-  // actor is a SEPARATE session, so makeTurnCostTracker's per-session limitUsd
-  // gives N actors N independent caps (the documented P0 cost posture).
+  // why: reuse the record resolved at turn start instead of reading the
+  // session again at the accounting boundary.
   const costSession = turnSession;
   const costTracker = makeTurnCostTracker({
     limitUsd: settingsStore.get().spendLimitUsd,
@@ -671,13 +556,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // sessionId rides along so the panel only ticks the meter of the
       // chat actually being viewed (turns can stream in the background).
       uiPorts.broadcast(/** @type {any} */ ({ type: 'turn/cost', ...info, sessionId }));
-      // DESIGN-17 P1: surface an actor turn's spend on its card — delegated work
-      // is not free. Caps stay per-session (the spec's posture); this only makes the
-      // spend VISIBLE. info.turn is THIS exchange's tally (the actor accumulates
-      // across messages; the card shows just this turn).
-      if (actorDisplay) {
-        uiPorts.broadcast(/** @type {any} */ ({ type: 'turn/actor-cost', parentToolUseId: actorDisplay.parentToolUseId, cost: info.turn }));
-      }
     },
     onLimitExceeded: (/** @type {any} */ { sessionId: sid, spent, limitUsd }) => {
       if (uiConnected()) {
@@ -796,12 +674,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         case 'state':
           lastSession = ev.session;
           uiPorts.broadcast({ type: 'turn/state', session: ev.session });
-          // Glass pane: the full actor-session snapshot drives the inline card
-          // (collapsed, per-step — not per-delta, to keep the actor's micro-
-          // actions low-noise as the spec's display stream prescribes). Carry the
-          // card meta (fromIndex/kind/…) too, so a panel that connects mid-turn and
-          // MISSED turn/actor-start can still self-seed the card from this push.
-          if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-state', parentToolUseId: actorDisplay.parentToolUseId, session: ev.session, fromIndex: displayFromIndex, kind: actorDisplay.kind, instanceId: actorDisplay.instanceId, name: actorDisplay.name });
           break;
         case 'delta':
           uiPorts.broadcast({
@@ -849,12 +721,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
             messageId: ev.messageId,
             error: visibleError,
             ...(typeof ev.code === 'string' ? { code: ev.code } : {}),
-            ...(typeof ev.outcomeKnown === 'boolean' ? { outcomeKnown: ev.outcomeKnown } : {}),
-            ...(outcomeUnknown ? { retryable: false } : {}),
-          });
-          if (actorDisplay) uiPorts.broadcast({
-            type: 'turn/actor-error', parentToolUseId: actorDisplay.parentToolUseId,
-            sessionId: ev.sessionId, error: visibleError,
             ...(typeof ev.outcomeKnown === 'boolean' ? { outcomeKnown: ev.outcomeKnown } : {}),
             ...(outcomeUnknown ? { retryable: false } : {}),
           });
@@ -925,15 +791,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         ...(typeof detail?.outcomeKnown === 'boolean' ? { outcomeKnown: detail.outcomeKnown } : {}),
         ...(outcomeUnknown ? { retryable: false } : {}),
       });
-      // Glass pane: a LOOP-level failure (provider error etc.) never reached the
-      // stream's 'error' case, so the actor card would otherwise close as 'ok'.
-      // Surface it as a failed card.
-      if (actorDisplay) uiPorts.broadcast({
-        type: 'turn/actor-error', parentToolUseId: actorDisplay.parentToolUseId,
-        sessionId, error,
-        ...(typeof detail?.outcomeKnown === 'boolean' ? { outcomeKnown: detail.outcomeKnown } : {}),
-        ...(outcomeUnknown ? { retryable: false } : {}),
-      });
     }
   } finally {
     // release() drains the next queued wake synchronously. An opted-in caller
@@ -965,11 +822,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       .catch((/** @type {any} */ e) => console.warn('[sw] trim enrichment failed', e));
     if (uiConnected()) {
       uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false });
-      // Glass pane: close the actor card's live state (stops its spinner). An
-      // ABORT (Stop cascade / spend-limit) yields a clean stopReason='aborted' with
-      // turnOk still true, so carry `aborted` explicitly — the reducer renders it as
-      // a 'cancelled' card (not a misleading green 'ok'). ok=false marks a failure.
-      if (actorDisplay) uiPorts.broadcast({ type: 'turn/actor-done', parentToolUseId: actorDisplay.parentToolUseId, sessionId, ok: turnOk, aborted: lastStopReason === 'aborted' });
     }
   }
   // why: the outcome lets goal mode stop on a failed/aborted turn rather than

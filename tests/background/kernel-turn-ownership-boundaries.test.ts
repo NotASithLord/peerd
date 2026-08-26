@@ -183,6 +183,22 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('keeps actor prompt, projection, and result shaping out of the orchestrator authority driver', async () => {
+    const modules = await modulesFor('peerd-runtime/loop/turn-driver.js');
+    for (const module of [
+      'peerd-runtime/actor/capability-manifest.js',
+      'peerd-runtime/tools/exposure.js',
+    ]) expect(modules.has(module), `orchestrator driver imports ${module}`).toBe(false);
+    const source = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+    );
+    for (const semanticPath of [
+      "surface: 'actor'", 'turn/actor-start', 'turn/actor-state',
+      'turn/actor-cost', 'turn/actor-error', 'turn/actor-done',
+    ]) expect(source).not.toContain(semanticPath);
+    expect(source).toContain('actor_background_turn_refused');
+  });
+
   it('hosts Pod command/file semantics only in controller and isolated-worker graphs', async () => {
     const podSemanticModules = new Set([
       'peerd-runtime/controller-pod-tools.js',

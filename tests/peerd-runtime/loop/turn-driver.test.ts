@@ -11,10 +11,10 @@
 import { describe, test, expect } from 'bun:test';
 import {
   buildTemporalContext as buildTurnTemporalContext,
-  inboundActorCallAllowed,
   makeTurnDriver,
   safeForegroundTabContext,
 } from '/peerd-runtime/loop/turn-driver.js';
+import { projectControllerToolSurface } from '/peerd-runtime/controller-tool-projection.js';
 import { buildTemporalContext } from '/peerd-runtime/loop/system-prompt.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
@@ -70,20 +70,23 @@ describe('foreground tab prompt context', () => {
   });
 });
 
-test('the inbound dweb policy rejects forged hidden/signing tool calls', () => {
-  expect(inboundActorCallAllowed({
-    isActor: true, inbound: true, actorType: 'dweb', name: 'dweb_peers',
-  })).toBe(true);
+test('the controller-owned inbound dweb projection excludes signing and delegation tools', () => {
+  const input = {
+    surface: 'actor', actorType: 'dweb', backing: 'dweb',
+    actorSurface: 'tools', toolManifest: null, runtimeCapabilities: null,
+  };
+  const inbound: any = projectControllerToolSurface({ ...input, inbound: true });
+  expect(inbound.ok).toBe(true);
+  const inboundNames = new Set(inbound.tools.map((tool: any) => tool.name));
+  expect(inboundNames.has('dweb_peers')).toBe(true);
   for (const name of ['a2a_run', 'dweb_share', 'dweb_install', 'message_actor']) {
-    expect(inboundActorCallAllowed({
-      isActor: true, inbound: true, actorType: 'dweb', name,
-    })).toBe(false);
+    expect(inboundNames.has(name)).toBe(false);
   }
   // The rule is specific to untrusted daemon wakes; ordinary actor turns keep
   // their existing kind/grant gates.
-  expect(inboundActorCallAllowed({
-    isActor: true, inbound: false, actorType: 'dweb', name: 'a2a_run',
-  })).toBe(true);
+  const ordinary: any = projectControllerToolSurface({ ...input, inbound: false });
+  expect(ordinary.ok).toBe(true);
+  expect(ordinary.tools.some((tool: any) => tool.name === 'a2a_run')).toBe(true);
 });
 
 test('maybeAutoResume no-ops when the setting is off (never reads the session)', async () => {

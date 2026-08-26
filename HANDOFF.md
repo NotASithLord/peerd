@@ -77,7 +77,7 @@ relevant baseline.
 
 The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, `4dd2279`,
 `37c91a2`, `7ba4a2d`, `8379fbe`, `d3a99db`, and the current staged
-provider-pricing closure.
+provider-pricing and dead actor-driver closure.
 
 - The broad `kernel-transfer.js` aggregate and generic controller tool-effect
   lane are deleted. Orchestrator and isolated actors share exact per-domain
@@ -94,6 +94,12 @@ provider-pricing closure.
 - The frozen legacy allowlist remains at 17. No authority operation was added;
   existing exact handlers still bind owner/session/run, class, arguments,
   cancellation, replay and known/unknown outcome state.
+- The orchestrator authority driver refuses actor and spawned sessions before
+  turn construction. Its formerly unreachable actor prompt, tool projection,
+  instance pinning and actor-card result-shaping branches are deleted. Inbound
+  dweb tool narrowing is tested at the controller projection that actually
+  serves isolated actors; the SW retains only the early custody refusal and
+  actor-host availability state used by orchestrator tools.
 
 The representative tool-feature fixture now adds a real controller-owned tool
 policy (model-facing description and schema), implementation and ownership row
@@ -102,11 +108,12 @@ controller identity literals, the candidate has exactly the same SW inputs and
 byte-identical authority code. The complete fixture appears only in the
 controller graph.
 
-Store-Chrome telemetry for the latest staged checkpoint is 1,304,247 bundled
+Store-Chrome telemetry for the latest staged checkpoint is 1,302,049 bundled
 SW bytes, 447 staged inputs and a 347,857-byte minified cold graph. The
-preceding `d3a99db` package was 1,303,760 bytes with the same staged-input and
-cold-graph counts. The live `kernel-turn-live-factories.js` graph fell from 292
-to 291 modules: `peerd-provider/pricing.js`, `metadata.js` and
+preceding provider-pricing package was 1,304,247 bytes with the same
+staged-input and cold-graph counts. The live
+`kernel-turn-live-factories.js` graph remains at 291 modules after falling from
+292: `peerd-provider/pricing.js`, `metadata.js` and
 `semantic-metadata.js` are no longer reachable, leaving only the fixed provider
 error types. Provider selection and price projection now occur in the sealed
 controller and isolated actor worker. The SW validates and folds the bounded
