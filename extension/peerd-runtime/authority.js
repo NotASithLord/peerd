@@ -1,0 +1,75 @@
+// @ts-check
+// Authority-side runtime state and policy used by the MV3 turn adapter.
+
+export {
+  AUTH_BOUNDARY_STOPPED_MESSAGE,
+  AUTH_STATE_UNAVAILABLE_MESSAGE,
+  AUTH_WAITING_FOR_USER_MESSAGE,
+} from './actor/auth-wait.js';
+export { assembleDebugBundle, childSessionIdsOf } from './observability/debug-bundle.js';
+export { createCommandStore } from './composer/command-store.js';
+export { createRunCacheStore } from './tools/run-cache.js';
+export { createSkillStore } from './skills/store.js';
+export { makeActorMessaging } from './actor/actor-messaging.js';
+export { makeAsyncActors } from './actor/async-actors.js';
+export { buildAncestry } from './actor/delegation-lineage.js';
+export {
+  actorIsolationAvailable,
+  actorIsolationCapability,
+  actorIsolationRefusal,
+  actorIsolationSpawnRefusal,
+  actorIsolationTemporarilyUnavailable,
+} from './actor/isolation.js';
+export { makeMeshDispatch } from './actor/a2a-dispatch.js';
+export { createConversationRegistry } from './actor/conversation-registry.js';
+export {
+  makeApiActorBindings,
+  makeWebActorRegistry,
+  makeWebActorTabBindings,
+  retireStoppedRoamingWebActorDurably,
+} from './actor/web-actor.js';
+export { makeOriginStateStore } from './actor/origin-state-store.js';
+export { makeLearnedOrigins } from './actor/learned-origins.js';
+export {
+  authorizeSiteClientRelayOrigin,
+  hasDurableSiteClientState,
+  makeCredentialScope,
+  makeFixedSiteClientOriginGuard,
+  makeJudgeLanding,
+  makeSignInExcursionAuthorizer,
+  makeSignInExcursionRevoker,
+  makeSignInOriginAuthorizer,
+  makeSiteClientOriginAuthorizer,
+  makeSiteClientOriginGuard,
+} from './actor/origin-lock.js';
+export {
+  decideNumericTabAuthority,
+  IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
+  numericTabAuthorityRefusal,
+} from './actor/numeric-tab-authority.js';
+export { isKnownIdp, isKnownIdpHost } from './actor/idp-registry.js';
+export { isUgcHost } from './actor/ugc-registry.js';
+export { createRefRegistry } from './dom/ref-registry.js';
+export { SessionNotFoundError } from './errors.js';
+export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch-tracking.js';
+export { makeEngineLiveness } from './lifecycle/engine-liveness.js';
+export { makeLifecycleBoot } from './lifecycle/boot.js';
+export { retryClassForTool } from './lifecycle/tool-retry-class.js';
+export { classifyFailure } from './observability/failure-classify.js';
+export { makePrewalkController } from './loop/prewalk-controller.js';
+export { resolveRuntimeCapabilities } from './runtime-capabilities.js';
+export { createSiteClientStore } from './site-clients/store.js';
+export { createToolboxStore } from './toolbox/store.js';
+export { isAddressableBrowserTab } from './tools/browser-automation-policy.js';
+export { learnedOriginCovers } from './actor/origin-sensitivity.js';
+export { pullInHintInjected } from './dom/pull-in-hint-injected.js';
+export { shapeSketch } from './site-clients/shape-sketch.js';
+export { classifyBrowserAutomationTarget } from './tools/browser-automation-policy.js';
+export {
+  activityOverlayInjected,
+  clearActivityOverlayInjected,
+} from './dom/activity-overlay-injected.js';
+export {
+  isDenylistedTab,
+  liveDocumentLocationInjected,
+} from './dom/browser-target-probe.js';

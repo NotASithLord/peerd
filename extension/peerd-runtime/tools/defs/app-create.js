@@ -9,7 +9,7 @@
 
 import { APP_RUNTIME_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
-import { isBinaryAssetPath, MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/background.js';
+import { isBinaryAssetPath, MAX_MODEL_APP_FILE_BYTES } from '/peerd-engine/app-assets.js';
 import { normalizeGitRemote } from '/peerd-engine/repository/remote.js';
 import { base64ByteLength } from '/shared/bundle/bytes.js';
 

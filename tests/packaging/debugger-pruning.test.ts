@@ -27,7 +27,7 @@ describe('package-time debugger graph pruning', () => {
     expect('onTabUpdated' in pool).toBe(false);
     expect('onTabRemoved' in pool).toBe(false);
     const source = readFileSync(
-      join(REPO_ROOT, 'extension', 'background', 'kernel-turn-live-factories.js'),
+      join(REPO_ROOT, 'extension', 'background', 'kernel-turn-authority-adapter.js'),
       'utf8',
     );
     expect(source).toContain(

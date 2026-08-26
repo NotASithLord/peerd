@@ -2,8 +2,8 @@
 // Pod arm of sandbox_create: fast shell/WASI environment over existing OPFS,
 // Git, egress, and tab lifecycle primitives.
 
-import { POD_TAB_GROUP_TITLE } from '/background/pod-client.js';
-import { normalizeGitRemote } from '/peerd-engine/background.js';
+import { ENGINE_TAB_GROUP_TITLE } from '/shared/engine-tab-group.js';
+import { normalizeGitRemote } from '/peerd-engine/repository/remote.js';
 import { oncePerSession } from './once-per-session.js';
 
 /** @param {boolean} persistent */
@@ -53,7 +53,7 @@ export const createPodSandbox = async (args, ctx) => {
       depth: Math.min(500, Math.max(1, Number(args.gitDepth) || 50)),
       signal: /** @type {any} */ (ctx).abortSignal,
     });
-    try { await tracker.ensureTab(record.id, { active: false, groupTitle: POD_TAB_GROUP_TITLE }); }
+    try { await tracker.ensureTab(record.id, { active: false, groupTitle: ENGINE_TAB_GROUP_TITLE }); }
     catch (error) {
       // Background tabs may be throttled past the readiness deadline even though
       // the tab exists. Keep the live workspace; only roll back a real spawn failure.
