@@ -199,6 +199,23 @@ describe('kernel turn ownership boundaries', () => {
     expect(source).toContain('actor_background_turn_refused');
   });
 
+  it('keeps model-facing turn corrections in the sealed prompt renderer', () => {
+    const driver = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+    );
+    const renderer = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/system-prompt.js'), 'utf8',
+    );
+    for (const semanticOwner of [
+      'PREWALK_NUDGE', 'actorIsolationPromptBlock', 'runtimeCapabilityPromptBlock',
+    ]) {
+      expect(driver).not.toContain(semanticOwner);
+      expect(renderer).toContain(semanticOwner);
+    }
+    expect(driver).toContain('actorIsolation: actorIsolationForModelStep');
+    expect(driver).toContain('runtimeCapabilities');
+  });
+
   it('hosts Pod command/file semantics only in controller and isolated-worker graphs', async () => {
     const podSemanticModules = new Set([
       'peerd-runtime/controller-pod-tools.js',

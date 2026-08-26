@@ -179,6 +179,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     status: 'available', host: 'background-page-worker', reason: null, retryable: false,
   };
   let systemPromptRenders = 0;
+  const systemPromptInputs: any[] = [];
   let releases = 0;
   let goalSummary: string | null = null;
   let goalEffect: any = null;
@@ -264,8 +265,9 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     browser: { tabs: { query: async () => [] } },
     originOfTabUrl: () => '',
     skillRegistry: { describeForPrompt: async () => '' },
-    renderSystemPrompt: async () => {
+    renderSystemPrompt: async (input: any) => {
       systemPromptRenders++;
+      systemPromptInputs.push(input);
       return 'system';
     },
     resolveManifestAllow: () => null,
@@ -407,6 +409,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     recordedModelCalls,
     audits,
     systemPromptRenders: () => systemPromptRenders,
+    systemPromptInputs,
     releases: () => releases,
     goalSummary: () => goalSummary,
     goalEffect: () => goalEffect,
@@ -452,9 +455,9 @@ describe('runAgentTurn credential custody', () => {
     const fixture = turnDeps('chat', { runtimeUnsupported: true });
     await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });
     expect(fixture.loopCtx().tools.map((tool: any) => tool.name)).toEqual(['message_actor']);
-    const system = await fixture.loopCtx().getSystemPrompt();
-    expect(system).toContain('Headless script execution is unavailable');
-    expect(system).toContain('visible Notebook actor');
+    await fixture.loopCtx().getSystemPrompt();
+    expect(fixture.systemPromptInputs.at(-1).runtimeCapabilities.sealedJobs.status)
+      .toBe('unsupported');
   });
 
   test('a turn cannot snapshot actor isolation before durable host health is ready', async () => {
@@ -475,14 +478,15 @@ describe('runAgentTurn credential custody', () => {
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' }))
       .toEqual({ ok: true, stopReason: 'end_turn' });
     expect(fixture.modelCalls).toHaveLength(2);
-    expect(fixture.modelCalls[0].system).not.toContain('<actor_execution');
     expect(fixture.modelCalls[0].tools.map((tool: any) => tool.name))
       .toEqual(['message_actor', 'actor_create', 'request_review', 'actor_list']);
-    expect(fixture.modelCalls[1].system)
-      .toContain('<actor_execution status="temporarily_unavailable">');
-    expect(fixture.modelCalls[1].system).toContain('Do not retry automatically');
     expect(fixture.modelCalls[1].tools.map((tool: any) => tool.name)).toEqual(['actor_list']);
-    expect(fixture.systemPromptRenders()).toBe(1);
+    // The loop seeds the model contract, refreshes it before step one, then
+    // refreshes again after the effect. The controller sees the live bounded
+    // projection on every render; authority no longer shapes the prompt text.
+    expect(fixture.systemPromptInputs.map((input) => input.actorIsolation.status))
+      .toEqual(['available', 'available', 'temporarily_unavailable']);
+    expect(fixture.systemPromptRenders()).toBe(3);
   });
 
   test('a bound actor session is refused before the background loop, tools, or model', async () => {

@@ -152,6 +152,54 @@ describe('renderSystemPrompt — <session_instructions> augmentation', () => {
   });
 });
 
+describe('renderSystemPrompt — controller-owned turn guidance', () => {
+  const TEMPLATE = 'BASE-PROMPT {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}';
+
+  test('renders planning, actor-host, and runtime-capability corrections', async () => {
+    _setTemplateForTests(TEMPLATE);
+    const out = await renderSystemPrompt({
+      prewalkPlanning: true,
+      actorIsolation: {
+        status: 'temporarily_unavailable',
+        host: 'background-page-worker',
+        reason: 'worker startup failed',
+        retryable: true,
+      },
+      runtimeCapabilities: {
+        version: 1,
+        sealedJobs: {
+          status: 'unsupported', host: null, reasonCode: 'host_unsupported',
+          retryable: false, alternativeCode: 'use_visible_notebook',
+        },
+      } as any,
+    });
+    expect(out).toContain('<goal_opening_discipline>');
+    expect(out).toContain('<actor_execution status="temporarily_unavailable">');
+    expect(out).toContain('Do not retry automatically');
+    expect(out).toContain('<runtime_capabilities version="1">');
+    expect(out).toContain('Headless script execution is unavailable');
+  });
+
+  test('keeps actor and ephemeral prompts free of orchestrator turn guidance', async () => {
+    _setTemplateForTests(TEMPLATE);
+    const state = {
+      prewalkPlanning: true,
+      actorIsolation: {
+        status: 'temporarily_unavailable', host: 'background-page-worker',
+        reason: 'worker startup failed', retryable: true,
+      },
+    } as const;
+    const bound = await renderSystemPrompt({ ...state, actorType: 'web', backing: 'tab' });
+    const ephemeral = await renderSystemPrompt({
+      ...state, taskOverride: 'inspect the change', effectiveTools: [],
+    });
+    for (const out of [bound, ephemeral]) {
+      expect(out).not.toContain('<goal_opening_discipline>');
+      expect(out).not.toContain('<actor_execution');
+    }
+  });
+});
+
 describe('buildTemporalContext — ephemeral <active_tab> reorientation', () => {
   // design 01: the active-tab reorientation moved OUT of the cached system block
   // (renderSystemPrompt) into the per-turn <context> message so the system string
