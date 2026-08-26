@@ -18,6 +18,7 @@ import { createController } from '../../extension/offscreen/controller-runtime.j
 import {
   renderSystemPromptFromAssets,
 } from '../../extension/peerd-runtime/loop/system-prompt.js';
+import { buildTemporalBlock } from '../../extension/peerd-runtime/clock/context.js';
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
 
 const TEMPLATE = readFileSync(join(EXTENSION_DIR, 'peerd-provider/system-prompt.txt'), 'utf8');
@@ -198,6 +199,7 @@ describe('production semantic controller slice', () => {
       { taskOverride: 'review the patch', effectiveTools: ['message_actor'] },
       {
         actorType: 'app', actorSurface: 'code', instanceId: 'app-1',
+        temporalNowMs: 1_700_000_000_000,
         customSystemPrompt: 'keep responses terse',
         appRole: {
           source: 'local', publisher: 'alice', manifestDigest: 'a'.repeat(64),
@@ -207,7 +209,13 @@ describe('production semantic controller slice', () => {
       { actorType: 'web', backing: 'tab', actorSurface: 'code', schemaReply: true },
     ];
     for (const ctx of contexts) {
-      const expected = renderSystemPromptFromAssets(ctx as any, {
+      const { temporalNowMs, ...promptContext } = ctx as any;
+      const expected = renderSystemPromptFromAssets({
+        ...promptContext,
+        ...(temporalNowMs === undefined ? {} : {
+          temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: temporalNowMs }),
+        }),
+      }, {
         template: TEMPLATE, dwebBlock: DWEB_BLOCK,
       });
       await expect(semantic.renderSystemPrompt(ctx)).resolves.toBe(expected);

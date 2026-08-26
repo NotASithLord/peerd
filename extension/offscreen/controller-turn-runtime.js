@@ -34,6 +34,7 @@ import {
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
+import { buildTemporalBlock, buildTemporalContext } from '/peerd-runtime/controller.js';
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import {
   callModel as callProviderModel,
@@ -58,6 +59,33 @@ const parseJson = (/** @type {unknown} */ value, /** @type {string} */ label) =>
 };
 
 const TOOL_RPC_CONCURRENCY = 64;
+
+/** @param {Record<string, any>} ctx */
+const contextMessageForTurn = (ctx) => {
+  if (!Number.isFinite(ctx.turnNow)
+      || !(ctx.previousTurnAt === null || Number.isFinite(ctx.previousTurnAt))
+      || !(ctx.activeTabContext === null || (isRecord(ctx.activeTabContext)
+        && typeof ctx.activeTabContext.url === 'string'
+        && ctx.activeTabContext.url.length <= 2048
+        && (ctx.activeTabContext.title === undefined
+          || typeof ctx.activeTabContext.title === 'string')))
+      || !(ctx.protectedTabContext === null
+        || ctx.protectedTabContext === 'private_network'
+        || ctx.protectedTabContext === 'sensitive_site')
+      || !(ctx.recoveryBlock === undefined || (typeof ctx.recoveryBlock === 'string'
+        && ctx.recoveryBlock.length <= 16 * 1024))) {
+    throw new Error('turn context projection is invalid');
+  }
+  const temporalBlock = buildTemporalBlock({
+    lastTurnAt: ctx.previousTurnAt,
+    nowMs: ctx.turnNow,
+  });
+  return [buildTemporalContext({
+    temporalBlock,
+    activeTab: ctx.activeTabContext,
+    protectedTab: ctx.protectedTabContext,
+  }), ctx.recoveryBlock].filter(Boolean).join('\n\n');
+};
 
 /**
  * Backpressure large read-only waves before they enter private-channel
@@ -277,6 +305,7 @@ const runControllerTurnWith = async (payload, options) => {
     });
     for await (const event of runUserTurn({
       ...ctx,
+      contextMessage: contextMessageForTurn(ctx),
       reasoning: reasoningForTurn(ctx),
       contextWindow,
       sessionId: input.sessionId,
