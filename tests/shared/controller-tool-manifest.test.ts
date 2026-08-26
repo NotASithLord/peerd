@@ -9,6 +9,7 @@ import {
   CONTROLLER_VM_TOOL_NAMES,
   CONTROLLER_NOTEBOOK_TOOL_NAMES,
   CONTROLLER_APP_TOOL_NAMES,
+  CONTROLLER_PERSISTENCE_TOOL_NAMES,
 } from '../../extension/peerd-runtime/controller-turn.js';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
@@ -29,6 +30,7 @@ describe('controller tool manifest', () => {
       'app_update', 'app_open', 'app_search', 'app_delete',
       'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file',
       'app_observe', 'app_act', 'app_code',
+      'read_memory', 'remember', 'todo_init', 'todo_check', 'todo_add',
     ]);
     expect(hosted).toEqual([
       ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS),
@@ -38,6 +40,7 @@ describe('controller tool manifest', () => {
       ...CONTROLLER_VM_TOOL_NAMES,
       ...CONTROLLER_NOTEBOOK_TOOL_NAMES,
       ...CONTROLLER_APP_TOOL_NAMES,
+      ...CONTROLLER_PERSISTENCE_TOOL_NAMES,
     ]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))

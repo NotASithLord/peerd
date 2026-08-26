@@ -22,6 +22,7 @@ import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 import { createVmToolAuthority } from './vm-tool-authority.js';
 import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 import { createAppToolAuthority } from './app-tool-authority.js';
+import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -572,6 +573,19 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.domainState.authority ??= createAppToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const persistenceExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'persistence', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createPersistenceToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx,
     });
     return entry;
   };
@@ -1511,6 +1525,44 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('App code authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.runCode(value.code, value.timeoutMs));
+        }
+        case 'turn.memory.read-scope': {
+          const entry = persistenceExecutionEntry(run, value, ['read_memory'], ['scope']);
+          if (!entry) return failed('memory read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readMemoryScope(value.scope));
+        }
+        case 'turn.memory.read-subtree': {
+          const entry = persistenceExecutionEntry(
+            run, value, ['read_memory'], ['workspace', 'subpath'],
+          );
+          if (!entry) return failed('memory subtree authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readMemorySubtree(value.workspace, value.subpath));
+        }
+        case 'turn.memory.write': {
+          const entry = persistenceExecutionEntry(
+            run, value, ['remember'], ['scope', 'body'],
+          );
+          if (!entry) return failed('memory write authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.writeMemory(value.scope, value.body));
+        }
+        case 'turn.todo.read': {
+          const entry = persistenceExecutionEntry(
+            run, value, ['todo_init', 'todo_check', 'todo_add'], [],
+          );
+          if (!entry) return failed('todo read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readTodos());
+        }
+        case 'turn.todo.replace': {
+          const entry = persistenceExecutionEntry(
+            run, value, ['todo_init', 'todo_check', 'todo_add'], ['version', 'todos'],
+          );
+          if (!entry) return failed('todo replace authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.replaceTodos(value.version, value.todos));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

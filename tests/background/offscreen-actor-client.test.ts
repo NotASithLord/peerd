@@ -1051,11 +1051,11 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
   test('a REVIEW child re-stamps exposure from the PERSISTED record', async () => {
     let seenCtx: any = null;
     const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['read_memory'], review: true }) },
+      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script'], review: true }) },
       dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
       EXPOSURE_REVIEW: 'review',
     }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'read_memory', args: {} } }, OFFSCREEN));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(true);
     expect(seenCtx.exposure).toBe('review');
   });
@@ -1332,6 +1332,17 @@ describe('controller-owned repository tools: exact isolated authority', () => {
       settleToolCall: async (_prepared: any, execution: any) => execution.result,
     });
     const observed: any = await during(async (relayToken) => {
+      const tamperedPrepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: {
+          id: 'call-remember-tampered', name: 'remember',
+          args: { scope: 'user', body: 'approved' },
+        },
+      }, OFFSCREEN);
+      const tampered = await client.routes['memory/write']({
+        relayToken, executionId: tamperedPrepared.executionId,
+        scope: { kind: 'user', workspace: '', subpath: undefined }, body: 'altered',
+      }, OFFSCREEN);
       const prepared: any = await client.routes['actor/tool-prepare']({
         relayToken,
         call: { id: 'call-pod-destroy', name: 'pod_destroy', args: { podId: 'pod-1' } },
@@ -1423,6 +1434,83 @@ describe('controller-owned App tools: exact isolated authority', () => {
     });
     expect(observed.effect).toMatchObject({
       ok: false, error: 'App write receipt lost', outcomeKnown: false, retryable: false,
+    });
+    expect(observed.legacy.error).toContain('not legacy-owned');
+    expect(observed.settled).toMatchObject({
+      ok: true,
+      result: { ok: false, code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
+    });
+    expect(writes).toBe(1);
+    expect(legacyDispatches).toBe(0);
+  });
+});
+
+describe('controller-owned persistence tools: exact isolated authority', () => {
+  test('pins a confirmed memory write and preserves an unknown lost receipt', async () => {
+    let writes = 0;
+    let legacyDispatches = 0;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'spawned', grantedTools: ['remember'] }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-memory-1', kind: 'spawned' },
+        memory: {
+          writeWithConfirm: async () => {
+            writes += 1;
+            throw new Error('memory receipt lost');
+          },
+        },
+      }),
+      restrictCtxCapabilities: (ctx: any) => ctx,
+      dispatchToolCall: async () => { legacyDispatches += 1; return { ok: true }; },
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const observed: any = await during(async (relayToken) => {
+      const tamperedPrepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: {
+          id: 'call-remember-tampered', name: 'remember',
+          args: { scope: 'user', body: 'approved' },
+        },
+      }, OFFSCREEN);
+      const tampered = await client.routes['memory/write']({
+        relayToken, executionId: tamperedPrepared.executionId,
+        scope: { kind: 'user', workspace: '', subpath: undefined }, body: 'altered',
+      }, OFFSCREEN);
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: {
+          id: 'call-remember', name: 'remember',
+          args: { scope: 'user', body: 'approved' },
+        },
+      }, OFFSCREEN);
+      const effect = await client.routes['memory/write']({
+        relayToken, executionId: prepared.executionId,
+        scope: { kind: 'user', workspace: '', subpath: undefined }, body: 'approved',
+      }, OFFSCREEN);
+      const legacy = await client.routes['actor/tool-dispatch']({
+        relayToken,
+        call: {
+          id: 'call-remember', name: 'remember',
+          args: { scope: 'user', body: 'approved' },
+        },
+      }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: false, error: 'remember_failed: memory receipt lost' },
+      }, OFFSCREEN);
+      return { prepared, tampered, effect, legacy, settled };
+    }, 'actor-memory-1');
+
+    expect(observed.prepared).toMatchObject({
+      ok: true, mode: 'execute', toolName: 'remember',
+      projection: { sessionId: 'actor-memory-1', goalActive: false },
+    });
+    expect(observed.tampered).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(observed.effect).toMatchObject({
+      ok: false, error: 'memory receipt lost', outcomeKnown: false, retryable: false,
     });
     expect(observed.legacy.error).toContain('not legacy-owned');
     expect(observed.settled).toMatchObject({

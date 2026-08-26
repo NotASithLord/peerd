@@ -39,13 +39,10 @@ import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
 import { toolboxDeleteTool }          from './toolbox-delete.js';
-import { rememberTool }                from './remember.js';
-import { readMemoryTool }              from './read-memory.js';
 import { requestReviewTool }          from './request-review.js';
 import { scheduleCreateTool }          from './schedule-create.js';
 import { scheduleListTool }            from './schedule-list.js';
 import { scheduleCancelTool }          from './schedule-cancel.js';
-import { todoInitTool, todoCheckTool, todoAddTool } from './todo.js';
 import { dwebShareTool }               from './dweb-share.js';
 import { dwebDiscoverTool }            from './dweb-discover.js';
 import { dwebInstallTool }             from './dweb-install.js';
@@ -95,17 +92,11 @@ export {
   toolboxWriteTool,
   toolboxListTool,
   toolboxDeleteTool,
-  // memory (V1.5 — file-based AGENTS.md)
-  rememberTool,
-  readMemoryTool,
   requestReviewTool,
   // scheduling (background Routines — loop/scheduler.js)
   scheduleCreateTool,
   scheduleListTool,
   scheduleCancelTool,
-  todoInitTool,
-  todoCheckTool,
-  todoAddTool,
   // dweb (network — preview only, exposure-gated off the store build)
   dwebShareTool,
   dwebDiscoverTool,
@@ -188,9 +179,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   toolboxWriteTool,
   toolboxListTool,
   toolboxDeleteTool,
-  // memory (V1.5 — file-based AGENTS.md)
-  readMemoryTool,
-  rememberTool,
   // review (clean-context read-only reviewer — feature 08)
   requestReviewTool,
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
@@ -200,9 +188,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   scheduleCreateTool,
   scheduleListTool,
   scheduleCancelTool,
-  todoInitTool,
-  todoCheckTool,
-  todoAddTool,
   // dweb (network publish/discover/install — preview only; exposure.js hides
   // these from the agent on the store build, where DWEB_ENABLED is false)
   dwebDiscoverTool,
