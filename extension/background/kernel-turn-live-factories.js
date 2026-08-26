@@ -87,6 +87,7 @@ import {
   PERMISSION_MODES,
   pinActorCall,
   prepareUserAttachmentsWithDocs,
+  projectToolAuthority,
   registerMetadataInventory,
   registerTool,
   resolveManifestAllow,
@@ -1512,15 +1513,13 @@ export const createKernelTurnLiveFactories = (deps) => {
             headlessAvailable: !deps.firefox,
           }) : undefined);
       const descriptors = filterByRuntimeCapabilities(filterDescriptorsByManifest(
-        actorDescriptors(listTools(), kind, record.backing, actorSurface),
+        actorDescriptors(listToolDescriptors(), kind, record.backing, actorSurface),
         resolveManifestAllow(record.toolManifest),
       ), runtimeCapabilities);
       const inboundTools = new Set(DWEB_INBOUND_TOOL_NAMES);
       const tools = (inbound === true && kind === 'dweb'
         ? descriptors.filter((descriptor) => inboundTools.has(descriptor.name)) : descriptors)
-        .map((descriptor) => ({
-        name: descriptor.name, description: descriptor.description, schema: descriptor.schema,
-      }));
+        .map(projectToolAuthority);
       const systemPrompt = await deps.seams.renderSystemPrompt({
         actorType: kind, backing: record.backing, instanceId, actorSurface,
         schemaReply: deps.settingsStore.get().schemaValidatedReplies === true,
@@ -1592,6 +1591,7 @@ export const createKernelTurnLiveFactories = (deps) => {
         provider: record.provider, model: record.model, depth: record.depth,
         ollamaHost: deps.settingsStore.get().ollamaHost,
         tools, priorMessages: record.messages ?? [], reasoning, contextWindow,
+        runtimeCapabilities,
         oneShot: oneShot === true,
         actorType: kind, backing: record.backing, inbound: inbound === true,
         ...(actorSurface ? { actorSurface } : {}),
@@ -1910,7 +1910,7 @@ export const createKernelTurnLiveFactories = (deps) => {
     const spawnActorCore = makeSpawnActor({
       sessions: shared.sessions, appendAudit: deps.auditLog.append,
       getToolDescriptors: () => filterByRuntimeCapabilities(
-        mainAgentDescriptors(listTools()), runtimeCapabilities,
+        mainAgentDescriptors(listToolDescriptors()), runtimeCapabilities,
       ),
       turnSlots: shared.turnSlots,
       runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ options) => live.runActorIsolated({
@@ -1919,7 +1919,7 @@ export const createKernelTurnLiveFactories = (deps) => {
         ollamaHost: deps.settingsStore.get().ollamaHost,
         depth: job.depth, maxSteps: job.maxSteps,
         maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
-        tools: job.tools ?? [],
+        tools: job.tools ?? [], runtimeCapabilities,
       }, options),
       renderSystemPromptForChild: (task, effectiveTools) => deps.seams.renderSystemPrompt({
         taskOverride: task, effectiveTools,

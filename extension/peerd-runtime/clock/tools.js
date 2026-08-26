@@ -1,13 +1,7 @@
 // @ts-check
 
 import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
-import { executeNow } from './execute.js';
 import { executeWaitUntil } from './wait-execute.js';
-
-/** @type {import('/shared/tool-types.js').Tool} */
-export const nowTool = composeTool("now", {
-  execute: async () => executeNow(),
-});
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const waitUntilTool = composeTool("wait_until", {
@@ -15,4 +9,4 @@ export const waitUntilTool = composeTool("wait_until", {
 });
 
 /** @type {import('/shared/tool-types.js').Tool[]} */
-export const CLOCK_TOOLS = [nowTool, waitUntilTool];
+export const CLOCK_TOOLS = [waitUntilTool];

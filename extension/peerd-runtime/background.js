@@ -50,6 +50,7 @@ export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch
 export { makeWriteGuard } from './lifecycle/write-guard.js';
 export { makeEngineLiveness } from './lifecycle/engine-liveness.js';
 export { retryClassForTool } from './lifecycle/tool-retry-class.js';
+export { projectToolAuthority } from './tools/metadata/descriptor.js';
 export { applyStoreBootPosture, VERSION_STAMP_KEY } from './lifecycle/store-registry.js';
 export { migrationBlockedReport } from './lifecycle/recovery-report.js';
 export { classifyFailure } from './observability/failure-classify.js';

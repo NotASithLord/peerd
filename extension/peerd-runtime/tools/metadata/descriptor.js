@@ -35,6 +35,20 @@ export const toToolDescriptor = (source) => {
   }));
 };
 
+/**
+ * Structured-clone-safe authority projection. Model prose/schema are restored
+ * only after this exact policy subset reaches a sealed agent heap.
+ * @param {{name:string,primitive?:any,sideEffect?:any,dispatch?:any,retryClass?:any,dweb?:any}} descriptor
+ */
+export const projectToolAuthority = (descriptor) => Object.freeze({
+  name: descriptor.name,
+  primitive: descriptor.primitive,
+  sideEffect: descriptor.sideEffect,
+  ...(descriptor.dispatch === undefined ? {} : { dispatch: descriptor.dispatch }),
+  ...(descriptor.retryClass === undefined ? {} : { retryClass: descriptor.retryClass }),
+  ...(descriptor.dweb === undefined ? {} : { dweb: descriptor.dweb }),
+});
+
 /** @param {ToolDescriptor} descriptor @param {any} args @param {any} ctx */
 export const resolveDescriptorOrigins = (descriptor, args, ctx) =>
   descriptor.origins(args, ctx) ?? [];

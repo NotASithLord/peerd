@@ -43,6 +43,7 @@ const job = {
   systemPrompt: 'system',
   provider: 'anthropic',
   model: 'model',
+  runtimeCapabilities: { readableHtml: { mode: 'raw' } },
 };
 
 const expectFourAdmissions = async (prefix: string) => {
@@ -111,6 +112,7 @@ describe('actor worker startup proof', () => {
     expect(result).toMatchObject({ ok: true, started: true, finalText: 'done' });
     expect(worker.posted.map((message) => message.type)).toEqual(['probe', 'run']);
     expect(worker.posted[1]).toMatchObject({
+      runtimeCapabilities: job.runtimeCapabilities,
       execution: {
         protocol: EXECUTION_PROTOCOL,
         id: 'run-1',

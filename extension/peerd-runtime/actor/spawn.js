@@ -34,8 +34,9 @@ import { resolveManifestAllow } from '../tools/manifests.js';
 // goes through the web actor via message_actor, never a raw grant); filterActorSurface
 // drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
 // fenced reads, already gate-refused for a non-actor). Both are pure.
-import { mainAgentDescriptors, filterActorSurface, REVIEW_INSTANCE_READS } from '../tools/exposure.js';
+import { mainAgentDescriptors, filterActorSurface, filterByGoalActive, REVIEW_INSTANCE_READS } from '../tools/exposure.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../../shared/bounded-module-load.js';
+import { projectToolAuthority } from '../tools/metadata/descriptor.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
 
@@ -282,7 +283,8 @@ export const finalActorTurnReply = (session) => {
  * @param {Object} deps
  * @param {ReturnType<typeof import('../sessions/store.js').createSessionStore>} deps.sessions
  * @param {(entry: object) => Promise<unknown>} deps.appendAudit
- * @param {() => Array<{ name: string, description: string, schema: object }>} deps.getToolDescriptors
+ * @param {() => Array<{ name:string, primitive?:any, sideEffect?:any,
+ *   dispatch?:any, retryClass?:any, dweb?:any }>} deps.getToolDescriptors
  *   Returns the full registered tool descriptor set (parent's tools).
  * @param {() => number} [deps.now]
  * @param {{ claim: (sessionId: string) => { controller: AbortController, release: () => void }, stop: (sessionId: string) => boolean }} [deps.turnSlots]
@@ -493,7 +495,9 @@ export const makeSpawnActor = (deps) => {
     // set by an SW-side caller — the review orchestrator — because actor_create
     // builds its spawn request from an explicit field whitelist and never spreads
     // model args (pinned by a test).
-    const surface = filterActorSurface(mainAgentDescriptors(getToolDescriptors()));
+    const surface = filterByGoalActive(
+      filterActorSurface(mainAgentDescriptors(getToolDescriptors())), false,
+    );
     const grantable = review
       ? surface.concat(
         getToolDescriptors().filter((t) => REVIEW_INSTANCE_READS.has(t.name)
@@ -502,9 +506,7 @@ export const makeSpawnActor = (deps) => {
       : surface;
     const subset = narrowTools(grantable, { tools, allowRecursion, allow: parentAllow });
     const allowedNames = new Set(subset.map((t) => t.name));
-    const subsetDescriptors = subset.map((t) => ({
-      name: t.name, description: t.description, schema: t.schema,
-    }));
+    const subsetDescriptors = subset.map(projectToolAuthority);
 
     const child = await sessions.create({
       kind: 'spawned',

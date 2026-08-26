@@ -155,6 +155,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   metadataOnly = false,
   runtimeUnsupported = false,
   turnUnknown = false,
+  goalControl = false,
 } = {}) => {
   const liveGetSecret = async () => 'sk-live';
   const liveSafeFetch = async () => new Response('ok');
@@ -182,6 +183,9 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   };
   let systemPromptRenders = 0;
   let releases = 0;
+  let goalSummary: string | null = null;
+  let goalEffect: any = null;
+  let goalSettled: any = null;
   const settings = {
     reasoningEnabled: false,
     reasoningEffort: 'medium',
@@ -229,7 +233,12 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     buildToolContext: async (args: any) => {
       toolContextBuilds++;
       toolContextArgs = args;
-      return { permission: {}, actorSurface: 'tools', schemaReply: false };
+      return {
+        permission: {}, actorSurface: 'tools', schemaReply: false,
+        ...(goalControl ? {
+          completeGoalRun: (summary: string) => { goalSummary = summary; return true; },
+        } : {}),
+      };
     },
     filterByDwebActive: identity,
     filterByDwebEnabled: identity,
@@ -254,6 +263,13 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     goalActiveFor: () => false,
     dwebEngagedSessions: new Set(),
     markDwebEngaged: () => {},
+    prepareToolCall: goalControl ? async (call: any, ctx: any) => ({
+      prepared: true, call, ctx, args: call.args ?? {},
+    }) : undefined,
+    settleToolCall: goalControl ? async (_custody: any, execution: any) => {
+      goalSettled = execution.result;
+      return execution.result;
+    } : undefined,
     dispatchToolCall: async () => {
       actorIsolation = {
         status: 'temporarily_unavailable', host: 'background-page-worker',
@@ -323,6 +339,21 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     },
     runUserTurn: dynamicIsolation ? runUserTurn : async function* (ctx: any) {
       loopCtx = ctx;
+      if (goalControl) {
+        const prepared = await ctx.toolExecution.prepare({
+          id: 'goal-call', name: 'complete_goal', args: { summary: 'done' },
+        });
+        goalEffect = await ctx.toolExecution.effect(
+          prepared.custody, 'goal.end', { summary: 'done' },
+        );
+        await ctx.toolExecution.settle(prepared.custody, {
+          protocol: 1, executionId: 'goal-execution', argsDigest: 'a'.repeat(64),
+          ok: true, outcomeKnown: true, effectEntered: true,
+          value: { ok: true, content: 'Goal run ended. Summary: done' },
+        });
+        yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
+        return;
+      }
       if (turnUnknown) {
         session.messages.push({
           role: 'assistant', id: 'assistant-unknown', content: 'partial', streaming: true,
@@ -386,6 +417,9 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     audits,
     systemPromptRenders: () => systemPromptRenders,
     releases: () => releases,
+    goalSummary: () => goalSummary,
+    goalEffect: () => goalEffect,
+    goalSettled: () => goalSettled,
     loopCtx: () => loopCtx,
     toolContextArgs: () => toolContextArgs,
     toolContextBuilds: () => toolContextBuilds,
@@ -395,6 +429,18 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
 };
 
 describe('runAgentTurn credential custody', () => {
+  test('complete_goal retains exact goal.end authority in the SW', async () => {
+    const fixture = turnDeps('chat', { goalControl: true });
+    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'finish' });
+    expect(fixture.goalSummary()).toBe('done');
+    expect(fixture.goalEffect()).toEqual({
+      ok: true, outcomeKnown: true, value: { ended: true },
+    });
+    expect(fixture.goalSettled()).toMatchObject({
+      ok: true, content: 'Goal run ended. Summary: done',
+    });
+  });
+
   test('a no-tool turn never builds rich tool authority', async () => {
     const fixture = turnDeps('chat');
     await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });

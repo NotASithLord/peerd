@@ -12,11 +12,13 @@ import {
 describe('controller tool manifest', () => {
   test('admits only implemented controller tools', () => {
     const hosted = Object.keys(CONTROLLER_TOOL_MANIFEST.tools);
-    expect(hosted).toEqual(['now']);
+    expect(hosted).toEqual(['now', 'complete_goal']);
     expect(hosted).toEqual(Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS));
-    expect(hosted.every((name) => CONTROLLER_TOOL_MANIFEST.tools[name].effects.length === 0))
-      .toBe(true);
+    expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
+    expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))
+      .toEqual(['goal.end']);
     expect(controllerHostsTool('now')).toBe(true);
+    expect(controllerHostsTool('complete_goal')).toBe(true);
     expect(controllerHostsTool('wait_until')).toBe(false);
     expect(controllerHostsTool('__proto__')).toBe(false);
   });

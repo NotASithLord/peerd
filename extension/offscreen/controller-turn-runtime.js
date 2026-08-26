@@ -3,6 +3,7 @@
 // runtime imports this fixed package-local module only after a turn.run commit.
 
 import { runUserTurn } from '/peerd-runtime/controller-turn.js';
+import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { controllerHostsTool } from '/shared/controller-tool-manifest.js';
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
@@ -102,10 +103,11 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
   }
   const kernelCall = options.kernelCall;
   const ctx = parseJson(input.ctxJson, 'turn context');
-  const tools = parseJson(input.toolsJson, 'turn tools');
-  if (!isRecord(ctx) || !Array.isArray(tools)) {
+  const toolProjection = parseJson(input.toolsJson, 'turn tools');
+  if (!isRecord(ctx) || !Array.isArray(toolProjection)) {
     return { ok: false, code: 'turn-payload-invalid', outcomeKnown: true };
   }
+  const tools = hydrateToolDescriptors(toolProjection, ctx.runtimeCapabilities);
   const withToolSlot = makeToolBackpressure(options.signal);
   const runId = input.runId;
   let nestedUnknown = false;
@@ -179,8 +181,10 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
         const refreshed = await rpc('turn.tools.refresh', {});
         classifications = isRecord(refreshed?.classifications)
           ? { ...refreshed.classifications } : {};
-        return typeof refreshed?.toolsJson === 'string'
-          ? parseJson(refreshed.toolsJson, 'turn tools') : [];
+        if (typeof refreshed?.toolsJson !== 'string') return [];
+        const projection = parseJson(refreshed.toolsJson, 'turn tools');
+        if (!Array.isArray(projection)) throw new Error('turn tools wire payload is invalid');
+        return hydrateToolDescriptors(projection, ctx.runtimeCapabilities);
       },
       toolDispatch: (/** @type {unknown} */ call) => withToolSlot(async () => {
         const legacyDispatch = async () => parseJson(await rpc('turn.tool.dispatch', {

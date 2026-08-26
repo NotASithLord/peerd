@@ -17,6 +17,9 @@ import {
   inspectTool,
   BUILTIN_TOOLS,
 } from '/peerd-runtime/tools/defs/index.js';
+import { getToolMetadata } from '/peerd-runtime/semantic.js';
+
+const inspectMetadata = getToolMetadata(inspectTool.name);
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @param {import('/shared/tool-types.js').ToolResult} r @returns {any} */
@@ -235,10 +238,10 @@ describe('inspect dispatch', () => {
   });
 
   it('the schema enumerates all five kinds and requires kind', () => {
-    const props = /** @type {any} */ (inspectTool.schema).properties;
+    const props = /** @type {any} */ (inspectMetadata.schema).properties;
     expect([...props.kind.enum].sort()).toEqual(
       ['audit_log', 'denylist', 'provider_config', 'session_access', 'storage']);
-    expect(/** @type {any} */ (inspectTool.schema).required).toEqual(['kind']);
+    expect(/** @type {any} */ (inspectMetadata.schema).required).toEqual(['kind']);
   });
 });
 

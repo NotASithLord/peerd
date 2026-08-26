@@ -1,8 +1,8 @@
 // @ts-check
-// Clock tools — now, wait_until.
+// SW-executed clock tools — wait_until. `now` is controller-owned.
 
 import { describe, it, expect } from '../../../framework.js';
-import { nowTool, waitUntilTool, CLOCK_TOOLS } from '/peerd-runtime/clock/tools.js';
+import { waitUntilTool, CLOCK_TOOLS } from '/peerd-runtime/clock/tools.js';
 
 /** @param {Partial<import('/shared/tool-types.js').ToolContext>} [overrides] */
 const ctx = (overrides = {}) => /** @type {import('/shared/tool-types.js').ToolContext} */ ({
@@ -12,20 +12,8 @@ const ctx = (overrides = {}) => /** @type {import('/shared/tool-types.js').ToolC
 });
 
 describe('clock.tools', () => {
-  it('the clock surface is exactly now + wait_until (checkpoints ripped out 2026-06-12)', () => {
-    expect(CLOCK_TOOLS.map((t) => t.name).join(',')).toBe('now,wait_until');
-  });
-
-  describe('now', () => {
-    it('returns an ISO timestamp, timezone, and day-of-week', async () => {
-      const r = await nowTool.execute({}, ctx());
-      expect(r.ok).toBe(true);
-      const parsed = JSON.parse(/** @type {import('/shared/tool-types.js').ToolResultOk} */ (r).content);
-      expect(typeof parsed.iso).toBe('string');
-      expect(parsed.iso.endsWith('Z')).toBe(true);
-      expect(typeof parsed.timezone).toBe('string');
-      expect(typeof parsed.dayOfWeek).toBe('string');
-    });
+  it('the SW clock surface keeps only the durable wait', () => {
+    expect(CLOCK_TOOLS.map((t) => t.name).join(',')).toBe('wait_until');
   });
 
   describe('wait_until', () => {

@@ -9,6 +9,7 @@ import {
 import { exposureGate } from '../../extension/peerd-runtime/tools/gates.js';
 import { fetchUrlTool } from '../../extension/peerd-runtime/tools/defs/fetch-url.js';
 import { readPageTool } from '../../extension/peerd-runtime/tools/defs/read-page.js';
+import { getToolMetadata } from '../../extension/peerd-runtime/semantic.js';
 
 const names = [
   'script', 'read_run_cache', 'page_code', 'app_code', 'site_client_run', 'read_pdf',
@@ -43,7 +44,10 @@ describe('runtime host capabilities', () => {
 
   test('web descriptors describe the snapshot and raw fallbacks without naming absent readers', () => {
     const capability = resolveRuntimeCapabilities({ offscreenDocument: false });
-    const webDescriptors = filterByRuntimeCapabilities([fetchUrlTool, readPageTool], capability);
+    const webDescriptors = filterByRuntimeCapabilities([
+      { ...fetchUrlTool, ...getToolMetadata('fetch_url') },
+      { ...readPageTool, ...getToolMetadata('read_page') },
+    ], capability);
     expect(webDescriptors[0].description).toContain('sanitized raw response body');
     expect(webDescriptors[0].description).not.toContain('read_doc');
     expect(webDescriptors[0].schema.properties.raw.description).toContain('no hosted Markdown extractor');

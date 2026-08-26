@@ -1,6 +1,6 @@
 // Tool → retry class: the derivation rules, and §16.1's inventory obligation
 // ("every side-effecting tool has a retry classification") asserted against the
-// REAL registered tool list rather than a hand-copied one — so a new tool def
+// REAL authority inventory rather than a hand-copied one — so a new tool
 // that lands without a considered class fails here, not in production recovery.
 
 import { describe, test, expect } from 'bun:test';
@@ -9,14 +9,10 @@ import {
 } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import { isRetryClass } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
 
-// The shared test bootstrap owns the browser identity. Replacing the global in
-// one suite is unsafe because browser-api.js intentionally binds by identity.
-const { BUILTIN_TOOLS } = await import('../../../extension/peerd-runtime/tools/defs/index.js');
-const { WEB_TOOLS } = await import('../../../extension/peerd-runtime/tools/web/index.js');
-const { CLOCK_TOOLS } = await import('../../../extension/peerd-runtime/clock/index.js');
+import { listToolPolicies } from '../../../extension/peerd-runtime/tools/metadata/policy.js';
 
-/** The whole registered inventory the SW assembles at boot. */
-const ALL_TOOLS = [...BUILTIN_TOOLS, ...WEB_TOOLS, ...CLOCK_TOOLS];
+/** The whole compact authority inventory the SW installs at boot. */
+const ALL_TOOLS = listToolPolicies();
 
 const byName = new Map(ALL_TOOLS.map((t) => [t.name, t] as const));
 
