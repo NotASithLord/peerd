@@ -14,12 +14,6 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 
 const MAX_BYTES = 50 * 1024 * 1024;  // 50MB cap per fetch
 
-/**
- * The vm writeFile() surface vm_import exercises (offscreen VM client).
- * @typedef {Object} VmWriter
- * @property {(path: string, bytes: Uint8Array, opts: { sessionId?: string }) => Promise<unknown>} writeFile
- */
-
 /** @type {import('/shared/tool-types.js').Tool} */
 export const vmImportTool = composeTool("vm_import", {
 
@@ -28,50 +22,21 @@ export const vmImportTool = composeTool("vm_import", {
     if (typeof args?.path !== 'string' || !args.path.startsWith('/')) {
       return { ok: false, error: 'path_required_absolute' };
     }
-    // why: ctx.vm is the opaque `Object` contract slot; narrow it to the
-    // writeFile() surface this tool exercises.
-    const vm = /** @type {VmWriter | undefined} */ (ctx.vm);
-    if (!vm || typeof vm.writeFile !== 'function') {
-      return { ok: false, error: 'vm_not_available' };
-    }
-    if (typeof ctx.webFetch !== 'function') {
-      return { ok: false, error: 'web_fetch_not_available' };
-    }
-    /** @type {Uint8Array} */
-    let bytes;
-    /** @type {number} */
-    let status;
-    let contentType;
+    const authority = /** @type {{ importFile?: (url:string,path:string,maxBytes:number)=>Promise<{bytes:number,status:number,contentType:string}> }} */ (
+      /** @type {any} */ (ctx).vmAuthority);
+    if (!authority?.importFile) return { ok: false, error: 'vm_not_available' };
     try {
-      const res = await ctx.webFetch(args.url);
-      status = res.status;
-      contentType = res.headers.get('content-type') ?? '';
-      if (!res.ok) {
-        return { ok: false, error: `fetch_failed: HTTP ${res.status}` };
-      }
-      const ab = await res.arrayBuffer();
-      if (ab.byteLength > MAX_BYTES) {
-        return { ok: false, error: `payload_too_large: ${ab.byteLength}B > ${MAX_BYTES}B` };
-      }
-      bytes = new Uint8Array(ab);
+      const result = await authority.importFile(args.url, args.path, MAX_BYTES);
+      return {
+        ok: true,
+        content: JSON.stringify({
+          url: args.url, path: args.path, bytes: result.bytes,
+          status: result.status, contentType: result.contentType,
+        }, null, 2),
+      };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
-      return { ok: false, error: `fetch_threw: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+      return { ok: false, error: err?.message ?? String(e) };
     }
-    try {
-      await vm.writeFile(args.path, bytes, {
-        sessionId: ctx.session?.sessionId,
-      });
-    } catch (e) {
-      const err = /** @type {{ name?: string, message?: string }} */ (e);
-      return { ok: false, error: `write_threw: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
-    }
-    return {
-      ok: true,
-      content: JSON.stringify({
-        url: args.url, path: args.path,
-        bytes: bytes.byteLength, status, contentType,
-      }, null, 2),
-    };
   },
 });

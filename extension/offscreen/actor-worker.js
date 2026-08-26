@@ -10,9 +10,11 @@ import {
   controllerHostsActorTool,
   controllerHostsPodTool,
   controllerHostsRepositoryTool,
+  controllerHostsVmTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
+  executeControllerVmTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -90,6 +92,13 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'repository-link-response'
       || m.type === 'repository-fetch-response'
       || m.type === 'repository-push-response'
+      || m.type === 'vm-read-response'
+      || m.type === 'vm-list-response'
+      || m.type === 'vm-set-default-response'
+      || m.type === 'vm-run-response'
+      || m.type === 'vm-import-file-response'
+      || m.type === 'vm-write-text-file-response'
+      || m.type === 'vm-destroy-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -370,6 +379,36 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             prepared.toolName, prepared.args, prepared.projection, repositoryAuthority,
             { signal: abort.signal },
           );
+        } else if (controllerHostsVmTool(prepared.toolName)) {
+          const vmAuthority = Object.freeze({
+            readVm: (/** @type {string} */ vmId) => authorityValue(actorToolRequest(
+              'vm-read-request', { executionId, vmId },
+            )),
+            listVms: () => authorityValue(actorToolRequest(
+              'vm-list-request', { executionId },
+            )),
+            setDefaultVm: (/** @type {string} */ vmId) => authorityValue(actorToolRequest(
+              'vm-set-default-request', { executionId, vmId },
+            )),
+            runVm: (/** @type {string} */ command, /** @type {number} */ timeoutMs,
+              /** @type {string|undefined} */ vmId) => authorityValue(actorToolRequest(
+              'vm-run-request', { executionId, command, timeoutMs, vmId },
+            )),
+            importFile: (/** @type {string} */ url, /** @type {string} */ path,
+              /** @type {number} */ maxBytes) => authorityValue(actorToolRequest(
+              'vm-import-file-request', { executionId, url, path, maxBytes },
+            )),
+            writeTextFile: (/** @type {string} */ path, /** @type {string} */ content) =>
+              authorityValue(actorToolRequest(
+                'vm-write-text-file-request', { executionId, path, content },
+              )),
+            destroyVm: (/** @type {string} */ vmId) => authorityValue(actorToolRequest(
+              'vm-destroy-request', { executionId, vmId },
+            )),
+          });
+          result = await executeControllerVmTool(
+            prepared.toolName, prepared.args, vmAuthority,
+          );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
         });
@@ -431,6 +470,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         controllerHostsActorTool(call?.name)
         || controllerHostsPodTool(call?.name)
         || controllerHostsRepositoryTool(call?.name)
+        || controllerHostsVmTool(call?.name)
       )
         ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling

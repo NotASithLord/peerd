@@ -193,7 +193,7 @@ describe('run() — Stop-cascade aborted stamping', () => {
       sendMessage: async (m: any) => {
         if (m.type !== 'actor/run') return { ok: true };
         relay = client.routes['actor/tool-dispatch']({
-          relayToken: m.job.relayToken, call: { name: 'vm_boot', args: {} },
+          relayToken: m.job.relayToken, call: { name: 'js_notebook', args: {} },
         }, OFFSCREEN);
         await started;
         ac.abort();
@@ -368,7 +368,7 @@ describe('run() — Stop-cascade aborted stamping', () => {
         relayToken = job.relayToken;
         relayAgain = sendToSW;
         const relay = sendToSW('actor/tool-dispatch', {
-          relayToken, call: { name: 'vm_boot', args: {} },
+          relayToken, call: { name: 'js_notebook', args: {} },
         });
         await started;
         onRelayDrain();
@@ -400,7 +400,7 @@ describe('run() — Stop-cascade aborted stamping', () => {
     expect(workerAborts).toHaveLength(1);
     expect(relayAgain).not.toBeNull();
     expect(await (relayAgain as unknown as (type: string, payload: any) => Promise<any>)(
-      'actor/tool-dispatch', { relayToken, call: { name: 'vm_boot', args: {} } },
+      'actor/tool-dispatch', { relayToken, call: { name: 'js_notebook', args: {} } },
     )).toEqual({ ok: false, error: 'actor/tool-dispatch: unauthorized relay' });
   });
 });
@@ -511,7 +511,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
     });
     const out = await during(
       (relayToken) => client.routes['actor/tool-dispatch']({
-        relayToken, call: { name: 'vm_boot', args: {} },
+        relayToken, call: { name: 'js_notebook', args: {} },
       }, OFFSCREEN),
       's1', undefined, {}, { signal: controller.signal },
     );
@@ -527,7 +527,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       dispatchToolCall: async () => { throw new Error('dispatch receipt lost'); },
     });
     const out = await during((relayToken) => client.routes['actor/tool-dispatch']({
-      relayToken, call: { name: 'vm_boot', args: {} },
+      relayToken, call: { name: 'js_notebook', args: {} },
     }, OFFSCREEN));
     expect(out).toMatchObject({
       ok: false, error: 'dispatch receipt lost', outcomeKnown: false, retryable: false,
@@ -591,7 +591,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       buildToolContext: async (o: any) => { ctxOpts = o; return {}; },
       dispatchToolCall: async () => ({ ok: true }),
     });
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_boot', args: {} } }, OFFSCREEN), 'engine');
+    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'js_notebook', args: {} } }, OFFSCREEN), 'engine');
     expect(ctxOpts.activeTabId).toBeUndefined();     // engine acts on its instance, not a tab
     // The grant now decides WHICH session is dispatched against, so a chat-session
     // grant reaches the kind check and is refused there.
@@ -883,10 +883,10 @@ describe('relay quotas', () => {
         inferenceInput(relayToken), OFFSCREEN,
       );
       const firstTool = await client.routes['actor/tool-dispatch']({
-        relayToken, call: { name: 'vm_boot', args: {} },
+        relayToken, call: { name: 'js_notebook', args: {} },
       }, OFFSCREEN);
       const secondTool = await client.routes['actor/tool-dispatch']({
-        relayToken, call: { name: 'vm_boot', args: {} },
+        relayToken, call: { name: 'js_notebook', args: {} },
       }, OFFSCREEN);
       return { firstModel, secondModel, firstTool, secondTool };
     });

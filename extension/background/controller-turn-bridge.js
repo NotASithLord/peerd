@@ -19,6 +19,7 @@ import {
 import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { createRepositoryToolAuthority } from './repository-tool-authority.js';
+import { createVmToolAuthority } from './vm-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -529,6 +530,20 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.domainState.authority ??= createRepositoryToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const vmExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+    /** @type {string[]} */ optional = [],
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'vm', tools, fields, optional);
+    if (!entry) return null;
+    entry.domainState.authority ??= createVmToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx,
     });
     return entry;
   };
@@ -1280,6 +1295,54 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('repository push authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.push(value.target, value.branch));
+        }
+        case 'turn.vm.read': {
+          const entry = vmExecutionEntry(run, value, ['vm_boot', 'vm_delete'], ['vmId']);
+          if (!entry) return failed('VM read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readVm(value.vmId));
+        }
+        case 'turn.vm.list': {
+          const entry = vmExecutionEntry(run, value, ['vm_boot'], []);
+          if (!entry) return failed('VM list authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.listVms());
+        }
+        case 'turn.vm.set-default': {
+          const entry = vmExecutionEntry(run, value, ['vm_boot'], ['vmId']);
+          if (!entry) return failed('VM default authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'control', () =>
+            entry.domainState.authority.setDefaultVm(value.vmId));
+        }
+        case 'turn.vm.run': {
+          const entry = vmExecutionEntry(
+            run, value, ['vm_boot'], ['command', 'timeoutMs'], ['vmId'],
+          );
+          if (!entry) return failed('VM run authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.runVm(value.command, value.timeoutMs, value.vmId));
+        }
+        case 'turn.vm.import-file': {
+          const entry = vmExecutionEntry(
+            run, value, ['vm_import'], ['url', 'path', 'maxBytes'],
+          );
+          if (!entry) return failed('VM import authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.importFile(value.url, value.path, value.maxBytes));
+        }
+        case 'turn.vm.write-text-file': {
+          const entry = vmExecutionEntry(
+            run, value, ['vm_write_file'], ['path', 'content'],
+          );
+          if (!entry) return failed('VM file-write authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.writeTextFile(value.path, value.content));
+        }
+        case 'turn.vm.destroy': {
+          const entry = vmExecutionEntry(run, value, ['vm_delete'], ['vmId']);
+          if (!entry) return failed('VM destroy authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.destroyVm(value.vmId));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

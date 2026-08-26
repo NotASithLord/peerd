@@ -67,6 +67,13 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.repository.link': { tool: 'repo_remote', riskClass: 'commit' },
   'turn.repository.fetch': { tool: 'repo_remote', riskClass: 'commit' },
   'turn.repository.push': { tool: 'repo_remote', riskClass: 'resource' },
+  'turn.vm.read': { tools: ['vm_boot', 'vm_delete'], riskClass: 'read' },
+  'turn.vm.list': { tool: 'vm_boot', riskClass: 'read' },
+  'turn.vm.set-default': { tool: 'vm_boot', riskClass: 'control' },
+  'turn.vm.run': { tool: 'vm_boot', riskClass: 'resource' },
+  'turn.vm.import-file': { tool: 'vm_import', riskClass: 'resource' },
+  'turn.vm.write-text-file': { tool: 'vm_write_file', riskClass: 'commit' },
+  'turn.vm.destroy': { tool: 'vm_delete', riskClass: 'commit' },
 });
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
@@ -261,6 +268,13 @@ export const createControllerKernelQuota = (
     'turn.repository.link': toolBudget,
     'turn.repository.fetch': toolBudget,
     'turn.repository.push': toolBudget,
+    'turn.vm.read': toolBudget,
+    'turn.vm.list': toolBudget,
+    'turn.vm.set-default': toolBudget,
+    'turn.vm.run': toolBudget,
+    'turn.vm.import-file': toolBudget,
+    'turn.vm.write-text-file': toolBudget,
+    'turn.vm.destroy': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
     'turn.finalize': 1,

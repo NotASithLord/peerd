@@ -19,6 +19,7 @@ import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { createRepositoryToolAuthority } from './repository-tool-authority.js';
+import { createVmToolAuthority } from './vm-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -404,6 +405,19 @@ export const makeOffscreenActorClient = ({
       && entry?.open === true
       && controllerToolDomain(entry.toolName) === domain
       && toolNames.includes(entry.toolName) ? entry : null;
+  };
+  const vmEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'vm', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createVmToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+    });
+    return entry;
   };
 
   const runDomainEffect = async (
@@ -1381,6 +1395,76 @@ export const makeOffscreenActorClient = ({
       });
       return runDomainEffect(entry, 'repository/push', 'resource', () =>
         entry.domainState.authority.push(msg.target, msg.branch));
+    },
+    'vm/read': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = vmEntry(grant, msg, ['vm_boot', 'vm_delete'], ['vmId']);
+      if (!entry) return { ok: false, error: 'vm/read: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'vm/read', 'read', () =>
+        entry.domainState.authority.readVm(msg.vmId));
+    },
+    'vm/list': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = vmEntry(grant, msg, ['vm_boot'], []);
+      if (!entry) return { ok: false, error: 'vm/list: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'vm/list', 'read', () =>
+        entry.domainState.authority.listVms());
+    },
+    'vm/set-default': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = vmEntry(grant, msg, ['vm_boot'], ['vmId']);
+      if (!entry) return { ok: false, error: 'vm/set-default: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'vm/set-default', 'control', () =>
+        entry.domainState.authority.setDefaultVm(msg.vmId));
+    },
+    'vm/run': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = vmEntry(grant, msg, ['vm_boot'], ['command', 'timeoutMs', 'vmId']);
+      if (!entry) return { ok: false, error: 'vm/run: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'vm/run', 'resource', () =>
+        entry.domainState.authority.runVm(msg.command, msg.timeoutMs, msg.vmId));
+    },
+    'vm/import-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = vmEntry(grant, msg, ['vm_import'], ['url', 'path', 'maxBytes']);
+      if (!entry) return { ok: false, error: 'vm/import-file: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'vm/import-file', 'resource', () =>
+        entry.domainState.authority.importFile(msg.url, msg.path, msg.maxBytes));
+    },
+    'vm/write-text-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = vmEntry(grant, msg, ['vm_write_file'], ['path', 'content']);
+      if (!entry) return { ok: false, error: 'vm/write-text-file: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'vm/write-text-file', 'commit', () =>
+        entry.domainState.authority.writeTextFile(msg.path, msg.content));
+    },
+    'vm/destroy': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = vmEntry(grant, msg, ['vm_delete'], ['vmId']);
+      if (!entry) return { ok: false, error: 'vm/destroy: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'vm/destroy', 'commit', () =>
+        entry.domainState.authority.destroyVm(msg.vmId));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

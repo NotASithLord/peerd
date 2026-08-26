@@ -49,12 +49,9 @@ export const vmBootTool = composeTool("vm_boot", {
     if (typeof args?.cmd !== 'string' || !args.cmd.trim()) {
       return { ok: false, error: 'cmd_required' };
     }
-    // why: ctx.vm is the opaque `Object` contract slot; narrow it to the
-    // run() surface this tool exercises (offscreen VM client).
-    const vm = /** @type {VmRunner | undefined} */ (ctx.vm);
-    if (!vm || typeof vm.run !== 'function') {
-      return { ok: false, error: 'vm_not_available' };
-    }
+    const authority = /** @type {{ readVm?: (id:string)=>Promise<VmRecord|null|undefined>, listVms?: ()=>Promise<VmRecord[]>, setDefaultVm?: (id:string)=>Promise<unknown>, runVm?: (cmd:string,timeoutMs:number,vmId?:string)=>Promise<VmRunResult> }} */ (
+      /** @type {any} */ (ctx).vmAuthority);
+    if (!authority?.runVm) return { ok: false, error: 'vm_not_available' };
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
     // Resolve `vm` -- accept either id (vm-...) or name. Name lookup
     // is case-insensitive against the registry.
@@ -62,17 +59,15 @@ export const vmBootTool = composeTool("vm_boot", {
     let targetVmId;
     if (typeof args.vm === 'string' && args.vm.trim().length > 0) {
       const want = args.vm.trim();
-      // why: vmRegistry is an SW-injected context extra not on the
-      // ToolContext contract slot; narrow to the surface this tool uses.
-      const vmRegistry = /** @type {VmRegistry | undefined} */ (
-        /** @type {{ vmRegistry?: unknown }} */ (ctx).vmRegistry);
-      if (!vmRegistry) return { ok: false, error: 'vm_registry_unavailable' };
+      if (!authority.readVm || !authority.listVms || !authority.setDefaultVm) {
+        return { ok: false, error: 'vm_registry_unavailable' };
+      }
       if (want.startsWith('vm-')) {
-        const rec = await vmRegistry.get(want);
+        const rec = await authority.readVm(want);
         if (!rec) return { ok: false, error: `vm_not_found: ${want}` };
         targetVmId = want;
       } else {
-        const all = await vmRegistry.list();
+        const all = await authority.listVms();
         const lower = want.toLowerCase();
         const found = all.find((rec) => rec.name.toLowerCase() === lower);
         if (!found) return { ok: false, error: `vm_not_found: ${want}` };
@@ -82,17 +77,13 @@ export const vmBootTool = composeTool("vm_boot", {
       // calls route to the same VM. No "attach" concept; just remember
       // what we touched. (targetVmId is always set on this branch — the
       // explicit check also satisfies the type narrower.)
-      if (ctx.session?.sessionId && targetVmId) {
-        try { await vmRegistry.setDefaultForSession(ctx.session.sessionId, targetVmId); }
+      if (targetVmId) {
+        try { await authority.setDefaultVm(targetVmId); }
         catch (e) { console.debug('[vm_boot] MRU bump failed', e); }
       }
     }
     try {
-      const result = await vm.run(args.cmd, {
-        timeoutMs,
-        sessionId: ctx.session?.sessionId,
-        vmId: targetVmId,
-      });
+      const result = await authority.runVm(args.cmd, timeoutMs, targetVmId);
       return { ok: true, content: formatRunResult(args.cmd, result) };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);

@@ -34,41 +34,20 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 export const vmDeleteTool = composeTool("vm_delete", {
 
   execute: async (args, ctx) => {
-    // why: vmRegistry / vmTabTracker are SW-injected context extras not on the
-    // ToolContext contract slot; narrow to the surfaces this tool exercises.
-    const vmRegistry = /** @type {VmRegistry | undefined} */ (
-      /** @type {{ vmRegistry?: unknown }} */ (ctx).vmRegistry);
-    const vmTabTracker = /** @type {VmTabTracker | undefined} */ (
-      /** @type {{ vmTabTracker?: unknown }} */ (ctx).vmTabTracker);
-    if (!vmRegistry || !vmTabTracker) {
+    const authority = /** @type {{ readVm?: (id:string)=>Promise<VmRecord|null|undefined>, destroyVm?: (id:string)=>Promise<unknown> }} */ (
+      /** @type {any} */ (ctx).vmAuthority);
+    if (!authority?.readVm || !authority.destroyVm) {
       return { ok: false, error: 'vm_registry_unavailable' };
     }
     if (typeof args?.vmId !== 'string') return { ok: false, error: 'vmId_required' };
-    const rec = await vmRegistry.get(args.vmId);
+    const rec = await authority.readVm(args.vmId);
     if (!rec) return { ok: false, error: 'vm_not_found' };
     if (rec.pinned) return { ok: false, error: 'vm_pinned' };
-    // Close tab → drop IDB → remove from registry. Tab close fires
-    // chrome.tabs.onRemoved which clears the tracker entry.
-    await vmTabTracker.closeTab(args.vmId);
-    // why: brief settle so the tab actually closes before IDB delete.
-    // Otherwise deleteDatabase is blocked by the open IDB connection
-    // in the tab and rejects.
-    await new Promise((r) => setTimeout(r, 200));
     try {
-      if (typeof indexedDB !== 'undefined') {
-        await new Promise((resolve, reject) => {
-          const req = indexedDB.deleteDatabase(rec.diskOverlayKey);
-          req.onsuccess = () => resolve(undefined);
-          req.onerror = () => reject(req.error ?? new Error('delete failed'));
-          req.onblocked = () => reject(new Error('disk overlay still open elsewhere'));
-        });
-      }
+      await authority.destroyVm(args.vmId);
     } catch (e) {
-      // Non-fatal: registry entry will be removed anyway; user can
-      // run vm_delete again later to retry the IDB cleanup.
-      console.warn('[vm_delete] IDB delete failed', e);
+      return { ok: false, error: `vm_delete_failed: ${/** @type {{message?:string}} */ (e)?.message ?? String(e)}` };
     }
-    await vmRegistry.delete(args.vmId);
     return {
       ok: true,
       content: JSON.stringify({
