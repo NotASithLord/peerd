@@ -14,12 +14,12 @@
 //     crossed the user's spendLimitUsd, the call is refused before any
 //     tokens burn — background quality work must never push a capped
 //     session further past its cap.
-//   - the cost FOLD: the child's usage is priced via the injected
-//     costOf and folded into the PARENT session's persisted tally, so
+//   - the cost FOLD: the child's sealed-controller price projection is folded
+//     into the PARENT session's persisted tally, so
 //     the cost tracker / CostChip / the next turn's hard-limit check
 //     all see these calls. Background spend is never invisible.
 //
-// All IO injected (spawnActor, sessions, costOf) — bun-testable.
+// All IO injected (spawnActor, sessions) — Bun-testable.
 
 import { normalizeTally, addUsage, limitExceeded } from '../cost/accumulator.js';
 
@@ -30,19 +30,15 @@ export const CHEAP_CALL_MAX_OUTPUT_TOKENS = 700;
 
 /**
  * @param {Object} deps
- * @param {(req: object) => Promise<{ result: string, sessionId: string|null, usage?: TokenUsage, refused?: true, durationMs?: number }>} deps.spawnActor
+ * @param {(req: object) => Promise<{ result: string, sessionId: string|null, usage?: TokenUsage, price?:{cost:number,estimated:boolean}, refused?: true, durationMs?: number }>} deps.spawnActor
  *   The bound spawn from makeSpawnActor (SW passes its own bound fn).
  * @param {{ get: Function, setCost: Function }} deps.sessions
- * @param {(model: string|undefined, usage: TokenUsage) => { cost: number }} deps.costOf
- *   Pricing fn (peerd-provider's local table), pre-bound to the user's
- *   pricing overrides by the SW. Injected, never imported — DI rule.
  * @param {() => number|undefined} [deps.getSpendLimitUsd]  settings.spendLimitUsd at call time
  * @param {(entry: object) => Promise<unknown>} [deps.appendAudit]
  */
 export const makeCheapCall = ({
   spawnActor,
   sessions,
-  costOf,
   getSpendLimitUsd = () => 0,
   appendAudit = async () => {},
 }) => {
@@ -101,11 +97,18 @@ export const makeCheapCall = ({
     // snapshot (these calls run between turns by design — see the
     // queue-then-drain rationale in summary-enrichment.js).
     if (out.usage) {
-      let cost = 0;
-      try { cost = costOf(session.model, out.usage)?.cost ?? 0; } catch { cost = 0; }
+      const price = out.price;
+      if (!price || typeof price.cost !== 'number' || !Number.isFinite(price.cost)
+          || price.cost < 0 || typeof price.estimated !== 'boolean') {
+        appendAudit({
+          type: 'cheap_call_price_invalid', sessionId,
+          details: { label, performed: true, outcomeKnown: true },
+        }).catch(() => {});
+        return { ok: false, reason: 'price-invalid', usage: out.usage };
+      }
       try {
         const fresh = await sessions.get(sessionId);
-        const folded = addUsage(normalizeTally(fresh?.cost), out.usage, cost);
+        const folded = addUsage(normalizeTally(fresh?.cost), out.usage, price.cost);
         await sessions.setCost(sessionId, folded);
       } catch { /* a persist hiccup must not fail the call */ }
     }

@@ -28,10 +28,9 @@ describe('makeCheapCall', () => {
     const call = makeCheapCall({
       spawnActor: async (req: any) => {
         spawns.push(req);
-        return { result: 'the answer', sessionId: 'child-1', usage };
+        return { result: 'the answer', sessionId: 'child-1', usage, price: { cost: 0.02, estimated: true } };
       },
       sessions: sessions as any,
-      costOf: () => ({ cost: 0.02 }),
       getSpendLimitUsd: () => 5,
     });
     const res = await call({ sessionId: 's1', task: 'summarise', label: 'trim-summary' });
@@ -57,7 +56,6 @@ describe('makeCheapCall', () => {
       // sessionId completes the spawnActor return contract (never called here)
       spawnActor: async () => { spawned = true; return { result: 'x', sessionId: null }; },
       sessions: sessions as any,
-      costOf: () => ({ cost: 0 }),
       getSpendLimitUsd: () => 5,
       appendAudit: async (e: any) => { audits.push(e); },
     });
@@ -71,9 +69,10 @@ describe('makeCheapCall', () => {
   test('no limit set (0) → never blocked by the preflight', async () => {
     const record = { sessionId: 's1', cost: { cost: 999, turns: 1 } };
     const call = makeCheapCall({
-      spawnActor: async () => ({ result: 'ok', sessionId: null, usage }),
+      spawnActor: async () => ({
+        result: 'ok', sessionId: null, usage, price: { cost: 0.01, estimated: true },
+      }),
       sessions: makeSessions(record) as any,
-      costOf: () => ({ cost: 0.01 }),
       getSpendLimitUsd: () => 0,
     });
     expect((await call({ sessionId: 's1', task: 't' })).ok).toBe(true);
@@ -83,7 +82,6 @@ describe('makeCheapCall', () => {
     const call = makeCheapCall({
       spawnActor: async () => { throw new Error('no'); },
       sessions: makeSessions(null) as any,
-      costOf: () => ({ cost: 0 }),
     });
     expect(await call({ sessionId: 'ghost', task: 't' }))
       .toEqual({ ok: false, skipped: true, reason: 'no-session' });
@@ -95,7 +93,6 @@ describe('makeCheapCall', () => {
     const call = makeCheapCall({
       spawnActor: async () => ({ result: 'actor refused: max depth', sessionId: null, refused: true }),
       sessions: sessions as any,
-      costOf: () => ({ cost: 0 }),
     });
     const res = await call({ sessionId: 's1', task: 't' });
     expect(res.ok).toBe(false);
@@ -103,17 +100,21 @@ describe('makeCheapCall', () => {
     expect(sessions.costWrites.length).toBe(0);
   });
 
-  test('a throwing costOf still returns the text (cost folds as zero)', async () => {
+  test('a missing price projection fails closed and is audited', async () => {
     const record = { sessionId: 's1', model: 'm', cost: { cost: 0.5, turns: 1 } };
     const sessions = makeSessions(record);
+    const audits: any[] = [];
     const call = makeCheapCall({
       spawnActor: async () => ({ result: 'fine', sessionId: null, usage }),
       sessions: sessions as any,
-      costOf: () => { throw new Error('no rate card'); },
+      appendAudit: async (entry: any) => { audits.push(entry); },
     });
     const res = await call({ sessionId: 's1', task: 't' });
-    expect(res.ok).toBe(true);
-    expect(sessions.costWrites[0].cost).toBeCloseTo(0.5);
-    expect(sessions.costWrites[0].inputTokens).toBe(100); // tokens still counted
+    expect(res).toMatchObject({ ok: false, reason: 'price-invalid', usage });
+    expect(sessions.costWrites).toEqual([]);
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'cheap_call_price_invalid',
+      details: { label: 'cheap-call', performed: true, outcomeKnown: true },
+    }));
   });
 });

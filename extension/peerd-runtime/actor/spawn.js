@@ -294,7 +294,7 @@ export const finalActorTurnReply = (session) => {
  * @param {(handle: unknown) => void} [deps.clearTimer]
  *   Injected timer pair (setTimeout/clearTimeout in the SW) so the timeout is
  *   Bun-testable without real waiting.
- * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: any, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>) | null} [deps.runChildOffscreen]
+ * @param {((job: object, opts?: { signal?: AbortSignal, onEvent?: (ev: object) => void }) => Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: any, price?:{cost:number,estimated:boolean}, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, outcomeKnown?: boolean }>) | null} [deps.runChildOffscreen]
  *   Heap split: run a child's loop in a dedicated Worker (its own heap;
  *   key never enters it). Tool-less children only relay the model call; tool-bearing
  *   children (job.tools set) also relay each tool call to the SW-gated dispatch.
@@ -395,7 +395,7 @@ export const makeSpawnActor = (deps) => {
    *   run (default DEFAULT_TIMEOUT_MS, clamped to MAX_TIMEOUT_MS)
    * @param {(ev: object) => void} [req.onEvent]   live forwarder for the side panel
    * @param {string} [req.parentToolUseId]         links the parent's card → child session
-   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, exceeded?: true, refused?: true, timedOut?: true, stopped?: true, executionFailed?: true, outcomeKnown?: boolean }>}
+   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, price?:{cost:number,estimated:boolean}, exceeded?: true, refused?: true, timedOut?: true, stopped?: true, executionFailed?: true, outcomeKnown?: boolean }>}
    */
   const spawnActor = async (req) => {
     const {
@@ -616,6 +616,7 @@ export const makeSpawnActor = (deps) => {
     let toolCalls = 0;
     let lastStopReason;
     const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    let price = { cost: 0, estimated: true };
     let start = 0;
     let isolationRefused = false;
     let executionFailed = false;
@@ -713,6 +714,10 @@ export const makeSpawnActor = (deps) => {
             usage.cacheReadTokens += r.usage.cacheReadTokens || 0;
             usage.cacheWriteTokens += r.usage.cacheWriteTokens || 0;
           }
+          if (r.price && typeof r.price.cost === 'number' && Number.isFinite(r.price.cost)
+              && r.price.cost >= 0 && typeof r.price.estimated === 'boolean') {
+            price = { cost: price.cost + r.price.cost, estimated: price.estimated && r.price.estimated };
+          }
           taggedAudit(r.ok
             ? { type: 'actor_ran_isolated', details: { workerType: 'dedicated', realmVerified: true } }
             : {
@@ -793,6 +798,7 @@ export const makeSpawnActor = (deps) => {
       durationMs,
       depth,
       usage,
+      price,
       ...(exceeded ? { exceeded: true } : {}),
       ...(timedOut ? { timedOut: true } : {}),
       ...(stopped ? { stopped: true } : {}),

@@ -143,7 +143,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     buildTemporalBlock,
     classifyAction,
     confirmActionsFromRecord,
-    costOf,
     createSkillRegistry,
     createSuggestionStore,
     decideAction,
@@ -1565,6 +1564,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         ollamaHost: deps.settingsStore.get().ollamaHost,
         tools, priorMessages: record.messages ?? [], reasoning,
         contextWindowOverrides: deps.settingsStore.get().contextWindowOverrides,
+        pricingOverrides: deps.settingsStore.get().pricingOverrides,
         runtimeCapabilities,
         oneShot: oneShot === true,
         actorType: kind, backing: record.backing, inbound: inbound === true,
@@ -1600,9 +1600,11 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
           .catch(() => { persisted = false; });
       }
       if (result.usage) {
-        const price = costOf(record.model, result.usage,
-          deps.settingsStore.get().pricingOverrides,
-          { localProvider: providerEgressPolicy(record.provider)?.credential === null });
+        const price = result.price;
+        if (!price || typeof price.cost !== 'number' || !Number.isFinite(price.cost)
+            || price.cost < 0 || typeof price.estimated !== 'boolean') {
+          throw new TypeError('actor usage price projection invalid');
+        }
         await foldSessionCost(actorSessionId, result.usage, price?.cost ?? 0).catch(() => {});
         if (display && projection.patchBound(display, { cost: price })) {
           post({
@@ -1914,6 +1916,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         depth: job.depth, maxSteps: job.maxSteps,
         maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
         tools: job.tools ?? [], runtimeCapabilities,
+        pricingOverrides: deps.settingsStore.get().pricingOverrides,
       }, options),
       renderSystemPromptForChild: (task, effectiveTools) => deps.seams.renderSystemPrompt({
         taskOverride: task, effectiveTools,
@@ -1986,9 +1989,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     });
     const cheapCall = makeCheapCall({
       spawnActor, sessions: shared.sessions,
-      costOf: (/** @type {string|undefined} */ model, /** @type {any} */ usage) =>
-        costOf(/** @type {any} */ (model ?? ''), usage,
-          deps.settingsStore.get().pricingOverrides),
       getSpendLimitUsd: () => deps.settingsStore.get().spendLimitUsd,
       appendAudit: deps.auditLog.append,
     });
@@ -2960,9 +2960,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     },
     dispatchToolCall, prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant, decideAction,
-    isKeylessProvider: (/** @type {string} */ providerName) =>
-      providerEgressPolicy(providerName)?.credential === null,
-    costOf, makeTurnCostTracker,
+    makeTurnCostTracker,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     postChatNote: deps.postChatNote,
     REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS,

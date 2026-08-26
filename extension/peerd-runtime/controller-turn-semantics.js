@@ -83,7 +83,6 @@ import { makeToolboxParseCheck } from './toolbox/core.js';
 import { wrapUntrusted } from './tools/prompt-wrap.js';
 import { digestCapture } from './site-clients/digest.js';
 import { drainFetchTapInjected, installFetchTapInjected } from './dom/fetch-tap-injected.js';
-import { costOf } from '/peerd-provider/pricing.js';
 import { parseAppManifest } from '/peerd-engine/app-manifest.js';
 
 const REASONING_BUDGET_TOKENS = 2048;
@@ -174,7 +173,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   shapeMeshResult,
   skillRegistrySource,
   siteHandleFor,
-  costOf,
   createSuggestionStore,
   describeLandingStop,
   digestCapture,

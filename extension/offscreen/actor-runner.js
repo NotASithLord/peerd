@@ -42,6 +42,7 @@ export const describeActorExecution = (job, executionId) => describeExecution({
     maxOutputTokens: job.maxOutputTokens,
     reasoning: job.reasoning,
     contextWindowOverrides: job.contextWindowOverrides,
+    pricingOverrides: job.pricingOverrides,
   },
   input: job.message,
   state: { messages: Array.isArray(job.priorMessages) ? job.priorMessages : [] },
@@ -108,7 +109,7 @@ export const abortActor = (runId) => {
  * Run one BOUND-actor turn in a dedicated Worker.
  * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindowOverrides?:Record<string,number>, runtimeCapabilities?: object, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, onRelayDrain?: () => void, createWorker?: (url: string) => Worker, startupMs?: number, relayDrainMs?: number, maxLoopEvents?: number }} deps
- * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean }>}
+ * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, price?:{cost:number,estimated:boolean}, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean }>}
  */
 export const runActor = async (job, {
   workerUrl,
@@ -186,7 +187,7 @@ export const runActor = async (job, {
             code: 'actor_tool_outcome_unknown',
             error: 'outcome_unknown: Verify the target before retrying.',
             finalText: terminal.finalText ?? '', newMessages: terminal.newMessages ?? [],
-            usage: terminal.usage, stopReason: terminal.stopReason,
+            usage: terminal.usage, price: terminal.price, stopReason: terminal.stopReason,
             toolCalls: relayedToolRequests,
             ...(relayedPerformed === true ? { performed: true } : {}),
             outcomeKnown: false, retryable: false,
@@ -199,7 +200,7 @@ export const runActor = async (job, {
             code: 'actor_model_outcome_unknown',
             error: 'outcome_unknown: Verify before retrying.',
             finalText: terminal.finalText ?? '', newMessages: terminal.newMessages ?? [],
-            usage: terminal.usage, stopReason: terminal.stopReason,
+            usage: terminal.usage, price: terminal.price, stopReason: terminal.stopReason,
             toolCalls: relayedToolRequests,
             ...(relayedPerformed === true ? { performed: true } : {}),
             outcomeKnown: false, retryable: false,
@@ -1357,11 +1358,11 @@ export const runActor = async (job, {
             requestFinish({
               ok: false, started: true, error: r.error,
               finalText: r.finalText ?? '', newMessages: r.newMessages ?? [],
-              usage: r.usage, stopReason: r.stopReason, toolCalls,
+              usage: r.usage, price: r.price, stopReason: r.stopReason, toolCalls,
               outcomeKnown: true,
             });
           }
-          else requestFinish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, stopReason: r.stopReason, toolCalls: relayedToolRequests });
+          else requestFinish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, price: r.price, stopReason: r.stopReason, toolCalls: relayedToolRequests });
         }
         if (m.type === 'error') {
           requestFinish({ ok: false, started: true, phase: 'run', code: 'actor_worker_error', error: m.error ?? 'actor worker error' });

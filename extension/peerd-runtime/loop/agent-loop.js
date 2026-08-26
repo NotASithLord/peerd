@@ -54,7 +54,7 @@ import { RESUME_NUDGE } from './resume-detect.js';
  *        | { type: 'reasoning', sessionId: string, messageId: string, text: string }
  *        | { type: 'tool-use', sessionId: string, messageId: string, toolUseId: string, name: string, input: object }
  *        | { type: 'tool-result', sessionId: string, toolUseId: string, result: ToolResult }
- *        | { type: 'usage', sessionId: string, messageId: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number } }
+ *        | { type: 'usage', sessionId: string, messageId: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, price?: {cost:number,estimated:boolean} }
  *        | { type: 'error', sessionId: string, messageId: string, error: string, code?: string, outcomeKnown?: boolean, retryable?: boolean }
  *        | { type: 'stop',  sessionId: string, messageId: string, stopReason?: string }
  *        | { type: 'rate-limit-pause', sessionId: string, messageId: string, retryAfterMs: number, attempt: number }
@@ -689,16 +689,19 @@ export async function* runUserTurn(ctx) {
             // No-op: input is complete; parsing happens below.
             break;
           case 'usage':
-            // why: forward token usage straight through as a loop event.
-            // The loop itself stays pricing-agnostic — the SW multiplies
-            // by the local pricing table, accumulates per-turn/session,
-            // and enforces the optional hard spend limit (feature 06).
+            // why: forward token usage and the sealed controller's bounded
+            // price projection straight through. The loop stays pricing-
+            // agnostic; the SW validates/folds the projection and retains
+            // spend-limit custody.
             // Emitting per model call means a multi-step tool-using turn
             // reports each call's usage as it lands, so the meter ticks
             // up live instead of only at end-of-turn.
             yield {
               type: 'usage', sessionId,
               messageId: assistantStub.id, usage: ev.usage,
+              ...(/** @type {ProviderEvent & {price?:{cost:number,estimated:boolean}}} */ (ev).price === undefined
+                ? {}
+                : { price: /** @type {ProviderEvent & {price:{cost:number,estimated:boolean}}} */ (ev).price }),
             };
             break;
           case 'message-stop':
