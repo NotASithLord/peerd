@@ -331,6 +331,80 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('executes repo_version through exact repository authority', async () => {
+    const repositoryDescriptor = authorityDescriptor('repo_version');
+    let legacy = 0;
+    let genericExecutor = 0;
+    const order: string[] = [];
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [repositoryDescriptor], refreshTools: async () => [repositoryDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-repository-1', name: 'repo_version' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-repository-1',
+            partialJson: '{"op":"checkpoint","message":"approved"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-repository-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              actorType: 'app', actorInstanceId: 'app-1',
+              repositories: {
+                coordinate: async (_ref: any, operation: () => Promise<any>) => {
+                  order.push('lock');
+                  try { return await operation(); }
+                  finally { order.push('unlock'); }
+                },
+                commit: async (_ref: any, options: any) => {
+                  order.push(`checkpoint:${options.message}`);
+                  return { oid: 'new' };
+                },
+              },
+              appQuiescence: {
+                run: async (_id: string, operation: () => Promise<any>) => {
+                  order.push('quiesce');
+                  const value = await operation();
+                  order.push('resume');
+                  return value;
+                },
+              },
+            },
+          },
+          args: call.args,
+          projection: { actorType: 'app', actorInstanceId: 'app-1' },
+          manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+        }),
+        handleToolEffect: async () => ({
+          ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+      executeToolCall: async () => { genericExecutor += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    expect(order).toEqual(['quiesce', 'lock', 'checkpoint:approved', 'unlock', 'resume']);
+    expect(legacy).toBe(0);
+    expect(genericExecutor).toBe(0);
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      result: expect.objectContaining({ ok: true, content: expect.stringContaining('checkpoint') }),
+    }));
+  });
+
   test('retains preparation in the kernel and exposes only exact effect calls', async () => {
     const custody = Object.freeze({ private: true });
     const observed: any[] = [];

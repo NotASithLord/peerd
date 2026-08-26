@@ -18,6 +18,7 @@ import { controllerToolDomain, CONTROLLER_TOOL_MANIFEST } from '/shared/controll
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
+import { createRepositoryToolAuthority } from './repository-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -764,6 +765,9 @@ export const makeOffscreenActorClient = ({
         sessionDepth: admittedContext.ctx.session?.depth ?? 0,
         sessionKind: admittedContext.ctx.session?.kind ?? 'spawned',
         inbound: admittedContext.ctx.inbound === true,
+      } : domain === 'repository' ? {
+        actorType: admittedContext.ctx.actorType,
+        actorInstanceId: admittedContext.ctx.actorInstanceId,
       } : { sessionId: admittedContext.ctx.session?.sessionId };
       return {
         ok: true, mode: 'execute', executionId,
@@ -1164,6 +1168,220 @@ export const makeOffscreenActorClient = ({
         },
       ));
     },
+    'repository/read-pod': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['pod_destroy'], ['podId']);
+      if (!entry) return { ok: false, error: 'repository/read-pod: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/read-pod', 'read', () =>
+        entry.domainState.authority.readPod(msg.podId));
+    },
+    'repository/destroy-pod': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['pod_destroy'], ['podId']);
+      if (!entry) return { ok: false, error: 'repository/destroy-pod: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/destroy-pod', 'commit', () =>
+        entry.domainState.authority.destroyPod(msg.podId));
+    },
+    'repository/read-status': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_history'], []);
+      if (!entry) return { ok: false, error: 'repository/read-status: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/read-status', 'read', () =>
+        entry.domainState.authority.readStatus());
+    },
+    'repository/read-history': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_history'], ['depth']);
+      if (!entry) return { ok: false, error: 'repository/read-history: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/read-history', 'read', () =>
+        entry.domainState.authority.readHistory(msg.depth));
+    },
+    'repository/read-remote': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(
+        grant, msg, 'repository', ['repo_history', 'repo_remote'], [],
+      );
+      if (!entry) return { ok: false, error: 'repository/read-remote: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/read-remote', 'read', () =>
+        entry.domainState.authority.readRemote());
+    },
+    'repository/read-diff': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_history'], ['from', 'to']);
+      if (!entry) return { ok: false, error: 'repository/read-diff: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/read-diff', 'read', () =>
+        entry.domainState.authority.readDiff(msg.from, msg.to));
+    },
+    'repository/confirm-restore': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['to']);
+      if (!entry) return { ok: false, error: 'repository/confirm-restore: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/confirm-restore', 'control', () =>
+        entry.domainState.authority.confirmRestore(msg.to));
+    },
+    'repository/checkpoint': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['message']);
+      if (!entry) return { ok: false, error: 'repository/checkpoint: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/checkpoint', 'commit', () =>
+        entry.domainState.authority.checkpoint(msg.message));
+    },
+    'repository/branch': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['name']);
+      if (!entry) return { ok: false, error: 'repository/branch: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/branch', 'commit', () =>
+        entry.domainState.authority.branch(msg.name));
+    },
+    'repository/checkout': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['name']);
+      if (!entry) return { ok: false, error: 'repository/checkout: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/checkout', 'commit', () =>
+        entry.domainState.authority.checkout(msg.name));
+    },
+    'repository/restore': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_version'], ['to']);
+      if (!entry) return { ok: false, error: 'repository/restore: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/restore', 'commit', () =>
+        entry.domainState.authority.restore(msg.to));
+    },
+    'repository/confirm-remote': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], [
+        'op', 'target', 'branch',
+      ]);
+      if (!entry) return { ok: false, error: 'repository/confirm-remote: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/confirm-remote', 'control', () =>
+        entry.domainState.authority.confirmRemote(msg.op, msg.target, msg.branch));
+    },
+    'repository/link': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], ['url']);
+      if (!entry) return { ok: false, error: 'repository/link: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/link', 'commit', () =>
+        entry.domainState.authority.link(msg.url));
+    },
+    'repository/fetch': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], ['target']);
+      if (!entry) return { ok: false, error: 'repository/fetch: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/fetch', 'commit', () =>
+        entry.domainState.authority.fetch(msg.target));
+    },
+    'repository/push': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'repository', ['repo_remote'], ['target', 'branch']);
+      if (!entry) return { ok: false, error: 'repository/push: authority mismatch', outcomeKnown: true };
+      entry.domainState.authority ??= createRepositoryToolAuthority({
+        call: entry.prepared.call, ctx: entry.prepared.ctx,
+        signal: /** @type {any} */ (grant).relaySignal,
+      });
+      return runDomainEffect(entry, 'repository/push', 'resource', () =>
+        entry.domainState.authority.push(msg.target, msg.branch));
+    },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
@@ -1181,8 +1399,8 @@ export const makeOffscreenActorClient = ({
       try {
         const executionResult = entry.unknownIrreversible === true ? {
           ok: false,
-          error: 'Tool outcome unknown. Check Pod state before retrying.',
-          code: 'pod-outcome-unknown',
+          error: 'Tool outcome unknown. Check authority state before retrying.',
+          code: 'tool-outcome-unknown',
           outcomeKnown: false,
           retryable: false,
           outcomeKind: 'host-lost',

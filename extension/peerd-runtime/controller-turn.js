@@ -11,3 +11,8 @@ export {
   controllerHostsPodTool,
   executeControllerPodTool,
 } from './controller-pod-tools.js';
+export {
+  CONTROLLER_REPOSITORY_TOOL_NAMES,
+  controllerHostsRepositoryTool,
+  executeControllerRepositoryTool,
+} from './controller-repository-tools.js';

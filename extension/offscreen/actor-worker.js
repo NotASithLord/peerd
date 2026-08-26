@@ -9,8 +9,10 @@
 import {
   controllerHostsActorTool,
   controllerHostsPodTool,
+  controllerHostsRepositoryTool,
   executeControllerActorTool,
   executeControllerPodTool,
+  executeControllerRepositoryTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -73,6 +75,21 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'pod-cancel-response'
       || m.type === 'pod-read-file-response'
       || m.type === 'pod-write-file-response'
+      || m.type === 'repository-read-pod-response'
+      || m.type === 'repository-destroy-pod-response'
+      || m.type === 'repository-read-status-response'
+      || m.type === 'repository-read-history-response'
+      || m.type === 'repository-read-remote-response'
+      || m.type === 'repository-read-diff-response'
+      || m.type === 'repository-confirm-restore-response'
+      || m.type === 'repository-checkpoint-response'
+      || m.type === 'repository-branch-response'
+      || m.type === 'repository-checkout-response'
+      || m.type === 'repository-restore-response'
+      || m.type === 'repository-confirm-remote-response'
+      || m.type === 'repository-link-response'
+      || m.type === 'repository-fetch-response'
+      || m.type === 'repository-push-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -298,6 +315,61 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             prepared.toolName, prepared.args, prepared.projection, podAuthority,
             { signal: abort.signal },
           );
+        } else if (controllerHostsRepositoryTool(prepared.toolName)) {
+          const repositoryAuthority = Object.freeze({
+            readPod: (/** @type {string} */ podId) => authorityValue(actorToolRequest(
+              'repository-read-pod-request', { executionId, podId },
+            )),
+            destroyPod: (/** @type {string} */ podId) => authorityValue(actorToolRequest(
+              'repository-destroy-pod-request', { executionId, podId },
+            )),
+            readStatus: () => authorityValue(actorToolRequest(
+              'repository-read-status-request', { executionId },
+            )),
+            readHistory: (/** @type {number} */ depth) => authorityValue(actorToolRequest(
+              'repository-read-history-request', { executionId, depth },
+            )),
+            readRemote: () => authorityValue(actorToolRequest(
+              'repository-read-remote-request', { executionId },
+            )),
+            readDiff: (/** @type {string} */ from, /** @type {string|null} */ to) =>
+              authorityValue(actorToolRequest(
+                'repository-read-diff-request', { executionId, from, to },
+              )),
+            confirmRestore: (/** @type {string} */ to) => authorityValue(actorToolRequest(
+              'repository-confirm-restore-request', { executionId, to },
+            )),
+            checkpoint: (/** @type {string} */ message) => authorityValue(actorToolRequest(
+              'repository-checkpoint-request', { executionId, message },
+            )),
+            branch: (/** @type {string} */ name) => authorityValue(actorToolRequest(
+              'repository-branch-request', { executionId, name },
+            )),
+            checkout: (/** @type {string} */ name) => authorityValue(actorToolRequest(
+              'repository-checkout-request', { executionId, name },
+            )),
+            restore: (/** @type {string} */ to) => authorityValue(actorToolRequest(
+              'repository-restore-request', { executionId, to },
+            )),
+            confirmRemote: (/** @type {string} */ op, /** @type {string} */ target,
+              /** @type {string|undefined} */ branch) => authorityValue(actorToolRequest(
+              'repository-confirm-remote-request', { executionId, op, target, branch },
+            )),
+            link: (/** @type {string} */ url) => authorityValue(actorToolRequest(
+              'repository-link-request', { executionId, url },
+            )),
+            fetch: (/** @type {string} */ target) => authorityValue(actorToolRequest(
+              'repository-fetch-request', { executionId, target },
+            )),
+            push: (/** @type {string} */ target, /** @type {string|undefined} */ branch) =>
+              authorityValue(actorToolRequest(
+                'repository-push-request', { executionId, target, branch },
+              )),
+          });
+          result = await executeControllerRepositoryTool(
+            prepared.toolName, prepared.args, prepared.projection, repositoryAuthority,
+            { signal: abort.signal },
+          );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
         });
@@ -356,7 +428,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       });
       const legacyToolDispatch = makeRelayedToolDispatch(requestTool);
       const toolDispatch = (/** @type {any} */ call) => (
-        controllerHostsActorTool(call?.name) || controllerHostsPodTool(call?.name)
+        controllerHostsActorTool(call?.name)
+        || controllerHostsPodTool(call?.name)
+        || controllerHostsRepositoryTool(call?.name)
       )
         ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling

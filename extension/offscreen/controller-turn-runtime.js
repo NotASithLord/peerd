@@ -5,8 +5,10 @@
 import {
   controllerHostsActorTool,
   controllerHostsPodTool,
+  controllerHostsRepositoryTool,
   executeControllerActorTool,
   executeControllerPodTool,
+  executeControllerRepositoryTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -409,6 +411,54 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             });
             const value = await executeControllerPodTool(
               request.toolName, request.args, request.projection, podAuthority,
+              { signal: options.signal },
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsRepositoryTool(request.toolName)) {
+            const repositoryAuthority = Object.freeze({
+              readPod: (/** @type {string} */ podId) => rpc('turn.repository.read-pod', {
+                ...binding, podId,
+              }),
+              destroyPod: (/** @type {string} */ podId) => rpc('turn.repository.destroy-pod', {
+                ...binding, podId,
+              }),
+              readStatus: () => rpc('turn.repository.read-status', binding),
+              readHistory: (/** @type {number} */ depth) => rpc('turn.repository.read-history', {
+                ...binding, depth,
+              }),
+              readRemote: () => rpc('turn.repository.read-remote', binding),
+              readDiff: (/** @type {string} */ from, /** @type {string|null} */ to) =>
+                rpc('turn.repository.read-diff', { ...binding, from, to }),
+              confirmRestore: (/** @type {string} */ to) =>
+                rpc('turn.repository.confirm-restore', { ...binding, to }),
+              checkpoint: (/** @type {string} */ message) =>
+                rpc('turn.repository.checkpoint', { ...binding, message }),
+              branch: (/** @type {string} */ name) =>
+                rpc('turn.repository.branch', { ...binding, name }),
+              checkout: (/** @type {string} */ name) =>
+                rpc('turn.repository.checkout', { ...binding, name }),
+              restore: (/** @type {string} */ to) =>
+                rpc('turn.repository.restore', { ...binding, to }),
+              confirmRemote: (/** @type {string} */ op, /** @type {string} */ target,
+                /** @type {string|undefined} */ branch) =>
+                rpc('turn.repository.confirm-remote', { ...binding, op, target, branch }),
+              link: (/** @type {string} */ url) =>
+                rpc('turn.repository.link', { ...binding, url }),
+              fetch: (/** @type {string} */ target) =>
+                rpc('turn.repository.fetch', { ...binding, target }),
+              push: (/** @type {string} */ target, /** @type {string|undefined} */ branch) =>
+                rpc('turn.repository.push', { ...binding, target, branch }),
+            });
+            const value = await executeControllerRepositoryTool(
+              request.toolName, request.args, request.projection, repositoryAuthority,
               { signal: options.signal },
             );
             execution = {

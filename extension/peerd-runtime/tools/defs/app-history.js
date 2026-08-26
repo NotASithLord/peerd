@@ -54,17 +54,17 @@ export const repositoryToolFailure = (cause, tool, action) => {
 /** @type {import('/shared/tool-types.js').Tool} */
 export const repositoryHistoryTool = composeTool("repo_history", {
   execute: async (args, ctx) => {
-    const repositories = /** @type {any} */ (ctx).repositories;
+    const authority = /** @type {any} */ (ctx).repositoryAuthority;
     const kind = /** @type {any} */ (ctx).actorType;
     const id = /** @type {any} */ (ctx).actorInstanceId;
-    if (!repositories || !id || !['app', 'notebook', 'pod'].includes(kind)) return { ok: false, error: 'repository_unavailable' };
+    if (!authority || !id || !['app', 'notebook', 'pod'].includes(kind)) return { ok: false, error: 'repository_unavailable' };
     try {
       const ref = { kind, id };
       const depth = Math.min(100, Math.max(1, Number(args?.depth) || 20));
       const [status, commits, remote] = await Promise.all([
-        repositories.status(ref),
-        repositories.history(ref, { depth }),
-        repositories.getRemote(ref),
+        authority.readStatus(),
+        authority.readHistory(depth),
+        authority.readRemote(),
       ]);
       let diff = null;
       if (args?.includeDiff === true) {
@@ -73,10 +73,7 @@ export const repositoryHistoryTool = composeTool("repo_history", {
         const requestedTo = typeof args.to === 'string' ? args.to : null;
         if (requestedFrom !== 'HEAD' && !visibleOids.has(requestedFrom)) return { ok: false, error: 'diff_from_must_be_a_visible_commit' };
         if (requestedTo !== null && requestedTo !== 'HEAD' && !visibleOids.has(requestedTo)) return { ok: false, error: 'diff_to_must_be_a_visible_commit' };
-        const result = await repositories.diff(ref, {
-          from: requestedFrom,
-          to: requestedTo,
-        });
+        const result = await authority.readDiff(requestedFrom, requestedTo);
         diff = {
           from: result.from, to: result.to,
           files: result.files.map((/** @type {any} */ file) => ({ path: file.path, status: file.status, binary: !!file.binary })),

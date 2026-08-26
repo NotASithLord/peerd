@@ -5,6 +5,7 @@ import { CONTROLLER_TOOL_IMPLEMENTATIONS } from '../../extension/peerd-runtime/c
 import {
   CONTROLLER_ACTOR_TOOL_NAMES,
   CONTROLLER_POD_TOOL_NAMES,
+  CONTROLLER_REPOSITORY_TOOL_NAMES,
 } from '../../extension/peerd-runtime/controller-turn.js';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
@@ -19,11 +20,13 @@ describe('controller tool manifest', () => {
     expect(hosted).toEqual([
       'now', 'complete_goal', 'actor_create', 'actor_tasks', 'actor_cancel', 'message_actor',
       'pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write',
+      'pod_destroy', 'repo_history', 'repo_version', 'repo_remote',
     ]);
     expect(hosted).toEqual([
       ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS),
       ...CONTROLLER_ACTOR_TOOL_NAMES,
       ...CONTROLLER_POD_TOOL_NAMES,
+      ...CONTROLLER_REPOSITORY_TOOL_NAMES,
     ]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))

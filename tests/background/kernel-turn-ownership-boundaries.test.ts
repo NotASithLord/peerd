@@ -50,6 +50,7 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/controller-turn-semantics.js',
       'peerd-runtime/controller-actor-tools.js',
       'peerd-runtime/controller-pod-tools.js',
+      'peerd-runtime/controller-repository-tools.js',
       'peerd-runtime/controller-tools.js',
       'peerd-runtime/semantic.js',
       'peerd-runtime/site-clients/digest.js',
@@ -108,6 +109,30 @@ describe('kernel turn ownership boundaries', () => {
     for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
       const modules = await modulesFor(entry);
       for (const module of podSemanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
+  it('hosts repository semantics only in controller and isolated-worker graphs', async () => {
+    const repositorySemanticModules = new Set([
+      'peerd-runtime/controller-repository-tools.js',
+      'peerd-runtime/tools/defs/pod-destroy.js',
+      'peerd-runtime/tools/defs/app-history.js',
+      'peerd-runtime/tools/defs/app-version.js',
+      'peerd-runtime/tools/defs/app-remote.js',
+    ]);
+    const authorityEntries = [
+      'background/kernel-turn-authority-adapter.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ];
+    for (const entry of authorityEntries) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => repositorySemanticModules.has(module))).toEqual([]);
+    }
+
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of repositorySemanticModules) expect(modules.has(module)).toBe(true);
     }
   });
 

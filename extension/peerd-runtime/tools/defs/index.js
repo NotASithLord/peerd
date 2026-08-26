@@ -44,7 +44,6 @@ import { appCodeTool }                from './app-code.js';
 import { jsWriteFileTool }            from './js-write-file.js';
 import { jsReadFileTool }             from './js-read-file.js';
 import { jsDeleteTool }               from './js-delete.js';
-import { podDestroyTool }             from './pod-destroy.js';
 import { appUpdateTool }              from './app-update.js';
 import { appOpenTool }                from './app-open.js';
 import { appSearchTool }              from './app-search.js';
@@ -55,9 +54,6 @@ import { appListFilesTool }           from './app-list-files.js';
 import { appDeleteFileTool }          from './app-delete-file.js';
 import { appObserveTool }             from './app-observe.js';
 import { appActTool }                 from './app-act.js';
-import { repositoryHistoryTool }      from './app-history.js';
-import { repositoryVersionTool }      from './app-version.js';
-import { repositoryRemoteTool }       from './app-remote.js';
 import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
@@ -120,7 +116,6 @@ export {
   jsReadFileTool,
   jsDeleteTool,
   // engine (Pod)
-  podDestroyTool,
   // engine (App)
   appUpdateTool,
   appOpenTool,
@@ -133,9 +128,6 @@ export {
   appCodeTool,
   appObserveTool,
   appActTool,
-  repositoryHistoryTool,
-  repositoryVersionTool,
-  repositoryRemoteTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules)
@@ -236,7 +228,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   jsReadFileTool,
   jsDeleteTool,
   // engine (Pod)
-  podDestroyTool,
   // engine (App)
   appUpdateTool,
   appOpenTool,
@@ -249,9 +240,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   appCodeTool,
   appObserveTool,
   appActTool,
-  repositoryHistoryTool,
-  repositoryVersionTool,
-  repositoryRemoteTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules the

@@ -1300,9 +1300,75 @@ describe('controller-owned Pod tools: exact isolated authority', () => {
     expect(observed.legacy.error).toContain('not legacy-owned');
     expect(observed.settled).toMatchObject({
       ok: true,
-      result: { ok: false, code: 'pod-outcome-unknown', outcomeKnown: false, retryable: false },
+      result: { ok: false, code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
     });
     expect(writes).toBe(1);
+    expect(legacyDispatches).toBe(0);
+  });
+});
+
+describe('controller-owned repository tools: exact isolated authority', () => {
+  test('pins Pod destruction and preserves an unknown repository receipt', async () => {
+    let destroys = 0;
+    let legacyDispatches = 0;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'pod', instanceId: 'pod-1' }) },
+      buildToolContext: async () => ({
+        actorType: 'pod', actorInstanceId: 'pod-1',
+        podRegistry: {
+          get: async () => ({ id: 'pod-1', name: 'owned pod', pinned: false }),
+          delete: async () => {},
+        },
+        podTabTracker: { closeTab: async () => {} },
+        repositories: {
+          coordinate: async (_ref: any, operation: () => Promise<any>) => operation(),
+          destroy: async () => { destroys += 1; throw new Error('destroy receipt lost'); },
+        },
+      }),
+      dispatchToolCall: async () => { legacyDispatches += 1; return { ok: true }; },
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const observed: any = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: { id: 'call-pod-destroy', name: 'pod_destroy', args: { podId: 'pod-1' } },
+      }, OFFSCREEN);
+      const read = await client.routes['repository/read-pod']({
+        relayToken, executionId: prepared.executionId, podId: 'pod-1',
+      }, OFFSCREEN);
+      const effect = await client.routes['repository/destroy-pod']({
+        relayToken, executionId: prepared.executionId, podId: 'pod-1',
+      }, OFFSCREEN);
+      const legacy = await client.routes['actor/tool-dispatch']({
+        relayToken,
+        call: { id: 'call-pod-destroy', name: 'pod_destroy', args: { podId: 'pod-1' } },
+      }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: false, error: 'pod_destroy_failed: destroy receipt lost' },
+      }, OFFSCREEN);
+      return { prepared, read, effect, legacy, settled };
+    }, 'actor-pod-1');
+
+    expect(observed.prepared).toMatchObject({
+      ok: true, mode: 'execute', toolName: 'pod_destroy',
+      projection: { actorType: 'pod', actorInstanceId: 'pod-1' },
+    });
+    expect(observed.read).toMatchObject({
+      ok: true, value: { id: 'pod-1', name: 'owned pod', pinned: false },
+    });
+    expect(observed.effect).toMatchObject({
+      ok: false, error: 'destroy receipt lost', outcomeKnown: false, retryable: false,
+    });
+    expect(observed.legacy.error).toContain('not legacy-owned');
+    expect(observed.settled).toMatchObject({
+      ok: true,
+      result: { ok: false, code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
+    });
+    expect(destroys).toBe(1);
     expect(legacyDispatches).toBe(0);
   });
 });

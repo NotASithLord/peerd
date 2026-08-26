@@ -9,11 +9,16 @@ import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/
 import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
-import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import {
+  registerTool, clearTools, registerMetadataInventory,
+} from '../../../extension/peerd-runtime/tools/registry.js';
+import {
+  dispatchToolCall, prepareToolCall, settleToolCall,
+} from '../../../extension/peerd-runtime/tools/dispatcher.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
-import { repositoryRemoteTool } from '../../../extension/peerd-runtime/tools/defs/app-remote.js';
-import { repositoryVersionTool } from '../../../extension/peerd-runtime/tools/defs/app-version.js';
+import {
+  executeControllerRepositoryTool,
+} from '../../../extension/peerd-runtime/controller-repository-tools.js';
 
 const S = OPERATION_STATES;
 
@@ -667,43 +672,42 @@ describe('the full dispatcher path', () => {
     expect((await log.get('sess-1:tu-1'))!.state).toBe(S.OUTCOME_UNKNOWN);
   });
 
-  test('Git mutation host loss remains unknown through the full dispatcher path', async () => {
-    registerTool(repositoryRemoteTool as any);
-    registerTool(repositoryVersionTool as any);
+  test('Git mutation host loss remains unknown through controller settlement', async () => {
+    registerMetadataInventory();
     for (const operation of ['checkpoint', 'restore', 'link', 'fetch', 'push'] as const) {
       const { tracker, log } = makeTracker();
       const failure = Object.assign(new Error('late host reply'), {
         code: 'repository-host-timeout', outcomeKnown: false, outcomeKind: 'host-lost',
       });
-      const repositories = {
-        coordinate: async (_ref: any, run: () => Promise<any>) => run(),
-        getRemote: async () => ({ url: 'https://github.com/owner/repo.git', host: 'github.com' }),
-        commit: async () => {
-          if (operation === 'checkpoint') throw failure;
-          return { created: true };
-        },
+      const approvedRemote = { url: 'https://github.com/owner/repo.git', host: 'github.com' };
+      const repositoryAuthority = {
+        readRemote: async () => approvedRemote,
+        confirmRestore: async () => 'yes_once',
+        confirmRemote: async () => 'yes_once',
+        checkpoint: async () => { throw failure; },
         restore: async () => { throw failure; },
-        setRemote: async () => { throw failure; },
+        link: async () => { throw failure; },
         fetch: async () => { throw failure; },
         push: async () => { throw failure; },
       };
-      const remote = ['link', 'fetch', 'push'].includes(operation);
-      const name = remote ? 'repo_remote' : 'repo_version';
+      const isRemote = ['link', 'fetch', 'push'].includes(operation);
+      const name = isRemote ? 'repo_remote' : 'repo_version';
       const args = operation === 'restore' ? { op: operation, to: 'abc123' }
         : operation === 'link'
           ? { op: operation, url: 'https://github.com/owner/repo' }
           : { op: operation };
       const id = `git-${operation}`;
-      const result = await dispatchToolCall(
-        { id, name, args },
-        {
-          ...baseCtx(), lifecycle: tracker,
-          exposure: 'actor', actorType: 'app', actorInstanceId: 'app-1', repositories,
-          session: { sessionId: 'sess-1', kind: 'actor' },
-          confirm: async () => 'yes_once',
-          appQuiescence: { run: async (_appId: string, run: () => Promise<any>) => run() },
-        } as any,
+      const prepared: any = await prepareToolCall({ id, name, args }, {
+        ...baseCtx(), lifecycle: tracker,
+        exposure: 'actor', actorType: 'app', actorInstanceId: 'app-1',
+        session: { sessionId: 'sess-1', kind: 'actor' },
+      } as any);
+      expect(prepared.prepared).toBe(true);
+      const semantic = await executeControllerRepositoryTool(
+        name, args, { actorType: 'app', actorInstanceId: 'app-1' },
+        repositoryAuthority, { signal: new AbortController().signal },
       );
+      const result = await settleToolCall(prepared, { result: semantic });
       expect(result).toMatchObject({
         ok: false,
         code: 'repository-host-timeout',
