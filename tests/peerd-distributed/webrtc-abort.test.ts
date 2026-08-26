@@ -136,7 +136,10 @@ describe('webrtc transport — the wired late-completion guard (D2)', () => {
       { signaling: sigStub() as any, sameMachine: true },
     );
     const localPc = instances[0];
-    expect(localPc.config).toMatchObject({ iceServers: [] });
+    expect(localPc.config).toMatchObject({
+      bundlePolicy: 'max-bundle', iceTransportPolicy: 'all', iceServers: [],
+    });
+    expect(localPc.config.iceCandidatePoolSize).toBeUndefined();
     localPc.dc.readyState = 'open';
     localPc.dc.onopen();
     await localReady;
@@ -146,7 +149,10 @@ describe('webrtc transport — the wired late-completion guard (D2)', () => {
       { signaling: sigStub() as any, sameMachine: false },
     );
     const remotePc = instances[1];
-    expect(remotePc.config).toMatchObject({ iceServers: publicIce });
+    expect(remotePc.config).toMatchObject({
+      bundlePolicy: 'max-bundle', iceTransportPolicy: 'all', iceServers: publicIce,
+    });
+    expect(remotePc.config.iceCandidatePoolSize).toBeUndefined();
     remotePc.dc.readyState = 'open';
     remotePc.dc.onopen();
     await remoteReady;
