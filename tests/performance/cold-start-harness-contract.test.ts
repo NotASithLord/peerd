@@ -209,7 +209,9 @@ describe('cold-start browser harness contract', () => {
       expect(text).toContain("coldBudgetMode: 'native-target'");
       expect(text).toContain('NATIVE_FLOOR_CONTRACT.freshProcesses');
       expect(text).toContain('NATIVE_FLOOR_CONTRACT.confirmedStopWakes');
-      expect(text).toContain("nativeFloor ? 'home/home.html' : 'sidepanel/sidepanel.html'");
+      expect(text).toContain("const runtimeSurface = 'home'");
+      expect(text).toContain("const surfacePath = 'home/home.html'");
+      expect(text).not.toContain("'sidepanel/sidepanel.html'");
       expect(text).toContain("extensionDir: prepared.store.extensionDir");
       expect(text).toContain('wakeSamples: sample < chromeWakes ? 1 : 0');
       expect(text).toContain('vaultGateReadyFromWorkerTargetMs');

@@ -649,7 +649,7 @@ export const assessColdStartReport = (report, {
       firefoxWakes: profile?.firefox?.wakes,
       firefoxIdleMs: profile?.firefox?.idleMs,
       runtimeTarget: 'release',
-      runtimeSurface: 'sidepanel-tab',
+      runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
     };
     for (const [key, expected] of Object.entries(exactOptions)) {

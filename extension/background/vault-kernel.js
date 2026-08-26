@@ -93,6 +93,7 @@ import {
   createKernelSessionReader,
   createKernelProfileAuthority,
   buildVaultKernelState,
+  LOCKED_PROVIDER_AUTHORITY_VIEW,
   resolveKernelPermission,
   makeSessionSupportPreflight,
 } from './vault-kernel-core.js';
@@ -380,9 +381,9 @@ const stateSnapshot = async () => {
       onboardingComplete: durableProfile.onboardingComplete,
     };
   }
-  const providerView = await providerProjection.view(
-    authority.locked ? null : currentSession, authority.locked,
-  );
+  const providerView = authority.locked
+    ? LOCKED_PROVIDER_AUTHORITY_VIEW
+    : await providerProjection.view(currentSession, false);
   return buildVaultKernelState({
     kernel: generation.identity,
     status: {

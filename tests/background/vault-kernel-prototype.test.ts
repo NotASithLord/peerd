@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
-import { buildVaultKernelState } from '../../extension/background/vault-kernel-core.js';
+import {
+  buildVaultKernelState,
+  LOCKED_PROVIDER_AUTHORITY_VIEW,
+} from '../../extension/background/vault-kernel-core.js';
 import { validateKernelStateProjection } from '../../extension/shared/kernel-state-contract.js';
 import { createVault } from '../../extension/peerd-egress/vault/vault.js';
 
@@ -27,9 +30,7 @@ const KERNEL = Object.freeze({
 const lockedUi = {
   settings: { vaultAutoLockMs: 45 * 60_000 },
   session: { sessionId: null, messages: [], permission: { mode: 'plan', confirmActions: true } },
-  providers: { current: 'anthropic', model: 'claude-sonnet-4-6', hasKey: false },
-  composer: { provider: 'anthropic', model: 'claude-sonnet-4-6', keyless: false,
-    credentialReady: false, localReady: false, canSend: false, reason: 'vault-locked' },
+  ...LOCKED_PROVIDER_AUTHORITY_VIEW,
 };
 
 const makeKv = () => {
@@ -91,7 +92,10 @@ describe('minimal vault authority-kernel prototype', () => {
       reason: 'controller-not-ready', retryable: true,
     });
     expect(state.session.sessionId).toBeNull();
+    expect(state.providers).toEqual({ current: '', model: '', hasKey: false });
     expect(state.composer).toMatchObject({ canSend: false, reason: 'vault-locked' });
+    expect(state.composer.provider).toBe('');
+    expect(state.composer.model).toBe('');
     expect(validateKernelStateProjection(state)).toEqual({ ok: true, state });
     expect(JSON.stringify(state)).not.toMatch(/credentialId|prfSalt|wrappedDK|secret|apiKey/);
   });

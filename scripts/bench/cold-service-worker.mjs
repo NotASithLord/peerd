@@ -138,7 +138,10 @@ if (!['release', 'native-floor'].includes(runtimeTarget)) {
   throw new Error('--runtime-target must be release or native-floor');
 }
 const nativeFloor = runtimeTarget === 'native-floor';
-const runtimeSurface = nativeFloor ? 'home' : 'sidepanel-tab';
+// why: CDP/WebDriver open extension documents as tabs. A tab-backed copy of
+// the browser-owned side panel is correctly refused by sender provenance, so
+// Home is the exact human surface these harnesses can exercise honestly.
+const runtimeSurface = 'home';
 const coldBudgetMode = nativeFloor ? 'native-target' : 'enforce';
 const intOption = (name, fallback, minimum) => {
   if (options[name] === undefined) return fallback;
@@ -809,9 +812,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       await page.send('ServiceWorker.enable', {}, remaining());
     }
     await enableChromePrfFixture(page);
-    // CDP cannot open Chrome's browser-owned side panel. The native floor uses
-    // Home, its exact tab-owned human surface, so provenance remains real.
-    const surfacePath = nativeFloor ? 'home/home.html' : 'sidepanel/sidepanel.html';
+    // CDP cannot open Chrome's browser-owned side panel. Home is its exact
+    // tab-owned human surface, so route provenance remains real.
+    const surfacePath = 'home/home.html';
     const panelUrl = `chrome-extension://${firstWorker.extensionId}/${surfacePath}`;
     const navigationFromLaunchMs = hostNowMs() - launchStarted;
     const navigation = await page.send('Page.navigate', { url: panelUrl }, remaining());
@@ -1377,7 +1380,7 @@ const runFirefoxProcess = async ({ binary, driverBinary, artifact, wake }) => {
     if (installedId !== ADDON_ID) throw new Error(`unexpected Firefox add-on id: ${installedId}`);
     const userAgent = await driver.execute('return navigator.userAgent;');
     const version = String(userAgent).match(/Firefox\/([0-9.]+)/)?.[1] ?? 'unknown';
-    await within(driver.navigate(`${FIREFOX_ORIGIN}/sidepanel/sidepanel.html`), remaining(), 'Firefox panel navigation');
+    await within(driver.navigate(`${FIREFOX_ORIGIN}/home/home.html`), remaining(), 'Firefox Home navigation');
     const staticShellReady = await waitFirefoxExpression(driver,
       `document.documentElement.dataset.peerdStaticShellPainted === 'true'`, remaining());
     if (!staticShellReady) throw new Error('Firefox static vault shell did not paint');
@@ -1428,7 +1431,7 @@ const runFirefoxProcess = async ({ binary, driverBinary, artifact, wake }) => {
       const wakeDeadlineAt = wakeStarted + coldTimeoutMs;
       const wakeRemaining = () => Math.max(1, wakeDeadlineAt - hostNowMs());
       try {
-        await within(driver.navigate(`${FIREFOX_ORIGIN}/sidepanel/sidepanel.html`), wakeRemaining(), 'Firefox wake panel navigation');
+        await within(driver.navigate(`${FIREFOX_ORIGIN}/home/home.html`), wakeRemaining(), 'Firefox wake Home navigation');
         const wakeStaticShellReady = await waitFirefoxExpression(driver,
           `document.documentElement.dataset.peerdStaticShellPainted === 'true'`, wakeRemaining());
         if (!wakeStaticShellReady) throw new Error('Firefox wake static vault shell did not paint');
