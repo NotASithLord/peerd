@@ -115,6 +115,32 @@ describe('kernel turn ownership boundaries', () => {
         || forbiddenPrefixes.some((prefix) => module.startsWith(prefix)))).toEqual([]);
   });
 
+  it('keeps tool inventory and exposure projection in the sealed controller', async () => {
+    const authorityModules = await modulesFor('background/kernel-turn-live-factories.js');
+    for (const module of [
+      'peerd-runtime/controller-tool-projection.js',
+      'peerd-runtime/tools/metadata-registry.js',
+      'peerd-runtime/tools/metadata/catalog.js',
+    ]) expect(authorityModules.has(module), `authority graph imports ${module}`).toBe(false);
+
+    const controllerModules = await modulesFor('offscreen/controller-turn-runtime.js');
+    for (const module of [
+      'peerd-runtime/controller-tool-projection.js',
+      'peerd-runtime/tools/metadata/policy.js',
+      'peerd-runtime/tools/metadata/catalog.js',
+    ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
+
+    const driver = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+    );
+    expect(driver).toContain('controller tool projection unavailable');
+    for (const fallback of [
+      'mainAgentDescriptors(listToolDescriptors())',
+      'actorDescriptors(listToolDescriptors()',
+      '.map(projectToolAuthority)',
+    ]) expect(driver).not.toContain(fallback);
+  });
+
   it('hosts actor tool semantics only in controller and isolated-worker graphs', async () => {
     const actorSemanticModules = new Set([
       'peerd-runtime/controller-actor-tools.js',

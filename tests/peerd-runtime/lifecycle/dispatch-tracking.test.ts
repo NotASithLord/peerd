@@ -10,8 +10,12 @@ import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/o
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
 import {
-  registerTool, clearTools, registerMetadataInventory,
+  registerTool, clearTools,
 } from '../../../extension/peerd-runtime/tools/registry.js';
+import {
+  getToolDescriptor as getMetadataToolDescriptor,
+  registerMetadataInventory,
+} from '../../../extension/peerd-runtime/tools/metadata-registry.js';
 import {
   dispatchToolCall, prepareToolCall, settleToolCall,
 } from '../../../extension/peerd-runtime/tools/dispatcher.js';
@@ -701,7 +705,7 @@ describe('the full dispatcher path', () => {
         ...baseCtx(), lifecycle: tracker,
         exposure: 'actor', actorType: 'app', actorInstanceId: 'app-1',
         session: { sessionId: 'sess-1', kind: 'actor' },
-      } as any);
+      } as any, getMetadataToolDescriptor(name));
       expect(prepared.prepared).toBe(true);
       const semantic = await executeControllerRepositoryTool(
         name, args, { actorType: 'app', actorInstanceId: 'app-1' },

@@ -37,12 +37,14 @@ const closedFailure = () => ({
  * @param {(authority:{authorizeTurnCall:Function,handleTurnKernelCall:Function})=>{
  *   callTurn:(payload:unknown,options?:any)=>Promise<any>,
  *   renderSystemPrompt:(ctx:Record<string,unknown>)=>Promise<string>,
+ *   projectTurnTools:(ctx:Record<string,unknown>)=>Promise<any[]>,
  *   withRun:(operation:()=>Promise<void>)=>Promise<void>,
  *   release:()=>void,
  * }} deps.createController
  * @param {(seams:{
  *   runUserTurn:Function,
  *   renderSystemPrompt:Function,
+ *   projectTurnTools:Function,
  *   withRun:Function,
  * })=>Promise<{
  *   turnDeps:Record<string,any>,
@@ -98,6 +100,7 @@ export const createKernelTurnOwner = ({
   });
   if (typeof controller?.callTurn !== 'function'
       || typeof controller.renderSystemPrompt !== 'function'
+      || typeof controller.projectTurnTools !== 'function'
       || typeof controller.withRun !== 'function'
       || typeof controller.release !== 'function') {
     bridge.close();
@@ -125,6 +128,7 @@ export const createKernelTurnOwner = ({
     const loaded = await loadRuntime(Object.freeze({
       runUserTurn: bridge.runUserTurn,
       renderSystemPrompt: controller.renderSystemPrompt.bind(controller),
+      projectTurnTools: controller.projectTurnTools.bind(controller),
       withRun: controller.withRun.bind(controller),
     }));
     if (!loaded || typeof loaded !== 'object'

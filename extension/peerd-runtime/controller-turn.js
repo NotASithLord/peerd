@@ -1,6 +1,7 @@
 // @ts-check
 
 export { runUserTurn } from './loop/agent-loop.js';
+export { projectControllerToolSurface } from './controller-tool-projection.js';
 export {
   CONTROLLER_LOCAL_TOOL_NAMES,
   controllerHostsLocalTool,

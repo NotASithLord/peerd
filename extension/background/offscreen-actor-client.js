@@ -71,7 +71,7 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * @param {{ get: (id: string) => Promise<any> }} deps.sessions
  * @param {(opts: object) => Promise<object>} deps.buildToolContext
  * @param {(call: object, ctx: object) => Promise<any>} deps.dispatchToolCall
- * @param {(call: object, ctx: object) => Promise<any>} [deps.prepareToolCall]
+ * @param {(call: object, ctx: object, descriptor?:object) => Promise<any>} [deps.prepareToolCall]
  * @param {(prepared: object, execution: object) => Promise<any>} [deps.settleToolCall]
  * @param {(call: any, actorType: string|undefined, instanceId: string|undefined) => void} deps.pinActorCall
  * @param {(ctx: any, allowedNames: Set<string>) => any} [deps.restrictCtxCapabilities]  phase 4:
@@ -145,7 +145,7 @@ export const makeOffscreenActorClient = ({
     ? Math.floor(maxLoopEventsPerRun) : 256;
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> }>} Firefox relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> }>} Firefox relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: Firefox binds
@@ -230,6 +230,7 @@ export const makeOffscreenActorClient = ({
       modelRelays: 0, toolRelays: 0, loopEvents: 0,
       modelActive: false, modelStreamId: null, contextRead: false,
       actorExecutions: new Map(),
+      toolDescriptors: new Map((tools ?? []).map((tool) => [tool?.name, tool])),
       ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
         ? { actorSurface: job.actorSurface }
         : {}),
@@ -320,7 +321,7 @@ export const makeOffscreenActorClient = ({
    * token. Every route treats a missing or retired grant as a hard refusal.
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> } | null}
+   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> } | null}
    */
   const grantFor = (msg, sender, boundGrant = null) => {
     if (boundGrant) return boundGrant;
@@ -871,7 +872,9 @@ export const makeOffscreenActorClient = ({
       grant.toolRelays += 1;
       const admittedContext = await contextForTool(grant, call);
       if (admittedContext.ok !== true) return admittedContext;
-      const prepared = await prepareToolCall(call, admittedContext.ctx);
+      const prepared = await prepareToolCall(
+        call, admittedContext.ctx, grant.toolDescriptors.get(call?.name),
+      );
       if (prepared?.prepared !== true) return { ok: true, mode: 'result', result: prepared };
       const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[domain];
       if (!policy || structuredClonePayloadBytes(prepared.args) > policy.argumentBytes) {

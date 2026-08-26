@@ -613,7 +613,7 @@ export const makeSemanticControllerClient = ({
       ? (operation) => withLease(operation)
       : (operation) => operation();
   const semanticCapabilities = Object.freeze([
-    'prompt.render',
+    'prompt.render', 'turn.tools.project',
     ...(hasRuntimeAuthority ? [RUNTIME_DISPATCH_CAPABILITY] : []),
     ...(hasSemanticAuthority ? ['semantic.dispatch'] : []),
     ...(hasTurnAuthority ? ['turn.run'] : []),
@@ -631,9 +631,11 @@ export const makeSemanticControllerClient = ({
   const authorizeCall = (
     /** @type {string} */ capability,
     /** @type {unknown} */ payload,
-  ) => capability === 'prompt.render' ? {
+  ) => capability === 'prompt.render' || capability === 'turn.tools.project' ? {
       ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
-      origin: null, target: 'system-prompt', replayClass: 'A',
+      origin: null,
+      target: capability === 'prompt.render' ? 'system-prompt' : 'turn-tool-projection',
+      replayClass: 'A',
     }
     : capability === 'turn.run' && hasTurnAuthority ? authorizeTurnCall(payload) : null;
   const authorizeControllerCall = (/** @type {string} */ capability,
@@ -888,6 +890,35 @@ export const makeSemanticControllerClient = ({
     }, {
       outcomeKnownOnLoss: true,
       code: 'controller-firefox-prompt-lifetime-lost',
+      onLost: retireActiveOnLifetimeLoss,
+    });
+
+  const projectTurnTools = (/** @type {Record<string, unknown>} */ input) =>
+    withControllerLease(async (/** @type {unknown} */ lease) => {
+      enterLeased();
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          let client = null;
+          try {
+            client = await getClient(lease);
+            const result = await client.call('turn.tools.project', input, { timeoutMs: 15_000 });
+            if (result?.ok === true && Array.isArray(result.tools)) return result.tools;
+            if (result?.outcomeKnown === true) {
+              throw Object.assign(new Error(result.code ?? 'turn-tool-projection-failed'), result);
+            }
+          } catch (cause) {
+            if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
+          }
+          if (client) retire(client);
+        }
+        throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
+          code: 'controller-tool-projection-startup-failed',
+          outcomeKnown: true, phase: 'startup', retryable: true,
+        });
+      } finally { exitLeased(); }
+    }, {
+      outcomeKnownOnLoss: true,
+      code: 'controller-firefox-tool-projection-lifetime-lost',
       onLost: retireActiveOnLifetimeLoss,
     });
 
@@ -1153,6 +1184,7 @@ export const makeSemanticControllerClient = ({
 
   return Object.freeze({
     renderSystemPrompt,
+    projectTurnTools,
     callTurn,
     callSemantic,
     callRuntime,

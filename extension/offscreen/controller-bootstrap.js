@@ -22,7 +22,8 @@ const handleOffer = makeControllerOfferHandler({
   expectedWorkerUrl: backgroundModuleUrl(browser),
   expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
   supportedCaps: [
-    'prompt.render', RUNTIME_DISPATCH_CAPABILITY, 'semantic.dispatch', 'turn.run',
+    'prompt.render', 'turn.tools.project', RUNTIME_DISPATCH_CAPABILITY,
+    'semantic.dispatch', 'turn.run',
     KERNEL_FEATURE_DISPATCH_CAPABILITY,
   ],
   loadController,

@@ -26,7 +26,7 @@ import {
 } from '../errors.js';
 // Pure policy helpers (not IO) — direct import is the gates.js precedent, and
 // keeps the actor turn setup readable. Flag-gated so they're inert when off.
-import { EXPOSURE_ACTOR, actorDescriptors, filterActorSurface, pinActorCall } from '../tools/exposure.js';
+import { EXPOSURE_ACTOR, pinActorCall } from '../tools/exposure.js';
 // The prewalk planning nudge (loop/prewalk.js) — appended to the system
 // prompt only while session.prewalk.phase === 'planning'. Pure text; the
 // swap/restore IO rides the injected reconcilePrewalk/maybePrewalkSwap deps.
@@ -34,19 +34,16 @@ import { PREWALK_NUDGE } from './prewalk.js';
 import { DWEB_INBOUND_TOOL_NAMES } from '../actor/capability-manifest.js';
 import {
   actorIsolationAvailable, actorIsolationForTurn, actorIsolationPromptBlock, actorIsolationRefusal,
-  ACTOR_ISOLATION_UNAVAILABLE_TOOLS, filterByActorIsolation,
+  ACTOR_ISOLATION_UNAVAILABLE_TOOLS,
 } from '../actor/isolation.js';
 import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
-import {
-  filterByRuntimeCapabilities, runtimeCapabilityPromptBlock, runtimeCapabilityRefusal,
-} from '../runtime-capabilities.js';
+import { runtimeCapabilityPromptBlock, runtimeCapabilityRefusal } from '../runtime-capabilities.js';
 import {
   CONTROLLER_AUTHORITY_MANIFEST,
   controllerAuthorityClassAllowed,
 } from '../../shared/controller-authority-manifest.js';
 import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
-import { projectToolAuthority } from '../tools/metadata/descriptor.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
 
@@ -130,13 +127,10 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
   const {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
     sessions, turnSlots, buildTemporalBlock, memory, browser,
-    skillRegistry, renderSystemPrompt, resolveManifestAllow, buildToolContext,
-    filterByDwebActive, filterByDwebEnabled,
-    filterDescriptorsByManifest, mainAgentDescriptors, listTools,
-    listToolDescriptors = listTools, settingsStore, DWEB_ENABLED,
-    filterByGoalActive, goalActiveFor,
+    skillRegistry, renderSystemPrompt, buildToolContext,
+    settingsStore, DWEB_ENABLED, filterByGoalActive, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
-    maybeNudgeDebuggerGrant, getTool, getToolDescriptor = getTool,
+    maybeNudgeDebuggerGrant, getToolDescriptor = () => null,
     decideAction, listProviders, costOf, makeTurnCostTracker, uiConnected, uiPorts, auditLog,
     postChatNote, runUserTurn,
     REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
@@ -165,6 +159,9 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     // turn may snapshot it. Tests and non-browser callers stay synchronous.
     waitForActorIsolation = async () => {},
     getRuntimeCapabilities = () => null,
+    // The controller is the sole owner of inventory and exposure semantics.
+    // The driver never reconstructs a local fallback from an authority graph.
+    projectToolDescriptors,
   } = deps;
 
 /**
@@ -446,7 +443,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // Re-read per turn so a mid-chat /tools change applies on the next turn —
   // the same freshness contract getSystemPrompt keeps for /system.
   const manifestSession = await sessions.get(sessionId);
-  const sessionToolAllow = resolveManifestAllow(manifestSession?.toolManifest);
   const turnPermission = await resolvePermission(manifestSession);
 
   const toolContextArgs = isActor
@@ -470,40 +466,26 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     });
     return toolContextReady;
   };
+  /** @type {Map<string,any>} */
+  let currentToolDescriptorsByName = new Map();
 
   // Recomputed PER STEP (the loop's refreshTools): the dweb-engagement and
   // goal cuts below change mid-turn, so the advertised list must follow.
   const refreshMainTools = async () => {
-    // THIRD cut: dweb tools (publish/discover/install) only when the dweb is on.
-    // Runs BEFORE the .map (which drops the `dweb` flag) so the agent never sees
-    // them on the store build (DWEB_ENABLED false) or with the setting off.
-    // FOURTH cut: the dweb SECONDARY tools (sovereign controls + bridge guide) stay
-    // hidden until this session has CALLED a dweb tool — engagement, not the
-    // always-on network's peer presence. Composes after the dweb-enabled gate.
-    // FIFTH cut: goal mode. complete_goal is registered always but revealed to
-    // the model ONLY while a goal run is live for this session (goalActiveFor),
-    // so a normal chat never sees it. Outermost so it composes over the rest.
-    // SIXTH cut (DESIGN-17): the actor surface. The actor-only instance tier
-    // (writes AND the fenced reads) LEAVES the main agent (it delegates via
-    // message_actor, which it keeps). Outermost so it composes over everything.
-    const exposed = filterActorSurface(
-      filterByGoalActive(
-        filterByDwebActive(
-          filterByDwebEnabled(
-            filterDescriptorsByManifest(mainAgentDescriptors(listToolDescriptors()), sessionToolAllow),
-            DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
-          ),
-          dwebEngagedSessions.has(sessionId),
-        ),
-        !!goalActiveFor?.(sessionId),
-      ),
-    );
     const isolation = effectiveActorIsolation();
-    const descriptors = filterByRuntimeCapabilities(
-      isolation ? filterByActorIsolation(exposed, isolation) : exposed,
-      runtimeCapabilities,
-    )
-      .map(projectToolAuthority);
+    if (typeof projectToolDescriptors !== 'function') {
+      throw new TypeError('controller tool projection unavailable');
+    }
+    const descriptors = await projectToolDescriptors({
+      surface: 'main', toolManifest: manifestSession?.toolManifest,
+      dwebEnabled: DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
+      dwebEngaged: dwebEngagedSessions.has(sessionId),
+      goalActive: !!goalActiveFor?.(sessionId),
+      actorIsolation: isolation, runtimeCapabilities,
+    });
+    currentToolDescriptorsByName = new Map(descriptors.map(
+      (/** @type {any} */ descriptor) => [descriptor.name, descriptor],
+    ));
     actorIsolationForModelStep = isolation;
     return descriptors;
   };
@@ -516,18 +498,19 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // gate (which refuses click/type for it). null manifest passes through unchanged.
   const refreshActorTools = async () => {
     const toolContext = await getToolContext();
-    const descriptors = filterByRuntimeCapabilities(
-      filterDescriptorsByManifest(
-        actorDescriptors(listToolDescriptors(), actorType, actorBacking, toolContext.actorSurface),
-        sessionToolAllow,
-      ),
-      runtimeCapabilities,
-    );
-    const inboundAllowed = new Set(DWEB_INBOUND_TOOL_NAMES);
-    return (toolContext.inbound === true && actorType === 'dweb'
-      ? descriptors.filter((/** @type {any} */ tool) => inboundAllowed.has(tool.name))
-      : descriptors)
-      .map(projectToolAuthority);
+    if (typeof projectToolDescriptors !== 'function') {
+      throw new TypeError('controller tool projection unavailable');
+    }
+    const descriptors = await projectToolDescriptors({
+      surface: 'actor', actorType, backing: actorBacking,
+      actorSurface: toolContext.actorSurface,
+      toolManifest: manifestSession?.toolManifest,
+      runtimeCapabilities, inbound: toolContext.inbound === true,
+    });
+    currentToolDescriptorsByName = new Map(descriptors.map(
+      (/** @type {any} */ descriptor) => [descriptor.name, descriptor],
+    ));
+    return descriptors;
   };
   const refreshTools = isActor ? refreshActorTools : refreshMainTools;
   const toolDescriptors = await refreshTools();
@@ -582,7 +565,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         const authorityClass = binding?.authorityClass;
         if (!controllerAuthorityClassAllowed(authorityClass)) return null;
         const toolContext = await getToolContext();
-        const prepared = await prepareToolCall(call, toolContext);
+        const prepared = await prepareToolCall(call, toolContext, binding?.descriptor);
         if (prepared?.prepared !== true) return { mode: 'result', result: prepared };
         const projection = authorityClass === 'actor'
           ? {
@@ -649,7 +632,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // writes or would need a confirmation round-trip stays serial, so two
   // side effects can't interleave and confirm modals never stack.
   const classifyToolCall = (/** @type {string} */ name) => {
-    const tool = getToolDescriptor(name);
+    const tool = currentToolDescriptorsByName.get(name) ?? getToolDescriptor(name);
     if (!tool) return null;
     return decideAction({
       mode: /** @type {any} */ (turnPermission?.mode),

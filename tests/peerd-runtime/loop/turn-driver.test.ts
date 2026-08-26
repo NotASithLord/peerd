@@ -192,6 +192,25 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     providerFallbacks: failover ? ['openrouter'] : [],
   };
   const identity = (value: any) => value;
+  const descriptorInventory = metadataOnly || dynamicIsolation
+    ? ['message_actor', 'actor_create', 'request_review', 'actor_list']
+      .map((name) => ({
+        name, description: `${name} test tool.`, schema: { type: 'object' },
+        primitive: 'actor', sideEffect: name === 'request_review' || name === 'actor_list'
+          ? 'read' : 'write',
+      }))
+    : runtimeUnsupported
+      ? ['script', 'read_pdf', 'message_actor'].map((name) => ({
+        name, description: `${name} test tool.`, schema: { type: 'object' },
+        primitive: name === 'message_actor' ? 'actor' : 'host', sideEffect: 'read',
+      }))
+      : [];
+  const projectToolDescriptors = async (input: any) => descriptorInventory.filter((descriptor) => {
+    if (input.runtimeCapabilities && ['script', 'read_pdf'].includes(descriptor.name)) return false;
+    if (input.actorIsolation?.status !== 'available'
+        && ['message_actor', 'actor_create', 'request_review'].includes(descriptor.name)) return false;
+    return true;
+  });
   const callModel = async function* (args: any) {
     modelCalls.push(args);
     if (dynamicIsolation) {
@@ -262,19 +281,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     filterByDwebEnabled: identity,
     filterDescriptorsByManifest: identity,
     mainAgentDescriptors: identity,
-    listTools: () => {
-      if (metadataOnly) throw new Error('executable inventory must stay cold');
-      return dynamicIsolation || runtimeUnsupported
-        ? (runtimeUnsupported ? ['script', 'read_pdf', 'message_actor'] : ['message_actor', 'actor_create', 'request_review', 'actor_list'])
-          .map((name) => ({ name, description: `${name} test tool.`, schema: { type: 'object' } }))
-        : [];
-    },
-    listToolDescriptors: metadataOnly ? () => [
-      { name: 'message_actor', description: 'delegate', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'write' },
-      { name: 'actor_create', description: 'create', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'write' },
-      { name: 'request_review', description: 'review', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'read' },
-      { name: 'actor_list', description: 'list', schema: { type: 'object' }, primitive: 'actor', sideEffect: 'read' },
-    ] : undefined,
+    projectToolDescriptors,
     settingsStore: { get: () => settings },
     DWEB_ENABLED: false,
     filterByGoalActive: identity,

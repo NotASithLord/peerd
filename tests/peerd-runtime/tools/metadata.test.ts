@@ -10,11 +10,17 @@ import {
 } from '../../../extension/peerd-runtime/semantic.js';
 import { composeTool } from '../../../extension/peerd-runtime/tools/metadata/index.js';
 import { getToolPolicy } from '../../../extension/peerd-runtime/tools/metadata/policy.js';
-import { projectToolAuthority } from '../../../extension/peerd-runtime/tools/metadata/descriptor.js';
+import {
+  projectToolAuthority,
+  toToolDescriptor,
+} from '../../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import {
   normalizeSiteOrigin,
   originOfUrl,
 } from '../../../extension/peerd-runtime/tool-origin-policy.js';
+import {
+  projectControllerToolSurface,
+} from '../../../extension/peerd-runtime/controller-tool-projection.js';
 import {
   clearTools, listTools, registerTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
@@ -138,7 +144,9 @@ describe('tool metadata authority', () => {
     const { hydrateToolDescriptors } = await import(
       '../../../extension/peerd-runtime/semantic.js'
     );
-    const projection = projectToolAuthority(ALL_TOOLS[0] as any);
+    const projection = projectToolAuthority(toToolDescriptor(
+      getToolPolicy(ALL_TOOLS[0].name),
+    ));
     expect(Object.keys(projection)).not.toContain('description');
     expect(Object.keys(projection)).not.toContain('schema');
     expect(hydrateToolDescriptors([projection])[0]).toMatchObject({
@@ -185,6 +193,25 @@ describe('tool origin rules', () => {
     expect(originOfUrl('chrome://settings/privacy')).toBe('chrome://settings');
     expect(originOfUrl('about:config')).toBe('about://config');
     expect(originOfUrl('https://Example.com:443/a')).toBe('https://example.com');
+  });
+});
+
+describe('controller tool projection', () => {
+  test('returns only clone-safe authority policy and rejects widened requests', () => {
+    const projected: any = projectControllerToolSurface({ surface: 'all' });
+    expect(projected.ok).toBe(true);
+    expect(projected.tools).not.toBeEmpty();
+    expect(projected.tools[0]).toMatchObject({
+      name: expect.any(String), primitive: expect.any(String),
+      sideEffect: expect.any(String), originRule: expect.any(Object),
+    });
+    expect(projected.tools[0]).not.toHaveProperty('description');
+    expect(projected.tools[0]).not.toHaveProperty('schema');
+    expect(projectControllerToolSurface({
+      surface: 'all', browser: { tabs: true },
+    })).toEqual({
+      ok: false, code: 'turn-tool-projection-invalid', outcomeKnown: true,
+    });
   });
 });
 

@@ -25,12 +25,14 @@ export { isDenylistedTab, liveDocumentLocationInjected } from './browser-authori
 export { SessionNotFoundError } from './errors.js';
 export {
   registerTool,
-  registerMetadataInventory,
   getTool,
-  getToolDescriptor,
   listTools,
-  listToolDescriptors,
 } from './tools/registry.js';
+export {
+  registerMetadataInventory,
+  getToolDescriptor,
+  listToolDescriptors,
+} from './tools/metadata-registry.js';
 export { mainAgentDescriptors, filterByDwebEnabled, filterByDwebActive, filterByGoalActive, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors } from './tools/exposure.js';
 export { resolveManifestAllow, manifestLabel, filterDescriptorsByManifest } from './tools/manifests.js';
 export { resolveRuntimeCapabilities, filterByRuntimeCapabilities, requireRuntimeCapability } from './runtime-capabilities.js';

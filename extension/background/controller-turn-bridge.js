@@ -315,6 +315,7 @@ export const makeControllerTurnBridge = ({
   };
   const setTools = (/** @type {any} */ run, /** @type {unknown} */ tools) => {
     run.tools = Array.isArray(tools) ? tools : [];
+    run.toolDescriptors = new Map(run.tools.map((/** @type {any} */ tool) => [tool?.name, tool]));
     run.toolNames = new Set(run.tools.map((/** @type {any} */ tool) => tool?.name)
       .filter((/** @type {unknown} */ name) => typeof name === 'string'));
     run.classifications = classificationsFor(run, run.tools);
@@ -861,6 +862,7 @@ export const makeControllerTurnBridge = ({
             executionId,
             modelArgsDigest,
             authorityClass: value.authorityClass,
+            descriptor: run.toolDescriptors.get(call.name),
             deadlineAt,
             signal: run.signal,
           });
@@ -1893,7 +1895,8 @@ export const makeControllerTurnBridge = ({
       maxOutputTokens: Number.isSafeInteger(ctx.maxOutputTokens)
         ? Math.max(1, Math.min(64_000, Number(ctx.maxOutputTokens))) : 64_000,
       preparedExecutions: new Map(),
-      tools: [], toolNames: new Set(), classifications: {}, system: null,
+      tools: [], toolNames: new Set(), toolDescriptors: new Map(),
+      classifications: {}, system: null,
       nestedUnknown: false, abortFinalized: false,
       currentAssistantId: null, resumeAssistantId: null,
       dispatchBarrier: Promise.resolve(),

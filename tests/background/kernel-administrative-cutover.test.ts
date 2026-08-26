@@ -533,7 +533,7 @@ describe('sealed administrative root cutover', () => {
     expect(await feature.dispatch('administrative', 'hooks/list', {}))
       .toEqual({ ok: true, outcomeKnown: true, value: [] });
     expect(offered).toEqual([[
-      'prompt.render', KERNEL_FEATURE_DISPATCH_CAPABILITY,
+      'prompt.render', 'turn.tools.project', KERNEL_FEATURE_DISPATCH_CAPABILITY,
     ]]);
     semantic.close();
   });

@@ -5,6 +5,7 @@ import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime
 import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
 import { createContextSnapshots } from '../../extension/background/context-snapshots.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
+import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
 
 const event = () => {
   const listeners = new Set<(...args: any[]) => void>();
@@ -251,7 +252,14 @@ const harness = async (
       get: () => settings,
       update: async (patch: any) => Object.assign(settings, patch),
     },
-    seams: { renderSystemPrompt: async () => 'system' },
+    seams: {
+      renderSystemPrompt: async () => 'system',
+      projectTurnTools: async (input: unknown) => {
+        const result = projectControllerToolSurface(input);
+        if (result.ok !== true) throw new Error(result.code);
+        return result.tools;
+      },
+    },
     confirmation: { confirm: async () => 'yes_once' },
     denylist: { ready: async () => ({ ok: true }), patterns: () => [] },
     featureHost: {

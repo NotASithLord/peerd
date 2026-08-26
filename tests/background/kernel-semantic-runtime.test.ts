@@ -15,6 +15,7 @@ const controller = (overrides: Record<string, any> = {}) => ({
   callRuntime: async () => ({ ok: true }),
   callFeature: async () => ({ ok: true }),
   renderSystemPrompt: async () => '',
+  projectTurnTools: async () => [],
   withRun: async (operation: () => Promise<any>) => operation(),
   retire: () => {},
   close: () => {},
