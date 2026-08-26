@@ -8,7 +8,9 @@
 // untrusted instance/page output stays in this heap. Module worker → strict.
 import {
   controllerHostsActorTool,
+  controllerHostsPodTool,
   executeControllerActorTool,
+  executeControllerPodTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -63,6 +65,14 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'actor-tasks-read-response'
       || m.type === 'actor-task-cancel-response'
       || m.type === 'actor-message-deliver-response'
+      || m.type === 'pod-resolve-response'
+      || m.type === 'pod-read-remote-response'
+      || m.type === 'pod-confirm-git-response'
+      || m.type === 'pod-exec-response'
+      || m.type === 'pod-status-response'
+      || m.type === 'pod-cancel-response'
+      || m.type === 'pod-read-file-response'
+      || m.type === 'pod-write-file-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -201,7 +211,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         };
       }
       const executionId = prepared.executionId;
-      const authority = Object.freeze({
+      const actorAuthority = Object.freeze({
         spawnSync: (/** @type {any} */ request) => authorityValue(actorToolRequest(
           'actor-spawn-sync-request', {
             executionId, task: request.task,
@@ -238,10 +248,59 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       });
       let result;
       try {
-        result = await executeControllerActorTool(
-          prepared.toolName, prepared.args, prepared.projection, authority,
-          { callId: prepared.callId, signal: abort.signal },
-        );
+        if (controllerHostsActorTool(prepared.toolName)) {
+          result = await executeControllerActorTool(
+            prepared.toolName, prepared.args, prepared.projection, actorAuthority,
+            { callId: prepared.callId, signal: abort.signal },
+          );
+        } else if (controllerHostsPodTool(prepared.toolName)) {
+          const podAuthority = Object.freeze({
+            resolve: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+              'pod-resolve-request', { executionId, podId: request?.podId },
+            )),
+            readRemote: (/** @type {string} */ podId) => authorityValue(actorToolRequest(
+              'pod-read-remote-request', { executionId, podId },
+            )),
+            confirmGit: (/** @type {string} */ op) => authorityValue(actorToolRequest(
+              'pod-confirm-git-request', { executionId, op },
+            )),
+            executeCommand: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+              'pod-exec-request', {
+                executionId, command: request.command, podId: request.podId,
+                timeoutMs: request.timeoutMs, background: request.background === true,
+                remoteGitGrant: request.remoteGitGrant ?? null,
+              },
+            )),
+            readStatus: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+              'pod-status-request', {
+                executionId, podId: request.podId, jobId: request.jobId,
+                stream: request.stream, offset: request.offset, limit: request.limit,
+              },
+            )),
+            cancelJob: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+              'pod-cancel-request', {
+                executionId, podId: request.podId, jobId: request.jobId,
+              },
+            )),
+            readFile: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+              'pod-read-file-request', {
+                executionId, podId: request.podId, path: request.path,
+              },
+            )),
+            writeFile: (/** @type {any} */ request) => authorityValue(actorToolRequest(
+              'pod-write-file-request', {
+                executionId, podId: request.podId, path: request.path,
+                content: request.content,
+              },
+            )),
+          });
+          result = await executeControllerPodTool(
+            prepared.toolName, prepared.args, prepared.projection, podAuthority,
+            { signal: abort.signal },
+          );
+        } else throw Object.assign(new Error('controller tool has no semantic owner'), {
+          code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
+        });
       } catch (cause) {
         const failure = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
         result = {
@@ -296,7 +355,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         modelEgress,
       });
       const legacyToolDispatch = makeRelayedToolDispatch(requestTool);
-      const toolDispatch = (/** @type {any} */ call) => controllerHostsActorTool(call?.name)
+      const toolDispatch = (/** @type {any} */ call) => (
+        controllerHostsActorTool(call?.name) || controllerHostsPodTool(call?.name)
+      )
         ? executeActorTool(call) : legacyToolDispatch(call);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
       // summary. The SW's closure (over a policy-reduced live tab origin) can't

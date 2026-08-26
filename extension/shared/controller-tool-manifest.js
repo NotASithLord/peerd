@@ -7,7 +7,7 @@ import {
 
 const manifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: 'd34b1856e74b2dc1cf522b389c3d0e30859905621220aa60d24c92a6d4954fe6',
+  digest: '36f4a3c453079043fc6adb3143c9299fb0c57928c11a0ac60197ee0b81ba720d',
   tools: {
     now: {
       projectionKeys: [],
@@ -46,6 +46,30 @@ const manifestSource = {
       projectionKeys: ['sessionId', 'sessionKind', 'inbound'],
       effects: [],
     },
+    pod_exec: {
+      projectionKeys: ['sessionId'],
+      effects: [],
+      argumentBytes: 1024 * 1024,
+      resultBytes: 2 * 1024 * 1024,
+    },
+    pod_status: {
+      projectionKeys: ['sessionId'],
+      effects: [],
+    },
+    pod_cancel: {
+      projectionKeys: ['sessionId'],
+      effects: [],
+    },
+    pod_read: {
+      projectionKeys: ['sessionId'],
+      effects: [],
+      resultBytes: 2 * 1024 * 1024,
+    },
+    pod_write: {
+      projectionKeys: ['sessionId'],
+      effects: [],
+      argumentBytes: 1024 * 1024,
+    },
   },
 };
 
@@ -65,6 +89,10 @@ export const controllerHostsTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(CONTROLLER_TOOL_MANIFEST.tools, name);
 
 const actorTools = new Set(['actor_create', 'actor_tasks', 'actor_cancel', 'message_actor']);
+const podTools = new Set(['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write']);
 
 export const controllerToolDomain = (/** @type {unknown} */ name) =>
-  typeof name === 'string' && actorTools.has(name) ? 'actor' : null;
+  typeof name !== 'string' ? null
+    : actorTools.has(name) ? 'actor'
+      : podTools.has(name) ? 'pod'
+        : null;

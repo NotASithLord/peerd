@@ -49,6 +49,7 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-engine/app-manifest.js',
       'peerd-runtime/controller-turn-semantics.js',
       'peerd-runtime/controller-actor-tools.js',
+      'peerd-runtime/controller-pod-tools.js',
       'peerd-runtime/controller-tools.js',
       'peerd-runtime/semantic.js',
       'peerd-runtime/site-clients/digest.js',
@@ -82,6 +83,31 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect(modules.has('peerd-runtime/controller-actor-tools.js')).toBe(true);
       for (const module of actorSemanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
+  it('hosts Pod command/file semantics only in controller and isolated-worker graphs', async () => {
+    const podSemanticModules = new Set([
+      'peerd-runtime/controller-pod-tools.js',
+      'peerd-runtime/tools/defs/pod-exec.js',
+      'peerd-runtime/tools/defs/pod-status.js',
+      'peerd-runtime/tools/defs/pod-cancel.js',
+      'peerd-runtime/tools/defs/pod-read.js',
+      'peerd-runtime/tools/defs/pod-write.js',
+    ]);
+    const authorityEntries = [
+      'background/kernel-turn-authority-adapter.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ];
+    for (const entry of authorityEntries) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => podSemanticModules.has(module))).toEqual([]);
+    }
+
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of podSemanticModules) expect(modules.has(module)).toBe(true);
     }
   });
 

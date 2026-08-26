@@ -38,12 +38,20 @@ const MODEL_STREAM_BYTES = 8 * MIB;
 const MODEL_STREAM_EVENTS = 131_072;
 const MAX_CONCURRENT_KERNEL_CALLS = 256;
 const TURN_IDLE_DEADLINE_MS = 30 * 60_000;
-const ACTOR_OPERATIONS = Object.freeze({
+const DOMAIN_OPERATIONS = Object.freeze({
   'turn.actor.spawn-sync': { tool: 'actor_create', riskClass: 'resource' },
   'turn.actor.spawn-async': { tool: 'actor_create', riskClass: 'resource' },
   'turn.actor.tasks': { tool: 'actor_tasks', riskClass: 'read' },
   'turn.actor.cancel': { tool: 'actor_cancel', riskClass: 'control' },
   'turn.actor.message': { tool: 'message_actor', riskClass: 'resource' },
+  'turn.pod.resolve': { tool: 'pod_exec', riskClass: 'read' },
+  'turn.pod.read-remote': { tool: 'pod_exec', riskClass: 'read' },
+  'turn.pod.confirm-git': { tool: 'pod_exec', riskClass: 'control' },
+  'turn.pod.exec': { tool: 'pod_exec', riskClass: 'resource' },
+  'turn.pod.status': { tool: 'pod_status', riskClass: 'read' },
+  'turn.pod.cancel': { tool: 'pod_cancel', riskClass: 'control' },
+  'turn.pod.read-file': { tool: 'pod_read', riskClass: 'read' },
+  'turn.pod.write-file': { tool: 'pod_write', riskClass: 'commit' },
 });
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
@@ -215,6 +223,14 @@ export const createControllerKernelQuota = (
     'turn.actor.tasks': toolBudget,
     'turn.actor.cancel': toolBudget,
     'turn.actor.message': toolBudget,
+    'turn.pod.resolve': toolBudget,
+    'turn.pod.read-remote': toolBudget,
+    'turn.pod.confirm-git': toolBudget,
+    'turn.pod.exec': toolBudget,
+    'turn.pod.status': toolBudget,
+    'turn.pod.cancel': toolBudget,
+    'turn.pod.read-file': toolBudget,
+    'turn.pod.write-file': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
     'turn.finalize': 1,
@@ -231,14 +247,14 @@ export const createControllerKernelQuota = (
     const limit = limits[/** @type {keyof typeof limits} */ (operation)];
     if (used >= limit) return refusal('kernel-operation-budget-exhausted');
     const value = record(record(payload)?.value);
-    const actorPolicy = ACTOR_OPERATIONS[/** @type {keyof typeof ACTOR_OPERATIONS} */ (operation)];
-    if (actorPolicy) {
+    const domainPolicy = DOMAIN_OPERATIONS[/** @type {keyof typeof DOMAIN_OPERATIONS} */ (operation)];
+    if (domainPolicy) {
       const execution = typeof value?.executionId === 'string'
         ? toolExecutions.get(value.executionId) : null;
-      if (!execution || execution.toolName !== actorPolicy.tool
+      if (!execution || execution.toolName !== domainPolicy.tool
           || value?.argsDigest !== execution.argsDigest
           || value?.turnGeneration !== execution.turnGeneration) {
-        return refusal('kernel-actor-authority-invalid');
+        return refusal('kernel-domain-authority-invalid');
       }
     }
     if (operation === 'turn.model.read-inference'
@@ -313,11 +329,11 @@ export const createControllerKernelQuota = (
         if (request) toolExecutions.set(request.executionId, request);
       } catch { /* malformed preparation remains kernel-owned */ }
     }
-    const actorPolicy = ACTOR_OPERATIONS[/** @type {keyof typeof ACTOR_OPERATIONS} */ (operation)];
+    const domainPolicy = DOMAIN_OPERATIONS[/** @type {keyof typeof DOMAIN_OPERATIONS} */ (operation)];
     const replayable = operation === 'turn.session.get'
       || operation === 'turn.prompt.get' || operation === 'turn.tools.refresh'
       || operation === 'turn.tool.prepare'
-      || actorPolicy?.riskClass === 'read' || actorPolicy?.riskClass === 'control'
+      || domainPolicy?.riskClass === 'read' || domainPolicy?.riskClass === 'control'
       || (operation === 'turn.tool.effect'
         && pendingLoss(operation, payload).retryable === true);
     custody.observe(result, replayable);
@@ -325,17 +341,17 @@ export const createControllerKernelQuota = (
   };
 
   const pendingLoss = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
-    const actorPolicy = ACTOR_OPERATIONS[/** @type {keyof typeof ACTOR_OPERATIONS} */ (operation)];
-    if (actorPolicy) {
+    const domainPolicy = DOMAIN_OPERATIONS[/** @type {keyof typeof DOMAIN_OPERATIONS} */ (operation)];
+    if (domainPolicy) {
       const effect = record(record(payload)?.value);
       const execution = typeof effect?.executionId === 'string'
         ? toolExecutions.get(effect.executionId) : null;
-      if (!execution || execution.toolName !== actorPolicy.tool
+      if (!execution || execution.toolName !== domainPolicy.tool
           || effect?.argsDigest !== execution.argsDigest
           || effect?.turnGeneration !== execution.turnGeneration) {
         return unknownPendingLoss();
       }
-      return toolEffectLossSemantics(actorPolicy.riskClass, 'during');
+      return toolEffectLossSemantics(domainPolicy.riskClass, 'during');
     }
     if (operation !== 'turn.tool.effect') return unknownPendingLoss();
     const effect = record(record(payload)?.value);

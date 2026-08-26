@@ -17,6 +17,7 @@
 import { controllerToolDomain, CONTROLLER_TOOL_MANIFEST } from '/shared/controller-tool-manifest.js';
 import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
+import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -27,6 +28,11 @@ const exactKeys = (
   const allowed = new Set([...required, ...optional]);
   return required.every((key) => Object.hasOwn(record, key))
     && Object.keys(record).every((key) => allowed.has(key));
+};
+
+const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
+  try { return JSON.stringify(left) === JSON.stringify(right); }
+  catch { return false; }
 };
 
 // An inbound dweb wake is reasoning over bytes chosen by a remote peer. Keep its
@@ -384,6 +390,45 @@ export const makeOffscreenActorClient = ({
     return { ok: true, actorSessionId, rec, ctx };
   };
 
+  const domainEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string} */ domain,
+    /** @type {string[]} */ toolNames,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = grant?.actorExecutions.get(msg.executionId);
+    return grant && !grant.relaySignal.aborted
+      && exactKeys(msg, ['executionId', ...fields])
+      && entry?.open === true
+      && controllerToolDomain(entry.toolName) === domain
+      && toolNames.includes(entry.toolName) ? entry : null;
+  };
+
+  const runDomainEffect = async (
+    /** @type {any} */ entry,
+    /** @type {string} */ operation,
+    /** @type {'read'|'control'|'commit'|'resource'} */ riskClass,
+    /** @type {()=>Promise<any>|any} */ execute,
+  ) => {
+    if (entry.domainCalls.has(operation)) {
+      return { ok: false, error: `${operation}: authority already used`, outcomeKnown: true };
+    }
+    entry.domainCalls.add(operation);
+    entry.effectEntered = true;
+    try { return { ok: true, value: await execute(), outcomeKnown: true }; }
+    catch (cause) {
+      const detail = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+      const replayable = riskClass === 'read' || riskClass === 'control';
+      const outcomeKnown = replayable || detail?.outcomeKnown === true;
+      if (!outcomeKnown) entry.unknownIrreversible = true;
+      return {
+        ok: false, error: detail?.message ?? String(cause), outcomeKnown,
+        retryable: outcomeKnown && detail?.retryable !== false,
+      };
+    }
+  };
+
   const routes = {
     /**
      * @param {{relayToken?:string,providerId?:string,modelId?:string,nativeBody?:object}} [msg]
@@ -681,14 +726,15 @@ export const makeOffscreenActorClient = ({
         };
       }
     },
-    /** Admit one controller-owned actor tool without executing its semantics in the SW. */
+    /** Admit one controller-owned tool without executing its semantics in the SW. */
     'actor/tool-prepare': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const call = msg.call;
-      if (!grant || !exactKeys(msg, ['call']) || controllerToolDomain(call?.name) !== 'actor'
+      const domain = controllerToolDomain(call?.name);
+      if (!grant || !exactKeys(msg, ['call']) || domain === null
           || legacyToolAllowed(call?.name) || typeof prepareToolCall !== 'function'
           || typeof settleToolCall !== 'function') {
         return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
@@ -709,19 +755,21 @@ export const makeOffscreenActorClient = ({
       }
       const executionId = `ae-${now().toString(36)}-${++seq}`;
       grant.actorExecutions.set(executionId, {
-        open: true, effectEntered: false, domainCalls: new Set(), prepared,
+        open: true, effectEntered: false, unknownIrreversible: false,
+        domainCalls: new Set(), domainState: {}, prepared,
         toolName: call.name,
       });
+      const projection = domain === 'actor' ? {
+        sessionId: admittedContext.ctx.session?.sessionId,
+        sessionDepth: admittedContext.ctx.session?.depth ?? 0,
+        sessionKind: admittedContext.ctx.session?.kind ?? 'spawned',
+        inbound: admittedContext.ctx.inbound === true,
+      } : { sessionId: admittedContext.ctx.session?.sessionId };
       return {
         ok: true, mode: 'execute', executionId,
         callId: typeof call.id === 'string' && call.id ? call.id : executionId,
         toolName: call.name, args: prepared.args,
-        projection: {
-          sessionId: admittedContext.ctx.session?.sessionId,
-          sessionDepth: admittedContext.ctx.session?.depth ?? 0,
-          sessionKind: admittedContext.ctx.session?.kind ?? 'spawned',
-          inbound: admittedContext.ctx.inbound === true,
-        },
+        projection,
       };
     },
     'actor/spawn-sync': async (
@@ -919,6 +967,203 @@ export const makeOffscreenActorClient = ({
         };
       }
     },
+    'pod/resolve': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], ['podId']);
+      if (!entry || msg.podId !== entry.prepared.call?.args?.podId) {
+        return { ok: false, error: 'pod/resolve: authority mismatch', outcomeKnown: true };
+      }
+      const resolve = entry.prepared.ctx?.podClient?.resolveId;
+      if (typeof resolve !== 'function') {
+        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+      }
+      const result = await runDomainEffect(entry, 'pod/resolve', 'read', () => resolve({
+        sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
+      }));
+      if (result.ok === true && typeof result.value === 'string') {
+        entry.domainState.podId = result.value;
+      }
+      return result;
+    },
+    'pod/read-remote': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], ['podId']);
+      const intent = entry ? podGitRemoteIntents(entry.prepared.call?.args?.command ?? '')[0] : null;
+      if (!entry || typeof msg.podId !== 'string' || msg.podId !== entry.domainState.podId
+          || !intent || intent.url) {
+        return { ok: false, error: 'pod/read-remote: authority mismatch', outcomeKnown: true };
+      }
+      const readRemote = entry.prepared.ctx?.repositories?.getRemote;
+      const result = await runDomainEffect(entry, 'pod/read-remote', 'read', () =>
+        typeof readRemote === 'function'
+          ? readRemote({ kind: 'pod', id: msg.podId }) : null);
+      if (result.ok === true) entry.domainState.remote = result.value;
+      return result;
+    },
+    'pod/confirm-git': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], ['op']);
+      const intents = entry ? podGitRemoteIntents(entry.prepared.call?.args?.command ?? '') : [];
+      const intent = intents.length === 1 ? intents[0] : null;
+      const target = intent?.url ?? entry?.domainState?.remote?.url;
+      if (!entry || typeof entry.domainState.podId !== 'string'
+          || !intent || msg.op !== intent.op || typeof target !== 'string') {
+        return { ok: false, error: 'pod/confirm-git: authority mismatch', outcomeKnown: true };
+      }
+      let origin;
+      try { origin = new URL(target).origin; }
+      catch { return { ok: false, error: 'pod/confirm-git: invalid remote', outcomeKnown: true }; }
+      const confirm = entry.prepared.ctx?.confirm;
+      if (typeof confirm !== 'function') {
+        return { ok: true, value: false, outcomeKnown: true };
+      }
+      const result = await runDomainEffect(entry, 'pod/confirm-git', 'control', () => confirm({
+        tool: 'pod_exec', kind: `git_${intent.op}`,
+        sideEffect: intent.op === 'push' ? 'mutate_external' : 'write',
+        origins: [origin],
+        summary: intent.op === 'push'
+          ? `Allow this one Pod job to push code and commit history to ${target}?`
+          : `Allow this one Pod job to ${intent.op} ${target} through peerd's audited Git transport?`,
+      }));
+      if (result.ok === true && [true, 'yes_once', 'yes_session'].includes(result.value)) {
+        entry.domainState.remoteGitGrant = { op: intent.op, url: target };
+      }
+      return result;
+    },
+    'pod/exec': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_exec'], [
+        'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
+      ]);
+      const args = entry?.prepared?.call?.args;
+      let program;
+      let intents;
+      try {
+        program = parsePodShell(args?.command ?? '');
+        intents = podGitRemoteIntents(args?.command ?? '');
+      } catch {
+        return { ok: false, error: 'pod/exec: invalid admitted command', outcomeKnown: true };
+      }
+      const expectedTimeout = Math.min(300_000, Math.max(1, Number(args?.timeoutMs) || 30_000));
+      const expectedBackground = args?.background === true || program.background;
+      const expectedGrant = intents.length === 1
+        ? entry?.domainState?.remoteGitGrant ?? null : null;
+      if (!entry || intents.length > 1 || typeof entry.domainState.podId !== 'string'
+          || msg.command !== args?.command || msg.podId !== entry.domainState.podId
+          || msg.timeoutMs !== expectedTimeout || msg.background !== expectedBackground
+          || !sameClone(msg.remoteGitGrant, expectedGrant)) {
+        return { ok: false, error: 'pod/exec: authority mismatch', outcomeKnown: true };
+      }
+      const execute = entry.prepared.ctx?.podClient?.exec;
+      if (typeof execute !== 'function') {
+        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+      }
+      return runDomainEffect(entry, 'pod/exec', 'resource', () => execute(msg.command, {
+        podId: msg.podId,
+        timeoutMs: expectedTimeout,
+        background: expectedBackground,
+        remoteGitGrant: expectedGrant,
+        signal: expectedBackground ? undefined : /** @type {any} */ (grant).relaySignal,
+      }));
+    },
+    'pod/status': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_status'], [
+        'podId', 'jobId', 'stream', 'offset', 'limit',
+      ]);
+      const args = entry?.prepared?.call?.args;
+      if (!entry || msg.podId !== args?.podId || msg.jobId !== args?.jobId
+          || msg.stream !== args?.stream || msg.offset !== args?.offset
+          || msg.limit !== args?.limit) {
+        return { ok: false, error: 'pod/status: authority mismatch', outcomeKnown: true };
+      }
+      const status = entry.prepared.ctx?.podClient?.status;
+      if (typeof status !== 'function') {
+        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+      }
+      return runDomainEffect(entry, 'pod/status', 'read', () => status({
+        sessionId: entry.prepared.ctx.session?.sessionId,
+        podId: msg.podId, jobId: msg.jobId, stream: msg.stream,
+        offset: msg.offset, limit: msg.limit,
+      }));
+    },
+    'pod/cancel': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_cancel'], ['podId', 'jobId']);
+      const args = entry?.prepared?.call?.args;
+      if (!entry || typeof msg.jobId !== 'string' || msg.jobId !== args?.jobId
+          || msg.podId !== args?.podId) {
+        return { ok: false, error: 'pod/cancel: authority mismatch', outcomeKnown: true };
+      }
+      const cancel = entry.prepared.ctx?.podClient?.cancel;
+      if (typeof cancel !== 'function') {
+        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+      }
+      return runDomainEffect(entry, 'pod/cancel', 'control', () => cancel(msg.jobId, {
+        sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
+      }));
+    },
+    'pod/read-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_read'], ['podId', 'path']);
+      const args = entry?.prepared?.call?.args;
+      if (!entry || typeof msg.path !== 'string' || msg.path !== args?.path
+          || msg.podId !== args?.podId) {
+        return { ok: false, error: 'pod/read-file: authority mismatch', outcomeKnown: true };
+      }
+      const readFile = entry.prepared.ctx?.podClient?.readFile;
+      if (typeof readFile !== 'function') {
+        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+      }
+      return runDomainEffect(entry, 'pod/read-file', 'read', () => readFile(msg.path, {
+        sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
+      }));
+    },
+    'pod/write-file': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = domainEntry(grant, msg, 'pod', ['pod_write'], [
+        'podId', 'path', 'content',
+      ]);
+      const args = entry?.prepared?.call?.args;
+      if (!entry || typeof msg.path !== 'string' || typeof msg.content !== 'string'
+          || msg.path !== args?.path || msg.content !== args?.content
+          || msg.podId !== args?.podId) {
+        return { ok: false, error: 'pod/write-file: authority mismatch', outcomeKnown: true };
+      }
+      const writeFile = entry.prepared.ctx?.podClient?.writeFile;
+      if (typeof writeFile !== 'function') {
+        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+      }
+      return runDomainEffect(entry, 'pod/write-file', 'commit', () => writeFile(
+        msg.path, msg.content, {
+          sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
+        },
+      ));
+    },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
@@ -934,7 +1179,15 @@ export const makeOffscreenActorClient = ({
       }
       entry.open = false;
       try {
-        const result = await settleToolCall(entry.prepared, { result: msg.result });
+        const executionResult = entry.unknownIrreversible === true ? {
+          ok: false,
+          error: 'Tool outcome unknown. Check Pod state before retrying.',
+          code: 'pod-outcome-unknown',
+          outcomeKnown: false,
+          retryable: false,
+          outcomeKind: 'host-lost',
+        } : msg.result;
+        const result = await settleToolCall(entry.prepared, { result: executionResult });
         grant.actorExecutions.delete(msg.executionId);
         return { ok: true, result };
       } catch (cause) {
