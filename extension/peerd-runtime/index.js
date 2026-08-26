@@ -19,7 +19,7 @@ export { detectInterruptedTurn, RESUME_NUDGE } from './loop/resume-detect.js';
 // streams in other conversations survive navigation + new sends.
 export { makeTurnSlots } from './loop/turn-slots.js';
 // The agent turn driver — runAgentTurn + maybeAutoResume with injected IO.
-export { makeTurnDriver } from './loop/turn-driver.js';
+export { makeTurnAuthorityDriver } from './loop/turn-authority-driver.js';
 // Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
 // agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
 export { makeGoalRunner, GOAL_MAX_ITERATIONS, goalContinuationPrompt } from './loop/goal-runner.js';

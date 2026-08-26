@@ -1,15 +1,15 @@
 // @ts-check
-// peerd-runtime/loop/turn-driver — the agent turn driver.
-// makeTurnDriver(deps) returns { runAgentTurn, maybeAutoResume }; every
-// IO/dependency is INJECTED (functional-core/imperative-shell) so the turn
-// orchestration — ~530 lines previously reachable only through a real browser —
-// can be unit-tested with fakes. The body is unchanged from the SW; only the
-// binding source moved from the SW's closure scope to this deps object.
+// peerd-runtime/loop/turn-authority-driver — the service-worker turn shell.
+// makeTurnAuthorityDriver(deps) returns { runAgentTurn, maybeAutoResume }; every
+// privileged IO is INJECTED (functional-core/imperative-shell) so the authority
+// orchestration can be unit-tested with fakes. Pure permission, spend-limit and
+// replay policy live beside this shell instead of arriving through the semantic
+// owner.
 //
-// why inject (not import): runAgentTurn closes over the SW's live instance graph
-// (vault, sessions, the side-panel ports, the tool dispatcher, cost/failover
-// helpers, ...). Injecting preserves exact behavior and keeps this module
-// browser-free and testable.
+// why inject privileged dependencies: runAgentTurn closes over the SW's live
+// instance graph (vault, sessions, ports and exact tool custody). Injection
+// keeps this module browser-free and testable without hiding authority behind a
+// generic callback surface.
 //
 import {
   ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
@@ -21,6 +21,9 @@ import {
 import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
+import { decideAction } from '../permissions/policy.js';
+import { makeTurnCostTracker } from '../cost/turn-tracker.js';
+import { detectInterruptedTurn } from './resume-detect.js';
 import {
   CONTROLLER_AUTHORITY_MANIFEST,
   controllerAuthorityClassAllowed,
@@ -67,20 +70,17 @@ export const safeForegroundTabContext = (tab, denylist = []) => {
   };
 };
 
-export const makeTurnDriver = (/** @type {any} */ deps) => {
+export const makeTurnAuthorityDriver = (/** @type {any} */ deps) => {
   const {
     vault, VaultLockedError, sessionCache, ensureActiveProvider, resolvePermission,
     sessions, turnSlots, memory, browser,
     skillRegistry, renderSystemPrompt, buildToolContext,
-    settingsStore, DWEB_ENABLED, filterByGoalActive, goalActiveFor,
+    settingsStore, DWEB_ENABLED, goalActiveFor,
     dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant, getToolDescriptor = () => null,
-    decideAction, makeTurnCostTracker,
     uiConnected, uiPorts, auditLog,
     postChatNote, runUserTurn,
     trimEnricher,
-    currentAppScope,
-    checkpointMgr, detectInterruptedTurn,
     getDenylist = () => [],
     // Prewalk (loop/prewalk.js), both optional so actor/test drivers stay
     // inert: reconcilePrewalk applies a pending planning→executing model swap

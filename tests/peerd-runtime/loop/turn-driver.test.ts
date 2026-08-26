@@ -10,9 +10,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  makeTurnDriver,
+  makeTurnAuthorityDriver,
   safeForegroundTabContext,
-} from '/peerd-runtime/loop/turn-driver.js';
+} from '/peerd-runtime/loop/turn-authority-driver.js';
 import { projectControllerToolSurface } from '/peerd-runtime/controller-tool-projection.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
@@ -29,8 +29,8 @@ const deps = (/** @type {any} */ over: any = {}) => ({
   ...over,
 });
 
-test('makeTurnDriver returns the two entry points', () => {
-  const d = makeTurnDriver(deps());
+test('makeTurnAuthorityDriver returns the two entry points', () => {
+  const d = makeTurnAuthorityDriver(deps());
   expect(typeof d.runAgentTurn).toBe('function');
   expect(typeof d.maybeAutoResume).toBe('function');
 });
@@ -76,7 +76,7 @@ test('the controller-owned inbound dweb projection excludes signing and delegati
 
 test('maybeAutoResume no-ops when the setting is off (never reads the session)', async () => {
   let read = false;
-  const d = makeTurnDriver(deps({
+  const d = makeTurnAuthorityDriver(deps({
     settingsStore: { get: () => ({ autoResumeInterruptedTurns: false }) },
     sessions: { get: async () => { read = true; return {}; } },
   }));
@@ -86,14 +86,14 @@ test('maybeAutoResume no-ops when the setting is off (never reads the session)',
 
 test('maybeAutoResume no-ops on a null sessionId', async () => {
   let read = false;
-  const d = makeTurnDriver(deps({ sessions: { get: async () => { read = true; return {}; } } }));
+  const d = makeTurnAuthorityDriver(deps({ sessions: { get: async () => { read = true; return {}; } } }));
   await d.maybeAutoResume(null);
   expect(read).toBe(false);
 });
 
 test('maybeAutoResume no-ops when the vault is locked', async () => {
   let read = false;
-  const d = makeTurnDriver(deps({
+  const d = makeTurnAuthorityDriver(deps({
     vault: { isLocked: () => true },
     sessions: { get: async () => { read = true; return {}; } },
   }));
@@ -103,7 +103,7 @@ test('maybeAutoResume no-ops when the vault is locked', async () => {
 
 test('maybeAutoResume no-ops when the session is already streaming', async () => {
   let read = false;
-  const d = makeTurnDriver(deps({
+  const d = makeTurnAuthorityDriver(deps({
     turnSlots: { isBusy: () => true },
     sessions: { get: async () => { read = true; return {}; } },
   }));
@@ -113,7 +113,7 @@ test('maybeAutoResume no-ops when the session is already streaming', async () =>
 
 test('maybeAutoResume no-ops when a Goal run owns the session (no double-drive)', async () => {
   let read = false;
-  const d = makeTurnDriver(deps({
+  const d = makeTurnAuthorityDriver(deps({
     // The goal loop re-drives its own interrupted turn on resume; auto-resume
     // must bail BEFORE reading the session so the two can't contend the slot.
     goalActiveFor: (sid: string) => sid === 's1',
@@ -125,7 +125,7 @@ test('maybeAutoResume no-ops when a Goal run owns the session (no double-drive)'
 
 test('maybeAutoResume does not resume a turn that is not resumable', async () => {
   let noted = false;
-  const d = makeTurnDriver(deps({
+  const d = makeTurnAuthorityDriver(deps({
     detectInterruptedTurn: () => ({ resumable: false }),
     postChatNote: () => { noted = true; },
   }));
@@ -223,7 +223,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     }
     yield { type: 'message-stop', stopReason: 'end_turn' };
   };
-  const driver = makeTurnDriver({
+  const driver = makeTurnAuthorityDriver({
     vault: { isLocked: () => false },
     sessionCache: {
       sessionGet: async (key: string) => key === 'currentSessionId' ? 's1' : null,
@@ -378,8 +378,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     trimEnricher: { queue: () => {}, drain: async () => {} },
     contextWindowFor: () => null,
     liveContextWindow: () => null,
-    currentAppScope: async () => null,
-    checkpointMgr: { capture: async () => {} },
     detectInterruptedTurn: () => ({ resumable: false }),
     getActorIsolation: () => actorIsolation,
     waitForActorIsolation,

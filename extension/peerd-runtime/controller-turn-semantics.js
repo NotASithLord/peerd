@@ -26,13 +26,11 @@ import {
   ACTION_CLASSES,
   classifyAction,
   confirmActionsFromRecord,
-  decideAction,
   normalizeConfirmActions,
   normalizeMode,
   PERMISSION_MODES,
 } from './permissions/policy.js';
 import { createSkillRegistry } from './skills/registry.js';
-import { detectInterruptedTurn } from './loop/resume-detect.js';
 import {
   dispatchToolCall,
   prepareToolCall,
@@ -56,8 +54,6 @@ import { makeAutoMemory } from './memory/auto-memory-orchestrator.js';
 import { createSuggestionStore } from './memory/suggestions.js';
 import { makeTrimEnricher } from './loop/summary-enrichment.js';
 import { makeToolsCommand } from './tools/manifest-command.js';
-import { makeTurnCostTracker } from './cost/turn-tracker.js';
-import { makeTurnDriver } from './loop/turn-driver.js';
 import { manifestLabel, resolveManifestAllow } from './tools/manifests.js';
 import { limitExceeded, normalizeTally } from './cost/accumulator.js';
 import { filterByRuntimeCapabilities } from './runtime-capabilities.js';
@@ -103,8 +99,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   classifyAction,
   confirmActionsFromRecord,
   createSkillRegistry,
-  decideAction,
-  detectInterruptedTurn,
   dispatchToolCall,
   DOC_TEXT_MAX_CHARS,
   DWEB_INBOUND_TOOL_NAMES,
@@ -129,8 +123,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   makeToolboxParseCheck,
   makeToolsCommand,
   makeTrimEnricher,
-  makeTurnCostTracker,
-  makeTurnDriver,
   manifestLabel,
   mergeSources,
   meshCallToOp,

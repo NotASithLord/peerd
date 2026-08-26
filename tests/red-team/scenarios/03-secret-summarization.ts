@@ -20,7 +20,7 @@ import { restrictCtxCapabilities } from '../../../extension/peerd-runtime/actor/
 import { makeActorSummaryFence } from '../../../extension/peerd-runtime/actor/actor-worker-core.js';
 import { createActorModelEgress } from '../../../extension/offscreen/actor-model-egress.js';
 import { wrapUntrusted, neutralizeFence } from '../../../extension/peerd-runtime/tools/prompt-wrap.js';
-import { makeTurnDriver } from '../../../extension/peerd-runtime/loop/turn-driver.js';
+import { makeTurnAuthorityDriver } from '../../../extension/peerd-runtime/loop/turn-authority-driver.js';
 import { appSearchTool } from '../../../extension/peerd-runtime/tools/defs/app-search.js';
 
 const identity = <T>(value: T): T => value;
@@ -48,7 +48,7 @@ const probeBoundActorTurnDriver = async () => {
     ollamaHost: 'http://127.0.0.1:11434',
     dwebEnabled: false,
   };
-  const driver = makeTurnDriver({
+  const driver = makeTurnAuthorityDriver({
     vault: { isLocked: () => false },
     sessionCache: {
       sessionGet: async (key: string) => key === 'currentSessionId' ? session.sessionId : null,
@@ -257,6 +257,6 @@ export const scenario: Scenario = {
           `ok=${String(result?.ok)} realCloses=${realCloses}`));
     }
 
-    return summarize(probes, ['makeTurnDriver (background actor refusal)', 'restrictCtxCapabilities (tool-context narrowing)', 'createActorModelEgress (exact isolated inference projection)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)', 'app_search whole-result fence']);
+    return summarize(probes, ['makeTurnAuthorityDriver (background actor refusal)', 'restrictCtxCapabilities (tool-context narrowing)', 'createActorModelEgress (exact isolated inference projection)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)', 'app_search whole-result fence']);
   },
 };

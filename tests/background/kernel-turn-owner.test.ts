@@ -93,6 +93,8 @@ const makeRuntime = (seams: any, calls: Record<string, any>, sessionCache = make
         getSystemPrompt: () => seams.renderSystemPrompt({ actorType: 'orchestrator' }),
         appendAudit: async () => {}, enrichTrimSummary: () => {},
         signal: new AbortController().signal, reasoning: { enabled: false },
+        previousTurnAt: null, turnNow: 1_700_000_000_000,
+        activeTabContext: null, protectedTabContext: null, recoveryBlock: '',
         callModel: async function* () {
           calls.modelCalls += 1;
           yield { type: 'text-delta', text: 'sealed reply' };
@@ -158,7 +160,7 @@ const providerAuthorityFor = (calls: Record<string, any>) =>
   }) as any;
 
 describe('native kernel turn owner', () => {
-  test('keeps the turn driver, model loop, and legacy worker outside its static graph', async () => {
+  test('keeps the semantic driver, model loop, and legacy worker outside its static graph', async () => {
     const graph = [...await collectStaticModuleGraph(
       EXTENSION_DIR, join(EXTENSION_DIR, 'background/kernel-turn-owner.js'),
     )].map((path) => path.slice(EXTENSION_DIR.length + 1));
@@ -166,6 +168,7 @@ describe('native kernel turn owner', () => {
     expect(graph).toContain('background/kernel-session-turn-routes.js');
     expect(graph).not.toContain('background/service-worker.js');
     expect(graph).not.toContain('peerd-runtime/loop/turn-driver.js');
+    expect(graph).toContain('peerd-runtime/loop/turn-authority-driver.js');
     expect(graph).not.toContain('peerd-runtime/loop/agent-loop.js');
     expect(graph).not.toContain('offscreen/controller-turn-runtime.js');
   });

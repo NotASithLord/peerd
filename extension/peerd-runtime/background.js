@@ -74,7 +74,7 @@ export { appendNoteToUserDoc } from './memory/auto-memory.js';
 export { makeCheapCall } from './actor/cheap-call.js';
 export { makeTrimEnricher } from './loop/summary-enrichment.js';
 export { makeTurnSlots } from './loop/turn-slots.js';
-export { makeTurnDriver } from './loop/turn-driver.js';
+export { makeTurnAuthorityDriver } from './loop/turn-authority-driver.js';
 export { createProfileStore } from './profiles/store.js';
 export { createContactsStore } from './contacts/store.js';
 export { PERMISSION_MODES, ACTION_CLASSES, classifyAction, decideAction, normalizeMode, normalizeConfirmActions, confirmActionsFromRecord } from './permissions/policy.js';

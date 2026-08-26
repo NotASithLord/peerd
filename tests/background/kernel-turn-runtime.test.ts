@@ -28,6 +28,7 @@ describe('kernel turn runtime assembly', () => {
       EXTENSION_DIR, join(EXTENSION_DIR, 'background/kernel-turn-runtime.js'),
     )].map((path) => path.slice(EXTENSION_DIR.length + 1));
     expect(graph).not.toContain('peerd-runtime/loop/turn-driver.js');
+    expect(graph).not.toContain('peerd-runtime/loop/turn-authority-driver.js');
     expect(graph).not.toContain('peerd-runtime/loop/goal-runner.js');
     expect(graph).not.toContain('peerd-runtime/todo/core.js');
     expect(graph).not.toContain('peerd-runtime/kernel-turn.js');
