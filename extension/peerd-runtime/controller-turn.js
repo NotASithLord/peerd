@@ -51,3 +51,8 @@ export {
   controllerHostsScheduleTool,
   executeControllerScheduleTool,
 } from './controller-schedule-tools.js';
+export {
+  CONTROLLER_DWEB_TOOL_NAMES,
+  controllerHostsDwebTool,
+  executeControllerDwebTool,
+} from './controller-dweb-tools.js';

@@ -441,7 +441,10 @@ describe('inbound provenance — monotonic SW grant', () => {
         buildOpts.push(opts);
         // Simulate a ctx builder that forgot the derived bit. The live SW grant
         // must still stamp inbound and strip the signing-worker closure.
-        return { inbound: false, synthetic: false, jsOffscreenClient: { run: true }, dweb: { peers: true } };
+        return {
+          inbound: false, synthetic: false, jsOffscreenClient: { run: true },
+          dweb: { peers: async () => ({ ok: true, peers: [] }) },
+        };
       },
       restrictCtxCapabilities: (ctx: any, allowed: Set<string>) => {
         restrictedTo = [...allowed];
@@ -454,15 +457,27 @@ describe('inbound provenance — monotonic SW grant', () => {
         dispatchedCtx = ctx;
         return { ok: true, content: 'safe read' };
       },
+      prepareToolCall: async (call: any, ctx: any) => {
+        dispatchedCtx = ctx;
+        return { prepared: true, call, ctx, args: call.args };
+      },
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
     });
     const out = await during(async (relayToken) => {
       const forbidden = await client.routes['actor/tool-dispatch']({
         relayToken, call: { name: 'a2a_run', args: { code: 'await mesh.send(...)' } },
       }, OFFSCREEN);
-      const allowed = await client.routes['actor/tool-dispatch']({
+      const prepared: any = await client.routes['actor/tool-prepare']({
         relayToken, call: { name: 'dweb_peers', args: {} },
       }, OFFSCREEN);
-      return { forbidden, allowed };
+      const allowed = await client.routes['dweb/read-peers']({
+        relayToken, executionId: prepared.executionId,
+      }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: true, content: 'safe read' },
+      }, OFFSCREEN);
+      return { forbidden, prepared, allowed, settled };
     }, 'dweb', undefined, {
       actorType: 'dweb', inbound: true,
       tools: ['dweb_peers', 'a2a_run', 'dweb_share', 'dweb_install']
@@ -471,8 +486,10 @@ describe('inbound provenance — monotonic SW grant', () => {
 
     expect(out.forbidden.ok).toBe(false);
     expect(out.forbidden.error).toContain('tool_not_available_to_inbound_actor');
-    expect(out.allowed).toEqual({ ok: true, result: { ok: true, content: 'safe read' } });
-    expect(dispatches).toEqual(['dweb_peers']);
+    expect(out.prepared).toMatchObject({ ok: true, mode: 'execute', toolName: 'dweb_peers' });
+    expect(out.allowed).toMatchObject({ ok: true, value: { ok: true, peers: [] } });
+    expect(out.settled).toMatchObject({ ok: true, result: { ok: true, content: 'safe read' } });
+    expect(dispatches).toEqual([]);
     expect(buildOpts).toEqual([expect.objectContaining({ synthetic: true, trusted: false })]);
     expect(dispatchedCtx).toEqual(expect.objectContaining({ synthetic: true, trusted: false, inbound: true }));
     expect(dispatchedCtx.jsOffscreenClient).toBeUndefined();

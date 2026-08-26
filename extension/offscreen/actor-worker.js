@@ -17,6 +17,7 @@ import {
   controllerHostsPageTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
+  controllerHostsDwebTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -27,6 +28,7 @@ import {
   executeControllerPageTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
+  executeControllerDwebTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
@@ -161,6 +163,12 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'schedule-read-routines-response'
       || m.type === 'schedule-arm-confirmed-routine-response'
       || m.type === 'schedule-cancel-routine-response'
+      || m.type === 'dweb-discover-apps-response'
+      || m.type === 'dweb-publish-confirmed-app-response'
+      || m.type === 'dweb-install-confirmed-app-response'
+      || m.type === 'dweb-read-peers-response'
+      || m.type === 'dweb-set-peer-blocked-response'
+      || m.type === 'dweb-set-discovery-enabled-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -643,6 +651,27 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           });
           result = await executeControllerScheduleTool(
             prepared.toolName, prepared.args, scheduleAuthority, { signal: abort.signal },
+          );
+        } else if (controllerHostsDwebTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
+            authorityValue(actorToolRequest(type, { executionId, ...value }));
+          const dwebAuthority = Object.freeze({
+            discoverApps: () => request('dweb-discover-apps-request'),
+            publishConfirmedApp: (/** @type {string} */ appId) =>
+              request('dweb-publish-confirmed-app-request', { appId }),
+            installConfirmedApp: (/** @type {string} */ uri,
+              /** @type {string|undefined} */ name) =>
+              request('dweb-install-confirmed-app-request', { uri, name }),
+            readPeers: () => request('dweb-read-peers-request'),
+            setPeerBlocked: (/** @type {string} */ did, /** @type {boolean} */ block,
+              /** @type {string|undefined} */ reason) =>
+              request('dweb-set-peer-blocked-request', { did, block, reason }),
+            setDiscoveryEnabled: (/** @type {boolean} */ enabled) =>
+              request('dweb-set-discovery-enabled-request', { enabled }),
+          });
+          result = await executeControllerDwebTool(
+            prepared.toolName, prepared.args, prepared.projection,
+            dwebAuthority, { signal: abort.signal },
           );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,

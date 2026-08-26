@@ -27,10 +27,11 @@ export const dwebPeersTool = composeTool("dweb_peers", {
 
   execute: async (_args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot to the one op this tool uses.
-    const dweb = /** @type {{ peers: () => Promise<PeersResult> } | null | undefined} */ (
-      /** @type {{ dweb?: unknown }} */ (ctx).dweb);
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
-    const r = await dweb.peers();
+    const authority = /** @type {{readPeers?:()=>Promise<PeersResult>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.readPeers !== 'function') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    const r = await authority.readPeers();
+    if (r?.error === 'dweb_unavailable') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (!r?.ok) return { ok: false, error: r?.error ?? 'peers_failed' };
     const peers = (r.peers ?? []).map((p) => ({ did: p.did, name: p.name ?? null, linked: !!p.linked, path: p.path ?? null }));
     return {

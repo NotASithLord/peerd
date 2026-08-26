@@ -21,13 +21,6 @@ export const LEGACY_TOOL_ALLOWLIST = Object.freeze([
   'toolbox_list',
   'toolbox_delete',
   'request_review',
-  'dweb_discover',
-  'dweb_share',
-  'dweb_install',
-  'dweb_peers',
-  'dweb_block',
-  'dweb_discovery',
-  'dweb_guide',
   'a2a_run',
 ]);
 

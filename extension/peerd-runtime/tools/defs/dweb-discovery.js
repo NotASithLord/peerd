@@ -22,11 +22,12 @@ export const dwebDiscoveryTool = composeTool("dweb_discovery", {
 
   execute: async (args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot to the one op this tool uses.
-    const dweb = /** @type {{ setDiscovery: (o: { enabled: boolean }) => Promise<{ ok?: boolean, error?: string }> } | null | undefined} */ (
-      /** @type {{ dweb?: unknown }} */ (ctx).dweb);
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    const authority = /** @type {{setDiscoveryEnabled?:(enabled:boolean)=>Promise<any>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.setDiscoveryEnabled !== 'function') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (typeof args?.enabled !== 'boolean') return { ok: false, error: 'enabled_required', content: 'Pass { enabled: true|false }.' };
-    const r = await dweb.setDiscovery({ enabled: args.enabled });
+    const r = await authority.setDiscoveryEnabled(args.enabled);
+    if (r?.error === 'dweb_unavailable') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (!r?.ok) return { ok: false, error: r?.error ?? 'set_discovery_failed' };
     return { ok: true, content: JSON.stringify({ discovery: args.enabled ? 'on' : 'off' }, null, 2) };
   },

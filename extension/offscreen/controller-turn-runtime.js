@@ -13,6 +13,7 @@ import {
   controllerHostsPageTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
+  controllerHostsDwebTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -23,6 +24,7 @@ import {
   executeControllerPageTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
+  executeControllerDwebTool,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -702,6 +704,34 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
             });
             const value = await executeControllerScheduleTool(
               request.toolName, request.args, scheduleAuthority, { signal: options.signal },
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsDwebTool(request.toolName)) {
+            const dwebAuthority = Object.freeze({
+              discoverApps: () => rpc('turn.dweb.discover-apps', binding),
+              publishConfirmedApp: (/** @type {string} */ appId) =>
+                rpc('turn.dweb.publish-confirmed-app', { ...binding, appId }),
+              installConfirmedApp: (/** @type {string} */ uri,
+                /** @type {string|undefined} */ name) =>
+                rpc('turn.dweb.install-confirmed-app', { ...binding, uri, name }),
+              readPeers: () => rpc('turn.dweb.read-peers', binding),
+              setPeerBlocked: (/** @type {string} */ did, /** @type {boolean} */ block,
+                /** @type {string|undefined} */ reason) =>
+                rpc('turn.dweb.set-peer-blocked', { ...binding, did, block, reason }),
+              setDiscoveryEnabled: (/** @type {boolean} */ enabled) =>
+                rpc('turn.dweb.set-discovery-enabled', { ...binding, enabled }),
+            });
+            const value = await executeControllerDwebTool(
+              request.toolName, request.args, request.projection,
+              dwebAuthority, { signal: options.signal },
             );
             execution = {
               protocol: request.protocol,

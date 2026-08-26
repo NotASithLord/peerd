@@ -34,10 +34,11 @@ export const dwebDiscoverTool = composeTool("dweb_discover", {
   execute: async (_args, ctx) => {
     // why: ctx.dweb is an SW-injected slot (null when the dweb is off) absent
     // from the base ToolContext; narrow it to the one discover() op used here.
-    const dweb = /** @type {{ discover: () => Promise<DiscoverResult> } | null | undefined} */ (
-      /** @type {{ dweb?: unknown }} */ (ctx).dweb);
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
-    const r = await dweb.discover();
+    const authority = /** @type {{discoverApps?:()=>Promise<DiscoverResult>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.discoverApps !== 'function') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    const r = await authority.discoverApps();
+    if (r?.error === 'dweb_unavailable') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (!r?.ok) return { ok: false, error: r?.error ?? 'discover_failed' };
     const apps = (r.apps ?? []).map((a) => ({
       name: a.name,

@@ -38,29 +38,23 @@ export const dwebShareTool = composeTool("dweb_share", {
   execute: async (args, ctx) => {
     // why: narrow ctx to the dweb-only slots (dweb surface + force-confirm) the
     // SW injects for dweb builds — absent/loosely-typed on the base ToolContext.
-    const dctx = /** @type {DwebShareCtx} */ (/** @type {unknown} */ (ctx));
-    if (!dctx.dweb) return {
+    const authority = /** @type {{publishConfirmedApp?:(appId:string)=>Promise<any>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.publishConfirmedApp !== 'function') return {
       ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
       outcomeKind: 'pre-effect-failure',
     };
     const appId = String(args?.appId ?? '').trim();
     if (!appId) return { ok: false, error: 'appId_required', outcomeKind: 'pre-effect-failure' };
-    // Publishing is public, so confirm even if the global confirm toggle is OFF
-    // (the dispatcher's gate already confirms it when the toggle is on).
-    if (dctx.permission?.confirmActions === false && dctx.confirm) {
-      const ans = await dctx.confirm({
-        tool: 'dweb_share', kind: 'dweb_publish', origins: [],
-        summary: `Publish app "${appId}" to the dweb app store? Peers will be able to discover and install it.`,
-        sessionId: ctx.session?.sessionId ?? null,
-      }, ctx.abortSignal);
-      if (ans !== 'yes_once' && ans !== 'yes_session') {
-        return {
-          ok: false, error: 'declined', content: 'User declined to publish to the dweb.',
-          outcomeKind: 'pre-effect-failure',
-        };
-      }
-    }
-    const r = await dctx.dweb.share(appId);
+    const r = await authority.publishConfirmedApp(appId);
+    if (r?.error === 'dweb_unavailable') return {
+      ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
+      outcomeKind: 'pre-effect-failure',
+    };
+    if (r?.declined === true) return {
+      ok: false, error: 'declined', content: 'User declined to publish to the dweb.',
+      outcomeKind: 'pre-effect-failure',
+    };
     if (!r?.ok) {
       const error = r?.error ?? 'share_failed';
       const preEffect = ['dweb-disabled', 'dweb-start-failed', 'app-not-found'].includes(error);

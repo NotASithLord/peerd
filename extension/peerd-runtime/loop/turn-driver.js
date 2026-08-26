@@ -603,6 +603,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
                   messageCount: toolContext.session?.messageCount ?? 0,
                   trimCovered: toolContext.session?.trimCovered ?? 0,
                 }
+                : controllerToolDomain(call?.name) === 'dweb'
+                  ? {
+                    sessionId: toolContext.session?.sessionId,
+                    dwebAvailable: toolContext.dweb != null,
+                  }
             : {};
         return {
           mode: 'execute',

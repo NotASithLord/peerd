@@ -26,6 +26,7 @@ import { createPersistenceToolAuthority } from './persistence-tool-authority.js'
 import { createPageToolAuthority } from './page-tool-authority.js';
 import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { createScheduleToolAuthority } from './schedule-tool-authority.js';
+import { createDwebToolAuthority } from './dweb-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -626,6 +627,19 @@ export const makeControllerTurnBridge = ({
     const entry = domainExecutionEntry(run, value, 'schedule', tools, fields);
     if (!entry) return null;
     entry.domainState.authority ??= createScheduleToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const dwebExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'dweb', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createDwebToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -1765,6 +1779,44 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('schedule cancel authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.cancelRoutine(value.id));
+        }
+        case 'turn.dweb.discover-apps': {
+          const entry = dwebExecutionEntry(run, value, ['dweb_discover'], []);
+          if (!entry) return failed('dweb discovery authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.discoverApps());
+        }
+        case 'turn.dweb.publish-confirmed-app': {
+          const entry = dwebExecutionEntry(run, value, ['dweb_share'], ['appId']);
+          if (!entry) return failed('dweb publish authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.publishConfirmedApp(value.appId));
+        }
+        case 'turn.dweb.install-confirmed-app': {
+          const entry = dwebExecutionEntry(run, value, ['dweb_install'], ['uri', 'name']);
+          if (!entry) return failed('dweb install authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.installConfirmedApp(value.uri, value.name));
+        }
+        case 'turn.dweb.read-peers': {
+          const entry = dwebExecutionEntry(run, value, ['dweb_peers'], []);
+          if (!entry) return failed('dweb peer authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readPeers());
+        }
+        case 'turn.dweb.set-peer-blocked': {
+          const entry = dwebExecutionEntry(
+            run, value, ['dweb_block'], ['did', 'block', 'reason'],
+          );
+          if (!entry) return failed('dweb block authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.setPeerBlocked(value.did, value.block, value.reason));
+        }
+        case 'turn.dweb.set-discovery-enabled': {
+          const entry = dwebExecutionEntry(run, value, ['dweb_discovery'], ['enabled']);
+          if (!entry) return failed('dweb policy authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.setDiscoveryEnabled(value.enabled));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);
