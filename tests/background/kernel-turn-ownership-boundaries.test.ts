@@ -148,6 +148,7 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-provider/pricing.js',
       'peerd-provider/registry.js',
       'peerd-provider/semantic-metadata.js',
+      'peerd-provider/errors.js',
     ]) expect(authorityModules.has(module), `authority graph imports ${module}`).toBe(false);
 
     const controllerModules = await modulesFor('offscreen/controller-turn-runtime.js');

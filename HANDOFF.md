@@ -76,8 +76,8 @@ relevant baseline.
 ## Current retained state
 
 The deletion-oriented chain is `2f92849`, `58ebb61`, `31afe71`, `4dd2279`,
-`37c91a2`, `7ba4a2d`, `8379fbe`, `d3a99db`, `3f11140`, `7cc1084`, and the
-current prompt-composition ownership cut.
+`37c91a2`, `7ba4a2d`, `8379fbe`, `d3a99db`, `3f11140`, `7cc1084`, `6d97fd1`,
+and the current provider-failure ownership cut.
 
 - The broad `kernel-transfer.js` aggregate and generic controller tool-effect
   lane are deleted. Orchestrator and isolated actors share exact per-domain
@@ -106,6 +106,11 @@ current prompt-composition ownership cut.
   projections used for tool admission. It no longer imports or composes those
   model-facing blocks. There is still one controller render path and no new
   authority operation or compatibility path.
+- Provider exception interpretation now terminates in the sealed controller.
+  It projects one bounded UI failure code; the authority driver validates that
+  code and no longer imports provider exception classes. Consequently the live
+  turn authority graph reaches no `peerd-provider` module. Fixed provider
+  endpoint, credential, quota and transport custody is unchanged.
 
 The representative tool-feature fixture now adds a real controller-owned tool
 policy (model-facing description and schema), implementation and ownership row
@@ -114,18 +119,16 @@ controller identity literals, the candidate has exactly the same SW inputs and
 byte-identical authority code. The complete fixture appears only in the
 controller graph.
 
-Store-Chrome telemetry for the latest staged checkpoint is 1,300,998 bundled
-SW bytes, 447 staged inputs and a 347,857-byte minified cold graph. The prior
-checkpoint was 1,302,049 bytes with the same staged-input and cold-graph
-counts. The live
-`kernel-turn-live-factories.js` graph remains at 291 modules after falling from
-292: `peerd-provider/pricing.js`, `metadata.js` and
-`semantic-metadata.js` are no longer reachable, leaving only the fixed provider
-error types. Provider selection and price projection now occur in the sealed
-controller and isolated actor worker. The SW validates and folds the bounded
-price result and retains session spend-limit custody; a missing or malformed
-price fails closed. The SW still owns the fixed egress manifest's credential
-classification. These numbers are observations, not optimization targets.
+Store-Chrome telemetry for the latest staged checkpoint is 1,300,133 bundled
+SW bytes, 446 staged inputs and a 347,857-byte minified cold graph. The prior
+checkpoint was 1,300,998 bytes and 447 inputs with the same cold graph. The live
+`kernel-turn-live-factories.js` graph is 290 modules and contains no
+`peerd-provider` module. Provider selection, price projection and provider
+failure interpretation now occur in the sealed controller and isolated actor
+worker. The SW validates and folds the bounded price result and retains session
+spend-limit custody; a missing or malformed price fails closed. The SW still
+owns the fixed egress manifest's credential classification. These numbers are
+observations, not optimization targets.
 
 The isolated Home harness (only the obsolete byte ceilings relaxed in the
 measurement worktree) passed complete route/event/port and actionable-vault
@@ -133,11 +136,11 @@ readiness: 3.61 seconds from browser launch, 685 ms from worker target, 133 ms
 from Home navigation, and 107 ms for a confirmed forced wake. The assessment
 was green and remains inside the accepted functional envelope.
 
-Latest prompt-ownership verification: 146 focused prompt/turn/boundary tests
-passed, and the broader retained checkpoint set of 94 turn, ownership,
-controller identity and feature-growth tests passed. Static typecheck, lint and
-tscheck coverage passed; Store packaging/posture passed. No full-suite or live
-browser rerun was required for this bounded pure-composition cut. The preceding
+Latest provider-boundary verification: 79 focused provider/turn/controller and
+ownership tests passed, followed by 90 identity, feature-growth and retained
+boundary tests. Static typecheck and lint passed; Store packaging/posture
+passed. No full-suite or live browser rerun was required for this bounded
+response-interpretation cut. The preceding
 full Bun suite passed 7,511 tests and reproduced only the same five inherited failures:
 the session-support cutover, native-entry identity, test-only vault package,
 typed-error minification, and obsolete native cold-size target. The in-browser
