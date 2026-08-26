@@ -38,6 +38,13 @@ const MODEL_STREAM_BYTES = 8 * MIB;
 const MODEL_STREAM_EVENTS = 131_072;
 const MAX_CONCURRENT_KERNEL_CALLS = 256;
 const TURN_IDLE_DEADLINE_MS = 30 * 60_000;
+const ACTOR_OPERATIONS = Object.freeze({
+  'turn.actor.spawn-sync': { tool: 'actor_create', riskClass: 'resource' },
+  'turn.actor.spawn-async': { tool: 'actor_create', riskClass: 'resource' },
+  'turn.actor.tasks': { tool: 'actor_tasks', riskClass: 'read' },
+  'turn.actor.cancel': { tool: 'actor_cancel', riskClass: 'control' },
+  'turn.actor.message': { tool: 'message_actor', riskClass: 'resource' },
+});
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
   ? Math.max(1, Math.min(HARD_TURN_STEPS, Number(value))) : HARD_TURN_STEPS;
@@ -203,6 +210,11 @@ export const createControllerKernelQuota = (
     'turn.tool.effect': 8 * toolBudget,
     'turn.tool.settle': toolBudget,
     'turn.tool.dispatch': toolBudget,
+    'turn.actor.spawn-sync': toolBudget,
+    'turn.actor.spawn-async': toolBudget,
+    'turn.actor.tasks': toolBudget,
+    'turn.actor.cancel': toolBudget,
+    'turn.actor.message': toolBudget,
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
     'turn.finalize': 1,
@@ -219,6 +231,16 @@ export const createControllerKernelQuota = (
     const limit = limits[/** @type {keyof typeof limits} */ (operation)];
     if (used >= limit) return refusal('kernel-operation-budget-exhausted');
     const value = record(record(payload)?.value);
+    const actorPolicy = ACTOR_OPERATIONS[/** @type {keyof typeof ACTOR_OPERATIONS} */ (operation)];
+    if (actorPolicy) {
+      const execution = typeof value?.executionId === 'string'
+        ? toolExecutions.get(value.executionId) : null;
+      if (!execution || execution.toolName !== actorPolicy.tool
+          || value?.argsDigest !== execution.argsDigest
+          || value?.turnGeneration !== execution.turnGeneration) {
+        return refusal('kernel-actor-authority-invalid');
+      }
+    }
     if (operation === 'turn.model.read-inference'
         || operation === 'turn.model.cancel-inference') {
       const streamId = value?.streamId;
@@ -291,9 +313,11 @@ export const createControllerKernelQuota = (
         if (request) toolExecutions.set(request.executionId, request);
       } catch { /* malformed preparation remains kernel-owned */ }
     }
+    const actorPolicy = ACTOR_OPERATIONS[/** @type {keyof typeof ACTOR_OPERATIONS} */ (operation)];
     const replayable = operation === 'turn.session.get'
       || operation === 'turn.prompt.get' || operation === 'turn.tools.refresh'
       || operation === 'turn.tool.prepare'
+      || actorPolicy?.riskClass === 'read' || actorPolicy?.riskClass === 'control'
       || (operation === 'turn.tool.effect'
         && pendingLoss(operation, payload).retryable === true);
     custody.observe(result, replayable);
@@ -301,6 +325,18 @@ export const createControllerKernelQuota = (
   };
 
   const pendingLoss = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
+    const actorPolicy = ACTOR_OPERATIONS[/** @type {keyof typeof ACTOR_OPERATIONS} */ (operation)];
+    if (actorPolicy) {
+      const effect = record(record(payload)?.value);
+      const execution = typeof effect?.executionId === 'string'
+        ? toolExecutions.get(effect.executionId) : null;
+      if (!execution || execution.toolName !== actorPolicy.tool
+          || effect?.argsDigest !== execution.argsDigest
+          || effect?.turnGeneration !== execution.turnGeneration) {
+        return unknownPendingLoss();
+      }
+      return toolEffectLossSemantics(actorPolicy.riskClass, 'during');
+    }
     if (operation !== 'turn.tool.effect') return unknownPendingLoss();
     const effect = record(record(payload)?.value);
     const execution = typeof effect?.executionId === 'string'

@@ -246,6 +246,57 @@ export const runActor = async (job, {
         ok: false, started, phase: started ? 'run' : 'startup',
         code: 'actor_worker_protocol_error', error,
       });
+      const relayExactToolMessage = async (
+        /** @type {any} */ message,
+        /** @type {string} */ responseType,
+        /** @type {()=>Promise<any>} */ send,
+        /** @type {{countCall?:boolean,observeResult?:boolean}} */ options = {},
+      ) => {
+        if (options.countCall) relayedToolRequests += 1;
+        pendingToolRelays += 1;
+        try {
+          const reply = await send();
+          const result = options.observeResult ? reply?.result : undefined;
+          if (reply?.outcomeKnown === false || result?.outcomeKnown === false) {
+            relayedUnknown = true;
+          }
+          if (options.observeResult) {
+            const performed = typeof reply?.performed === 'boolean'
+              ? reply.performed
+              : typeof result?.performed === 'boolean'
+                ? result.performed
+                : reply?.ok === true && result?.ok === true
+                  ? true
+                  : reply?.ok === false && reply?.outcomeKnown !== false
+                    ? false
+                    : undefined;
+            if (performed === true || (performed === false && relayedPerformed !== true)) {
+              relayedPerformed = performed;
+            }
+          }
+          if (!terminal) w.postMessage({ type: responseType, rid: message.rid, reply });
+        } catch (cause) {
+          const detail = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,performed?:boolean}} */ (cause);
+          relayedUnknown ||= detail?.outcomeKnown !== true;
+          if (detail?.performed === true
+              || (detail?.performed === false && relayedPerformed !== true)) {
+            relayedPerformed = detail.performed;
+          }
+          if (!terminal) w.postMessage({
+            type: responseType, rid: message.rid,
+            reply: {
+              ok: false, error: detail?.message ?? String(cause),
+              ...(typeof detail?.code === 'string' ? { code: detail.code } : {}),
+              outcomeKnown: detail?.outcomeKnown === true,
+              ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
+              ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
+            },
+          });
+        } finally {
+          pendingToolRelays -= 1;
+          settleTerminal();
+        }
+      };
       const startupTimer = setTimeout(() => requestFinish({
         ok: false, started: false, phase: 'startup',
         code: 'actor_worker_start_timeout', error: `actor worker did not become ready within ${startupMs}ms`,
@@ -511,6 +562,68 @@ export const runActor = async (job, {
             pendingModelRelays -= 1;
             settleTerminal();
           }
+          return;
+        }
+        if (m.type === 'actor-tool-prepare-request') {
+          await relayExactToolMessage(m, 'actor-tool-prepare-response', () =>
+            sendToSW('actor/tool-prepare', {
+              ...(relayToken ? { relayToken } : {}), call: m.call,
+            }), { countCall: true });
+          return;
+        }
+        if (m.type === 'actor-spawn-sync-request') {
+          await relayExactToolMessage(m, 'actor-spawn-sync-response', () =>
+            sendToSW('actor/spawn-sync', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              task: m.task, allowRecursion: m.allowRecursion,
+              ...(m.tools === undefined ? {} : { tools: m.tools }),
+              ...(m.maxSteps === undefined ? {} : { maxSteps: m.maxSteps }),
+              ...(m.maxDepth === undefined ? {} : { maxDepth: m.maxDepth }),
+            }));
+          return;
+        }
+        if (m.type === 'actor-spawn-async-request') {
+          await relayExactToolMessage(m, 'actor-spawn-async-response', () =>
+            sendToSW('actor/spawn-async', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              task: m.task, allowRecursion: m.allowRecursion,
+              ...(m.tools === undefined ? {} : { tools: m.tools }),
+              ...(m.maxSteps === undefined ? {} : { maxSteps: m.maxSteps }),
+              ...(m.maxDepth === undefined ? {} : { maxDepth: m.maxDepth }),
+            }));
+          return;
+        }
+        if (m.type === 'actor-tasks-read-request') {
+          await relayExactToolMessage(m, 'actor-tasks-read-response', () =>
+            sendToSW('actor/tasks-read', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'actor-task-cancel-request') {
+          await relayExactToolMessage(m, 'actor-task-cancel-response', () =>
+            sendToSW('actor/task-cancel', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              taskId: m.taskId,
+            }));
+          return;
+        }
+        if (m.type === 'actor-message-deliver-request') {
+          await relayExactToolMessage(m, 'actor-message-deliver-response', () =>
+            sendToSW('actor/message-deliver', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              to: m.to, message: m.message, oneShot: m.oneShot,
+              awaitReply: m.awaitReply, degradeToAsync: m.degradeToAsync,
+              awaitCapMs: m.awaitCapMs,
+            }));
+          return;
+        }
+        if (m.type === 'actor-tool-settle-request') {
+          await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
+            sendToSW('actor/tool-settle', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              result: m.result,
+            }), { observeResult: true });
           return;
         }
         if (m.type === 'tool-request') {

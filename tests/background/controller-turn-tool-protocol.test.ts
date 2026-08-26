@@ -209,6 +209,64 @@ describe('controller turn finite tool protocol', () => {
     });
   });
 
+  test('executes actor_cancel through the exact actor authority operation', async () => {
+    const actorCancelDescriptor = authorityDescriptor('actor_cancel');
+    let legacy = 0;
+    let genericExecutor = 0;
+    let cancelled = '';
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [actorCancelDescriptor], refreshTools: async () => [actorCancelDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-actor-cancel-1', name: 'actor_cancel' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-actor-cancel-1',
+            partialJson: '{"taskId":"task-9"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-actor-cancel-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_TOOL_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              actorAuthority: {
+                cancelTask: async (taskId: string) => {
+                  cancelled = taskId;
+                  return { ok: true, content: `cancelled ${taskId}` };
+                },
+              },
+            },
+          },
+          args: call.args, projection: {}, manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
+        }),
+        handleToolEffect: async () => ({
+          ok: false, code: 'tool-effect-denied', outcomeKnown: true,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+      executeToolCall: async () => { genericExecutor += 1; return {}; },
+    });
+    expect(result.error).toBeNull();
+    expect(cancelled).toBe('task-9');
+    expect(legacy).toBe(0);
+    expect(genericExecutor).toBe(0);
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      result: expect.objectContaining({ ok: true, content: 'cancelled task-9' }),
+    }));
+  });
+
   test('retains preparation in the kernel and exposes only exact effect calls', async () => {
     const custody = Object.freeze({ private: true });
     const observed: any[] = [];

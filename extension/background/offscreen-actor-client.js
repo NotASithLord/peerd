@@ -14,6 +14,21 @@
 //
 // Pure shell — every IO injected — so it is unit-testable without a browser.
 
+import { controllerToolDomain, CONTROLLER_TOOL_MANIFEST } from '/shared/controller-tool-manifest.js';
+import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
+import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
+
+const exactKeys = (
+  /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
+  /** @type {readonly string[]} */ optional = ['relayToken'],
+) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = /** @type {Record<string,unknown>} */ (value);
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(record, key))
+    && Object.keys(record).every((key) => allowed.has(key));
+};
+
 // An inbound dweb wake is reasoning over bytes chosen by a remote peer. Keep its
 // useful read/moderation surface, but do not advertise any operation that can
 // delegate, spend, sign/publish, install peer code, or change standing network
@@ -38,6 +53,8 @@
  * @param {{ get: (id: string) => Promise<any> }} deps.sessions
  * @param {(opts: object) => Promise<object>} deps.buildToolContext
  * @param {(call: object, ctx: object) => Promise<any>} deps.dispatchToolCall
+ * @param {(call: object, ctx: object) => Promise<any>} [deps.prepareToolCall]
+ * @param {(prepared: object, execution: object) => Promise<any>} [deps.settleToolCall]
  * @param {(call: any, actorType: string|undefined, instanceId: string|undefined) => void} deps.pinActorCall
  * @param {(ctx: any, allowedNames: Set<string>) => any} [deps.restrictCtxCapabilities]  phase 4:
  *   strip an actor ctx down to the capabilities its GRANTED tools need (capability-by-need),
@@ -85,7 +102,9 @@
  */
 export const makeOffscreenActorClient = ({
   ensureHost, ensureOffscreen, sendMessage, runOnChannel, providerEgress,
-  sessions, buildToolContext, dispatchToolCall, pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, now = Date.now,
+  sessions, buildToolContext, dispatchToolCall, prepareToolCall, settleToolCall,
+  pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW,
+  now = Date.now,
   reviewToolAllowed = () => false,
   recordModelCall = () => {},
   broadcastOp = (/** @type {any} */ _msg) => {},
@@ -108,7 +127,7 @@ export const makeOffscreenActorClient = ({
     ? Math.floor(maxLoopEventsPerRun) : 256;
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean }>} Firefox relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> }>} Firefox relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: Firefox binds
@@ -192,6 +211,7 @@ export const makeOffscreenActorClient = ({
       inbound, allowedTools, relaySignal: relayController.signal,
       modelRelays: 0, toolRelays: 0, loopEvents: 0,
       modelActive: false, modelStreamId: null, contextRead: false,
+      actorExecutions: new Map(),
       ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
         ? { actorSurface: job.actorSurface }
         : {}),
@@ -252,6 +272,21 @@ export const makeOffscreenActorClient = ({
       signal?.removeEventListener('abort', abortRun);
       relayController.abort();
       await providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
+      if (typeof settleToolCall === 'function') {
+        await Promise.allSettled([...grant.actorExecutions.values()].map(async (entry) => {
+          if (entry.open !== true) return;
+          entry.open = false;
+          await settleToolCall(entry.prepared, { result: {
+            ok: false,
+            error: 'actor semantic execution host was lost before settlement',
+            code: 'actor-tool-host-lost',
+            outcomeKnown: entry.effectEntered !== true,
+            retryable: entry.effectEntered !== true,
+            outcomeKind: entry.effectEntered === true ? 'host-lost' : 'pre-effect-failure',
+          } });
+        }));
+      }
+      grant.actorExecutions.clear();
       // Retiring the grant is what makes it a liveness check: every relay for
       // this run is refused from here on, so a late/replayed one can't dispatch.
       if (!runOnChannel) grants.delete(relayToken);
@@ -267,7 +302,7 @@ export const makeOffscreenActorClient = ({
    * token. Every route treats a missing or retired grant as a hard refusal.
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean } | null}
+   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> } | null}
    */
   const grantFor = (msg, sender, boundGrant = null) => {
     if (boundGrant) return boundGrant;
@@ -275,6 +310,78 @@ export const makeOffscreenActorClient = ({
     const token = msg?.relayToken;
     if (typeof token !== 'string' || token.length === 0) return null;
     return grants.get(token) ?? null;
+  };
+
+  /** Build the exact live actor context from SW-owned run and session custody. */
+  const contextForTool = async (/** @type {any} */ grant, /** @type {any} */ call) => {
+    const { actorSessionId } = grant;
+    if (grant.inbound && (typeof call?.name !== 'string'
+        || !grant.allowedTools?.has(call.name))) {
+      return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
+    }
+    const rec = await sessions.get(actorSessionId);
+    if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+    if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
+    if (rec.kind === 'spawned') {
+      if (!restrictCtxCapabilities) {
+        return { ok: false, error: 'actor/tool-dispatch: actor offscreen not wired' };
+      }
+      const persistedGrants = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
+      const granted = grant.inbound
+        ? new Set([...persistedGrants].filter((name) => grant.allowedTools?.has(name)))
+        : persistedGrants;
+      if (typeof call?.name !== 'string' || !granted.has(call.name)) {
+        return { ok: false, error: `tool_not_available_to_actor: ${call?.name}` };
+      }
+      if (rec.review === true && !reviewToolAllowed(call.name)) {
+        return { ok: false, error: `tool_not_available_to_reviewer: ${call.name}` };
+      }
+      const base = await buildToolContext({
+        sessionId: actorSessionId,
+        lifecycleTurnId: grant.runId,
+        lifecycleUserInitiated: !grant.inbound,
+        ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
+      });
+      if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+      const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({
+        ...entry,
+        details: {
+          ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId,
+          actorSessionId, depth: rec.depth,
+        },
+      });
+      return { ok: true, actorSessionId, rec, ctx: restrictCtxCapabilities({
+        ...base, audit, abortSignal: grant.relaySignal,
+        ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
+        ...(rec.review === true && EXPOSURE_REVIEW ? { exposure: EXPOSURE_REVIEW } : {}),
+      }, granted) };
+    }
+    if (rec.kind !== 'actor') {
+      return { ok: false, error: 'actor/tool-dispatch: not an actor or actor session' };
+    }
+    const activeTabId = rec.actorType === 'web' && rec.backing !== 'api' && ownedTabFor
+      ? ownedTabFor(actorSessionId) : undefined;
+    if (grant.inbound && !restrictCtxCapabilities) {
+      return { ok: false, error: 'actor/tool-dispatch: inbound capability filter not wired' };
+    }
+    const base = await buildToolContext({
+      exposure: EXPOSURE_ACTOR, sessionId: actorSessionId, activeTabId,
+      actorInstanceId: rec.instanceId, actorType: rec.actorType, actorBacking: rec.backing,
+      lifecycleTurnId: grant.runId,
+      lifecycleUserInitiated: !grant.inbound,
+      ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
+      ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
+    });
+    if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+    const stamped = {
+      ...base, abortSignal: grant.relaySignal,
+      ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
+    };
+    const ctx = grant.inbound
+      ? /** @type {Function} */ (restrictCtxCapabilities)(stamped, grant.allowedTools)
+      : stamped;
+    pinActorCall(call, rec.actorType, rec.instanceId);
+    return { ok: true, actorSessionId, rec, ctx };
   };
 
   const routes = {
@@ -527,143 +634,39 @@ export const makeOffscreenActorClient = ({
         permitsProvider: (/** @type {string} */ providerId) => providerId === grant.provider,
       });
     },
-    /**
-     * @param {{ relayToken?: string, call?: any }} [msg] - SW-side ctx build + gate + dispatch.
-     * @param {unknown} [sender] - must be the offscreen document (see grantFor).
-     */
-    'actor/tool-dispatch': async (msg = {}, sender = undefined, boundGrant = null) => {
+    /** Frozen compatibility route. Controller-owned names are refused here. */
+    'actor/tool-dispatch': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
       let admitted = false;
       try {
-        // The session comes from the offscreen-pinned GRANT, not the message. This is
-        // the route that builds an instance-pinned, tool-granting context, so a caller
-        // that could name its own session would inherit any actor's pin and toolset.
         const grant = grantFor(msg, sender, boundGrant);
         if (!grant) return { ok: false, error: 'actor/tool-dispatch: unauthorized relay' };
         if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+        const call = msg.call;
         if (grant.toolRelays >= toolRelayLimit) return {
           ok: false, error: 'actor/tool-dispatch: relay budget exhausted',
           code: 'actor_tool_relay_limit', outcomeKnown: true, performed: false,
         };
         grant.toolRelays += 1;
-        const { actorSessionId } = grant;
-        const call = msg.call;
-        // Descriptor narrowing makes the model unlikely to ask; this check is the
-        // authority wall. The grant's set was minted from the SW-stamped inbound
-        // job, never from this relayed call or the Worker holding peer content.
-        if (grant.inbound && (typeof call?.name !== 'string' || !grant.allowedTools?.has(call.name))) {
-          return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
+        const admittedContext = await contextForTool(grant, call);
+        if (admittedContext.ok !== true) return admittedContext;
+        if (!legacyToolAllowed(call?.name)) {
+          return { ok: false, error: `actor/tool-dispatch: tool is not legacy-owned: ${call?.name}` };
         }
-        const rec = await sessions.get(actorSessionId);
-        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-        if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
-
-        // Phase 4 — a spawned child is a tool-bearing EPHEMERAL actor. Its toolset is the
-        // NARROWED-GENERAL set persisted at spawn (rec.grantedTools), not an instance
-        // pin. Rebuild its restricted ctx SW-side EXACTLY as the in-SW spawn path does
-        // (buildToolContext → audit-tag → abortSignal → restrictCtxCapabilities over the
-        // granted set) and re-check the relayed call against grantedTools first — the
-        // worker's call args (shaped by tool output it read) are never trusted, the same
-        // defense-in-depth as the actor pin.
-        if (rec.kind === 'spawned') {
-          if (!restrictCtxCapabilities) return { ok: false, error: 'actor/tool-dispatch: actor offscreen not wired' };
-          const persistedGrants = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
-          const granted = grant.inbound
-            ? new Set([...persistedGrants].filter((name) => grant.allowedTools?.has(name)))
-            : persistedGrants;
-          if (typeof call?.name !== 'string' || !granted.has(call.name)) return { ok: false, error: `tool_not_available_to_actor: ${call?.name}` };
-          // Layer 2 of the clean-context review contract: re-evaluate the live
-          // positive allowlist at call time. The record's grantedTools may be
-          // stale or corrupt; it is never sufficient authority for a reviewer.
-          if (rec.review === true && !reviewToolAllowed(call.name)) {
-            return { ok: false, error: `tool_not_available_to_reviewer: ${call.name}` };
-          }
-          const base = await buildToolContext({
-            sessionId: actorSessionId,
-            lifecycleTurnId: grant.runId,
-            lifecycleUserInitiated: !grant.inbound,
-            ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
-          });
-          if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-          // Stamp the child lineage on every audit its tools emit (parity with spawn.js's taggedAudit).
-          const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({ ...entry, details: { ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId, actorSessionId, depth: rec.depth } });
-          // #160: re-stamp the review-exemption marker from the PERSISTED record
-          // (spawn.js writes rec.review SW-side at create; no worker or model arg
-          // can reach it). why here: this route rebuilds ctx from the record alone,
-          // so without the stamp the tier gate saw exposure undefined and refused
-          // the three instance reads — the exemption only worked on the in-SW
-          // fallback path. Fail-closed: rec.review !== true, or no injected
-          // EXPOSURE_REVIEW, stamps nothing.
-          const ctx = restrictCtxCapabilities({
-            ...base, audit, abortSignal: grant.relaySignal,
-            // Monotonic backstop: even a miswired context builder cannot erase
-            // the provenance attached to this live SW grant.
-            ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
-            ...(rec.review === true && EXPOSURE_REVIEW ? { exposure: EXPOSURE_REVIEW } : {}),
-          }, granted);
-          admitted = true;
-          const result = await dispatchToolCall(call, ctx);
-          return { ok: true, result };
-        }
-
-        if (rec.kind !== 'actor') return { ok: false, error: 'actor/tool-dispatch: not an actor or actor session' };
-        // Phase 3: a WEB actor (kind 'web', backing tab) OWNS one tab; its DOM tools
-        // must target THAT tab and the origin/denylist gate must see its origin.
-        // Resolve the owned tab id HERE, per dispatch (never trust the worker), so a
-        // mid-turn navigate that adopts a tab is seen by the next call. buildToolContext
-        // FAILS CLOSED if the id is stale (leaves activeTab unset — never the user's
-        // foreground). An API actor (backing 'api') has no tab → activeTabId stays
-        // undefined; an engine actor acts on its instance → also undefined.
-        const activeTabId = (rec.actorType === 'web' && rec.backing !== 'api' && ownedTabFor)
-          ? ownedTabFor(/** @type {string} */ (actorSessionId))
-          : undefined;
-        if (grant.inbound && !restrictCtxCapabilities) {
-          return { ok: false, error: 'actor/tool-dispatch: inbound capability filter not wired' };
-        }
-        const base = await buildToolContext({
-          exposure: EXPOSURE_ACTOR, sessionId: actorSessionId, activeTabId,
-          actorInstanceId: rec.instanceId, actorType: rec.actorType, actorBacking: rec.backing,
-          lifecycleTurnId: grant.runId,
-          lifecycleUserInitiated: !grant.inbound,
-          ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
-          ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
-        });
-        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-        // Stop/cancel belongs to the ACTOR TURN, not only spawned children.
-        // Thread the live SW-owned signal into every bound context so a
-        // page_code/a2a_run/site_client_run tool cannot outlive the reasoning
-        // worker that invoked it.
-        const stamped = {
-          ...base,
-          abortSignal: grant.relaySignal,
-          ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
-        };
-        // Strip the ctx's closures as well as its descriptors: an injected model
-        // cannot recover a2a_run's mesh-signing worker through a forged tool call.
-        const ctx = grant.inbound
-          ? /** @type {(ctx: any, allowedNames: Set<string>) => any} */ (restrictCtxCapabilities)(
-            stamped, /** @type {Set<string>} */ (grant.allowedTools),
-          )
-          : stamped;
-        // Re-pin to the BOUND instance — the worker's call args are never trusted.
-        // (A no-op for web DOM tools, whose numeric-tab pin the GATE enforces via
-        // ctx.activeTab; still runs so engine/edit_file calls normalize.)
-        pinActorCall(call, rec.actorType, rec.instanceId);
         admitted = true;
-        const result = await dispatchToolCall(call, ctx);
-        // Announce the settled dispatch — pure, privacy-minimal observability.
-        // Arguments can contain form text, credentials, or attacker-derived
-        // bytes, so no UI port receives them.
-        // why: an OFFSCREEN actor turn emits no turn/tool-use broadcast (that
-        // path is turn-driver's, in-SW only) — without this the eval harness's
-        // OM2W recorder can't see the actor's page actions. Best-effort.
-        try {
-          broadcastOp({
-            type: 'actor/op', sessionId: actorSessionId,
-            name: typeof call?.name === 'string' && /^[a-z0-9_-]{1,64}$/.test(call.name)
-              ? call.name : 'unknown',
-            ok: result?.ok !== false,
-          });
-        } catch { /* display-only */ }
+        const result = await dispatchToolCall(call, admittedContext.ctx);
+        if (admittedContext.rec.kind === 'actor') {
+          try {
+            broadcastOp({
+              type: 'actor/op', sessionId: admittedContext.actorSessionId,
+              name: typeof call?.name === 'string' && /^[a-z0-9_-]{1,64}$/.test(call.name)
+                ? call.name : 'unknown',
+              ok: result?.ok !== false,
+            });
+          } catch { /* display-only */ }
+        }
         return { ok: true, result };
       } catch (e) {
         const failure = /** @type {{ message?: string, code?: string, outcomeKnown?: boolean, performed?: boolean }} */ (e);
@@ -675,6 +678,270 @@ export const makeOffscreenActorClient = ({
             ...(typeof failure?.performed === 'boolean' ? { performed: failure.performed } : {}),
             ...(failure?.outcomeKnown === true ? {} : { retryable: false }),
           } : {}),
+        };
+      }
+    },
+    /** Admit one controller-owned actor tool without executing its semantics in the SW. */
+    'actor/tool-prepare': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const call = msg.call;
+      if (!grant || !exactKeys(msg, ['call']) || controllerToolDomain(call?.name) !== 'actor'
+          || legacyToolAllowed(call?.name) || typeof prepareToolCall !== 'function'
+          || typeof settleToolCall !== 'function') {
+        return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
+      }
+      if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+      if (grant.toolRelays >= toolRelayLimit) return {
+        ok: false, error: 'actor/tool-prepare: relay budget exhausted',
+        code: 'actor_tool_relay_limit', outcomeKnown: true, performed: false,
+      };
+      grant.toolRelays += 1;
+      const admittedContext = await contextForTool(grant, call);
+      if (admittedContext.ok !== true) return admittedContext;
+      const prepared = await prepareToolCall(call, admittedContext.ctx);
+      if (prepared?.prepared !== true) return { ok: true, mode: 'result', result: prepared };
+      const policy = CONTROLLER_TOOL_MANIFEST.tools[call.name];
+      if (!policy || structuredClonePayloadBytes(prepared.args) > policy.argumentBytes) {
+        return { ok: false, error: 'actor/tool-prepare: semantic arguments exceed authority limits' };
+      }
+      const executionId = `ae-${now().toString(36)}-${++seq}`;
+      grant.actorExecutions.set(executionId, {
+        open: true, effectEntered: false, domainCalls: new Set(), prepared,
+        toolName: call.name,
+      });
+      return {
+        ok: true, mode: 'execute', executionId,
+        callId: typeof call.id === 'string' && call.id ? call.id : executionId,
+        toolName: call.name, args: prepared.args,
+        projection: {
+          sessionId: admittedContext.ctx.session?.sessionId,
+          sessionDepth: admittedContext.ctx.session?.depth ?? 0,
+          sessionKind: admittedContext.ctx.session?.kind ?? 'spawned',
+          inbound: admittedContext.ctx.inbound === true,
+        },
+      };
+    },
+    'actor/spawn-sync': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = grant?.actorExecutions.get(msg.executionId);
+      const args = entry?.prepared?.call?.args;
+      const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
+      const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
+      const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
+      if (!grant || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
+        'relayToken', 'tools', 'maxSteps', 'maxDepth',
+      ]) || !entry || entry.open !== true || entry.toolName !== 'actor_create'
+          || args?.sync !== true || msg.task !== args?.task
+          || msg.allowRecursion !== (args?.allowRecursion === true)
+          || JSON.stringify(msg.tools) !== JSON.stringify(expectedTools)
+          || msg.maxSteps !== expectedMaxSteps || msg.maxDepth !== expectedMaxDepth
+          || entry.domainCalls.size > 0 || typeof msg.task !== 'string'
+          || typeof msg.allowRecursion !== 'boolean'
+          || (msg.tools !== undefined && (!Array.isArray(msg.tools)
+            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string')))
+          || (msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps))
+          || (msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth))) {
+        return { ok: false, error: 'actor/spawn-sync: authority mismatch', outcomeKnown: true };
+      }
+      entry.domainCalls.add('actor/spawn-sync');
+      try {
+        const ctx = entry.prepared.ctx;
+        if (typeof ctx?.actorAuthority?.spawnSync !== 'function') {
+          return { ok: true, value: { refused: true, result: 'actor_orchestrator_unavailable' } };
+        }
+        entry.effectEntered = true;
+        return { ok: true, value: await ctx.actorAuthority.spawnSync({
+          task: msg.task,
+          ...(msg.tools === undefined ? {} : { tools: msg.tools }),
+          ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
+          ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
+          allowRecursion: msg.allowRecursion,
+          parentSessionId: ctx.session?.sessionId,
+          parentDepth: ctx.session?.depth ?? 0,
+          parentInbound: ctx.inbound === false ? false : true,
+          parentToolUseId: entry.prepared.call?.id,
+        }) };
+      } catch (cause) {
+        const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+        return {
+          ok: false, error: failure?.message ?? String(cause),
+          outcomeKnown: failure?.outcomeKnown === true,
+          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
+        };
+      }
+    },
+    'actor/spawn-async': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = grant?.actorExecutions.get(msg.executionId);
+      const args = entry?.prepared?.call?.args;
+      const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
+      const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
+      const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
+      if (!grant || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
+        'relayToken', 'tools', 'maxSteps', 'maxDepth',
+      ]) || !entry || entry.open !== true || entry.toolName !== 'actor_create'
+          || args?.sync === true || msg.task !== args?.task
+          || msg.allowRecursion !== (args?.allowRecursion === true)
+          || JSON.stringify(msg.tools) !== JSON.stringify(expectedTools)
+          || msg.maxSteps !== expectedMaxSteps || msg.maxDepth !== expectedMaxDepth
+          || entry.domainCalls.size > 0 || typeof msg.task !== 'string'
+          || typeof msg.allowRecursion !== 'boolean'
+          || (msg.tools !== undefined && (!Array.isArray(msg.tools)
+            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string')))
+          || (msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps))
+          || (msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth))) {
+        return { ok: false, error: 'actor/spawn-async: authority mismatch', outcomeKnown: true };
+      }
+      entry.domainCalls.add('actor/spawn-async');
+      try {
+        const ctx = entry.prepared.ctx;
+        if (typeof ctx?.actorAuthority?.spawnAsync !== 'function') {
+          return { ok: true, value: { ok: false, error: 'async_actor_unavailable' } };
+        }
+        entry.effectEntered = true;
+        return { ok: true, value: await ctx.actorAuthority.spawnAsync({
+          task: msg.task,
+          ...(msg.tools === undefined ? {} : { tools: msg.tools }),
+          ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
+          ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
+          allowRecursion: msg.allowRecursion,
+          parentSessionId: ctx.session?.sessionId,
+          parentDepth: ctx.session?.depth ?? 0,
+          parentInbound: ctx.inbound === false ? false : true,
+          parentToolUseId: entry.prepared.call?.id,
+        }) };
+      } catch (cause) {
+        const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+        return {
+          ok: false, error: failure?.message ?? String(cause),
+          outcomeKnown: failure?.outcomeKnown === true,
+          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
+        };
+      }
+    },
+    'actor/tasks-read': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = grant?.actorExecutions.get(msg.executionId);
+      if (!grant || !exactKeys(msg, ['executionId'])
+          || !entry || entry.open !== true || entry.toolName !== 'actor_tasks'
+          || entry.domainCalls.size > 0) {
+        return { ok: false, error: 'actor/tasks-read: authority mismatch', outcomeKnown: true };
+      }
+      entry.domainCalls.add('actor/tasks-read');
+      entry.effectEntered = true;
+      try {
+        const read = entry.prepared.ctx?.actorAuthority?.listTasks;
+        return { ok: true, value: typeof read === 'function' ? await read() : [] };
+      } catch (cause) {
+        return { ok: false, error: cause instanceof Error ? cause.message : String(cause), outcomeKnown: true, retryable: true };
+      }
+    },
+    'actor/task-cancel': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = grant?.actorExecutions.get(msg.executionId);
+      if (!grant || !exactKeys(msg, ['executionId', 'taskId'])
+          || !entry || entry.open !== true || entry.toolName !== 'actor_cancel'
+          || entry.domainCalls.size > 0 || typeof msg.taskId !== 'string' || !msg.taskId
+          || msg.taskId !== entry.prepared.call?.args?.taskId) {
+        return { ok: false, error: 'actor/task-cancel: authority mismatch', outcomeKnown: true };
+      }
+      entry.domainCalls.add('actor/task-cancel');
+      entry.effectEntered = true;
+      try {
+        const cancel = entry.prepared.ctx?.actorAuthority?.cancelTask;
+        return { ok: true, value: typeof cancel === 'function'
+          ? await cancel(msg.taskId) : { ok: false, error: 'async_actor_unavailable' } };
+      } catch (cause) {
+        return { ok: false, error: cause instanceof Error ? cause.message : String(cause), outcomeKnown: true, retryable: true };
+      }
+    },
+    'actor/message-deliver': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = grant?.actorExecutions.get(msg.executionId);
+      const args = entry?.prepared?.call?.args;
+      const sessionKind = entry?.prepared?.ctx?.session?.kind;
+      if (!grant || !exactKeys(msg, [
+        'executionId', 'to', 'message', 'oneShot', 'awaitReply',
+        'degradeToAsync', 'awaitCapMs',
+      ]) || !entry || entry.open !== true || entry.toolName !== 'message_actor'
+          || entry.domainCalls.size > 0 || typeof msg.to !== 'string'
+          || msg.to !== args?.to || msg.message !== args?.message
+          || msg.oneShot !== (args?.oneShot === true)
+          || msg.awaitReply !== (sessionKind === 'spawned' || args?.await === true)
+          || msg.degradeToAsync !== (args?.await === true && sessionKind !== 'spawned')
+          || typeof msg.message !== 'string' || typeof msg.oneShot !== 'boolean'
+          || typeof msg.awaitReply !== 'boolean' || typeof msg.degradeToAsync !== 'boolean'
+          || !Number.isSafeInteger(msg.awaitCapMs) || msg.awaitCapMs < 1
+          || msg.awaitCapMs > 3 * 60_000) {
+        return { ok: false, error: 'actor/message-deliver: authority mismatch', outcomeKnown: true };
+      }
+      entry.domainCalls.add('actor/message-deliver');
+      try {
+        const ctx = entry.prepared.ctx;
+        if (typeof ctx?.actorAuthority?.deliverMessage !== 'function') {
+          return { ok: true, value: { ok: false, error: 'message_actor is not enabled' } };
+        }
+        entry.effectEntered = true;
+        return { ok: true, value: await ctx.actorAuthority.deliverMessage({
+          to: msg.to, message: msg.message, oneShot: msg.oneShot,
+          senderSessionId: ctx.session?.sessionId,
+          inbound: ctx.inbound === true,
+          toolUseId: entry.prepared.call?.id,
+          awaitReply: msg.awaitReply,
+          awaitSignal: grant.relaySignal,
+          degradeToAsync: msg.degradeToAsync,
+          awaitCapMs: msg.awaitCapMs,
+        }) };
+      } catch (cause) {
+        const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+        return {
+          ok: false, error: failure?.message ?? String(cause),
+          outcomeKnown: failure?.outcomeKnown === true,
+          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
+        };
+      }
+    },
+    'actor/tool-settle': async (
+      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {any} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = grant?.actorExecutions.get(msg.executionId);
+      const policy = entry ? CONTROLLER_TOOL_MANIFEST.tools[entry.toolName] : null;
+      if (!grant || !exactKeys(msg, ['executionId', 'result'])
+          || !entry || entry.open !== true || !policy
+          || structuredClonePayloadBytes(msg.result) > policy.resultBytes
+          || typeof settleToolCall !== 'function') {
+        return { ok: false, error: 'actor/tool-settle: authority mismatch', outcomeKnown: true };
+      }
+      entry.open = false;
+      try {
+        const result = await settleToolCall(entry.prepared, { result: msg.result });
+        grant.actorExecutions.delete(msg.executionId);
+        return { ok: true, result };
+      } catch (cause) {
+        return {
+          ok: false, error: cause instanceof Error ? cause.message : String(cause),
+          outcomeKnown: entry.effectEntered !== true,
+          retryable: entry.effectEntered !== true,
         };
       }
     },

@@ -14,6 +14,7 @@ import {
 import {
   CONTROLLER_TOOL_MANIFEST,
   controllerHostsTool,
+  controllerToolDomain,
 } from '../shared/controller-tool-manifest.js';
 import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 
@@ -30,6 +31,13 @@ const TURN_DEADLINE_MS = 30 * 60_000;
 /** @param {unknown} value @returns {value is Record<string, any>} */
 const isRecord = (value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
+
+const exactOptionalKeys = (
+  /** @type {Record<string,any>|null} */ value,
+  /** @type {string[]} */ required,
+  /** @type {string[]} */ optional = [],
+) => !!value && required.every((key) => Object.hasOwn(value, key))
+  && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
 
 /** @param {unknown} left @param {unknown} right */
 const sameClone = (left, right) => {
@@ -452,6 +460,62 @@ export const makeControllerTurnBridge = ({
       run.modelCandidates.some((/** @type {any} */ candidate) => candidate.provider === providerId),
     redeemOpaque: (/** @type {string} */ token) => redeemModelOpaque(run, token),
   });
+  const actorExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ toolNames,
+    /** @type {string[]} */ businessKeys,
+    /** @type {string[]} */ optionalKeys = [],
+  ) => {
+    if (!exactOptionalKeys(value, [
+      'executionId', 'argsDigest', 'turnGeneration', ...businessKeys,
+    ], optionalKeys)) return null;
+    const entry = run.preparedExecutions.get(value.executionId);
+    if (!entry || entry.open !== true || entry.domain !== 'actor'
+        || !toolNames.includes(entry.call?.name)
+        || value.argsDigest !== entry.argsDigest
+        || value.turnGeneration !== run.turnGeneration) return null;
+    return entry;
+  };
+  const runActorEffect = async (
+    /** @type {any} */ run,
+    /** @type {any} */ entry,
+    /** @type {string} */ operation,
+    /** @type {'read'|'control'|'commit'|'resource'} */ riskClass,
+    /** @type {()=>Promise<any>|any} */ execute,
+  ) => {
+    if (entry.domainCalls.has(operation)) {
+      return failed('actor authority operation already used', true);
+    }
+    entry.domainCalls.add(operation);
+    const replayable = riskClass === 'read' || riskClass === 'control';
+    entry.effectEntered = true;
+    entry.effectPending += 1;
+    if (!replayable) entry.pendingIrreversible += 1;
+    let result;
+    try { result = await execute(); }
+    catch (cause) {
+      entry.effectPending = Math.max(0, entry.effectPending - 1);
+      if (!replayable) entry.pendingIrreversible = Math.max(0, entry.pendingIrreversible - 1);
+      const detail = /** @type {{outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+      const outcomeKnown = replayable || detail?.outcomeKnown === true;
+      if (!outcomeKnown) {
+        entry.unknownIrreversible = true;
+        run.nestedUnknown = true;
+      }
+      return {
+        ok: false,
+        code: 'actor-authority-operation-lost',
+        error: cause instanceof Error ? cause.message : String(cause),
+        outcomeKnown,
+        retryable: outcomeKnown && detail?.retryable !== false,
+      };
+    }
+    entry.effectPending = Math.max(0, entry.effectPending - 1);
+    if (!replayable) entry.pendingIrreversible = Math.max(0, entry.pendingIrreversible - 1);
+    if (!replayable) entry.settledIrreversible = true;
+    return known(result);
+  };
   const assertRunPayload = (/** @type {unknown} */ payload, /** @type {any} */ context) => {
     if (!isRecord(payload) || typeof payload.runId !== 'string') return null;
     const run = runs.get(payload.runId);
@@ -757,6 +821,7 @@ export const makeControllerTurnBridge = ({
             deadlineAt, release, open: true, effectEntered: false, effectPending: 0,
             pendingIrreversible: 0, settledIrreversible: false,
             unknownIrreversible: false, policy: parsedRequest.policy,
+            domain: controllerToolDomain(call.name), domainCalls: new Set(),
             quota: createToolEffectQuota(parsedRequest.policy),
           });
           return known({ mode: 'execute', requestJson: jsonWire(request), deadlineAt });
@@ -765,6 +830,7 @@ export const makeControllerTurnBridge = ({
           const entry = run.preparedExecutions.get(value.executionId);
           if (!entry || entry.open !== true || value.argsDigest !== entry.argsDigest
               || value.turnGeneration !== run.turnGeneration
+              || entry.domain !== null
               || typeof value.operation !== 'string'
               || !EFFECT_OPERATION.test(value.operation)) {
             return failed('tool effect grant mismatch', true);
@@ -846,6 +912,101 @@ export const makeControllerTurnBridge = ({
             });
           }
           return known(result);
+        }
+        case 'turn.actor.spawn-sync':
+        case 'turn.actor.spawn-async': {
+          const entry = actorExecutionEntry(run, value, ['actor_create'], [
+            'task', 'allowRecursion',
+          ], ['tools', 'maxSteps', 'maxDepth']);
+          const args = entry?.call?.args;
+          const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
+          const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
+          const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
+          if (!entry || typeof value.task !== 'string'
+              || value.task !== args?.task
+              || value.allowRecursion !== (args?.allowRecursion === true)
+              || (operation === 'turn.actor.spawn-sync') !== (args?.sync === true)
+              || !sameClone(value.tools, expectedTools)
+              || value.maxSteps !== expectedMaxSteps
+              || value.maxDepth !== expectedMaxDepth
+              || typeof value.allowRecursion !== 'boolean'
+              || (value.tools !== undefined && (!Array.isArray(value.tools)
+                || value.tools.some((/** @type {unknown} */ name) => typeof name !== 'string')))
+              || (value.maxSteps !== undefined && !Number.isFinite(value.maxSteps))
+              || (value.maxDepth !== undefined && !Number.isFinite(value.maxDepth))) {
+            return failed('actor spawn authority mismatch', true);
+          }
+          const ctx = entry.custody?.ctx;
+          const actorAuthority = ctx?.actorAuthority;
+          const spawn = operation === 'turn.actor.spawn-sync'
+            ? actorAuthority?.spawnSync : actorAuthority?.spawnAsync;
+          if (typeof spawn !== 'function') {
+            return known({ ok: false, error: 'actor_orchestrator_unavailable', outcomeKnown: true });
+          }
+          return runActorEffect(run, entry, operation, 'resource', () => spawn({
+            task: value.task,
+            ...(value.tools === undefined ? {} : { tools: value.tools }),
+            ...(value.maxSteps === undefined ? {} : { maxSteps: value.maxSteps }),
+            ...(value.maxDepth === undefined ? {} : { maxDepth: value.maxDepth }),
+            allowRecursion: value.allowRecursion,
+            parentSessionId: ctx.session?.sessionId,
+            parentDepth: ctx.session?.depth ?? 0,
+            parentInbound: ctx.inbound === false ? false : true,
+            parentToolUseId: entry.call.id,
+          }));
+        }
+        case 'turn.actor.tasks': {
+          const entry = actorExecutionEntry(run, value, ['actor_tasks'], [], []);
+          if (!entry) return failed('actor tasks authority mismatch', true);
+          const list = entry.custody?.ctx?.actorAuthority?.listTasks;
+          return runActorEffect(run, entry, operation, 'read', () =>
+            typeof list === 'function' ? list() : []);
+        }
+        case 'turn.actor.cancel': {
+          const entry = actorExecutionEntry(run, value, ['actor_cancel'], ['taskId']);
+          if (!entry || typeof value.taskId !== 'string' || !value.taskId
+              || value.taskId !== entry.call?.args?.taskId) {
+            return failed('actor cancel authority mismatch', true);
+          }
+          const cancel = entry.custody?.ctx?.actorAuthority?.cancelTask;
+          return runActorEffect(run, entry, operation, 'control', () =>
+            typeof cancel === 'function'
+              ? cancel(value.taskId) : { ok: false, error: 'async_actor_unavailable' });
+        }
+        case 'turn.actor.message': {
+          const entry = actorExecutionEntry(run, value, ['message_actor'], [
+            'to', 'message', 'oneShot', 'awaitReply', 'degradeToAsync', 'awaitCapMs',
+          ]);
+          const args = entry?.call?.args;
+          const sessionKind = entry?.custody?.ctx?.session?.kind;
+          if (!entry || typeof value.to !== 'string' || typeof value.message !== 'string'
+              || value.to !== args?.to || value.message !== args?.message
+              || value.oneShot !== (args?.oneShot === true)
+              || value.awaitReply !== (sessionKind === 'spawned' || args?.await === true)
+              || value.degradeToAsync !== (args?.await === true && sessionKind !== 'spawned')
+              || typeof value.oneShot !== 'boolean' || typeof value.awaitReply !== 'boolean'
+              || typeof value.degradeToAsync !== 'boolean'
+              || !Number.isSafeInteger(value.awaitCapMs) || value.awaitCapMs < 1
+              || value.awaitCapMs > 3 * 60_000) {
+            return failed('actor message authority mismatch', true);
+          }
+          const ctx = entry.custody?.ctx;
+          const messageActor = ctx?.actorAuthority?.deliverMessage;
+          if (typeof messageActor !== 'function') {
+            return known({ ok: false, error: 'message_actor is not enabled', outcomeKnown: true });
+          }
+          return runActorEffect(run, entry, operation, 'resource', () => messageActor({
+            to: value.to,
+            message: value.message,
+            oneShot: value.oneShot,
+            senderSessionId: ctx.session?.sessionId,
+            inbound: ctx.inbound === true,
+            toolUseId: entry.call.id,
+            awaitReply: value.awaitReply,
+            awaitSignal: run.signal,
+            degradeToAsync: value.degradeToAsync,
+            awaitCapMs: value.awaitCapMs,
+          }));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

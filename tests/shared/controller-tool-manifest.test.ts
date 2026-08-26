@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { relative } from 'node:path';
 import { CONTROLLER_TOOL_IMPLEMENTATIONS } from '../../extension/peerd-runtime/controller-tools.js';
+import { CONTROLLER_ACTOR_TOOL_NAMES } from '../../extension/peerd-runtime/controller-turn.js';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
@@ -12,8 +13,12 @@ import {
 describe('controller tool manifest', () => {
   test('admits only implemented controller tools', () => {
     const hosted = Object.keys(CONTROLLER_TOOL_MANIFEST.tools);
-    expect(hosted).toEqual(['now', 'complete_goal']);
-    expect(hosted).toEqual(Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS));
+    expect(hosted).toEqual([
+      'now', 'complete_goal', 'actor_create', 'actor_tasks', 'actor_cancel', 'message_actor',
+    ]);
+    expect(hosted).toEqual([
+      ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS), ...CONTROLLER_ACTOR_TOOL_NAMES,
+    ]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.now.effects).toEqual([]);
     expect(CONTROLLER_TOOL_MANIFEST.tools.complete_goal.effects.map((effect: any) => effect.operation))
       .toEqual(['goal.end']);

@@ -161,10 +161,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect'],
   idb:                ['inspect'],
-  spawnActor:      ['actor_create'],
-  spawnActorAsync: ['actor_create'],
-  actorTasks:      ['actor_tasks'],
-  actorCancel:     ['actor_cancel'],
+  actorAuthority:  ['actor_create', 'actor_tasks', 'actor_cancel', 'message_actor'],
   requestReview:      ['request_review'],
   // sandbox_create's app arm reads ctx.dweb to decide whether to build a
   // dwapp, so it keeps the dweb closure alongside the dweb_* tools.
@@ -200,7 +197,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
   appTabTracker:      ['actor_list', 'repo_version'],
   appQuiescence:      ['repo_version', 'repo_remote'],
-  messageActor:    ['message_actor'],
+  messageActor:    ['script'],
   // The sealed-code run registry (Stop + relay custody). Script's actor client
   // additionally requires messageActor, so code delegation still composes off
   // exactly the same grant as direct message_actor.

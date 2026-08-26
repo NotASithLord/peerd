@@ -94,10 +94,11 @@ describe('restrictCtxCapabilities', () => {
     memory: { read: () => {} },
     kv: { get: () => {} },
     idb: { getAll: () => {} },
-    spawnActor: () => {},
-    spawnActorAsync: () => {},
-    actorTasks: () => {},
-    actorCancel: () => {},
+    actorAuthority: {
+      spawnSync: () => {}, spawnAsync: () => {},
+      listTasks: () => {}, cancelTask: () => {}, deliverMessage: () => {},
+    },
+    messageActor: () => {},
     requestReview: () => {},
     dweb: { share: () => {} },
     jsOffscreenClient: { execHeadless: () => {} },
@@ -127,7 +128,7 @@ describe('restrictCtxCapabilities', () => {
     expect('getSecret' in out).toBe(false);
     expect('safeFetch' in out).toBe(false);
     expect('webFetch' in out).toBe(false);
-    expect('spawnActor' in out).toBe(false);
+    expect('actorAuthority' in out).toBe(false);
     expect('dweb' in out).toBe(false);
     // non-capability fields survive
     expect(out.activeTab).toEqual({ id: 1 });
@@ -162,6 +163,7 @@ describe('restrictCtxCapabilities', () => {
       expect('jsOffscreenClient' in narrowed).toBe(true);
       expect('scriptRuns' in narrowed).toBe(true);
     }
+    expect('messageActor' in restrictCtxCapabilities(fullCtx(), new Set(['script']))).toBe(true);
   });
 
   test('getSecret / safeFetch have NO tool consumer — always stripped', () => {
@@ -172,15 +174,14 @@ describe('restrictCtxCapabilities', () => {
     expect('safeFetch' in out).toBe(false);
     // but the ones with consumers are all kept
     expect('webFetch' in out).toBe(true);
-    expect('spawnActor' in out).toBe(true);
+    expect('actorAuthority' in out).toBe(true);
   });
 
   test('spawn closure is stripped for a non-recursive actor (no actor_create granted)', () => {
     // the inherit-all-but-spawn case: tools present but actor_create narrowed out.
     const allowed = new Set(['fetch_url', 'read_memory', 'request_review']);
     const out = restrictCtxCapabilities(fullCtx(), allowed);
-    expect('spawnActor' in out).toBe(false);
-    expect('spawnActorAsync' in out).toBe(false);
+    expect('actorAuthority' in out).toBe(false);
     expect('webFetch' in out).toBe(true);   // fetch_url needs it
     expect('memory' in out).toBe(true);     // read_memory needs it
   });

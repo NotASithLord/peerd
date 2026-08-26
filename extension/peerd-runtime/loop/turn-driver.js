@@ -583,11 +583,19 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
         const toolContext = await getToolContext();
         const prepared = await prepareToolCall(call, toolContext);
         if (prepared?.prepared !== true) return { mode: 'result', result: prepared };
+        const projection = ['actor_create', 'message_actor'].includes(call?.name)
+          ? {
+              sessionId: toolContext.session?.sessionId,
+              sessionDepth: toolContext.session?.depth ?? 0,
+              sessionKind: toolContext.session?.kind ?? 'chat',
+              inbound: toolContext.inbound === true,
+            }
+          : {};
         return {
           mode: 'execute',
           custody: prepared,
           args: prepared.args,
-          projection: {},
+          projection,
           manifestDigest: CONTROLLER_TOOL_MANIFEST.digest,
         };
       },

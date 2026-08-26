@@ -19,6 +19,7 @@ import {
   clearTools, listTools, registerTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
 import { CONTROLLER_TOOL_IMPLEMENTATIONS } from '../../../extension/peerd-runtime/controller-tools.js';
+import { CONTROLLER_ACTOR_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-actor-tools.js';
 
 const { BUILTIN_TOOLS } = await import(
   '../../../extension/peerd-runtime/tools/defs/index.js'
@@ -32,7 +33,8 @@ const { loadSkillTool } = await import(
 const ALL_TOOLS = [...BUILTIN_TOOLS, ...CLOCK_TOOLS, ...WEB_TOOLS, loadSkillTool];
 const EXECUTION_TOOL_NAMES = new Set(ALL_TOOLS.map((tool) => tool.name));
 const CONTROLLER_ONLY_TOOL_NAMES = new Set(
-  Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS).filter((name) => !EXECUTION_TOOL_NAMES.has(name)),
+  [...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS), ...CONTROLLER_ACTOR_TOOL_NAMES]
+    .filter((name) => !EXECUTION_TOOL_NAMES.has(name)),
 );
 const METADATA_KEYS = new Set([
   'name', 'primitive', 'description', 'schema', 'sideEffect',
@@ -202,8 +204,10 @@ describe('tool metadata anti-drift', () => {
       visit(parsed);
     }
     expect(rawDefinitions).toEqual([]);
-    expect(composed).toHaveLength(TOOL_METADATA_ORDER.length - CONTROLLER_ONLY_TOOL_NAMES.size);
-    expect(new Set([...composed, ...CONTROLLER_ONLY_TOOL_NAMES]))
+    expect(new Set(composed).size).toBe(composed.length);
+    // Actor definitions remain real controller-owned implementations and must
+    // stay covered here even though the SW registry no longer imports them.
+    expect(new Set([...composed, ...Object.keys(CONTROLLER_TOOL_IMPLEMENTATIONS)]))
       .toEqual(new Set(TOOL_METADATA_ORDER));
   });
 });

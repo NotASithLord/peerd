@@ -12,7 +12,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // injected outside the base ToolContext; narrow ctx to it at the use site. The
 // snapshot shape mirrors makeAsyncActors' actorTasks (actor/async-actors.js).
 /** @typedef {{ taskId: string, task: string, status: string, lastOutput: string, childSessionId?: string|null, grantedTools?: string[]|null }} ActorTaskSnapshot */
-/** @typedef {{ actorTasks?: () => ActorTaskSnapshot[] }} ActorTasksCtx */
+/** @typedef {{ actorTasks?: () => ActorTaskSnapshot[]|Promise<ActorTaskSnapshot[]> }} ActorTasksCtx */
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const actorTasksTool = composeTool("actor_tasks", {
@@ -23,7 +23,7 @@ export const actorTasksTool = composeTool("actor_tasks", {
     if (typeof sctx.actorTasks !== 'function') {
       return { ok: false, error: 'async_actor_unavailable' };
     }
-    const tasks = sctx.actorTasks();
+    const tasks = await sctx.actorTasks();
     if (!tasks.length) return { ok: true, content: 'No async spawned in this chat.' };
     const lines = tasks.map((t) => {
       const tail = t.lastOutput ? `\n  …${t.lastOutput.slice(-200)}` : '';
