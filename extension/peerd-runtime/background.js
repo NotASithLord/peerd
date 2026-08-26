@@ -21,7 +21,7 @@ export {
 export { createRefRegistry } from './dom/ref-registry.js';
 export { pullInHintInjected } from './dom/pull-in-hint-injected.js';
 export { installFetchTapInjected, drainFetchTapInjected } from './dom/fetch-tap-injected.js';
-export { isDenylistedTab, liveDocumentLocationInjected } from './tools/defs/dom-helpers.js';
+export { isDenylistedTab, liveDocumentLocationInjected } from './browser-authority/dom-helpers.js';
 export { SessionNotFoundError } from './errors.js';
 export {
   registerTool,
@@ -108,7 +108,6 @@ export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export { createConversationRegistry } from './actor/conversation-registry.js';
 export { makeWebActorTabBindings, makeWebActorRegistry, retireStoppedRoamingWebActorDurably, safeWebActorSummaryOrigin, fenceWebActorSummary, makeApiActorBindings, normalizeApiOrigin, fenceApiActorSummary, siteHandleFor, parseSiteHandle } from './actor/web-actor.js';
-export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
 export { makeOriginStateStore } from './actor/origin-state-store.js';
 export { makeLearnedOrigins } from './actor/learned-origins.js';
 export { makeJudgeLanding, makeCredentialScope, makeSignInOriginAuthorizer, makeSignInExcursionAuthorizer, makeSignInExcursionRevoker, makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin, hasDurableSiteClientState } from './actor/origin-lock.js';

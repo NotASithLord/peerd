@@ -253,6 +253,40 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('hosts page definitions only in controller and isolated-worker graphs', async () => {
+    const pageSemanticModules = new Set([
+      'peerd-runtime/controller-page-tools.js',
+      'peerd-runtime/tools/defs/open-tab.js',
+      'peerd-runtime/tools/defs/read-page.js',
+      'peerd-runtime/tools/defs/snapshot.js',
+      'peerd-runtime/tools/defs/read-state.js',
+      'peerd-runtime/tools/defs/watch-changes.js',
+      'peerd-runtime/tools/defs/query-dom.js',
+      'peerd-runtime/tools/defs/page-eval.js',
+      'peerd-runtime/tools/defs/page-exec.js',
+      'peerd-runtime/tools/defs/page-keys.js',
+      'peerd-runtime/tools/defs/navigate.js',
+      'peerd-runtime/tools/defs/type.js',
+      'peerd-runtime/tools/defs/click.js',
+      'peerd-runtime/tools/defs/login.js',
+      'peerd-runtime/tools/defs/page-code.js',
+      'peerd-runtime/tools/web/screenshot.js',
+      'peerd-runtime/tools/web/view.js',
+    ]);
+    for (const entry of [
+      'background/kernel-turn-authority-adapter.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ]) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => pageSemanticModules.has(module))).toEqual([]);
+    }
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of pageSemanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
   it('composes one synchronous owner path without a protocol or dynamic fallback', () => {
     const source = readFileSync(
       join(EXTENSION_ROOT, 'background/kernel-turn-live-factories.js'),

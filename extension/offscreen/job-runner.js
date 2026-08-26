@@ -41,6 +41,7 @@ import {
   ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS,
   actorsCallToOp, buildCodeClientSource, canonicalCodeTraceLabel,
   CODE_RUN_MAX_TRACE_OPS, MAX_FILE_CONTENT_CHARS,
+  pageCallToRelay, shapePageCallOutcome,
 } from '/peerd-runtime/offscreen.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
 import {
@@ -163,7 +164,14 @@ export const abortAllJobs = () => {
 const MAX_RELAYING_JOBS = 2;
 let activeRelayingJobs = 0;
 const RELAYING_MESSAGE_TYPES = Object.freeze(new Set([
-  'sw/web-fetch', 'actor/spawn', 'actors/call', 'page/call', 'app-code/observe',
+  'sw/web-fetch', 'actor/spawn', 'actors/call',
+  'page-program/navigate', 'page-program/click', 'page-program/fill',
+  'page-program/snapshot', 'page-program/read', 'page-program/read-state',
+  'page-program/watch-changes', 'page-program/query-dom', 'page-program/read-pdf',
+  'page-program/view', 'page-program/fetch', 'page-program/read-document',
+  'page-program/read-cache', 'page-program/site-client-read',
+  'page-program/site-client-write', 'page-program/site-capture',
+  'page-program/login', 'app-code/observe',
   'app-code/act',
   'a2a/call', 'site-fetch/call', 'script/model-call',
 ]));
@@ -938,10 +946,16 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           usedPage = true;
           try {
-            const resp = await runCodeOp(
+            const relay = pageCallToRelay({ method: m.method, args: m.args });
+            const raw = await runCodeOp(
               'page', m.method,
-              () => sendToSW('page/call', { method: m.method, args: m.args, ownerSessionId, runId }),
+              () => sendToSW(relay.route, {
+                args: relay.args, ownerSessionId, runId,
+              }),
               (response) => response?.ok === true,
+            );
+            const resp = /** @type {any} */ (
+              shapePageCallOutcome(String(m.method ?? ''), raw)
             );
             const policies = Array.isArray(resp?.browserPolicies)
               ? resp.browserPolicies

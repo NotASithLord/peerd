@@ -14,7 +14,7 @@ import { projectToolAuthority } from '../../../extension/peerd-runtime/tools/met
 import {
   normalizeSiteOrigin,
   originOfUrl,
-} from '../../../extension/peerd-runtime/tools/metadata/origins.js';
+} from '../../../extension/peerd-runtime/tool-origin-policy.js';
 import {
   clearTools, listTools, registerTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
@@ -26,6 +26,7 @@ import { CONTROLLER_VM_TOOL_NAMES } from '../../../extension/peerd-runtime/contr
 import { CONTROLLER_NOTEBOOK_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-notebook-tools.js';
 import { CONTROLLER_APP_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-app-tools.js';
 import { CONTROLLER_PERSISTENCE_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-persistence-tools.js';
+import { CONTROLLER_PAGE_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-page-tools.js';
 
 const { BUILTIN_TOOLS } = await import(
   '../../../extension/peerd-runtime/tools/defs/index.js'
@@ -48,6 +49,7 @@ const CONTROLLER_ONLY_TOOL_NAMES = new Set(
     ...CONTROLLER_NOTEBOOK_TOOL_NAMES,
     ...CONTROLLER_APP_TOOL_NAMES,
     ...CONTROLLER_PERSISTENCE_TOOL_NAMES,
+    ...CONTROLLER_PAGE_TOOL_NAMES,
   ]
     .filter((name) => !EXECUTION_TOOL_NAMES.has(name)),
 );

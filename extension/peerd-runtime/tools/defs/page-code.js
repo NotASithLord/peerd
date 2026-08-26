@@ -11,7 +11,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // ingests untrusted page text, so its code hand must hold nothing beyond what
 // the tool-call actor already holds (the exclusion IS the boundary,
 // exposure.js) — every page.* call maps onto the SAME gated tool (navigate /
-// click / type / snapshot / read_page) via the SW 'page/call' route, so the
+// click / type / snapshot / read_page) via fixed SW page-program routes, so the
 // denylist, confirm gates, and audit apply unchanged. This tool is a
 // vocabulary/shape change, not new capability.
 //
@@ -19,11 +19,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // on the trusted side — the worker can never name a session or a tab; the SW
 // route re-derives the owned tab from its own bindings per call.
 
-import { clamp } from '/shared/util.js';
 import { formatRunResult } from './script.js';
-
-const DEFAULT_TIMEOUT_MS = 60_000;
-const MAX_TIMEOUT_MS = 180_000;
 
 // The code-REPL worker's capability profile — fixed, never caller-supplied.
 export const PAGE_CODE_CAPS = Object.freeze({
@@ -37,38 +33,12 @@ export const pageCodeTool = composeTool("page_code", {
     if (typeof args?.code !== 'string' || args.code.length === 0) {
       return { ok: false, error: 'code_required' };
     }
-    // why: jsOffscreenClient rides the opaque ctx contract (not on ToolContext);
-    // narrow to the one method this tool calls.
-    const jsOffscreenClient = /** @type {{ execHeadless?: (code: string, opts: object) => Promise<import('./script.js').RunResult>, abortHeadless?: (runId: string, owner?: string) => Promise<void> } | undefined} */ (
-      /** @type {any} */ (ctx).jsOffscreenClient);
-    if (!jsOffscreenClient || typeof jsOffscreenClient.execHeadless !== 'function') {
-      return { ok: false, error: 'page_code_unavailable' };
-    }
-    // The actor's own session — the trusted owner identity the page bridge rides
-    // on. Absent (a non-session ctx) → fail closed; the SW route ALSO verifies
-    // the session is a tab-backed web actor before any dispatch.
-    const ownerSessionId = ctx.session?.sessionId;
-    if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
-      return { ok: false, error: 'page_code_requires_actor_session' };
-    }
-    const extras = /** @type {{ scriptRuns?: { mintRunId: (owner: string) => string, register: (runId: string, signal: any, owner: string, caps: Record<string, boolean>) => void, release: (runId: string) => void }, abortSignal?: any }} */ (/** @type {any} */ (ctx));
-    if (!extras.scriptRuns) return { ok: false, error: 'page_code_run_registry_unavailable' };
-    if (extras.abortSignal?.aborted) return { ok: false, error: 'page_code_aborted: the turn was stopped before the run started' };
-    const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
-    const runId = extras.scriptRuns.mintRunId(ownerSessionId);
-    extras.scriptRuns.register(runId, extras.abortSignal, ownerSessionId, { page: true });
-    /** @type {(() => void) | undefined} */
-    let onAbort;
-    if (extras.abortSignal && jsOffscreenClient.abortHeadless) {
-      onAbort = () => { jsOffscreenClient.abortHeadless?.(runId, ownerSessionId); };
-      if (extras.abortSignal.aborted) onAbort();
-      else extras.abortSignal.addEventListener('abort', onAbort, { once: true });
-    }
     try {
-      const result = await jsOffscreenClient.execHeadless(args.code, {
-        timeoutMs, caps: PAGE_CODE_CAPS, ownerSessionId, runId,
-        signal: extras.abortSignal,
-      });
+      // why: code execution, run custody and cancellation stay behind the exact
+      // page-program authority. The controller only interprets the bounded run
+      // result and never receives browser, storage or offscreen clients.
+      const result = await /** @type {any} */ (ctx).pageAuthority.runOwnedPageProgram();
+      if (result?.ok === false) return result;
       if (result.endTurn === true) {
         return {
           ok: false,
@@ -93,11 +63,6 @@ export const pageCodeTool = composeTool("page_code", {
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       return { ok: false, error: `page_code_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
-    } finally {
-      extras.scriptRuns.release(runId);
-      if (onAbort && extras.abortSignal) {
-        try { extras.abortSignal.removeEventListener?.('abort', onAbort); } catch { /* stub */ }
-      }
     }
   },
 });

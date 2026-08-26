@@ -498,7 +498,7 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     // closed at exposureGate), and present ONLY in the code-surface web actor's
     // positive set. (The spawn_subagent path is walled separately: the
     // capability strip drops jsOffscreenClient for any non-code-surface ctx,
-    // and the SW page/call route refuses a non-web-actor owner — the slice-3
+    // and the fixed SW page-program routes refuse a non-web-actor owner — the slice-3
     // security tests.)
     expect(isHiddenFromMain('page_code')).toBe(true);
     const r = eg({ name: 'page_code' }, {}, { exposure: 'main' });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { navigateTool } from '../../../extension/peerd-runtime/tools/defs/navigate.js';
+import { navigateTool } from '../../../extension/background/page-authority/navigate.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 const directRefusalContext = () => {

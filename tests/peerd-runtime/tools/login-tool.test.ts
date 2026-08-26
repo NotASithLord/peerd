@@ -9,7 +9,7 @@
 // different nodes) and never a fake synthetic click.
 
 import { describe, test, expect } from 'bun:test';
-import { loginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+import { loginTool } from '../../../extension/background/page-authority/login.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 interface Over {

@@ -14,7 +14,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 
 import { serializeListResult } from './columnar.js';
 import { executeByKind } from './kind-dispatch.js';
-import { isDenylistedTab, originOfUrl } from './dom-helpers.js';
+import { isDenylistedTab, originOfUrl } from '../../browser-authority/dom-helpers.js';
 import { wrapUntrusted, safeTitle } from '../prompt-wrap.js';
 import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js';
 import { clamp } from '/shared/util.js';

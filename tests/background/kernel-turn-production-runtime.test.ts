@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnProductionRuntime } from '../../extension/background/kernel-turn-production-runtime.js';
 import { createKernelTurnCustody } from '../../extension/background/kernel-turn-custody.js';
+import { KERNEL_PAGE_PROGRAM_ROUTE_NAMES } from '../../extension/shared/kernel-feature-route-inventory.js';
 
 const sendCustody = () => ({
   validOperationId: () => false, operationWindowValid: () => false,
@@ -67,8 +68,8 @@ describe('kernel turn production runtime', () => {
                 onBeforeRequest: () => undefined, reconcile: async () => {},
               },
               relayRoutes: Object.fromEntries([
-                'a2a/call', 'actors/call', 'page/call', 'script/model-call',
-                'script-run/abort', 'site-fetch/call',
+                'a2a/call', 'actors/call', 'site-fetch/call',
+                ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
               ].map((name) => [name, async () => ({ ok: true })])),
             },
           };

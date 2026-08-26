@@ -6,6 +6,7 @@
 // no session fails closed (the page surface is never anonymous).
 
 import { describe, test, expect, mock } from 'bun:test';
+import { createPageToolAuthority } from '../../extension/background/page-tool-authority.js';
 import { pageCodeTool, PAGE_CODE_CAPS } from '../../extension/peerd-runtime/tools/defs/page-code.js';
 
 const RESULT = { value: 'ok', consoleOutput: [], durationMs: 5, error: null };
@@ -19,6 +20,11 @@ const ctxWith = (over: object = {}) => {
   return { ctx, execHeadless };
 };
 
+const executePageCode = (args: Record<string, unknown>, ctx: Record<string, unknown>) =>
+  pageCodeTool.execute(args, {
+    pageAuthority: createPageToolAuthority({ call: { name: 'page_code', args }, ctx }),
+  } as any);
+
 describe('page_code — the code-REPL action tool', () => {
   test('the locked profile is page + compute only (no egress / subagent / opfs)', () => {
     expect(PAGE_CODE_CAPS).toEqual({ page: true, egress: false, subagent: false, opfs: false });
@@ -26,7 +32,7 @@ describe('page_code — the code-REPL action tool', () => {
 
   test('runs the script with the FIXED caps + the actor session as owner (not caller-supplied)', async () => {
     const { ctx, execHeadless } = ctxWith();
-    const out = await pageCodeTool.execute({ code: 'await page.goto("https://example.com"); return 1' }, ctx as any);
+    const out = await executePageCode({ code: 'await page.goto("https://example.com"); return 1' }, ctx);
     expect(out.ok).toBe(true);
     expect(execHeadless).toHaveBeenCalledTimes(1);
     const [code, opts] = execHeadless.mock.calls[0];
@@ -40,15 +46,15 @@ describe('page_code — the code-REPL action tool', () => {
 
   test('fails closed with no actor session — the page surface is never anonymous', async () => {
     const { ctx, execHeadless } = ctxWith({ session: undefined });
-    const out = await pageCodeTool.execute({ code: 'return 1' }, ctx as any);
+    const out = await executePageCode({ code: 'return 1' }, ctx);
     expect(out).toEqual({ ok: false, error: 'page_code_requires_actor_session' });
     expect(execHeadless).not.toHaveBeenCalled();
   });
 
   test('empty code is rejected; a missing client is reported, not thrown', async () => {
-    const empty = await pageCodeTool.execute({ code: '' }, ctxWith().ctx as any);
+    const empty = await executePageCode({ code: '' }, ctxWith().ctx);
     expect(empty).toEqual({ ok: false, error: 'code_required' });
-    const noClient = await pageCodeTool.execute({ code: 'return 1' }, { session: { sessionId: 's1' } } as any);
+    const noClient = await executePageCode({ code: 'return 1' }, { session: { sessionId: 's1' } });
     expect(noClient).toEqual({ ok: false, error: 'page_code_unavailable' });
   });
 
@@ -61,7 +67,7 @@ describe('page_code — the code-REPL action tool', () => {
         execHeadless: async () => ({ ...RESULT, value: 'discarded click result', browserPolicies: [browserPolicy] }),
       },
     });
-    const out: any = await pageCodeTool.execute({ code: 'await page.click("#open"); return 1' }, ctx as any);
+    const out: any = await executePageCode({ code: 'await page.click("#open"); return 1' }, ctx);
     expect(out.browserChildPolicyNotices).toEqual([browserPolicy]);
     expect(out.content).not.toContain('protected_child_navigation');
   });
@@ -74,7 +80,7 @@ describe('page_code — the code-REPL action tool', () => {
         }),
       },
     });
-    expect(await pageCodeTool.execute({ code: 'await page.goto("https://idp.test")' }, ctx as any)).toEqual({
+    expect(await executePageCode({ code: 'await page.goto("https://idp.test")' }, ctx)).toEqual({
       ok: false,
       error: 'page_code_ended_for_host_policy',
       content: 'Finish signing in in the open tab.',
@@ -94,7 +100,7 @@ describe('page_code — the code-REPL action tool', () => {
         }),
       },
     });
-    expect(await pageCodeTool.execute({ code: 'await page.click("#send")' }, ctx as any)).toEqual({
+    expect(await executePageCode({ code: 'await page.click("#send")' }, ctx)).toEqual({
       ok: false,
       error: 'page_code_ended_for_host_policy',
       content: 'This form submits to another site. Nothing was submitted.',

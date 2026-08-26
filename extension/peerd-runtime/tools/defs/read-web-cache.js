@@ -15,7 +15,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // outside it.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { originOfUrl } from './dom-helpers.js';
+import { originOfUrl } from '../../browser-authority/dom-helpers.js';
 import { buildPagedResult, clampPageLimit, pageStatusLine } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */

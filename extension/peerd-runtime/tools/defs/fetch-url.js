@@ -19,7 +19,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // same-origin cookies come from the browser's jar via the boundary, never a header.
 
 import { fetchUrl } from '../web/primitives.js';
-import { originOfUrl } from './dom-helpers.js';
+import { originOfUrl } from '../../browser-authority/dom-helpers.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { disarmMarkup, disarmText } from '../../dom/cdr.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';

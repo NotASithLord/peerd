@@ -28,7 +28,7 @@ import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
 import { classifyLoginAffordance } from '../../../extension/peerd-runtime/tools/login-affordance.js';
-import { loginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+import { loginTool } from '../../../extension/background/page-authority/login.js';
 import { isKnownIdp } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 

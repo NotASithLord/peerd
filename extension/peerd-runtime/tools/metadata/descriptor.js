@@ -1,7 +1,7 @@
 // @ts-check
 
 import { retryClassForTool } from '../../lifecycle/tool-retry-class.js';
-import { resolveToolOrigins } from './origins.js';
+import { resolveToolOrigins } from '../../tool-origin-policy.js';
 
 /**
  * @typedef {Pick<import('/shared/tool-types.js').Tool,

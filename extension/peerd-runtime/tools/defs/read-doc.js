@@ -23,7 +23,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // wrong. read_doc sniffs the bytes and reports what it found.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { originOfUrl, isDenylistedTab } from './dom-helpers.js';
+import { originOfUrl, isDenylistedTab } from '../../browser-authority/dom-helpers.js';
 import { formatDocBody, formatDocHead, DEFAULT_MAX_CHARS } from '../../doc/format.js';
 import { toMarkdown } from '../../doc/markdown.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';

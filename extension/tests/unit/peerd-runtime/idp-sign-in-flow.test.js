@@ -8,7 +8,7 @@ import {
   makeSignInExcursionAuthorizer,
 } from '/peerd-runtime/actor/origin-lock.js';
 import { isKnownIdp, isKnownIdpHost } from '/peerd-runtime/actor/idp-registry.js';
-import { loginTool } from '/peerd-runtime/tools/defs/login.js';
+import { loginTool } from '/background/page-authority/login.js';
 
 describe('identity-provider transit sign-in flow', () => {
   it('binds the relying site, parks at the exact confirmed IdP, and resumes at home', async () => {

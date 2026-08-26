@@ -7,8 +7,9 @@
 // scripting plumbing, output formatting, origin gating.
 
 import { describe, it, expect } from '../../framework.js';
-import { pageEvalTool } from '/peerd-runtime/tools/defs/index.js';
-import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+import { pageEvalTool } from '/background/page-authority/page-eval.js';
+import { pageEvalTool as controllerPageEvalTool } from '/peerd-runtime/tools/defs/page-eval.js';
+import { controllerHostsPageTool } from '/peerd-runtime/controller-page-tools.js';
 import {
   browserProbeResult,
   TEST_DOCUMENT_ID,
@@ -21,7 +22,7 @@ const scriptReply = (opts, result) => {
 };
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
-/** @typedef {import('/peerd-runtime/tools/defs/page-eval.js').PageEvalResult} PageEvalResult */
+/** @typedef {import('/background/page-authority/page-eval.js').PageEvalResult} PageEvalResult */
 /** @param {PageEvalResult} r @returns {string} */
 const okContent = (r) => /** @type {import('/shared/tool-types.js').ToolResultOk} */ (r).content;
 /** @param {PageEvalResult} r @returns {string} */
@@ -176,15 +177,14 @@ describe('page_eval — outer tool', () => {
     expect(errOf(r).includes('script_inject_failed')).toBe(true);
   });
 
-  it('is registered in BUILTIN_TOOLS with DOM primitive + write side-effect', () => {
-    const found = BUILTIN_TOOLS.find(t => t.name === 'page_eval');
-    expect(!!found).toBe(true);
-    expect(found?.primitive).toBe('tab');
-    expect(found?.sideEffect).toBe('write');
+  it('is registered only in the controller catalog with DOM write metadata', () => {
+    expect(controllerHostsPageTool('page_eval')).toBe(true);
+    expect(controllerPageEvalTool.primitive).toBe('tab');
+    expect(controllerPageEvalTool.sideEffect).toBe('write');
   });
 
   it('origin gate returns the active-tab origin', () => {
-    const origins = pageEvalTool.origins({ code: 'x' }, /** @type {ToolContext} */ ({
+    const origins = controllerPageEvalTool.origins({ code: 'x' }, /** @type {ToolContext} */ ({
       activeTab: { origin: 'https://github.com' },
     }));
     expect(origins).toEqual(['https://github.com']);

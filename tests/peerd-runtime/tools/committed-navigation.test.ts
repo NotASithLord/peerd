@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   resetToVerifiedBlank,
   updateAndObserveCommittedNavigation,
-} from '../../../extension/peerd-runtime/tools/defs/committed-navigation.js';
+} from '../../../extension/peerd-runtime/browser-authority/committed-navigation.js';
 
 describe('committed navigation observation', () => {
   test('ignores a stale complete event until the requested transition completes', async () => {

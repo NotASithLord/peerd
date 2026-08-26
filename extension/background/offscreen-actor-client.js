@@ -23,6 +23,7 @@ import { createVmToolAuthority } from './vm-tool-authority.js';
 import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 import { createAppToolAuthority } from './app-tool-authority.js';
 import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
+import { createPageToolAuthority } from './page-tool-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -460,6 +461,19 @@ export const makeOffscreenActorClient = ({
     if (!entry) return null;
     entry.domainState.authority ??= createPersistenceToolAuthority({
       call: entry.prepared.call, ctx: entry.prepared.ctx,
+    });
+    return entry;
+  };
+  const pageEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ tools,
+  ) => {
+    const entry = domainEntry(grant, msg, 'page', tools, []);
+    if (!entry) return null;
+    entry.domainState.authority ??= createPageToolAuthority({
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
   };
@@ -1773,6 +1787,102 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'todo/replace: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'todo/replace', 'commit', () =>
         entry.domainState.authority.replaceTodos(msg.version, msg.todos));
+    },
+    'page/open-tab': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['open_tab']);
+      if (!entry) return { ok: false, error: 'page/open-tab: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/open-tab', 'resource', () =>
+        entry.domainState.authority.openProtectedBackgroundTab());
+    },
+    'page/read': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['read_page']);
+      if (!entry) return { ok: false, error: 'page/read: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/read', 'read', () =>
+        entry.domainState.authority.readOwnedPage());
+    },
+    'page/snapshot': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['snapshot']);
+      if (!entry) return { ok: false, error: 'page/snapshot: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/snapshot', 'read', () =>
+        entry.domainState.authority.captureOwnedAccessibilityTree());
+    },
+    'page/read-state': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['read_state']);
+      if (!entry) return { ok: false, error: 'page/read-state: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/read-state', 'read', () =>
+        entry.domainState.authority.readOwnedFrameworkState());
+    },
+    'page/watch-changes': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['watch_changes']);
+      if (!entry) return { ok: false, error: 'page/watch-changes: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/watch-changes', 'read', () =>
+        entry.domainState.authority.drainOwnedDomChanges());
+    },
+    'page/query-dom': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['query_dom']);
+      if (!entry) return { ok: false, error: 'page/query-dom: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/query-dom', 'read', () =>
+        entry.domainState.authority.queryOwnedDom());
+    },
+    'page/evaluate-main': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_eval']);
+      if (!entry) return { ok: false, error: 'page/evaluate-main: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/evaluate-main', 'resource', () =>
+        entry.domainState.authority.evaluateOwnedPageMainWorld());
+    },
+    'page/evaluate-debugger': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_exec']);
+      if (!entry) return { ok: false, error: 'page/evaluate-debugger: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/evaluate-debugger', 'resource', () =>
+        entry.domainState.authority.evaluateOwnedPageDebugger());
+    },
+    'page/keys-availability': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_keys']);
+      if (!entry) return { ok: false, error: 'page/keys-availability: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/keys-availability', 'read', () =>
+        entry.domainState.authority.readTrustedKeysAvailability());
+    },
+    'page/navigate': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['navigate']);
+      if (!entry) return { ok: false, error: 'page/navigate: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/navigate', 'resource', () =>
+        entry.domainState.authority.navigateOwnedTab());
+    },
+    'page/fill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['type']);
+      if (!entry) return { ok: false, error: 'page/fill: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/fill', 'resource', () =>
+        entry.domainState.authority.fillOwnedTarget());
+    },
+    'page/click': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['click']);
+      if (!entry) return { ok: false, error: 'page/click: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/click', 'resource', () =>
+        entry.domainState.authority.clickOwnedTarget());
+    },
+    'page/login': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['login']);
+      if (!entry) return { ok: false, error: 'page/login: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/login', 'resource', () =>
+        entry.domainState.authority.performConfirmedOwnedLogin());
+    },
+    'page/run-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['page_code']);
+      if (!entry) return { ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/run-program', 'resource', () =>
+        entry.domainState.authority.runOwnedPageProgram());
+    },
+    'page/capture-foreground': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['capture']);
+      if (!entry) return { ok: false, error: 'page/capture-foreground: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/capture-foreground', 'read', () =>
+        entry.domainState.authority.captureForegroundPixels());
+    },
+    'page/capture-owned': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg, ['view']);
+      if (!entry) return { ok: false, error: 'page/capture-owned: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'page/capture-owned', 'read', () =>
+        entry.domainState.authority.captureOwnedTabPixels());
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

@@ -542,10 +542,10 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       ownedTabFor: () => 42,
       buildToolContext: async (o: any) => { ctxOpts = o; return { ctx: true }; },
       pinActorCall: (call: any, at: string, id: string) => { pinned = { call, at, id }; },
-      dispatchToolCall: async () => ({ ok: true, content: 'snapshot' }),
+      dispatchToolCall: async () => ({ ok: true, content: 'pdf' }),
     });
-    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'snapshot', args: {} } }, OFFSCREEN));
-    expect(out).toEqual({ ok: true, result: { ok: true, content: 'snapshot' } });
+    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'read_pdf', args: {} } }, OFFSCREEN));
+    expect(out).toEqual({ ok: true, result: { ok: true, content: 'pdf' } });
     expect(ctxOpts.activeTabId).toBe(42);           // the owned tab reached the ctx
     expect(ctxOpts.actorType).toBe('web');
     expect(pinned.id).toBe('web');                  // re-pinned to the bound instance
@@ -1518,6 +1518,69 @@ describe('controller-owned persistence tools: exact isolated authority', () => {
       result: { ok: false, code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
     });
     expect(writes).toBe(1);
+    expect(legacyDispatches).toBe(0);
+  });
+});
+
+describe('controller-owned page tools: exact isolated authority', () => {
+  test('pins page_code to one authority-owned run and refuses legacy dispatch', async () => {
+    let legacyDispatches = 0;
+    const runEvents: any[] = [];
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', instanceId: 'web' }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-page-1', kind: 'actor' },
+        jsOffscreenClient: {
+          execHeadless: async (code: string, options: any) => {
+            runEvents.push(['execute', code, options]);
+            return { value: 'done', error: null };
+          },
+        },
+        scriptRuns: {
+          mintRunId: () => 'page-run-actor-1',
+          register: (...args: any[]) => runEvents.push(['register', ...args]),
+          release: (...args: any[]) => runEvents.push(['release', ...args]),
+        },
+      }),
+      ownedTabFor: () => 42,
+      dispatchToolCall: async () => { legacyDispatches += 1; return { ok: true }; },
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const observed: any = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken,
+        call: { id: 'call-page-code', name: 'page_code', args: { code: 'return 1' } },
+      }, OFFSCREEN);
+      const effect = await client.routes['page/run-program']({
+        relayToken, executionId: prepared.executionId,
+      }, OFFSCREEN);
+      const legacy = await client.routes['actor/tool-dispatch']({
+        relayToken,
+        call: { id: 'call-page-code', name: 'page_code', args: { code: 'return 1' } },
+      }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: true, content: 'done' },
+      }, OFFSCREEN);
+      return { prepared, effect, legacy, settled };
+    }, 'actor-page-1');
+
+    expect(observed.prepared).toMatchObject({
+      ok: true, mode: 'execute', toolName: 'page_code',
+      projection: { sessionId: 'actor-page-1' },
+    });
+    expect(observed.effect).toMatchObject({
+      ok: true, outcomeKnown: true, value: { value: 'done', error: null },
+    });
+    expect(observed.legacy.error).toContain('not legacy-owned');
+    expect(observed.settled).toMatchObject({ ok: true, result: { ok: true, content: 'done' } });
+    expect(runEvents[0]).toEqual([
+      'register', 'page-run-actor-1', expect.anything(), 'actor-page-1', { page: true },
+    ]);
+    expect(runEvents.at(-1)).toEqual(['release', 'page-run-actor-1']);
     expect(legacyDispatches).toBe(0);
   });
 });

@@ -3902,7 +3902,7 @@ return {
   assert(Array.isArray(outcome?.calls)
     && outcome.calls.filter((type) => type === 'sw/web-fetch').length === 2
     && !outcome.calls.some((type) => [
-      'actor/spawn', 'dweb/distributed/info', 'provider/call', 'page/call', 'site/call',
+      'actor/spawn', 'dweb/distributed/info', 'provider/call', 'page-program/snapshot', 'site/call',
     ].includes(type)),
   'forged remote bridge envelopes do not leave the Firefox Notebook host',
   JSON.stringify(outcome?.calls));

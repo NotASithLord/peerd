@@ -6,12 +6,13 @@
 // formatting of the CDP result shape, error mapping.
 
 import { describe, it, expect } from '../../framework.js';
-import { pageExecTool } from '/peerd-runtime/tools/defs/index.js';
-import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+import { pageExecTool } from '/background/page-authority/page-exec.js';
+import { pageExecTool as controllerPageExecTool } from '/peerd-runtime/tools/defs/page-exec.js';
+import { controllerHostsPageTool } from '/peerd-runtime/controller-page-tools.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
-/** @typedef {import('/peerd-runtime/tools/defs/page-exec.js').PageExecResult} PageExecResult */
+/** @typedef {import('/background/page-authority/page-exec.js').PageExecResult} PageExecResult */
 /** @param {PageExecResult} r @returns {string} */
 const okContent = (r) => /** @type {import('/shared/tool-types.js').ToolResultOk} */ (r).content;
 /** @param {PageExecResult} r @returns {string} */
@@ -200,15 +201,14 @@ describe('page_exec — outer tool', () => {
     expect(errOf(r).includes('cannot_attach_to_tab')).toBe(true);
   });
 
-  it('is registered in BUILTIN_TOOLS with DOM primitive + write side-effect', () => {
-    const found = BUILTIN_TOOLS.find(t => t.name === 'page_exec');
-    expect(!!found).toBe(true);
-    expect(found?.primitive).toBe('tab');
-    expect(found?.sideEffect).toBe('write');
+  it('is registered only in the controller catalog with DOM write metadata', () => {
+    expect(controllerHostsPageTool('page_exec')).toBe(true);
+    expect(controllerPageExecTool.primitive).toBe('tab');
+    expect(controllerPageExecTool.sideEffect).toBe('write');
   });
 
   it('exposes the active-tab origin for the egress gate', () => {
-    const origins = pageExecTool.origins({ expression: 'x' }, /** @type {ToolContext} */ ({
+    const origins = controllerPageExecTool.origins({ expression: 'x' }, /** @type {ToolContext} */ ({
       activeTab: { origin: 'https://github.com' },
     }));
     expect(origins).toEqual(['https://github.com']);

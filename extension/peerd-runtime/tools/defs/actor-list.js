@@ -21,7 +21,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // (denylisted tabs dropped — the same enumeration-leak fence as the old
 // list_tabs), API integrations are the chat's formed ∪ keyed set.
 
-import { originOfUrl, isDenylistedTab } from './dom-helpers.js';
+import { originOfUrl, isDenylistedTab } from '../../browser-authority/dom-helpers.js';
 import { serializeListResult } from './columnar.js';
 import { safeTitle } from '../prompt-wrap.js';
 import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js';

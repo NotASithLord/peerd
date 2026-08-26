@@ -1047,6 +1047,118 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'page-open-tab-request') {
+          await relayExactToolMessage(m, 'page-open-tab-response', () =>
+            sendToSW('page/open-tab', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-read-request') {
+          await relayExactToolMessage(m, 'page-read-response', () =>
+            sendToSW('page/read', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'page-snapshot-request') {
+          await relayExactToolMessage(m, 'page-snapshot-response', () =>
+            sendToSW('page/snapshot', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'page-read-state-request') {
+          await relayExactToolMessage(m, 'page-read-state-response', () =>
+            sendToSW('page/read-state', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'page-watch-changes-request') {
+          await relayExactToolMessage(m, 'page-watch-changes-response', () =>
+            sendToSW('page/watch-changes', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'page-query-dom-request') {
+          await relayExactToolMessage(m, 'page-query-dom-response', () =>
+            sendToSW('page/query-dom', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'page-evaluate-main-request') {
+          await relayExactToolMessage(m, 'page-evaluate-main-response', () =>
+            sendToSW('page/evaluate-main', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-evaluate-debugger-request') {
+          await relayExactToolMessage(m, 'page-evaluate-debugger-response', () =>
+            sendToSW('page/evaluate-debugger', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-keys-availability-request') {
+          await relayExactToolMessage(m, 'page-keys-availability-response', () =>
+            sendToSW('page/keys-availability', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'page-navigate-request') {
+          await relayExactToolMessage(m, 'page-navigate-response', () =>
+            sendToSW('page/navigate', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-fill-request') {
+          await relayExactToolMessage(m, 'page-fill-response', () =>
+            sendToSW('page/fill', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-click-request') {
+          await relayExactToolMessage(m, 'page-click-response', () =>
+            sendToSW('page/click', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-login-request') {
+          await relayExactToolMessage(m, 'page-login-response', () =>
+            sendToSW('page/login', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-run-program-request') {
+          await relayExactToolMessage(m, 'page-run-program-response', () =>
+            sendToSW('page/run-program', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'page-capture-foreground-request') {
+          await relayExactToolMessage(m, 'page-capture-foreground-response', () =>
+            sendToSW('page/capture-foreground', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'page-capture-owned-request') {
+          await relayExactToolMessage(m, 'page-capture-owned-response', () =>
+            sendToSW('page/capture-owned', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

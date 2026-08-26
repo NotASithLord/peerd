@@ -77,7 +77,7 @@ describe('kernel executable runtime', () => {
     });
     expect(appRuntimeLoads).toBe(1);
     expect(runtime.routes['pod/git']).toBeFunction();
-    expect(await runtime.routes['page/call']({}, 'trusted')).toMatchObject({ ok: true });
+    expect(await runtime.routes['page-program/navigate']({}, 'trusted')).toMatchObject({ ok: true });
     expect(await runtime.routes['script/model-call']({ runId: 'run:1' }, 'trusted'))
       .toEqual({ ok: true, name: 'script/model-call', message: { runId: 'run:1' } });
     expect(await runtime.routes['vm/tab-ready']({ vmId: 'vm-1' }, 'trusted'))

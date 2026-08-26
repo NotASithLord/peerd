@@ -85,7 +85,7 @@ export const makeOm2wRecorder = ({ capture, tabInfo, stop, maxSteps = 25 }) => {
     },
 
     /**
-     * A settled page.* op from the CODE surface (the SW page/call route's
+     * A settled page.* op from the CODE surface (the fixed SW page-program route's
      * 'page/op' broadcast). Single-phase — the op arrives WITH its outcome, so
      * it becomes a step immediately (the page state is already post-action);
      * no pending map. Same cap enforcement as the tool path, so the two arms

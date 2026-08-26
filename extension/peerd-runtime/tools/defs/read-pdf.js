@@ -17,7 +17,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // isn't installed.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl, isDenylistedTab } from './dom-helpers.js';
+import { resolveTargetTab, originOfUrl, isDenylistedTab } from '../../browser-authority/dom-helpers.js';
 import { requireEngine } from '../../pdf/engines.js';
 import { formatPdfBody, DEFAULT_MAX_CHARS } from '../../pdf/extract-format.js';
 // read_pdf re-fetches bytes offscreen, so it applies the same shared lexical

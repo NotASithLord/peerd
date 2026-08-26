@@ -6,7 +6,7 @@
 // default snapshot mode is untouched.
 
 import { describe, test, expect } from 'bun:test';
-import { readPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
+import { readPageTool } from '../../../extension/background/page-authority/read-page.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 const fencedBody = (content: string) =>

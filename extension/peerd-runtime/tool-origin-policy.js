@@ -65,4 +65,3 @@ export const resolveToolOrigins = (rule, args, ctx) => {
   }
   throw new TypeError(`unknown tool origin rule: ${String(rule.kind)}`);
 };
-

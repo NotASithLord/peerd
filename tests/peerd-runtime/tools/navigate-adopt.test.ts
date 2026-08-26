@@ -5,7 +5,7 @@
 // (a web ctx must NEVER fall back to the user's foreground tab).
 
 import { describe, test, expect } from 'bun:test';
-import { navigateTool } from '../../../extension/peerd-runtime/tools/defs/navigate.js';
+import { navigateTool } from '../../../extension/background/page-authority/navigate.js';
 
 // A tabs mock whose update() resolves and fires the onUpdated 'complete' the
 // navigation watcher awaits. get() returns the landed URL.

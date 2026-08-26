@@ -5,7 +5,7 @@
 // never falls back to captureVisibleTab.
 
 import { describe, test, expect } from 'bun:test';
-import { viewTool } from '../../extension/peerd-runtime/tools/web/view.js';
+import { viewTool } from '../../extension/background/page-authority/view.js';
 import {
   browserProbeResult,
   TEST_DOCUMENT_ID,

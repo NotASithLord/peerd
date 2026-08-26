@@ -935,7 +935,7 @@ evaluating peerd should know. Each cites where it lives in the code.
   `read_web_cache` or a site-client fetch in the window before a DOM tool re-enters
   the chokepoint. Durable client record custody is a separate invariant (INV-18).
   (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
-  `tools/defs/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
+  `browser-authority/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
   The #251 arc hardened the TAB actor's site-client CREDENTIAL path but left its
   API-actor sibling: the `site-fetch/call` relay's `backing:'api'` branch pinned credentials to the
   MODEL-supplied `origin` argument, so an API actor bound to one origin could name a

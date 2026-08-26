@@ -202,7 +202,7 @@ export const WEB_ACTOR_DOM_TOOLS = WEB_ACTOR_DOM_TOOL_NAMES;
 // surface is derived from the page client manifest: the actor perceives AND
 // acts through page.* (page.snapshot()/page.content() for perception — still
 // the a11y snapshot, the unchanged axis — and page.goto/click/fill for action),
-// every call routing through the SW 'page/call' route to the SAME gated DOM
+// every call routing through a fixed SW page-program route to the SAME gated DOM
 // tools on its owned tab. Operations not represented by a page method stay
 // discrete; today that is site_client_run, because nesting a second sealed job
 // inside page_code would deadlock the bounded relay pool.

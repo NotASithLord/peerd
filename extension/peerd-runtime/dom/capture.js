@@ -24,7 +24,7 @@
 
 import { serializeAxTree } from './ax-serialize.js';
 import { domWalkInjected } from './walk-injected.js';
-import { browserDocumentIdentity, scriptingTarget } from '../tools/defs/dom-helpers.js';
+import { browserDocumentIdentity, scriptingTarget } from '../browser-authority/dom-helpers.js';
 import {
   browserDocumentRefusalFrom,
   browserTargetRefusalResult,
