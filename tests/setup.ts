@@ -9,7 +9,7 @@
 import { mock } from 'bun:test';
 import { plugin } from 'bun';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 // The production cold-path adapter intentionally binds only to the browser's
 // native WebExtension object; it must never pull the compatibility polyfill
@@ -46,7 +46,11 @@ if (!(globalThis as any).browser && !(globalThis as any).chrome) {
 // of whether its transitive import graph touches leading-slash
 // specifiers — removing the need for dependency-light duplicates kept
 // in sync by hand (see tests/.../wrap-parity, prompt-wrap).
-const extensionRoot = join(import.meta.dir, '..', 'extension');
+// why process.cwd(), not import.meta.dir: Bun's transpiler cache can preserve
+// the latter from a disposable worktree and resolve root-relative extension
+// imports into a directory that no longer exists. Test commands are rooted at
+// the repository, so the live working directory is the stable source of truth.
+const extensionRoot = join(process.cwd(), 'extension');
 plugin({
   name: 'peerd-leading-slash',
   setup(build) {
@@ -54,7 +58,17 @@ plugin({
     // extension/. Genuine filesystem-absolute paths (or typos) return
     // undefined and fall through to Bun's default resolver.
     build.onResolve({ filter: /^\// }, (args) => {
-      const candidate = join(extensionRoot, args.path.slice(1));
+      // why the extension marker: Bun can cache the resolved absolute form of
+      // a root-relative import from a disposable worktree. Recover only the
+      // extension-local suffix, so a deleted measurement directory cannot
+      // poison later test runs while unrelated absolute paths still fall
+      // through untouched.
+      const marker = `${sep}extension${sep}`;
+      const markerAt = args.path.lastIndexOf(marker);
+      const relativePath = markerAt >= 0
+        ? args.path.slice(markerAt + marker.length)
+        : args.path.slice(1);
+      const candidate = join(extensionRoot, relativePath);
       return existsSync(candidate) ? { path: candidate } : undefined;
     });
   },
