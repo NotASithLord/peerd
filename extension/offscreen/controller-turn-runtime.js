@@ -580,9 +580,16 @@ const runControllerTurnWith = async (payload, options, executeToolCall) => {
               deleteFile: (
                 /** @type {string|undefined} */ appId, /** @type {string} */ path,
               ) => rpc('turn.app.delete-file', { ...binding, appId, path }),
+              observeRuntime: () => rpc('turn.app.observe', binding),
+              actRuntime: (
+                /** @type {string} */ action,
+                /** @type {Record<string,unknown>} */ params,
+              ) => rpc('turn.app.act', { ...binding, action, params }),
+              runCode: (/** @type {string} */ code, /** @type {number} */ timeoutMs) =>
+                rpc('turn.app.run-code', { ...binding, code, timeoutMs }),
             });
             const value = await executeControllerAppTool(
-              request.toolName, request.args, appAuthority,
+              request.toolName, request.args, appAuthority, request.projection,
             );
             execution = {
               protocol: request.protocol,

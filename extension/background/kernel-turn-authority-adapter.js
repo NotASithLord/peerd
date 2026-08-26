@@ -179,7 +179,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     listToolDescriptors,
     localStoreSource,
     mainAgentDescriptors,
-    makeAppCallHandler,
     makeAutoMemory,
     makeCheapCall,
     makeInitOrchestrator,
@@ -2094,13 +2093,52 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         actorSurface: 'tools',
       }),
     });
-    const appCall = makeAppCallHandler({
-      dispatchToolCall: /** @type {any} */ (dispatchToolCall),
-      buildActorContext: (/** @type {any} */ { sessionId, appId }) => buildToolContext({
-        sessionId, exposure: EXPOSURE_ACTOR, actorType: 'app',
-        actorInstanceId: appId, actorSurface: 'tools',
-      }),
-    });
+    const observeAppRuntime = async (/** @type {{sessionId:string,appId:string,signal?:AbortSignal}} */ request) => {
+      const startedAt = performance.now();
+      const ctx = await buildToolContext({
+        sessionId: request.sessionId, exposure: EXPOSURE_ACTOR, actorType: 'app',
+        actorInstanceId: request.appId, actorSurface: 'code',
+      });
+      if (typeof ctx.appAgentCall !== 'function') return {
+        ok: false, error: 'app_playtest_not_available', outcomeKnown: true,
+        outcomeKind: 'pre-effect-failure',
+      };
+      const result = await ctx.appAgentCall('observe', {}, request.signal);
+      deps.auditLog.append({
+        type: result?.ok === false ? 'tool_failed' : 'tool_executed',
+        sessionId: request.sessionId,
+        details: {
+          tool: 'app_observe', primitive: 'app', dispatch: 'read',
+          durationMs: Math.round(performance.now() - startedAt),
+          ...(result?.ok === false ? { error: result.error } : {}),
+        },
+      }).catch(() => {});
+      return result;
+    };
+    const actAppRuntime = async (/** @type {{sessionId:string,appId:string,action:string,params:object,signal?:AbortSignal}} */ request) => {
+      const startedAt = performance.now();
+      const ctx = await buildToolContext({
+        sessionId: request.sessionId, exposure: EXPOSURE_ACTOR, actorType: 'app',
+        actorInstanceId: request.appId, actorSurface: 'code',
+      });
+      if (typeof ctx.appAgentCall !== 'function') return {
+        ok: false, error: 'app_playtest_not_available', outcomeKnown: true,
+        outcomeKind: 'pre-effect-failure',
+      };
+      const result = await ctx.appAgentCall(
+        'act', { action: request.action, params: request.params }, request.signal,
+      );
+      deps.auditLog.append({
+        type: result?.ok === false ? 'tool_failed' : 'tool_executed',
+        sessionId: request.sessionId,
+        details: {
+          tool: 'app_act', primitive: 'app', dispatch: 'write',
+          durationMs: Math.round(performance.now() - startedAt),
+          ...(result?.ok === false ? { error: result.error } : {}),
+        },
+      }).catch(() => {});
+      return result;
+    };
     const actorsRoutes = makeActorsRoutes({
       sessions: shared.sessions, uiPorts: shared.uiPorts, buildToolContext,
       dispatchToolCall, actorMessaging, scriptRuns, actorsCallToOp,
@@ -2602,7 +2640,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     };
     const relays = {
       scriptRuns, validateGeneration, retireStale, dispatchToolCall,
-      buildActorContext: buildToolContext, appActorChat, engineTrackersHydrated, engineReady,
+      observeAppRuntime, actAppRuntime, appActorChat, engineTrackersHydrated, engineReady,
       relayRoutes, engineRoutes, eventOwners,
       dwebInbound: dwebAgentOwner.onMessage,
       syncDwebAgentRoom: dwebAgentOwner.syncRoom,

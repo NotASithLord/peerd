@@ -89,7 +89,6 @@ import {
 } from './actor/web-actor.js';
 import { describeLandingStop, landingStopCard, originPhrase } from './actor/origin-lock-report.js';
 import { makeToolboxParseCheck } from './toolbox/core.js';
-import { makeAppCallHandler } from './actor/app-call-handler.js';
 import { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
 import { WEB_TOOLS } from './tools/web/index.js';
 import { wrapUntrusted } from './tools/prompt-wrap.js';
@@ -173,7 +172,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   listToolDescriptors,
   localStoreSource,
   mainAgentDescriptors,
-  makeAppCallHandler,
   makeAutoMemory,
   makeCheapCall,
   makeInitOrchestrator,

@@ -1051,11 +1051,11 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
   test('a REVIEW child re-stamps exposure from the PERSISTED record', async () => {
     let seenCtx: any = null;
     const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['app_observe'], review: true }) },
+      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['read_memory'], review: true }) },
       dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
       EXPOSURE_REVIEW: 'review',
     }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'app_observe', args: {} } }, OFFSCREEN));
+    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'read_memory', args: {} } }, OFFSCREEN));
     expect(out.ok).toBe(true);
     expect(seenCtx.exposure).toBe('review');
   });

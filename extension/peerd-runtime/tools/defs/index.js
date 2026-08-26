@@ -35,9 +35,6 @@ import { openTabTool }               from './open-tab.js';
 import { sandboxCreateTool }          from './sandbox-create.js';
 import { scriptTool }                  from './script.js';
 import { pageCodeTool }               from './page-code.js';
-import { appCodeTool }                from './app-code.js';
-import { appObserveTool }             from './app-observe.js';
-import { appActTool }                 from './app-act.js';
 import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
@@ -92,9 +89,6 @@ export {
   pageCodeTool,
   // engine (Pod)
   // engine (App)
-  appCodeTool,
-  appObserveTool,
-  appActTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules)
@@ -187,9 +181,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   readRunCacheTool,
   // engine (Pod)
   // engine (App)
-  appCodeTool,
-  appObserveTool,
-  appActTool,
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
   // toolbox (design js-superpower/06 — durable agent-authored modules the

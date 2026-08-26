@@ -985,6 +985,29 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'app-observe-request') {
+          await relayExactToolMessage(m, 'app-observe-response', () =>
+            sendToSW('app/observe', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'app-act-request') {
+          await relayExactToolMessage(m, 'app-act-response', () =>
+            sendToSW('app/act', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              action: m.action, params: m.params,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'app-run-code-request') {
+          await relayExactToolMessage(m, 'app-run-code-response', () =>
+            sendToSW('app/run-code', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              code: m.code, timeoutMs: m.timeoutMs,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

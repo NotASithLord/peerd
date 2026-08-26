@@ -163,7 +163,8 @@ export const abortAllJobs = () => {
 const MAX_RELAYING_JOBS = 2;
 let activeRelayingJobs = 0;
 const RELAYING_MESSAGE_TYPES = Object.freeze(new Set([
-  'sw/web-fetch', 'actor/spawn', 'actors/call', 'page/call', 'app/call',
+  'sw/web-fetch', 'actor/spawn', 'actors/call', 'page/call', 'app-code/observe',
+  'app-code/act',
   'a2a/call', 'site-fetch/call', 'script/model-call',
 ]));
 
@@ -892,9 +893,21 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           usedApp = true;
           try {
+            const request = m.method === 'observe'
+              ? { type: 'app-code/observe', payload: { ownerSessionId, runId, rid: m.rid } }
+              : m.method === 'act'
+                ? {
+                  type: 'app-code/act',
+                  payload: {
+                    ownerSessionId, runId, rid: m.rid,
+                    action: m.args?.action, params: m.args?.params,
+                  },
+                }
+                : null;
+            if (!request) throw new Error(`unknown app method: ${String(m.method)}`);
             const resp = await runCodeOp(
               'app', m.method,
-              () => sendToSW('app/call', { method: m.method, args: m.args, ownerSessionId, runId, rid: m.rid }),
+              () => sendToSW(request.type, request.payload),
               (response) => response?.ok === true,
             );
             if (resp?.outcomeKnown === false || resp?.outcomeKind === 'transport-lost' || resp?.outcomeKind === 'host-lost') {

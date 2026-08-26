@@ -34,7 +34,7 @@ const POD_ROUTES = new Set([
   'pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch',
 ]);
 const RELAY_ROUTES = new Set([
-  'a2a/call', 'actors/call', 'app/call', 'page/call', 'script/model-call',
+  'a2a/call', 'actors/call', 'app-code/observe', 'app-code/act', 'page/call', 'script/model-call',
   'script-run/abort', 'site-fetch/call',
 ]);
 const ENGINE_ATTACH_ROUTES = new Set(KERNEL_ENGINE_ATTACH_ROUTE_NAMES);
@@ -47,7 +47,7 @@ const DWEB_APP_ROUTES = new Set(['dweb/audit', 'dweb/base/room']);
 const EXECUTABLE_LIVE_LOADERS = Object.freeze([
   ['loadEngineLive', 'engine-live'],
   ['loadActorChatRelays', 'actor-chat-relays'],
-  ['loadAppCallRelays', 'app-call-relays'],
+  ['loadAppRuntimeRelays', 'app-runtime-relays'],
   ['loadRelayRoutes', 'relay-routes'],
   ['loadTransferLive', 'transfer-live'],
   ['loadDwebRoutes', 'dweb-routes'],
@@ -263,7 +263,7 @@ export const createKernelExecutableControl = (deps) => {
     loadRuntimeDeps: async () => ({
       engine: { load: live.loadEngineLive },
       actorChat: { load: live.loadActorChatRelays },
-      appCall: { load: live.loadAppCallRelays },
+      appRuntime: { load: live.loadAppRuntimeRelays },
       relay: {
         dispatch: deps.dispatchRuntimeRelay,
         load: live.loadRelayRoutes,

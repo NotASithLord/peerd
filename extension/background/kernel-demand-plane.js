@@ -297,7 +297,7 @@ export const createKernelDemandPlane = (deps) => {
     createRuntime: createKernelExecutableRuntime,
     loadEngineLive: async () => (await getRichOwner()).executableLive,
     loadActorChatRelays: async () => (await getRichOwner()).relays,
-    loadAppCallRelays: async () => (await getRichOwner()).relays,
+    loadAppRuntimeRelays: async () => (await getRichOwner()).relays,
     loadRelayRoutes: async () => {
       const owner = await getRichOwner();
       return { ...owner.relayRoutes, ...owner.relays?.engineRoutes };

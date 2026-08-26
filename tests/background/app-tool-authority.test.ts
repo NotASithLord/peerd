@@ -87,4 +87,51 @@ describe('exact App authority', () => {
     expect(result).toMatchObject({ ok: false });
     expect(deleted).toBe(false);
   });
+
+  test('runs code with one fixed App-only capability and owner-bound lease', async () => {
+    const calls: any[] = [];
+    const leases: any[] = [];
+    const call = { name: 'app_code', args: { code: 'return app.observe()', timeoutMs: 5000 } };
+    const authority = createAppToolAuthority({
+      call,
+      ctx: context({
+        jsOffscreenClient: {
+          execHeadless: async (code: string, options: any) => {
+            calls.push({ code, options });
+            options.onExecutionDispatch();
+            return { value: 'ok', consoleOutput: [], durationMs: 1 };
+          },
+        },
+        scriptRuns: {
+          mintRunId: () => 'run-app-1',
+          register: (...args: any[]) => leases.push(['register', ...args]),
+          release: (...args: any[]) => leases.push(['release', ...args]),
+        },
+      }),
+      signal: new AbortController().signal,
+    });
+    const result = await authority.runCode(call.args.code, 5000);
+    expect(result.value).toBe('ok');
+    expect(calls[0].options).toMatchObject({
+      timeoutMs: 5000,
+      caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
+      ownerSessionId: 'session-1', runId: 'run-app-1',
+    });
+    expect(leases.map((entry) => entry[0])).toEqual(['register', 'release']);
+  });
+
+  test('pins runtime action name and parameters to the admitted call', async () => {
+    let relayed = false;
+    const authority = createAppToolAuthority({
+      call: { name: 'app_act', args: { action: 'move', params: { x: 1 } } },
+      ctx: context({
+        appAgentCall: async () => { relayed = true; return { ok: true, value: {} }; },
+      }),
+    });
+    let failure: any;
+    try { await authority.actRuntime('move', { x: 2 }); }
+    catch (cause) { failure = cause; }
+    expect(failure).toMatchObject({ message: 'App authority mismatch', outcomeKnown: true });
+    expect(relayed).toBe(false);
+  });
 });

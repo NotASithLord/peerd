@@ -223,9 +223,9 @@ throw new Error('unrelated failure');`,
         ownerSessionId: 'app-actor-1', runId: 'app-run-1',
       },
       {
-        sendToSW: async (/** @type {string} */ type, /** @type {{method?:string,ownerSessionId?:string,runId?:string}} */ payload) => {
+        sendToSW: async (/** @type {string} */ type, /** @type {{ownerSessionId?:string,runId?:string}} */ payload) => {
           calls.push({ type, payload });
-          if (payload.method === 'observe') return { ok: true, value: { screen: 'game' } };
+          if (type === 'app-code/observe') return { ok: true, value: { screen: 'game' } };
           return { ok: true, value: { accepted: true } };
         },
       },
@@ -233,7 +233,7 @@ throw new Error('unrelated failure');`,
     expect(result.error).toBe(null);
     expect(result.value).toEqual({ screen: 'game' });
     expect(result.usedApp).toBe(true);
-    expect(calls.map((call) => call.type)).toEqual(['app/call', 'app/call']);
+    expect(calls.map((call) => call.type)).toEqual(['app-code/observe', 'app-code/act']);
     expect(calls.every((call) => call.payload.ownerSessionId === 'app-actor-1')).toBe(true);
     expect(calls.every((call) => call.payload.runId === 'app-run-1')).toBe(true);
     const codeTrace = /** @type {Array<{bridge:string,method:string}>} */ (result.codeTrace ?? []);
@@ -973,7 +973,8 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(attempts.actors).toContain('not defined');
     expect(calls.filter((call) => call.type === 'sw/web-fetch').length).toBe(1);
     expect(calls.some((call) => [
-      'actor/spawn', 'actors/call', 'script/model-call', 'page/call', 'app/call',
+      'actor/spawn', 'actors/call', 'script/model-call', 'page/call',
+      'app-code/observe', 'app-code/act',
       'dweb/distributed/info', 'site-fetch/call', 'a2a/call',
     ].includes(call.type))).toBe(false);
   });

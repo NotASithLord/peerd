@@ -119,6 +119,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'app-read-file-response'
       || m.type === 'app-list-files-response'
       || m.type === 'app-delete-file-response'
+      || m.type === 'app-observe-response'
+      || m.type === 'app-act-response'
+      || m.type === 'app-run-code-response'
       || m.type === 'actor-tool-settle-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
@@ -505,9 +508,22 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             ) => authorityValue(actorToolRequest(
               'app-delete-file-request', { executionId, appId, path },
             )),
+            observeRuntime: () => authorityValue(actorToolRequest(
+              'app-observe-request', { executionId },
+            )),
+            actRuntime: (
+              /** @type {string} */ action,
+              /** @type {Record<string,unknown>} */ params,
+            ) => authorityValue(actorToolRequest(
+              'app-act-request', { executionId, action, params },
+            )),
+            runCode: (/** @type {string} */ code, /** @type {number} */ timeoutMs) =>
+              authorityValue(actorToolRequest(
+                'app-run-code-request', { executionId, code, timeoutMs },
+              )),
           });
           result = await executeControllerAppTool(
-            prepared.toolName, prepared.args, appAuthority,
+            prepared.toolName, prepared.args, appAuthority, prepared.projection,
           );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
