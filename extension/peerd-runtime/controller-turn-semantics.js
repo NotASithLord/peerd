@@ -12,9 +12,6 @@ import {
   actorAllowedToolsFor,
   EXPOSURE_ACTOR,
   EXPOSURE_REVIEW,
-  filterByDwebActive,
-  filterByDwebEnabled,
-  filterByGoalActive,
   mainAgentDescriptors,
   pinActorCall,
 } from './tools/exposure.js';
@@ -62,11 +59,7 @@ import { makeTrimEnricher } from './loop/summary-enrichment.js';
 import { makeToolsCommand } from './tools/manifest-command.js';
 import { makeTurnCostTracker } from './cost/turn-tracker.js';
 import { makeTurnDriver } from './loop/turn-driver.js';
-import {
-  filterDescriptorsByManifest,
-  manifestLabel,
-  resolveManifestAllow,
-} from './tools/manifests.js';
+import { manifestLabel, resolveManifestAllow } from './tools/manifests.js';
 import { limitExceeded, normalizeTally } from './cost/accumulator.js';
 import { filterByRuntimeCapabilities } from './runtime-capabilities.js';
 import { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
@@ -85,8 +78,6 @@ import { digestCapture } from './site-clients/digest.js';
 import { drainFetchTapInjected, installFetchTapInjected } from './dom/fetch-tap-injected.js';
 import { parseAppManifest } from '/peerd-engine/app-manifest.js';
 
-const REASONING_BUDGET_TOKENS = 2048;
-const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 let toolsRegistered = false;
 
 const registerTools = () => {
@@ -121,11 +112,7 @@ export const createControllerTurnSemantics = () => Object.freeze({
   DWEB_INBOUND_TOOL_NAMES,
   EXPOSURE_ACTOR,
   EXPOSURE_REVIEW,
-  filterByDwebActive,
-  filterByDwebEnabled,
-  filterByGoalActive,
   filterByRuntimeCapabilities,
-  filterDescriptorsByManifest,
   finalActorTurnReply,
   finalAssistantText,
   formatDocBody,
@@ -161,8 +148,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   prepareToolCall,
   prepareUserAttachmentsWithDocs,
   registerTools,
-  REASONING_BUDGET_TOKENS,
-  REASONING_EFFORT_LEVELS,
   resolveManifestAllow,
   resolveSiteUrl,
   resolveWebActorSurface,

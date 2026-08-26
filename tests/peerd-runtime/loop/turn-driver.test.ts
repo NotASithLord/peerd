@@ -391,9 +391,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       })) { /* drain */ }
       yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
     },
-    REASONING_BUDGET_TOKENS: 0,
-    REASONING_EFFORT_LEVELS: ['medium'],
-    DEFAULT_SETTINGS: { reasoningEffort: 'medium' },
     trimEnricher: { queue: () => {}, drain: async () => {} },
     contextWindowFor: () => null,
     liveContextWindow: () => null,
@@ -613,6 +610,16 @@ describe('runAgentTurn credential custody', () => {
     });
     expect(fixture.loopCtx()).not.toHaveProperty('resolveFailoverChain');
     expect(fixture.loopCtx()).not.toHaveProperty('shouldFailover');
+  });
+
+  test('the authority shell forwards raw reasoning settings without model policy', async () => {
+    const fixture = turnDeps('chat');
+    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' });
+    expect(fixture.loopCtx()).toMatchObject({
+      reasoningEnabled: false,
+      reasoningEffort: 'medium',
+    });
+    expect(fixture.loopCtx()).not.toHaveProperty('reasoning');
   });
 
   test('a main loop never receives credential or network authority closures', async () => {

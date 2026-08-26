@@ -30,6 +30,7 @@ import {
   executeControllerScheduleTool,
   executeControllerDwebTool,
   projectControllerToolSurface,
+  reasoningForTurn,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -276,6 +277,7 @@ const runControllerTurnWith = async (payload, options) => {
     });
     for await (const event of runUserTurn({
       ...ctx,
+      reasoning: reasoningForTurn(ctx),
       contextWindow,
       sessionId: input.sessionId,
       tools,

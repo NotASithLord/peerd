@@ -40,7 +40,8 @@ export const describeActorExecution = (job, executionId) => describeExecution({
     model: job.model,
     maxSteps: job.maxSteps,
     maxOutputTokens: job.maxOutputTokens,
-    reasoning: job.reasoning,
+    reasoningEnabled: job.reasoningEnabled,
+    reasoningEffort: job.reasoningEffort,
     contextWindowOverrides: job.contextWindowOverrides,
     pricingOverrides: job.pricingOverrides,
   },
@@ -107,7 +108,7 @@ export const abortActor = (runId) => {
 
 /**
  * Run one BOUND-actor turn in a dedicated Worker.
- * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoning?: object, contextWindowOverrides?:Record<string,number>, runtimeCapabilities?: object, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
+ * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoningEnabled?: boolean, reasoningEffort?: string, contextWindowOverrides?:Record<string,number>, runtimeCapabilities?: object, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, onRelayDrain?: () => void, createWorker?: (url: string) => Worker, startupMs?: number, relayDrainMs?: number, maxLoopEvents?: number }} deps
  * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, price?:{cost:number,estimated:boolean}, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean }>}
  */

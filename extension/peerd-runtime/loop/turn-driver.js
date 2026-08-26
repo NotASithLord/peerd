@@ -112,7 +112,7 @@ export const makeTurnDriver = (/** @type {any} */ deps) => {
     decideAction, makeTurnCostTracker,
     uiConnected, uiPorts, auditLog,
     postChatNote, runUserTurn,
-    REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS, DEFAULT_SETTINGS, trimEnricher,
+    trimEnricher,
     currentAppScope,
     checkpointMgr, detectInterruptedTurn,
     getDenylist = () => [],
@@ -601,18 +601,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       toolDispatch,
       ...(toolExecution ? { toolExecution } : {}),
       classifyToolCall,
-      // why: resolve from CURRENT settings at turn start (settings load
-      // async and the user can dial reasoning/effort between turns). The
-      // includes() guard normalizes junk that could only arrive via a
-      // crafted transfer import (applyImport copies values verbatim) —
-      // an invalid string would otherwise 400 every turn at the API.
-      reasoning: {
-        enabled: settingsStore.get().reasoningEnabled,
-        budgetTokens: REASONING_BUDGET_TOKENS,
-        effort: REASONING_EFFORT_LEVELS.includes(settingsStore.get().reasoningEffort)
-          ? settingsStore.get().reasoningEffort
-          : DEFAULT_SETTINGS.reasoningEffort,
-      },
+      // Reasoning normalization is provider/model semantics. Authority passes
+      // only the user settings snapshot; the sealed controller applies its
+      // fixed budget and accepted effort vocabulary before model egress.
+      reasoningEnabled: settingsStore.get().reasoningEnabled === true,
+      reasoningEffort: settingsStore.get().reasoningEffort,
       signal: abortController.signal,
       // Long-session compression: when the history trim drops NEW
       // messages, the loop fires this (never awaited). We only queue;

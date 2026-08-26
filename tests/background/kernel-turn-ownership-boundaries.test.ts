@@ -157,6 +157,12 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-provider/pricing.js',
       'peerd-provider/registry.js',
     ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
+
+    const driver = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'), 'utf8',
+    );
+    expect(driver).not.toContain('REASONING_BUDGET_TOKENS');
+    expect(driver).not.toContain('REASONING_EFFORT_LEVELS');
   });
 
   it('hosts actor tool semantics only in controller and isolated-worker graphs', async () => {

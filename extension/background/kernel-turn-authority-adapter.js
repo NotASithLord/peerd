@@ -157,11 +157,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     EXPOSURE_REVIEW,
     fenceApiActorSummary,
     fenceWebActorSummary,
-    filterByDwebActive,
-    filterByDwebEnabled,
-    filterByGoalActive,
     filterByRuntimeCapabilities,
-    filterDescriptorsByManifest,
     finalActorTurnReply,
     finalAssistantText,
     formatDocBody,
@@ -198,8 +194,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     pinActorCall,
     prepareToolCall,
     prepareUserAttachmentsWithDocs,
-    REASONING_BUDGET_TOKENS,
-    REASONING_EFFORT_LEVELS,
     registerTools,
     resolveManifestAllow,
     resolveSiteUrl,
@@ -1505,12 +1499,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         effectiveTools: tools.map((tool) => tool.name),
         inbound: inbound === true,
       });
-      const reasoning = {
-        enabled: deps.settingsStore.get().reasoningEnabled,
-        budgetTokens: REASONING_BUDGET_TOKENS,
-        effort: REASONING_EFFORT_LEVELS.includes(deps.settingsStore.get().reasoningEffort)
-          ? deps.settingsStore.get().reasoningEffort : CHANNEL_DEFAULTS.reasoningEffort,
-      };
+      const reasoningEnabled = deps.settingsStore.get().reasoningEnabled === true;
+      const reasoningEffort = deps.settingsStore.get().reasoningEffort;
       const display = parentToolUseId ? {
         parentToolUseId, parentSessionId, rootSessionId,
         actorCorrelationId: correlationId, kind, instanceId, name, task: message,
@@ -1562,7 +1552,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         actorSessionId, message: deliveredMessage, systemPrompt,
         provider: record.provider, model: record.model, depth: record.depth,
         ollamaHost: deps.settingsStore.get().ollamaHost,
-        tools, priorMessages: record.messages ?? [], reasoning,
+        tools, priorMessages: record.messages ?? [], reasoningEnabled, reasoningEffort,
         contextWindowOverrides: deps.settingsStore.get().contextWindowOverrides,
         pricingOverrides: deps.settingsStore.get().pricingOverrides,
         runtimeCapabilities,
@@ -2963,8 +2953,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     makeTurnCostTracker,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     postChatNote: deps.postChatNote,
-    REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS,
-    DEFAULT_SETTINGS: CHANNEL_DEFAULTS, trimEnricher: live.trimEnricher,
+    trimEnricher: live.trimEnricher,
     currentAppScope: async (/** @type {string} */ sessionId) => {
       const appId = await engine.appRegistry.getDefaultForSession(sessionId).catch(() => null);
       return appId ? `app:${appId}` : null;
