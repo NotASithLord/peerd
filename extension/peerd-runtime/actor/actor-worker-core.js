@@ -17,7 +17,7 @@
 // NO engine clients, NO chrome.* — it ingests untrusted content (page DOM, VM
 // stdout, API/response bodies) that can reach neither the orchestrator's memory
 // nor the key. Its ONLY outward edges are two SW-gated relays:
-//   - the model call → the SW adds getSecret + safeFetch (the key stays in the SW);
+//   - exact inference stream effects → fixed SW egress authority;
 //   - a tool call → the SW builds the actor's instance-PINNED, gated tool context
 //     and dispatches THERE (the pin + gate + audit + engine clients + tabs are ALL
 //     SW-side). why the SW MUST re-pin+gate: the worker's `call` args are
@@ -103,35 +103,6 @@ export const makeInMemorySessions = (seed) => {
   };
   return store;
 };
-
-/**
- * Build the RELAYED callModel the worker hands to runUserTurn. An async-generator
- * that DELEGATES the actual streaming call to the SW: it strips the non-serializable
- * fields (getSecret, safeFetch, signal — functions/AbortSignal that structured-clone
- * throws on, AND the key/egress path that must never leave the SW), hands the rest to
- * `requestModel`, and yields back the events the SW accumulated. The SW route re-adds
- * its OWN getSecret + safeFetch so the key stays there.
- *
- * @param {(args: object) => Promise<{ events?: any[], error?: string }>} requestModel
- * @param {number} [maxOutputTokens]  injected as maxTokens (the output cap), mirroring spawn.js.
- */
-export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
-  async function* relayedCallModel(/** @type {any} */ args) {
-    // Drop getSecret + safeFetch (FUNCTIONS — structured-clone throws DataCloneError
-    // on a function; a missed strip made the relay throw on EVERY call, silently
-    // falling back to the in-SW loop) AND signal (a non-cloneable AbortSignal).
-    // Belt-and-braces: also drop any OTHER function-valued field so a future loop
-    // addition can't re-break the clone.
-    const { getSecret, safeFetch, signal, ...rest } = args ?? {};
-    void getSecret; void safeFetch; void signal;
-    /** @type {Record<string, unknown>} */
-    const serializable = {};
-    for (const [k, v] of Object.entries(rest)) if (typeof v !== 'function') serializable[k] = v;
-    if (maxOutputTokens != null) serializable.maxTokens = maxOutputTokens;
-    const reply = await requestModel(serializable);
-    if (reply?.error) throw new Error(reply.error);
-    for (const ev of reply?.events ?? []) yield ev;
-  };
 
 /**
  * Reconstruct a WEB/API actor's rolling-summary SELF-FENCE for the worker loop ctx

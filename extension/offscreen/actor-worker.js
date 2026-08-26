@@ -2,19 +2,25 @@
 // offscreen/actor-worker.js — the ONE Worker that runs any non-orchestrator agent
 // loop in its own heap (the heap split): an ephemeral reasoning actor (tools:[],
 // so the tool-relay below never fires) OR a bound actor (VM / Notebook / App / web,
-// tool-bearing). Imperative shell over actor-worker-core. Relays BOTH the model call
-// AND every tool call to the SW (which holds the key, the engine clients, the
-// instance pin, and the gate); the untrusted instance/page output stays in this
-// heap. Module worker → strict.
+// tool-bearing). Imperative shell over actor-worker-core. Provider semantics run
+// HERE and pull from an exact SW-owned inference stream; tool effects still relay
+// to the SW, which holds the key, engine clients, instance pin, and gate. The
+// untrusted instance/page output stays in this heap. Module worker → strict.
 import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
-import { makeInMemorySessions, makeRelayedCallModel, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
+import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
+import {
+  callModel as callProviderModel,
+  contextWindowFor,
+  providerModelContextWindow,
+} from '/peerd-provider/controller.js';
 import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
+import { createActorModelEgress } from './actor-model-egress.js';
 import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
 
 let seq = 0;
 let runId = '';
-/** @type {Map<string, (v: any) => void>} rid → pending model-call resolver */
+/** @type {Map<string, (v: any) => void>} rid → pending model-authority resolver */
 const modelPending = new Map();
 /** @type {Map<string, (v: any) => void>} rid → pending tool-dispatch resolver */
 const toolPending = new Map();
@@ -35,8 +41,17 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     return;
   }
 
-  if (m.type === 'model-response') { modelPending.get(m.rid)?.({ events: m.events }); modelPending.delete(m.rid); return; }
-  if (m.type === 'model-error') { modelPending.get(m.rid)?.({ error: m.error }); modelPending.delete(m.rid); return; }
+  if (m.type === 'model-open-inference-response'
+      || m.type === 'model-read-inference-chunk-response'
+      || m.type === 'model-cancel-inference-response'
+      || m.type === 'model-open-local-response'
+      || m.type === 'model-read-local-response'
+      || m.type === 'model-cancel-local-response'
+      || m.type === 'model-read-context-response') {
+    modelPending.get(m.rid)?.(m.reply);
+    modelPending.delete(m.rid);
+    return;
+  }
   if (m.type === 'tool-response') { toolPending.get(m.rid)?.(m.reply); toolPending.delete(m.rid); return; }
   if (m.type === 'abort') {
     abort.abort();
@@ -68,10 +83,67 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       return;
     }
     runId = execution.id;
-    const requestModel = (/** @type {object} */ args) => new Promise((resolve) => {
-      const rid = `mc-${++seq}`;
+    const openInference = (/** @type {any} */ request) => new Promise((resolve) => {
+      const rid = `mo-${++seq}`;
       modelPending.set(rid, resolve);
-      self.postMessage({ type: 'model-request', rid, runId, args });
+      self.postMessage({
+        type: 'model-open-inference-request', rid, runId,
+        providerId: request.providerId,
+        modelId: request.modelId,
+        nativeBody: request.nativeBody,
+      });
+    });
+    const readInferenceChunk = (/** @type {any} */ request) => new Promise((resolve) => {
+      const rid = `mr-${++seq}`;
+      modelPending.set(rid, resolve);
+      self.postMessage({
+        type: 'model-read-inference-chunk-request', rid, runId,
+        streamId: request.streamId,
+      });
+    });
+    const cancelInference = (/** @type {any} */ request) => new Promise((resolve) => {
+      const rid = `mx-${++seq}`;
+      modelPending.set(rid, resolve);
+      self.postMessage({
+        type: 'model-cancel-inference-request', rid, runId,
+        streamId: request.streamId,
+      });
+    });
+    const readModelContext = (/** @type {any} */ request) => new Promise((resolve) => {
+      const rid = `mw-${++seq}`;
+      modelPending.set(rid, resolve);
+      self.postMessage({
+        type: 'model-read-context-request', rid, runId,
+        providerId: request.providerId,
+        modelId: request.modelId,
+      });
+    });
+    const openLocalGeneration = (/** @type {any} */ request) => new Promise((resolve) => {
+      const rid = `lo-${++seq}`;
+      modelPending.set(rid, resolve);
+      self.postMessage({
+        type: 'model-open-local-request', rid, runId,
+        providerId: request.providerId,
+        modelId: request.modelId,
+        messages: request.messages,
+        system: request.system,
+        tools: request.tools,
+        maxTokens: request.maxTokens,
+      });
+    });
+    const readLocalGeneration = (/** @type {any} */ request) => new Promise((resolve) => {
+      const rid = `lr-${++seq}`;
+      modelPending.set(rid, resolve);
+      self.postMessage({
+        type: 'model-read-local-request', rid, runId, streamId: request.streamId,
+      });
+    });
+    const cancelLocalGeneration = (/** @type {any} */ request) => new Promise((resolve) => {
+      const rid = `lx-${++seq}`;
+      modelPending.set(rid, resolve);
+      self.postMessage({
+        type: 'model-cancel-local-request', rid, runId, streamId: request.streamId,
+      });
     });
     const requestTool = (/** @type {object} */ call) => new Promise((resolve) => {
       const rid = `tc-${++seq}`;
@@ -87,7 +159,29 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         depth: metadata.depth,
         messages: state.messages,
       });
-      const callModel = makeRelayedCallModel(requestModel, program.maxOutputTokens);
+      const modelEgress = createActorModelEgress({
+        openInference, readInferenceChunk, cancelInference, readModelContext,
+        openLocalGeneration, readLocalGeneration, cancelLocalGeneration,
+      });
+      const liveWindow = await providerModelContextWindow(program.provider, program.model, {
+        modelEgress, signal: abort.signal,
+      });
+      const contextWindow = contextWindowFor(program.model, {
+        overrides: program.contextWindowOverrides,
+        live: liveWindow ?? undefined,
+      });
+      // Provider/model/output policy is pinned twice: this SW-authored program
+      // fixes semantic selection here, and the SW grant independently rejects a
+      // mismatched native request before credentials or network are reachable.
+      const callModel = (/** @type {any} */ args) => callProviderModel({
+        ...args,
+        provider: program.provider,
+        model: program.model,
+        ...(program.maxOutputTokens != null
+          ? { maxTokens: program.maxOutputTokens }
+          : {}),
+        modelEgress,
+      });
       const toolDispatch = makeRelayedToolDispatch(requestTool);
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
       // summary. The SW's closure (over a policy-reduced live tab origin) can't
@@ -117,7 +211,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           oneShot: metadata.oneShot,
           signal: abort.signal,
           reasoning: program.reasoning,
-          contextWindow: program.contextWindow,
+          ...(contextWindow == null ? {} : { contextWindow }),
           inbound: metadata.inbound === true,
           preflightReply: metadata.preflightReply,
         },

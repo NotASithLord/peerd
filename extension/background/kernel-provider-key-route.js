@@ -1,29 +1,30 @@
 // @ts-check
 
-import { providerAuthority } from '../shared/provider-authority-policy.js';
+import { providerEgressPolicy } from './provider-egress-manifest.js';
 
 /** @param {Record<string,any>} deps */
 export const makeKernelProviderSetKeyRoute = ({
   vault, settingsStore, auditLog, pushState,
 }) => async (/** @type {any} */ message = {}) => {
-  const policy = providerAuthority(message.provider);
+  const policy = providerEgressPolicy(message.provider);
   if (!policy) return { ok: false, error: 'unknown-provider' };
-  if (policy.secretName === null) return { ok: false, error: 'keyless-provider' };
+  if (policy.credential === null) return { ok: false, error: 'keyless-provider' };
   const key = typeof message.plaintext === 'string' ? message.plaintext.trim() : '';
   if (key.length < 8) return { ok: false, error: 'key-too-short' };
   try {
-    const prior = await vault.getSecret(policy.secretName);
+    const prior = await vault.getSecret(policy.credential);
     if (prior !== key) {
-      await vault.setSecret(policy.secretName, key);
-      auditLog.append({ type: 'provider_added', details: { provider: policy.name } }).catch(() => {});
+      await vault.setSecret(policy.credential, key);
+      auditLog.append({ type: 'provider_added', details: { provider: message.provider } }).catch(() => {});
     }
-    const active = providerAuthority(settingsStore.get().providerName);
-    let usable = active?.secretName === null;
-    if (!usable && active?.secretName) {
-      try { usable = !!(await vault.getSecret(active.secretName)); } catch { usable = false; }
+    const activeName = settingsStore.get().providerName;
+    const active = providerEgressPolicy(activeName);
+    let usable = active?.credential === null;
+    if (!usable && active?.credential) {
+      try { usable = !!(await vault.getSecret(active.credential)); } catch { usable = false; }
     }
-    if (message.activate !== false && !usable && active?.name !== policy.name) {
-      await settingsStore.update({ providerName: policy.name, providerModel: '' });
+    if (message.activate !== false && !usable && activeName !== message.provider) {
+      await settingsStore.update({ providerName: message.provider, providerModel: '' });
     }
     await Promise.resolve(pushState());
     return { ok: true };

@@ -29,6 +29,7 @@
 
 import browser from '/shared/browser-api.js';
 import {
+  LOCAL_MODEL_CHANNEL_CANCEL, LOCAL_MODEL_CHANNEL_CHUNK,
   LOCAL_MODEL_CHANNEL_PROTOCOL, LOCAL_MODEL_CHANNEL_RESULT,
   parseLocalModelChannelOffer,
 } from '/shared/feature-lease-protocol.js';
@@ -341,6 +342,42 @@ export const acceptLocalModelOffer = (
   if (!offer || event?.ports?.length !== 1 || !port || !ownsLease(offer.lease)) {
     try { port?.close(); } catch {}
     return false;
+  }
+  if (offer.method === 'generate') {
+    const controller = new AbortController();
+    port.onmessage = (/** @type {MessageEvent} */ message) => {
+      const value = message.data;
+      if (value?.type === LOCAL_MODEL_CHANNEL_CANCEL
+          && value.protocol === LOCAL_MODEL_CHANNEL_PROTOCOL
+          && value.channelId === offer.channelId) controller.abort();
+    };
+    port.start();
+    try { port.postMessage({
+      type: LOCAL_MODEL_CHANNEL_RESULT, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+      channelId: offer.channelId, ok: true, started: true, outcomeKnown: true,
+    }); } catch { controller.abort(); }
+    Promise.resolve().then(() => generateLocal(offer.args, (token) => {
+      if (typeof token !== 'string' || !token) return;
+      try { port.postMessage({
+        type: LOCAL_MODEL_CHANNEL_CHUNK, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+        channelId: offer.channelId, token,
+      }); } catch { controller.abort(); }
+    }, { signal: controller.signal })).then(
+      () => {
+        try { port.postMessage({
+          type: LOCAL_MODEL_CHANNEL_RESULT, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+          channelId: offer.channelId, ok: true, done: true, outcomeKnown: true,
+        }); } catch {}
+      },
+      (cause) => {
+        try { port.postMessage({
+          type: LOCAL_MODEL_CHANNEL_RESULT, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+          channelId: offer.channelId, ok: false, done: true, outcomeKnown: true,
+          error: cause instanceof Error ? cause.message : String(cause),
+        }); } catch {}
+      },
+    ).finally(() => { try { port.close(); } catch {} });
+    return true;
   }
   const reply = (/** @type {any} */ result) => {
     try { port.postMessage({

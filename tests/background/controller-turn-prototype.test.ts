@@ -5,12 +5,13 @@ import { runUserTurn as runDirectTurn } from '../../extension/peerd-runtime/loop
 import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import { hydrateToolDescriptors } from '../../extension/peerd-runtime/semantic.js';
+import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const clone = <T>(value: T): T => structuredClone(value);
 
 const makeSessions = () => {
   let record: any = {
-    sessionId: 'session-1', provider: 'provider-1', model: 'model-1', messages: [],
+    sessionId: 'session-1', provider: 'anthropic', model: 'claude-sonnet-4-6', messages: [],
   };
   return {
     get: async (sessionId: string) => sessionId === record.sessionId ? clone(record) : undefined,
@@ -61,6 +62,7 @@ type HarnessOptions = {
   ctx: any;
   captureEvents?: any[];
   inspectOuter?: (payload: any) => void;
+  inspectModelRequest?: (request: any, grant: any) => void;
   interceptKernel?: (
     operation: string,
     payload: any,
@@ -69,7 +71,9 @@ type HarnessOptions = {
   ) => Promise<any>;
 };
 
-const runPrototype = async ({ ctx, captureEvents, inspectOuter, interceptKernel }: HarnessOptions) => {
+const runPrototype = async ({
+  ctx, captureEvents, inspectOuter, inspectModelRequest, interceptKernel,
+}: HarnessOptions) => {
   let bridge: ReturnType<typeof makeControllerTurnBridge>;
   let id = 0;
   const getClient = async () => ({
@@ -102,7 +106,14 @@ const runPrototype = async ({ ctx, captureEvents, inspectOuter, interceptKernel 
       });
     },
   });
-  bridge = makeControllerTurnBridge({ getClient, newId: () => `prototype-${++id}` });
+  bridge = makeControllerTurnBridge({
+    getClient,
+    newId: () => `prototype-${++id}`,
+    providerEgress: makeScriptedProviderAuthority(
+      () => ctx.callModel,
+      (request, grant) => inspectModelRequest?.(request, grant),
+    ) as any,
+  });
   try {
     const events = [];
     for await (const event of bridge.runUserTurn(ctx)) {
@@ -137,12 +148,8 @@ const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]
   signal: new AbortController().signal,
   now: () => 1_700_000_000_000,
   reasoning: { enabled: false },
-  callModel: async function* (args: any) {
-    const {
-      getSecret: _getSecret, safeFetch: _safeFetch, signal: _signal, ...wireArgs
-    } = args;
-    capture.push(clone(wireArgs));
-    expect(args.messages[0].attachments[0].data).toBe('RAW-IMAGE-BYTES');
+  callModel: async function* () {
+    capture.push({ called: true });
     yield { type: 'text-delta', text: 'done' };
     yield {
       type: 'usage',
@@ -163,9 +170,15 @@ describe('orchestrator controller turn boundary', () => {
     directCtx.refreshTools = async () => directCtx.tools;
     const directEvents = await drain(runDirectTurn(directCtx as any));
     const observedTransport: string[] = [];
+    const authorityMedia: string[] = [];
     const controllerEvents = await runPrototype({
       ctx: makeSimpleCtx(controllerSessions, controllerCalls),
       inspectOuter: (payload) => observedTransport.push(JSON.stringify(payload)),
+      inspectModelRequest: (request, grant) => {
+        const token = request.nativeBody.messages[0].content[0].source.data;
+        expect(token).toStartWith('peerd-controller-opaque:');
+        authorityMedia.push(grant.redeemOpaque(token));
+      },
       interceptKernel: async (_operation, payload, next) => {
         observedTransport.push(JSON.stringify(payload));
         return next();
@@ -175,6 +188,7 @@ describe('orchestrator controller turn boundary', () => {
     expect(normalize(controllerEvents)).toEqual(normalize(directEvents));
     expect(normalize(controllerSessions.snapshot())).toEqual(normalize(directSessions.snapshot()));
     expect(normalize(controllerCalls)).toEqual(normalize(directCalls));
+    expect(authorityMedia).toEqual(['RAW-IMAGE-BYTES']);
     expect(observedTransport.join('\n')).not.toContain('RAW-IMAGE-BYTES');
     expect(observedTransport.join('\n')).not.toContain('RAW-PROVIDER-SECRET');
   });
@@ -226,17 +240,15 @@ describe('orchestrator controller turn boundary', () => {
         callModel: async function* () { pinModelCalls += 1; },
       },
       interceptKernel: async (operation, payload, next) => {
-        if (operation === 'turn.model.open') {
-          const request = JSON.parse(payload.value.requestJson);
-          request.system = 'FORGED-SYSTEM';
-          payload.value.requestJson = JSON.stringify(request);
+        if (operation === 'turn.model.open-inference') {
+          payload.value.modelId = 'forged-model';
         }
         return next();
       },
     });
     expect(pinModelCalls).toBe(0);
     expect(pinEvents.some((event) => event.type === 'error'
-      && String(event.error).includes('model/tool/system pin mismatch'))).toBe(true);
+      && String(event.error).includes('model-egress-request-invalid'))).toBe(true);
   });
 
   test('kernel scheduling revalidates concurrency when the host forges a read classification', async () => {
@@ -353,7 +365,7 @@ describe('orchestrator controller turn boundary', () => {
           denied.push(await invoke('turn.session.append', {
             runId, value: { sessionId: 'session-1', messageJson: JSON.stringify({ role: 'user', content: 'FORGED' }) },
           }));
-          denied.push(await invoke('turn.model.open', { runId, value: {} }));
+          denied.push(await invoke('turn.model.open-inference', { runId, value: {} }));
           denied.push(await invoke('turn.tool.dispatch', { runId, value: {} }));
           denied.push(await invoke('turn.audit.append', { runId, value: { entry: { forged: true } } }));
         }
@@ -630,8 +642,7 @@ describe('orchestrator controller turn boundary', () => {
       ...makeSimpleCtx(sessions, []), attachments: undefined,
       callModel: async function* () {
         modelCalls += 1;
-        yield { type: 'text-delta', text: 'partial' };
-        yield { type: 'message-stop', stopReason: 'end_turn' };
+        yield { type: 'tool-use-start', id: 'unreceived', name: descriptor.name };
       },
     };
     let failure: any = null;
@@ -642,7 +653,7 @@ describe('orchestrator controller turn boundary', () => {
         captureEvents: events,
         interceptKernel: async (operation, _payload, next) => {
           const result = await next();
-          if (operation !== 'turn.model.next') return result;
+          if (operation !== 'turn.model.observe-event') return result;
           modelNext += 1;
           return modelNext === 1 ? {
             ok: false, code: 'kernel-channel-lost',
@@ -717,7 +728,7 @@ describe('orchestrator controller turn boundary', () => {
       ctx,
       interceptKernel: async (operation, _payload, next) => {
         operations.push(operation);
-        if (operation === 'turn.model.cancel' && abort.signal.aborted) {
+        if (operation === 'turn.model.cancel-inference' && abort.signal.aborted) {
           return { ok: false, code: 'controller-call-aborted', outcomeKnown: false };
         }
         return next();
@@ -734,7 +745,7 @@ describe('orchestrator controller turn boundary', () => {
       role: 'assistant', streaming: false, stopReason: 'aborted',
     });
     expect(operations.filter((operation) => operation === 'turn.abort.finalize')).toHaveLength(1);
-    expect(operations).not.toContain('turn.model.cancel');
+    expect(operations).not.toContain('turn.model.cancel-inference');
   });
 
   test('a failed read-only session lookup remains known-safe', async () => {

@@ -6,6 +6,17 @@ import {
   runtimeDispatchTimeoutMs,
 } from '/shared/kernel-runtime-policy.js';
 
+const RICH_RELAY_EFFECTS = new Set([
+  'rich.script.admit',
+  'rich.model.open-inference',
+  'rich.model.read-inference',
+  'rich.model.cancel-inference',
+  'rich.model.open-local',
+  'rich.model.read-local',
+  'rich.model.cancel-local',
+  'rich.model.observe-usage',
+]);
+
 /** @param {{call:(payload:unknown,options?:{timeoutMs?:number})=>Promise<any>,
  * readBootstrap?:()=>Promise<unknown>|unknown,now?:()=>number,
  * handleRichKernelCall?:(operation:string,payload:unknown,context:any)=>Promise<any>|any}} deps */
@@ -59,7 +70,7 @@ export const createKernelRuntimeControl = ({
       }
       if (context?.authority?.replayClass === 'E'
           && ((context.authority.target === 'kernel-runtime-rich-relay'
-              && (operation === 'rich.script.admit' || operation === 'rich.model.call'))
+              && RICH_RELAY_EFFECTS.has(operation))
             || (context.authority.target === 'kernel-runtime-rich-abort'
               && operation === 'rich.script.abort'))) {
         return typeof handleRichKernelCall === 'function'

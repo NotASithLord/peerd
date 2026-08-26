@@ -319,7 +319,8 @@ describe('actor worker startup proof', () => {
           type: 'tool-request', rid: 'late-tool', call: { name: 'click', args: {} },
         } });
         worker.emit('message', { data: {
-          type: 'model-request', rid: 'late-model', args: {},
+          type: 'model-open-inference-request', rid: 'late-model',
+          providerId: 'anthropic', modelId: 'model', nativeBody: {},
         } });
       });
     };
@@ -466,7 +467,8 @@ describe('actor worker startup proof', () => {
       } }));
       if (message.type === 'run') queueMicrotask(() => {
         worker.emit('message', { data: {
-          type: 'model-request', rid: 'model-pending', args: {},
+          type: 'model-open-inference-request', rid: 'model-pending',
+          providerId: 'anthropic', modelId: 'model', nativeBody: {},
         } });
         worker.emit('message', { data: {
           type: 'done', result: { finalText: 'forged success', newMessages: [] },
@@ -584,7 +586,8 @@ describe('actor worker startup proof', () => {
       workerUrl: '/worker.js',
       createWorker: () => {
         queueMicrotask(() => worker.emit('message', { data: {
-          type: 'model-request', rid: 'forged', args: {},
+          type: 'model-open-inference-request', rid: 'forged',
+          providerId: 'anthropic', modelId: 'model', nativeBody: {},
         } }));
         return worker as unknown as Worker;
       },

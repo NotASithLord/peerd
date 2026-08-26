@@ -55,12 +55,14 @@ const closedFailure = () => ({
  * }>} deps.loadRuntime
  * @param {number} [deps.loadTimeoutMs]
  * @param {()=>string} [deps.newId]
+ * @param {ReturnType<import('./provider-egress-authority.js').createProviderEgressAuthority>}
+ *   [deps.providerEgress]
  * @param {(runtime:Record<string,any>,custody:{isCurrent:()=>boolean,publish:()=>boolean})=>Promise<void>|void} [deps.onLoaded]
  */
 export const createKernelTurnOwner = ({
   createController, loadRuntime, onLoaded,
   loadTimeoutMs = TURN_RUNTIME_LOAD_TIMEOUT_MS,
-  newId,
+  newId, providerEgress,
 }) => {
   if (typeof createController !== 'function' || typeof loadRuntime !== 'function') {
     throw new TypeError('kernel-turn-owner-config-invalid');
@@ -90,6 +92,7 @@ export const createKernelTurnOwner = ({
       }
       return ctx.toolExecution.settle(custody, result, binding);
     },
+    providerEgress,
     ...(newId ? { newId } : {}),
   });
   controller = createController({

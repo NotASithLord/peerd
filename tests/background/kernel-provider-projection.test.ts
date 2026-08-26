@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   createKernelProviderProjection,
 } from '../../extension/background/kernel-provider-projection.js';
+import { routes as controllerLocalRoutes } from '../../extension/offscreen/kernel-local-host.js';
 
 const makeProjection = (overrides: Record<string, any> = {}) => {
   let settings = overrides.settings ?? {
@@ -18,6 +19,8 @@ const makeProjection = (overrides: Record<string, any> = {}) => {
       },
     },
     browser: { storage: { local: { get: async () => overrides.local ?? {} } } },
+    projectSemantic: async (snapshot: any) =>
+      controllerLocalRoutes['models/state-projection'](snapshot),
     localModels: overrides.localModels ?? true,
     pushState: () => { pushes.push('state'); },
   });

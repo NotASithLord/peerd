@@ -59,13 +59,59 @@ export const RUNTIME_DISPATCH_MANIFEST = Object.freeze({
         calls: 1,
         concurrent: 1,
       }),
-      'rich.model.call': Object.freeze({
-        inputBytes: 512 * KIB,
+      'rich.model.open-inference': Object.freeze({
+        inputBytes: 32 * 1024 * KIB,
         inputKeys: Object.freeze([
-          'token', 'ownerSessionId', 'runId', 'provider', 'model', 'system',
-          'messages', 'maxTokens', 'ollamaHost', 'pricingOverrides', 'localProvider',
+          'token', 'ownerSessionId', 'runId', 'providerId', 'modelId', 'nativeBody',
         ]),
-        resultBytes: 512 * KIB,
+        resultBytes: 16 * KIB,
+        calls: 16,
+        concurrent: 1,
+      }),
+      'rich.model.read-inference': Object.freeze({
+        inputBytes: 4 * KIB,
+        inputKeys: Object.freeze(['token', 'ownerSessionId', 'runId', 'streamId']),
+        resultBytes: 128 * KIB,
+        calls: 256,
+        concurrent: 1,
+      }),
+      'rich.model.cancel-inference': Object.freeze({
+        inputBytes: 4 * KIB,
+        inputKeys: Object.freeze(['token', 'ownerSessionId', 'runId', 'streamId']),
+        resultBytes: 4 * KIB,
+        calls: 16,
+        concurrent: 1,
+      }),
+      'rich.model.open-local': Object.freeze({
+        inputBytes: 2 * 1024 * KIB,
+        inputKeys: Object.freeze([
+          'token', 'ownerSessionId', 'runId', 'providerId', 'modelId',
+          'messages', 'system', 'tools', 'maxTokens',
+        ]),
+        resultBytes: 4 * KIB,
+        calls: 16,
+        concurrent: 1,
+      }),
+      'rich.model.read-local': Object.freeze({
+        inputBytes: 4 * KIB,
+        inputKeys: Object.freeze(['token', 'ownerSessionId', 'runId', 'streamId']),
+        resultBytes: 128 * KIB,
+        calls: 256,
+        concurrent: 1,
+      }),
+      'rich.model.cancel-local': Object.freeze({
+        inputBytes: 4 * KIB,
+        inputKeys: Object.freeze(['token', 'ownerSessionId', 'runId', 'streamId']),
+        resultBytes: 4 * KIB,
+        calls: 16,
+        concurrent: 1,
+      }),
+      'rich.model.observe-usage': Object.freeze({
+        inputBytes: 4 * KIB,
+        inputKeys: Object.freeze([
+          'token', 'ownerSessionId', 'runId', 'providerId', 'modelId', 'usage',
+        ]),
+        resultBytes: 4 * KIB,
         calls: 1,
         concurrent: 1,
       }),
@@ -126,59 +172,69 @@ export const parseRuntimeBootstrapProjection = (value) => {
 /** @param {unknown} value */
 export const parseRuntimeRichAdmitProjection = (value) => {
   const projection = record(value);
-  const owner = record(projection?.owner);
-  const settings = record(projection?.settings);
-  if (!projection || !owner || !settings
-      || !exactKeys(projection, ['token', 'owner', 'settings'])
+  if (!projection || !exactKeys(projection, ['token', 'providerId', 'modelId'])
       || typeof projection.token !== 'string' || projection.token.length < 16
-      || !exactKeys(owner, ['provider', 'model', 'cost'])
-      || typeof owner.provider !== 'string' || !owner.provider
-      || typeof owner.model !== 'string' || !owner.model
-      || !record(owner.cost)
-      || !exactKeys(settings, [
-        'spendLimitUsd', 'pricingOverrides', 'ollamaHost',
-      ])
-      || !(settings.spendLimitUsd === null
-        || (Number.isFinite(settings.spendLimitUsd) && settings.spendLimitUsd >= 0))
-      || !record(settings.pricingOverrides)
-      || typeof settings.ollamaHost !== 'string') return null;
+      || typeof projection.providerId !== 'string' || !projection.providerId
+      || typeof projection.modelId !== 'string' || !projection.modelId) return null;
   return Object.freeze({
     token: projection.token,
-    owner: Object.freeze({
-      provider: owner.provider, model: owner.model, cost: owner.cost,
-    }),
-    settings: Object.freeze({
-      spendLimitUsd: settings.spendLimitUsd,
-      pricingOverrides: settings.pricingOverrides,
-      ollamaHost: settings.ollamaHost,
-    }),
+    providerId: projection.providerId,
+    modelId: projection.modelId,
   });
 };
 
 /** @param {unknown} value */
-export const parseRuntimeRichModelValue = (value) => {
+export const parseRuntimeRichOpenInferenceValue = (value) => {
   const result = record(value);
-  const allowed = new Set(['text', 'stopReason', 'usage', 'cost', 'error']);
-  if (!result || !['text', 'usage', 'cost'].every((key) => Object.hasOwn(result, key))
-      || Object.keys(result).some((key) => !allowed.has(key))
-      || typeof result.text !== 'string'
-      || (result.stopReason !== undefined && typeof result.stopReason !== 'string')
-      || (result.error !== undefined && typeof result.error !== 'string')
-      || !Number.isFinite(result.cost) || result.cost < 0) return null;
-  const usage = result.usage === null ? null : record(result.usage);
-  if (usage && (!exactKeys(usage, ['inputTokens', 'outputTokens'])
-      || !Number.isFinite(usage.inputTokens) || usage.inputTokens < 0
-      || !Number.isFinite(usage.outputTokens) || usage.outputTokens < 0)) return null;
-  if (result.usage !== null && !usage) return null;
+  const headers = record(result?.headers);
+  if (!result || !headers || !exactKeys(result, [
+    'streamId', 'status', 'statusText', 'headers', 'hasBody',
+  ]) || typeof result.streamId !== 'string' || result.streamId.length < 1
+      || result.streamId.length > 256
+      || !Number.isSafeInteger(result.status) || result.status < 100 || result.status > 599
+      || typeof result.statusText !== 'string' || result.statusText.length > 256
+      || typeof result.hasBody !== 'boolean'
+      || Object.keys(headers).length > 16
+      || Object.entries(headers).some(([name, headerValue]) => name.length > 128
+        || typeof headerValue !== 'string' || headerValue.length > 2048)) return null;
   return Object.freeze({
-    text: result.text,
-    ...(result.stopReason === undefined ? {} : { stopReason: result.stopReason }),
-    ...(result.error === undefined ? {} : { error: result.error }),
-    usage: usage ? Object.freeze({
-      inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
-    }) : null,
-    cost: result.cost,
+    streamId: result.streamId,
+    status: result.status,
+    statusText: result.statusText,
+    headers: Object.freeze({ ...headers }),
+    hasBody: result.hasBody,
   });
+};
+
+/** @param {unknown} value */
+export const parseRuntimeRichReadInferenceValue = (value) => {
+  const result = record(value);
+  if (!result || typeof result.done !== 'boolean') return null;
+  if (result.done === true) {
+    return exactKeys(result, ['done']) ? Object.freeze({ done: true }) : null;
+  }
+  return exactKeys(result, ['done', 'chunk']) && result.chunk instanceof Uint8Array
+    && result.chunk.byteLength <= 64 * KIB
+    ? Object.freeze({ done: false, chunk: result.chunk }) : null;
+};
+
+/** @param {unknown} value */
+export const parseRuntimeRichOpenLocalValue = (value) => {
+  const result = record(value);
+  return result && exactKeys(result, ['streamId'])
+    && typeof result.streamId === 'string' && result.streamId.length >= 8
+    && result.streamId.length <= 256
+    ? Object.freeze({ streamId: result.streamId }) : null;
+};
+
+/** @param {unknown} value */
+export const parseRuntimeRichReadLocalValue = (value) => {
+  const result = record(value);
+  if (!result || typeof result.done !== 'boolean') return null;
+  if (result.done) return exactKeys(result, ['done']) ? Object.freeze({ done: true }) : null;
+  return exactKeys(result, ['done', 'token'])
+    && typeof result.token === 'string' && result.token.length <= 64 * KIB
+    ? Object.freeze({ done: false, token: result.token }) : null;
 };
 
 /** @param {unknown} value */
@@ -260,7 +316,7 @@ export const createRuntimeEffectQuota = (request) => {
   let pendingIrreversible = 0;
   let settledIrreversible = false;
   let unknownIrreversible = false;
-  const irreversible = (/** @type {string} */ operation) => operation === 'rich.model.call';
+  const irreversible = (/** @type {string} */ operation) => operation.startsWith('rich.model.');
   const pendingCap = Object.values(effects).reduce(
     (total, effect) => total + Number(effect.concurrent), 0,
   );
@@ -316,10 +372,44 @@ export const createRuntimeEffectQuota = (request) => {
           || !parseRuntimeRichAdmitProjection(reply.value))) {
       return invalid();
     }
-    if (operation === 'rich.model.call' && reply.ok === true
+    if (operation === 'rich.model.open-inference' && reply.ok === true
         && (reply.outcomeKnown !== true
           || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
-          || !parseRuntimeRichModelValue(reply.value))) {
+          || !parseRuntimeRichOpenInferenceValue(reply.value))) {
+      return invalid();
+    }
+    if (operation === 'rich.model.read-inference' && reply.ok === true
+        && (reply.outcomeKnown !== true
+          || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
+          || !parseRuntimeRichReadInferenceValue(reply.value))) {
+      return invalid();
+    }
+    if (operation === 'rich.model.cancel-inference' && reply.ok === true
+        && (reply.outcomeKnown !== true
+          || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
+          || reply.value !== null)) {
+      return invalid();
+    }
+    if (operation === 'rich.model.open-local' && reply.ok === true
+        && (reply.outcomeKnown !== true
+          || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
+          || !parseRuntimeRichOpenLocalValue(reply.value))) {
+      return invalid();
+    }
+    if (operation === 'rich.model.read-local' && reply.ok === true
+        && (reply.outcomeKnown !== true
+          || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
+          || !parseRuntimeRichReadLocalValue(reply.value))) {
+      return invalid();
+    }
+    if (operation === 'rich.model.cancel-local' && reply.ok === true
+        && (reply.outcomeKnown !== true
+          || !exactKeys(reply, ['ok', 'outcomeKnown', 'value'])
+          || reply.value !== null)) {
+      return invalid();
+    }
+    if (operation === 'rich.model.observe-usage' && reply.ok === true
+        && (reply.outcomeKnown !== true || !exactKeys(reply, ['ok', 'outcomeKnown']))) {
       return invalid();
     }
     if (operation === 'rich.script.abort' && reply.ok === true

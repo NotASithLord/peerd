@@ -149,7 +149,7 @@ test('maybeAutoResume does not resume a turn that is not resumable', async () =>
 
 const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   failover = false, boundaryFailure = false, streamBoundaryFailure = false,
-  waitForAbort = false, abortDuringFallback = false, uiDisconnected = false,
+  waitForAbort = false, uiDisconnected = false,
   waitForActorIsolation = async () => {},
   dynamicIsolation = false,
   metadataOnly = false,
@@ -157,11 +157,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   turnUnknown = false,
   goalControl = false,
 } = {}) => {
-  const liveGetSecret = async () => 'sk-live';
-  const liveSafeFetch = async () => new Response('ok');
-  const rogueGetSecret = async () => 'sk-rogue';
-  const rogueSafeFetch = async () => new Response('rogue');
-  const rogueSignal = new AbortController().signal;
   const turnAbortController = new AbortController();
   const session: any = {
     sessionId: 's1', kind, provider: 'anthropic', model: 'claude-test',
@@ -172,7 +167,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   let toolContextArgs: any = null;
   let toolContextBuilds = 0;
   const modelCalls: any[] = [];
-  const modelKeyReads: string[] = [];
   const recordedModelCalls: any[] = [];
   const broadcasts: any[] = [];
   const chatNotes: string[] = [];
@@ -194,8 +188,32 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     spendLimitUsd: 0,
     ollamaHost: 'http://127.0.0.1:11434',
     dwebEnabled: false,
+    providerFailoverEnabled: failover,
+    providerFallbacks: failover ? ['openrouter'] : [],
   };
   const identity = (value: any) => value;
+  const callModel = async function* (args: any) {
+    modelCalls.push(args);
+    if (dynamicIsolation) {
+      if (modelCalls.length === 1) {
+        yield { type: 'tool-use-start', id: 'actor-tool', name: 'message_actor' };
+        yield { type: 'tool-use-stop', id: 'actor-tool' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      } else {
+        yield { type: 'message-stop', stopReason: 'end_turn' };
+      }
+      return;
+    }
+    if (waitForAbort) {
+      await new Promise((resolve) => {
+        args.signal.addEventListener('abort', resolve, { once: true });
+        setTimeout(resolve, 25);
+      });
+      if (args.signal.aborted) return;
+      lateProviderContinuation += 1;
+    }
+    yield { type: 'message-stop', stopReason: 'end_turn' };
+  };
   const driver = makeTurnDriver({
     vault: { isLocked: () => false },
     sessionCache: {
@@ -295,49 +313,15 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     uiPorts: { broadcast: (message: any) => broadcasts.push(message) },
     auditLog: { append: async (entry: any) => { audits.push(entry); } },
     postChatNote: (note: string) => { chatNotes.push(note); },
-    resolveFailoverChain: (start: any) => abortDuringFallback
-      ? [
-        start,
-        { provider: 'openrouter', model: 'fallback-model' },
-        { provider: 'openai', model: 'last-fallback-model' },
-      ]
-      : failover ? [start, { provider: 'openrouter', model: 'fallback-model' }]
-      : [start],
-    shouldFailover: () => failover || abortDuringFallback,
     recordModelCall: (call: any) => recordedModelCalls.push(call),
-    callModel: async function* (args: any) {
-      modelCalls.push(args);
-      if (dynamicIsolation) {
-        if (modelCalls.length === 1) {
-          yield { type: 'tool-use-start', id: 'actor-tool', name: 'message_actor' };
-          yield { type: 'tool-use-stop', id: 'actor-tool' };
-          yield { type: 'message-stop', stopReason: 'tool_use' };
-        } else {
-          yield { type: 'message-stop', stopReason: 'end_turn' };
-        }
-        return;
-      }
-      if (abortDuringFallback) {
-        modelKeyReads.push(args.provider);
-        await args.getSecret(args.provider);
-        if (args.provider === 'anthropic') throw new Error('primary overloaded');
-        if (args.provider === 'openrouter') {
-          await new Promise((resolve) => args.signal.addEventListener('abort', resolve, { once: true }));
-          throw new DOMException('Aborted', 'AbortError');
-        }
-      }
-      if (failover && args.provider === 'anthropic') throw new Error('primary overloaded');
-      if (waitForAbort) {
-        await new Promise((resolve) => {
-          args.signal.addEventListener('abort', resolve, { once: true });
-          setTimeout(resolve, 25);
-        });
-        if (args.signal.aborted) return;
-        lateProviderContinuation += 1;
-      }
-      yield { type: 'message-stop', stopReason: 'end_turn' };
-    },
-    runUserTurn: dynamicIsolation ? runUserTurn : async function* (ctx: any) {
+    runUserTurn: dynamicIsolation
+      ? (ctx: any) => runUserTurn({
+        ...ctx,
+        callModel,
+        getSecret: async () => { throw new Error('credential access is kernel-owned'); },
+        safeFetch: async () => { throw new Error('egress is kernel-owned'); },
+      })
+      : async function* (ctx: any) {
       loopCtx = ctx;
       if (goalControl) {
         const prepared = await ctx.toolExecution.prepare({
@@ -376,19 +360,14 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
         yield { type: 'stop', sessionId: 's1', stopReason: undefined };
         return;
       }
-      for await (const _ of ctx.callModel({
-        provider: 'rogue-provider',
-        model: 'rogue-model',
+      for await (const _ of callModel({
+        provider: session.provider,
+        model: session.model,
         messages: [],
-        ollamaHost: 'https://rogue.invalid',
-        signal: rogueSignal,
-        getSecret: rogueGetSecret,
-        safeFetch: rogueSafeFetch,
+        signal: ctx.signal,
       })) { /* drain */ }
       yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
     },
-    getSecret: liveGetSecret,
-    safeFetch: liveSafeFetch,
     REASONING_BUDGET_TOKENS: 0,
     REASONING_EFFORT_LEVELS: ['medium'],
     DEFAULT_SETTINGS: { reasoningEffort: 'medium' },
@@ -410,10 +389,8 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     } as any : null,
   });
   return {
-    driver, modelCalls, modelKeyReads, broadcasts, chatNotes, turnAbortController,
+    driver, modelCalls, broadcasts, chatNotes, turnAbortController,
     recordedModelCalls,
-    liveGetSecret, liveSafeFetch,
-    rogueGetSecret, rogueSafeFetch, rogueSignal,
     audits,
     systemPromptRenders: () => systemPromptRenders,
     releases: () => releases,
@@ -591,29 +568,26 @@ describe('runAgentTurn credential custody', () => {
     expect(fixture.lateProviderContinuation()).toBe(0);
   });
 
-  test('Stop on a fallback never calls or keys the next candidate', async () => {
-    const fixture = turnDeps('chat', { abortDuringFallback: true });
-    const running = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' });
-    for (let attempt = 0; attempt < 20 && fixture.modelCalls.length < 2; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    expect(fixture.modelCalls.map((call) => call.provider)).toEqual(['anthropic', 'openrouter']);
-    fixture.turnAbortController.abort();
-    await running;
-    expect(fixture.modelCalls.map((call) => call.provider)).toEqual(['anthropic', 'openrouter']);
-    expect(fixture.modelKeyReads).toEqual(['anthropic', 'openrouter']);
-    expect(fixture.chatNotes).toHaveLength(1);
-    expect(fixture.chatNotes[0]).not.toContain('openai');
+  test('the authority shell forwards only failover preferences to controller semantics', async () => {
+    const fixture = turnDeps('chat', { failover: true });
+    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' });
+    expect(fixture.loopCtx()).toMatchObject({
+      providerFailoverEnabled: true,
+      providerFallbacks: ['openrouter'],
+    });
+    expect(fixture.loopCtx()).not.toHaveProperty('resolveFailoverChain');
+    expect(fixture.loopCtx()).not.toHaveProperty('shouldFailover');
   });
 
-  test('a main loop keeps the live credential closures', async () => {
+  test('a main loop never receives credential or network authority closures', async () => {
     const fixture = turnDeps('chat');
     await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });
 
-    expect(fixture.loopCtx().getSecret).toBe(fixture.liveGetSecret);
-    expect(fixture.loopCtx().safeFetch).toBe(fixture.liveSafeFetch);
-    expect(fixture.modelCalls[0].getSecret).toBe(fixture.liveGetSecret);
-    expect(fixture.modelCalls[0].safeFetch).toBe(fixture.liveSafeFetch);
+    expect(fixture.loopCtx()).not.toHaveProperty('getSecret');
+    expect(fixture.loopCtx()).not.toHaveProperty('safeFetch');
+    expect(fixture.loopCtx()).not.toHaveProperty('callModel');
+    expect(fixture.modelCalls[0]).not.toHaveProperty('getSecret');
+    expect(fixture.modelCalls[0]).not.toHaveProperty('safeFetch');
   });
 
   test('an actor session cannot reach a failover provider in the background heap', async () => {

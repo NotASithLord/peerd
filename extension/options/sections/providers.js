@@ -345,7 +345,7 @@ export const ProvidersSection = {
     // why NOT localWebGpuAvailable here: that flag is a HOST fact, not readiness.
     // It reports only that an offscreen document can be created, so it is true on
     // every Chrome regardless of GPU or whether the on-device model was ever
-    // downloaded. models/options is the readiness signal: model-catalog drops
+    // downloaded. models/options is the readiness signal: the controller drops
     // local-webgpu until it is resident, so membership there means a first turn
     // would actually run. Matches ensureActiveProvider, which binds a new chat on
     // localModelState.available(); Settings must not name a default the SW would

@@ -220,7 +220,30 @@ describe('local controller cutover', () => {
       featureHost: { runtime: {} },
       offscreenUrl: 'chrome-extension://id/offscreen/offscreen.html',
       localModels: false,
-      providerProjection: { observeOllamaStatus: () => {} },
+      providerProjection: {
+        observeOllamaStatus: () => {},
+        authoritySnapshot: async () => ({
+          settings: {
+            providerName: 'anthropic', providerModel: '', openrouterModels: [],
+          },
+          session: null,
+          locked: false,
+          usable: ['anthropic'],
+          localModels: false,
+          downloaded: [],
+          configRevision: 0,
+          ollamaStatus: null,
+        }),
+      },
+      providerEgress: {
+        openInference: async () => ({
+          ok: false, code: 'model-egress-credential-unavailable', outcomeKnown: true,
+        }),
+        readInferenceChunk: async () => ({
+          ok: true, outcomeKnown: true, value: { done: true },
+        }),
+        cancelInference: async () => ({ ok: true, outcomeKnown: true, value: null }),
+      },
       pushState: () => {},
       fetchFn: async () => new Response(JSON.stringify({ models: [] }), { status: 200 }),
       ...overrides.deps,
@@ -236,7 +259,7 @@ describe('local controller cutover', () => {
       } }),
     });
     expect(await control.routes['provider/test']({ provider: 'anthropic' }))
-      .toMatchObject({ ok: false, code: 'local-effect-substitution', outcomeKnown: true });
+      .toMatchObject({ ok: false, code: 'feature-effect-denied', outcomeKnown: true });
   });
 
   test('preserves model option projection behind exact kernel snapshots', async () => {
@@ -247,7 +270,15 @@ describe('local controller cutover', () => {
 
   test('keeps an unconfirmed provider probe unknown', async () => {
     const control = lane({ deps: {
-      fetchFn: async () => { throw new Error('transport lost'); },
+      providerEgress: {
+        openInference: async () => {
+          throw Object.assign(new Error('transport lost'), { outcomeKnown: false });
+        },
+        readInferenceChunk: async () => ({
+          ok: true, outcomeKnown: true, value: { done: true },
+        }),
+        cancelInference: async () => ({ ok: true, outcomeKnown: true, value: null }),
+      },
     } });
     expect(await control.routes['provider/test']({ provider: 'anthropic' }))
       .toMatchObject({ ok: false, outcomeKnown: false });
@@ -288,6 +319,11 @@ describe('repository/local production composition', () => {
     expect(bytes(await graph('background/kernel-repository-control.js'))).toBeLessThan(160_000);
     expect(bytes(await graph('background/kernel-local-control.js'))).toBeLessThan(180_000);
     expect(bytes(await graph('offscreen/kernel-repository-host.js'))).toBeLessThan(80_000);
-    expect(bytes(await graph('offscreen/kernel-local-host.js'))).toBeLessThan(100_000);
+    const localHost = await graph('offscreen/kernel-local-host.js');
+    const localAuthority = await graph('background/kernel-local-control.js');
+    expect(localHost.has('peerd-provider/controller.js')).toBe(true);
+    expect(localAuthority.has('peerd-provider/controller.js')).toBe(false);
+    expect([...localAuthority].some((module) => module.includes('peerd-provider/adapters/')))
+      .toBe(false);
   });
 });

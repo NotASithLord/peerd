@@ -110,6 +110,7 @@ import {
   WEB_ACTOR_SOURCE_PROJECTION_KEY,
   webActorSourceProjectionRow,
 } from '/shared/web-actor-source-projection.js';
+import { providerEgressPolicy } from './provider-egress-manifest.js';
 
 const originOf = (/** @type {string} */ value) => {
   try { return new URL(value).origin; }
@@ -124,6 +125,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
   if (!deps?.engine || !deps.browser || !deps.vault || !deps.settingsStore
       || !deps.seams || !deps.confirmation || !deps.denylist
       || !deps.scriptRuns || !deps.contextSnapshots
+      || !deps.providerEgress || typeof deps.resolveProviderSelection !== 'function'
       || typeof semanticOwner?.registerTools !== 'function') {
     throw new TypeError('kernel-turn-live-config-invalid');
   }
@@ -139,11 +141,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     applyComposer,
     buildMintInjection,
     buildTemporalBlock,
-    callModel,
     canonicalCodeTraceLabel,
     classifyAction,
     confirmActionsFromRecord,
-    contextWindowFor,
     costOf,
     createSkillRegistry,
     createSuggestionStore,
@@ -175,7 +175,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     landingStopCard,
     limitExceeded,
     listProviders,
-    listProviderModels,
     listTools,
     listToolDescriptors,
     localStoreSource,
@@ -205,13 +204,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     parseSiteHandle,
     PERMISSION_MODES,
     pinActorCall,
-    planFailoverChain,
     prepareToolCall,
     prepareUserAttachmentsWithDocs,
     projectActorTurnTools,
     projectToolAuthority,
-    providerModelContextWindow,
-    providerSecretName,
     REASONING_BUDGET_TOKENS,
     REASONING_EFFORT_LEVELS,
     registerTools,
@@ -221,11 +217,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     resolveWebActorSurface,
     restrictCtxCapabilities,
     safeWebActorSummaryOrigin,
-    selectActiveProvider,
     settleToolCall,
     shapeActorsResult,
     shapeMeshResult,
-    shouldFailover,
     skillRegistrySource,
     siteHandleFor,
     wrapUntrusted,
@@ -439,36 +433,29 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
   let goalRunner = null;
 
   const resolveActiveProvider = () => {
-    return selectActiveProvider(deps.settingsStore.get(), deps.firefox);
+    const settings = deps.settingsStore.get();
+    const provider = providerEgressPolicy(settings.providerName);
+    if (!provider || (settings.providerName === 'local-webgpu' && deps.firefox)) {
+      throw new Error('no-provider');
+    }
+    return { name: settings.providerName, model: String(settings.providerModel ?? '') };
   };
   const ensureActiveProvider = async () => {
     await deps.ready;
-    const providers = listProviders().filter((provider) =>
-      provider.name !== 'local-webgpu' || !deps.firefox);
-    const configuredName = deps.settingsStore.get().providerName;
-    if (configuredName && providers.some((provider) => provider.name === configuredName)) {
-      return resolveActiveProvider();
+    const selection = await deps.resolveProviderSelection(null);
+    if (selection?.ok !== true || typeof selection.selected !== 'string') {
+      throw new Error('no-provider');
     }
-    for (const candidate of providers) {
-      let usable = false;
-      if (candidate.keyless) {
-        if (candidate.liveModels) {
-          const models = await listProviderModels(candidate.name, {
-            safeFetch, ollamaHost: deps.settingsStore.get().ollamaHost,
-          }).catch(() => null);
-          usable = Array.isArray(models) && models.length > 0;
-        } else if (candidate.name !== 'local-webgpu') usable = true;
-      } else if (candidate.vaultSecretName) {
-        usable = !!await deps.vault.getSecret(candidate.vaultSecretName).catch(() => null);
-      }
-      if (!usable) continue;
-      await deps.settingsStore.update({
-        providerName: candidate.name, providerModel: '',
-      }).catch(() => {});
+    const [name, model, extra] = selection.selected.split('::');
+    if (extra !== undefined || !providerEgressPolicy(name)
+        || (name === 'local-webgpu' && deps.firefox) || !model) {
+      throw new Error('no-provider');
+    }
+    if (deps.settingsStore.get().providerName !== name) {
+      await deps.settingsStore.update({ providerName: name, providerModel: '' });
       deps.providerProjection?.bumpRevision?.();
-      return resolveActiveProvider();
     }
-    return resolveActiveProvider();
+    return { name, model };
   };
   const resolvePermission = async (/** @type {any} */ session) => {
     if (session?.sessionId && goalRunner?.isActive(session.sessionId)) {
@@ -484,7 +471,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         }) ?? false),
     };
   };
-  const providerSecret = providerSecretName;
+  const providerCredentialReady = async (/** @type {string} */ providerName) => {
+    const credential = providerEgressPolicy(providerName)?.credential;
+    if (credential === null) return true;
+    if (typeof credential !== 'string') return false;
+    return !!await deps.vault.getSecret(credential).catch(() => null);
+  };
   const costChains = new Map();
   const foldSessionCost = (/** @type {string} */ sessionId,
     /** @type {any} */ usage, /** @type {number} */ amount) => {
@@ -813,7 +805,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       provider: {
         name: providerName,
         model: session?.model ?? resolveActiveProvider().model,
-        hasKey: !!(await deps.vault.getSecret(providerSecret(providerName)).catch(() => null)),
+        hasKey: await providerCredentialReady(providerName),
       },
       vault: { isLocked: deps.vault.isLocked() },
       now: Date.now,
@@ -1518,10 +1510,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         effort: REASONING_EFFORT_LEVELS.includes(deps.settingsStore.get().reasoningEffort)
           ? deps.settingsStore.get().reasoningEffort : CHANNEL_DEFAULTS.reasoningEffort,
       };
-      const contextWindow = contextWindowFor(record.model, {
-        overrides: deps.settingsStore.get().contextWindowOverrides,
-        live: liveContextWindow(record.provider, record.model),
-      });
       const display = parentToolUseId ? {
         parentToolUseId, parentSessionId, rootSessionId,
         actorCorrelationId: correlationId, kind, instanceId, name, task: message,
@@ -1573,7 +1561,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         actorSessionId, message: deliveredMessage, systemPrompt,
         provider: record.provider, model: record.model, depth: record.depth,
         ollamaHost: deps.settingsStore.get().ollamaHost,
-        tools, priorMessages: record.messages ?? [], reasoning, contextWindow,
+        tools, priorMessages: record.messages ?? [], reasoning,
+        contextWindowOverrides: deps.settingsStore.get().contextWindowOverrides,
         runtimeCapabilities,
         oneShot: oneShot === true,
         actorType: kind, backing: record.backing, inbound: inbound === true,
@@ -1765,8 +1754,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
           'controller', (/** @type {any} */ lease) => channel.run(job, { ...options, lease }),
           { reason: 'actor-demand' },
         ) : undefined,
-      callModel: /** @type {any} */ (callModel),
-      getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name), safeFetch,
+      providerEgress: deps.providerEgress,
       sessions: shared.sessions, buildToolContext,
       dispatchToolCall: /** @type {any} */ (dispatchToolCall),
       reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(name,
@@ -2757,25 +2745,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       debuggerNudgeShown = true;
     } catch { /* the next unavailable result can retry after a surface reconnects */ }
   };
-  /** @type {Map<string,{window?:number,fetching?:boolean}>} */
-  const contextWindowCache = new Map();
-  const liveContextWindow = (/** @type {string} */ provider, /** @type {string} */ model) => {
-    if (!provider || !model) return undefined;
-    const host = provider === 'ollama' ? `::${deps.settingsStore.get().ollamaHost ?? ''}` : '';
-    const key = `${provider}${host}::${model}`;
-    const cached = contextWindowCache.get(key);
-    if (typeof cached?.window === 'number') return cached.window;
-    if (cached?.fetching) return undefined;
-    contextWindowCache.set(key, { fetching: true });
-    providerModelContextWindow(provider, model, {
-      getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name),
-      safeFetch, ollamaHost: deps.settingsStore.get().ollamaHost,
-    }).then((window) => {
-      if (typeof window === 'number') contextWindowCache.set(key, { window });
-      else contextWindowCache.delete(key);
-    }).catch(() => contextWindowCache.delete(key));
-    return undefined;
-  };
   const checkpointMgr = {
     capture: async (/** @type {{scope:string,label?:string|null}} */ { scope, label }) => {
       if (typeof scope !== 'string' || !scope.startsWith('app:')) return null;
@@ -2830,20 +2799,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     getToolDescriptor,
     listProviders, costOf, makeTurnCostTracker,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
-    resolveFailoverChain: (/** @type {{provider:string,model:string}} */ start) => {
-      const settings = deps.settingsStore.get();
-      const fallbacks = settings.providerFailoverEnabled
-        ? (settings.providerFallbacks ?? []).flatMap((/** @type {string} */ name) => {
-          const provider = listProviders().find((entry) => entry.name === name);
-          return provider ? [{ provider: provider.name, model: provider.defaultModel }] : [];
-        }) : [];
-      return planFailoverChain(start, fallbacks);
-    },
-    shouldFailover, callModel, postChatNote: deps.postChatNote,
-    getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name), safeFetch,
+    postChatNote: deps.postChatNote,
     REASONING_BUDGET_TOKENS, REASONING_EFFORT_LEVELS,
     DEFAULT_SETTINGS: CHANNEL_DEFAULTS, trimEnricher: live.trimEnricher,
-    contextWindowFor, liveContextWindow,
     currentAppScope: async (/** @type {string} */ sessionId) => {
       const appId = await engine.appRegistry.getDefaultForSession(sessionId).catch(() => null);
       return appId ? `app:${appId}` : null;
@@ -2852,7 +2810,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     getDenylist: () => deps.denylist.patterns(),
     drainRecoveryNotices: (/** @type {string} */ sessionId) =>
       lifecycleBoot.drainNoticesFor(sessionId),
-    recordModelCall: contextSnapshots.record,
     getActorIsolation: () => live.actorIsolation,
     waitForActorIsolation: () => live.actorIsolationReady,
     getRuntimeCapabilities: () => runtimeCapabilities,

@@ -11,18 +11,12 @@
 // model retries if a connection drops when you try to send a message, just 3
 // times max"): when the initial fetch REJECTS at the network level — fetch
 // surfaces connection reset/refused/DNS blips as a bare TypeError — the call
-// is retried with a short backoff. See fetchInitialResponseWithRetry below
+// is retried with a short backoff. See openInitialResponseWithRetry below
 // for the exact semantics and the deliberate non-retry cases.
 //
-// Pure-ish: fetchFn + signals + sleep injected, so it's unit-testable.
-
-/**
- * The injected fetch — the egress-gated `safeFetch` the adapters thread through.
- * A structural subset of the platform `fetch` (it takes the same args and
- * resolves a Response), declared here so the connect helpers don't demand the
- * full `typeof fetch` overload set.
- * @typedef {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} SafeFetch
- */
+// Pure-ish: the initial-response effect + signals + sleep are injected, so it
+// is unit-testable without knowing whether authority is a native fetch or a
+// named controller-to-kernel operation.
 
 // No-op disposer for the paths that register no listeners (the AbortSignal.any
 // branch and the 0/1-signal branches). Shared so every return shape is uniform.
@@ -69,34 +63,26 @@ export const combineSignals = (a, b) => {
 };
 
 /**
- * Fetch the INITIAL response with a connect timeout. Returns the Response (its
- * headers); the caller streams `res.body` untimed. The connect timer is cleared
- * as soon as headers arrive (or the fetch throws), so it can never abort a
- * healthy in-progress stream.
+ * Run a named initial-response effect with a connect timeout. The effect gets
+ * only the composed signal; its authority implementation retains every other
+ * transport detail.
  *
- * On timeout (and only when it wasn't the caller's Stop), throws whatever
- * `onTimeout(timeoutMs)` returns — a typed, legible error so the turn fails
- * clearly instead of hanging.
- *
- * @param {SafeFetch} fetchFn
- * @param {string|URL|Request} url
- * @param {RequestInit} init
+ * @param {(signal?: AbortSignal) => Promise<Response>} openResponse
  * @param {{ stopSignal?: AbortSignal, timeoutMs: number, onTimeout: (ms:number)=>Error }} opts
  * @returns {Promise<Response>}
  */
-export const fetchInitialResponse = async (fetchFn, url, init, { stopSignal, timeoutMs, onTimeout }) => {
+export const openInitialResponse = async (openResponse, { stopSignal, timeoutMs, onTimeout }) => {
   const timeoutCtl = new AbortController();
   const timer = setTimeout(() => timeoutCtl.abort(), timeoutMs);
   const { signal, dispose } = combineSignals(stopSignal, timeoutCtl.signal);
   try {
-    return await fetchFn(url, { ...init, signal });
+    return await openResponse(signal);
   } catch (e) {
-    // The connect timer fired (no headers in time) and it wasn't the user's Stop.
     if (timeoutCtl.signal.aborted && !(stopSignal && stopSignal.aborted)) throw onTimeout(timeoutMs);
-    throw e; // user Stop (AbortError, handled upstream as a clean stop) or other network error
+    throw e;
   } finally {
-    clearTimeout(timer); // headers arrived or threw → stop guarding; the SSE body streams untimed
-    dispose();           // unhook the fallback relay's input-signal listeners (no-op on the AbortSignal.any path)
+    clearTimeout(timer);
+    dispose();
   }
 };
 
@@ -145,8 +131,9 @@ export const abortableSleep = (ms, signal) => new Promise((resolve, reject) => {
  * wait first. Pure — values in, values out — so Bun pins the decision table
  * without timers or fetch stubs.
  *
- * Retry ONLY fetch's network-level failure mode: a bare TypeError
- * ("Failed to fetch" — connection reset/refused, DNS, TLS). Never retried:
+ * Retry ONLY a network-level failure: a direct-host TypeError or the exact
+ * `model-egress-connect-failed` code projected by the authority boundary.
+ * Never retried:
  *   - user aborts: AbortError is a DOMException, and `stopAborted` is checked
  *     first for paranoia in case an abort surfaces in another shape;
  *   - typed connect-timeout errors from onTimeout — they already burned a
@@ -162,7 +149,11 @@ export const abortableSleep = (ms, signal) => new Promise((resolve, reject) => {
  */
 export const decideConnectRetry = ({ error, attempt, maxAttempts = MAX_CONNECT_ATTEMPTS, stopAborted = false }) => {
   if (stopAborted) return { retry: false };
-  if (!(error instanceof TypeError)) return { retry: false };
+  const authorityCode = error && typeof error === 'object'
+    ? /** @type {{code?:unknown}} */ (error).code : null;
+  if (!(error instanceof TypeError) && authorityCode !== 'model-egress-connect-failed') {
+    return { retry: false };
+  }
   if (attempt >= maxAttempts) return { retry: false };
   // Clamp to the last ladder entry so a caller-supplied maxAttempts larger
   // than the ladder still gets a sane wait instead of undefined.
@@ -171,30 +162,20 @@ export const decideConnectRetry = ({ error, attempt, maxAttempts = MAX_CONNECT_A
 };
 
 /**
- * fetchInitialResponse with connection-drop retry. Same contract — returns
- * the Response whose headers arrived; the caller streams `res.body` untimed —
- * but a network-level rejection (TypeError) of the INITIAL fetch is retried
- * up to maxAttempts total tries with a short backoff.
+ * Retry a named initial-response effect after a network-level rejection, up
+ * to maxAttempts total tries with a short backoff. Retry remains a provider
+ * semantic decision while the effect retains transport authority.
  *
- * Scope boundary (deliberate): this only ever re-sends when fetch REJECTED,
- * i.e. before response headers existed and before any stream bytes were
- * consumed, so a retry can never duplicate model output. A connection that
- * dies MID-STREAM (after partial events were yielded downstream) is NOT
- * retried here — blindly re-sending would replay text/tool deltas the agent
- * loop already consumed; the loop's stopReason === 'incomplete' path surfaces
- * those drops legibly instead.
+ * Scope boundary: this only re-sends before response headers exist and before
+ * any stream bytes are consumed. A mid-stream failure is never replayed.
  *
- * @param {SafeFetch} fetchFn
- * @param {string|URL|Request} url
- * @param {RequestInit} init
+ * @param {(signal?: AbortSignal) => Promise<Response>} openResponse
  * @param {{ stopSignal?: AbortSignal, timeoutMs: number, onTimeout: (ms:number)=>Error,
  *           maxAttempts?: number,
  *           sleepFn?: (ms:number, signal?:AbortSignal)=>Promise<void> }} opts
- *   `sleepFn` is a test seam (adapters thread their `_sleep` through) so unit
- *   tests exercise the retry path without real timers.
  * @returns {Promise<Response>}
  */
-export const fetchInitialResponseWithRetry = async (fetchFn, url, init, opts) => {
+export const openInitialResponseWithRetry = async (openResponse, opts) => {
   const {
     stopSignal, timeoutMs, onTimeout,
     maxAttempts = MAX_CONNECT_ATTEMPTS,
@@ -206,7 +187,7 @@ export const fetchInitialResponseWithRetry = async (fetchFn, url, init, opts) =>
     // the first try) must not trigger another network call.
     if (stopSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
     try {
-      return await fetchInitialResponse(fetchFn, url, init, { stopSignal, timeoutMs, onTimeout });
+      return await openInitialResponse(openResponse, { stopSignal, timeoutMs, onTimeout });
     } catch (e) {
       const verdict = decideConnectRetry({
         error: e,

@@ -19,6 +19,7 @@ import {
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
 const ABORT_CLEANUP_OPERATIONS = new Set([
+  'turn.model.cancel-inference', 'turn.model.cancel-local',
   'turn.tool.settle', 'turn.abort.finalize', 'turn.finalize',
 ]);
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -125,7 +126,8 @@ const controllerCtx = (ctx) => {
   const keys = [
     'userText', 'synthetic', 'resume', 'contextMessage', 'reasoning',
     'actorReply', 'contextWindow', 'oneShot', 'maxSteps', 'persistDeltas',
-    'preflightReply', 'runtimeCapabilities',
+    'preflightReply', 'runtimeCapabilities', 'providerFailoverEnabled',
+    'providerFallbacks', 'contextWindowOverrides',
   ];
   const out = /** @type {Record<string, unknown>} */ ({});
   for (const key of keys) if (ctx[key] !== undefined) out[key] = ctx[key];
@@ -147,6 +149,8 @@ const controllerCtx = (ctx) => {
  * @param {ReturnType<import('../shared/tool-execution-protocol.js').compileToolEffectManifest>}
  *   [deps.toolManifest]
  * @param {()=>number} [deps.now]
+ * @param {ReturnType<import('./provider-egress-authority.js').createProviderEgressAuthority>}
+ *   [deps.providerEgress]
  */
 export const makeControllerTurnBridge = ({
   getClient,
@@ -156,6 +160,7 @@ export const makeControllerTurnBridge = ({
   settleToolCall,
   digestArgs = digestJson,
   toolManifest = CONTROLLER_TOOL_MANIFEST,
+  providerEgress,
   now = Date.now,
 }) => {
   /** @type {Map<string, any>} */
@@ -246,25 +251,6 @@ export const makeControllerTurnBridge = ({
   const rehydrateImages = (/** @type {any} */ run, /** @type {unknown} */ images) =>
     Array.isArray(images) ? images.map((image) => isRecord(image)
       ? rehydrateData(run, image, 'tool-image') : image) : images;
-const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, any>} */ args) => ({
-  ...args,
-  signal: run.signal,
-    messages: Array.isArray(args.messages) ? args.messages.map((message) => {
-      if (!isRecord(message)) return message;
-      return {
-        ...message,
-        ...(Array.isArray(message.attachments) ? {
-          attachments: message.attachments.map((attachment) => isRecord(attachment)
-            ? rehydrateData(run, attachment, 'attachment')
-            : attachment),
-        } : {}),
-        ...(Array.isArray(message.toolResults) ? {
-          toolResults: message.toolResults.map((result) => isRecord(result)
-            ? { ...result, images: rehydrateImages(run, result.images) } : result),
-        } : {}),
-      };
-    }) : args.messages,
-  });
   const rehydrateEvent = (/** @type {any} */ run, /** @type {unknown} */ event) => {
     if (!isRecord(event) || event.type !== 'tool-result' || !isRecord(event.result)) return event;
     return {
@@ -321,15 +307,6 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
       .filter((/** @type {unknown} */ name) => typeof name === 'string'));
     run.classifications = classificationsFor(run, run.tools);
   };
-  const authorityTools = (/** @type {unknown} */ tools) => Array.isArray(tools)
-    ? tools.map((tool) => ({
-      name: tool?.name,
-      primitive: tool?.primitive,
-      sideEffect: tool?.sideEffect,
-      ...(tool?.dispatch === undefined ? {} : { dispatch: tool.dispatch }),
-      ...(tool?.retryClass === undefined ? {} : { retryClass: tool.retryClass }),
-      ...(tool?.dweb === undefined ? {} : { dweb: tool.dweb }),
-    })) : [];
   const dispatchIsConcurrencySafe = (/** @type {any} */ run, /** @type {string} */ name) => {
     let verdict = null;
     try { verdict = run.ctx.classifyToolCall?.(name) ?? null; } catch { verdict = null; }
@@ -452,6 +429,28 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
       if (pending && typeof event.partialJson === 'string') pending.inputBuf += event.partialJson;
     }
   };
+  const redeemModelOpaque = (/** @type {any} */ run, /** @type {string} */ token) => {
+    const opaque = run.opaque.get(token);
+    return opaque?.kind === 'attachment' || opaque?.kind === 'tool-image'
+      ? opaque.value : null;
+  };
+  const modelCandidate = (/** @type {any} */ value) => isRecord(value)
+    && typeof value.provider === 'string' && value.provider.length > 0
+    && value.provider.length <= 64
+    && typeof value.model === 'string' && value.model.length > 0
+    && value.model.length <= 256
+    ? { provider: value.provider, model: value.model } : null;
+  const modelGrant = (/** @type {any} */ run) => ({
+    owner: run.providerOwner,
+    signal: run.signal,
+    maxOutputTokens: run.maxOutputTokens,
+    permits: (/** @type {string} */ providerId, /** @type {string} */ modelId) =>
+      run.modelCandidates.some((/** @type {any} */ candidate) =>
+        candidate.provider === providerId && candidate.model === modelId),
+    permitsProvider: (/** @type {string} */ providerId) =>
+      run.modelCandidates.some((/** @type {any} */ candidate) => candidate.provider === providerId),
+    redeemOpaque: (/** @type {string} */ token) => redeemModelOpaque(run, token),
+  });
   const assertRunPayload = (/** @type {unknown} */ payload, /** @type {any} */ context) => {
     if (!isRecord(payload) || typeof payload.runId !== 'string') return null;
     const run = runs.get(payload.runId);
@@ -566,45 +565,101 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
         case 'turn.trim.enrich':
           try { return known(run.ctx.enrichTrimSummary?.(value.request)); }
           catch (cause) { return failed(cause, true); }
-        case 'turn.model.open': {
-          if (run.models.size !== 0) return failed('overlapping model stream refused', true);
+        case 'turn.model.bind': {
+          if (run.modelCandidates.length !== 0 || !Array.isArray(value.candidates)
+              || value.candidates.length < 1 || value.candidates.length > 8) {
+            return failed('model plan already bound or invalid', true);
+          }
           const session = await run.ctx.sessions.get(run.sessionId);
-          const args = /** @type {Record<string, any>} */ (
-            jsonUnwire(value.requestJson, 'model request')
-          );
-          if (!session || args.provider !== session.provider || args.model !== session.model
-              || typeof run.system !== 'string' || args.system !== run.system
-              || !sameClone(authorityTools(args.tools), run.tools)) {
-            return failed('model/tool/system pin mismatch', true);
+          const candidates = value.candidates.map(modelCandidate);
+          if (!session || candidates.some((candidate) => candidate === null)
+              || candidates[0]?.provider !== session.provider
+              || (session.model && candidates[0]?.model !== session.model)) {
+            return failed('model plan primary mismatch', true);
+          }
+          const allowedFallbacks = run.ctx.providerFailoverEnabled === true
+            && Array.isArray(run.ctx.providerFallbacks)
+            ? new Set(run.ctx.providerFallbacks.filter(
+              (/** @type {unknown} */ name) => typeof name === 'string',
+            ))
+            : new Set();
+          const seen = new Set([session.provider]);
+          for (const candidate of candidates.slice(1)) {
+            if (!candidate || !allowedFallbacks.has(candidate.provider)
+                || seen.has(candidate.provider)) {
+              return failed('model plan fallback mismatch', true);
+            }
+            seen.add(candidate.provider);
+          }
+          if (!session.model) {
+            try {
+              await run.ctx.sessions.update(run.sessionId, { model: candidates[0]?.model });
+            } catch (cause) { return unknown(run, cause); }
+          }
+          run.modelCandidates = candidates;
+          return known({ candidates });
+        }
+        case 'turn.model.open-inference': {
+          if (!providerEgress || run.modelCandidates.length === 0) {
+            return failed('model egress unavailable', true);
           }
           run.modelToolCalls.clear();
           run.legacyToolCalls.clear();
-          const modelId = newId();
-          const hydrated = rehydrateModelArgs(run, args);
-          const iterator = run.ctx.callModel(hydrated)[Symbol.asyncIterator]();
-          run.models.set(modelId, iterator);
-          return known({ modelId });
+          return providerEgress.openInference(value, modelGrant(run));
         }
-        case 'turn.model.next': {
-          const iterator = run.models.get(value.modelId);
-          if (!iterator) return failed('model stream is not active', true);
-          try {
-            const next = await iterator.next();
-            if (next.done) {
-              run.models.delete(value.modelId);
-              return known({ done: true });
-            }
-            recordModelEvent(run, next.value);
-            return known({ done: false, event: next.value });
-          } catch (cause) {
-            run.models.delete(value.modelId);
-            return failed(cause, true);
+        case 'turn.model.read-inference':
+          return providerEgress
+            ? providerEgress.readInferenceChunk(value, modelGrant(run))
+            : failed('model egress unavailable', true);
+        case 'turn.model.cancel-inference':
+          return providerEgress
+            ? providerEgress.cancelInference(value, modelGrant(run))
+            : failed('model egress unavailable', true);
+        case 'turn.model.read-inventory':
+          return providerEgress
+            ? providerEgress.readModelInventory(value, modelGrant(run))
+            : failed('model egress unavailable', true);
+        case 'turn.model.read-context':
+          return providerEgress
+            ? providerEgress.readModelContext(value, modelGrant(run))
+            : failed('model egress unavailable', true);
+        case 'turn.model.open-local':
+          return providerEgress
+            ? providerEgress.openLocalGeneration(value, modelGrant(run))
+            : failed('local model egress unavailable', true);
+        case 'turn.model.read-local':
+          return providerEgress
+            ? providerEgress.readLocalGeneration(value, modelGrant(run))
+            : failed('local model egress unavailable', true);
+        case 'turn.model.cancel-local':
+          return providerEgress
+            ? providerEgress.cancelLocalGeneration(value, modelGrant(run))
+            : failed('local model egress unavailable', true);
+        case 'turn.model.observe-event':
+          if (value.type === 'tool-use-start'
+              && typeof value.id === 'string' && typeof value.name === 'string') {
+            recordModelEvent(run, value);
+            return known(null);
           }
-        }
-        case 'turn.model.cancel': {
-          const iterator = run.models.get(value.modelId);
-          run.models.delete(value.modelId);
-          if (iterator?.return) await iterator.return();
+          if (value.type === 'tool-use-delta'
+              && typeof value.id === 'string' && typeof value.partialJson === 'string'
+              && value.partialJson.length <= 256 * 1024) {
+            recordModelEvent(run, value);
+            return known(null);
+          }
+          return failed('model event observation invalid', true);
+        case 'turn.model.observe-failover': {
+          const from = modelCandidate(value.from);
+          const to = modelCandidate(value.to);
+          if (!from || !to || !modelGrant(run).permits(from.provider, from.model)
+              || !modelGrant(run).permits(to.provider, to.model)) {
+            return failed('model failover observation invalid', true);
+          }
+          run.ctx.appendAudit({
+            type: 'provider_failover', sessionId: run.sessionId,
+            details: { from: from.provider, to: to.provider, reason: String(value.reason ?? 'error').slice(0, 128) },
+          }).catch(() => {});
+          run.ctx.postChatNote?.(`${from.provider} unavailable; switching to ${to.provider} and continuing…`);
           return known(null);
         }
         case 'turn.tool.prepare': {
@@ -950,8 +1005,11 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
     const run = {
       runId, sessionId: ctx.sessionId, turnGeneration,
       ctx, events, abort: localAbort, signal: localAbort.signal,
-      opaque: new Map(), models: new Map(), modelToolCalls: new Map(),
+      opaque: new Map(), modelToolCalls: new Map(),
       legacyToolCalls: new Map(),
+      providerOwner: Object.freeze({ runId }), modelCandidates: [],
+      maxOutputTokens: Number.isSafeInteger(ctx.maxOutputTokens)
+        ? Math.max(1, Math.min(64_000, Number(ctx.maxOutputTokens))) : 64_000,
       preparedExecutions: new Map(),
       tools: [], toolNames: new Set(), classifications: {}, system: null,
       nestedUnknown: false, abortFinalized: false,
@@ -997,11 +1055,8 @@ const rehydrateModelArgs = (/** @type {any} */ run, /** @type {Record<string, an
       ctx.signal?.removeEventListener?.('abort', onAbort);
       events.close();
       await cleanupPrepared(run, 'tool-execution-controller-lost');
+      await providerEgress?.closeOwner(run.providerOwner);
       runs.delete(runId);
-      for (const iterator of run.models.values()) {
-        try { await iterator.return?.(); } catch { /* detached provider cleanup */ }
-      }
-      run.models.clear();
       run.opaque.clear();
     }
   };

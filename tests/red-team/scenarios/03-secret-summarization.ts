@@ -17,7 +17,8 @@ import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
 import { restrictCtxCapabilities } from '../../../extension/peerd-runtime/actor/spawn.js';
-import { makeRelayedCallModel, makeActorSummaryFence } from '../../../extension/peerd-runtime/actor/actor-worker-core.js';
+import { makeActorSummaryFence } from '../../../extension/peerd-runtime/actor/actor-worker-core.js';
+import { createActorModelEgress } from '../../../extension/offscreen/actor-model-egress.js';
 import { wrapUntrusted, neutralizeFence } from '../../../extension/peerd-runtime/tools/prompt-wrap.js';
 import { makeTurnDriver } from '../../../extension/peerd-runtime/loop/turn-driver.js';
 import { appSearchTool } from '../../../extension/peerd-runtime/tools/defs/app-search.js';
@@ -167,27 +168,37 @@ export const scenario: Scenario = {
         : leaked(`actor granted [${grant.join(', ')}] tries to read a secret`, `getSecret in out=${'getSecret' in out} safeFetch in out=${'safeFetch' in out}`));
     }
 
-    // 3) Isolated model-call boundary: a smuggled function never crosses realms.
+    // 3) Isolated model authority: the adapter can send only its native body and
+    // pinned provider/model identity. Functions and fetch controls have no field.
     {
       let captured: any = null;
-      const callModel = makeRelayedCallModel(async (arg: any) => { captured = arg; return { events: [] }; }, 4096);
-      // Drain the generator so requestModel actually runs.
-      const gen = callModel({
-        provider: 'anthropic',
+      const modelEgress = createActorModelEgress({
+        openInference: async (request) => {
+          captured = request;
+          return {
+            ok: true,
+            value: { streamId: 'probe', status: 200, headers: {}, hasBody: false },
+          };
+        },
+        readInferenceChunk: async () => ({ ok: true, value: { done: true } }),
+        cancelInference: async () => ({ ok: true, value: null }),
+      });
+      await modelEgress.openInference({
+        providerId: 'anthropic', modelId: 'model',
+        nativeBody: { model: 'model', stream: true, messages: [{ role: 'user', content: 'hi' }] },
         getSecret: async () => 'sk-ant-LEAK',       // the exfil closure
         safeFetch: async () => new Response(''),      // the egress closure
         signal: new AbortController().signal,         // non-cloneable
         evilFn: () => 'arbitrary',                     // a future/unknown function field
-        messages: [{ role: 'user', content: 'hi' }], // benign field that should survive
       });
-      for await (const _ of gen) { void _; }
       const noFns = captured && Object.values(captured).every((v) => typeof v !== 'function');
       const noNamedLeaks = captured && !('getSecret' in captured) && !('safeFetch' in captured) && !('signal' in captured) && !('evilFn' in captured);
       let clonable = false;
       try { structuredClone(captured); clonable = true; } catch { clonable = false; }
-      const benignSurvived = captured?.messages?.[0]?.content === 'hi' && captured?.maxTokens === 4096;
+      const benignSurvived = captured?.nativeBody?.messages?.[0]?.content === 'hi'
+        && captured?.providerId === 'anthropic' && captured?.modelId === 'model';
       probes.push(noFns && noNamedLeaks && clonable && benignSurvived
-        ? blocked('smuggle getSecret/safeFetch into the model-call args', 'all functions dropped; args structured-cloneable; only benign fields + maxTokens crossed')
+        ? blocked('smuggle getSecret/safeFetch into model authority', 'the exact request projection carried only provider, model, and native body')
         : leaked('smuggle getSecret/safeFetch into the model-call args', `noFns=${noFns} noNamedLeaks=${noNamedLeaks} clonable=${clonable} benignSurvived=${benignSurvived}`));
     }
 
@@ -246,6 +257,6 @@ export const scenario: Scenario = {
           `ok=${String(result?.ok)} realCloses=${realCloses}`));
     }
 
-    return summarize(probes, ['makeTurnDriver (background actor refusal)', 'restrictCtxCapabilities (tool-context narrowing)', 'makeRelayedCallModel (isolated boundary function strip)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)', 'app_search whole-result fence']);
+    return summarize(probes, ['makeTurnDriver (background actor refusal)', 'restrictCtxCapabilities (tool-context narrowing)', 'createActorModelEgress (exact isolated inference projection)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)', 'app_search whole-result fence']);
   },
 };

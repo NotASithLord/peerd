@@ -191,14 +191,14 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(graph).not.toContain('peerd-runtime/contacts/store.js');
     expect(graph).not.toContain('background/kernel-semantic-demand.js');
     expect(graph).not.toContain('background/semantic-demand-client.js');
-    expect(graph).toContain('shared/semantic-demand-policy.js');
+    expect(graph).not.toContain('shared/semantic-demand-policy.js');
     expect(graph).not.toContain('background/kernel-command-reader.js');
     expect(graph).not.toContain('background/kernel-app-file-reader.js');
     expect(graph).not.toContain('peerd-runtime/skills/registry.js');
     expect(graph).not.toContain('peerd-runtime/skills/store.js');
     expect(graph).not.toContain('background/app-client.js');
     expect(graph).not.toContain('peerd-engine/opfs.js');
-    expect(graph).toContain('background/offscreen-controller-client.js');
+    expect(graph).not.toContain('background/offscreen-controller-client.js');
     expect(graph).not.toContain('background/kernel-demand-plane.js');
     expect(graph).not.toContain('background/kernel-production-runtime.js');
     expect(graph).not.toContain('offscreen/semantic-route-host.js');

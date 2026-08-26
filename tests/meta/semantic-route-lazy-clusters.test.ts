@@ -77,7 +77,7 @@ describe('digest-bound lazy semantic route clusters', () => {
       contacts: 'background/routes/contacts.js',
       contributor: 'peerd-runtime/observability/contributor-store.js',
       memory: 'offscreen/semantic-routes/memory.js',
-      providers: 'shared/provider-authority-policy.js',
+      providers: 'peerd-provider/metadata.js',
     };
     for (const [cluster, ownRoute] of Object.entries(expected)) {
       const entry = `offscreen/semantic-routes/${cluster}.js`;

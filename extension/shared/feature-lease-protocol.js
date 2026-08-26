@@ -7,6 +7,8 @@ export const FEATURE_LEASE_HOST_PROTOCOL = 1;
 export const FEATURE_LEASE_KEEPALIVE_PORT = 'feature-lease-keepalive';
 export const LOCAL_MODEL_CHANNEL_OFFER = 'peerd/local-model-channel';
 export const LOCAL_MODEL_CHANNEL_RESULT = 'local-model/result';
+export const LOCAL_MODEL_CHANNEL_CHUNK = 'local-model/chunk';
+export const LOCAL_MODEL_CHANNEL_CANCEL = 'local-model/cancel';
 export const LOCAL_MODEL_CHANNEL_PROTOCOL = 1;
 export const REPOSITORY_CHANNEL_OFFER = 'peerd/repository-channel';
 export const REPOSITORY_CHANNEL_PROTOCOL = 1;
@@ -15,7 +17,7 @@ export const OFFSCREEN_FEATURE_LEASE_SCOPES = Object.freeze([
   'controller', 'dweb', 'dom-host', 'media-host', 'model-host', 'vault-authority',
 ]);
 
-const LOCAL_MODEL_METHODS = new Set(['status', 'catalog', 'probe', 'init']);
+const LOCAL_MODEL_METHODS = new Set(['status', 'catalog', 'probe', 'init', 'generate']);
 export const REPOSITORY_METHODS = Object.freeze([
   'init', 'stage', 'commit', 'status', 'branches', 'history', 'diff', 'restore',
   'branch', 'checkout', 'setRemote', 'getRemote', 'fetch', 'push', 'clone',
@@ -49,6 +51,23 @@ export const parseLocalModelChannelOffer = (value) => {
       || (offer.args.includeSupport !== undefined
         && typeof offer.args.includeSupport !== 'boolean')
       || !offer.lease || typeof offer.lease !== 'object') return null;
+  if (offer.method === 'generate') {
+    const keys = Object.keys(offer.args).sort().join('\n');
+    if (keys !== 'maxTokens\nmessages\nmodel\nsystem\ntools'
+        || !Array.isArray(offer.args.messages) || offer.args.messages.length > 256
+        || offer.args.messages.some((/** @type {any} */ message) => !message || typeof message !== 'object'
+          || !['user', 'assistant'].includes(message.role)
+          || (!Array.isArray(message.content) && typeof message.content !== 'string'))
+        || typeof offer.args.system !== 'string'
+        || !Array.isArray(offer.args.tools) || offer.args.tools.length > 256
+        || !Number.isSafeInteger(offer.args.maxTokens) || offer.args.maxTokens < 1
+        || offer.args.maxTokens > 64_000) return null;
+    try {
+      if (new TextEncoder().encode(JSON.stringify(offer.args)).byteLength > 2 * 1024 * 1024) {
+        return null;
+      }
+    } catch { return null; }
+  }
   return offer;
 };
 

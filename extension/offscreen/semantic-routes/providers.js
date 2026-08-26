@@ -1,6 +1,6 @@
 // @ts-check
 
-import { PROVIDER_AUTHORITY } from '../../shared/provider-authority-policy.js';
+import { PROVIDER_METADATA } from '/peerd-provider/controller.js';
 
 /**
  * @param {string} route
@@ -18,7 +18,7 @@ export const dispatchProviderSemanticRoute = async (route, _message, options) =>
   const status = result.value;
   return {
     ok: true,
-    providers: PROVIDER_AUTHORITY.map((provider) => {
+    providers: PROVIDER_METADATA.map((provider) => {
       const key = status[provider.name];
       return {
         name: provider.name,
@@ -26,8 +26,8 @@ export const dispatchProviderSemanticRoute = async (route, _message, options) =>
         defaultModel: provider.defaultModel,
         defaultRunnerModel: provider.defaultRunnerModel,
         hasKey: key?.hasKey === true,
-        keyless: provider.secretName === null,
-        liveModels: provider.probeKind === 'ollama',
+        keyless: provider.keyless,
+        liveModels: provider.liveModels,
         keyPreview: typeof key?.keyPreview === 'string' ? key.keyPreview : null,
       };
     }),

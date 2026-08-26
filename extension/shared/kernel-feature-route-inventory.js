@@ -57,5 +57,5 @@ export const KERNEL_REPOSITORY_ROUTE_NAMES = Object.freeze(
 );
 
 export const KERNEL_LOCAL_ROUTE_NAMES = Object.freeze(
-  'provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status'.split(' '),
+  'provider/test models/options models/state-projection openrouter/models local-model/catalog local-model/init local-model/probe local-model/status'.split(' '),
 );

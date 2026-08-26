@@ -1,18 +1,16 @@
 // @ts-check
-// Cold provider/composer truth. Route implementations may be demand-owned,
-// but state/get must still describe the selected provider without starting a
-// feature host or probing the network.
+// Cold provider authority projection. This module owns only credential and
+// local-residency facts; labels, defaults, model catalogs and composer
+// semantics are projected by the sealed controller.
 
-import {
-  PROVIDER_AUTHORITY,
-  providerAuthority,
-} from '../shared/provider-authority-policy.js';
+import { PROVIDER_EGRESS_MANIFEST } from './provider-egress-manifest.js';
 
 /**
  * @param {Object} deps
  * @param {{get:()=>Record<string,any>}} deps.settingsStore
  * @param {{getSecret:(name:string)=>Promise<string|null>}} deps.vault
  * @param {any} deps.browser
+ * @param {(snapshot:Record<string,any>)=>Promise<any>} deps.projectSemantic
  * @param {boolean} [deps.localModels]
  * @param {()=>Promise<any>|any} [deps.pushState]
  */
@@ -20,9 +18,13 @@ export const createKernelProviderProjection = ({
   settingsStore,
   vault,
   browser,
+  projectSemantic,
   localModels = true,
   pushState = () => {},
 }) => {
+  if (typeof projectSemantic !== 'function') {
+    throw new TypeError('kernel-provider-semantic-projection-required');
+  }
   /** @type {{known:boolean,reachable:boolean,count:number|null,models:string[]|null,host:string}|null} */
   let ollamaStatus = null;
   let ollamaStatusKey = '';
@@ -39,61 +41,58 @@ export const createKernelProviderProjection = ({
   };
   const bumpRevision = () => { configRevision += 1; };
 
-  const view = async (/** @type {any} */ session = null,
+  const authoritySnapshot = async (/** @type {any} */ session = null,
     /** @type {boolean} */ locked = false) => {
     const settings = settingsStore.get();
-    const defaults = providerAuthority(settings.providerName) ?? providerAuthority('anthropic')
-      ?? PROVIDER_AUTHORITY[0];
-    const defaultModel = typeof settings.providerModel === 'string' && settings.providerModel.trim()
-      ? settings.providerModel.trim() : defaults.defaultModel;
-    const selected = providerAuthority(session?.provider ?? defaults.name);
-    const composerModel = typeof session?.model === 'string' && session.model.trim()
-      ? session.model : selected?.name === defaults.name ? defaultModel : selected?.defaultModel ?? '';
-    const credential = async (/** @type {any} */ policy) => {
-      if (locked || !policy) return false;
-      if (policy.secretName === null) return true;
-      try { return !!(await vault.getSecret(policy.secretName)); } catch { return false; }
-    };
-    const defaultCredential = await credential(defaults);
-    const composerCredential = selected?.name === defaults.name
-      ? defaultCredential : await credential(selected);
-    let localReady = selected?.name !== 'local-webgpu';
-    if (!localReady && localModels) {
+    const usable = [];
+    if (!locked) {
+      for (const [provider, policy] of Object.entries(PROVIDER_EGRESS_MANIFEST)) {
+        if (policy.credential === null) usable.push(provider);
+        else {
+          try { if (await vault.getSecret(policy.credential)) usable.push(provider); }
+          catch { /* locked or unavailable */ }
+        }
+      }
+    }
+    let downloaded = [];
+    if (!locked && localModels) {
       try {
         const raw = (await browser.storage.local.get('localModelDownloaded'))?.localModelDownloaded;
-        localReady = raw === true || Array.isArray(raw) && raw.includes(composerModel);
-      } catch { localReady = false; }
+        downloaded = raw === true ? ['gemma-4-e2b'] : Array.isArray(raw)
+          ? raw.slice(0, 64).filter((id) => typeof id === 'string' && id.length <= 128)
+          : [];
+      } catch { downloaded = []; }
     }
-    const liveOllama = ollamaStatus?.host === String(settings.ollamaHost ?? '') ? ollamaStatus : null;
-    const ollamaNoModels = selected?.name === 'ollama'
-      && liveOllama?.known && liveOllama.reachable && liveOllama.count === 0;
-    const ollamaModelMissing = selected?.name === 'ollama'
-      && liveOllama?.known && liveOllama.reachable
-      && Array.isArray(liveOllama.models) && liveOllama.models.length > 0
-      && !liveOllama.models.includes(composerModel)
-      && !(!composerModel.split('/').at(-1)?.includes(':')
-        && liveOllama.models.includes(`${composerModel}:latest`));
-    const ollamaReady = selected?.name !== 'ollama' || (!ollamaNoModels && !ollamaModelMissing);
-    const reason = locked ? 'vault-locked' : !selected ? 'unknown-provider'
-      : !composerCredential ? 'missing-key'
-        : !localReady ? 'local-model-not-installed'
-          : ollamaNoModels ? 'ollama-no-models'
-            : ollamaModelMissing ? 'ollama-model-missing' : null;
-    return {
-      providers: {
-        current: defaults.name, hasKey: defaultCredential, model: defaultModel,
-        defaultRunnerModel: defaults.defaultRunnerModel, configRevision,
-      },
-      composer: {
-        provider: selected?.name ?? String(session?.provider ?? ''), model: composerModel,
-        keyless: selected?.secretName === null, credentialReady: composerCredential,
-        localReady, ollamaReady, canSend: reason === null, reason,
-        warning: reason === null && selected?.name === 'ollama'
-          && liveOllama?.known && liveOllama.reachable === false
-          ? 'ollama-unreachable' : null,
-      },
-    };
+    const liveOllama = ollamaStatus?.host === String(settings.ollamaHost ?? '')
+      ? { known: ollamaStatus.known, reachable: ollamaStatus.reachable,
+        count: ollamaStatus.count, models: ollamaStatus.models }
+      : null;
+    return Object.freeze({
+      settings: Object.freeze({
+        providerName: String(settings.providerName ?? ''),
+        providerModel: String(settings.providerModel ?? ''),
+        openrouterModels: Array.isArray(settings.openrouterModels)
+          ? settings.openrouterModels.slice(0, 200) : [],
+      }),
+      session: session && typeof session === 'object' ? Object.freeze({
+        provider: typeof session.provider === 'string' ? session.provider : null,
+        model: typeof session.model === 'string' ? session.model : null,
+      }) : null,
+      usable: Object.freeze(usable),
+      downloaded: Object.freeze(downloaded),
+      localModels,
+      locked,
+      ollamaStatus: liveOllama,
+      configRevision,
+    });
   };
 
-  return Object.freeze({ view, observeOllamaStatus, bumpRevision });
+  const view = async (/** @type {any} */ session = null,
+    /** @type {boolean} */ locked = false) => projectSemantic(
+    await authoritySnapshot(session, locked),
+  );
+
+  return Object.freeze({
+    view, authoritySnapshot, observeOllamaStatus, bumpRevision,
+  });
 };

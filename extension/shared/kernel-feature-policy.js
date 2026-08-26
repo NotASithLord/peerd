@@ -37,7 +37,7 @@ const READ_ROUTES = new Set([
   'session/contextSnapshots',
   'pod/get-meta', 'export/artifact', 'import/inspect', 'hooks/list',
   'apps/repository/status', 'apps/repository/history', 'apps/repository/diff',
-  'models/options', 'openrouter/models', 'local-model/catalog',
+  'models/options', 'models/state-projection', 'openrouter/models', 'local-model/catalog',
   'local-model/probe', 'local-model/status',
   'dweb/base/find', 'dweb/base/heard', 'dweb/base/status', 'dweb/base/updates',
   'dweb/distributed/info', 'dweb/self-prepare-offer', 'dweb/self-read-surface',
@@ -220,10 +220,20 @@ const REPOSITORY_EFFECTS = Object.freeze({
   }),
 });
 const LOCAL_EFFECTS = Object.freeze({
+  'models/state-projection': Object.freeze({}),
   'provider/test': Object.freeze({
     'local.provider.test': effectPolicy(
-      ['provider'], 1, 16 * KIB, MIB,
-      (input) => string(input.provider, 64),
+      ['provider', 'model', 'nativeBody'], 1, 32 * MIB, MIB,
+      (input) => string(input.provider, 64) && string(input.model, 256)
+        && !!input.nativeBody && typeof input.nativeBody === 'object'
+        && !Array.isArray(input.nativeBody),
+    ),
+    'local.models.ollama': readEffectPolicy([], 1, 16 * KIB, MIB),
+    'local.models.observe-ollama': readEffectPolicy(
+      ['known', 'reachable', 'count', 'models'], 1, 256 * KIB, 4 * KIB,
+      (input) => typeof input.known === 'boolean' && typeof input.reachable === 'boolean'
+        && (input.count === null || Number.isSafeInteger(input.count))
+        && (input.models === null || Array.isArray(input.models)),
     ),
   }),
   'models/options': Object.freeze({
@@ -233,6 +243,12 @@ const LOCAL_EFFECTS = Object.freeze({
     ),
     'local.models.ollama': effectPolicy(
       [], 1, 16 * KIB, MIB,
+    ),
+    'local.models.observe-ollama': readEffectPolicy(
+      ['known', 'reachable', 'count', 'models'], 1, 256 * KIB, 4 * KIB,
+      (input) => typeof input.known === 'boolean' && typeof input.reachable === 'boolean'
+        && (input.count === null || Number.isSafeInteger(input.count))
+        && (input.models === null || Array.isArray(input.models)),
     ),
   }),
   'openrouter/models': Object.freeze({

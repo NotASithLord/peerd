@@ -37,6 +37,34 @@ const options = (overrides: Record<string, unknown> = {}) => ({
   deadlineAt: Date.now() + 10_000,
   ...overrides,
 });
+const richSse = (text: string) => new TextEncoder().encode([
+  'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(text)}}}\n\n`,
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
+  'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+].join(''));
+const richKernelHandler = (seen: string[], text: string) => {
+  let read = false;
+  return async (operation: string) => {
+    seen.push(operation);
+    if (operation === 'rich.script.admit') return {
+      ok: true, outcomeKnown: true,
+      value: {
+        token: 'reservation-token-1234',
+        providerId: 'anthropic', modelId: 'claude-test',
+      },
+    };
+    if (operation === 'rich.model.open-inference') return {
+      ok: true, outcomeKnown: true,
+      value: { streamId: 'stream:1', status: 200, statusText: 'OK', headers: {}, hasBody: true },
+    };
+    if (operation === 'rich.model.read-inference') return {
+      ok: true, outcomeKnown: true,
+      value: read ? { done: true } : (read = true, { done: false, chunk: richSse(text) }),
+    };
+    return { ok: true, outcomeKnown: true };
+  };
+};
 
 const connectRuntime = async ({
   authorizeCall = () => AUTHORITY,
@@ -129,27 +157,19 @@ describe('sealed kernel runtime dispatch policy', () => {
       signal: new AbortController().signal,
       authority,
       deadlineAt: Date.now() + 30_000,
-      kernelCall: async (operation) => {
-        effects.push(operation);
-        if (operation === 'rich.script.admit') return {
-          ok: true, outcomeKnown: true,
-          value: {
-            token: 'reservation-token-1234',
-            owner: { provider: 'anthropic', model: 'claude-test', cost: { cost: 0 } },
-            settings: { spendLimitUsd: null, pricingOverrides: {}, ollamaHost: '' },
-          },
-        };
-        return {
-          ok: true, outcomeKnown: true,
-          value: { text: 'world', usage: null, cost: 0 },
-        };
-      },
+      kernelCall: richKernelHandler(effects, 'world'),
     });
     expect(result).toEqual({
       ok: true, outcomeKnown: true,
-      value: { ok: true, value: { text: 'world', model: 'claude-test' } },
+      value: { ok: true, value: {
+        text: 'world', model: 'claude-test', stopReason: 'end_turn',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      } },
     });
-    expect(effects).toEqual(['rich.script.admit', 'rich.model.call']);
+    expect(effects).toEqual([
+      'rich.script.admit', 'rich.model.open-inference',
+      'rich.model.read-inference', 'rich.model.read-inference', 'rich.model.observe-usage',
+    ]);
   });
 
   test('keeps Stop dispatch independent from saturated model turns', async () => {
@@ -342,12 +362,11 @@ describe('sealed kernel runtime dispatch policy', () => {
             requestedModel: null,
           });
           if (admitted?.ok !== true) return admitted;
-          return context.effects.call('rich.model.call', {
+          return context.effects.call('rich.model.open-inference', {
             token: 'reservation-token-1234',
             ownerSessionId: 'session:1', runId: 'run:1',
-            provider: 'anthropic', model: 'claude-test', system: '',
-            messages: [{ role: 'user', content: 'hello' }], maxTokens: 32,
-            ollamaHost: '', pricingOverrides: {}, localProvider: false,
+            providerId: 'anthropic', modelId: 'claude-test',
+            nativeBody: { model: 'claude-test', stream: true, messages: [], max_tokens: 32, system: '' },
           });
         },
         'runtime.rich.abort': async (_input, context) => context.effects.call(
@@ -368,8 +387,7 @@ describe('sealed kernel runtime dispatch policy', () => {
           ok: true, outcomeKnown: true,
           value: {
             token: 'reservation-token-1234',
-            owner: { provider: 'anthropic', model: 'claude-test', cost: { cost: 0 } },
-            settings: { spendLimitUsd: null, pricingOverrides: {}, ollamaHost: '' },
+            providerId: 'anthropic', modelId: 'claude-test',
           },
         };
         providerCalls += 1;
@@ -377,7 +395,7 @@ describe('sealed kernel runtime dispatch policy', () => {
         await heldProvider;
         return {
           ok: true, outcomeKnown: true,
-          value: { text: 'late', usage: null, cost: 0 },
+          value: { streamId: 'stream:1', status: 200, statusText: 'OK', headers: {}, hasBody: true },
         };
       },
     }));
@@ -407,10 +425,10 @@ describe('sealed kernel runtime dispatch policy', () => {
     releaseProvider();
     await expect(relay).resolves.toEqual({
       ok: true, outcomeKnown: true,
-      value: { text: 'late', usage: null, cost: 0 },
+      value: { streamId: 'stream:1', status: 200, statusText: 'OK', headers: {}, hasBody: true },
     });
     expect(providerCalls).toBe(1);
-    await expect(retainedEffect('rich.model.call', {})).resolves.toEqual({
+    await expect(retainedEffect('rich.model.open-inference', {})).resolves.toEqual({
       ok: false, code: 'runtime-grant-settled', outcomeKnown: true,
     });
   });
@@ -669,8 +687,7 @@ describe('private runtime controller channel', () => {
           ok: true, outcomeKnown: true,
           value: {
             token: 'reservation-token-1234',
-            owner: { provider: 'anthropic', model: 'claude-test', cost: { cost: 0 } },
-            settings: { spendLimitUsd: null, pricingOverrides: {}, ollamaHost: '' },
+            providerId: 'anthropic', modelId: 'claude-test',
           },
         };
       },
@@ -716,11 +733,12 @@ describe('private runtime controller channel', () => {
           ok: true, outcomeKnown: true,
           value: {
             token: 'reservation-token-1234',
-            owner: { provider: 'anthropic', model: 'claude-test', cost: { cost: 0 } },
-            settings: { spendLimitUsd: null, pricingOverrides: {}, ollamaHost: '' },
+            providerId: 'anthropic', modelId: 'claude-test',
           },
         }
-        : { ok: true, outcomeKnown: true, value: { text: 'done', usage: null, cost: 0 } },
+        : { ok: true, outcomeKnown: true, value: {
+          streamId: 'stream:1', status: 200, statusText: 'OK', headers: {}, hasBody: true,
+        } },
       loadRuntimeHost: async () => ({
         createKernelRuntimeHost: () => createKernelRuntimeHost({ handlers: {
           'runtime.rich.relay': async (_input, context) => {
@@ -728,12 +746,11 @@ describe('private runtime controller channel', () => {
               ownerSessionId: 'session:1', runId: 'run:1', maxTokens: 32,
               requestedModel: null,
             });
-            await context.effects.call('rich.model.call', {
+            await context.effects.call('rich.model.open-inference', {
               token: 'reservation-token-1234',
               ownerSessionId: 'session:1', runId: 'run:1',
-              provider: 'anthropic', model: 'claude-test', system: '',
-              messages: [{ role: 'user', content: 'hello' }], maxTokens: 32,
-              ollamaHost: '', pricingOverrides: {}, localProvider: false,
+              providerId: 'anthropic', modelId: 'claude-test',
+              nativeBody: { model: 'claude-test', stream: true, messages: [], max_tokens: 32, system: '' },
             });
             committed();
             return new Promise(() => {});
@@ -1006,21 +1023,7 @@ describe('private runtime controller channel', () => {
       let client!: ReturnType<typeof makeSemanticControllerClient>;
       const control = createKernelRuntimeControl({
         call: (payload) => client.callRuntime(payload),
-        handleRichKernelCall: async (operation) => {
-          seen.push(operation);
-          if (operation === 'rich.script.admit') return {
-            ok: true, outcomeKnown: true,
-            value: {
-              token: 'reservation-token-1234',
-              owner: { provider: 'anthropic', model: 'claude-test', cost: { cost: 0 } },
-              settings: { spendLimitUsd: null, pricingOverrides: {}, ollamaHost: '' },
-            },
-          };
-          return {
-            ok: true, outcomeKnown: true,
-            value: { text: 'same', usage: null, cost: 0 },
-          };
-        },
+        handleRichKernelCall: richKernelHandler(seen, 'same'),
       });
       const loadController = async () => createController({
         loadRuntimeHost: async () => ({ createKernelRuntimeHost }),
@@ -1056,7 +1059,10 @@ describe('private runtime controller channel', () => {
         ok: true, outcomeKnown: true,
         value: { ok: true, value: { text: 'same', model: 'claude-test' } },
       });
-      expect(seen).toEqual(['rich.script.admit', 'rich.model.call']);
+      expect(seen).toEqual([
+        'rich.script.admit', 'rich.model.open-inference',
+        'rich.model.read-inference', 'rich.model.read-inference', 'rich.model.observe-usage',
+      ]);
       client.close();
       offerHandler?.close();
     }

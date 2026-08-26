@@ -250,6 +250,7 @@ describe('cold entry graphs', () => {
     const runtimeImports = [...executableKernel.matchAll(/\bimport\(\s*(['"])([^'"]+)\1\s*\)/g)]
       .map((match) => match[2]);
     expect(runtimeImports).toEqual([
+      './offscreen-controller-client.js',
       './kernel-production-runtime.js',
       './kernel-demand-plane.js',
       './kernel-session-authority.js',
