@@ -234,6 +234,8 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/todo/core.js',
     ]);
     for (const entry of [
+      'background/vault-kernel.js',
+      'background/kernel-turn-live-factories.js',
       'background/controller-turn-bridge.js',
       'background/offscreen-actor-client.js',
     ]) {
@@ -284,6 +286,30 @@ describe('kernel turn ownership boundaries', () => {
     for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
       const modules = await modulesFor(entry);
       for (const module of pageSemanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
+  it('hosts introspection, skill, and wait semantics only in controller graphs', async () => {
+    const semanticModules = new Set([
+      'peerd-runtime/controller-introspection-tools.js',
+      'peerd-runtime/tools/defs/actor-list.js',
+      'peerd-runtime/tools/defs/inspect.js',
+      'peerd-runtime/skills/load-skill-tool.js',
+      'peerd-runtime/clock/tools.js',
+      'peerd-runtime/clock/wait-execute.js',
+    ]);
+    for (const entry of [
+      'background/vault-kernel.js',
+      'background/kernel-turn-live-factories.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ]) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
+    }
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of semanticModules) expect(modules.has(module)).toBe(true);
     }
   });
 

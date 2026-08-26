@@ -109,7 +109,9 @@ describe('load_skill tool — on-invocation body injection', () => {
     // why the cast: a deliberately MINIMAL ctx — load_skill's execute reads
     // only ctx.skills, so the rest of the (required) ToolContext surface is
     // irrelevant to this unit and intentionally omitted.
-    const res: any = await tool.loadSkillTool.execute({ name: 'demo' }, { skills: registry } as unknown as ToolContext);
+    const res: any = await tool.loadSkillTool.execute({ name: 'demo' }, {
+      skillAuthority: { readInstalledSkill: registry.loadBody },
+    } as unknown as ToolContext);
     expect(res.ok).toBe(true);
     expect(res.content).toContain('<skill name="demo">');
     expect(res.content).toContain('body text');
@@ -118,7 +120,9 @@ describe('load_skill tool — on-invocation body injection', () => {
   test('reports not-found for an unknown skill', async () => {
     const registry = reg.createSkillRegistry({ store: store.createSkillStore() });
     // why the cast: same deliberately minimal ctx as above.
-    const res: any = await tool.loadSkillTool.execute({ name: 'ghost' }, { skills: registry } as unknown as ToolContext);
+    const res: any = await tool.loadSkillTool.execute({ name: 'ghost' }, {
+      skillAuthority: { readInstalledSkill: registry.loadBody },
+    } as unknown as ToolContext);
     expect(res.ok).toBe(false);
     expect(res.error).toContain('ghost');
   });

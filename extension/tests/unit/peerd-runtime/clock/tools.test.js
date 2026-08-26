@@ -1,5 +1,5 @@
 // @ts-check
-// SW-executed clock tools — wait_until. `now` is controller-owned.
+// Controller-executed clock tools. The SW retains only turn cancellation custody.
 
 import { describe, it, expect } from '../../../framework.js';
 import { waitUntilTool, CLOCK_TOOLS } from '/peerd-runtime/clock/tools.js';
@@ -12,7 +12,7 @@ const ctx = (overrides = {}) => /** @type {import('/shared/tool-types.js').ToolC
 });
 
 describe('clock.tools', () => {
-  it('the SW clock surface keeps only the durable wait', () => {
+  it('the controller clock surface keeps the durable wait', () => {
     expect(CLOCK_TOOLS.map((t) => t.name).join(',')).toBe('wait_until');
   });
 

@@ -591,12 +591,18 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
               sessionKind: toolContext.session?.kind ?? 'chat',
               inbound: toolContext.inbound === true,
             }
-          : controllerToolDomain(call?.name) === 'persistence'
-            ? {
+            : controllerToolDomain(call?.name) === 'persistence'
+              ? {
                 sessionId: toolContext.session?.sessionId,
                 activeTabOrigin: toolContext.activeTab?.origin,
                 goalActive: !!toolContext.todoStore,
               }
+              : call?.name === 'load_skill'
+                ? {
+                  sessionId: toolContext.session?.sessionId,
+                  messageCount: toolContext.session?.messageCount ?? 0,
+                  trimCovered: toolContext.session?.trimCovered ?? 0,
+                }
             : {};
         return {
           mode: 'execute',

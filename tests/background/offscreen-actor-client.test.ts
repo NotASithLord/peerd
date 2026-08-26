@@ -1584,3 +1584,56 @@ describe('controller-owned page tools: exact isolated authority', () => {
     expect(legacyDispatches).toBe(0);
   });
 });
+
+describe('controller-owned introspection tools: exact isolated authority', () => {
+  test('filters and relays inspect session tabs without legacy dispatch', async () => {
+    let legacyDispatches = 0;
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({ kind: 'spawned', grantedTools: ['inspect'] }) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-inspect-1', kind: 'spawned' },
+        tabs: { query: async () => [
+          { id: 1, url: 'https://example.test/x', title: 'Docs', active: true },
+          { id: 2, url: 'http://127.0.0.1/admin', title: 'Admin' },
+        ] },
+        denylist: [],
+      }),
+      restrictCtxCapabilities: (ctx: any) => ctx,
+      dispatchToolCall: async () => { legacyDispatches += 1; return { ok: true }; },
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: call.args,
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => execution.result,
+    });
+    const observed: any = await during(async (relayToken) => {
+      const call = {
+        id: 'call-inspect-tabs', name: 'inspect', args: { kind: 'session_access' },
+      };
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, call,
+      }, OFFSCREEN);
+      const effect = await client.routes['introspection/automatable-tabs']({
+        relayToken, executionId: prepared.executionId,
+      }, OFFSCREEN);
+      const legacy = await client.routes['actor/tool-dispatch']({ relayToken, call }, OFFSCREEN);
+      const settled = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: true, content: 'one tab' },
+      }, OFFSCREEN);
+      return { prepared, effect, legacy, settled };
+    }, 'actor-inspect-1');
+
+    expect(observed.prepared).toMatchObject({
+      ok: true, mode: 'execute', toolName: 'inspect',
+    });
+    expect(observed.effect).toMatchObject({
+      ok: true, outcomeKnown: true,
+      value: [{ id: 1, url: 'https://example.test/x', title: 'Docs', active: true }],
+    });
+    expect(observed.legacy.error).toContain('not legacy-owned');
+    expect(observed.settled).toMatchObject({
+      ok: true, result: { ok: true, content: 'one tab' },
+    });
+    expect(legacyDispatches).toBe(0);
+  });
+});

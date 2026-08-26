@@ -14,7 +14,11 @@ const BODY = 'THE FULL SKILL PLAYBOOK BODY — many lines of instructions.';
 
 // A ctx with a mock skills registry and the SW-injected session watermark fields.
 const ctxFor = (session: any) => ({
-  skills: { loadBody: async (name: string) => ({ meta: { name, version: '1' }, body: BODY }) },
+  skillAuthority: {
+    readInstalledSkill: async (name: string) => ({
+      meta: { name, version: '1' }, body: BODY,
+    }),
+  },
   session,
 } as any);
 

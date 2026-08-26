@@ -24,6 +24,7 @@ import { createNotebookToolAuthority } from './notebook-tool-authority.js';
 import { createAppToolAuthority } from './app-tool-authority.js';
 import { createPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { createPageToolAuthority } from './page-tool-authority.js';
+import { createIntrospectionToolAuthority } from './introspection-tool-authority.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -599,6 +600,19 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.domainState.authority ??= createPageToolAuthority({
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const introspectionExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ tools,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'introspection', tools, fields);
+    if (!entry) return null;
+    entry.domainState.authority ??= createIntrospectionToolAuthority({
+      call: entry.call, ctx: entry.custody?.ctx,
     });
     return entry;
   };
@@ -1672,6 +1686,48 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('page owned capture authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.captureOwnedTabPixels());
+        }
+        case 'turn.introspection.actor-roster': {
+          const entry = introspectionExecutionEntry(run, value, ['actor_list'], []);
+          if (!entry) return failed('actor roster authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readActorRoster());
+        }
+        case 'turn.introspection.provider-posture': {
+          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          if (!entry) return failed('provider posture authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readProviderPosture());
+        }
+        case 'turn.introspection.storage-snapshot': {
+          const entry = introspectionExecutionEntry(run, value, ['inspect'], ['prefix']);
+          if (!entry) return failed('storage inspection authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readStorageSnapshot(value.prefix));
+        }
+        case 'turn.introspection.automatable-tabs': {
+          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          if (!entry) return failed('tab inspection authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readAutomatableTabs());
+        }
+        case 'turn.introspection.denylist-patterns': {
+          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          if (!entry) return failed('denylist inspection authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readDenylistPatterns());
+        }
+        case 'turn.introspection.audit-entries': {
+          const entry = introspectionExecutionEntry(run, value, ['inspect'], []);
+          if (!entry) return failed('audit inspection authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readAuditEntries());
+        }
+        case 'turn.introspection.installed-skill': {
+          const entry = introspectionExecutionEntry(run, value, ['load_skill'], ['name']);
+          if (!entry) return failed('skill read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readInstalledSkill(value.name));
         }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);

@@ -1159,6 +1159,57 @@ export const runActor = async (job, {
             }));
           return;
         }
+        if (m.type === 'introspection-actor-roster-request') {
+          await relayExactToolMessage(m, 'introspection-actor-roster-response', () =>
+            sendToSW('introspection/actor-roster', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'introspection-provider-posture-request') {
+          await relayExactToolMessage(m, 'introspection-provider-posture-response', () =>
+            sendToSW('introspection/provider-posture', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'introspection-storage-snapshot-request') {
+          await relayExactToolMessage(m, 'introspection-storage-snapshot-response', () =>
+            sendToSW('introspection/storage-snapshot', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              prefix: m.prefix,
+            }));
+          return;
+        }
+        if (m.type === 'introspection-automatable-tabs-request') {
+          await relayExactToolMessage(m, 'introspection-automatable-tabs-response', () =>
+            sendToSW('introspection/automatable-tabs', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'introspection-denylist-patterns-request') {
+          await relayExactToolMessage(m, 'introspection-denylist-patterns-response', () =>
+            sendToSW('introspection/denylist-patterns', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'introspection-audit-entries-request') {
+          await relayExactToolMessage(m, 'introspection-audit-entries-response', () =>
+            sendToSW('introspection/audit-entries', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }));
+          return;
+        }
+        if (m.type === 'introspection-installed-skill-request') {
+          await relayExactToolMessage(m, 'introspection-installed-skill-response', () =>
+            sendToSW('introspection/installed-skill', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              name: m.name,
+            }));
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {

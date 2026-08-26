@@ -29,19 +29,36 @@ const okContent = (r) => /** @type {import('/shared/tool-types.js').ToolResultOk
  * @param {Record<string, any>} [overrides]
  * @returns {ToolContext}
  */
-const baseCtx = (overrides = {}) => /** @type {ToolContext} */ (/** @type {unknown} */ ({
-  session: { sessionId: 's1' },
-  tabs: { query: async () => [] },
-  getSecret: async () => null,
-  audit: async () => {},
-  confirm: async () => 'no_once',
-  kv: { list: async () => ({}) },
-  idb: { getAll: async () => [] },
-  denylist: ['chase.com', '*.chase.com', '*.proton.me'],
-  provider: { name: 'anthropic', model: 'claude-sonnet-4-6', hasKey: true },
-  vault: { isLocked: false },
-  ...overrides,
-}));
+const baseCtx = (overrides = {}) => {
+  const source = {
+    tabs: { query: async (/** @type {Record<string,unknown>} */ _query = {}) => [] },
+    kv: { list: async (/** @type {string|undefined} */ _prefix = undefined) => ({}) },
+    idb: { getAll: async (/** @type {string} */ _store = '') => [] },
+    denylist: ['chase.com', '*.chase.com', '*.proton.me'],
+    provider: { name: 'anthropic', model: 'claude-sonnet-4-6', hasKey: true },
+    vault: { isLocked: false },
+    ...overrides,
+  };
+  return /** @type {ToolContext} */ (/** @type {unknown} */ ({
+    session: { sessionId: 's1' },
+    getSecret: async () => null,
+    audit: async () => {},
+    confirm: async () => 'no_once',
+    ...overrides,
+    introspectionAuthority: {
+      readProviderPosture: async () => ({
+        provider: source.provider.name,
+        model: source.provider.model,
+        hasKey: source.provider.hasKey,
+        vaultLocked: source.vault.isLocked,
+      }),
+      readStorageSnapshot: (/** @type {string|undefined} */ prefix) => source.kv.list(prefix),
+      readAutomatableTabs: () => source.tabs.query({}),
+      readDenylistPatterns: async () => source.denylist,
+      readAuditEntries: () => source.idb.getAll('audit_log'),
+    },
+  }));
+};
 
 /** @param {string} kind @param {Record<string, any>} args @param {ToolContext} ctx */
 const inspect = (kind, args, ctx) => inspectTool.execute({ kind, ...args }, ctx);

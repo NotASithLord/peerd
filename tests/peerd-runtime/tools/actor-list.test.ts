@@ -9,10 +9,12 @@
 import { describe, test, expect } from 'bun:test';
 import { actorListTool } from '../../../extension/peerd-runtime/tools/defs/actor-list.js';
 import { getToolMetadata } from '../../../extension/peerd-runtime/semantic.js';
+import { createIntrospectionToolAuthority } from '../../../extension/background/introspection-tool-authority.js';
 
 // A ctx with every source wired. Each registry mirrors the real snapshot shape:
 // vm → { vms, currentVmId }, js → { notebooks, currentId }, app → { apps, currentId }.
-const fullCtx = (over: Record<string, any> = {}) => ({
+const fullCtx = (over: Record<string, any> = {}) => {
+  const source = {
   session: { sessionId: 's1' },
   vmRegistry: { snapshot: async () => ({ vms: [
     { id: 'vm-1', name: 'project-alpha', pinned: true },
@@ -40,7 +42,12 @@ const fullCtx = (over: Record<string, any> = {}) => ({
   ],
   denylist: [],
   ...over,
-});
+  };
+  const authority = createIntrospectionToolAuthority({
+    call: { name: 'actor_list', args: {} }, ctx: source,
+  });
+  return { actorDirectory: { readRoster: authority.readActorRoster } };
+};
 
 const parse = (r: any) => {
   expect(r.ok).toBe(true);

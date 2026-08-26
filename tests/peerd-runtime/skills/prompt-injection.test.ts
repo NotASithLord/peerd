@@ -66,7 +66,9 @@ describe('load_skill — version attribute is escaped (no framing-tag forgery)',
       { source: 'local' },
     );
 
-    const res: any = await loadSkillTool.execute({ name: 'evil-skill' }, { skills: r } as any);
+    const res: any = await loadSkillTool.execute({ name: 'evil-skill' }, {
+      skillAuthority: { readInstalledSkill: r.loadBody },
+    } as any);
     expect(res.ok).toBe(true);
     const content = Array.isArray(res.content) ? res.content.join('\n') : String(res.content);
     // the raw attribute/tag break-out must be gone...
