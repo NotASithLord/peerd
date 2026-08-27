@@ -170,6 +170,33 @@ const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]
 });
 
 describe('orchestrator controller turn boundary', () => {
+  test('emergency bridge close releases active provider owners', async () => {
+    const released: object[] = [];
+    const bridge = makeControllerTurnBridge({
+      getClient: async () => ({
+        call: () => new Promise(() => {}),
+      }),
+      providerEgress: {
+        closeOwner: async (owner: object) => { released.push(owner); },
+      } as any,
+      newId: () => 'emergency-close-run',
+    });
+    const turn = bridge.runUserTurn({
+      sessionId: 'session-emergency-close', tools: [],
+      signal: new AbortController().signal,
+    });
+    void turn.next();
+    for (let attempt = 0; attempt < 10 && bridge.activeCount() === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(bridge.activeCount()).toBe(1);
+
+    await bridge.close();
+
+    expect(bridge.activeCount()).toBe(0);
+    expect(released).toHaveLength(1);
+  });
+
   test('matches direct transcript semantics while opaque media stays kernel-side', async () => {
     const directSessions = makeSessions();
     const controllerSessions = makeSessions();

@@ -240,7 +240,8 @@ export const controllerOperationAllowedAfterCancel = (
   /** @type {string} */ capability,
   /** @type {string} */ operation,
 ) => capability === 'turn.run'
-  && (operation === 'turn.model.cancel-inference' || operation === 'turn.tool.settle'
+  && (operation === 'turn.model.cancel-inference' || operation === 'turn.model.cancel-local'
+    || operation === 'turn.tool.settle'
     || operation === 'turn.abort.finalize' || operation === 'turn.finalize');
 
 /**

@@ -103,7 +103,7 @@ export const createKernelTurnOwner = ({
       || typeof controller.projectTurnTools !== 'function'
       || typeof controller.withRun !== 'function'
       || typeof controller.release !== 'function') {
-    bridge.close();
+    void bridge.close();
     throw new TypeError('kernel-turn-controller-invalid');
   }
 
@@ -307,7 +307,7 @@ export const createKernelTurnOwner = ({
       current?.retire();
       try { await current?.release(); }
       finally {
-        bridge.close();
+        await bridge.close();
         controller.release();
       }
     },

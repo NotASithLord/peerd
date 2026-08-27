@@ -27,6 +27,8 @@ denyNavigator('sendBeacon', undefined);
 for (const name of ['storage', 'serviceWorker', 'locks']) denyNavigator(name, undefined);
 const globals = /** @type {Record<string, unknown>} */ (globalThis);
 const ABORT_CLEANUP_OPERATIONS = new Set([
+  'turn.model.cancel-inference',
+  'turn.model.cancel-local',
   'turn.abort.finalize',
   'turn.finalize',
   'turn.tool.settle',
