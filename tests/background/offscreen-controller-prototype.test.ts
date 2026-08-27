@@ -1228,6 +1228,11 @@ describe('controller protocol pure validation', () => {
     expect(controllerPayloadBytes(cyclic)).toBe(Infinity);
     expect(controllerPayloadBytes(Object.defineProperty({}, 'secret', { get: () => 'x' })))
       .toBe(Infinity);
+    const namedArray: any[] & { payload?: string } = [];
+    namedArray.payload = 'x'.repeat(1024);
+    expect(payloadFitsControllerCap(namedArray, 512)).toBe(false);
+    expect(controllerPayloadBytes(Object.defineProperty([], '0', { get: () => 'x' })))
+      .toBe(Infinity);
   });
 
   test('large plain transcripts stay byte-bounded through the packed session seam', () => {

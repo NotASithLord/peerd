@@ -233,6 +233,95 @@ describe('orchestrator controller turn boundary', () => {
     expect(released).toHaveLength(1);
   });
 
+  test('emergency bridge close retires runs when provider cleanup never returns', async () => {
+    const bridge = makeControllerTurnBridge({
+      getClient: async () => ({ call: () => new Promise(() => {}) }),
+      providerEgress: {
+        closeOwner: async () => new Promise(() => {}),
+      } as any,
+      cleanupTimeoutMs: 10,
+      newId: () => 'hung-provider-cleanup-run',
+    });
+    const turn = bridge.runUserTurn({
+      sessionId: 'session-hung-provider-cleanup', tools: [],
+      signal: new AbortController().signal,
+    });
+    void turn.next();
+    for (let attempt = 0; attempt < 10 && bridge.activeCount() === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    const completed = await Promise.race([
+      bridge.close().then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    expect(completed).toBe('completed');
+    expect(bridge.activeCount()).toBe(0);
+  });
+
+  test('Stop re-closes provider custody admitted after the first cleanup', async () => {
+    const controller = new AbortController();
+    let releaseOpen!: () => void;
+    let markOpenStarted!: () => void;
+    const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+    const openStarted = new Promise<void>((resolve) => { markOpenStarted = resolve; });
+    let closes = 0;
+    let observed: any = null;
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    bridge = makeControllerTurnBridge({
+      getClient: async () => ({
+        call: async (capability: string, payload: any, options: any) => {
+          const authority = bridge.authorize(payload);
+          const invoke = (operation: string, value: unknown) => bridge.handleKernelCall(
+            operation, { runId: payload.runId, value }, {
+              capability, authority, signal: options.signal,
+              deadlineAt: Date.now() + 60_000,
+            },
+          );
+          await invoke('turn.model.bind', {
+            candidates: [{ provider: 'local-webgpu', model: 'model-1' }],
+          });
+          const opening = invoke('turn.model.open-local', {
+            providerId: 'local-webgpu', modelId: 'model-1',
+            messages: [], system: '', tools: [], maxTokens: 128,
+          });
+          await openStarted;
+          controller.abort();
+          releaseOpen();
+          observed = await opening;
+          return observed;
+        },
+      }),
+      providerEgress: {
+        openLocalGeneration: async () => {
+          markOpenStarted();
+          await openGate;
+          return { ok: true, value: { streamId: 'late-controller-local' } };
+        },
+        closeOwner: async () => { closes += 1; return new Promise(() => {}); },
+      } as any,
+      cleanupTimeoutMs: 10,
+      newId: () => 'late-provider-open-run',
+    });
+    const run = drain(bridge.runUserTurn({
+      sessionId: 'session-late-provider-open', tools: [],
+      maxOutputTokens: 4096, signal: controller.signal,
+      sessions: {
+        get: async () => ({
+          sessionId: 'session-late-provider-open',
+          provider: 'local-webgpu', model: 'model-1',
+        }),
+      },
+    })).catch(() => []);
+    const completed = await Promise.race([
+      run.then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    expect(completed).toBe('completed');
+    expect(observed).toMatchObject({ ok: false, code: 'turn-run-aborted' });
+    expect(closes).toBeGreaterThanOrEqual(2);
+    expect(bridge.activeCount()).toBe(0);
+  });
+
   test('emergency close does not let a stuck tool post-hook block provider release', async () => {
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let markPrepared!: () => void;
@@ -288,6 +377,74 @@ describe('orchestrator controller turn boundary', () => {
     await bridge.close();
     await settlement;
 
+    expect(bridge.activeCount()).toBe(0);
+    expect(released).toHaveLength(1);
+  });
+
+  test('Stop and controller loss retire the run when tool settlement never returns', async () => {
+    const controller = new AbortController();
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    let markPrepared!: () => void;
+    let markSettlement!: () => void;
+    const prepared = new Promise<void>((resolve) => { markPrepared = resolve; });
+    const settlement = new Promise<void>((resolve) => { markSettlement = resolve; });
+    const released: object[] = [];
+    bridge = makeControllerTurnBridge({
+      getClient: async () => ({
+        call: async (capability: string, payload: any, options: any) => {
+          const authority = bridge.authorize(payload);
+          const invoke = (operation: string, value: unknown) => bridge.handleKernelCall(
+            operation, { runId: payload.runId, value }, {
+              capability, authority, signal: options.signal,
+              deadlineAt: Date.now() + 60_000,
+            },
+          );
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-start', id: 'lost-tool', name: 'complete_goal',
+          });
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-delta', id: 'lost-tool', partialJson: '{"summary":"done"}',
+          });
+          await invoke('turn.tool.prepare', {
+            authorityClass: 'local',
+            callJson: JSON.stringify({
+              id: 'lost-tool', name: 'complete_goal', args: { summary: 'done' },
+            }),
+          });
+          markPrepared();
+          return new Promise((resolve) => options.signal.addEventListener('abort', () => resolve({
+            ok: false, code: 'controller-call-aborted', outcomeKnown: true,
+          }), { once: true }));
+        },
+      }),
+      prepareToolCall: async (call: any) => ({
+        mode: 'execute', custody: {}, args: call.args, projection: {},
+        manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+      }),
+      settleToolCall: async () => { markSettlement(); return new Promise(() => {}); },
+      providerEgress: {
+        closeOwner: async (owner: object) => { released.push(owner); },
+      } as any,
+      newId: () => 'stopped-stuck-settlement-run',
+    });
+    const run = (async () => {
+      try {
+        for await (const _event of bridge.runUserTurn({
+          sessionId: 'session-stopped-stuck-settlement',
+          tools: [{ name: 'complete_goal' }],
+          classifyToolCall: () => ({ actionClass: 'write', confirm: false }),
+          signal: controller.signal,
+        })) { /* drain */ }
+      } catch { /* expected Stop result */ }
+    })();
+    await prepared;
+    controller.abort();
+    const completed = await Promise.race([
+      run.then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    await settlement;
+    expect(completed).toBe('completed');
     expect(bridge.activeCount()).toBe(0);
     expect(released).toHaveLength(1);
   });
