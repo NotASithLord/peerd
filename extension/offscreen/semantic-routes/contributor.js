@@ -3,11 +3,11 @@
 // exposes one read-only record and retains every storage/mutation capability.
 
 import {
-  contributorActionForTool, contributorFeedbackTargets, contributorTurnResult,
-  makeContributorStore,
+  contributorFeedbackTargets, makeContributorStore,
 } from '/peerd-runtime/controller-administrative.js';
 import {
-  CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_PROTOCOL,
+  CONTRIBUTOR_CHANNEL_CALL, contributorPayloadFits,
+  CONTRIBUTOR_CHANNEL_PROTOCOL,
   CONTRIBUTOR_CHANNEL_REPLY, CONTRIBUTOR_CHANNEL_RESULT,
   parseContributorOffer,
 } from '/shared/contributor-channel.js';
@@ -17,7 +17,7 @@ import {
 export const dispatchContributorSemanticRoute = async (route, _message, options) => {
   if (![
     'contributor/status', 'contributor/enable', 'contributor/disable',
-    'contributor/arm', 'contributor/settlement', 'contributor/feedback',
+    'contributor/settlement', 'contributor/feedback',
   ].includes(route)
       || typeof options.kernelCall !== 'function') {
     return { ok: false, code: 'semantic-contributor-route-refused', outcomeKnown: true };
@@ -55,48 +55,26 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
       failure: () => failure ?? { outcomeKnown: !writeRequested },
     };
   };
-  if (route === 'contributor/arm') {
-    const result = await kernelCall('semantic.contributor.arm-read', {});
-    if (result?.ok !== true) return { ok: true, arm: { enabled: false, generation: null } };
-    const store = makeContributorStore({ kv: {
-      get: async () => result.value ?? null,
-      set: async () => { throw new Error('contributor-arm-read-only'); },
-      delete: async () => { throw new Error('contributor-arm-read-only'); },
-    } });
-    return { ok: true, arm: await store.arm() };
-  }
   if (route === 'contributor/settlement') {
     const keys = [
-      'consentGeneration', 'operationKey', 'feedbackContextKey', 'decision',
-      'browser', 'extensionVersion', 'channel', 'provider', 'model',
-      'durationMs', 'toolNames', 'assistantMessages', 'stopped', 'result', 'usage',
+      'version', 'consentGeneration', 'operationKey', 'feedbackContextKey', 'decision',
+      'browser', 'extensionVersion', 'channel', 'provider', 'modelFamily',
+      'durationMs', 'tokens', 'outcome', 'failure', 'actions',
     ];
     if (Object.keys(message).sort().join('\0') !== keys.sort().join('\0')
-        || !message.decision || !Array.isArray(message.toolNames)
-        || !Array.isArray(message.assistantMessages)) {
+        || message.version !== 1 || !message.decision || !Array.isArray(message.actions)) {
       return { ok: false, error: 'invalid-contributor-settlement', outcomeKnown: true };
     }
     const mutation = recordStore(
       'semantic.contributor.settlement-read', 'semantic.contributor.settlement-record',
     );
     try {
-      const actions = message.toolNames.flatMap((/** @type {any} */ toolName) => {
-        const action = contributorActionForTool(toolName);
-        return action ? [{
+      const actions = message.actions.map((/** @type {any} */ action) => ({
           feature: 'web_actor_surface', ...message.decision,
           browser: message.browser, extensionVersion: message.extensionVersion,
-          channel: message.channel, provider: message.provider, model: message.model,
+          channel: message.channel, provider: message.provider, model: message.modelFamily,
           action,
-        }] : [];
-      });
-      const { outcome, failure } = contributorTurnResult({
-        assistantMessages: message.assistantMessages,
-        stopped: message.stopped,
-        result: message.result,
-      });
-      const usage = message.usage && typeof message.usage === 'object' ? message.usage : {};
-      const tokens = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']
-        .reduce((sum, key) => sum + (Number.isFinite(usage[key]) ? Math.max(0, usage[key]) : 0), 0);
+        }));
       const recorded = await mutation.store.recordWebSettlement({
         consentGeneration: message.consentGeneration,
         operationKey: message.operationKey,
@@ -104,8 +82,9 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
         turn: {
           feature: 'web_actor_surface', ...message.decision,
           browser: message.browser, extensionVersion: message.extensionVersion,
-          channel: message.channel, provider: message.provider, model: message.model,
-          outcome, failure, durationMs: message.durationMs, tokens,
+          channel: message.channel, provider: message.provider, model: message.modelFamily,
+          outcome: message.outcome, failure: message.failure,
+          durationMs: message.durationMs, tokens: message.tokens,
         },
         actions,
       });
@@ -220,6 +199,9 @@ export const acceptContributorOffer = (
   };
   const kernelCall = (/** @type {string} */ operation, /** @type {unknown} */ payload) =>
     new Promise((resolve) => {
+      if (operation.length > 128 || !contributorPayloadFits(payload ?? {})) {
+        resolve({ ok: false, outcomeKnown: true }); return;
+      }
       const requestId = `c${++nextRequest}`;
       pending.set(requestId, { resolve });
       try { port.postMessage({
@@ -231,7 +213,9 @@ export const acceptContributorOffer = (
     const packet = messageEvent.data;
     if (packet?.type !== CONTRIBUTOR_CHANNEL_REPLY
         || packet.protocol !== CONTRIBUTOR_CHANNEL_PROTOCOL
-        || packet.channelId !== offer.channelId || typeof packet.requestId !== 'string') {
+        || packet.channelId !== offer.channelId || typeof packet.requestId !== 'string'
+        || packet.requestId.length > 128
+        || !contributorPayloadFits(packet.result ?? {})) {
       finish(); return;
     }
     const item = pending.get(packet.requestId);
@@ -244,6 +228,9 @@ export const acceptContributorOffer = (
   port.start();
   dispatchContributorSemanticRoute(offer.route, offer.message ?? {}, { kernelCall }).then(
     (result) => {
+      if (!contributorPayloadFits(result ?? {})) {
+        finish(); return;
+      }
       try { port.postMessage({
         type: CONTRIBUTOR_CHANNEL_RESULT, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
         channelId: offer.channelId, result,
