@@ -67,14 +67,16 @@ const firefoxContributorArm = async (/** @type {any} */ kv) => {
   for (const [key, value] of Object.entries(snapshots)) {
     const valid = key.startsWith(CONTRIBUTOR_STATE_PREFIX)
       && value && typeof value === 'object' && !Array.isArray(value)
-      && Object.keys(value).sort().join('\0') === ['record', 'revision', 'state', 'version'].join('\0')
+      && Object.keys(value).sort().join('\0')
+        === ['committed', 'record', 'revision', 'state', 'version'].join('\0')
       && value.version === 2 && Number.isSafeInteger(value.revision) && value.revision > 0
       && value.revision <= CONTRIBUTOR_MAX_REVISION
+      && typeof value.committed === 'boolean'
       && ['active', 'revoked'].includes(value.state)
       && (value.state === 'revoked' ? value.record === null : !!value.record);
     if (!valid) return Object.freeze({ enabled: false, generation: null });
-    if (!latest || value.revision > latest.value.revision
-        || value.revision === latest.value.revision && key > latest.key) latest = { key, value };
+    if (value.committed && (!latest || value.revision > latest.value.revision
+        || value.revision === latest.value.revision && key > latest.key)) latest = { key, value };
   }
   if (latest) {
     if (latest.value.state !== 'active') {

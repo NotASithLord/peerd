@@ -35,7 +35,7 @@ describe('kernel Firefox lazy addon', () => {
         get: async () => null, set: async () => {}, delete: async () => {},
         list: async () => ({
           'contributor_metrics.state.v2.1-test': {
-            version: 2, revision: 1, state: 'active',
+            version: 2, revision: 1, state: 'active', committed: true,
             record: {
               version: 1,
               consent: {

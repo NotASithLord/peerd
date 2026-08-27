@@ -61,6 +61,7 @@ const storage = (initial: any) => {
     value: () => {
       const snapshots = [...values.entries()]
         .filter(([key]) => key.startsWith('contributor_metrics.state.v2.'))
+        .filter(([, value]) => value.committed === true)
         .sort((left, right) => right[1].revision - left[1].revision);
       if (snapshots.length > 0) {
         return snapshots[0][1].state === 'active'
@@ -291,16 +292,15 @@ describe('Preview Contributor Metrics private channel', () => {
     expect(await authority.arm()).toEqual(acknowledged);
   });
 
-  test('an unseen pre-crash enable cannot win after a restarted owner acknowledges consent', async () => {
+  test('a late pre-crash commit loses after restart and clock rollback', async () => {
     const values = new Map<string, any>();
     let releaseLateWrite: () => void = () => {};
     const lateWrite = new Promise<void>((resolve) => { releaseLateWrite = resolve; });
-    let holdFirstStateWrite = true;
+    let stateWrites = 0;
     const kv = {
       get: async (key: string) => structuredClone(values.get(key) ?? null),
       set: async (key: string, value: any) => {
-        if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && holdFirstStateWrite) {
-          holdFirstStateWrite = false;
+        if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && ++stateWrites === 2) {
           await lateWrite;
         }
         values.set(key, structuredClone(value));
@@ -319,7 +319,7 @@ describe('Preview Contributor Metrics private channel', () => {
     }, target))
       .toMatchObject({ ok: false, outcomeKnown: false });
     const restarted = createPreviewContributorAuthority({
-      kv, storageDeadlineMs: 5, now: () => 200, makeId: () => crypto.randomUUID(),
+      kv, storageDeadlineMs: 5, now: () => 50, makeId: () => crypto.randomUUID(),
     });
     expect(await restarted.handle('semantic.contributor.enable', {
       expected: null, value: enabledRecord('restarted-consent'),
@@ -526,7 +526,7 @@ describe('Preview Contributor Metrics private channel', () => {
       await state.kv.set(`${CONTRIBUTOR_STATE_PREFIX}corrupt-${index}`, {
         version: 2,
         revision: index === 128 ? Number.MAX_SAFE_INTEGER : index + 1,
-        state: 'active',
+        state: 'active', committed: true,
         record: { raw: 'not-a-contributor-record' },
       });
     }
@@ -549,7 +549,8 @@ describe('Preview Contributor Metrics private channel', () => {
       kv: {
         get: async (key: string) => { operations.push(`get:${key}`); return state.kv.get(key); },
         set: async (key: string, value: any) => {
-          operations.push(`set:${key}`); await state.kv.set(key, value);
+          operations.push(`set:${key}:${String(value.committed)}`);
+          await state.kv.set(key, value);
         },
         delete: async (key: string) => {
           operations.push(`delete:${key}`); await state.kv.delete(key);
@@ -564,13 +565,16 @@ describe('Preview Contributor Metrics private channel', () => {
       signal: { aborted: false }, deadlineAt: Date.now() + 1_000,
     })).toMatchObject({ ok: true, outcomeKnown: true });
     expect(operations[0]).toStartWith(`set:${CONTRIBUTOR_STATE_PREFIX}`);
+    expect(operations[0]).toEndWith(':false');
+    expect(operations[1]).toEndWith(':true');
+    expect(operations.findIndex((operation) => operation.startsWith('list:'))).toBeGreaterThan(1);
   });
 
   test('revocation repairs its marker above a durable revision after clock rollback', async () => {
     const state = storage(null);
     await state.kv.set(`${CONTRIBUTOR_STATE_PREFIX}future-active`, {
       version: 2, revision: 5_000_000_000_000_000,
-      state: 'active', record: enabledRecord(),
+      state: 'active', record: enabledRecord(), committed: true,
     });
     const authority = createPreviewContributorAuthority({
       kv: state.kv, now: () => 100,

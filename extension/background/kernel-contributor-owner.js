@@ -165,9 +165,10 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
   let lastIssuedRevision = 0;
   const stateSnapshot = (/** @type {unknown} */ value) => {
     const candidate = /** @type {any} */ (value);
-    if (!exactKeys(candidate, ['version', 'revision', 'state', 'record'])
+    if (!exactKeys(candidate, ['version', 'revision', 'state', 'record', 'committed'])
         || candidate.version !== 2 || !Number.isSafeInteger(candidate.revision)
         || candidate.revision <= 0 || candidate.revision > CONTRIBUTOR_MAX_REVISION
+        || typeof candidate.committed !== 'boolean'
         || !['active', 'revoked'].includes(candidate.state)
         || candidate.state === 'revoked' && candidate.record !== null
         || candidate.state === 'active' && armFromRecord(candidate.record).enabled !== true) {
@@ -186,12 +187,15 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
       if (!key.startsWith(CONTRIBUTOR_STATE_PREFIX)) continue;
       const normalized = stateSnapshot(value);
       if (!normalized) throw new Error('contributor-state-snapshot-invalid');
-      if (!latest || normalized.revision > latest.value.revision
-          || normalized.revision === latest.value.revision && key > latest.key) {
+      // why: a proposal is durable before its commit write can begin. A
+      // successor observes every proposal's ceiling, while a first-write
+      // timeout can land late only as an inert uncommitted proposal.
+      lastIssuedRevision = Math.max(lastIssuedRevision, normalized.revision);
+      if (normalized.committed && (!latest || normalized.revision > latest.value.revision
+          || normalized.revision === latest.value.revision && key > latest.key)) {
         latest = { key, value: normalized };
       }
     }
-    if (latest) lastIssuedRevision = Math.max(lastIssuedRevision, latest.value.revision);
     return latest;
   };
   const observeRevisionCeiling = async () => {
@@ -242,9 +246,12 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
   const writeState = async (/** @type {any|null} */ record) => {
     const revision = issueRevision();
     const key = `${CONTRIBUTOR_STATE_PREFIX}${String(revision).padStart(16, '0')}-${makeId()}`;
-    const value = Object.freeze({
+    const proposal = Object.freeze({
       version: 2, revision, state: record ? 'active' : 'revoked', record,
+      committed: false,
     });
+    await set(key, proposal);
+    const value = Object.freeze({ ...proposal, committed: true });
     await set(key, value);
     // why: every key is generation-unique and cleanup only targets older
     // revisions. A timed-out write/delete may finish late, but it can neither
