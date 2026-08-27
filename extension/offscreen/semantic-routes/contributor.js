@@ -133,7 +133,8 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
     const result = await kernelCall('semantic.contributor.read', {});
     if (result?.ok !== true) return {
       ok: false, error: 'Contributor Metrics status is temporarily unavailable.',
-      outcomeKnown: true, retryable: true,
+      outcomeKnown: result?.outcomeKnown === true,
+      retryable: result?.outcomeKnown === true,
     };
     const store = makeContributorStore({ kv: {
       get: async () => result.value ?? null,

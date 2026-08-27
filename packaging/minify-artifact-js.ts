@@ -55,6 +55,11 @@ const DWEB_DISABLED_PRESERVE_EXACT = new Set([
   'background/routes/dweb.js',
   'background/routes/dweb-self.js',
 ]);
+const STORE_PRESERVE_EXACT = new Set([
+  'offscreen/actor-worker.js',
+  'offscreen/semantic-route-host.js',
+  'options/components/options-app.js',
+]);
 
 const byteLength = (source: string): number => Buffer.byteLength(source, 'utf8');
 
@@ -68,6 +73,7 @@ const shouldTransform = (
   return ['.js', '.mjs'].includes(extname(file))
     && !rel.startsWith('vendor/')
     && !PRESERVE_EXACT.has(rel)
+    && (channel !== 'store' || !STORE_PRESERVE_EXACT.has(rel))
     && (dwebEnabledForTarget(channel, browser) || !DWEB_DISABLED_PRESERVE_EXACT.has(rel));
 };
 

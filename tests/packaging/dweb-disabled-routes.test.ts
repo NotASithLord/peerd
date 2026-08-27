@@ -10,11 +10,14 @@ import { makeDwebRoutes as makeDisabledDwebRoutes } from '../../packaging/templa
 import { makeDwebSelfRoutes as makeDisabledDwebSelfRoutes } from '../../packaging/templates/routes-dweb-self.disabled.js';
 import {
   DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
-  STORE_LOADER_TEMPLATE,
+  STORE_ACTOR_WORKER_TEMPLATE, STORE_LOADER_TEMPLATE,
+  STORE_OPTIONS_APP_TEMPLATE, STORE_SEMANTIC_HOST_TEMPLATE,
 } from '../../packaging/lib.ts';
 import { applyDwebDisabledTemplates } from '../../packaging/package.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
-import { dwebDisabledTemplateFailures } from '../../packaging/verify-store-artifact.ts';
+import {
+  dwebDisabledTemplateFailures, storeContributorBoundaryFailures,
+} from '../../packaging/verify-store-artifact.ts';
 
 const temporaryRoots: string[] = [];
 const temporaryRoot = (): string => {
@@ -160,6 +163,9 @@ describe('dweb-disabled route factories', () => {
       ['shared/dweb-loader.js', STORE_LOADER_TEMPLATE],
       ['background/routes/dweb.js', DWEB_ROUTES_DISABLED_TEMPLATE],
       ['background/routes/dweb-self.js', DWEB_SELF_ROUTES_DISABLED_TEMPLATE],
+      ['offscreen/actor-worker.js', STORE_ACTOR_WORKER_TEMPLATE],
+      ['options/components/options-app.js', STORE_OPTIONS_APP_TEMPLATE],
+      ['offscreen/semantic-route-host.js', STORE_SEMANTIC_HOST_TEMPLATE],
     ] as const) {
       const target = join(root, relativePath);
       mkdirSync(dirname(target), { recursive: true });
@@ -173,6 +179,16 @@ describe('dweb-disabled route factories', () => {
       'background/routes/dweb.js is NOT the committed disabled template',
       'background/routes/dweb-self.js missing from artifact',
       'offscreen/dweb-transfer-host.js present in dweb-disabled artifact',
+    ]);
+  });
+
+  test('artifact verifier rejects Contributor projection code in the Store actor runtime', () => {
+    const root = temporaryRoot();
+    write(root, 'offscreen/actor-worker-runtime.js', 'export const startActorWorker = () => {};\n');
+    expect(storeContributorBoundaryFailures(root)).toEqual([]);
+    write(root, 'offscreen/actor-worker-runtime.js', 'const contributor = projectResult();\n');
+    expect(storeContributorBoundaryFailures(root)).toEqual([
+      'offscreen/actor-worker-runtime.js contains Contributor code',
     ]);
   });
 

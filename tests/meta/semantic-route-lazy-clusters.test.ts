@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { relative, join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
-import { CONTROLLER_BUILD_ENTRIES } from '../../packaging/controller-build-identity.ts';
+import {
+  CONTROLLER_BUILD_ENTRIES, CONTROLLER_OPTIONAL_BUILD_ENTRIES,
+} from '../../packaging/controller-build-identity.ts';
 import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
 import {
   SEMANTIC_HOST_BUILD_ENTRIES,
@@ -86,7 +88,9 @@ describe('digest-bound lazy semantic route clusters', () => {
       for (const other of Object.values(expected).filter((route) => route !== ownRoute)) {
         expect(modules.has(other), `${entry} -> ${other}`).toBe(false);
       }
-      expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
+      expect([
+        ...CONTROLLER_BUILD_ENTRIES, ...CONTROLLER_OPTIONAL_BUILD_ENTRIES,
+      ]).toContain(entry as any);
       expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain(entry as any);
     }
     expect(JSON.parse(JSON.stringify(SEMANTIC_HOST_CLUSTER_ENTRIES))).toEqual(

@@ -135,7 +135,7 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
   // Feedback belongs to the completed answer for a human turn, not every
   // intermediate assistant step before a tool call. The live answer becomes
   // eligible only after the authoritative turn slot is idle.
-  const feedbackMessageIds = busy
+  const feedbackMessageIds = busy || !CONTRIBUTOR_FEEDBACK_ENABLED
     ? new Set()
     : new Set(contributorFeedbackTargets(messages ?? []).keys());
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN

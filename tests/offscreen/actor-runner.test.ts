@@ -65,7 +65,7 @@ const answerProbe = (worker: FakeWorker, message: any) => {
 describe('actor worker startup proof', () => {
   test('the worker forwards the preflight reply into the actor loop', () => {
     const source = readFileSync(
-      new URL('../../extension/offscreen/actor-worker.js', import.meta.url), 'utf8',
+      new URL('../../extension/offscreen/actor-worker-runtime.js', import.meta.url), 'utf8',
     );
     expect(source).toContain('preflightReply: metadata.preflightReply');
   });
@@ -258,9 +258,13 @@ describe('actor worker startup proof', () => {
     const workerSource = readFileSync(
       new URL('../../extension/offscreen/actor-worker.js', import.meta.url), 'utf8',
     );
+    const runtimeSource = readFileSync(
+      new URL('../../extension/offscreen/actor-worker-runtime.js', import.meta.url), 'utf8',
+    );
     expect(runnerSource).not.toContain('controller-contributor.js');
     expect(runnerSource).toContain('parseContributorProjection');
     expect(workerSource).toContain('projectContributorSettlement');
+    expect(runtimeSource).not.toContain('contributor');
   });
 
   test('refuses an invalid realm before run or relay', async () => {

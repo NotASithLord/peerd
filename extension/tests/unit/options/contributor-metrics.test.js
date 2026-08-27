@@ -98,17 +98,20 @@ describe('Contributor Metrics human UI', () => {
     }
   });
 
-  it('reconciles an unknown enable result and never renders raw transport text', async () => {
+  it('keeps an unknown enable explicit through status refresh until the user retries', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);
     let statusCalls = 0;
+    let enableCalls = 0;
     const send = async (/** @type {any} */ message) => {
       if (message.type === 'contributor/status') {
         statusCalls += 1;
-        return statusCalls === 1
-          ? { ok: true, status: { enabled: false, disclosureVersion: 1, diagnostic: null } }
-          : { ok: false, error: 'status-lost' };
+        return { ok: true,
+          status: { enabled: false, disclosureVersion: 1, diagnostic: null } };
       }
+      enableCalls += 1;
+      if (enableCalls > 1) return { ok: true,
+        status: { enabled: true, disclosureVersion: 1, diagnostic: null, bytes: '{}' } };
       return {
         ok: false, error: 'raw-private-generation',
         outcomeKnown: false, outcomeKind: 'transport-lost',
@@ -123,7 +126,12 @@ describe('Contributor Metrics human UI', () => {
       expect(statusCalls).toBe(2);
       expect(root.textContent).toContain('could not confirm whether enabling Contributor Metrics finished');
       expect(root.textContent?.includes('raw-private-generation')).toBe(false);
-      expect(button(root, 'Enable Contributor Metrics').disabled).toBe(true);
+      expect(button(root, 'Retry enable').disabled).toBe(false);
+      button(root, 'Retry enable').click();
+      await settle();
+      expect(enableCalls).toBe(2);
+      expect(root.textContent).toContain('Enabled locally');
+      expect(root.textContent?.includes('could not confirm whether enabling')).toBe(false);
     } finally {
       m.mount(root, null);
       root.remove();

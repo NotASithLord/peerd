@@ -67,7 +67,7 @@ const unresolved = async (
 };
 
 /** Every module entry point that ships: each page's <script src> + the SW. */
-const entryPoints = (root: string, dweb: boolean): string[] => {
+const entryPoints = (root: string, dweb: boolean, contributor: boolean): string[] => {
   const entries = new Set<string>();
   for (const f of walk(root)) {
     if (!f.endsWith('.html')) continue;
@@ -93,7 +93,7 @@ const entryPoints = (root: string, dweb: boolean): string[] => {
   // the cold static graph by design. Seed the reviewed inventory explicitly;
   // unlike the old actor-worker special case, missing entries must fail instead
   // of being silently skipped.
-  for (const lazyEntry of packagedLazyModuleEntries(dweb)) {
+  for (const lazyEntry of packagedLazyModuleEntries(dweb, contributor)) {
     entries.add(join(root, lazyEntry));
   }
   return [...entries];
@@ -159,7 +159,9 @@ for (const channel of ['preview', 'store'] as const) {
   for (const browser of ['chrome', 'firefox'] as const) {
     await packageArtifact({ channel, browser, version, sign: false, verify: false });
     const root = join(REPO_ROOT, 'artifacts', 'staging', `${channel}-${browser}`);
-    const entries = entryPoints(root, dwebEnabledForTarget(channel, browser));
+    const entries = entryPoints(
+      root, dwebEnabledForTarget(channel, browser), channel === 'preview',
+    );
     let chMiss = 0;
     for (const entry of entries) {
       const miss = await unresolved(entry, root);

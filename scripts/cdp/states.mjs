@@ -2362,8 +2362,14 @@ export const STATES = [
       const page = await openWidePage(ctx, 'options/options.html#!/contributor-metrics');
       const stored = () => evalIn(page, `(async () => {
         const browser = (await import('/vendor/browser-polyfill.js')).default;
-        return browser.storage.local.get(['contributor_metrics.aggregate.v1']);
+        const all = await browser.storage.local.get(null);
+        return Object.fromEntries(Object.entries(all)
+          .filter(([key]) => key.startsWith('contributor_metrics.')));
       })()`, true);
+      const latestCommitted = (records) => Object.entries(records ?? {})
+        .filter(([key, value]) => key.startsWith('contributor_metrics.state.v2.')
+          && value?.version === 2 && value?.committed === true)
+        .sort((left, right) => right[1].revision - left[1].revision)[0]?.[1] ?? null;
       try {
         await waitFor(() => evalIn(page, `document.querySelector('.contributor-metrics') !== null`),
           { budgetMs: 15_000, pollMs: 80 });
@@ -2379,7 +2385,7 @@ export const STATES = [
           return browser.runtime.sendMessage({ type: 'contributor/enable' });
         })()`, true);
         rec.check('non-Options first-party pages cannot enable contribution',
-          forged?.ok === false && forged?.error === 'trusted-options-sender-required',
+          forged?.ok === false && forged?.code === 'contributor-channel-admission-denied',
           JSON.stringify(forged));
         rec.check('a rejected enable remains storage-inert',
           Object.keys(await stored()).length === 0, JSON.stringify(await stored()));
@@ -2389,9 +2395,11 @@ export const STATES = [
         await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') !== null`),
           { budgetMs: 8_000, pollMs: 80 });
         const active = await stored();
-        const record = active?.['contributor_metrics.aggregate.v1'];
-        rec.check('the exact Options button creates one atomic consent+aggregate record',
+        const snapshot = latestCommitted(active);
+        const record = snapshot?.record;
+        rec.check('the exact Options button commits one v2 consent journal generation',
           Object.keys(active ?? {}).length === 1
+            && snapshot?.state === 'active'
             && record?.version === 1
             && record?.consent?.enabled === true
             && record?.consent?.schemaVersion === 1
@@ -2404,9 +2412,14 @@ export const STATES = [
           .find((button) => button.textContent === 'Disable and clear')?.click())()`);
         await waitFor(() => evalIn(page, `document.querySelector('.contributor-payload') === null`),
           { budgetMs: 8_000, pollMs: 80 });
+        await waitFor(async () => Object.keys(await stored()).length === 1,
+          { budgetMs: 8_000, pollMs: 80 });
         const cleared = await stored();
-        rec.check('disable revokes consent and clears all pending local state',
-          Object.keys(cleared ?? {}).length === 0, JSON.stringify(cleared));
+        const revoked = latestCommitted(cleared);
+        rec.check('disable commits revocation and removes consent-bearing local state',
+          Object.keys(cleared ?? {}).length === 1
+            && revoked?.state === 'revoked' && revoked?.record === null,
+          JSON.stringify(cleared));
       } finally { try { page.close(); } catch { /* */ } }
     },
   },

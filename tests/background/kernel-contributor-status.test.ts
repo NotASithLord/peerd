@@ -428,6 +428,39 @@ describe('Preview Contributor Metrics private channel', () => {
     expect(await restarted.arm()).toEqual(acknowledged);
   });
 
+  test('an uncommitted enable stays unknown across restart until its late commit is durable', async () => {
+    const state = storage(null);
+    const sender = {};
+    const originalSet = state.kv.set;
+    let releaseLateCommit: () => void = () => {};
+    const lateCommit = new Promise<void>((resolve) => { releaseLateCommit = resolve; });
+    let stateWrites = 0;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && ++stateWrites === 2) {
+        await lateCommit;
+      }
+      await originalSet(key, value);
+    };
+    const beforeRestart = directRoutesFor(state, sender);
+    expect(await beforeRestart.routes['contributor/enable']({
+      type: 'contributor/enable',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await beforeRestart.routes['contributor/status']({
+      type: 'contributor/status',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+
+    const restarted = directRoutesFor(state, sender);
+    expect(await restarted.routes['contributor/status']({
+      type: 'contributor/status',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+    releaseLateCommit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await restarted.routes['contributor/status']({
+      type: 'contributor/status',
+    }, sender)).toMatchObject({ ok: true, status: { enabled: true } });
+    expect(await restarted.arm()).toMatchObject({ enabled: true });
+  });
+
   test('production disable timeout then re-enable ignores the late revocation', async () => {
     const state = storage(null);
     const sender = {};
@@ -485,6 +518,43 @@ describe('Preview Contributor Metrics private channel', () => {
     releaseLateRevocation();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(await restarted.arm()).toEqual(acknowledged);
+  });
+
+  test('an uncommitted revocation stays unknown across restart until its late commit is durable', async () => {
+    const state = storage(null);
+    const sender = {};
+    const beforeRestart = directRoutesFor(state, sender);
+    expect(await beforeRestart.routes['contributor/enable']({
+      type: 'contributor/enable',
+    }, sender)).toMatchObject({ ok: true, status: { enabled: true } });
+    const originalSet = state.kv.set;
+    let releaseLateCommit: () => void = () => {};
+    const lateCommit = new Promise<void>((resolve) => { releaseLateCommit = resolve; });
+    let revocationWrites = 0;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && value?.state === 'revoked'
+          && ++revocationWrites === 2) {
+        await lateCommit;
+      }
+      await originalSet(key, value);
+    };
+    expect(await beforeRestart.routes['contributor/disable']({
+      type: 'contributor/disable',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await beforeRestart.routes['contributor/status']({
+      type: 'contributor/status',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+
+    const restarted = directRoutesFor(state, sender);
+    expect(await restarted.routes['contributor/status']({
+      type: 'contributor/status',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+    releaseLateCommit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await restarted.routes['contributor/status']({
+      type: 'contributor/status',
+    }, sender)).toMatchObject({ ok: true, status: { enabled: false } });
+    expect(await restarted.arm()).toEqual({ enabled: false, generation: null });
   });
 
   test('late snapshot cleanup never deletes a newer acknowledged generation', async () => {
