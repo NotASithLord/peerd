@@ -30,7 +30,16 @@ export const structuredClonePayloadBytes = (
     seen.add(value);
     try {
       if (Array.isArray(value)) {
-        return value.reduce((total, entry) => total + size(entry, depth + 1), 0);
+        let total = 0;
+        for (const [key, descriptor] of Object.entries(
+          Object.getOwnPropertyDescriptors(value),
+        )) {
+          if (key === 'length') continue;
+          if (!('value' in descriptor)) return Infinity;
+          total += encoder.encode(key).byteLength + size(descriptor.value, depth + 1);
+          if (!Number.isFinite(total)) return Infinity;
+        }
+        return total;
       }
       const prototype = Object.getPrototypeOf(value);
       if (prototype !== Object.prototype && prototype !== null) return Infinity;

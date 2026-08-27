@@ -46,8 +46,12 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
   if (Object.is(left, right)) return true;
   if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
   if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
-      && left.every((value, index) => sameClone(value, right[index]));
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key, index) => key === rightKeys[index]
+        && sameClone(Reflect.get(left, key), Reflect.get(right, key)));
   }
   if (left instanceof ArrayBuffer || right instanceof ArrayBuffer) {
     if (!(left instanceof ArrayBuffer) || !(right instanceof ArrayBuffer)
@@ -331,7 +335,10 @@ export const makeOffscreenActorClient = ({
         // it already fired under {once:true}); keeps nothing dangling on the turn signal.
         signal?.removeEventListener('abort', abortRun);
         relayController.abort();
-        await providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
+        if (providerEgress?.closeOwner) {
+          await boundedCleanup(Promise.resolve().then(() =>
+            providerEgress.closeOwner(grant.providerOwner)));
+        }
         if (typeof settleToolCall === 'function') {
           await Promise.allSettled([...grant.actorExecutions.values()].map(async (entry) => {
             if (entry.open !== true) return;
@@ -459,11 +466,36 @@ export const makeOffscreenActorClient = ({
     /** @type {string[]} */ fields,
   ) => {
     const entry = grant?.actorExecutions.get(msg.executionId);
-    return grant && !grant.relaySignal.aborted
+    return entryEffectsAllowed(grant, entry)
       && exactKeys(msg, ['executionId', ...fields])
-      && entry?.open === true
-      && entry.effectsOpen === true
       && entry.authorityClass === domain ? entry : null;
+  };
+
+  const entryEffectsAllowed = (/** @type {any} */ grant, /** @type {any} */ entry) => {
+    if (!grant || grant.relaySignal.aborted || entry?.open !== true
+        || entry.effectsOpen !== true) return false;
+    const seen = new Set();
+    let current = entry;
+    while (typeof current.parentExecutionId === 'string') {
+      if (seen.has(current.executionId)) return false;
+      seen.add(current.executionId);
+      current = grant.actorExecutions.get(current.parentExecutionId);
+      if (!current || current.open !== true || current.effectsOpen !== true) return false;
+    }
+    return true;
+  };
+
+  const closeEntryEffects = (
+    /** @type {any} */ grant,
+    /** @type {any} */ entry,
+    /** @type {Set<string>} */ seen = new Set(),
+  ) => {
+    if (!entry || seen.has(entry.executionId)) return;
+    seen.add(entry.executionId);
+    entry.effectsOpen = false;
+    for (const childId of entry.childExecutionIds ?? []) {
+      closeEntryEffects(grant, grant.actorExecutions.get(childId), seen);
+    }
   };
   const repositoryEntry = (
     /** @type {any} */ grant,
@@ -645,6 +677,7 @@ export const makeOffscreenActorClient = ({
     }
     entry.domainCalls.add(operation);
     entry.effectEntered = true;
+    entry.effectPending += 1;
     try { return { ok: true, value: await execute(), outcomeKnown: true }; }
     catch (cause) {
       const detail = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
@@ -655,7 +688,19 @@ export const makeOffscreenActorClient = ({
         ok: false, error: detail?.message ?? String(cause), outcomeKnown,
         retryable: outcomeKnown && detail?.retryable !== false,
       };
+    } finally {
+      entry.effectPending = Math.max(0, entry.effectPending - 1);
     }
+  };
+
+  const runDirectActorEffect = async (
+    /** @type {any} */ entry,
+    /** @type {string} */ operation,
+    /** @type {'read'|'control'|'commit'} */ riskClass,
+    /** @type {()=>Promise<any>|any} */ execute,
+  ) => {
+    const result = await runDomainEffect(entry, operation, riskClass, execute);
+    return result.ok === true ? { ok: true, value: result.value } : result;
   };
 
   const settleActorExecution = (
@@ -665,10 +710,39 @@ export const makeOffscreenActorClient = ({
   ) => {
     // Settlement freezes the result and synchronously closes every effect route.
     // Durable persistence may retry, but authority can never reopen around it.
-    entry.effectsOpen = false;
+    closeEntryEffects(grant, entry);
     if (entry.settling) return entry.settling;
-    if (entry.hasSettlementResult !== true) {
-      entry.settlementResult = structuredClone(result);
+    if (entry.hasReportedSettlementResult !== true) {
+      entry.reportedSettlementResult = structuredClone(result);
+      entry.hasReportedSettlementResult = true;
+      const liveChildren = [...entry.childExecutionIds]
+        .map((id) => grant.actorExecutions.get(id))
+        .filter((child) => child?.open === true);
+      const pending = entry.effectPending > 0;
+      const alreadyUnknown = entry.unknownIrreversible === true;
+      const descendantEffect = liveChildren.some((child) =>
+        child.effectEntered === true || child.effectPending > 0
+        || child.unknownIrreversible === true);
+      if (pending || descendantEffect) entry.unknownIrreversible = true;
+      const effectStateKnown = entry.unknownIrreversible !== true
+        && !pending && liveChildren.length === 0;
+      let effectiveResult = entry.reportedSettlementResult;
+      if (!effectStateKnown) {
+        const effectWasAlreadyUnknown = alreadyUnknown
+          && !pending && liveChildren.length === 0;
+        effectiveResult = {
+          ok: false,
+          error: effectWasAlreadyUnknown
+            ? 'Tool outcome unknown. Check authority state before retrying.'
+            : 'Tool execution settled while exact authority remained active.',
+          code: effectWasAlreadyUnknown
+            ? 'tool-outcome-unknown' : 'actor-tool-effect-pending',
+          outcomeKnown: false,
+          retryable: false,
+          outcomeKind: 'host-lost',
+        };
+      }
+      entry.settlementResult = structuredClone(effectiveResult);
       entry.hasSettlementResult = true;
     }
     const pending = (async () => {
@@ -678,6 +752,10 @@ export const makeOffscreenActorClient = ({
         );
         entry.open = false;
         grant.actorExecutions.delete(entry.executionId);
+        if (typeof entry.parentExecutionId === 'string') {
+          grant.actorExecutions.get(entry.parentExecutionId)
+            ?.childExecutionIds?.delete(entry.executionId);
+        }
         return { ok: true, result: settled };
       } catch (cause) {
         return {
@@ -691,6 +769,29 @@ export const makeOffscreenActorClient = ({
     })();
     entry.settling = pending;
     return pending;
+  };
+
+  const preparationStillLive = (
+    /** @type {any} */ grant,
+    /** @type {boolean} */ nested,
+    /** @type {string|undefined} */ parentExecutionId,
+    /** @type {any} */ parent,
+  ) => !grant.relaySignal.aborted && (!nested
+    || (grant.actorExecutions.get(parentExecutionId) === parent
+      && entryEffectsAllowed(grant, parent)));
+
+  const retirePreparedWithoutAuthority = (/** @type {any} */ prepared) => {
+    if (prepared?.prepared !== true || typeof settleToolCall !== 'function') return;
+    const result = {
+      ok: false,
+      error: 'actor tool preparation lost its live authority before execution',
+      code: 'actor-tool-prepare-aborted',
+      outcomeKnown: true,
+      retryable: true,
+      outcomeKind: 'pre-effect-failure',
+    };
+    void boundedCleanup(Promise.resolve().then(() =>
+      settleToolCall(prepared, { result })));
   };
 
   const routes = {
@@ -759,7 +860,10 @@ export const makeOffscreenActorClient = ({
             && modelId === grant.model,
         });
         if (grant.relaySignal.aborted || abortedRuns.has(key)) {
-          await providerEgress.closeOwner(grant.providerOwner).catch(() => {});
+          grant.modelActive = false;
+          grant.modelStreamId = null;
+          await boundedCleanup(Promise.resolve().then(() =>
+            providerEgress.closeOwner(grant.providerOwner)));
           return { ok: false, error: 'aborted' };
         }
         if (result?.ok !== true) grant.modelActive = false;
@@ -877,6 +981,13 @@ export const makeOffscreenActorClient = ({
         permits: (/** @type {string} */ providerId, /** @type {string} */ modelId) =>
           providerId === grant.provider && modelId === grant.model,
       });
+      if (grant.relaySignal.aborted || abortedRuns.has(grant.runId)) {
+        grant.modelActive = false;
+        grant.modelStreamId = null;
+        await boundedCleanup(Promise.resolve().then(() =>
+          providerEgress.closeOwner(grant.providerOwner)));
+        return { ok: false, error: 'aborted' };
+      }
       if (result?.ok !== true || typeof result?.value?.streamId !== 'string') {
         grant.modelActive = false;
         return result;
@@ -962,8 +1073,7 @@ export const makeOffscreenActorClient = ({
           || !controllerAuthorityClassAllowed(domain)
           || typeof prepareToolCall !== 'function'
           || typeof settleToolCall !== 'function'
-          || (nestedPageProgram && (!parent || parent.open !== true
-            || parent.effectsOpen !== true
+          || (nestedPageProgram && (!entryEffectsAllowed(grant, parent)
             || parent.toolName !== 'page_code' || parent.authorityClass !== 'page'
             || !isPageProgramSemanticTool(call?.name)))) {
         return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
@@ -978,6 +1088,12 @@ export const makeOffscreenActorClient = ({
         pageProgram: nestedPageProgram,
       });
       if (admittedContext.ok !== true) return admittedContext;
+      if (!preparationStillLive(
+        grant, nestedPageProgram, pageProgramParentExecutionId, parent,
+      )) {
+        return { ok: false, error: grant.relaySignal.aborted
+          ? 'aborted' : 'actor/tool-prepare: parent authority retired' };
+      }
       const descriptor = nestedPageProgram
         ? grant.pageProgramToolDescriptors.get(call?.name)
         : grant.toolDescriptors.get(call?.name);
@@ -987,9 +1103,17 @@ export const makeOffscreenActorClient = ({
       const prepared = await prepareToolCall(
         call, admittedContext.ctx, descriptor,
       );
+      if (!preparationStillLive(
+        grant, nestedPageProgram, pageProgramParentExecutionId, parent,
+      )) {
+        retirePreparedWithoutAuthority(prepared);
+        return { ok: false, error: grant.relaySignal.aborted
+          ? 'aborted' : 'actor/tool-prepare: parent authority retired' };
+      }
       if (prepared?.prepared !== true) return { ok: true, mode: 'result', result: prepared };
       const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[domain];
       if (!policy || structuredClonePayloadBytes(prepared.args) > policy.argumentBytes) {
+        retirePreparedWithoutAuthority(prepared);
         return { ok: false, error: 'actor/tool-prepare: semantic arguments exceed authority limits' };
       }
       let authorityCall;
@@ -1001,17 +1125,22 @@ export const makeOffscreenActorClient = ({
           ...call, args: structuredClone(prepared.args),
         });
       } catch {
+        retirePreparedWithoutAuthority(prepared);
         return { ok: false, error: 'actor/tool-prepare: semantic arguments are not cloneable' };
       }
       const executionId = `ae-${now().toString(36)}-${++seq}`;
       grant.actorExecutions.set(executionId, {
         executionId,
         open: true, effectsOpen: true, settling: null,
+        hasReportedSettlementResult: false, reportedSettlementResult: undefined,
         hasSettlementResult: false, settlementResult: undefined,
-        effectEntered: false, unknownIrreversible: false,
+        effectEntered: false, effectPending: 0, unknownIrreversible: false,
+        parentExecutionId: nestedPageProgram ? pageProgramParentExecutionId : null,
+        childExecutionIds: new Set(),
         domainCalls: new Set(), domainState: {}, prepared,
         call: authorityCall, toolName: call.name, authorityClass: domain,
       });
+      if (nestedPageProgram) parent.childExecutionIds.add(executionId);
       const projection = domain === 'actor' ? {
         sessionId: admittedContext.ctx.session?.sessionId,
         sessionDepth: admittedContext.ctx.session?.depth ?? 0,
@@ -1055,9 +1184,10 @@ export const makeOffscreenActorClient = ({
       const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
       const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
       const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
-      if (!grant || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
+      if (!entryEffectsAllowed(grant, entry)
+          || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
         'relayToken', 'tools', 'maxSteps', 'maxDepth',
-      ]) || !entry || entry.open !== true || entry.effectsOpen !== true
+      ])
           || entry.toolName !== 'actor_create'
           || args?.sync !== true || msg.task !== args?.task
           || msg.allowRecursion !== (args?.allowRecursion === true)
@@ -1071,14 +1201,13 @@ export const makeOffscreenActorClient = ({
           || (msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth))) {
         return { ok: false, error: 'actor/spawn-sync: authority mismatch', outcomeKnown: true };
       }
-      entry.domainCalls.add('actor/spawn-sync');
-      try {
-        const ctx = entry.prepared.ctx;
-        if (typeof ctx?.actorAuthority?.spawnSync !== 'function') {
-          return { ok: true, value: { refused: true, result: 'actor_orchestrator_unavailable' } };
-        }
-        entry.effectEntered = true;
-        return { ok: true, value: await ctx.actorAuthority.spawnSync({
+      const ctx = entry.prepared.ctx;
+      if (typeof ctx?.actorAuthority?.spawnSync !== 'function') {
+        entry.domainCalls.add('actor/spawn-sync');
+        return { ok: true, value: { refused: true, result: 'actor_orchestrator_unavailable' } };
+      }
+      return runDirectActorEffect(entry, 'actor/spawn-sync', 'commit', () =>
+        ctx.actorAuthority.spawnSync({
           task: msg.task,
           ...(msg.tools === undefined ? {} : { tools: msg.tools }),
           ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
@@ -1088,15 +1217,7 @@ export const makeOffscreenActorClient = ({
           parentDepth: ctx.session?.depth ?? 0,
           parentInbound: ctx.inbound === false ? false : true,
           parentToolUseId: entry.call?.id,
-        }) };
-      } catch (cause) {
-        const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-        return {
-          ok: false, error: failure?.message ?? String(cause),
-          outcomeKnown: failure?.outcomeKnown === true,
-          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
-        };
-      }
+        }));
     },
     'actor/spawn-async': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1108,9 +1229,10 @@ export const makeOffscreenActorClient = ({
       const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
       const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
       const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
-      if (!grant || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
+      if (!entryEffectsAllowed(grant, entry)
+          || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
         'relayToken', 'tools', 'maxSteps', 'maxDepth',
-      ]) || !entry || entry.open !== true || entry.effectsOpen !== true
+      ])
           || entry.toolName !== 'actor_create'
           || args?.sync === true || msg.task !== args?.task
           || msg.allowRecursion !== (args?.allowRecursion === true)
@@ -1124,14 +1246,13 @@ export const makeOffscreenActorClient = ({
           || (msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth))) {
         return { ok: false, error: 'actor/spawn-async: authority mismatch', outcomeKnown: true };
       }
-      entry.domainCalls.add('actor/spawn-async');
-      try {
-        const ctx = entry.prepared.ctx;
-        if (typeof ctx?.actorAuthority?.spawnAsync !== 'function') {
-          return { ok: true, value: { ok: false, error: 'async_actor_unavailable' } };
-        }
-        entry.effectEntered = true;
-        return { ok: true, value: await ctx.actorAuthority.spawnAsync({
+      const ctx = entry.prepared.ctx;
+      if (typeof ctx?.actorAuthority?.spawnAsync !== 'function') {
+        entry.domainCalls.add('actor/spawn-async');
+        return { ok: true, value: { ok: false, error: 'async_actor_unavailable' } };
+      }
+      return runDirectActorEffect(entry, 'actor/spawn-async', 'commit', () =>
+        ctx.actorAuthority.spawnAsync({
           task: msg.task,
           ...(msg.tools === undefined ? {} : { tools: msg.tools }),
           ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
@@ -1141,15 +1262,7 @@ export const makeOffscreenActorClient = ({
           parentDepth: ctx.session?.depth ?? 0,
           parentInbound: ctx.inbound === false ? false : true,
           parentToolUseId: entry.call?.id,
-        }) };
-      } catch (cause) {
-        const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-        return {
-          ok: false, error: failure?.message ?? String(cause),
-          outcomeKnown: failure?.outcomeKnown === true,
-          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
-        };
-      }
+        }));
     },
     'actor/tasks-read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1157,20 +1270,14 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
-      if (!grant || !exactKeys(msg, ['executionId'])
-          || !entry || entry.open !== true || entry.effectsOpen !== true
+      if (!entryEffectsAllowed(grant, entry) || !exactKeys(msg, ['executionId'])
           || entry.toolName !== 'actor_tasks'
           || entry.domainCalls.size > 0) {
         return { ok: false, error: 'actor/tasks-read: authority mismatch', outcomeKnown: true };
       }
-      entry.domainCalls.add('actor/tasks-read');
-      entry.effectEntered = true;
-      try {
-        const read = entry.prepared.ctx?.actorAuthority?.listTasks;
-        return { ok: true, value: typeof read === 'function' ? await read() : [] };
-      } catch (cause) {
-        return { ok: false, error: cause instanceof Error ? cause.message : String(cause), outcomeKnown: true, retryable: true };
-      }
+      const read = entry.prepared.ctx?.actorAuthority?.listTasks;
+      return runDirectActorEffect(entry, 'actor/tasks-read', 'read', () =>
+        typeof read === 'function' ? read() : []);
     },
     'actor/task-cancel': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1178,22 +1285,16 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
-      if (!grant || !exactKeys(msg, ['executionId', 'taskId'])
-          || !entry || entry.open !== true || entry.effectsOpen !== true
+      if (!entryEffectsAllowed(grant, entry) || !exactKeys(msg, ['executionId', 'taskId'])
           || entry.toolName !== 'actor_cancel'
           || entry.domainCalls.size > 0 || typeof msg.taskId !== 'string' || !msg.taskId
           || msg.taskId !== entry.call?.args?.taskId) {
         return { ok: false, error: 'actor/task-cancel: authority mismatch', outcomeKnown: true };
       }
-      entry.domainCalls.add('actor/task-cancel');
-      entry.effectEntered = true;
-      try {
-        const cancel = entry.prepared.ctx?.actorAuthority?.cancelTask;
-        return { ok: true, value: typeof cancel === 'function'
-          ? await cancel(msg.taskId) : { ok: false, error: 'async_actor_unavailable' } };
-      } catch (cause) {
-        return { ok: false, error: cause instanceof Error ? cause.message : String(cause), outcomeKnown: true, retryable: true };
-      }
+      const cancel = entry.prepared.ctx?.actorAuthority?.cancelTask;
+      return runDirectActorEffect(entry, 'actor/task-cancel', 'control', () =>
+        typeof cancel === 'function'
+          ? cancel(msg.taskId) : { ok: false, error: 'async_actor_unavailable' });
     },
     'actor/message-deliver': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1203,10 +1304,10 @@ export const makeOffscreenActorClient = ({
       const entry = grant?.actorExecutions.get(msg.executionId);
       const args = entry?.call?.args;
       const sessionKind = entry?.prepared?.ctx?.session?.kind;
-      if (!grant || !exactKeys(msg, [
+      if (!entryEffectsAllowed(grant, entry) || !exactKeys(msg, [
         'executionId', 'to', 'message', 'oneShot', 'awaitReply',
         'degradeToAsync', 'awaitCapMs',
-      ]) || !entry || entry.open !== true || entry.effectsOpen !== true
+      ])
           || entry.toolName !== 'message_actor'
           || entry.domainCalls.size > 0 || typeof msg.to !== 'string'
           || msg.to !== args?.to || msg.message !== args?.message
@@ -1219,31 +1320,22 @@ export const makeOffscreenActorClient = ({
           || msg.awaitCapMs > 3 * 60_000) {
         return { ok: false, error: 'actor/message-deliver: authority mismatch', outcomeKnown: true };
       }
-      entry.domainCalls.add('actor/message-deliver');
-      try {
-        const ctx = entry.prepared.ctx;
-        if (typeof ctx?.actorAuthority?.deliverMessage !== 'function') {
-          return { ok: true, value: { ok: false, error: 'message_actor is not enabled' } };
-        }
-        entry.effectEntered = true;
-        return { ok: true, value: await ctx.actorAuthority.deliverMessage({
+      const ctx = entry.prepared.ctx;
+      if (typeof ctx?.actorAuthority?.deliverMessage !== 'function') {
+        entry.domainCalls.add('actor/message-deliver');
+        return { ok: true, value: { ok: false, error: 'message_actor is not enabled' } };
+      }
+      return runDirectActorEffect(entry, 'actor/message-deliver', 'commit', () =>
+        ctx.actorAuthority.deliverMessage({
           to: msg.to, message: msg.message, oneShot: msg.oneShot,
           senderSessionId: ctx.session?.sessionId,
           inbound: ctx.inbound === true,
           toolUseId: entry.call?.id,
           awaitReply: msg.awaitReply,
-          awaitSignal: grant.relaySignal,
+          awaitSignal: /** @type {any} */ (grant).relaySignal,
           degradeToAsync: msg.degradeToAsync,
           awaitCapMs: msg.awaitCapMs,
-        }) };
-      } catch (cause) {
-        const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-        return {
-          ok: false, error: failure?.message ?? String(cause),
-          outcomeKnown: failure?.outcomeKnown === true,
-          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
-        };
-      }
+        }));
     },
     'pod/resolve': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -2283,19 +2375,11 @@ export const makeOffscreenActorClient = ({
           || typeof settleToolCall !== 'function') {
         return { ok: false, error: 'actor/tool-settle: authority mismatch', outcomeKnown: true };
       }
-      const executionResult = entry.unknownIrreversible === true ? {
-        ok: false,
-        error: 'Tool outcome unknown. Check authority state before retrying.',
-        code: 'tool-outcome-unknown',
-        outcomeKnown: false,
-        retryable: false,
-        outcomeKind: 'host-lost',
-      } : msg.result;
-      if (entry.hasSettlementResult === true
-          && !sameClone(entry.settlementResult, executionResult)) {
+      if (entry.hasReportedSettlementResult === true
+          && !sameClone(entry.reportedSettlementResult, msg.result)) {
         return { ok: false, error: 'actor/tool-settle: result mismatch', outcomeKnown: true };
       }
-      return settleActorExecution(grant, entry, executionResult);
+      return settleActorExecution(grant, entry, msg.result);
     },
     /**
      * @param {{ relayToken?: string, event?: object }} [msg]
