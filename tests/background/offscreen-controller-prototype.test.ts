@@ -976,63 +976,28 @@ describe('Chrome lazy controller private channel prototype', () => {
     channel.port1.close();
   });
 
-  test('a retired random epoch cannot replace the active epoch later', async () => {
+  test('offer adoption refuses the identity-free legacy path', () => {
     const expectedWorkerUrl = 'chrome-extension://id/background/kernel.js';
-    let calls = 0;
     const handler = makeControllerOfferHandler({
       expectedWorkerUrl,
       expectedBuildDigest: BUILD_DIGEST,
       supportedCaps: ['state.read'],
-      newId: ids('host-epoch-a', 'host-epoch-b'),
-      loadController: async () => ({
-        call: async () => { calls += 1; return { ok: true }; },
-      }),
+      loadController: async () => ({ call: async () => ({ ok: true }) }),
     });
-    const offer = (epoch: string, channelId: string) => {
-      const channel = new MessageChannel();
-      const accepted = handler({
-        isTrusted: true,
-        source: { scriptURL: expectedWorkerUrl },
-        data: {
-          type: 'peerd/controller-channel', protocol: 2,
-          buildDigest: BUILD_DIGEST,
-          kernelEpoch: epoch, channelId, capabilities: ['state.read'],
-        },
-        ports: [channel.port2],
-      } as unknown as MessageEvent);
-      return { accepted, port: channel.port1 };
-    };
-    const first = offer('epoch-a', 'channel-a');
-    expect(first.accepted).toBe(true);
-    const second = offer('epoch-b', 'channel-b');
-    expect(second.accepted).toBe(true);
-    const lateFirst = offer('epoch-a', 'channel-a-late');
-    expect(lateFirst.accepted).toBe(false);
-
-    const result = new Promise<any>((resolve) => {
-      second.port.onmessage = (event) => {
-        const common = {
-          protocol: 2, buildDigest: BUILD_DIGEST,
-          kernelEpoch: 'epoch-b', hostEpoch: 'host-epoch-b', channelId: 'channel-b',
-        };
-        if (event.data.type === 'controller/ready') {
-          second.port.postMessage({
-            ...common, sequence: 1, type: 'kernel/open', requestId: 'request-b',
-            grantId: 'grant-b', deadlineAt: Date.now() + 10_000,
-            capability: 'state.read', authority: AUTHORITY, payload: {},
-          });
-        } else if (event.data.type === 'controller/accepted') {
-          second.port.postMessage({
-            ...common, sequence: 2, type: 'kernel/commit',
-            requestId: 'request-b', grantId: 'grant-b',
-          });
-        } else if (event.data.type === 'controller/settled') resolve(event.data.result);
-      };
-      second.port.start();
-    });
-    expect(await result).toMatchObject({ ok: true });
-    expect(calls).toBe(1);
-    second.port.close();
+    const channel = new MessageChannel();
+    expect(handler({
+      isTrusted: true,
+      source: { scriptURL: expectedWorkerUrl },
+      data: {
+        type: 'peerd/controller-channel', protocol: 2,
+        buildDigest: BUILD_DIGEST,
+        kernelEpoch: 'legacy-kernel-epoch', channelId: 'legacy-channel',
+        capabilities: ['state.read'],
+      },
+      ports: [channel.port2],
+    } as unknown as MessageEvent)).toBe(false);
+    channel.port1.close();
+    handler.close();
   });
 
   test('offer adoption rejects a new epoch minted under the old boot identity', () => {

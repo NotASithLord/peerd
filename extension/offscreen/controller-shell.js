@@ -684,30 +684,21 @@ export const makeControllerOfferHandler = ({
   /** @type {Readonly<import('/shared/kernel-identity.js').KernelIdentity>|null} */
   let latestIdentity = null;
   let retiredGeneration = 0;
-  /** @type {string|null} */
-  let retiredLegacyEpoch = null;
-  /** @type {{ epoch:string, kernelIdentity?:unknown, leaseGeneration?:number,
+  /** @type {{ epoch:string, kernelIdentity:unknown, leaseGeneration:number,
    *   close:()=>void } | null} */
   let active = null;
   const noteRetired = (/** @type {NonNullable<typeof active>} */ binding) => {
-    if (binding.kernelIdentity && Number.isSafeInteger(binding.leaseGeneration)) {
-      if (!latestIdentity || !kernelIdentityMatches(latestIdentity, binding.kernelIdentity)) {
-        latestIdentity = /** @type {any} */ (binding.kernelIdentity);
-        retiredGeneration = 0;
-      }
-      retiredGeneration = Math.max(retiredGeneration, /** @type {number} */ (
-        binding.leaseGeneration
-      ));
-      return;
+    if (!latestIdentity || !kernelIdentityMatches(latestIdentity, binding.kernelIdentity)) {
+      latestIdentity = /** @type {any} */ (binding.kernelIdentity);
+      retiredGeneration = 0;
     }
-    retiredLegacyEpoch = binding.epoch;
+    retiredGeneration = Math.max(retiredGeneration, binding.leaseGeneration);
   };
   const handleOffer = (/** @type {MessageEvent} */ event) => {
     const source = /** @type {{ scriptURL?: string } | null} */ (event.source);
     const data = /** @type {any} */ (event.data);
     const offeredCaps = parseControllerCaps(data?.capabilities);
-    const offeredIdentity = data?.kernelIdentity === undefined
-      ? null : parseKernelIdentity(data.kernelIdentity);
+    const offeredIdentity = parseKernelIdentity(data?.kernelIdentity);
     const offeredLease = offeredIdentity ? parseOfferLease(data?.lease, offeredIdentity) : null;
     if (!event.isTrusted
         || source?.scriptURL !== expectedWorkerUrl
@@ -717,12 +708,11 @@ export const makeControllerOfferHandler = ({
         || data?.buildDigest !== expectedBuildDigest
         || !isControllerBuildDigest(data?.buildDigest)
         || typeof data?.kernelEpoch !== 'string'
-        || (data?.kernelIdentity !== undefined
-          && (!offeredIdentity || offeredIdentity.kernelEpoch !== data.kernelEpoch))
-        || (offeredIdentity && !offeredLease)
+        || !offeredIdentity || offeredIdentity.kernelEpoch !== data.kernelEpoch
+        || !offeredLease
         || !offeredCaps
         || event.ports?.length !== 1) return false;
-    if (offeredIdentity && latestIdentity) {
+    if (latestIdentity) {
       const sameKernel = kernelIdentityMatches(latestIdentity, offeredIdentity);
       if ((!sameKernel && !kernelIdentityIsSuccessor(latestIdentity, offeredIdentity))
           || (sameKernel && /** @type {NonNullable<typeof offeredLease>} */ (
@@ -732,12 +722,11 @@ export const makeControllerOfferHandler = ({
         return false;
       }
     }
-    if ((!offeredIdentity && retiredLegacyEpoch === data.kernelEpoch)
-        || active?.epoch === data.kernelEpoch) {
+    if (active?.epoch === data.kernelEpoch) {
       event.ports[0].close();
       return false;
     }
-    if (active?.kernelIdentity && offeredIdentity
+    if (active?.kernelIdentity
         && !kernelIdentityIsSuccessor(active.kernelIdentity, offeredIdentity)) {
       event.ports[0].close();
       return false;
@@ -746,8 +735,7 @@ export const makeControllerOfferHandler = ({
       noteRetired(active);
       active.close();
     }
-    if (offeredIdentity
-        && (!latestIdentity || !kernelIdentityMatches(latestIdentity, offeredIdentity))) {
+    if (!latestIdentity || !kernelIdentityMatches(latestIdentity, offeredIdentity)) {
       latestIdentity = offeredIdentity;
       retiredGeneration = 0;
     }
@@ -756,7 +744,7 @@ export const makeControllerOfferHandler = ({
       channelId: data.channelId,
       buildDigest: data.buildDigest,
       kernelEpoch: data.kernelEpoch,
-      ...(offeredIdentity ? { kernelIdentity: offeredIdentity } : {}),
+      kernelIdentity: offeredIdentity,
       hostEpoch: newId(),
       offeredCaps,
       supportedCaps,
@@ -768,7 +756,7 @@ export const makeControllerOfferHandler = ({
           active = null;
         }
       },
-    }), ...(offeredLease ? { leaseGeneration: offeredLease.generation } : {}) };
+    }), leaseGeneration: offeredLease.generation };
     return true;
   };
   // A feature-lease revocation must retire the exact controller epoch and its

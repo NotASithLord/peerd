@@ -9,7 +9,9 @@ import {
   controllerBuildDigest,
   writeControllerBuildIdentity,
 } from '../../packaging/controller-build-identity.ts';
-import { makeSemanticControllerClient } from '../../extension/background/offscreen-controller-client.js';
+import {
+  makeSemanticControllerClient as makeSemanticControllerClientBase,
+} from '../../extension/background/offscreen-controller-client.js';
 import { connectDirectController } from '../../extension/background/direct-controller-client.js';
 import { createKernelSessionAuthority } from '../../extension/background/kernel-session-authority.js';
 import { createKernelSupportControl } from '../../extension/background/kernel-support-control.js';
@@ -26,6 +28,47 @@ const DWEB_TEXT = readFileSync(
   join(EXTENSION_DIR, 'peerd-provider/system-prompt-dweb.txt'), 'utf8',
 ).trim();
 const DWEB_BLOCK = DWEB_TEXT ? `\n${DWEB_TEXT}\n` : '';
+const TEST_KERNEL_IDENTITY = Object.freeze({
+  schema: 1,
+  buildId: 'test-controller-build',
+  bootId: 'test-controller-boot',
+  kernelEpoch: 'test-controller-kernel',
+});
+let testLeaseGeneration = 0;
+const nextTestControllerLease = () => {
+  testLeaseGeneration += 1;
+  return Object.freeze({
+    ...TEST_KERNEL_IDENTITY,
+    scope: 'controller',
+    leaseId: `test-controller-lease-${String(testLeaseGeneration).padStart(8, '0')}`,
+    hostEpoch: 'test-controller-host',
+    generation: testLeaseGeneration,
+  });
+};
+const makeSemanticControllerClient = (
+  deps: Parameters<typeof makeSemanticControllerClientBase>[0],
+) => {
+  let leaseUsers = 0;
+  let sharedLease: ReturnType<typeof nextTestControllerLease> | null = null;
+  const withTestControllerLease = async <T>(
+    operation: (lease?: unknown) => Promise<T>,
+  ): Promise<T> => {
+    sharedLease ??= nextTestControllerLease();
+    leaseUsers += 1;
+    try { return await operation(sharedLease); }
+    finally {
+      leaseUsers -= 1;
+      if (leaseUsers === 0) sharedLease = null;
+    }
+  };
+  return makeSemanticControllerClientBase({
+    ...deps,
+    kernelIdentity: deps.kernelIdentity ?? TEST_KERNEL_IDENTITY,
+    ...(!deps.firefoxDirect && typeof deps.withControllerLease !== 'function' ? {
+      withControllerLease: withTestControllerLease,
+    } : {}),
+  });
+};
 
 describe('production semantic controller slice', () => {
   test('checked-in build identity matches the complete authored controller graphs and assets', async () => {
@@ -220,7 +263,7 @@ describe('production semantic controller slice', () => {
       });
       await expect(semantic.renderSystemPrompt(ctx)).resolves.toBe(expected);
     }
-    expect(ensures).toBe(1);
+    expect(ensures).toBe(contexts.length);
     semantic.close();
   });
 
@@ -310,7 +353,7 @@ describe('production semantic controller slice', () => {
         expect(leaseDepth).toBe(0);
         leaseDepth += 1;
         ordering.push('lease-acquired');
-        try { return await operation(); }
+        try { return await operation(nextTestControllerLease()); }
         finally {
           ordering.push('lease-released');
           leaseDepth -= 1;
@@ -377,7 +420,7 @@ describe('production semantic controller slice', () => {
         origin: null, target: 'orchestrator-turn', replayClass: 'E',
       }),
       handleTurnKernelCall: async () => ({ ok: true }),
-      withControllerLease: (operation) => operation(),
+      withControllerLease: (operation) => operation(nextTestControllerLease()),
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
       listWindowClients: async () => [{
         url: offscreenUrl,
@@ -419,7 +462,7 @@ describe('production semantic controller slice', () => {
         origin: null, target: 'semantic:test:first-party', replayClass: 'A',
       }),
       handleSemanticKernelCall: async () => ({ ok: true }),
-      withControllerLease: (operation) => operation(),
+      withControllerLease: (operation) => operation(nextTestControllerLease()),
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
       listWindowClients: async () => {
         discoveries += 1;
@@ -568,7 +611,7 @@ describe('production semantic controller slice', () => {
       handleFeatureKernelCall: async () => ({ ok: true }),
       withControllerLease: async (operation) => {
         leases += 1;
-        return operation();
+        return operation(nextTestControllerLease());
       },
       fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
       listWindowClients: async () => {
@@ -576,9 +619,11 @@ describe('production semantic controller slice', () => {
         if (discoveries <= 2) return [];
         return [{
           url: offscreenUrl,
-          postMessage: (data: unknown, transfer: Transferable[]) => offerHandler({
-            isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
-          } as unknown as MessageEvent),
+          postMessage: (data: unknown, transfer: Transferable[]) => {
+            offerHandler({
+              isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+            } as unknown as MessageEvent);
+          },
         }];
       },
     });
@@ -752,7 +797,7 @@ describe('production semantic controller slice', () => {
       offscreenUrl: 'offscreen/offscreen.html',
       firefoxDirect: false,
       dwebEnabled: false,
-      withControllerLease: (operation) => operation(),
+      withControllerLease: (operation) => operation(nextTestControllerLease()),
       retireHost: async (reason) => { retirements.push(reason); },
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
       listWindowClients: async () => [{
@@ -1043,7 +1088,9 @@ describe('production semantic controller slice', () => {
     await expect(Promise.all([first, second])).resolves.toEqual([
       { ok: true, generation: 2 }, { ok: true, generation: 2 },
     ]);
-    expect(connections).toBe(2);
+    // The concurrent caller owns generation 2; the original replay-safe call
+    // retries after that bounded lease settles and therefore opens generation 3.
+    expect(connections).toBe(3);
     client.close();
     offerHandler.close();
   });
