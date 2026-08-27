@@ -29,6 +29,7 @@ import {
   RUNTIME_DISPATCH_OUTER_BYTES,
 } from '/shared/kernel-runtime-policy.js';
 import {
+  kernelIdentityMatches,
   kernelIdentityIsSuccessor,
   parseKernelIdentity,
 } from '/shared/kernel-identity.js';
@@ -663,15 +664,51 @@ export const makeControllerOfferHandler = ({
   loadController,
   newId = () => crypto.randomUUID(),
 }) => {
-  const retiredEpochs = new Set();
-  /** @type {{ epoch: string, kernelIdentity?:unknown, close: () => void } | null} */
+  const parseOfferLease = (/** @type {any} */ value, /** @type {any} */ identity) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || value.scope !== 'controller'
+        || typeof value.leaseId !== 'string' || value.leaseId.length < 8
+        || value.leaseId.length > 256
+        || typeof value.hostEpoch !== 'string' || value.hostEpoch.length < 8
+        || value.hostEpoch.length > 256
+        || !Number.isSafeInteger(value.generation) || value.generation < 1
+        || !kernelIdentityMatches(identity, value)) return null;
+    return Object.freeze({ leaseId: value.leaseId, generation: value.generation });
+  };
+  // why one monotonic high-water mark: one kernel epoch legitimately releases
+  // and reacquires this scope many times. Its lease generation only increases,
+  // so constant memory rejects every retired lease without blacklisting the
+  // live kernel itself. The supervisor authenticates the exact active lease
+  // before this handler sees the offer; this layer additionally validates its
+  // schema and identity binding.
+  /** @type {Readonly<import('/shared/kernel-identity.js').KernelIdentity>|null} */
+  let latestIdentity = null;
+  let retiredGeneration = 0;
+  /** @type {string|null} */
+  let retiredLegacyEpoch = null;
+  /** @type {{ epoch:string, kernelIdentity?:unknown, leaseGeneration?:number,
+   *   close:()=>void } | null} */
   let active = null;
+  const noteRetired = (/** @type {NonNullable<typeof active>} */ binding) => {
+    if (binding.kernelIdentity && Number.isSafeInteger(binding.leaseGeneration)) {
+      if (!latestIdentity || !kernelIdentityMatches(latestIdentity, binding.kernelIdentity)) {
+        latestIdentity = /** @type {any} */ (binding.kernelIdentity);
+        retiredGeneration = 0;
+      }
+      retiredGeneration = Math.max(retiredGeneration, /** @type {number} */ (
+        binding.leaseGeneration
+      ));
+      return;
+    }
+    retiredLegacyEpoch = binding.epoch;
+  };
   const handleOffer = (/** @type {MessageEvent} */ event) => {
     const source = /** @type {{ scriptURL?: string } | null} */ (event.source);
     const data = /** @type {any} */ (event.data);
     const offeredCaps = parseControllerCaps(data?.capabilities);
     const offeredIdentity = data?.kernelIdentity === undefined
       ? null : parseKernelIdentity(data.kernelIdentity);
+    const offeredLease = offeredIdentity ? parseOfferLease(data?.lease, offeredIdentity) : null;
     if (!event.isTrusted
         || source?.scriptURL !== expectedWorkerUrl
         || data?.type !== CONTROLLER_CHANNEL_OFFER
@@ -682,9 +719,21 @@ export const makeControllerOfferHandler = ({
         || typeof data?.kernelEpoch !== 'string'
         || (data?.kernelIdentity !== undefined
           && (!offeredIdentity || offeredIdentity.kernelEpoch !== data.kernelEpoch))
+        || (offeredIdentity && !offeredLease)
         || !offeredCaps
         || event.ports?.length !== 1) return false;
-    if (retiredEpochs.has(data.kernelEpoch) || active?.epoch === data.kernelEpoch) {
+    if (offeredIdentity && latestIdentity) {
+      const sameKernel = kernelIdentityMatches(latestIdentity, offeredIdentity);
+      if ((!sameKernel && !kernelIdentityIsSuccessor(latestIdentity, offeredIdentity))
+          || (sameKernel && /** @type {NonNullable<typeof offeredLease>} */ (
+            offeredLease
+          ).generation <= retiredGeneration)) {
+        event.ports[0].close();
+        return false;
+      }
+    }
+    if ((!offeredIdentity && retiredLegacyEpoch === data.kernelEpoch)
+        || active?.epoch === data.kernelEpoch) {
       event.ports[0].close();
       return false;
     }
@@ -694,10 +743,15 @@ export const makeControllerOfferHandler = ({
       return false;
     }
     if (active) {
-      retiredEpochs.add(active.epoch);
+      noteRetired(active);
       active.close();
     }
-    active = bindControllerChannel({
+    if (offeredIdentity
+        && (!latestIdentity || !kernelIdentityMatches(latestIdentity, offeredIdentity))) {
+      latestIdentity = offeredIdentity;
+      retiredGeneration = 0;
+    }
+    active = { ...bindControllerChannel({
       port: event.ports[0],
       channelId: data.channelId,
       buildDigest: data.buildDigest,
@@ -708,10 +762,13 @@ export const makeControllerOfferHandler = ({
       supportedCaps,
       loadController,
       onClose: () => {
-        retiredEpochs.add(data.kernelEpoch);
-        if (active?.epoch === data.kernelEpoch) active = null;
+        const closing = active;
+        if (closing && closing.epoch === data.kernelEpoch) {
+          noteRetired(closing);
+          active = null;
+        }
       },
-    });
+    }), ...(offeredLease ? { leaseGeneration: offeredLease.generation } : {}) };
     return true;
   };
   // A feature-lease revocation must retire the exact controller epoch and its
@@ -722,7 +779,7 @@ export const makeControllerOfferHandler = ({
       loadController.close?.();
       return;
     }
-    retiredEpochs.add(active.epoch);
+    noteRetired(active);
     const prior = active;
     active = null;
     prior.close();

@@ -185,7 +185,9 @@ export const createFeatureLeaseCoordinator = ({
     if (disabled.has(scope)) return outcome(false, 'feature-lease-disabled', true, { scope });
     if (options.signal?.aborted) return outcome(false, 'feature-lease-cancelled', true, { scope });
     let hostEpoch;
-    try { hostEpoch = options.hostEpoch ?? await resolveHostEpoch(scope); }
+    try {
+      hostEpoch = options.hostEpoch ?? await resolveHostEpoch(scope);
+    }
     catch {
       return outcome(false, 'feature-lease-host-unavailable', true, { scope });
     }

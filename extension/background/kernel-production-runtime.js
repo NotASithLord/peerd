@@ -19,6 +19,7 @@ export const createKernelProductionRuntime = async (deps) => {
   if (!deps?.seams || !deps.browser || !deps.featureHost || !deps.denylist
       || !deps.appCatalog || !deps.providerProjection || typeof deps.canWrite !== 'function'
       || !deps.networkCustody || !deps.turnCustody
+      || typeof deps.createTurnFactories !== 'function'
       || networkFunctions.some((value) => typeof value !== 'function')
       || (deps.dwebEnabled && typeof deps.ensureDwebFeature !== 'function')) {
     throw new TypeError('kernel-production-runtime-config-invalid');
@@ -88,6 +89,7 @@ export const createKernelProductionRuntime = async (deps) => {
       deps.firefoxActorLifetime ? deps.firefoxActorLifetime.run(operation, options) : operation(),
     ensureOffscreen: deps.featureHost.ensureOffscreen,
     retireHost: (/** @type {string} */ reason) => deps.featureHost.runtime.retireActiveHost(reason),
+    importLocalArtifact: deps.importArtifactCodec,
   };
   const transfer = {
     idb: deps.idb,
@@ -154,13 +156,9 @@ export const createKernelProductionRuntime = async (deps) => {
     engine,
     turn,
     transfer,
-    createTurnFactories: async (
+    createTurnFactories: (
       /** @type {{engine:Record<string,any>}} */ { engine: sharedEngine },
-    ) => {
-      const { createKernelTurnLiveFactories } =
-        await import('./kernel-turn-live-factories.js');
-      return createKernelTurnLiveFactories({ ...deps, engine: sharedEngine });
-    },
+    ) => deps.createTurnFactories({ ...deps, engine: sharedEngine }),
     createDwebRoutes: deps.dwebEnabled ? async (
       /** @type {{engine:Record<string,any>,relays:Record<string,any>,transferLive:Record<string,any>}} */
       { engine: sharedEngine, relays, transferLive },

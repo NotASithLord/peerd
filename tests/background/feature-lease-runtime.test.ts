@@ -49,6 +49,7 @@ const makeEnvironment = () => {
   let ensureCount = 0;
   let closeCount = 0;
   let failStarts = 0;
+  const startGates = new Map<string, Promise<void>>();
   const starts: string[] = [];
   const stops: string[] = [];
   const adopts: string[] = [];
@@ -61,6 +62,7 @@ const makeEnvironment = () => {
       newId: () => hostEpoch,
       startScope: async (scope) => {
         starts.push(scope);
+        await startGates.get(scope);
         if (failStarts > 0) { failStarts -= 1; throw new Error('transient-host-start'); }
         return { started: scope };
       },
@@ -88,6 +90,7 @@ const makeEnvironment = () => {
     get closeCount() { return closeCount; },
     get host() { return host; },
     failNextStarts(count: number) { failStarts = count; },
+    stallStart(scope: string, gate: Promise<void>) { startGates.set(scope, gate); },
     replaceHost() { void host?.close(); return createHost(); },
     crashHost() { host = null; },
     async ensureOffscreen() { ensureCount += 1; if (!host) createHost(); },
@@ -177,6 +180,24 @@ describe('production feature-lease runtime', () => {
       kernelEpoch: 'kernel-epoch-a',
     });
     expect(owned).toBe(true);
+  });
+
+  test('a stalled durable feature does not head-of-line block controller demand', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
+    await runtime.ready;
+    const dweb = deferred<void>();
+    env.stallStart('dweb', dweb.promise);
+    const transition = runtime.runTransition('resume', { dwebEnabled: true });
+    while (!env.starts.includes('dweb')) await Promise.resolve();
+
+    const controller = await Promise.race([
+      runtime.runWithLease('controller', async () => 'controller-ready'),
+      new Promise((resolve) => setTimeout(() => resolve('blocked'), 100)),
+    ]);
+    expect(controller).toBe('controller-ready');
+    dweb.resolve();
+    await transition;
   });
 
   test('first, coalesced, and durable acquisitions expose only canonical capabilities', async () => {

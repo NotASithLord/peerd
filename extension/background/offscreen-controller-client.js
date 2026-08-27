@@ -619,6 +619,10 @@ export const makeSemanticControllerClient = ({
     ...(hasTurnAuthority ? ['turn.run'] : []),
     ...(hasFeatureAuthority ? [KERNEL_FEATURE_DISPATCH_CAPABILITY] : []),
   ]);
+  const expectedOffscreenUrl = (() => {
+    try { return new URL(offscreenUrl).href; }
+    catch { return browser.runtime.getURL(offscreenUrl); }
+  })();
   /** @type {Promise<any> | null} */
   let connecting = null;
   /** @type {any | null} */
@@ -714,7 +718,7 @@ export const makeSemanticControllerClient = ({
         ? handleControllerKernelCall : undefined,
       handshakeTimeoutMs: handshakeMs,
       findHost: async () => selectExactControllerHost(
-        await listWindowClients(), browser.runtime.getURL(offscreenUrl),
+        await listWindowClients(), expectedOffscreenUrl,
       ),
     });
     try {
@@ -1122,37 +1126,44 @@ export const makeSemanticControllerClient = ({
     }
     const replayable = parseKernelFeatureCall(capability, payload)?.policy.replayClass === 'A';
     try {
-      return await withControllerLease(async (/** @type {unknown} */ lease) => {
-        enterLeased();
-        try {
-          let client;
-          try { client = await getClient(lease); }
-          catch {
-            return startupResult('feature-dispatch-startup-failed');
-          }
+      let attempts = 0;
+      for (;;) {
+        const result = await withControllerLease(async (/** @type {unknown} */ lease) => {
+          enterLeased();
           try {
-            const result = await client.call(capability, payload, options);
-            if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) {
-              retire(client);
+            let client;
+            try { client = await getClient(lease); }
+            catch {
+              return startupResult('feature-dispatch-startup-failed');
             }
-            return result;
-          } catch (cause) {
-            retire(client);
-            return {
-              ok: false, code: 'feature-dispatch-transport-failed',
-              error: cause instanceof Error ? cause.message : String(cause),
-              outcomeKnown: false, phase: 'run',
-            };
+            try {
+              const reply = await client.call(capability, payload, options);
+              if (reply?.outcomeKnown === false || controllerGenerationMustRetire(reply)) {
+                retire(client);
+              }
+              return reply;
+            } catch (cause) {
+              retire(client);
+              return {
+                ok: false, code: 'feature-dispatch-transport-failed',
+                error: cause instanceof Error ? cause.message : String(cause),
+                outcomeKnown: false, phase: 'run',
+              };
+            }
+          } finally {
+            exitLeased();
           }
-        } finally {
-          exitLeased();
-        }
-      }, {
-        outcomeKnownOnLoss: replayable,
-        code: 'controller-firefox-feature-lifetime-lost',
-        onLost: retireActiveOnLifetimeLoss,
-        ...(!replayable ? { lossGraceMs: 2_000 } : {}),
-      });
+        }, {
+          outcomeKnownOnLoss: replayable,
+          code: 'controller-firefox-feature-lifetime-lost',
+          onLost: retireActiveOnLifetimeLoss,
+          ...(!replayable ? { lossGraceMs: 2_000 } : {}),
+        });
+        attempts += 1;
+        if (!replayable || result?.code !== 'feature-dispatch-startup-failed'
+            || attempts > 1) return result;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     } catch (cause) {
       const known = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false;
       return {

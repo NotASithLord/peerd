@@ -125,14 +125,16 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 });
 
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  shared: Object.freeze({ modules: 94, graphBytes: 678_376 }),
-  target: Object.freeze({ modules: 97, graphBytes: 728_153 }),
-  exclusive: Object.freeze({ modules: 3, graphBytes: 49_777 }),
-  entryBytesCeiling: 78,
-  directImportsCeiling: 2,
+  // Chrome's authored graph is the same complete closure that Bun packages;
+  // import() is not counted as a lazy boundary in an MV3 service worker.
+  shared: Object.freeze({ modules: 399, graphBytes: 3_770_072 }),
+  target: Object.freeze({ modules: 401, graphBytes: 3_819_807 }),
+  exclusive: Object.freeze({ modules: 3, graphBytes: 49_935 }),
+  entryBytesCeiling: 236,
+  directImportsCeiling: 3,
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 108, graphBytes: 862_165, entryBytes: 78, directImports: 2,
+  modules: 81, graphBytes: 571_818, entryBytes: 239, directImports: 3,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -183,7 +185,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // contract retryable placeholder, connect retry, leased-client refcount,
   // scope-tightened realm retirement), plus the live actor-isolation getter
   // that unfroze the snapshot's capability projection.
-  kernel: Object.freeze({ modules: 456, graphBytes: 4_319_560, entryBytes: 467_968, directImports: 111 }),
+  kernel: Object.freeze({ modules: 399, graphBytes: 3_770_072, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -205,11 +207,10 @@ export const COLD_START_TIMING_TARGETS = Object.freeze({
 
 export const COLD_GRAPH_RATCHETS = Object.freeze({
   chrome: Object.freeze({
-    // The agent loop moved behind the sealed lazy turn controller; the explicit
-    // vault lifecycle seam remains in the entry. The generated 213-byte build
-    // identity leaf is shared with exact background provenance. Exact
-    // four-cell measurement, with no reserved headroom.
-    serviceWorker: Object.freeze({ modules: 450, graphBytes: 1_680_949, entryBytes: 188_885 }),
+    // Chrome's complete executable MV3 closure is static: runtime import() is
+    // not a supported demand boundary. This is the exact achieved minified
+    // authored graph, before the disposable one-file package bundle.
+    serviceWorker: Object.freeze({ modules: 396, graphBytes: 1_825_463, entryBytes: 173 }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
     sidepanel: Object.freeze({ modules: 11, graphBytes: 140_331, entryBytes: 407 }),
@@ -236,7 +237,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   store: COLD_GRAPH_RATCHETS,
   preview: Object.freeze({
     chrome: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 453, graphBytes: 1_714_810, entryBytes: 188_885 }),
+      serviceWorker: Object.freeze({ modules: 401, graphBytes: 1_907_281, entryBytes: 207 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 140_331, entryBytes: 407 }),
       home: Object.freeze({ modules: 11, graphBytes: 140_499, entryBytes: 575 }),
       offscreen: Object.freeze({ modules: 9, graphBytes: 32_741, entryBytes: 15_570 }),

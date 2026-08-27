@@ -2274,6 +2274,27 @@ export const STATES = [
     },
   },
 
+  // --- functional: the first real turn crosses the sealed controller ----------
+  {
+    name: 'first-turn', kind: 'functional', phase: 'post-unlock', preserveFreshSession: true,
+    responder: () => ({ sse: sseText('first turn ready') }),
+    async run(ctx, rec) {
+      const state = await rpc(ctx.page, { type: 'state/get' });
+      rec.check('the first turn starts with unlocked vault custody',
+        state?.state?.vault?.locked === false, state?.error ?? JSON.stringify(state));
+      const accepted = await rpc(ctx.page, { type: 'agent/send', text: 'first turn probe' });
+      rec.check('the first turn is accepted by the live kernel', accepted?.ok !== false,
+        JSON.stringify(accepted));
+      const settled = await waitFor(async () => {
+        const out = await probe(ctx);
+        return out.assistantText === 'first turn ready' && !out.busy ? out : null;
+      }, { budgetMs: 20_000 });
+      const finalProbe = settled ?? await probe(ctx);
+      rec.check('the first turn reaches a controller reply and settles idle', !!settled,
+        JSON.stringify(finalProbe));
+    },
+  },
+
   // --- functional: a multi-turn conversation (history carries) ---------------
   {
     name: 'multi-turn', kind: 'functional', phase: 'post-unlock',

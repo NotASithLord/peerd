@@ -29,21 +29,20 @@ const base = (makeRichRuntime: (deps: any) => any) => ({
   syncDenylistNetwork: async () => {},
   networkCustody: { sync: async () => {}, state: () => ({ supported: true }) },
   turnCustody: {},
+  createTurnFactories: () => ({}),
   makeRichRuntime,
 });
 
 describe('kernel production runtime', () => {
-  test('does not barrel the demand plane through production', () => {
+  test('receives exact target factories without a runtime import fallback', () => {
     const background = join(import.meta.dir, '../../extension/background');
     const kernel = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
     const production = readFileSync(join(background, 'kernel-production-runtime.js'), 'utf8');
-    expect(kernel).toContain(
-      "const { createKernelDemandPlane } = await import('./kernel-demand-plane.js');",
-    );
-    expect(kernel).toContain(
-      'const { createKernelProductionRuntime } = await loadProductionRuntimeModule();',
-    );
+    expect(kernel).toContain('const createKernelDemandPlane = await runtimeModules.demandPlane();');
+    expect(kernel).toContain('loadProductionRuntimeModule(), runtimeModules.turnFactories(),');
     expect(production).not.toContain('createKernelDemandPlane');
+    expect(production).not.toContain("import('./kernel-turn-live-factories.js')");
+    expect(production).toContain('deps.createTurnFactories({ ...deps, engine: sharedEngine })');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('background/kernel-demand-plane.js');
   });
 

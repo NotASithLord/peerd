@@ -127,6 +127,7 @@ export const createKernelEngineLive = async (deps) => {
     withHost: deps.withArtifactLease,
     retireHost: deps.retireHost,
     withLocalLifetime: deps.withDirectLifetime,
+    importLocal: deps.importLocalArtifact,
   });
   const webHost = !deps.firefox && typeof deps.withDomLease === 'function'
     ? makeOffscreenWebClient({

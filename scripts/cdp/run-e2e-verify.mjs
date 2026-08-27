@@ -176,7 +176,7 @@ async function main() {
       await unlockAndReady(ctx.page);
       await freezeAnimations(ctx);
       for (const s of postUnlock) {
-        await resetSession(ctx);
+        if (s.preserveFreshSession !== true) await resetSession(ctx);
         await runState(ctx, s, results);
       }
     }

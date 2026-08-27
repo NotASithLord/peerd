@@ -56,7 +56,6 @@ describe('kernel turn production runtime', () => {
               scriptRuns: { ownerFor: () => null },
               validateGeneration: async () => true,
               retireStale: async () => {},
-              buildActorContext: async () => ({}),
               appActorChat: async () => ({ ok: true }),
               broadcastAgentTab: () => {}, onUiConnect: () => {},
               showWebTabHint: () => {}, isDrivenSource: () => false,

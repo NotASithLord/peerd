@@ -429,7 +429,12 @@ export const createProductionFeatureLeaseRuntime = ({
   const reconcile = () => withHostLifecycle(reconcileUnsafe);
   const runTransition = async (/** @type {'initialize'|'unlock'|'resume'} */ transition,
     /** @type {{dwebEnabled?:boolean}} */ options = {}) => {
-    const results = await withHostLifecycle(() => runTransitionUnsafe(transition, options));
+    // why: a durable feature may have an intentionally slow startup (the dweb
+    // mesh can wait on identity/network). Its per-scope coordinator already
+    // serializes that lease. Holding the physical-host lane across the whole
+    // transition would head-of-line block the controller and therefore the
+    // first agent turn even though both scopes safely share one host.
+    const results = await runTransitionUnsafe(transition, options);
     if (results.some((result) => result?.outcomeKnown === false
         && OFFSCREEN_SCOPES.has(result?.scope))) {
       await retireActiveHost('feature-transition-start-outcome-unknown');

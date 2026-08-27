@@ -7,8 +7,10 @@ import { join } from 'node:path';
 import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
+  assertNativeChromeBundleRatchet,
   bundleChromeNativeKernel,
   isChromeNativeKernelEntry,
+  NATIVE_CHROME_BUNDLE_RATCHETS,
   NATIVE_CHROME_PRUNED_IMPORTS,
 } from '../../packaging/bundle-chrome-native-kernel.ts';
 import { packageArtifact } from '../../packaging/package.ts';
@@ -21,10 +23,28 @@ import {
 
 describe('test-only vault kernel package target', () => {
   test('release bundling recognizes only the two native Chrome entries', () => {
-    expect(isChromeNativeKernelEntry('background/vault-kernel.js')).toBe(true);
+    expect(isChromeNativeKernelEntry('background/vault-kernel-chrome.js')).toBe(true);
     expect(isChromeNativeKernelEntry('background/vault-kernel-preview.js')).toBe(true);
     expect(isChromeNativeKernelEntry('background/service-worker.js')).toBe(false);
-    expect(isChromeNativeKernelEntry('background/vault-kernel.js?forged')).toBe(false);
+    expect(isChromeNativeKernelEntry('background/vault-kernel-chrome.js?forged')).toBe(false);
+  });
+
+  test('release bundling pins the exact staged input closure and byte ceiling', () => {
+    const inputs = Object.freeze(Array.from({ length: 396 }, (_, index) => `input-${index}.js`));
+    const exact = {
+      bytes: NATIVE_CHROME_BUNDLE_RATCHETS['background/vault-kernel-chrome.js'].bytes,
+      inputs,
+      inputSha256: 'c51755505453e1384498f571772bc006dd27253881da630c9f1de7b2035e84bf',
+    };
+    expect(() => assertNativeChromeBundleRatchet(
+      'background/vault-kernel-chrome.js', exact,
+    )).not.toThrow();
+    expect(() => assertNativeChromeBundleRatchet(
+      'background/vault-kernel-chrome.js', { ...exact, bytes: exact.bytes + 1 },
+    )).toThrow('native Chrome bundle grew');
+    expect(() => assertNativeChromeBundleRatchet(
+      'background/vault-kernel-chrome.js', { ...exact, inputSha256: '0'.repeat(64) },
+    )).toThrow('input closure changed');
   });
 
   test('changes only the copied background entry for each browser', () => {
@@ -40,7 +60,7 @@ describe('test-only vault kernel package target', () => {
     expect(chrome).toMatchObject({
       name: 'peerd vault kernel store floor',
       permissions: ['storage'],
-      background: { service_worker: 'background/vault-kernel.js', type: 'module' },
+      background: { service_worker: 'background/vault-kernel-chrome.js', type: 'module' },
     });
     expect(preview.background).toEqual({
       service_worker: 'background/vault-kernel-preview.js', type: 'module',
@@ -79,7 +99,7 @@ describe('test-only vault kernel package target', () => {
     const background = join(staging, 'background');
     mkdirSync(background, { recursive: true });
     writeFileSync(join(background, 'dep.js'), 'export const answer = 42;\n');
-    writeFileSync(join(background, 'vault-kernel.js'), [
+    writeFileSync(join(background, 'vault-kernel-chrome.js'), [
       "import { answer } from './dep.js';",
       "const kernelFirefox = 'chrome' === 'firefox';",
       "class ExactNamedError extends Error { constructor() { super(); this.name = 'ExactNamedError'; } }",
@@ -91,12 +111,12 @@ describe('test-only vault kernel package target', () => {
       '',
     ].join('\n'));
     try {
-      const result = await bundleChromeNativeKernel(staging, 'background/vault-kernel.js');
-      const output = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
+      const result = await bundleChromeNativeKernel(staging, 'background/vault-kernel-chrome.js');
+      const output = readFileSync(join(background, 'vault-kernel-chrome.js'), 'utf8');
       expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(3);
       expect(result.inputs).toEqual([
         'background/dep.js',
-        'background/vault-kernel.js',
+        'background/vault-kernel-chrome.js',
       ]);
       expect(output).toContain('peerd.kernel.bundle-start.v1');
       expect(output.trimStart().startsWith('(()=>')).toBe(false);
@@ -149,7 +169,7 @@ describe('test-only vault kernel package target', () => {
     const targets = [
       {
         channel: 'store' as const,
-        entry: 'background/vault-kernel.js',
+        entry: 'background/vault-kernel-chrome.js',
         digest: 'a'.repeat(64),
         dwebEnabled: false,
         advancedAutomationEnabled: false,
@@ -220,7 +240,7 @@ describe('test-only vault kernel package target', () => {
     const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'manifests/base.json'), 'utf8'));
     const release = readFileSync(join(REPO_ROOT, 'packaging/release.ts'), 'utf8');
     expect(manifest.background).toEqual({
-      service_worker: 'background/vault-kernel.js', type: 'module',
+      service_worker: 'background/vault-kernel-chrome.js', type: 'module',
     });
     expect(release).not.toContain('peerd-vault-kernel');
   });
@@ -287,7 +307,7 @@ describe('test-only vault kernel package target', () => {
       );
       const basePath = join(sourceRoot, 'manifests', 'base.json');
       const base = JSON.parse(readFileSync(basePath, 'utf8'));
-      base.background.service_worker = 'background/vault-kernel.js';
+      base.background.service_worker = 'background/vault-kernel-chrome.js';
       writeFileSync(basePath, `${JSON.stringify(base, null, 2)}\n`);
 
       for (const browser of ['chrome', 'firefox'] as const) {
@@ -301,7 +321,7 @@ describe('test-only vault kernel package target', () => {
           ? manifest.background.service_worker : manifest.background.scripts[0];
         const graph = await collectStaticModuleGraph(staging, join(staging, entryRelative));
         expect(entryRelative).toBe(browser === 'firefox'
-          ? FIREFOX_BACKGROUND_ENTRY : 'background/vault-kernel.js');
+          ? FIREFOX_BACKGROUND_ENTRY : 'background/vault-kernel-chrome.js');
         expect(graph.size > 1).toBe(browser === 'firefox');
         if (browser === 'chrome') {
           expect(graph.size).toBe(1);

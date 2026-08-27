@@ -49,13 +49,13 @@ const makeKV = () => {
 };
 
 /** @param delayMs widen the write window so a lock can race a persist. */
-const makeSession = (delayMs = 0) => {
+const makeSession = (delayMs = 0, onSet = () => {}) => {
   const store = new Map<string, any>();
   const wait = () => (delayMs ? new Promise((r) => setTimeout(r, delayMs)) : Promise.resolve());
   return {
     store,
     sessionGet: async (k: string) => store.get(k),
-    sessionSet: async (k: string, v: any) => { await wait(); store.set(k, v); },
+    sessionSet: async (k: string, v: any) => { onSet(); await wait(); store.set(k, v); },
     sessionDelete: async (k: string) => { await wait(); store.delete(k); },
   };
 };
@@ -214,12 +214,14 @@ describe('lock() and the session mirror', () => {
     // The other half of the regression: _persistDK's write completing AFTER a
     // lock. The slow sessionSet widens the window; the epoch check + the
     // serialized queue mean the lock wins by CALL order.
-    const sessionCache = makeSession(20);
+    let markSetStarted = () => {};
+    const setStarted = new Promise<void>((resolve) => { markSetStarted = resolve; });
+    const sessionCache = makeSession(20, markSetStarted);
     const v = createVault({ kv: makeKV(), sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
-    // initialize() does not await its own mirror write, so this returns with
-    // the persist mid-flight — exactly the real race.
-    await v.initialize(PASS);
+    const initializing = v.initialize(PASS);
+    await setStarted;
     v.lock();
+    await initializing;
     await new Promise((r) => setTimeout(r, 100));
     expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
     expect(v.isLocked()).toBe(true);

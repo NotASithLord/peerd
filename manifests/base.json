@@ -14,7 +14,7 @@
   "options_ui": { "page": "options/options.html", "open_in_tab": true },
 
   "background": {
-    "service_worker": "background/vault-kernel.js",
+    "service_worker": "background/vault-kernel-chrome.js",
     "type": "module"
   },
 
