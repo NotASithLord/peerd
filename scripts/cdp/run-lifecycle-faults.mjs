@@ -19,6 +19,10 @@ const REACHED_KEY = 'peerd.e2e.lifecycleFault.reached';
 const OPERATION_KEY = 'peerd.lifecycle.operations';
 const NOTICE_KEY = 'peerd.lifecycle.pendingNotices';
 const BOOT_ERROR_KEY = 'peerd.e2e.lifecycleFault.bootError';
+const PROGRESS_KEY = 'peerd.e2e.lifecycleFault.progress';
+const FAULT_PAGE = 'lifecycle-fault.html';
+const FAULT_CODE = "return 'peerd-lifecycle-fault';";
+const PASSPHRASE = 'peerd-physical-lifecycle-passphrase';
 const STABILITY_WINDOW_MS = 1_500;
 const SOURCE_TARGET = 'source';
 const STORE_TARGET = 'store';
@@ -57,78 +61,157 @@ export const injectLifecycleFaultKernel = (input) => {
   const routeAnchor = '  ...systemReadRoutes,\n  ...sessionSupportRoutes,\n  ...demandRoutes,';
   return replaceExact(input, routeAnchor, `  ...systemReadRoutes,
   ...sessionSupportRoutes,
-  'lifecycle-fault/dispatch': async (message) => {
+  'lifecycle-fault/dispatch': async (message, sender) => {
     try {
-      const relays = await getControllerRelays();
-      if (typeof relays.buildActorContext !== 'function') {
-        throw new Error('lifecycle fault relays are unavailable');
+      if (message?.reached === true) {
+        if (!offscreenUi(sender)
+            || typeof message.runId !== 'string'
+            || typeof message.ownerSessionId !== 'string'
+            || scriptRuns.ownerFor(message.runId) !== message.ownerSessionId) {
+          throw new Error('lifecycle fault offscreen custody proof refused');
+        }
+        await kv.set(${JSON.stringify(REACHED_KEY)}, [{
+          toolName: 'script', phase: 'offscreen.runJob', at: Date.now(),
+        }]);
+        return { recorded: true };
       }
-      const sessionId = message?.sessionId;
-      const callId = message?.callId;
-      const context = await relays.buildActorContext({
-        ...(typeof sessionId === 'string' ? { sessionId } : {}),
-        exposure: 'main',
-        lifecycleTurnId: 'chrome-physical-fault-turn',
-        lifecycleUserInitiated: true,
-      });
       if (message?.recoverOnly === true) {
+        if (typeof message.passphrase !== 'string') {
+          throw new Error('lifecycle recovery passphrase missing');
+        }
+        // Join the production boot transaction before attempting a manual
+        // unlock; racing boot and unlock can make the locked boot finalizer
+        // retire the exact authority channel serving the other call.
+        await kv.set(${JSON.stringify(PROGRESS_KEY)}, 'recovery:kernel-ready');
+        await kernelReady;
+        await kv.set(${JSON.stringify(PROGRESS_KEY)}, 'recovery:vault-unlock');
+        if (vault.isLocked()) {
+          await vault.unlock(message.passphrase);
+          await kv.set(${JSON.stringify(PROGRESS_KEY)}, 'recovery:feature-host');
+          await featureHost.vaultUnlocked();
+          await kv.set(${JSON.stringify(PROGRESS_KEY)}, 'recovery:custody');
+          await recoveryCustody.resume();
+        }
+        // Force the production turn owner and its lifecycle reconciler to load;
+        // reading storage alone would only prove that old bytes survived.
+        await kv.set(${JSON.stringify(PROGRESS_KEY)}, 'recovery:controller-relays');
+        await getControllerRelays();
+        await kv.delete(${JSON.stringify(PROGRESS_KEY)});
         return {
           recovered: true,
           generation: await kv.get('peerd.lifecycle.generation'),
         };
       }
-      if (typeof sessionId !== 'string' || typeof callId !== 'string'
-          || typeof context.lifecycle?.beginTracking !== 'function') {
-        throw new Error('lifecycle fault request is invalid');
-      }
-      await kv.set(${JSON.stringify(REACHED_KEY)}, []);
-      const generation = await kv.get('peerd.lifecycle.generation');
-      if (!generation?.id) throw new Error('lifecycle generation is not ready');
-      for (const [toolName, retryClass, trackedCallId] of [
-        ['fetch_url', 'B', 'chrome-fault-b'],
-        ['remember', 'C', 'chrome-fault-c'],
-        ['dweb_share', 'D', 'chrome-fault-d'],
-        ['script', 'E', callId],
-      ]) {
-        const tracking = await context.lifecycle.beginTracking({
-          callId: trackedCallId,
-          tool: { name: toolName, retryClass },
-          sessionId,
-          ownerSessionId: sessionId,
-          target: 'tool:' + toolName,
-          args: { lifecycleFault: true },
-          turnId: 'chrome-physical-fault-turn',
-          userInitiated: true,
+      if (message?.start === true && typeof message.passphrase === 'string') {
+        await kernelReady;
+        // This test-only route owns its setup transaction. Await the host
+        // transition instead of racing the production route's deliberately
+        // fire-and-forget post-initialize notification against turn startup.
+        await vault.initialize(message.passphrase);
+        await featureHost.vaultInitialized();
+        const onboarded = await kernelProfile.complete({ peerName: 'peerd', facts: null });
+        if (onboarded?.ok !== true) throw new Error('lifecycle fault onboarding failed');
+        await settingsStore.update({ providerName: 'ollama', providerModel: 'qwen3:8b' });
+        const relays = await getControllerRelays();
+        if (typeof relays.sessions?.create !== 'function') {
+          throw new Error('lifecycle fault session authority unavailable');
+        }
+        const session = await relays.sessions.create({
+          provider: 'ollama', model: 'qwen3:8b',
+          permissionMode: 'act', confirmActions: false,
         });
-        if (!tracking?.handle) throw new Error('lifecycle fault tracking failed');
+        if (typeof session?.sessionId !== 'string') {
+          throw new Error('lifecycle fault session creation failed');
+        }
+        await sessionCache.sessionSet('currentSessionId', session.sessionId);
+        // The exact authority effect intentionally never settles, so the
+        // request cannot be awaited. Its durable marker below is the proof of
+        // admission; any early refusal is persisted as a harness failure.
+        void demandRoutes['agent/send']({
+          text: 'Run the lifecycle fault script exactly once.',
+          sessionId: session.sessionId,
+        }).then((started) => {
+          if (started?.ok !== true) {
+            throw new Error('lifecycle fault turn did not start: ' + JSON.stringify(started));
+          }
+        }).catch((cause) => kv.set(${JSON.stringify(BOOT_ERROR_KEY)},
+          cause?.stack || cause?.message || String(cause)));
+        return { started: true };
       }
-      const reached = await kv.get(${JSON.stringify(REACHED_KEY)}) ?? [];
-      await kv.set(${JSON.stringify(REACHED_KEY)}, [
-        ...reached, { toolName: 'script', at: Date.now() },
-      ]);
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const reached = await kv.get(${JSON.stringify(REACHED_KEY)});
-        if (reached?.length === 1) return { started: true };
-        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-      }
-      throw new Error('fault probe did not reach the tool body');
+      throw new Error('lifecycle fault request is invalid');
     } catch (cause) {
-      await kv.set(${JSON.stringify(BOOT_ERROR_KEY)},
-        cause?.stack || cause?.message || String(cause));
-      throw cause;
+      const detail = (cause?.stack || cause?.message || String(cause))
+        + '\\nfeature leases: ' + JSON.stringify(featureHost.runtime.snapshot());
+      await kv.set(${JSON.stringify(BOOT_ERROR_KEY)}, detail);
+      throw new Error(detail);
     }
   },
   ...demandRoutes,`, 'source fault route');
 };
 
-export const assertLifecycleFaultExecutionSeam = (source) => {
-  const dispatched = 'await operationLog.markDispatched(operationId);';
-  const handle = 'return { handle: { operationId, retryClass, toolName: tool.name ?? \'unknown-tool\' } };';
-  const dispatchedAt = source.lastIndexOf(dispatched);
-  const handleAt = source.indexOf(handle);
-  if (dispatchedAt < 0 || handleAt < 0 || dispatchedAt >= handleAt) {
-    throw new Error('source lifecycle dispatch seam changed');
+export const injectLifecycleFaultTurnBudget = (input) => replaceExact(
+  input,
+  'const TURN_RUNTIME_LOAD_TIMEOUT_MS = 15_000;',
+  'const TURN_RUNTIME_LOAD_TIMEOUT_MS = 120_000;',
+  'source lifecycle turn-load budget',
+);
+
+export const injectLifecycleFaultEffect = (input) => {
+  const anchor = '        const result = await client.execHeadless(code, opts);';
+  const injected = replaceExact(input, anchor, `        if (code === ${JSON.stringify(FAULT_CODE)}) {
+          if (call?.name !== 'script') {
+            throw new Error('lifecycle fault execution target changed');
+          }
+          if (typeof ctx.lifecycle?.beginTracking !== 'function') {
+            throw new Error('lifecycle fault tracking unavailable');
+          }
+          for (const [toolName, retryClass, callId] of [
+            ['fetch_url', 'B', 'chrome-fault-b'],
+            ['remember', 'C', 'chrome-fault-c'],
+            ['dweb_share', 'D', 'chrome-fault-d'],
+          ]) {
+            const tracking = await ctx.lifecycle.beginTracking({
+              callId, tool: { name: toolName, retryClass },
+              sessionId, ownerSessionId: sessionId,
+              target: 'tool:' + toolName,
+              args: { lifecycleFault: true },
+              turnId: 'chrome-physical-fault-turn',
+              userInitiated: true,
+            });
+            if (!tracking?.handle) throw new Error('lifecycle fault tracking failed');
+          }
+        }
+${anchor}`, 'source exact script effect');
+  return injected;
+};
+
+export const injectLifecycleFaultJob = (input) => {
+  const anchor = 'const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = \'\', caps, ownerSessionId, ownerToolUseId, runId, pageProgramSemanticToken, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {';
+  return replaceExact(input, anchor, `${anchor}
+  if (code === ${JSON.stringify(FAULT_CODE)}) {
+    const recorded = await sendToSW('lifecycle-fault/dispatch', {
+      reached: true, runId, ownerSessionId,
+    });
+    if (recorded?.recorded !== true) {
+      throw new Error('lifecycle fault offscreen custody proof failed');
+    }
+    // The physical lane kills Chrome only after the real offscreen job host
+    // accepts custody. Ignore cancellation to model loss during execution.
+    await new Promise(() => {});
+  }`, 'source exact offscreen job effect');
+};
+
+export const assertLifecycleFaultExecutionSeam = ({ tracking, controller, bridge, authority }) => {
+  const canaries = [
+    [tracking, 'await operationLog.markDispatched(operationId);'],
+    [controller, "rpc('turn.tool.prepare', {"],
+    [controller, "rpc('turn.execution.run-script', { ...binding, ...scriptRequest })"],
+    [controller, "rpc('turn.tool.settle', {"],
+    [bridge, "case 'turn.execution.run-script':"],
+    [authority, 'const result = await client.execHeadless(code, opts);'],
+  ];
+  if (canaries.some(([source, canary]) => source.split(canary).length !== 2)) {
+    throw new Error('source lifecycle controller execution seam changed');
   }
 };
 
@@ -138,8 +221,28 @@ const injectLifecycleFaultTree = (extension) => {
     kernel,
     injectLifecycleFaultKernel(readFileSync(kernel, 'utf8')),
   );
-  const tracking = join(extension, 'peerd-runtime', 'lifecycle', 'dispatch-tracking.js');
-  assertLifecycleFaultExecutionSeam(readFileSync(tracking, 'utf8'));
+  const authority = join(extension, 'background', 'execution-tool-authority.js');
+  const authoritySource = readFileSync(authority, 'utf8');
+  assertLifecycleFaultExecutionSeam({
+    tracking: readFileSync(join(extension, 'peerd-runtime', 'lifecycle', 'dispatch-tracking.js'), 'utf8'),
+    controller: readFileSync(join(extension, 'offscreen', 'controller-turn-runtime.js'), 'utf8'),
+    bridge: readFileSync(join(extension, 'background', 'controller-turn-bridge.js'), 'utf8'),
+    authority: authoritySource,
+  });
+  overwriteRegularFile(authority, injectLifecycleFaultEffect(authoritySource));
+  const jobRunner = join(extension, 'offscreen', 'job-runner.js');
+  overwriteRegularFile(
+    jobRunner,
+    injectLifecycleFaultJob(readFileSync(jobRunner, 'utf8')),
+  );
+  const turnOwner = join(extension, 'background', 'kernel-turn-owner.js');
+  overwriteRegularFile(
+    turnOwner,
+    injectLifecycleFaultTurnBudget(readFileSync(turnOwner, 'utf8')),
+  );
+  // A blank extension-origin caller avoids side-panel startup issuing its own
+  // concurrent vault/status lease while the fault fixture initializes.
+  writeFileSync(join(extension, FAULT_PAGE), '<!doctype html><title>lifecycle fault</title>\n');
 };
 
 const makeSourceFaultExtension = async () => {
@@ -185,11 +288,13 @@ const makePackagedFaultExtension = async () => {
   }
   const stagedSources = [
     readFileSync(join(staging, backgroundEntry), 'utf8'),
-    readFileSync(join(staging, 'peerd-runtime/tools/dispatcher.js'), 'utf8'),
+    readFileSync(join(staging, 'background/execution-tool-authority.js'), 'utf8'),
+    readFileSync(join(staging, 'offscreen/controller-turn-runtime.js'), 'utf8'),
+    readFileSync(join(staging, 'offscreen/job-runner.js'), 'utf8'),
   ].join('\n');
   for (const canary of [
     REACHED_KEY, BOOT_ERROR_KEY, 'lifecycle-fault/dispatch',
-    'lifecycle fault execution target changed',
+    'turn.execution.run-script', FAULT_CODE, 'lifecycle fault execution target changed',
   ]) {
     if (!stagedSources.includes(canary)) {
       throw new Error(`packaged lifecycle probe was removed before launch: ${canary}`);
@@ -213,6 +318,62 @@ const waitFor = async (fn, budgetMs = 30_000) => {
 const assert = (value, message) => {
   if (!value) throw new Error(message);
   console.log(`  PASS ${message}`);
+};
+
+const lifecycleToolSse = () => {
+  const toolCall = {
+    index: 0,
+    id: 'chrome-physical-script-call',
+    type: 'function',
+    function: { name: 'script', arguments: JSON.stringify({ code: FAULT_CODE }) },
+  };
+  return [
+    `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: '' } }] })}`,
+    `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [toolCall] } }] })}`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    })}`,
+    'data: [DONE]', '',
+  ].join('\n\n') + '\n\n';
+};
+
+const armModelWire = async (target) => {
+  const session = await target.createCDPSession();
+  const requests = [];
+  const diagnostics = [];
+  session.on('Runtime.consoleAPICalled', ({ type, args }) => {
+    if (type !== 'error') return;
+    diagnostics.push(args.map((arg) => arg.value ?? arg.description ?? arg.type).join(' '));
+  });
+  session.on('Fetch.requestPaused', ({ requestId, request }) => {
+    const url = String(request?.url ?? '');
+    let tools = [];
+    try {
+      const requestBody = JSON.parse(request?.postData ?? '{}');
+      tools = Array.isArray(requestBody?.tools)
+        ? requestBody.tools.map((tool) => tool?.function?.name).filter(Boolean) : [];
+    } catch { /* diagnostic only */ }
+    requests.push({ url, tools });
+    const body = url.includes('/v1/chat/completions')
+      ? lifecycleToolSse()
+      : JSON.stringify({ models: [{ name: 'qwen3:8b', size: 1 }] });
+    const contentType = url.includes('/v1/chat/completions')
+      ? 'text/event-stream' : 'application/json';
+    void session.send('Fetch.fulfillRequest', {
+      requestId,
+      responseCode: 200,
+      responseHeaders: [{ name: 'content-type', value: contentType }],
+      body: Buffer.from(body).toString('base64'),
+    }).catch(() => {});
+  });
+  await session.send('Runtime.enable');
+  await session.send('Fetch.enable', { patterns: [{ urlPattern: '*11434*' }] });
+  return Object.freeze({
+    requests,
+    diagnostics,
+    detach: () => session.detach(),
+  });
 };
 
 const targetArgument = process.argv.find((argument) => argument.startsWith('--target='));
@@ -245,7 +406,7 @@ const main = async (target = SOURCE_TARGET) => {
     enableExtensions: [fault.extension],
     headless: true,
     pipe: true,
-    protocolTimeout: 30_000,
+    protocolTimeout: 120_000,
     timeout: 30_000,
     userDataDir: profile,
     args: [
@@ -259,20 +420,23 @@ const main = async (target = SOURCE_TARGET) => {
       candidate.type() === 'service_worker'
       && candidate.url().endsWith(`/${fault.backgroundEntry}`), { timeout: 30_000 }),
     35_000, stage);
+    const modelWire = await armModelWire(discoveredTarget);
     const extensionId = new URL(discoveredTarget.url()).host;
     stage = 'extension page';
     let page = await withDeadline(browser.newPage(), 10_000, stage);
-    await withDeadline(page.goto(`chrome-extension://${extensionId}/sidepanel/sidepanel.html`),
+    await withDeadline(page.goto(`chrome-extension://${extensionId}/${FAULT_PAGE}`),
       30_000, stage);
-    const sessionId = 'chrome-physical-lifecycle-session';
     const callId = 'chrome-physical-script-call';
-    await withDeadline(page.evaluate(() => {
-      void chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null);
-    }), 10_000, stage);
-    stage = 'real dispatcher fault';
-    await page.evaluate(({ sessionId: sid, callId: cid }) => {
-      void chrome.runtime.sendMessage({ type: 'lifecycle-fault/dispatch', sessionId: sid, callId: cid });
-    }, { sessionId, callId });
+    stage = 'real controller tool effect';
+    const started = await withDeadline(page.evaluate((passphrase) =>
+      chrome.runtime.sendMessage({
+        type: 'lifecycle-fault/dispatch', start: true, passphrase,
+    }), PASSPHRASE), 120_000, stage);
+    if (started?.started !== true) {
+      const storedDetail = await page.evaluate(async (key) =>
+        (await chrome.storage.local.get(key))[key], BOOT_ERROR_KEY);
+      throw new Error(`lifecycle fault turn did not start: ${storedDetail ?? JSON.stringify(started)}; controller diagnostics: ${JSON.stringify(modelWire.diagnostics)}`);
+    }
     stage = 'lifecycle generation';
     let bootError = null;
     const generation = await waitFor(() => page.evaluate(async (bootErrorKey) => {
@@ -289,14 +453,35 @@ const main = async (target = SOURCE_TARGET) => {
     }));
     if (!generation?.id) throw new Error(`production lifecycle boot did not mint a generation${bootError ? `: ${bootError}` : ''}`);
     assert(true, 'production lifecycle boot minted a generation');
-    const operationId = `${sessionId}:${callId}`;
-    const inFlight = await waitFor(() => page.evaluate(async ({ reachedKey, operationKey, id }) => {
-      const stored = await chrome.storage.local.get([reachedKey, operationKey]);
-      const record = stored[operationKey]?.[id];
-      return stored[reachedKey]?.length === 1 && record?.state === 'awaiting_remote'
-        && record?.dispatched === true;
-    }, { reachedKey: REACHED_KEY, operationKey: OPERATION_KEY, id: operationId }));
-    assert(inFlight, 'real Class E dispatch crossed its durable dispatch marker');
+    const inFlight = await waitFor(() => page.evaluate(async ({ reachedKey, operationKey,
+      bootErrorKey, cid }) => {
+      const stored = await chrome.storage.local.get([
+        reachedKey, operationKey, bootErrorKey,
+      ]);
+      if (stored[bootErrorKey]) return { failure: stored[bootErrorKey] };
+      const entry = Object.entries(stored[operationKey] ?? {}).find(([id, record]) =>
+        id.endsWith(':' + cid) && record?.toolName === 'script');
+      const record = entry?.[1];
+      return stored[reachedKey]?.[0]?.phase === 'offscreen.runJob'
+        && record?.state === 'awaiting_remote' && record?.dispatched === true
+        ? { operationId: entry[0], sessionId: record.sessionId } : null;
+    }, {
+      reachedKey: REACHED_KEY, operationKey: OPERATION_KEY,
+      bootErrorKey: BOOT_ERROR_KEY, cid: callId,
+    }));
+    if (inFlight?.failure) {
+      throw new Error(`controller fault turn failed: ${inFlight.failure}; controller diagnostics: ${JSON.stringify(modelWire.diagnostics)}; model requests: ${JSON.stringify(modelWire.requests)}`);
+    }
+    if (!inFlight?.operationId || !inFlight?.sessionId) {
+      const faultState = await page.evaluate(async (keys) =>
+        chrome.storage.local.get(keys), [
+        REACHED_KEY, OPERATION_KEY, BOOT_ERROR_KEY,
+      ]);
+      throw new Error(`real controller Class E effect did not cross the offscreen job host; state: ${JSON.stringify(faultState)}; controller diagnostics: ${JSON.stringify(modelWire.diagnostics)}; model requests: ${JSON.stringify(modelWire.requests)}`);
+    }
+    const { operationId, sessionId } = inFlight;
+    assert(true, 'model-issued Class E tool crossed controller prepare and exact effect authority');
+    await modelWire.detach().catch(() => {});
 
     stage = 'physical browser termination';
     forcedTerminationAttempted = true;
@@ -316,11 +501,18 @@ const main = async (target = SOURCE_TARGET) => {
       && candidate.url().endsWith(`/${fault.backgroundEntry}`), { timeout: 30_000 }),
     35_000, stage);
     page = await withDeadline(browser.newPage(), 10_000, stage);
-    await withDeadline(page.goto(`chrome-extension://${extensionId}/sidepanel/sidepanel.html`),
+    await withDeadline(page.goto(`chrome-extension://${extensionId}/${FAULT_PAGE}`),
       30_000, stage);
-    await withDeadline(page.evaluate(() => chrome.runtime.sendMessage({
-      type: 'lifecycle-fault/dispatch', recoverOnly: true,
-    })), 30_000, 'lifecycle recovery boot');
+    try {
+      await withDeadline(page.evaluate((passphrase) => chrome.runtime.sendMessage({
+        type: 'lifecycle-fault/dispatch', recoverOnly: true,
+        passphrase,
+      }), PASSPHRASE), 120_000, 'lifecycle recovery boot');
+    } catch (cause) {
+      const diagnostics = await page.evaluate(async (keys) =>
+        chrome.storage.local.get(keys), [PROGRESS_KEY, BOOT_ERROR_KEY]).catch(() => null);
+      throw new Error(`${cause?.message ?? cause}; recovery diagnostics: ${JSON.stringify(diagnostics)}`);
+    }
     const restarted = await waitFor(async () => {
       await page.evaluate(() => {
         void chrome.runtime.sendMessage({ type: 'state/get' }).catch(() => null);

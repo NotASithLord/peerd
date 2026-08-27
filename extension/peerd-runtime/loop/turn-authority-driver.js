@@ -398,7 +398,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
                     : {};
         return {
           mode: 'execute',
-          custody: { prepared, authorityClass },
+          // why ctx is explicit: the controller bridge binds finite named
+          // authority methods from this in-memory custody object. Keeping it
+          // only inside `prepared` made every production domain binder see an
+          // empty context even though settlement still had the full record.
+          custody: { prepared, authorityClass, ctx: prepared.ctx },
           args: prepared.args,
           projection,
           manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,

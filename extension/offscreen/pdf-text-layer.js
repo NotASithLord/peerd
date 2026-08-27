@@ -1,5 +1,18 @@
 // @ts-check
 
+// Metadata crosses the same structured-clone boundary as page text. pdf.js
+// returns producer-controlled strings, so keep those fields independently
+// bounded even when the document's text layer is empty.
+export const PDF_INFO_FIELD_CHARS = 2_048;
+
+/** @param {any} metadata */
+export const boundedPdfInfo = (metadata) => ({
+  title: typeof metadata?.info?.Title === 'string'
+    ? metadata.info.Title.slice(0, PDF_INFO_FIELD_CHARS) : '',
+  author: typeof metadata?.info?.Author === 'string'
+    ? metadata.info.Author.slice(0, PDF_INFO_FIELD_CHARS) : '',
+});
+
 /**
  * Read pdf.js text streams into one aggregate-bounded page list. The bound is
  * enforced while chunks arrive, before the result can become a large pages
@@ -62,7 +75,7 @@ export const extractBoundedPdfTextLayer = async (pdf, { maxPages, maxChars }) =>
   return {
     pages,
     pageCount,
-    info: { title: meta?.info?.Title || '', author: meta?.info?.Author || '' },
+    info: boundedPdfInfo(meta),
     chars,
     textCapped,
   };

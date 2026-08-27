@@ -424,7 +424,7 @@ describe('offscreen production feature-lease wiring', () => {
 
   test('scope teardown has explicit controller, job, repository, model, media, and dweb fences', () => {
     const shell = source('offscreen/offscreen.js');
-    expect(shell).toContain('retireControllerHost?.()');
+    expect(shell).toContain('releaseControllerHost?.()');
     expect(shell).toContain('abortRepositoryHostCalls()');
     expect(shell).toContain('abortAllJobs()');
     expect(shell).toContain('teardownLocalModel()');

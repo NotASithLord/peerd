@@ -536,7 +536,7 @@ const stopControllerFeature = async () => {
   }
   actorPorts.clear();
   try { repositoryHost?.abortRepositoryHostCalls(); } catch {}
-  try { controllerBootstrap?.retireControllerHost?.(); } catch {}
+  try { controllerBootstrap?.releaseControllerHost?.(); } catch {}
   return { stopped: true };
 };
 

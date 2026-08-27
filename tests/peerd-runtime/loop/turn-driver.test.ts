@@ -348,7 +348,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
           ok: true,
           outcomeKnown: true,
           value: {
-            ended: prepared.custody.prepared.ctx.completeGoalRun('done') === true,
+            ended: prepared.custody.ctx.completeGoalRun('done') === true,
           },
         };
         await ctx.toolExecution.settle(prepared.custody, {

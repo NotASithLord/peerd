@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { extractBoundedPdfTextLayer } from '../../extension/offscreen/pdf-text-layer.js';
+import {
+  extractBoundedPdfTextLayer,
+  PDF_INFO_FIELD_CHARS,
+} from '../../extension/offscreen/pdf-text-layer.js';
 
 const textPage = (chunks: any[], calls: string[], pageNumber: number) => ({
   streamTextContent: () => {
@@ -66,5 +69,21 @@ describe('bounded offscreen PDF text extraction', () => {
     const result = await extractBoundedPdfTextLayer(pdf, { maxPages: 1, maxChars: 100 });
     expect(result.pages).toEqual([{ page: 1, text: '1' }]);
     expect(result.textCapped).toBe(true);
+  });
+
+  test('bounds producer-controlled metadata before structured clone', async () => {
+    const calls: string[] = [];
+    const oversized = 'x'.repeat(PDF_INFO_FIELD_CHARS + 10_000);
+    const pdf = {
+      numPages: 0,
+      getPage: async (page: number) => textPage([], calls, page),
+      getMetadata: async () => ({ info: { Title: oversized, Author: oversized } }),
+    };
+    const result = await extractBoundedPdfTextLayer(pdf, { maxPages: 1, maxChars: 10 });
+    expect(result.info).toEqual({
+      title: 'x'.repeat(PDF_INFO_FIELD_CHARS),
+      author: 'x'.repeat(PDF_INFO_FIELD_CHARS),
+    });
+    expect(structuredClone(result).info).toEqual(result.info);
   });
 });
