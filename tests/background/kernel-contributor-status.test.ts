@@ -557,6 +557,28 @@ describe('Preview Contributor Metrics private channel', () => {
     expect(await restarted.arm()).toEqual({ enabled: false, generation: null });
   });
 
+  test('an unresolved revocation makes old receipts and later settlements inert', async () => {
+    const state = storage(enabledRecord());
+    const sender = {};
+    const beforeRestart = directRoutesFor(state, sender);
+    expect(await beforeRestart.recordWebSettlement(settlement('before-revocation')))
+      .toEqual({ ok: true, queued: true });
+    await state.kv.set(`${CONTRIBUTOR_STATE_PREFIX}uncertain-revocation`, {
+      version: 2, revision: 10, state: 'revoked', record: null, committed: false,
+    });
+
+    const restarted = directRoutesFor(state, sender);
+    expect(await restarted.pending()).toEqual([]);
+    expect(await restarted.recordWebSettlement(settlement('after-revocation')))
+      .toEqual({ ok: true, queued: false, reason: 'disabled' });
+    expect(await restarted.routes['contributor/status']({
+      type: 'contributor/status',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await restarted.arm()).toEqual({ enabled: false, generation: null });
+    expect(Object.values(state.listed(CONTRIBUTOR_STATE_PREFIX)))
+      .toEqual([expect.objectContaining({ state: 'revoked', committed: false })]);
+  });
+
   test('late snapshot cleanup never deletes a newer acknowledged generation', async () => {
     const state = storage(null);
     const sender = {};
@@ -674,6 +696,53 @@ describe('Preview Contributor Metrics private channel', () => {
       expect(posted).toBe(2);
       expect(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX)).toEqual({});
     } finally { live.restore(); }
+  });
+
+  test('a new receipt wakes one replay after an outcome-unknown drain', async () => {
+    const state = storage(enabledRecord());
+    const sender = {};
+    const scheduled: Array<() => void> = [];
+    let releaseUnknown: (() => void) | undefined;
+    let unknownStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { unknownStarted = resolve; });
+    const unknown = new Promise<void>((resolve) => { releaseUnknown = resolve; });
+    let settlementAttempts = 0;
+    const owner = createPreviewContributorRoutes({
+      kv: state.kv, optionsUi: (candidate: any) => candidate === sender,
+      sidepanelUi: () => false, homeUi: () => false,
+      validateFeedback: async () => ({ ok: false }),
+      offscreenUrl: null, featureHost: null,
+      scheduleDrain: (operation: () => void) => { scheduled.push(operation); },
+      dispatchSemanticRoute: async (route: string, message: any, options: any) => {
+        if (route === 'contributor/settlement' && settlementAttempts++ === 0) {
+          unknownStarted?.();
+          await unknown;
+          return { ok: false, code: 'channel-lost', outcomeKnown: false };
+        }
+        return dispatchContributorSemanticRoute(route, message, options);
+      },
+    });
+    scheduled.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await owner.recordWebSettlement(settlement('unknown-first', { durationMs: 1 })))
+      .toEqual({ ok: true, queued: true });
+    scheduled.shift()?.();
+    await started;
+    expect(await owner.recordWebSettlement(settlement('arrived-during-unknown', {
+      durationMs: 2,
+    }))).toEqual({ ok: true, queued: true });
+    releaseUnknown?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scheduled).toHaveLength(1);
+    scheduled.shift()?.();
+    for (let turn = 0; turn < 10 && (await owner.pending()).length > 0; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(await owner.pending()).toEqual([]);
+    expect(settlementAttempts).toBe(3);
+    expect(Object.values(state.value().aggregate.rows)).toEqual([
+      expect.objectContaining({ actorTurns: 2 }),
+    ]);
   });
 
   test('a timed-out receipt append survives restart without losing or doubling settlement', async () => {
@@ -826,6 +895,7 @@ describe('Preview Contributor Metrics private channel', () => {
     const state = storage(enabledRecord());
     const optionsSender = {};
     const sidepanelSender = {};
+    const homeSender = {};
     const messages = [
       { role: 'user', id: 'human-1', content: 'present', synthetic: false },
       { role: 'assistant', id: 'call-1', content: 'present', toolUses: [
@@ -836,6 +906,7 @@ describe('Preview Contributor Metrics private channel', () => {
     ];
     const live = routesFor(state, optionsSender, undefined, {
       sidepanel: sidepanelSender,
+      home: homeSender,
       validate: async () => ({ ok: true, messages }),
       scheduleDrain: () => {},
     });
@@ -854,7 +925,7 @@ describe('Preview Contributor Metrics private channel', () => {
       expect(await live.routes['contributor/feedback'](request, sidepanelSender))
         .toEqual({ ok: true, recorded: true, reason: null });
       expect(await live.owner.pending()).toEqual([]);
-      expect(await live.routes['contributor/feedback'](request, sidepanelSender))
+      expect(await live.routes['contributor/feedback'](request, homeSender))
         .toEqual({ ok: true, recorded: false, reason: null });
       expect(Object.values(state.value().aggregate.rows)[0]).toMatchObject({
         actorTurns: 1, worked: 1, didntWork: 0,

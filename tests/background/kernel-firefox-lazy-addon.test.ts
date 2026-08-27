@@ -52,6 +52,31 @@ describe('kernel Firefox lazy addon', () => {
     expect(loads).toEqual([]);
   });
 
+  test('an unresolved consent proposal cannot arm the Firefox actor path after restart', async () => {
+    const active = {
+      version: 1,
+      consent: {
+        enabled: true, schemaVersion: 1, disclosureVersion: 1,
+        generation: 'active-generation',
+      },
+      aggregate: { version: 1 },
+    };
+    const contributor = makeKernelFirefoxContributor()({
+      kv: {
+        get: async () => null, set: async () => {}, delete: async () => {},
+        list: async () => ({
+          'contributor_metrics.state.v2.active': {
+            version: 2, revision: 10, state: 'active', record: active, committed: true,
+          },
+          'contributor_metrics.state.v2.uncertain-revoke': {
+            version: 2, revision: 11, state: 'revoked', record: null, committed: false,
+          },
+        }),
+      },
+    });
+    expect(await contributor.arm()).toEqual({ enabled: false, generation: null });
+  });
+
   test('refuses an untrusted contributor sender before storage or semantic demand', async () => {
     const loads: string[] = [];
     const contributorFactory = makeKernelFirefoxContributor({

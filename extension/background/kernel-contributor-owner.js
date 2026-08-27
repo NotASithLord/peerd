@@ -158,9 +158,8 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     storage(() => kv.set(key, value));
   const remove = (/** @type {string} */ key) => storage(() => kv.delete(key));
   const list = (/** @type {string} */ prefix) => storage(() => kv.list(prefix));
-  // why: revocation hides uncancellable late writes now.
+  // why: reads cannot revive revoked or uncertain consent.
   let locallyRevoked = false;
-  // why: only explicit consent, not an ordinary read, resolves an uncertain mutation.
   let consentUncertain = false;
   let durableConsentUncertain = false;
   let lastIssuedRevision = 0;
@@ -220,9 +219,10 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     const record = await get(CONTRIBUTOR_RECORD_KEY);
     return armFromRecord(record).generation === marker.generation ? record : null;
   };
-  const readActiveRecord = async () => {
+  const readActiveRecord = async (allowUncertain = false) => {
     if (locallyRevoked) return null;
     const latest = await readLatestState();
+    if (durableConsentUncertain && !allowUncertain) return null;
     if (latest) return latest.value.state === 'active' ? latest.value.record : null;
     return legacyRecord();
   };
@@ -292,7 +292,9 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
       return { ok: false, code: 'semantic-kernel-operation-expired', outcomeKnown: true };
     }
     const run = async () => {
-      if (kind === 'read' || kind.endsWith('-read')) return readActiveRecord();
+      if (kind === 'read' || kind.endsWith('-read')) {
+        return readActiveRecord(kind === 'enable-read');
+      }
       if (kind === 'clear') {
         // why: the append-only revocation is the commit; cleanup can follow.
         locallyRevoked = true;
@@ -318,7 +320,7 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
         await writeState(value);
         return { ok: true };
       }
-      const current = await readActiveRecord();
+      const current = await readActiveRecord(kind === 'enable');
       if (JSON.stringify(current ?? null) !== JSON.stringify(payload?.expected ?? null)) {
         return { ok: false, error: 'contributor-state-changed' };
       }
@@ -704,20 +706,17 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
   const requestDrain = () => {
     if (drainScheduled) { drainAgain = true; return; }
     drainScheduled = true;
-    let lastDrainOk = false;
     try {
       scheduleDrain(() => {
         void (async () => {
-          let result;
           do {
             drainAgain = false;
-            result = await drainPending();
-            lastDrainOk = result?.ok === true;
-          } while (lastDrainOk && drainAgain);
+            if ((await drainPending())?.ok !== true) break;
+          } while (drainAgain);
         })().finally(() => {
-          const retry = lastDrainOk && drainAgain;
+          // why: a new wake after an ambiguous call merits one idempotent replay.
           drainScheduled = false;
-          if (retry) requestDrain();
+          if (drainAgain) requestDrain();
         });
       });
     } catch { drainScheduled = false; }

@@ -2672,7 +2672,8 @@ export const STATES = [
       await evalIn(ctx.page, `[...document.querySelectorAll('.task-feedback button')]
         .find((button) => button.textContent === 'worked')?.click()`);
       await waitFor(() => evalIn(ctx.page,
-        `document.querySelector('.task-feedback-note')?.textContent.includes('not recorded') === true`),
+        `document.querySelector('.task-feedback-note')?.textContent
+          .includes('enable Contributor Metrics in Settings') === true`),
       { budgetMs: 4_000, pollMs: 50 });
       const after = await evalIn(ctx.page, `({
         pressed: document.querySelector('.task-feedback button[aria-pressed="true"]')?.textContent,
@@ -2681,7 +2682,7 @@ export const STATES = [
         freeText: document.querySelector('.task-feedback input, .task-feedback textarea') !== null,
       })`);
       rec.check('disabled feedback is declined honestly without mutating the transcript',
-        !after?.pressed && after?.notice?.includes('not recorded')
+        !after?.pressed && after?.notice?.includes('enable Contributor Metrics in Settings')
           && after?.messageCount === beforeCount && after?.freeText === false,
         JSON.stringify({ beforeCount, after }));
     },
