@@ -5,7 +5,7 @@
 import { withDeadline } from '/shared/cold-util.js';
 import {
   VOICE_CHANNEL_OFFER, VOICE_CHANNEL_PROTOCOL, VOICE_CHANNEL_RESULT, VOICE_COMMANDS,
-  parseVoiceChannelOffer,
+  parseVoiceChannelOffer, parseVoiceCommand,
 } from '/shared/voice-channel.js';
 
 const STARTS_MEDIA = new Set(['voice/init', 'voice/listen']);
@@ -256,7 +256,12 @@ export const createKernelVoiceCustody = ({
   };
   const routes = Object.freeze(Object.fromEntries(VOICE_COMMANDS.map((type) => [
     type,
-    (/** @type {any} */ message = {}) => dispatch(shapeCommand(type, message)),
+    (/** @type {any} */ message = {}) => {
+      const command = parseVoiceCommand(shapeCommand(type, message));
+      return command ? dispatch(command) : Promise.resolve({
+        ok: false, error: 'voice-command-invalid', outcomeKnown: true,
+      });
+    },
   ])));
   const teardown = () => queue(async () => {
     if (firefox) {

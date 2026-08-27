@@ -116,6 +116,14 @@ describe('thin vault-kernel Port assembly', () => {
 });
 
 describe('executable vault-kernel cutover report', () => {
+  test('reports update-event readiness only for the target that attaches that listener', () => {
+    const source = readFileSync(join(
+      import.meta.dir, '..', '..', 'extension', 'background', 'vault-kernel.js',
+    ), 'utf8');
+    expect(source).toContain(
+      "'runtime.onUpdateAvailable': kernelSelfHostedChrome && !!kernelUpdateCustody",
+    );
+  });
   test('inventories all events and Ports but defaults every executable owner fail-closed', () => {
     const store = createVaultKernelAssemblyReport({ identity: IDENTITY });
     expect(store.events.map((entry) => entry.key))
