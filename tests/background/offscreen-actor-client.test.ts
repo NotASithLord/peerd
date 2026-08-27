@@ -404,6 +404,41 @@ describe('isolated exact tool authority', () => {
     expect(settlements).toBe(2);
   });
 
+  test('freezes an explicit null settlement across a failed durable attempt', async () => {
+    let settlements = 0;
+    const { client, during } = clientWithRelay({
+      settleToolCall: async (_prepared: any, execution: any) => {
+        settlements += 1;
+        if (settlements === 1) throw new Error('temporary settlement failure');
+        return execution.result;
+      },
+    });
+    const result = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'call-null-settle', name: 'actor_cancel', args: { taskId: 'task-1' } },
+      }, OFFSCREEN);
+      const first = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId, result: null,
+      }, OFFSCREEN);
+      const changed = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId, result: { ok: true },
+      }, OFFSCREEN);
+      const retry = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId, result: null,
+      }, OFFSCREEN);
+      return { first, changed, retry };
+    });
+    expect(result.first).toMatchObject({
+      ok: false, error: 'temporary settlement failure', outcomeKnown: true,
+    });
+    expect(result.changed).toMatchObject({
+      ok: false, error: 'actor/tool-settle: result mismatch', outcomeKnown: true,
+    });
+    expect(result.retry).toEqual({ ok: true, result: null });
+    expect(settlements).toBe(2);
+  });
+
   test('run teardown joins an in-flight durable settlement without duplicating it', async () => {
     let releaseSettlement!: () => void;
     let markStarted!: () => void;
