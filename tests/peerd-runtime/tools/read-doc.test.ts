@@ -123,6 +123,30 @@ describe('read_doc as the one public document reader', () => {
     expect(page.content).toContain('"format": "pdf-text"');
   });
 
+  test('uses the PDF query even when paging authority is unavailable', async () => {
+    const middle = 'needle clause: keep this exact passage';
+    const result = await readDocTool.execute({
+      url: 'https://docs.example/no-spill.pdf', query: 'needle exact passage', maxChars: 1_000,
+    }, docContext({
+      docOffscreenClient: { extract: async () => ({
+        ...pdfResult,
+        pdf: {
+          ...pdfResult.pdf,
+          pages: [
+            { page: 1, text: 'opening '.repeat(2_000) },
+            { page: 2, text: `${'middle '.repeat(1_000)}${middle}${' middle'.repeat(1_000)}` },
+            { page: 3, text: 'closing '.repeat(2_000) },
+          ],
+          pageCount: 3,
+        },
+      }) },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain(middle);
+    expect(result.content).not.toContain('read_result');
+  });
+
   test('caps the stored PDF text at the shared spill limit', async () => {
     let spilled: any = null;
     const result = await readDocTool.execute({

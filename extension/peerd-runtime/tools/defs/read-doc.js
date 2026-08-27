@@ -80,16 +80,6 @@ export const readDocTool = composeTool("read_doc", {
         MAX_SPILL_TEXT_CHARS,
       );
       const pdf = result.pdf;
-      if (!authority.spillResult) {
-        return {
-          ok: true,
-          content: wrapUntrusted({
-            origin: originOfUrl(target),
-            tool: 'read_doc',
-            body: formatPdfBody({ ...pdf, maxChars }),
-          }),
-        };
-      }
       const text = boundedPdfText(formatPdfBody({
         ...pdf, maxChars: Number.MAX_SAFE_INTEGER,
       }));
@@ -99,7 +89,7 @@ export const readDocTool = composeTool("read_doc", {
       const shown = ex ? ex.excerpt : win.window;
       const truncated = ex ? ex.excerpted : win.windowed;
       let footer = null;
-      if (truncated) {
+      if (truncated && authority.spillResult) {
         try {
           const cacheKey = await authority.spillResult({
             url: target, format: 'pdf-text', text,
