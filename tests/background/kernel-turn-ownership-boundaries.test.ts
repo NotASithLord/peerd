@@ -623,4 +623,22 @@ describe('kernel turn ownership boundaries', () => {
     expect(source).not.toContain('import(');
     expect(source).not.toMatch(/\b(operation|action)\s*,\s*payload\b/);
   });
+
+  it('keeps the fixed lifecycle residue in cohesive owners instead of a function bag', () => {
+    const semantics = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/controller-turn-semantics.js'),
+      'utf8',
+    );
+    const adapter = readFileSync(
+      join(EXTENSION_ROOT, 'background/kernel-turn-authority-adapter.js'),
+      'utf8',
+    );
+    for (const owner of ['actor', 'policy', 'site', 'turn']) {
+      expect(semantics).toContain(`${owner}: Object.freeze({`);
+      expect(adapter).toContain(`semanticOwners.${owner}`);
+    }
+    expect(semantics).not.toContain("from './actor/actors-api.js'");
+    expect(semantics).not.toContain('shapeActorsResult');
+    expect(adapter).not.toContain('semanticOwner;');
+  });
 });

@@ -85,11 +85,10 @@ substitute arbitrary byte target.
 
 ## Verification baseline
 
-The current Store-Chrome artifact packages and passes Store posture at
-1,237,160 bundled service-worker bytes, 398 staged inputs and a 347,603-byte
-release-minified cold graph. The preceding retained checkpoint was 1,258,793
-bytes, 415 inputs and the same cold-graph size. These values are observations,
-not goals.
+The current Store-Chrome artifact packages and passes Store posture. The
+current checkpoint measured 1,235,261 bundled service-worker bytes, 399 staged
+inputs and a 347,457-byte release-minified cold graph. These values are
+observations, not goals.
 
 Static typecheck, lint, checked-file coverage, dweb boundary, controller
 identity, ownership boundaries and focused security tests pass. The full Bun
@@ -103,28 +102,34 @@ at the final cut; do not treat the documented debts as new regressions, and do
 not add new failures. The separate web target previously reproduced its
 inherited stale activity-overlay browser-touch ledger.
 
-## Remaining deletion sequence
+## Fixed lifecycle residue
 
-The only remaining work is the residual semantic-root cut. Separate the
-authority lifecycle preparation/settlement shell from the semantic dispatcher,
-then remove the remaining `dispatchToolCall` uses in the authority driver,
-page-code relay and actor-code roster relay. Import fixed authority policy and
-adapters directly, relocate any remaining composer/attachment, Goal,
-scheduler/memory and actor-result semantics to their sealed owners, and delete
-`controller-turn-semantics.js`, `kernel-turn-live-factories.js` and superseded
-aggregate machinery when their last real caller disappears. Do not add a new
-dispatcher or duplicate path. Fixed session, vault, egress,
-browser/storage/engine, confirmation/audit, actor, alarm, replay and lifecycle
-custody stays in the service worker.
+`kernel-turn-live-factories.js` remains the one explicit composition edge
+between `kernel-turn-authority-adapter.js` and four cohesive, dependency-clean
+lifecycle owners in `controller-turn-semantics.js`: actor delivery, authority
+policy projection, site custody shaping and turn lifecycle orchestration. This
+is deliberately fixed residue, not a growing feature registry. Its graph
+contains no provider implementation, tool definition/catalog, controller tool
+implementation or generic dispatch lane.
+
+Deleting these two names would only move the same imports into the production
+runtime or split stateful Goal/scheduler/actor custody across an idle-retired
+Worker protocol. That would add a second lifecycle path without improving
+feature-growth independence. The residue therefore stays visible and is pinned
+by ownership tests. The old flat semantic function bag is gone, as is its
+unused actor-API closure. Revisit this seam only if a new execution host can own
+the complete lifecycle without duplicate custody.
 
 ## Completion condition
 
 Every public tool has exactly one controller semantic owner. The production
 Store-Chrome service worker imports no provider implementation, tool
-definition/catalog, semantic registry, turn/actor implementation or controller
-semantic root. The legacy dispatcher and every compatibility path are deleted.
-An ordinary controller-only feature adds no service-worker input, normalized
-authority code or authority operation apart from the generated identity
-literal. Static, Bun, browser, security and package verification have no new
-failures; fresh and forced-wake readiness remains inside the accepted envelope;
-the worktree is clean; and every retained checkpoint is committed and pushed.
+definition/catalog, semantic registry or controller tool implementation. The
+legacy dispatcher and every compatibility path are deleted. The fixed
+lifecycle composition above cannot acquire growing feature imports without an
+ownership-test change. An ordinary controller-only feature adds no
+service-worker input, normalized authority byte or authority operation apart
+from the generated identity literal. Static, Bun, browser, security and package
+verification have no new failures; fresh and forced-wake readiness remains
+inside the accepted envelope; the worktree is clean; and every retained
+checkpoint is committed and pushed.
