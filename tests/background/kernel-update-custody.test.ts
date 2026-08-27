@@ -182,6 +182,40 @@ describe('native preview update custody', () => {
     expect((h.values.get(KERNEL_UPDATE_CUSTODY_KEY) as any).pendingVersion).toBe('5.0.0');
   });
 
+  test('a hung window oracle cannot pin later update application', async () => {
+    let calls = 0;
+    const h = harness({
+      deps: {
+        operationTimeoutMs: 5,
+        listWindowClients: async () => ++calls === 1 ? new Promise(() => {}) : [],
+      },
+    });
+    await expect(h.custody.onUpdateAvailable({ version: '5.1.0' })).resolves.toBe(true);
+    expect(h.calls.reload).toBe(0);
+    await expect(h.custody.onQuiet()).resolves.toBe(true);
+    expect({ calls, reloads: h.calls.reload }).toEqual({ calls: 2, reloads: 1 });
+  });
+
+  test('a hung update check cannot pin a later check', async () => {
+    let checks = 0;
+    const h = harness({
+      deps: {
+        operationTimeoutMs: 5,
+        runtime: {
+          reload: () => {},
+          getManifest: () => ({ version: '0.0.0' }),
+          requestUpdateCheck: async () => {
+            checks += 1;
+            return checks === 1 ? new Promise(() => {}) : undefined;
+          },
+        },
+      },
+    });
+    await expect(h.custody.checkNow()).resolves.toBe(false);
+    await expect(h.custody.checkNow()).resolves.toBe(true);
+    expect(checks).toBe(2);
+  });
+
   test('keeps one capped quiet retry alive until a downloaded update can apply', async () => {
     const h = harness();
     h.setBusy(true);
