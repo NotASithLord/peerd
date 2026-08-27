@@ -5,7 +5,8 @@
 // offscreen document (offscreen/doc-extract.js). This client ensures the
 // offscreen doc exists and dispatches the job. Dependencies are injected
 // (ensureOffscreen + sendMessage) so it stays a pure, testable shell — the
-// same shape as offscreen-pdf-client.js.
+// PDF and structured-document engines remain separate behind this exact route;
+// the offscreen handler selects one only after sniffing the fetched bytes.
 //
 // why the error is REPACKED rather than thrown as a string: the conversion's
 // failures are the interesting part of its API (a legacy .doc, a PDF behind a
@@ -20,8 +21,8 @@
 export const makeOffscreenDocClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {{ url?: string, bytesB64?: string, name?: string, contentType?: string }} source
-   * @param {{ format?: string }} [opts]
-   * @returns {Promise<{ doc: import('/peerd-runtime/doc/model.js').Document, bytes: number, sniffedVia: string }>}
+   * @param {{ format?: string, engine?: string }} [opts]
+   * @returns {Promise<{ format: string, doc?: import('/peerd-runtime/doc/model.js').Document, pdf?: { engine: string, pages: {page:number,text:string}[], pageCount: number, info: object, scanned: boolean, ocrUsed: boolean, ocrAvailable: boolean }, bytes: number, sniffedVia: string }>}
    */
   extract: async (source, opts = {}) => {
     await ensureOffscreen();

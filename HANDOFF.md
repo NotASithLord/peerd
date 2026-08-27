@@ -92,9 +92,17 @@ and temporal-context ownership cuts, followed by the authority-driver cut.
   persistence, page, introspection, scheduling and dweb) and exact named
   operations. The deleted per-tool SW manifest and every redundant per-handler
   tool-name list no longer authorize effects.
-- The frozen legacy allowlist remains at 17. No authority operation was added;
+- The frozen legacy allowlist is now 15. No authority operation was added;
   existing exact handlers still bind owner/session/run, class, arguments,
   cancellation, replay and known/unknown outcome state.
+- The dedicated `request_review` product feature is deleted. A deliberately
+  narrow `actor_create` child is the single clean-context mechanism; the
+  review-only session marker, grants, orchestration, tool, routes and support
+  graph no longer exist.
+- `read_doc` is the only public document reader. It accepts an explicit URL or
+  the active PDF tab and selects the existing PDF.js/OCR or structured-document
+  engine after byte sniffing. The public `read_pdf` tool, its offscreen route,
+  client and duplicated policy/catalog/exposure wiring are deleted.
 - The orchestrator authority driver refuses actor and spawned sessions before
   turn construction. Its formerly unreachable actor prompt, tool projection,
   instance pinning and actor-card result-shaping branches are deleted. Inbound
@@ -139,10 +147,13 @@ controller identity literals, the candidate has exactly the same SW inputs and
 byte-identical authority code. The complete fixture appears only in the
 controller graph.
 
-Store-Chrome telemetry for the latest staged checkpoint is 1,297,009 bundled
-SW bytes, 445 staged inputs and a 347,857-byte minified cold graph. The prior
-checkpoint was 1,297,563 bytes and 445 inputs with the same cold graph. The live
-`kernel-turn-live-factories.js` graph is 289 modules and contains no
+Store-Chrome telemetry for the latest staged checkpoint is 1,284,139 bundled
+SW bytes, 437 staged inputs and a 347,832-byte minified cold graph. The same
+isolated packaging flow at `36a7eb5` produced 1,297,009 bytes, 445 inputs and a
+347,856-byte cold graph. The eight inputs removed are
+`background/offscreen-pdf-client.js`, both deleted tool definitions, and the
+five review support modules that were reachable from the worker. No worker
+input was added. The live `kernel-turn-live-factories.js` graph contains no
 `peerd-provider` module. Provider selection, price projection and provider
 failure interpretation now occur in the sealed controller and isolated actor
 worker. The SW validates and folds the bounded price result and retains session
@@ -156,20 +167,22 @@ readiness: 3.61 seconds from browser launch, 685 ms from worker target, 133 ms
 from Home navigation, and 107 ms for a confirmed forced wake. The assessment
 was green and remains inside the accepted functional envelope.
 
-Latest authority-driver verification: 110 focused turn/controller,
-feature-growth identity, security and ownership tests passed. Static typecheck and lint
-passed; Store packaging/posture passed. No full-suite or live browser rerun was
-required for this behavior-preserving ownership cut. The preceding
-full Bun suite passed 7,511 tests and reproduced only the same five inherited failures:
+Latest verification: the focused document, legacy-boundary, actor, route,
+controller and security tests pass. Static typecheck, lint, checked-file
+coverage and the dweb boundary pass; Store packaging and posture verification
+pass. The full Bun suite passes 7,479 of 7,484 tests and reproduces only the
+same five inherited failures:
 the session-support cutover, native-entry identity, test-only vault package,
 typed-error minification, and obsolete native cold-size target. The in-browser
-suite passed 1,000 tests and reproduced only the same two inherited UI
-failures. There are no new failures.
+suite passes 1,000 of 1,002 tests and reproduces only the same two inherited UI
+failures. The functional E2E harness still stops at
+`kernel-demand-routes-load-failed` during `settings/update`; clean `36a7eb5`
+reproduces the same refusal. There are no new failures.
 
 The remaining aggregate is now classified as fixed migration residue rather
 than an ordinary feature-growth edge. The SW still reaches
 `controller-turn-semantics.js` through `kernel-turn-live-factories.js`, but the
-path is closed over an explicit 17-tool compatibility list and fixed
+path is closed over an explicit 15-tool compatibility list and fixed
 orchestrators; it does not import the growing catalog or provider registry.
 The controller-only feature fixture proves that adding a real tool policy,
 schema, implementation and ownership row adds zero SW inputs and leaves
@@ -178,17 +191,17 @@ normalized authority code byte-identical.
 Deleting this residue has one honest executable boundary. It must move all of
 the following together, then physically delete the compatibility path:
 
-- the 17 frozen document/web, site-client, headless-execution, workspace,
-  toolbox, review and A2A implementations plus registry execution;
+- the 15 frozen document/web, site-client, headless-execution, workspace,
+  toolbox and A2A implementations plus registry execution;
 - composer and attachment shaping, Goal continuation semantics, scheduler and
-  memory orchestration, reviewer orchestration, and actor result shaping;
+  memory orchestration and actor result shaping;
 - their orchestrator and isolated-actor execution paths, using the same
   controller semantic owners.
 
 The corresponding fixed authority interfaces must cover exact document
 conversion, session-scoped web request and cache custody, site-client
 registry/runtime/capture custody, sandbox and headless-run custody, exact
-workspace file reads/writes, toolbox records, reviewer actor grants, A2A run
+workspace file reads/writes, toolbox records, A2A run
 grants, goal persistence/events, alarms, confirmation, audit, replay and
 cancellation. A smaller tool-family cut cannot delete the aggregate, while a
 single catch-all bridge would be the prohibited generic browser/storage/fetch
@@ -203,17 +216,12 @@ new authority classes still require a manifest and ledger review. The fixed
 semantic residue remains ownership debt and must not be described as fully
 migrated.
 
-The latest verification also repairs Bun's root-relative test resolver after
+The earlier root-relative resolver checkpoint also repairs Bun's test resolver after
 disposable-worktree runs. A cached absolute module path can no longer point
-focused tests into a deleted measurement tree. This changes no extension input
-or packaged byte. Store-Chrome telemetry remains 1,297,009 bundled SW bytes,
-445 staged inputs and a 347,857-byte minified cold graph; the accepted Home
-cold-start measurements therefore remain the production baseline by identical
-artifact content. Post-repair verification passes all 63 focused ownership,
-protocol, backpressure, runtime and feature-growth tests plus the complete Bun
-suite, typecheck, lint, checked-file coverage and the dweb boundary. The
-packaged-import check still stops only at its inherited 300 KB cold-graph
-budget; this checkpoint does not relax that obsolete policy gate.
+focused tests into a deleted measurement tree. The accepted Home cold-start
+measurements remain the production performance baseline. The packaged-import
+check still stops only at its inherited 300 KB cold-graph budget; this
+checkpoint does not relax that obsolete policy gate.
 
 ## Completion condition
 

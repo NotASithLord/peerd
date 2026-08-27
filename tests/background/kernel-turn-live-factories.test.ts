@@ -545,7 +545,7 @@ describe('kernel live turn factories', () => {
     expect(h.engine.appTabTracker.getTabId('app-1')).toBe(17);
   });
 
-  test('runs a bound actor with projection, reviewer and spend gates, then replays live state', async () => {
+  test('runs a bound actor with projection and spend gates, then replays live state', async () => {
     let releaseRun!: () => void;
     const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
     const jobs: any[] = [];
@@ -577,8 +577,6 @@ describe('kernel live turn factories', () => {
     const replay: any[] = [];
     await h.runtime.relays.onUiConnect({ postMessage: (message: any) => replay.push(message) });
     expect(replay.some((message) => message.type === 'turn/actor-start')).toBe(true);
-    expect(h.actorConfig().reviewToolAllowed('app_read_file')).toBe(true);
-    expect(h.actorConfig().reviewToolAllowed('app_write_file')).toBe(false);
     const actorSessionId = jobs[0].actorSessionId;
     await h.sessions.update(actorSessionId, { cost: { cost: 25 } });
     expect(await h.actorConfig().spendRefusalFor(actorSessionId)).toContain('spend limit');

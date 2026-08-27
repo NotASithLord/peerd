@@ -165,11 +165,6 @@ const PAGE_METHODS = {
     },
     shape: passthrough,
   },
-  readPdf: {
-    tool: 'read_pdf',
-    toArgs: (a) => plainOptions(a.options),
-    shape: passthrough,
-  },
   view: {
     tool: 'view',
     toArgs: () => ({}),
@@ -190,8 +185,10 @@ const PAGE_METHODS = {
   readDocument: {
     tool: 'read_doc',
     toArgs: (a) => {
-      if (typeof a?.url !== 'string' || !a.url) throw new PageApiError('page.readDocument(url): url must be a non-empty string');
-      return { ...plainOptions(a.options), url: a.url };
+      if (a?.url !== undefined && (typeof a.url !== 'string' || !a.url)) {
+        throw new PageApiError('page.readDocument(url?, options?): url must be a non-empty string when supplied');
+      }
+      return { ...plainOptions(a.options), ...(typeof a?.url === 'string' ? { url: a.url } : {}) };
     },
     shape: passthrough,
   },
@@ -247,7 +244,6 @@ const PAGE_TOOL_ROUTES = Object.freeze({
   read_state: 'page-program/read-state',
   watch_changes: 'page-program/watch-changes',
   query_dom: 'page-program/query-dom',
-  read_pdf: 'page-program/read-pdf',
   view: 'page-program/view',
   fetch_url: 'page-program/fetch',
   read_doc: 'page-program/read-document',

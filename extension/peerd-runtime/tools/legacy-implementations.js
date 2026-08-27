@@ -4,7 +4,6 @@
 // use its temporary legacy dispatcher. Explicit imports make each domain
 // migration delete its executable dependency instead of keeping the broad
 // built-in catalog reachable through a barrel.
-import { readPdfTool } from './defs/read-pdf.js';
 import { readDocTool } from './defs/read-doc.js';
 import { fetchUrlTool } from './defs/fetch-url.js';
 import { readWebCacheTool } from './defs/read-web-cache.js';
@@ -19,11 +18,9 @@ import { editFileTool } from './defs/edit-file.js';
 import { toolboxWriteTool } from './defs/toolbox-write.js';
 import { toolboxListTool } from './defs/toolbox-list.js';
 import { toolboxDeleteTool } from './defs/toolbox-delete.js';
-import { requestReviewTool } from './defs/request-review.js';
 import { a2aRunTool } from './defs/a2a-run.js';
 
 export const LEGACY_TOOL_IMPLEMENTATIONS = Object.freeze([
-  readPdfTool,
   readDocTool,
   fetchUrlTool,
   readWebCacheTool,
@@ -38,6 +35,5 @@ export const LEGACY_TOOL_IMPLEMENTATIONS = Object.freeze([
   toolboxWriteTool,
   toolboxListTool,
   toolboxDeleteTool,
-  requestReviewTool,
   a2aRunTool,
 ]);

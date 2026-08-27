@@ -4,8 +4,8 @@
 // Why here and not the SW: pdf.js parses in a Worker (GlobalWorkerOptions
 // .workerSrc), and a service worker cannot host a nested Worker. The
 // offscreen document can — the same reason voice (Moonshine) and script
-// (the sealed worker) live here. The read_pdf tool (SW) calls in via
-// background/offscreen-pdf-client.js → a 'pdf/extract' message → here.
+// (the sealed worker) live here. The read_doc offscreen handler calls this
+// engine after content sniffing identifies PDF bytes.
 //
 // Default engine: pdf.js TEXT LAYER — born-digital PDFs, no download. When a
 // PDF looks scanned (no usable text layer) AND the opt-in OCR engine is
@@ -22,21 +22,20 @@
 // (isEvalSupported:false, no form scripting). The text-layer path doesn't render
 // at all; the OCR path RASTERIZES pages to an OffscreenCanvas we own and hands
 // only the pixels to the recognizer — rasterizing is not script execution. The
-// text crosses back wrapped in <untrusted_web_content> by the read_pdf tool.
+// text crosses back wrapped in <untrusted_web_content> by the read_doc tool.
 // pdf.js parses in its own worker; a malformed/hostile PDF can at worst make the
 // parse fail, which we surface as an error.
 
 import browser from '/shared/browser-api.js';
-import { base64ToBytes } from '/shared/util.js';
 import {
   chooseEngine, looksScanned, createOcrStore,
-  PdfFetchError, PdfParseError,
+  PdfParseError,
 } from '/peerd-runtime/offscreen.js';
 
 // pdf.js is loaded LAZILY (dynamic import), not at module top level. The
 // offscreen document ALWAYS loads (voice + the SW keepalive port), but most
 // sessions never read a PDF — so we keep pdf.js's ~440KB parse + worker setup
-// off the offscreen startup path and pay it once, on the first read_pdf.
+// off the offscreen startup path and pay it once, on the first PDF read.
 // workerSrc is an extension URL ('self' under the offscreen CSP); the worker is
 // a module worker (v6 ships ESM).
 let pdfjsPromise = null;
@@ -48,7 +47,6 @@ const loadPdfjs = () => (pdfjsPromise ??= import('/vendor/pdfjs/pdf.min.mjs').th
 // Hard caps so a pathological PDF can't wedge the offscreen renderer. The
 // text cap is applied later (pure formatter); these bound the PARSE work.
 const MAX_PAGES = 500;
-const MAX_BYTES = 75 * 1024 * 1024;      // 75 MB — generous; a tab-loaded PDF
 
 /** @type {ReturnType<typeof createOcrStore> | null} */
 let ocrStore = null;
@@ -187,44 +185,6 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
 };
 
 /**
- * Fetch the PDF bytes for a source. http(s) and data: URLs are supported.
- * blob: URLs created in another tab are not reachable from here (documented
- * limitation — the agent should download the PDF into a sandbox instead).
- *
- * @param {{ url?: string, bytesB64?: string }} source
- * @returns {Promise<Uint8Array>}
- */
-const fetchPdfBytes = async (/** @type {{ url?: string, bytesB64?: string }} */ { url, bytesB64 } = {}) => {
-  if (bytesB64) return base64ToBytes(bytesB64);
-  if (!url || typeof url !== 'string') throw new PdfFetchError('no PDF url provided');
-  if (url.startsWith('blob:')) {
-    throw new PdfFetchError('blob: PDFs are not reachable from the extension; download the PDF first');
-  }
-  let res;
-  try {
-    // redirect:'manual' — the SW validated only the INITIAL host (denylist +
-    // isPrivateOrLocalHost in read-pdf.js). A default follow-mode fetch would
-    // let a public host 302 this request onto a loopback / LAN / link-local /
-    // metadata / denylisted host that no decision-time gate re-checks — the same
-    // SSRF pivot webFetch closes by refusing 3xx (INV-7). Mirror that here: a
-    // redirect returns an opaqueredirect (status 0) that we reject rather than
-    // follow, so the byte fetch can never reach an origin the guard never saw.
-    res = await fetch(url, { redirect: 'manual' });
-  } catch (e) {
-    throw new PdfFetchError(`could not fetch PDF: ${(/** @type {{ message?: string }} */ (e))?.message ?? e}`);
-  }
-  if (res.type === 'opaqueredirect' || res.status === 0) {
-    throw new PdfFetchError('PDF url redirected; redirects are refused to prevent SSRF to internal hosts');
-  }
-  if (!res.ok) throw new PdfFetchError(`HTTP ${res.status} fetching PDF`, { status: res.status });
-  const buf = await res.arrayBuffer();
-  if (buf.byteLength > MAX_BYTES) {
-    throw new PdfFetchError(`PDF too large: ${buf.byteLength} bytes (limit ${MAX_BYTES})`);
-  }
-  return new Uint8Array(buf);
-};
-
-/**
  * Extract every page's text via pdf.js's text layer. Returns structured page
  * data + document info; the pure formatter (formatPdfBody) caps + renders it.
  *
@@ -287,21 +247,22 @@ const extractTextLayer = async (bytes) => {
 };
 
 /**
- * Top-level extract: fetch → text layer → (scanned detection → OCR escalation).
- * Returns the structured result the read_pdf tool formats. In 'auto', a PDF that
+ * Extract already-sniffed PDF bytes through the text layer and optional OCR.
+ * Returns the structured result the read_doc tool formats. In 'auto', a PDF that
  * looks scanned AND has the opt-in OCR engine installed escalates to OCR; a
  * forced engine:'ocr' OCRs unconditionally. OCR is fail-closed: any failure
  * (driver not vendored, SRIs unpinned, recognizer error) falls back to the text
  * layer with a clear scanned note rather than crashing the read.
  *
- * @param {{ source: object, opts?: { engine?: string, dev?: boolean } }} msg
+ * @param {Uint8Array} bytes
+ * @param {{ engine?: string, dev?: boolean, sourceLabel?: string }} [opts]
  */
-export const handlePdfExtract = async (/** @type {{ source: any, opts?: { engine?: string, dev?: boolean } }} */ { source, opts = {} }) => {
-  // Stage label rides every failure so a manual run (offscreen DevTools, or the
-  // error returned to read_pdf) pinpoints WHERE it broke: plan / fetch / parse / ocr.
+export const extractPdfBytes = async (bytes, opts = {}) => {
+  // Stage label rides every failure so a manual run pinpoints WHERE it broke.
   let stage = 'plan';
   const dev = !!opts.dev;
-  const where = source?.url ? source.url.slice(0, 120) : '(inline bytes)';
+  const where = typeof opts.sourceLabel === 'string'
+    ? opts.sourceLabel.slice(0, 120) : '(document bytes)';
   try {
     const ocrAvailable = await getOcrStore().isInstalled({ dev }).catch(() => false);
     const plan = chooseEngine({ engine: opts.engine ?? 'auto', ocrAvailable });
@@ -309,9 +270,6 @@ export const handlePdfExtract = async (/** @type {{ source: any, opts?: { engine
       // Explicit engine:'ocr' but not installed.
       return { ok: false, error: 'ocr_not_installed', stage };
     }
-
-    stage = 'fetch';
-    const bytes = await fetchPdfBytes(source);
 
     // Forced engine:'ocr' (installed): OCR the whole document, no text-layer pass.
     if (plan.engine === 'ocr') {

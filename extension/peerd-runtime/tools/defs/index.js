@@ -9,7 +9,6 @@
 // the agent through all five in order.
 
 import { inspectTool }               from './inspect.js';
-import { readPdfTool }               from './read-pdf.js';
 import { readDocTool }               from './read-doc.js';
 import { fetchUrlTool }              from './fetch-url.js';
 import { readWebCacheTool }          from './read-web-cache.js';
@@ -25,7 +24,6 @@ import { editFileTool }               from './edit-file.js';
 import { toolboxWriteTool }           from './toolbox-write.js';
 import { toolboxListTool }            from './toolbox-list.js';
 import { toolboxDeleteTool }          from './toolbox-delete.js';
-import { requestReviewTool }          from './request-review.js';
 import { scheduleCreateTool }          from './schedule-create.js';
 import { scheduleListTool }            from './schedule-list.js';
 import { scheduleCancelTool }          from './schedule-cancel.js';
@@ -41,7 +39,6 @@ import { a2aRunTool }                  from './a2a-run.js';
 export {
   // inspect
   inspectTool,
-  readPdfTool,
   readDocTool,
   // sessions
   actorListTool,
@@ -63,7 +60,6 @@ export {
   toolboxWriteTool,
   toolboxListTool,
   toolboxDeleteTool,
-  requestReviewTool,
   // scheduling (background Routines — loop/scheduler.js)
   scheduleCreateTool,
   scheduleListTool,
@@ -92,10 +88,8 @@ export const BUILTIN_TOOLS = Object.freeze([
   // tabs + API integrations) that collapsed vm_list/js_list/app_list/list_tabs/
   // list_integrations into one columnar result keyed by `type`.
   actorListTool,
-  readPdfTool,
-  // read_doc — the OFFICE-format sibling of read_pdf (Word/Excel/PowerPoint/
-  // OpenDocument/RTF/EPUB/CSV). Registered + hidden from main (actor-only, like
-  // every other reader of untrusted document content); allowed for kind:'web'.
+  // read_doc: content-detected PDF/Office/OpenDocument/RTF/EPUB/CSV reading.
+  // Registered + hidden from main; allowed for kind:'web'.
   readDocTool,
   // the web actor's SESSIONLESS secure fetch (its non-render web mechanism).
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
@@ -131,8 +125,6 @@ export const BUILTIN_TOOLS = Object.freeze([
   toolboxWriteTool,
   toolboxListTool,
   toolboxDeleteTool,
-  // review (clean-context read-only reviewer — feature 08)
-  requestReviewTool,
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
   // exposure.js reveals them to the model ONLY while a goal run is active.
   // scheduling — background Routines (loop/scheduler.js). Main-agent tools; not

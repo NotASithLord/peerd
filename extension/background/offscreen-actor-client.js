@@ -82,14 +82,6 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  *   mid-turn navigate that adopts a tab (0→1) is seen by the NEXT tool call. undefined
  *   for engine/API actors (no tab) and the 0-tab web state.
  * @param {string} deps.EXPOSURE_ACTOR
- * @param {string} [deps.EXPOSURE_REVIEW]  issue 160 - the review-exemption marker. A review
- *   child's session record carries `review:true` (persisted SW-side at spawn); the
- *   tool-dispatch route re-stamps ctx.exposure from it so the tier gate admits the
- *   three instance reads on every dedicated-worker host.
- *   Optional and fail-closed: not injected → nothing is ever stamped.
- * @param {(name: string) => boolean} [deps.reviewToolAllowed] call-time reviewer
- *   allowlist. Optional and fail-closed for review records, so a persisted stale
- *   grant cannot widen the reviewer when the worker relays a call.
  * @param {() => number} [deps.now]
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
  *   inspector's capture hook — fed every delegated model call with the runMeta-derived
@@ -121,9 +113,8 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
 export const makeOffscreenActorClient = ({
   ensureHost, ensureOffscreen, sendMessage, runOnChannel, providerEgress,
   sessions, buildToolContext, dispatchToolCall, prepareToolCall, settleToolCall,
-  pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW,
+  pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR,
   now = Date.now,
-  reviewToolAllowed = () => false,
   recordModelCall = () => {},
   broadcastOp = (/** @type {any} */ _msg) => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
@@ -352,9 +343,6 @@ export const makeOffscreenActorClient = ({
       if (typeof call?.name !== 'string' || !granted.has(call.name)) {
         return { ok: false, error: `tool_not_available_to_actor: ${call?.name}` };
       }
-      if (rec.review === true && !reviewToolAllowed(call.name)) {
-        return { ok: false, error: `tool_not_available_to_reviewer: ${call.name}` };
-      }
       const base = await buildToolContext({
         sessionId: actorSessionId,
         lifecycleTurnId: grant.runId,
@@ -372,7 +360,6 @@ export const makeOffscreenActorClient = ({
       return { ok: true, actorSessionId, rec, ctx: restrictCtxCapabilities({
         ...base, audit, abortSignal: grant.relaySignal,
         ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
-        ...(rec.review === true && EXPOSURE_REVIEW ? { exposure: EXPOSURE_REVIEW } : {}),
       }, granted) };
     }
     if (rec.kind !== 'actor') {

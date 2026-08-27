@@ -81,7 +81,6 @@ import { makeOffscreenActorChannelClient, selectExactActorHostClient } from './o
 import { makeOffscreenActorClient } from './offscreen-actor-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenJsClient } from './offscreen-js-client.js';
-import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeAppActorChatHandler } from './app-actor-chat.js';
 import { makeActorsRoutes } from './routes/actors.js';
@@ -135,13 +134,11 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     ACTORS_ASK_DEFAULT_TIMEOUT_MS,
     ACTORS_TRACE_ERROR_MAX_CHARS,
     ACTORS_TRACE_TARGET_MAX_CHARS,
-    ACTION_CLASSES,
     actorsCallToOp,
     askOutcome,
     actorAllowedToolsFor,
     applyComposer,
     buildMintInjection,
-    classifyAction,
     confirmActionsFromRecord,
     createSkillRegistry,
     createSuggestionStore,
@@ -152,7 +149,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     DWEB_INBOUND_TOOL_NAMES,
     drainFetchTapInjected,
     EXPOSURE_ACTOR,
-    EXPOSURE_REVIEW,
     fenceApiActorSummary,
     fenceWebActorSummary,
     filterByRuntimeCapabilities,
@@ -161,7 +157,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     formatDocBody,
     GOAL_MAX_ITERATIONS,
     installFetchTapInjected,
-    isReadOnlyTool,
     landingStopCard,
     limitExceeded,
     localStoreSource,
@@ -170,7 +165,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     makeCheapCall,
     makeInitOrchestrator,
     makeGoalRunner,
-    makeRequestReview,
     makeScheduler,
     makeSpawnActor,
     makeToolboxParseCheck,
@@ -498,10 +492,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     ensureOffscreen: deps.featureHost.ensureOffscreen,
     sendMessage: (message) => hostMessage(message, 'script-job-demand'),
   });
-  const pdfOffscreenClient = deps.firefox ? null : makeOffscreenPdfClient({
-    ensureOffscreen: deps.featureHost.ensureOffscreen,
-    sendMessage: (message) => hostMessage(message, 'pdf-extract-demand'),
-  });
   const docOffscreenClient = deps.firefox ? null : makeOffscreenDocClient({
     ensureOffscreen: deps.featureHost.ensureOffscreen,
     sendMessage: (message) => hostMessage(message, 'document-extract-demand'),
@@ -664,7 +654,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       // actor client still needs this one capability until that domain moves.
       messageActor: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
       scriptRuns,
-      requestReview: (/** @type {any} */ request) => live.requestReview(request),
       completeGoalRun: sessionId
         ? (/** @type {string} */ summary) => goalRunner?.complete(sessionId, summary) ?? false : undefined,
       scheduleAdd: (/** @type {any} */ request) => live.scheduler?.add(request)
@@ -700,7 +689,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       appQuiescence: engine.appQuiescence,
       repositories: engine.repositories,
       jsOffscreenClient,
-      pdfOffscreenClient,
       docOffscreenClient,
       webOffscreenClient,
       runCache,
@@ -1751,16 +1739,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       dispatchToolCall: /** @type {any} */ (dispatchToolCall),
       prepareToolCall: /** @type {any} */ (prepareToolCall),
       settleToolCall: /** @type {any} */ (settleToolCall),
-      // why: controller-owned read tools no longer live in the SW execution
-      // registry. The inert descriptor projection remains the complete source
-      // for the existing reviewer grant until that grant becomes an authority
-      // ledger at the final semantic-root deletion.
-      reviewToolAllowed: (/** @type {string} */ name) => isReadOnlyTool(
-        name, allToolDescriptors,
-      ),
       pinActorCall, restrictCtxCapabilities,
       ownedTabFor: (/** @type {string} */ sessionId) => webActorTabBindings.tabFor(sessionId),
-      EXPOSURE_ACTOR, EXPOSURE_REVIEW,
+      EXPOSURE_ACTOR,
       recordModelCall: contextSnapshots.record,
       broadcastOp: post,
       isRelaySender: directActorHost?.isRelaySender ?? deps.isOffscreenSender,
@@ -1951,28 +1932,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     const stopVaultSubscription = deps.vault.subscribe?.(() => {
       if (!deps.vault.isLocked()) asyncActors.onVaultUnlock();
     });
-    const requestReview = makeRequestReview({
-      spawnActor: /** @type {any} */ (spawnActor),
-      getToolDescriptors: () => allToolDescriptors.map((tool) => ({
-        name: tool.name, sideEffect: tool.sideEffect,
-      })),
-      appendAudit: deps.auditLog.append,
-      checkpoints: {
-        diffSince: async (/** @type {string|null|undefined} */ ref) => {
-          const sessionId = await deps.sessionCache.sessionGet('currentSessionId');
-          const appId = sessionId
-            ? await engine.appRegistry.getDefaultForSession(sessionId).catch(() => null) : null;
-          const scope = appId ? `app:${appId}` : null;
-          if (!scope && !ref) return { files: [] };
-          return checkpointMgr.diffSince({ scope, ref: ref ?? null });
-        },
-      },
-      permissions: {
-        readOnlyTools: () => allToolDescriptors
-          .filter((tool) => classifyAction(tool) === ACTION_CLASSES.READ)
-          .map((tool) => tool.name),
-      },
-    });
     const cheapCall = makeCheapCall({
       spawnActor, sessions: shared.sessions,
       getSpendLimitUsd: () => deps.settingsStore.get().spendLimitUsd,
@@ -2078,7 +2037,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       liveSiteClientLandingFor: liveLandingFor,
     });
     Object.assign(live, {
-      actorMessaging, spawnActor, requestReview, scheduler, trimEnricher,
+      actorMessaging, spawnActor, scheduler, trimEnricher,
       autoMemory, init, adoptWebTab, liveLandingFor, originLockFor,
       actorRecoveryGate, actorLifecycle: spawnActorCore,
     });
@@ -2594,9 +2553,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         toolName: 'login', method: 'login', tabMode: 'owned', riskClass: 'resource',
         invoke: (authority) => authority.performConfirmedOwnedLogin(),
       }),
-      'page-program/read-pdf': pageProgramRoute({
-        toolName: 'read_pdf', method: 'readPdf', tabMode: 'owned', riskClass: 'read',
-      }),
       'page-program/fetch': pageProgramRoute({
         toolName: 'fetch_url', method: 'fetch', tabMode: 'free', riskClass: 'read',
       }),
@@ -2972,6 +2928,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
             bytesB64: attachment.data, name: attachment.name,
             contentType: attachment.mediaType,
           });
+          if (!doc) throw new Error('the file did not contain a supported structured document');
           return formatDocBody({
             doc, maxChars: DOC_TEXT_MAX_CHARS, source: attachment.name,
           });

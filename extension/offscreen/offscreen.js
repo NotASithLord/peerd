@@ -103,8 +103,6 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
 /** @typedef {(message: any) => Promise<any>} ExtractionHandler */
 /** @type {Readonly<Record<string, () => Promise<ExtractionHandler>>>} */
 const extractionLoaders = Object.freeze({
-  'pdf/extract': makeBoundedModuleLoader(() => import('./pdf-extract.js')
-    .then((module) => /** @type {ExtractionHandler} */ (module.handlePdfExtract))),
   'doc/extract': makeBoundedModuleLoader(() => import('./doc-extract.js')
     .then((module) => /** @type {ExtractionHandler} */ (module.handleDocExtract))),
   'web/extract': makeBoundedModuleLoader(() => import('./web-extract.js')

@@ -408,7 +408,7 @@ describe('the replay guard — guarantee 2', () => {
   });
 
   test('every Class F override requires a new call with re-derived grants', async () => {
-    for (const toolName of ['sandbox_create', 'vm_boot', 'actor_create', 'request_review']) {
+    for (const toolName of ['sandbox_create', 'vm_boot', 'actor_create']) {
       const { tracker, log } = makeTracker();
       const tool = { name: toolName, sideEffect: 'read' };
       const retryClass = retryClassForTool(tool);

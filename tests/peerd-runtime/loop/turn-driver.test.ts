@@ -183,22 +183,21 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   };
   const identity = (value: any) => value;
   const descriptorInventory = metadataOnly || dynamicIsolation
-    ? ['message_actor', 'actor_create', 'request_review', 'actor_list']
+    ? ['message_actor', 'actor_create', 'actor_list']
       .map((name) => ({
         name, description: `${name} test tool.`, schema: { type: 'object' },
-        primitive: 'actor', sideEffect: name === 'request_review' || name === 'actor_list'
-          ? 'read' : 'write',
+        primitive: 'actor', sideEffect: name === 'actor_list' ? 'read' : 'write',
       }))
     : runtimeUnsupported
-      ? ['script', 'read_pdf', 'message_actor'].map((name) => ({
+      ? ['script', 'read_doc', 'message_actor'].map((name) => ({
         name, description: `${name} test tool.`, schema: { type: 'object' },
         primitive: name === 'message_actor' ? 'actor' : 'host', sideEffect: 'read',
       }))
       : [];
   const projectToolDescriptors = async (input: any) => descriptorInventory.filter((descriptor) => {
-    if (input.runtimeCapabilities && ['script', 'read_pdf'].includes(descriptor.name)) return false;
+    if (input.runtimeCapabilities && ['script', 'read_doc'].includes(descriptor.name)) return false;
     if (input.actorIsolation?.status !== 'available'
-        && ['message_actor', 'actor_create', 'request_review'].includes(descriptor.name)) return false;
+        && ['message_actor', 'actor_create'].includes(descriptor.name)) return false;
     return true;
   });
   const callModel = async function* (args: any) {
@@ -299,7 +298,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     },
     getToolDescriptor: metadataOnly
       ? (name: string) => ({
-        name, primitive: 'actor', sideEffect: name === 'request_review' || name === 'actor_list' ? 'read' : 'write',
+        name, primitive: 'actor', sideEffect: name === 'actor_list' ? 'read' : 'write',
       })
       : undefined,
     decideAction: () => null,
@@ -384,7 +383,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     getRuntimeCapabilities: () => runtimeUnsupported ? {
       version: 1,
       sealedJobs: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'use_visible_notebook' },
-      pdfReader: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'attach_pdf_or_page_images' },
       documentReader: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'attach_pdf_or_plain_text' },
       readableHtml: { mode: 'snapshot_or_raw' },
       moonshineVoiceHost: { status: 'unsupported', host: null, reasonCode: 'host_unsupported', retryable: false, alternativeCode: 'type_in_composer' },
@@ -465,7 +463,7 @@ describe('runAgentTurn credential custody', () => {
       .toEqual({ ok: true, stopReason: 'end_turn' });
     expect(fixture.modelCalls).toHaveLength(2);
     expect(fixture.modelCalls[0].tools.map((tool: any) => tool.name))
-      .toEqual(['message_actor', 'actor_create', 'request_review', 'actor_list']);
+      .toEqual(['message_actor', 'actor_create', 'actor_list']);
     expect(fixture.modelCalls[1].tools.map((tool: any) => tool.name)).toEqual(['actor_list']);
     // The loop seeds the model contract, refreshes it before step one, then
     // refreshes again after the effect. The controller sees the live bounded

@@ -108,7 +108,6 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    *   instanceId?: string,
    *   actorType?: 'webvm' | 'notebook' | 'pod' | 'app' | 'web' | 'dweb',
    *   backing?: 'tab' | 'api',
-   *   review?: boolean,
    *   originState?: import('../actor/origin-lock.js').ActorOriginState,
    * }} [opts]
    * @returns {Promise<Session>}
@@ -133,7 +132,6 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     instanceId,
     actorType,
     backing,
-    review,
     originState,
   } = {}) => {
     const normalizedManifest = normalizeToolManifest(toolManifest);
@@ -196,14 +194,6 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       // egress, prompt, no-tab) reads turnSession.backing, so dropping it here silently
       // makes an API actor behave as a tab actor.
       ...(backing ? { backing } : {}),
-      // #160: the review-exemption marker. MUST be persisted: the offscreen
-      // tool-dispatch route rebuilds a review child's ctx from the RECORD alone
-      // and re-stamps exposure:'review' from this field — dropping it here (like
-      // backing above) silently makes the reviewer's four instance reads
-      // refused on the offscreen path. SW-only: spawn.js sets it from the trusted
-      // review orchestrator, never a worker/model arg. Persist only when true so
-      // every other child stays absent (fail-closed).
-      ...(review === true ? { review: true } : {}),
       // issue 251: a tab-backed web actor's origin authority — its mode, the
       // origin it owns, and its excursion counters. MUST be persisted, for the
       // same reason as `backing` above: a service worker eviction mid-task would

@@ -11,7 +11,6 @@ export const ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE = 'The actor request was n
 export const ACTOR_ISOLATION_UNAVAILABLE_TOOLS = Object.freeze(new Set([
   'message_actor',
   'actor_create',
-  'request_review',
 ]));
 
 /**

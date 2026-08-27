@@ -10,7 +10,7 @@
       "509c946 (#138, the heap split, 2026-07-03) added grantedTools — the child's persisted narrowed toolset.",
       "2818b13 (#141, 2026-07-04) widened actorType with 'dweb'.",
       "kind is still 'subagent' here: 67d46d5 (#178) renamed it to 'spawned' two days later, in 0.2.6.",
-      "STILL ABSENT at this version: todos + prewalk (65bac25, 0.2.8), review (419ecb6, 0.3.0), originState (1455923, 0.3.0).",
+      "STILL ABSENT at this version: todos + prewalk (65bac25, 0.2.8) and originState (1455923, 0.3.0).",
       "Records are v2-shaped (msgIndex + messagesV2:true, bodies in the sibling session_messages store) — that split predates the flattened-history root.",
       "settings keys are the e66d6b9:packaging/default-settings.mjs set (ollamaHost had landed in 0e9d159; watchAgentTab/prewalk*/frontDoorView had not).",
       "exportEnvelope is the transfer.js shape after bf7484a (#168) — still no `durability` block (added in 70f6e42, 2026-08-05).",
@@ -91,8 +91,8 @@
       "parentSessionId": "0198a2b0-1000-7000-8000-00000000c001",
       "task": "extract every line item from the receipt PDF",
       "depth": 1,
-      "grantedTools": ["read_pdf", "read_doc"],
-      "toolManifest": { "allow": ["read_pdf", "read_doc"] },
+      "grantedTools": ["read_doc"],
+      "toolManifest": { "allow": ["read_doc"] },
       "messagesV2": true,
       "msgIndex": ["0198a2b0-3001-7000-8000-00000000d004"]
     }

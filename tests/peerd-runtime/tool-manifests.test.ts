@@ -57,7 +57,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
 
   test('browse-only carries the READ DOM subset only, no mutating internals', () => {
     const allow = new Set(TOOL_MANIFEST_PRESETS['browse-only'].allow);
-    for (const name of ['message_actor', 'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'view']) {
+    for (const name of ['message_actor', 'snapshot', 'read_page', 'read_state', 'query_dom', 'read_doc', 'view']) {
       expect(allow.has(name)).toBe(true);
     }
     for (const name of ['do', 'get', 'check', 'click', 'type', 'page_keys', 'watch_changes']) {
@@ -71,7 +71,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
       for (const name of [
         'vm_boot', 'vm_create', 'vm_delete', 'js_notebook', 'js_create',
         'app_create', 'app_update', 'edit_file', 'actor_create',
-        'page_eval', 'page_exec', 'request_review', 'load_skill',
+        'page_eval', 'page_exec', 'load_skill',
       ]) {
         expect(allow.has(name)).toBe(false);
       }

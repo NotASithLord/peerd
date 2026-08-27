@@ -9,8 +9,8 @@ License:    Apache-2.0 (see LICENSE in the upstream package)
 
 Why vendored
 ------------
-peerd reads PDFs the agent encounters in a tab (the read_pdf runner tool,
-peerd-runtime/tools/defs/read-pdf.js). pdf.js is Mozilla's browser-native
+peerd reads PDFs the agent encounters through the read_doc runner tool
+(peerd-runtime/tools/defs/read-doc.js). pdf.js is Mozilla's browser-native
 PDF engine; its text layer extraction is the DEFAULT, always-available
 reader (no download). Extraction runs in the OFFSCREEN document
 (offscreen/pdf-extract.js) — pdf.js needs a Worker, which a service worker
@@ -58,4 +58,4 @@ Update procedure
   5. Recompute SHA-384/256 and paste them above:
        openssl dgst -sha384 -binary FILE | openssl base64 -A
   6. Update the Version / Source URL / tarball SHA lines.
-  7. Smoke-test read_pdf on a born-digital PDF and a scanned one.
+  7. Smoke-test read_doc on a born-digital PDF and a scanned one.

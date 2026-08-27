@@ -12,7 +12,7 @@ import { readPageTool } from '../../extension/peerd-runtime/tools/defs/read-page
 import { getToolMetadata } from '../../extension/peerd-runtime/semantic.js';
 
 const names = [
-  'script', 'read_run_cache', 'page_code', 'app_code', 'site_client_run', 'read_pdf',
+  'script', 'read_run_cache', 'page_code', 'app_code', 'site_client_run',
   'read_doc', 'dweb_discover', 'a2a_run', 'message_actor',
 ];
 const descriptors = names.map((name) => ({ name }));
@@ -22,7 +22,6 @@ describe('runtime host capabilities', () => {
     const capability = resolveRuntimeCapabilities({ offscreenDocument: true, dwebPackaged: true });
     expect(capability.version).toBe(1);
     expect(capability.sealedJobs.status).toBe('available');
-    expect(capability.pdfReader.status).toBe('available');
     expect(capability.documentReader.status).toBe('available');
     expect(capability.moonshineVoiceHost.status).toBe('available');
     expect(capability.pdfOcr.status).toBe('available');

@@ -1299,7 +1299,7 @@ const runBoundActorSmoke = async (driver, providerServer) => {
   'the installed Firefox package reports the dedicated-worker actor host as available',
   JSON.stringify(actorExecution));
   for (const facility of [
-    'sealedJobs', 'pdfReader', 'documentReader', 'moonshineVoiceHost',
+    'sealedJobs', 'documentReader', 'moonshineVoiceHost',
     'pdfOcr', 'localWebGpuHost', 'dwebMesh',
   ]) {
     assert(actorProof.state?.capabilities?.[facility]?.status === 'unsupported',
@@ -1367,7 +1367,7 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     'Firefox parent model requests omit the unsupported script tool',
     JSON.stringify(parsedParentRequests.map(toolNames)));
   const unsupportedActorTools = new Set([
-    'read_pdf', 'read_doc', 'page_code', 'site_client_run', 'a2a_run',
+    'read_doc', 'page_code', 'site_client_run', 'a2a_run',
   ]);
   assert(parsedActorRequests.every((request) => toolNames(request).every((name) =>
     !unsupportedActorTools.has(name) && !name.startsWith('dweb_'))),
@@ -1377,7 +1377,7 @@ const runBoundActorSmoke = async (driver, providerServer) => {
   const fetchDescriptor = actorTools.find((tool) => tool?.name === 'fetch_url');
   const readPageDescriptor = actorTools.find((tool) => tool?.name === 'read_page');
   assert(fetchDescriptor?.description?.includes('sanitized raw response body')
-    && !fetchDescriptor?.description?.includes('read_doc and read_pdf open them')
+    && !fetchDescriptor?.description?.includes('read_doc opens them')
     && fetchDescriptor?.input_schema?.properties?.raw?.description
       ?.includes('no hosted Markdown extractor'),
   'Firefox fetch_url model contract names the raw fallback and no missing readers',
@@ -1925,7 +1925,7 @@ browser.runtime.onMessage.addListener((message) => {
     if (!generation?.id) throw new Error('lifecycle generation is not ready');
     const sessionId = String(message.sessionId ?? '');
     const seeds = [
-      ['read_pdf', 'B'],
+      ['read_doc', 'B'],
       ['remember', 'C'],
       ['dweb_share', 'D'],
       ['script', 'E'],
@@ -2484,7 +2484,7 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
     const guardedSystem = requestSystemText(guardedPayload);
     assert(guardedSystem.includes('status="temporarily_unavailable"')
       && !guardedTools.some((name) =>
-        ['message_actor', 'actor_create', 'request_review'].includes(name)),
+        ['message_actor', 'actor_create'].includes(name)),
     'the next model turn names the pause and removes actor execution tools',
     JSON.stringify({ guardedSystem, guardedTools }));
 
@@ -3180,7 +3180,7 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
       String(actorRequests.length));
     assert(failureSystem.includes('status="temporarily_unavailable"')
       && !failureToolNames.some((name) =>
-        ['message_actor', 'actor_create', 'request_review'].includes(name)),
+        ['message_actor', 'actor_create'].includes(name)),
     'the continuation tells the model actors are unavailable and removes actor execution tools',
     JSON.stringify({ failureSystem, failureToolNames }));
     assert(failureRequests.every((record) => record.headers['x-api-key'] === PROVIDER_KEY_CANARY)
@@ -4929,7 +4929,6 @@ const main = async () => {
       && background?.capabilities?.actorExecution?.host === 'background-page-worker',
     'Firefox keeps dedicated actor execution available', JSON.stringify(background?.capabilities));
     assert(background?.capabilities?.sealedJobs?.status === 'unsupported'
-      && background?.capabilities?.pdfReader?.status === 'unsupported'
       && background?.capabilities?.documentReader?.status === 'unsupported'
       && background?.capabilities?.moonshineVoiceHost?.status === 'unsupported',
     'Firefox reports offscreen-hosted facilities unavailable before use', JSON.stringify(background?.capabilities));

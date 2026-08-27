@@ -66,7 +66,7 @@ describe('pageCallToToolCall — validation fails closed', () => {
   test('PAGE_API_METHODS lists exactly the supported surface', () => {
     expect([...PAGE_API_METHODS].sort()).toEqual([
       'captureSite', 'click', 'content', 'fetch', 'fill', 'goto',
-      'login', 'query', 'readCache', 'readDocument', 'readPdf', 'readSiteClient',
+      'login', 'query', 'readCache', 'readDocument', 'readSiteClient',
       'readState', 'snapshot', 'view', 'watchChanges', 'writeSiteClient',
     ]);
   });
@@ -78,6 +78,8 @@ describe('pageCallToToolCall — web capability parity', () => {
       .toEqual({ name: 'fetch_url', args: { url: 'https://example.com/x', query: 'price' } });
     expect(pageCallToToolCall({ method: 'readDocument', args: { url: 'https://example.com/a.docx', options: { maxChars: 9 } } }))
       .toEqual({ name: 'read_doc', args: { url: 'https://example.com/a.docx', maxChars: 9 } });
+    expect(pageCallToToolCall({ method: 'readDocument', args: { options: { engine: 'ocr' } } }))
+      .toEqual({ name: 'read_doc', args: { engine: 'ocr' } });
     expect(pageCallToToolCall({ method: 'readCache', args: { key: 'cache-1', options: { offset: 10 } } }))
       .toEqual({ name: 'read_web_cache', args: { key: 'cache-1', offset: 10 } });
   });
@@ -90,12 +92,11 @@ describe('pageCallToToolCall — web capability parity', () => {
     expect(pageCallToToolCall({ method: 'login', args: { target: '@e2' } })).toEqual({ name: 'login', args: { ref: '@e2' } });
   });
 
-  test('DOM, PDF, and vision parity methods map to the direct actor tools', () => {
+  test('DOM and vision parity methods map to the direct actor tools', () => {
     expect(pageCallToToolCall({ method: 'readState', args: { target: '@e2' } })).toEqual({ name: 'read_state', args: { ref: '@e2' } });
     expect(pageCallToToolCall({ method: 'watchChanges' }).name).toBe('watch_changes');
     expect(pageCallToToolCall({ method: 'query', args: { selector: '.row', options: { limit: 3 } } })).toEqual({ name: 'query_dom', args: { selector: '.row', limit: 3 } });
     expect(() => pageCallToToolCall({ method: 'keys', args: { sequence: 'Shift+I' } })).toThrow(/unknown page method/);
-    expect(pageCallToToolCall({ method: 'readPdf', args: { options: { engine: 'pdfjs' } } })).toEqual({ name: 'read_pdf', args: { engine: 'pdfjs' } });
     expect(pageCallToToolCall({ method: 'view' })).toEqual({ name: 'view', args: {} });
   });
 });

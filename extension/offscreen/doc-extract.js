@@ -26,12 +26,14 @@ import {
   convertToDocument, sniffDocFormat,
   DocFetchError, DocParseError, UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
 } from '/peerd-runtime/offscreen.js';
+import { extractPdfBytes } from './pdf-extract.js';
 
-// A hard ceiling on the bytes we will pull. Lower than the PDF reader's 75MB:
-// a PDF is often a scan whose size is pixels, whereas a .docx or .xlsx that
-// large is overwhelmingly embedded media we are going to discard anyway, and
-// the ZIP index read touches the whole buffer.
-const MAX_BYTES = 40 * 1024 * 1024;
+// Fetch far enough to preserve the PDF reader's existing ceiling, then apply
+// the lower structured-document cap after content sniffing. A large PDF is
+// often image data; a same-sized OOXML archive is overwhelmingly discarded
+// media and makes the ZIP index needlessly expensive.
+const MAX_FETCH_BYTES = 75 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
 
 /**
  * Fetch the document bytes. Mirrors offscreen/pdf-extract.js exactly, and the
@@ -61,14 +63,14 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
   }
   if (!res.ok) throw new DocFetchError(`HTTP ${res.status} fetching the document`, { status: res.status });
   const buf = await res.arrayBuffer();
-  if (buf.byteLength > MAX_BYTES) {
-    throw new DocFetchError(`document too large: ${buf.byteLength} bytes (limit ${MAX_BYTES})`);
+  if (buf.byteLength > MAX_FETCH_BYTES) {
+    throw new DocFetchError(`document too large: ${buf.byteLength} bytes (limit ${MAX_FETCH_BYTES})`);
   }
   return { bytes: new Uint8Array(buf), contentType: res.headers.get('content-type') ?? '' };
 };
 
 /**
- * @param {{ source: any, opts?: { maxChars?: number, format?: string } }} msg
+ * @param {{ source: any, opts?: { maxChars?: number, format?: string, engine?: string, dev?: boolean } }} msg
  */
 export const handleDocExtract = async ({ source, opts = {} }) => {
   // Stage rides every failure so the returned error pinpoints WHERE it broke.
@@ -86,17 +88,22 @@ export const handleDocExtract = async ({ source, opts = {} }) => {
     };
     const sniffed = sniffDocFormat(bytes, hints);
 
-    // These two redirects are DETECTION-driven, so an explicit opts.format
-    // skips them: overriding a wrong detection is the only reason that
-    // parameter exists, and refusing on the detected format would make the
-    // override unreachable in exactly the case it is for.
-    //
-    // PDF has a BETTER reader in this build (pdf.js text layer + opt-in OCR),
-    // so read_doc refuses it by NAME rather than by failure — the agent gets a
-    // route, not a dead end. Same for a URL that served HTML: that is the
-    // ordinary web path, and fetch_url/read_page do it far better.
+    // Detection selects the internal engine. An explicit structured-document
+    // format still overrides a mistaken sniff, but PDF needs no public sibling:
+    // it continues through the dedicated pdf.js/OCR engine behind read_doc.
     if (!opts.format && sniffed.format === 'pdf') {
-      return { ok: false, error: 'is_pdf', detail: 'This is a PDF. Use read_pdf, which has a text layer and OCR.' };
+      const extracted = await extractPdfBytes(bytes, {
+        engine: opts.engine,
+        dev: opts.dev,
+        sourceLabel: where,
+      });
+      if (!extracted.ok) return extracted;
+      return {
+        ok: true,
+        result: {
+          format: 'pdf', pdf: extracted.result, bytes: bytes.length, sniffedVia: sniffed.via,
+        },
+      };
     }
     if (!opts.format && (sniffed.format === 'html' || sniffed.format === 'text')) {
       return {
@@ -108,9 +115,12 @@ export const handleDocExtract = async ({ source, opts = {} }) => {
     }
 
     stage = 'convert';
+    if (bytes.length > MAX_DOCUMENT_BYTES) {
+      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_DOCUMENT_BYTES})`);
+    }
     const doc = await convertToDocument(bytes, hints);
     console.debug(`[offscreen/doc-extract] ${where}: ${doc.format}, ${doc.blocks.length} blocks, ${bytes.length} bytes`);
-    return { ok: true, result: { doc, bytes: bytes.length, sniffedVia: sniffed.via } };
+    return { ok: true, result: { format: doc.format, doc, bytes: bytes.length, sniffedVia: sniffed.via } };
   } catch (e) {
     const err = /** @type {{ name?: string, message?: string, format?: string }} */ (e);
     console.error(`[offscreen/doc-extract] FAILED at stage=${stage} for ${where}:`, e);

@@ -100,7 +100,7 @@ describe('kernel turn production runtime', () => {
               }),
               runInit: async () => {}, handleSystemCommand: async () => {},
               handleToolsCommand: async () => {}, postChatNote: () => {},
-              spawnActor: async () => {}, requestReview: async () => {},
+              spawnActor: async () => {},
               ensureSession: async () => 'root', actorRecoveryReady: async () => true,
               contextSnapshots: { snapshotsForMany: () => [], limits: () => ({}) },
               assembleDebugBundle: (value: any) => value, childSessionIdsOf: () => [],

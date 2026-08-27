@@ -22,7 +22,7 @@ describe('session projection', () => {
       cost: { total: 10 },
       // Device-local bookkeeping that must NOT travel:
       grantedTools: ['x'], spawnedTrusted: true, instanceId: 'vm-1', actorType: 'webvm',
-      backing: 'tab', originState: { mode: 'bound' }, review: true, prewalk: { phase: 'planning' },
+      backing: 'tab', originState: { mode: 'bound' }, prewalk: { phase: 'planning' },
       permissionMode: 'act', confirmActions: false, parentSessionId: 'p1', task: 'do it', depth2: 9,
       trimSummary: { rolling: 'source-only model context' }, toolManifest: { tools: ['dangerous'] },
       messages: [
@@ -32,7 +32,7 @@ describe('session projection', () => {
     };
     const portable: any = portableSession(session);
     for (const field of ['grantedTools', 'spawnedTrusted', 'instanceId', 'actorType', 'backing',
-      'originState', 'review', 'prewalk', 'permissionMode', 'confirmActions', 'parentSessionId', 'task',
+      'originState', 'prewalk', 'permissionMode', 'confirmActions', 'parentSessionId', 'task',
       'trimSummary', 'toolManifest']) {
       expect(portable).not.toHaveProperty(field);
     }

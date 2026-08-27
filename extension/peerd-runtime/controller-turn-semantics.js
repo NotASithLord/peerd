@@ -11,7 +11,6 @@ import {
 import {
   actorAllowedToolsFor,
   EXPOSURE_ACTOR,
-  EXPOSURE_REVIEW,
   mainAgentDescriptors,
   pinActorCall,
 } from './tools/exposure.js';
@@ -23,8 +22,6 @@ import {
   resolveWebActorSurface,
 } from './actor/capability-manifest.js';
 import {
-  ACTION_CLASSES,
-  classifyAction,
   confirmActionsFromRecord,
   normalizeConfirmActions,
   normalizeMode,
@@ -46,8 +43,6 @@ import {
 import { LEGACY_TOOL_IMPLEMENTATIONS } from './tools/legacy-implementations.js';
 import { localStoreSource, mergeSources, skillRegistrySource } from './composer/command-sources.js';
 import { makeInitOrchestrator } from './memory/init-orchestrator.js';
-import { makeRequestReview } from './review/orchestrator.js';
-import { isReadOnlyTool } from './review/read-only.js';
 import { makeScheduler } from './loop/scheduler.js';
 import { makeCheapCall } from './actor/cheap-call.js';
 import { makeAutoMemory } from './memory/auto-memory-orchestrator.js';
@@ -89,27 +84,23 @@ export const createControllerTurnSemantics = () => Object.freeze({
   ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
   ACTORS_TRACE_TARGET_MAX_CHARS,
-  ACTION_CLASSES,
   actorsCallToOp,
   askOutcome,
   actorAllowedToolsFor,
   applyComposer,
   buildMintInjection,
   canonicalCodeTraceLabel,
-  classifyAction,
   confirmActionsFromRecord,
   createSkillRegistry,
   dispatchToolCall,
   DOC_TEXT_MAX_CHARS,
   DWEB_INBOUND_TOOL_NAMES,
   EXPOSURE_ACTOR,
-  EXPOSURE_REVIEW,
   filterByRuntimeCapabilities,
   finalActorTurnReply,
   finalAssistantText,
   formatDocBody,
   GOAL_MAX_ITERATIONS,
-  isReadOnlyTool,
   limitExceeded,
   localStoreSource,
   mainAgentDescriptors,
@@ -117,7 +108,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   makeCheapCall,
   makeInitOrchestrator,
   makeGoalRunner,
-  makeRequestReview,
   makeScheduler,
   makeSpawnActor,
   makeToolboxParseCheck,

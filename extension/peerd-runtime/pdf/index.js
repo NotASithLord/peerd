@@ -2,7 +2,7 @@
 // peerd-runtime/pdf — public surface of the PDF-reading subsystem.
 //
 // Split across contexts, like voice:
-//   SW         — the read_pdf tool dispatches to the offscreen client
+//   SW: read_doc dispatches to the offscreen document reader
 //   offscreen  — pdf.js parsing + (opt-in) OCR recognition (needs a Worker)
 //   side panel — Settings → Voice & OCR drives the opt-in OCR download
 //
