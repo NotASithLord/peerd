@@ -182,6 +182,10 @@ export const createKernelProductionRuntime = async (deps) => {
         auditLog: deps.auditLog,
         kv: deps.kv,
         browser: deps.browser,
+        currentDwebHostEpoch: () => {
+          const lease = deps.featureHost.runtime.snapshot().leases.dweb;
+          return lease?.status === 'active' ? lease.hostEpoch : null;
+        },
         pushState: deps.pushState,
       });
     } : undefined,

@@ -90,6 +90,8 @@ export const createVoiceHostRuntime = ({
   };
   /** @type {ReturnType<typeof setTimeoutFn>|null} */
   let noSpeechTimer = null;
+  /** @type {Promise<any>|null} */
+  let noSpeechStop = null;
   const clearNoSpeechTimer = () => {
     if (noSpeechTimer !== null) clearTimeoutFn(noSpeechTimer);
     noSpeechTimer = null;
@@ -121,9 +123,15 @@ export const createVoiceHostRuntime = ({
     clearNoSpeechTimer();
     noSpeechTimer = setTimeoutFn(() => {
       if (!operationCurrent(owner, current) || transcriber !== active) return;
-      void Promise.resolve(active?.stop?.()).catch(() => {}).finally(() => {
+      // why: publish the stop barrier before calling the engine. A successor
+      // listen waits for this exact stop, so a delayed stale stop cannot end
+      // the successor's newly started microphone.
+      const stopping = Promise.resolve().then(() => active?.stop?.()).catch(() => {});
+      noSpeechStop = stopping;
+      void stopping.finally(() => {
+        if (noSpeechStop === stopping) noSpeechStop = null;
+        releaseMicTracks(owner);
         if (!operationCurrent(owner, current) || transcriber !== active) return;
-        releaseMicTracks();
         pushError({
           name: 'VoiceNoSpeechError',
           message: 'Heard nothing — mic released. Click the mic to try again.',
@@ -135,6 +143,7 @@ export const createVoiceHostRuntime = ({
   const teardown = async () => {
     generation += 1;
     clearNoSpeechTimer();
+    await noSpeechStop;
     const active = transcriber;
     transcriber = null;
     // why: release the exact retiring microphones before a possibly slow
@@ -169,6 +178,8 @@ export const createVoiceHostRuntime = ({
       ? ++generation : generation;
     try {
       if (command?.type === 'voice/init') {
+        await noSpeechStop;
+        if (!operationCurrent(owner, current)) return retireStale(transcriber, owner);
         let active = transcriber;
         if (!active) {
           const { createBestTranscriber } = await getEngine();
@@ -190,6 +201,7 @@ export const createVoiceHostRuntime = ({
       if (command?.type === 'voice/listen') {
         const active = transcriber;
         if (!active) return { ok: false, error: 'not-initialized' };
+        await noSpeechStop;
         if (!operationCurrent(owner, current)) return retireStale(active, owner);
         await active.listenFor(
           command.targetId,
@@ -224,6 +236,7 @@ export const createVoiceHostRuntime = ({
       }
       if (command?.type === 'voice/stop') {
         clearNoSpeechTimer();
+        await noSpeechStop;
         const active = transcriber;
         try { await active?.stop?.(); }
         finally { releaseMicTracks(); }

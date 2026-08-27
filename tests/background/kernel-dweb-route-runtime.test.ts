@@ -32,6 +32,7 @@ const deps = (over: Record<string, any> = {}) => ({
     onSettingsChanging: () => {}, onSettingsChanged: async () => {},
   },
   ensureDwebFeature: async () => {},
+  currentDwebHostEpoch: () => 'host-epoch-0001',
   withIdentityMutation: async (operation: () => Promise<any>) => operation(),
   settingsStore: { get: () => ({ dwebEnabled: false }), stored: () => ({}), update: async () => {} },
   vault: { isLocked: () => false },
@@ -59,5 +60,34 @@ describe('kernel dweb route runtime', () => {
   test('refuses construction without shared identity custody', () => {
     expect(() => createKernelDwebRouteOwner(deps({ withIdentityMutation: null })))
       .toThrow('kernel-dweb-route-runtime-config-invalid');
+  });
+
+  test('wires exact active host and mesh generation into production reseed messages', async () => {
+    const messages: any[] = [];
+    const shared = {
+      id: 'app-1', name: 'App', entryFile: 'index.html', shared: true,
+      dweb: { local: true, slug: 'app', manifest_created: 1, hash: 'hash', seq: 2 },
+    };
+    const engine = {
+      ...deps().engine,
+      appRegistry: { ...registry, list: async () => [shared], get: async () => shared },
+    };
+    const runtime = createKernelDwebRouteOwner(deps({
+      engine,
+      settingsStore: {
+        get: () => ({ dwebEnabled: true }), stored: () => ({}), update: async () => {},
+      },
+      browser: { runtime: { sendMessage: async (message: any) => {
+        messages.push(message);
+        return { ok: true };
+      } } },
+    }));
+    expect(await runtime.reseed.onHostGeneration({
+      hostEpoch: 'host-epoch-0001', meshGeneration: 3,
+    })).toEqual({ ok: true, seeded: 1 });
+    expect(messages).toEqual([expect.objectContaining({
+      type: 'dweb/base-host/share-app', reseed: true,
+      expectedHostEpoch: 'host-epoch-0001', expectedMeshGeneration: 3,
+    })]);
   });
 });

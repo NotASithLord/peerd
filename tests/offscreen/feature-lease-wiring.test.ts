@@ -412,6 +412,8 @@ describe('offscreen production feature-lease wiring', () => {
     expect(dweb).toContain("type: 'dweb/base-host/generation'");
     expect(dweb).toContain('reseedNotifier.notify({');
     expect(dweb).toContain('reseedNotifier.cancel();');
+    expect(dweb).toContain('msg.expectedHostEpoch !== activeFeatureHostEpoch');
+    expect(dweb).toContain('msg.expectedMeshGeneration !== meshGeneration');
     expect(dweb).toContain('clients: new Map()');
     expect(dweb).toContain("op === 'join-ack'");
     expect(dweb).toContain("error: 'dweb-host-generation-changed'");
