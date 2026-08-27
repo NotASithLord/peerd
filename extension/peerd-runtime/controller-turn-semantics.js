@@ -28,11 +28,6 @@ import {
   PERMISSION_MODES,
 } from './permissions/policy.js';
 import { createSkillRegistry } from './skills/registry.js';
-import {
-  dispatchToolCall,
-  prepareToolCall,
-  settleToolCall,
-} from './tools/dispatcher.js';
 import { DOC_TEXT_MAX_CHARS, prepareUserAttachmentsWithDocs } from './loop/attachments.js';
 import { GOAL_MAX_ITERATIONS, makeGoalRunner } from './loop/goal-runner.js';
 import { finalActorTurnReply, finalAssistantText, makeSpawnActor, restrictCtxCapabilities } from './actor/spawn.js';
@@ -77,7 +72,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   canonicalCodeTraceLabel,
   confirmActionsFromRecord,
   createSkillRegistry,
-  dispatchToolCall,
   DOC_TEXT_MAX_CHARS,
   DWEB_INBOUND_TOOL_NAMES,
   EXPOSURE_ACTOR,
@@ -109,14 +103,12 @@ export const createControllerTurnSemantics = () => Object.freeze({
   parseSiteHandle,
   PERMISSION_MODES,
   pinActorCall,
-  prepareToolCall,
   prepareUserAttachmentsWithDocs,
   resolveManifestAllow,
   resolveSiteUrl,
   resolveWebActorSurface,
   restrictCtxCapabilities,
   safeWebActorSummaryOrigin,
-  settleToolCall,
   shapeActorsResult,
   shapeMeshResult,
   skillRegistrySource,

@@ -5,7 +5,10 @@ describe('kernel rich runtime', () => {
   test('constructs engine before turn and shares exact instances with executable ownership', async () => {
     const sequence: string[] = [];
     const engine = { appRegistry: {}, appTabTracker: {} };
-    const relays = { sessions: {}, scriptRuns: {}, relayRoutes: { 'actors/call': () => {} } };
+    const relays = {
+      sessions: {}, scriptRuns: {},
+      relayRoutes: { 'actors/list': () => {}, 'actors/call': () => {} },
+    };
     let executableInput: any;
     let factoriesInput: any;
     let closed = 0;

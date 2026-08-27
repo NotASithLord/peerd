@@ -72,26 +72,13 @@ const engineRows = (src) => src.records.map((r) => ({
         : (r.pinned ? 'pinned' : ''),
   }));
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const actorListTool = composeTool("actor_list", {
-
-  execute: async (_args, ctx) => {
-    // why: the controller receives one bounded, authority-filtered directory;
-    // browser APIs and engine registries never cross the kernel boundary.
-    const c = /** @type {{
-     *   actorDirectory?: { readRoster: () => Promise<{
-     *     engines?: EngineSource[],
-     *     tabs?: Array<Record<string, any>>,
-     *     integrations?: Array<{ origin: string, keyed: boolean, formed: boolean }>,
-     *     restrictedTabsHidden?: number,
-     *     unavailable?: string[],
-     *     actorIsolation?: { status: string, host: string|null, reason: string|null, retryable: boolean },
-     *   }> },
-     * }} */ (/** @type {unknown} */ (ctx));
-    const roster = c.actorDirectory?.readRoster
-      ? await c.actorDirectory.readRoster()
-      : {};
-
+/**
+ * Shape one bounded authority roster for model and code consumers.
+ * @param {{engines?:EngineSource[],tabs?:Array<Record<string,any>>,
+ * integrations?:Array<{origin:string,keyed:boolean,formed:boolean}>,
+ * restrictedTabsHidden?:number,unavailable?:string[],actorIsolation?:any}} roster
+ */
+export const shapeActorRoster = (roster = {}) => {
     /** @type {ActorRow[]} */
     const actors = [];
     const unavailable = Array.isArray(roster.unavailable) ? [...roster.unavailable] : [];
@@ -145,7 +132,7 @@ export const actorListTool = composeTool("actor_list", {
       ...(restrictedTabsHidden > 0 ? { deniedCount: restrictedTabsHidden } : {}),
       ...(unavailable.length > 0 ? { unavailable: [...unavailable] } : {}),
     };
-    return {
+  return {
       ok: true,
       // why a second shape: actor_list's columnar content is optimized for a
       // language-model turn; code needs values it can filter/map without
@@ -164,6 +151,20 @@ export const actorListTool = composeTool("actor_list", {
         ...(unavailable.length > 0 ? { unavailable } : {}),
         actors,
       }, 'actors'),
-    };
+  };
+};
+
+/** @type {import('/shared/tool-types.js').Tool} */
+export const actorListTool = composeTool("actor_list", {
+  execute: async (_args, ctx) => {
+    // why: the controller receives one bounded, authority-filtered directory;
+    // browser APIs and engine registries never cross the kernel boundary.
+    const c = /** @type {{ actorDirectory?: { readRoster: () => Promise<any> } }} */ (
+      /** @type {unknown} */ (ctx)
+    );
+    const roster = c.actorDirectory?.readRoster
+      ? await c.actorDirectory.readRoster()
+      : {};
+    return shapeActorRoster(roster);
   },
 });

@@ -4,7 +4,7 @@ import { createKernelTurnRuntime } from './kernel-turn-runtime.js';
 import { KERNEL_PAGE_PROGRAM_ROUTE_NAMES } from '../shared/kernel-feature-route-inventory.js';
 
 export const KERNEL_TURN_RELAY_ROUTE_NAMES = Object.freeze([
-  'a2a/call', 'actors/call', 'site-fetch/call', ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
+  'a2a/call', 'actors/list', 'actors/call', 'site-fetch/call', ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
 ]);
 
 const requiredFunction = (/** @type {Record<string,any>} */ value, /** @type {string} */ key) => {
@@ -65,7 +65,7 @@ export const createKernelTurnProductionRuntime = async (deps) => {
     throw new TypeError('kernel-turn-production-relay-routes-invalid');
   }
   for (const key of [
-    'validateGeneration', 'retireStale', 'dispatchToolCall', 'buildActorContext',
+    'validateGeneration', 'retireStale', 'buildActorContext',
     'appActorChat', 'activeGoalStates', 'broadcastAgentTab', 'onUiConnect',
     'showWebTabHint', 'isDrivenSource', 'webActorSessionForTab',
     'resumeSchedules',

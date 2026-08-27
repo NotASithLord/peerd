@@ -56,7 +56,6 @@ describe('kernel turn production runtime', () => {
               scriptRuns: { ownerFor: () => null },
               validateGeneration: async () => true,
               retireStale: async () => {},
-              dispatchToolCall: async () => ({}),
               buildActorContext: async () => ({}),
               appActorChat: async () => ({ ok: true }),
               broadcastAgentTab: () => {}, onUiConnect: () => {},
@@ -69,7 +68,7 @@ describe('kernel turn production runtime', () => {
                 onBeforeRequest: () => undefined, reconcile: async () => {},
               },
               relayRoutes: Object.fromEntries([
-                'a2a/call', 'actors/call', 'site-fetch/call',
+                'a2a/call', 'actors/list', 'actors/call', 'site-fetch/call',
                 ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
               ].map((name) => [name, async () => ({ ok: true })])),
             },

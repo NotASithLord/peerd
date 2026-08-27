@@ -296,6 +296,51 @@ describe('isolated exact tool authority', () => {
     expect(prepared).toBe(false);
   });
 
+  test('admits only fixed page-program semantics under a live page_code execution', async () => {
+    const contexts: any[] = [];
+    const descriptors: any[] = [];
+    const { client, during } = clientWithRelay({
+      sessions: { get: async () => ({
+        kind: 'actor', actorType: 'web', backing: 'tab', instanceId: 'tab-7',
+      }) },
+      ownedTabFor: () => 7,
+      pageProgramToolDescriptors: [{ name: 'fetch_url', primitive: 'web' }],
+      buildToolContext: async (input: any) => {
+        contexts.push(input);
+        return { session: { sessionId: 'actor-1', kind: 'actor' } };
+      },
+      prepareToolCall: async (call: any, ctx: any, descriptor: any) => {
+        descriptors.push(descriptor);
+        return { prepared: true, call, ctx, args: call.args };
+      },
+    });
+    const result = await during(async (relayToken) => {
+      const outer: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'page',
+        call: { id: 'page-1', name: 'page_code', args: { code: 'return 1' } },
+      }, OFFSCREEN);
+      const nested = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'resource',
+        pageProgramParentExecutionId: outer.executionId,
+        call: { id: 'nested-1', name: 'fetch_url', args: { url: 'https://example.com' } },
+      }, OFFSCREEN);
+      const forged = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'resource',
+        pageProgramParentExecutionId: 'not-live',
+        call: { id: 'nested-2', name: 'read_doc', args: {} },
+      }, OFFSCREEN);
+      return { outer, nested, forged };
+    }, 'actor-1', {
+      actorType: 'web', backing: 'tab', actorSurface: 'code',
+      tools: [{ name: 'page_code', primitive: 'web' }],
+    });
+    expect(result.outer).toMatchObject({ ok: true, mode: 'execute', toolName: 'page_code' });
+    expect(result.nested).toMatchObject({ ok: true, mode: 'execute', toolName: 'fetch_url' });
+    expect(result.forged).toMatchObject({ ok: false });
+    expect(contexts.at(-1)?.actorSurface).toBe('tools');
+    expect(descriptors.at(-1)).toEqual({ name: 'fetch_url', primitive: 'web' });
+  });
+
   test('bounds the exact preparation relay count', async () => {
     const { client, during } = clientWithRelay({ maxToolRelaysPerRun: 1 });
     const result = await during(async (relayToken) => {

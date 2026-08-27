@@ -35,7 +35,7 @@ const POD_ROUTES = new Set([
   'pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch',
 ]);
 const RELAY_ROUTES = new Set([
-  'a2a/call', 'actors/call', 'app-code/observe', 'app-code/act', 'script/model-call',
+  'a2a/call', 'actors/list', 'actors/call', 'app-code/observe', 'app-code/act', 'script/model-call',
   'script-run/abort', 'site-fetch/call',
   ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
 ]);

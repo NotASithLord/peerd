@@ -17,8 +17,9 @@ import {
   registerMetadataInventory,
 } from '../../../extension/peerd-runtime/tools/metadata-registry.js';
 import {
-  dispatchToolCall, prepareToolCall, settleToolCall,
+  prepareToolCall, settleToolCall,
 } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import {
   executeControllerRepositoryTool,

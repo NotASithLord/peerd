@@ -21,8 +21,8 @@ const mismatch = () => Object.assign(new Error('page authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
 
-/** @param {{call:any,ctx:any,signal?:AbortSignal}} input */
-export const createPageToolAuthority = ({ call, ctx, signal }) => {
+/** @param {{call:any,ctx:any,signal?:AbortSignal,pageProgramSemanticToken?:string}} input */
+export const createPageToolAuthority = ({ call, ctx, signal, pageProgramSemanticToken }) => {
   const run = (/** @type {string} */ name, /** @type {{execute:Function}} */ handler) => {
     if (call?.name !== name || typeof handler?.execute !== 'function') throw mismatch();
     return handler.execute(call.args ?? {}, { ...ctx, abortSignal: signal ?? ctx?.abortSignal });
@@ -73,6 +73,7 @@ export const createPageToolAuthority = ({ call, ctx, signal }) => {
       try {
         return await client.execHeadless(args.code, {
           timeoutMs, caps: PAGE_PROGRAM_CAPS, ownerSessionId, runId,
+          ...(pageProgramSemanticToken ? { pageProgramSemanticToken } : {}),
           signal: abortSignal,
         });
       } finally {

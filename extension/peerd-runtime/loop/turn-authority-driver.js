@@ -15,12 +15,10 @@ import {
   ActorCredentialBoundaryError, ACTOR_CREDENTIAL_BOUNDARY_FAILURE, SessionNotFoundError,
 } from '../errors.js';
 import {
-  actorIsolationAvailable, actorIsolationForTurn, actorIsolationRefusal,
-  ACTOR_ISOLATION_UNAVAILABLE_TOOLS,
+  actorIsolationForTurn,
 } from '../actor/isolation.js';
 import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
-import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
 import { decideAction } from '../permissions/policy.js';
 import { makeTurnCostTracker } from '../cost/turn-tracker.js';
 import { detectInterruptedTurn } from './resume-detect.js';
@@ -76,8 +74,7 @@ export const makeTurnAuthorityDriver = (/** @type {any} */ deps) => {
     sessions, turnSlots, memory, browser,
     skillRegistry, renderSystemPrompt, buildToolContext,
     settingsStore, DWEB_ENABLED, goalActiveFor,
-    dwebEngagedSessions, markDwebEngaged, dispatchToolCall, prepareToolCall, settleToolCall,
-    maybeNudgeDebuggerGrant, getToolDescriptor = () => null,
+    dwebEngagedSessions, prepareToolCall, settleToolCall,
     uiConnected, uiPorts, auditLog,
     postChatNote, runUserTurn,
     trimEnricher,
@@ -88,7 +85,6 @@ export const makeTurnAuthorityDriver = (/** @type {any} */ deps) => {
     // context-window and reasoning resolve, so all three see the swapped
     // model; maybePrewalkSwap is the per-tool-call gate that flips the phase.
     reconcilePrewalk = null,
-    maybePrewalkSwap = null,
     // Engine-actor prewalk: swaps a VM/Notebook/App actor to its cheap executor
     // from its second turn onward. Optional so actor/test drivers stay inert.
     reconcileEngineActor = null,
@@ -348,39 +344,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   };
   const refreshTools = refreshMainTools;
   const toolDescriptors = await refreshTools();
-  const toolDispatch = async (/** @type {any} */ call) => {
-    const capabilityRefusal = runtimeCapabilityRefusal(String(call?.name ?? ''), getRuntimeCapabilities());
-    if (capabilityRefusal) return capabilityRefusal;
-    const isolation = effectiveActorIsolation();
-    if (isolation && !actorIsolationAvailable(isolation)
-        && ACTOR_ISOLATION_UNAVAILABLE_TOOLS.has(String(call?.name ?? ''))) {
-      const refusal = actorIsolationRefusal(isolation);
-      return {
-        ...refusal,
-        meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
-      };
-    }
-    const toolContext = await getToolContext();
-    // Engagement trigger: any dweb tool call marks the session dweb-engaged, so
-    // refreshMainTools reveals the SECONDARY dweb tools on the next step. The
-    // entry tools (discover/share/install) are dweb_* too, so the first one the
-    // agent calls flips it — dweb_discover is the natural opener.
-    if (typeof call?.name === 'string' && call.name.startsWith('dweb_')) markDwebEngaged(sessionId);
-    const result = await dispatchToolCall(call, /** @type {any} */ (toolContext));
-    // If a CDP-backed tool reported the debugger isn't available, surface a
-    // one-time "enable advanced automation" nudge to the side panel.
-    maybeNudgeDebuggerGrant(result);
-    // Prewalk swap gate: a successful mutating call while the session is in
-    // its planning phase may flip it to 'executing' (the model swap itself
-    // applies at the next turn's reconcile). Awaited so the phase write can't
-    // race this turn's remaining dispatches; a gate failure never breaks the
-    // tool result. Main turns only — actors have no prewalk state.
-    if (typeof maybePrewalkSwap === 'function') {
-      try { await maybePrewalkSwap({ sessionId, name: call?.name, ok: /** @type {any} */ (result)?.ok === true }); }
-      catch (e) { console.warn('[turn] prewalk swap gate failed', e); }
-    }
-    return result;
-  };
   const toolExecution = typeof prepareToolCall === 'function'
     && typeof settleToolCall === 'function' ? Object.freeze({
       prepare: async (/** @type {any} */ call, /** @type {any} */ binding) => {
@@ -464,7 +427,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // writes or would need a confirmation round-trip stays serial, so two
   // side effects can't interleave and confirm modals never stack.
   const classifyToolCall = (/** @type {string} */ name) => {
-    const tool = currentToolDescriptorsByName.get(name) ?? getToolDescriptor(name);
+    const tool = currentToolDescriptorsByName.get(name);
     if (!tool) return null;
     return decideAction({
       mode: /** @type {any} */ (turnPermission?.mode),
@@ -566,7 +529,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       // system prompt against the isolation snapshot selected here. Mid-turn
       // exposure changes therefore update the prompt and tools together.
       refreshTools,
-      toolDispatch,
       ...(toolExecution ? { toolExecution } : {}),
       classifyToolCall,
       // Reasoning normalization is provider/model semantics. Authority passes

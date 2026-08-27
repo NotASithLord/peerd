@@ -33,6 +33,14 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
     "source": "extension/background/routes/actors.js"
   },
   {
+    "route": "actors/list",
+    "channels": [
+      "store",
+      "preview"
+    ],
+    "source": "extension/background/routes/actors.js"
+  },
+  {
     "route": "actors/count",
     "channels": [
       "store",
@@ -910,36 +918,6 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
   },
   {
     "route": "page-program/view",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/fetch",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/read-document",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/read-result",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/site-client-read",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/site-client-write",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/site-capture",
     "channels": ["store", "preview"],
     "source": "extension/background/kernel-turn-authority-adapter.js"
   },

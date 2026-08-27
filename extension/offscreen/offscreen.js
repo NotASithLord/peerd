@@ -365,6 +365,8 @@ const onJobMessage = (msg, sender, sendResponse) => {
       // own messages.
       caps: msg.caps,
       ownerSessionId: msg.ownerSessionId, ownerToolUseId: msg.ownerToolUseId, runId: msg.runId,
+      pageProgramSemanticToken: typeof msg.pageProgramSemanticToken === 'string'
+        ? msg.pageProgramSemanticToken : undefined,
       // The durable-workspace mount (trusted job param, SW-set — the sender
       // gate above is what makes it trustworthy; _runJob validates the shape).
       workspaceSessionId: msg.workspaceSessionId,
