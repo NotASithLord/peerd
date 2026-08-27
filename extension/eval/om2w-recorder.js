@@ -106,7 +106,7 @@ export const makeOm2wRecorder = ({ capture, tabInfo, stop, maxSteps = 25 }) => {
     },
 
     /**
-     * A settled ACTOR tool dispatch (the SW actor/tool-dispatch 'actor/op'
+     * A settled ACTOR tool execution (the exact authority relay's 'actor/op'
      * broadcast — the OFFSCREEN actor heap's analog of turn/tool-use +
      * turn/tool-result, which only in-SW turns emit). Single-phase like
      * onPageOp; the TOOL mapper decides page action vs read/compute.

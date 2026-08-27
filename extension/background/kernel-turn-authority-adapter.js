@@ -125,8 +125,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
   if (!deps?.engine || !deps.browser || !deps.vault || !deps.settingsStore
       || !deps.seams || !deps.confirmation || !deps.denylist
       || !deps.scriptRuns || !deps.contextSnapshots
-      || !deps.providerEgress || typeof deps.resolveProviderSelection !== 'function'
-      || typeof semanticOwner?.registerTools !== 'function') {
+      || !deps.providerEgress || typeof deps.resolveProviderSelection !== 'function') {
     throw new TypeError('kernel-turn-live-config-invalid');
   }
   const {
@@ -182,7 +181,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     pinActorCall,
     prepareToolCall,
     prepareUserAttachmentsWithDocs,
-    registerTools,
     resolveManifestAllow,
     resolveSiteUrl,
     resolveWebActorSurface,
@@ -195,7 +193,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     siteHandleFor,
     wrapUntrusted,
   } = semanticOwner;
-  registerTools();
   const projectToolDescriptors = async (/** @type {Record<string,unknown>} */ input) => {
     const tools = await deps.seams.projectTurnTools(input);
     if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool.name !== 'string')) {
@@ -641,8 +638,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
           live.asyncActors.actorCancel(sessionId, taskId),
         deliverMessage: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
       }),
-      // why: script remains legacy-owned in this checkpoint and its sealed-code
-      // actor client still needs this one capability until that domain moves.
+      // why: the sealed-code actor client receives only actor messaging; tool
+      // semantics remain in the controller and message custody remains here.
       messageActor: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
       scriptRuns,
       completeGoalRun: sessionId
@@ -1724,7 +1721,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
         ) : undefined,
       providerEgress: deps.providerEgress,
       sessions: shared.sessions, buildToolContext,
-      dispatchToolCall: /** @type {any} */ (dispatchToolCall),
       prepareToolCall: /** @type {any} */ (prepareToolCall),
       settleToolCall: /** @type {any} */ (settleToolCall),
       pinActorCall, restrictCtxCapabilities,

@@ -5,6 +5,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { scriptTool, formatRunResult } from '../../../extension/peerd-runtime/tools/defs/script.js';
+import { executionToolContext } from '../../helpers/execution-tool.js';
 import {
   ACTORS_JOB_DEFAULT_TIMEOUT_MS,
 } from '../../../extension/peerd-runtime/actor/actors-api.js';
@@ -35,7 +36,7 @@ const run = async (code: string, ctxOver: Record<string, unknown> = {}) => {
     scriptRuns,
     ...ctxOver,
   };
-  const result = await scriptTool.execute({ code }, ctx as any);
+  const result = await scriptTool.execute({ code }, executionToolContext(ctx) as any);
   return { result, opts: seen as Record<string, unknown> | null, scriptRuns };
 };
 

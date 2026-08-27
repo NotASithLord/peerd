@@ -5,6 +5,11 @@ import { runControllerTurn } from '../../extension/offscreen/controller-turn-run
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
 import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
+import {
+  prepareToolCall as prepareRuntimeToolCall,
+  settleToolCall as settleRuntimeToolCall,
+} from '../../extension/peerd-runtime/tools/dispatcher.js';
+import { CONTROLLER_AUTHORITY_MANIFEST } from '../../extension/shared/controller-authority-manifest.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -34,8 +39,8 @@ const makeSessions = () => {
   };
 };
 
-// why: backpressure belongs to the frozen legacy lane until that lane is
-// deleted, so the fixture must not silently follow a controller-owned tool.
+// why: the final architecture has no generic dispatcher. Exercise saturation
+// through a real controller-owned tool and its exact execution authority.
 const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('script')));
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 5_000) => {
@@ -62,6 +67,21 @@ const connectHarness = async () => {
     getClient: async () => client,
     newId,
     providerEgress: makeScriptedProviderAuthority(() => modelCall) as any,
+    toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+    prepareToolCall: async (call: any, ctx: any, binding: any) => {
+      const prepared: any = await prepareRuntimeToolCall(call, ctx, binding.descriptor);
+      return prepared?.prepared === true ? {
+        mode: 'execute', custody: prepared, args: prepared.args,
+        projection: {
+          sessionId: ctx.session?.sessionId,
+          sessionKind: ctx.session?.kind,
+        },
+        manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+      } : { mode: 'result', result: prepared };
+    },
+    settleToolCall: async ({ custody, result }: any) => settleRuntimeToolCall(custody, {
+      result: result.value,
+    }),
   });
   client = await connectDirectController({
     capabilities: ['turn.run'],
@@ -103,10 +123,31 @@ const makeContext = ({
   sessionId: 'session-backpressure',
   userText: 'run the read wave',
   sessions: makeSessions(),
+  session: { sessionId: 'session-backpressure', kind: 'chat' },
   tools: [descriptor],
   refreshTools: async () => [descriptor],
   classifyToolCall: () => ({ actionClass: 'read', confirm: false }),
+  audit: async () => {},
+  hooks: [],
+  permission: { mode: 'act', confirmActions: false },
   toolDispatch,
+  jsOffscreenClient: {
+    execHeadless: async (code: string, options: any) => {
+      const effect = Promise.resolve(toolDispatch({ id: code, name: 'script', args: { code } }));
+      let onAbort = () => {};
+      const aborted = new Promise((_, reject) => {
+        onAbort = () => reject(new DOMException('headless execution host lost', 'AbortError'));
+        if (options.signal?.aborted) onAbort();
+        else options.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      try {
+        const result: any = await Promise.race([effect, aborted]);
+        return { durationMs: 1, value: result?.content };
+      } finally {
+        options.signal?.removeEventListener?.('abort', onAbort);
+      }
+    },
+  },
   getSystemPrompt: async () => 'PINNED-SYSTEM',
   appendAudit: async () => {},
   enrichTrimSummary: () => {},
@@ -124,7 +165,7 @@ const makeContext = ({
     for (let index = 0; index < toolCount; index += 1) {
       const id = `read-${index}`;
       yield { type: 'tool-use-start', id, name: descriptor.name };
-      yield { type: 'tool-use-delta', id, partialJson: `{"index":${index}}` };
+      yield { type: 'tool-use-delta', id, partialJson: `{"code":"${id}"}` };
       yield { type: 'tool-use-stop', id };
     }
     yield { type: 'message-stop', stopReason: 'tool_use' };

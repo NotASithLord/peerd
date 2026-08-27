@@ -95,6 +95,11 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.app.observe': { authorityClass: 'app', riskClass: 'read' },
   'turn.app.act': { authorityClass: 'app', riskClass: 'resource' },
   'turn.app.run-code': { authorityClass: 'app', riskClass: 'resource' },
+  'turn.memory.read-scope': { authorityClass: 'persistence', riskClass: 'read' },
+  'turn.memory.read-subtree': { authorityClass: 'persistence', riskClass: 'read' },
+  'turn.memory.write': { authorityClass: 'persistence', riskClass: 'commit' },
+  'turn.todo.read': { authorityClass: 'persistence', riskClass: 'read' },
+  'turn.todo.replace': { authorityClass: 'persistence', riskClass: 'commit' },
   'turn.page.open-tab': { authorityClass: 'page', riskClass: 'resource' },
   'turn.page.read': { authorityClass: 'page', riskClass: 'read' },
   'turn.page.snapshot': { authorityClass: 'page', riskClass: 'read' },
@@ -108,6 +113,42 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.page.run-program': { authorityClass: 'page', riskClass: 'resource' },
   'turn.page.capture-foreground': { authorityClass: 'page', riskClass: 'read' },
   'turn.page.capture-owned': { authorityClass: 'page', riskClass: 'read' },
+  'turn.resource.confirm-web-write': { authorityClass: 'resource', riskClass: 'commit' },
+  'turn.resource.request-web-text': { authorityClass: 'resource', riskClass: 'resource' },
+  'turn.resource.extract-markdown': { authorityClass: 'resource', riskClass: 'read' },
+  'turn.resource.extract-document': { authorityClass: 'resource', riskClass: 'read' },
+  'turn.resource.spill-result': { authorityClass: 'resource', riskClass: 'control' },
+  'turn.resource.read-result': { authorityClass: 'resource', riskClass: 'read' },
+  'turn.site-client.read': { authorityClass: 'siteclient', riskClass: 'read' },
+  'turn.site-client.run': { authorityClass: 'siteclient', riskClass: 'resource' },
+  'turn.site-client.commit': { authorityClass: 'siteclient', riskClass: 'commit' },
+  'turn.site-client.capture-start': { authorityClass: 'siteclient', riskClass: 'resource' },
+  'turn.site-client.capture-stop': { authorityClass: 'siteclient', riskClass: 'resource' },
+  'turn.execution.create-webvm': { authorityClass: 'execution', riskClass: 'commit' },
+  'turn.execution.create-notebook': { authorityClass: 'execution', riskClass: 'commit' },
+  'turn.execution.create-pod': { authorityClass: 'execution', riskClass: 'commit' },
+  'turn.execution.create-app': { authorityClass: 'execution', riskClass: 'commit' },
+  'turn.execution.run-script': { authorityClass: 'execution', riskClass: 'resource' },
+  'turn.execution.spill-script': { authorityClass: 'execution', riskClass: 'control' },
+  'turn.editing.read-target': { authorityClass: 'editing', riskClass: 'read' },
+  'turn.editing.write-target': { authorityClass: 'editing', riskClass: 'commit' },
+  'turn.introspection.actor-roster': { authorityClass: 'introspection', riskClass: 'read' },
+  'turn.introspection.provider-posture': { authorityClass: 'introspection', riskClass: 'read' },
+  'turn.introspection.storage-snapshot': { authorityClass: 'introspection', riskClass: 'read' },
+  'turn.introspection.automatable-tabs': { authorityClass: 'introspection', riskClass: 'read' },
+  'turn.introspection.denylist-patterns': { authorityClass: 'introspection', riskClass: 'read' },
+  'turn.introspection.audit-entries': { authorityClass: 'introspection', riskClass: 'read' },
+  'turn.introspection.installed-skill': { authorityClass: 'introspection', riskClass: 'read' },
+  'turn.schedule.read-routines': { authorityClass: 'schedule', riskClass: 'read' },
+  'turn.schedule.arm-confirmed-routine': { authorityClass: 'schedule', riskClass: 'commit' },
+  'turn.schedule.cancel-routine': { authorityClass: 'schedule', riskClass: 'commit' },
+  'turn.dweb.discover-apps': { authorityClass: 'dweb', riskClass: 'read' },
+  'turn.dweb.publish-confirmed-app': { authorityClass: 'dweb', riskClass: 'commit' },
+  'turn.dweb.install-confirmed-app': { authorityClass: 'dweb', riskClass: 'commit' },
+  'turn.dweb.read-peers': { authorityClass: 'dweb', riskClass: 'read' },
+  'turn.dweb.set-peer-blocked': { authorityClass: 'dweb', riskClass: 'commit' },
+  'turn.dweb.set-discovery-enabled': { authorityClass: 'dweb', riskClass: 'commit' },
+  'turn.dweb.run-mesh-program': { authorityClass: 'dweb', riskClass: 'resource' },
 });
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
@@ -269,79 +310,16 @@ export const createControllerKernelQuota = (
     'turn.model.cancel-inference': 32 * steps,
     'turn.model.read-inventory': steps,
     'turn.model.read-context': steps,
+    'turn.model.open-local': 32 * steps,
+    'turn.model.read-local': streamBudget,
+    'turn.model.cancel-local': 32 * steps,
     'turn.model.observe-event': streamBudget,
     'turn.model.observe-failover': 8 * steps,
     'turn.tool.prepare': toolBudget,
     'turn.tool.settle': toolBudget,
-    'turn.tool.dispatch': toolBudget,
-    'turn.goal.complete': toolBudget,
-    'turn.actor.spawn-sync': toolBudget,
-    'turn.actor.spawn-async': toolBudget,
-    'turn.actor.tasks': toolBudget,
-    'turn.actor.cancel': toolBudget,
-    'turn.actor.message': toolBudget,
-    'turn.pod.resolve': toolBudget,
-    'turn.pod.read-remote': toolBudget,
-    'turn.pod.confirm-git': toolBudget,
-    'turn.pod.exec': toolBudget,
-    'turn.pod.status': toolBudget,
-    'turn.pod.cancel': toolBudget,
-    'turn.pod.read-file': toolBudget,
-    'turn.pod.write-file': toolBudget,
-    'turn.repository.read-pod': toolBudget,
-    'turn.repository.destroy-pod': toolBudget,
-    'turn.repository.read-status': toolBudget,
-    'turn.repository.read-history': toolBudget,
-    'turn.repository.read-remote': toolBudget,
-    'turn.repository.read-diff': toolBudget,
-    'turn.repository.confirm-restore': toolBudget,
-    'turn.repository.checkpoint': toolBudget,
-    'turn.repository.branch': toolBudget,
-    'turn.repository.checkout': toolBudget,
-    'turn.repository.restore': toolBudget,
-    'turn.repository.confirm-remote': toolBudget,
-    'turn.repository.link': toolBudget,
-    'turn.repository.fetch': toolBudget,
-    'turn.repository.push': toolBudget,
-    'turn.vm.read': toolBudget,
-    'turn.vm.list': toolBudget,
-    'turn.vm.set-default': toolBudget,
-    'turn.vm.run': toolBudget,
-    'turn.vm.import-file': toolBudget,
-    'turn.vm.write-text-file': toolBudget,
-    'turn.vm.destroy': toolBudget,
-    'turn.notebook.read': toolBudget,
-    'turn.notebook.list': toolBudget,
-    'turn.notebook.set-default': toolBudget,
-    'turn.notebook.run': toolBudget,
-    'turn.notebook.write-file': toolBudget,
-    'turn.notebook.read-file': toolBudget,
-    'turn.notebook.destroy': toolBudget,
-    'turn.app.update': toolBudget,
-    'turn.app.open': toolBudget,
-    'turn.app.search': toolBudget,
-    'turn.app.read': toolBudget,
-    'turn.app.delete': toolBudget,
-    'turn.app.write-file': toolBudget,
-    'turn.app.read-file': toolBudget,
-    'turn.app.list-files': toolBudget,
-    'turn.app.delete-file': toolBudget,
-    'turn.app.observe': toolBudget,
-    'turn.app.act': toolBudget,
-    'turn.app.run-code': toolBudget,
-    'turn.page.open-tab': toolBudget,
-    'turn.page.read': toolBudget,
-    'turn.page.snapshot': toolBudget,
-    'turn.page.read-state': toolBudget,
-    'turn.page.watch-changes': toolBudget,
-    'turn.page.query-dom': toolBudget,
-    'turn.page.navigate': toolBudget,
-    'turn.page.fill': toolBudget,
-    'turn.page.click': toolBudget,
-    'turn.page.login': toolBudget,
-    'turn.page.run-program': toolBudget,
-    'turn.page.capture-foreground': toolBudget,
-    'turn.page.capture-owned': toolBudget,
+    ...Object.fromEntries(Object.keys(DOMAIN_OPERATIONS).map((operation) => [
+      operation, toolBudget,
+    ])),
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
     'turn.abort.finalize': 1,
     'turn.finalize': 1,
@@ -351,6 +329,7 @@ export const createControllerKernelQuota = (
   const admit = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
     if (!allowed.has(operation)) return refusal('kernel-operation-denied');
     if (!bounded(payload, operation === 'turn.model.read-inference'
+      || operation === 'turn.model.read-local'
       ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES)) {
       return refusal('kernel-operation-payload-too-large');
     }
@@ -369,11 +348,13 @@ export const createControllerKernelQuota = (
       }
     }
     if (operation === 'turn.model.read-inference'
-        || operation === 'turn.model.cancel-inference') {
+        || operation === 'turn.model.cancel-inference'
+        || operation === 'turn.model.read-local'
+        || operation === 'turn.model.cancel-local') {
       const streamId = value?.streamId;
       const model = typeof streamId === 'string' ? models.get(streamId) : null;
       if (!model) return refusal('kernel-model-channel-invalid');
-      if (operation === 'turn.model.read-inference') {
+      if (operation === 'turn.model.read-inference' || operation === 'turn.model.read-local') {
         if (model.pending) return refusal('kernel-model-pull-overlap');
         if (model.events >= MODEL_STREAM_EVENTS || model.bytes >= MODEL_STREAM_BYTES) {
           models.delete(streamId);
@@ -396,6 +377,7 @@ export const createControllerKernelQuota = (
     const reply = record(result);
     const replyValue = record(reply?.value);
     if (!bounded(result, operation === 'turn.model.read-inference'
+      || operation === 'turn.model.read-local'
       ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES)) {
       if (operation.startsWith('turn.model.')) {
         const streamId = value?.streamId ?? replyValue?.streamId;
@@ -403,14 +385,15 @@ export const createControllerKernelQuota = (
       }
       return refusal('kernel-operation-result-too-large', false);
     }
-    if (operation === 'turn.model.open-inference' && reply?.ok === true) {
+    if ((operation === 'turn.model.open-inference' || operation === 'turn.model.open-local')
+        && reply?.ok === true) {
       const streamId = replyValue?.streamId;
       if (typeof streamId !== 'string' || streamId.length < 1 || models.has(streamId)) {
         return refusal('kernel-model-channel-invalid', false);
       }
       models.set(streamId, { events: 0, bytes: 0, pending: false });
     }
-    if (operation === 'turn.model.read-inference') {
+    if (operation === 'turn.model.read-inference' || operation === 'turn.model.read-local') {
       const streamId = value?.streamId;
       const model = typeof streamId === 'string' ? models.get(streamId) : null;
       if (!model) return refusal('kernel-model-channel-invalid', false);
@@ -427,7 +410,7 @@ export const createControllerKernelQuota = (
         }
       }
     }
-    if (operation === 'turn.model.cancel-inference') {
+    if (operation === 'turn.model.cancel-inference' || operation === 'turn.model.cancel-local') {
       const streamId = value?.streamId;
       if (typeof streamId === 'string') models.delete(streamId);
     }

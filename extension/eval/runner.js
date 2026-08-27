@@ -142,7 +142,7 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
     // these a code-arm trajectory records as [navigate, answer] — no work for
     // the judge to see.
     case 'page/op': om2w?.onPageOp(msg); bumpSettle(); break;
-    // The OFFSCREEN actor heap's tool dispatches (actor/tool-dispatch) — the
+    // The OFFSCREEN actor heap's exact tool executions — the
     // analog of turn/tool-use for actor turns, which emit no turn/* events.
     case 'actor/op': om2w?.onActorOp(msg); bumpSettle(); break;
     case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } bumpSettle(); break;

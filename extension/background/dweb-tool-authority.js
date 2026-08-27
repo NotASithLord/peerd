@@ -81,6 +81,50 @@ export const createDwebToolAuthority = ({ call, ctx, signal }) => {
       return dweb?.setDiscovery({ enabled })
         ?? { ok: false, error: 'dweb_unavailable' };
     },
+    runMeshProgram: async (
+      /** @type {string} */ code, /** @type {number} */ timeoutMs,
+    ) => {
+      requireTool('a2a_run');
+      const expectedTimeout = Math.min(180_000, Math.max(
+        1000, Number(args?.timeoutMs ?? 135_000),
+      ));
+      if (code !== args?.code || timeoutMs !== expectedTimeout) throw mismatch();
+      if (!ctx?.dweb) return { ok: false, error: 'a2a_unavailable' };
+      const ownerSessionId = ctx?.session?.sessionId;
+      const client = ctx?.jsOffscreenClient;
+      const runs = ctx?.scriptRuns;
+      const abortSignal = signal ?? ctx?.abortSignal;
+      if (!client?.execHeadless) return { ok: false, error: 'a2a_unavailable' };
+      if (!ownerSessionId) return { ok: false, error: 'a2a: no owner session' };
+      if (!runs) return { ok: false, error: 'a2a_run_registry_unavailable' };
+      if (abortSignal?.aborted) {
+        return { ok: false, error: 'a2a_aborted: the turn was stopped before the run started' };
+      }
+      const runId = runs.mintRunId(ownerSessionId);
+      runs.register(runId, abortSignal, ownerSessionId, { a2a: true });
+      const onAbort = () => { void client.abortHeadless?.(runId, ownerSessionId); };
+      if (abortSignal && client.abortHeadless) {
+        if (abortSignal.aborted) onAbort();
+        else abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+      try {
+        const result = await client.execHeadless(code, {
+          timeoutMs, a2a: true, ownerSessionId, runId, signal: abortSignal,
+        });
+        return { ok: true, result };
+      } catch (cause) {
+        const error = /** @type {{name?:string,message?:string}} */ (cause);
+        return {
+          ok: false,
+          error: `a2a_run_failed: ${error?.name ?? 'Error'}: ${error?.message ?? String(cause)}`,
+        };
+      } finally {
+        runs.release(runId);
+        if (abortSignal && client.abortHeadless) {
+          abortSignal.removeEventListener?.('abort', onAbort);
+        }
+      }
+    },
   });
 };
 

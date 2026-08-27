@@ -37,10 +37,6 @@ import { DOC_TEXT_MAX_CHARS, prepareUserAttachmentsWithDocs } from './loop/attac
 import { GOAL_MAX_ITERATIONS, makeGoalRunner } from './loop/goal-runner.js';
 import { finalActorTurnReply, finalAssistantText, makeSpawnActor, restrictCtxCapabilities } from './actor/spawn.js';
 import { formatDocBody } from './doc/format.js';
-import {
-  registerTool,
-} from './tools/registry.js';
-import { LEGACY_TOOL_IMPLEMENTATIONS } from './tools/legacy-implementations.js';
 import { localStoreSource, mergeSources, skillRegistrySource } from './composer/command-sources.js';
 import { makeInitOrchestrator } from './memory/init-orchestrator.js';
 import { makeScheduler } from './loop/scheduler.js';
@@ -66,16 +62,6 @@ import { wrapUntrusted } from './tools/prompt-wrap.js';
 import { digestCapture } from './site-clients/digest.js';
 import { drainFetchTapInjected, installFetchTapInjected } from './dom/fetch-tap-injected.js';
 import { parseAppManifest } from '/peerd-engine/app-manifest.js';
-
-let toolsRegistered = false;
-
-const registerTools = () => {
-  if (toolsRegistered) return;
-  for (const tool of LEGACY_TOOL_IMPLEMENTATIONS) {
-    registerTool(/** @type {any} */ (tool));
-  }
-  toolsRegistered = true;
-};
 
 // why: T1 makes semantic ownership explicit while preserving the one live call
 // path. This owner receives no authority dependencies and can move intact later.
@@ -125,7 +111,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   pinActorCall,
   prepareToolCall,
   prepareUserAttachmentsWithDocs,
-  registerTools,
   resolveManifestAllow,
   resolveSiteUrl,
   resolveWebActorSurface,

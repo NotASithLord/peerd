@@ -13,8 +13,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import { scriptTool } from '../../extension/peerd-runtime/tools/defs/script.js';
+import { executionToolContext } from '../helpers/execution-tool.js';
 
-const ctx = (over: any = {}) => ({ session: { sessionId: 's1' }, ...over });
+const ctx = (over: any = {}) => executionToolContext({ session: { sessionId: 's1' }, ...over });
 
 describe('script — offscreen host availability', () => {
   test('no jsOffscreenClient (Firefox) → headless_js_unavailable', async () => {

@@ -170,7 +170,7 @@ describe('targeted offscreen actor MessageChannel', () => {
             } else if (message.type === 'actor/commit') {
               const relay = {
                 ...common, type: 'actor/relay', requestId: 'same-request',
-                relayType: 'actor/tool-dispatch', payload: { call: { name: 'click' } },
+                relayType: 'actor/tool-prepare', payload: { call: { name: 'click' } },
               };
               port.postMessage(relay);
               port.postMessage(relay);
@@ -210,7 +210,7 @@ describe('targeted offscreen actor MessageChannel', () => {
           const common = { protocol: 1, channelId: offer.channelId };
           const sendTool = () => port.postMessage({
             ...common, type: 'actor/relay', requestId: 'event-0',
-            relayType: 'actor/tool-dispatch', payload: { call: { name: 'click' } },
+            relayType: 'actor/tool-prepare', payload: { call: { name: 'click' } },
           });
           port.onmessage = (event) => {
             const message = event.data;
@@ -233,7 +233,7 @@ describe('targeted offscreen actor MessageChannel', () => {
               phase = 'tool-excess';
               port.postMessage({
                 ...common, type: 'actor/relay', requestId: 'tool-excess',
-                relayType: 'actor/tool-dispatch', payload: { call: { name: 'click' } },
+                relayType: 'actor/tool-prepare', payload: { call: { name: 'click' } },
               });
             } else if (message.type === 'actor/relay-response' && phase === 'tool-excess') {
               phase = 'done';
@@ -253,7 +253,7 @@ describe('targeted offscreen actor MessageChannel', () => {
       lease: actorLease,
       relay: async (type) => {
         if (type === 'actor/loop-event') eventForwards += 1;
-        if (type === 'actor/tool-dispatch') toolDispatches += 1;
+        if (type === 'actor/tool-prepare') toolDispatches += 1;
         return { ok: true };
       },
     });
@@ -275,7 +275,7 @@ describe('targeted offscreen actor MessageChannel', () => {
           workerUrl: '/offscreen/actor-worker.js',
           abort: () => {},
           run: async (_job, { sendToSW }) => {
-            observed = await sendToSW('actor/tool-dispatch', { call: { name: 'click' } });
+            observed = await sendToSW('actor/tool-prepare', { call: { name: 'click' } });
             return { ok: false, started: true, outcomeKnown: false };
           },
         }),

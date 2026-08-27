@@ -9,6 +9,7 @@ import {
   UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
   UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE,
 } from '../../../extension/peerd-engine/errors.js';
+import { executionToolContext } from '../../helpers/execution-tool.js';
 
 const policyError = `${REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE}: ${REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE}`;
 const unsupportedFormError = `${UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE}: ${UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE}`;
@@ -22,10 +23,10 @@ const policyResult = {
 
 describe('remote module package policy reaches the model as a tool failure', () => {
   test('script does not present the host policy refusal as a successful code result', async () => {
-    const result = await scriptTool.execute({ code: "import('https://example.test/mod.js')" }, {
+    const result = await scriptTool.execute({ code: "import('https://example.test/mod.js')" }, executionToolContext({
       session: { sessionId: 'session-1', kind: 'chat' },
       jsOffscreenClient: { execHeadless: async () => policyResult },
-    } as any);
+    }) as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe(policyError);
@@ -36,13 +37,13 @@ describe('remote module package policy reaches the model as a tool failure', () 
   });
 
   test('script preserves actor reply custody when policy ends the run', async () => {
-    const result = await scriptTool.execute({ code: 'return actors; await import(path)' }, {
+    const result = await scriptTool.execute({ code: 'return actors; await import(path)' }, executionToolContext({
       session: { sessionId: 'session-1', kind: 'chat' },
       jsOffscreenClient: { execHeadless: async () => ({
         ...policyResult,
         actorDeliveryIds: ['delivery-1', 'delivery-2', 'delivery-1'],
       }) },
-    } as any);
+    }) as any);
     expect(result.ok).toBe(false);
     expect((result as any).actorDeliveryIds).toEqual(['delivery-1', 'delivery-2']);
   });
@@ -102,7 +103,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
     ['script', scriptTool],
     ['Notebook', jsNotebookTool],
   ])('%s tells the model how to repair an unsupported import', async (_name, tool) => {
-    const result = await tool.execute({ code: "const path = './local.js'; await import(path)" }, {
+    const rawContext = {
       session: { sessionId: 'session-1', kind: 'chat' },
       jsOffscreenClient: { execHeadless: async () => ({
         ...policyResult,
@@ -112,7 +113,12 @@ describe('remote module package policy reaches the model as a tool failure', () 
         ...policyResult,
         errorCode: UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
       }) },
-    } as any);
+    };
+    const context = _name === 'script'
+      ? executionToolContext(rawContext) : rawContext;
+    const result = await tool.execute(
+      { code: "const path = './local.js'; await import(path)" }, context as any,
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe(unsupportedFormError);

@@ -478,8 +478,10 @@ describe('Chrome lazy controller private channel prototype', () => {
     const controller = await connectController({
       ensureOffscreen: async () => {}, capabilities: ['turn.run'],
       handleKernelCall: async (operation, payload, context) => {
-        expect(operation).toBe('turn.tool.dispatch');
-        expect(payload).toEqual({ value: { call: { id: 'call-1', name: 'read' } } });
+        expect(operation).toBe('turn.session.append');
+        expect(payload).toEqual({ value: {
+          sessionId: 'session:test', messageJson: '{"role":"user","content":"x"}',
+        } });
         kernelContext = context;
         return { ok: false, code: 'response-lost-after-send', outcomeKnown: false };
       },
@@ -492,8 +494,11 @@ describe('Chrome lazy controller private channel prototype', () => {
           loadController: async () => ({
             call: async (_capability, _payload, options) => {
               const nested = await options.kernelCall?.(
-                'turn.tool.dispatch', {
-                  value: { call: { id: 'call-1', name: 'read' } },
+                'turn.session.append', {
+                  value: {
+                    sessionId: 'session:test',
+                    messageJson: '{"role":"user","content":"x"}',
+                  },
                 },
               );
               expect(nested).toMatchObject({ outcomeKnown: false });
@@ -1209,11 +1214,9 @@ describe('controller protocol pure validation', () => {
     };
     expect(quota.admit('turn.session.set-trim', trim).ok).toBe(true);
 
-    const dispatch = {
-      runId: 'run-packed-tool',
-      value: { callJson: JSON.stringify({ id: 'tool', name: 'read_fixture', args: {} }) },
-    };
-    expect(quota.admit('turn.tool.dispatch', dispatch).ok).toBe(true);
+    expect(quota.admit('turn.tool.dispatch', { runId: 'deleted' })).toEqual({
+      ok: false, code: 'kernel-operation-denied', outcomeKnown: true,
+    });
     const result = {
       ok: true,
       value: JSON.stringify({
@@ -1223,9 +1226,6 @@ describe('controller protocol pure validation', () => {
       outcomeKnown: true,
     };
     expect(controllerPayloadBytes(result)).toBeLessThan(4 * 1024 * 1024);
-    expect(quota.observe('turn.tool.dispatch', dispatch, result)).toEqual({
-      ok: true, outcomeKnown: true,
-    });
   });
 
   test('more than 65,536 fragmented model chunks fit while the 8 MiB rail remains authoritative', () => {

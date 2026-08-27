@@ -45,46 +45,12 @@ export const a2aRunTool = composeTool("a2a_run", {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || !args.code.trim()) return { ok: false, error: 'code_required' };
-    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<any>, abortHeadless?: (runId: string, ownerSessionId?: string) => Promise<void> }, scriptRuns?: { mintRunId: (owner: string) => string, register: (runId: string, signal: any, owner: string, caps: Record<string, boolean>) => void, release: (runId: string) => void }, abortSignal?: { aborted: boolean, addEventListener: Function, removeEventListener?: Function } }} */ (
-      /** @type {unknown} */ (ctx));
-    const jsOffscreenClient = c.jsOffscreenClient;
-    if (!jsOffscreenClient?.execHeadless) return { ok: false, error: 'a2a_unavailable' };
-    const ownerSessionId = ctx.session?.sessionId;
-    if (!ownerSessionId) return { ok: false, error: 'a2a: no owner session' };
-    if (!c.scriptRuns) return { ok: false, error: 'a2a_run_registry_unavailable' };
-    // A turn that is ALREADY stopped must not launch a worker at all — the
-    // 'abort' event never re-fires on an aborted signal, so a run started now
-    // would hold a shared headless slot for its full 135s wall-clock (#153).
-    if (c.abortSignal?.aborted) {
-      return { ok: false, error: 'a2a_aborted: the turn was stopped before the run started' };
-    }
+    const authority = /** @type {any} */ (ctx).dwebAuthority;
+    if (!authority?.runMeshProgram) return { ok: false, error: 'a2a_unavailable' };
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
-    // Stop plumbing (#153, mirrors the script tool): a runId-carrying job is
-    // registered by the offscreen runner, so aborting the dweb-actor turn
-    // terminates the worker promptly instead of orphaning it to its timeout.
-    const runId = c.scriptRuns.mintRunId(ownerSessionId);
-    c.scriptRuns.register(runId, c.abortSignal, ownerSessionId, { a2a: true });
-    /** @type {(() => void) | undefined} */
-    let onAbort;
-    if (c.abortSignal && jsOffscreenClient.abortHeadless) {
-      onAbort = () => { jsOffscreenClient.abortHeadless?.(runId, ownerSessionId); };
-      if (c.abortSignal.aborted) onAbort();
-      else c.abortSignal.addEventListener('abort', onAbort, { once: true });
-    }
-    try {
-      const result = await jsOffscreenClient.execHeadless(args.code, {
-        timeoutMs, a2a: true, ownerSessionId, runId, signal: c.abortSignal,
-      });
-      return { ok: true, content: formatA2AResult(args.code, result) };
-    } catch (e) {
-      const err = /** @type {{ name?: string, message?: string }} */ (e);
-      return { ok: false, error: `a2a_run_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
-    } finally {
-      c.scriptRuns.release(runId);
-      if (onAbort && c.abortSignal) {
-        try { c.abortSignal.removeEventListener?.('abort', onAbort); } catch { /* stub signal in tests */ }
-      }
-    }
+    const run = await authority.runMeshProgram(args.code, timeoutMs);
+    if (!run?.ok) return run;
+    return { ok: true, content: formatA2AResult(args.code, run.result) };
   },
 });
 

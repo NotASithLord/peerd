@@ -4,6 +4,7 @@
 // path (createNotebookSandbox) with mocked registry + tab tracker.
 
 import { describe, test, expect, beforeEach } from 'bun:test';
+import { executionToolContext } from '../../helpers/execution-tool.js';
 
 // The shared test bootstrap provides the browser identity required by the
 // js-create import graph. Keep that single identity for the whole Bun worker.
@@ -12,7 +13,7 @@ const { _resetOncePerSession } = await import('../../../extension/peerd-runtime/
 
 beforeEach(() => { _resetOncePerSession(); });
 
-const ctxFor = (sessionId: string | null) => ({
+const ctxFor = (sessionId: string | null) => executionToolContext({
   session: sessionId ? { sessionId } : undefined,
   jsRegistry: {
     create: async () => ({ id: 'nb-1', name: 'Notebook' }),

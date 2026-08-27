@@ -17,6 +17,8 @@ import {
   controllerHostsPageTool,
   controllerHostsResourceTool,
   controllerHostsSiteClientTool,
+  controllerHostsExecutionTool,
+  controllerHostsEditingTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
@@ -32,13 +34,15 @@ import {
   executeControllerPageTool,
   executeControllerResourceTool,
   executeControllerSiteClientTool,
+  executeControllerExecutionTool,
+  executeControllerEditingTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
   reasoningForTurn,
   runUserTurn,
 } from '/peerd-runtime/controller-turn.js';
-import { makeInMemorySessions, makeRelayedToolDispatch, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
+import { makeInMemorySessions, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import {
   callModel as callProviderModel,
@@ -85,8 +89,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     modelPending.delete(m.rid);
     return;
   }
-  if (m.type === 'tool-response'
-      || m.type === 'actor-tool-prepare-response'
+  if (m.type === 'actor-tool-prepare-response'
       || m.type === 'actor-spawn-sync-response'
       || m.type === 'actor-spawn-async-response'
       || m.type === 'actor-tasks-read-response'
@@ -170,6 +173,14 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'site-client-commit-response'
       || m.type === 'site-client-capture-start-response'
       || m.type === 'site-client-capture-stop-response'
+      || m.type === 'execution-create-webvm-response'
+      || m.type === 'execution-create-notebook-response'
+      || m.type === 'execution-create-pod-response'
+      || m.type === 'execution-create-app-response'
+      || m.type === 'execution-run-script-response'
+      || m.type === 'execution-spill-script-response'
+      || m.type === 'editing-read-target-response'
+      || m.type === 'editing-write-target-response'
       || m.type === 'introspection-actor-roster-response'
       || m.type === 'introspection-provider-posture-response'
       || m.type === 'introspection-storage-snapshot-response'
@@ -178,6 +189,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'introspection-audit-entries-response'
       || m.type === 'introspection-installed-skill-response'
       || m.type === 'schedule-read-routines-response'
+      || m.type === 'dweb-run-mesh-program-response'
       || m.type === 'schedule-arm-confirmed-routine-response'
       || m.type === 'schedule-cancel-routine-response'
       || m.type === 'dweb-discover-apps-response'
@@ -282,11 +294,6 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       self.postMessage({
         type: 'model-cancel-local-request', rid, runId, streamId: request.streamId,
       });
-    });
-    const requestTool = (/** @type {object} */ call) => new Promise((resolve) => {
-      const rid = `tc-${++seq}`;
-      toolPending.set(rid, resolve);
-      self.postMessage({ type: 'tool-request', rid, runId, call });
     });
     const actorToolRequest = (
       /** @type {string} */ type, /** @type {Record<string,unknown>} */ payload,
@@ -682,6 +689,38 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           result = await executeControllerSiteClientTool(
             prepared.toolName, prepared.args, siteClientAuthority,
           );
+        } else if (controllerHostsExecutionTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
+            authorityValue(actorToolRequest(type, { executionId, ...value }));
+          const executionAuthority = Object.freeze({
+            createWebVm: (/** @type {any} */ plan) =>
+              request('execution-create-webvm-request', { plan }),
+            createNotebook: (/** @type {any} */ plan) =>
+              request('execution-create-notebook-request', { plan }),
+            createPod: (/** @type {any} */ plan) =>
+              request('execution-create-pod-request', { plan }),
+            createApp: (/** @type {any} */ plan) =>
+              request('execution-create-app-request', { plan }),
+            runHeadlessScript: (/** @type {any} */ scriptRequest) =>
+              request('execution-run-script-request', scriptRequest),
+            spillScriptValue: (/** @type {any} */ record) =>
+              request('execution-spill-script-request', record),
+          });
+          result = await executeControllerExecutionTool(
+            prepared.toolName, prepared.args, executionAuthority, prepared.projection,
+          );
+        } else if (controllerHostsEditingTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type, /** @type {any} */ value) =>
+            authorityValue(actorToolRequest(type, { executionId, ...value }));
+          const editingAuthority = Object.freeze({
+            readEditTarget: (/** @type {any} */ target) =>
+              request('editing-read-target-request', target),
+            writeEditTarget: (/** @type {any} */ target) =>
+              request('editing-write-target-request', target),
+          });
+          result = await executeControllerEditingTool(
+            prepared.toolName, prepared.args, editingAuthority,
+          );
         } else if (controllerHostsIntrospectionTool(prepared.toolName)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
             authorityValue(actorToolRequest(type, { executionId, ...value }));
@@ -729,6 +768,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               request('dweb-set-peer-blocked-request', { did, block, reason }),
             setDiscoveryEnabled: (/** @type {boolean} */ enabled) =>
               request('dweb-set-discovery-enabled-request', { enabled }),
+            runMeshProgram: (/** @type {string} */ code,
+              /** @type {number} */ timeoutMs) =>
+              request('dweb-run-mesh-program-request', { code, timeoutMs }),
           });
           result = await executeControllerDwebTool(
             prepared.toolName, prepared.args, prepared.projection,
@@ -790,9 +832,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           : {}),
         modelEgress,
       });
-      const legacyToolDispatch = makeRelayedToolDispatch(requestTool);
       const toolDispatch = (/** @type {any} */ call) => controllerHostsTool(call?.name)
-        ? executeActorTool(call) : legacyToolDispatch(call);
+        ? executeActorTool(call)
+        : Promise.resolve({
+          ok: false, error: 'actor tool has no controller owner', outcomeKnown: true,
+        });
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
       // summary. The SW's closure (over a policy-reduced live tab origin) can't
       // cross postMessage, so rebuild it here from the pure fence fns using the

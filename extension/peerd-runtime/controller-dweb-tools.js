@@ -9,10 +9,12 @@ import { dwebInstallTool } from './tools/defs/dweb-install.js';
 import { dwebPeersTool } from './tools/defs/dweb-peers.js';
 import { dwebBlockTool } from './tools/defs/dweb-block.js';
 import { dwebDiscoveryTool } from './tools/defs/dweb-discovery.js';
+import { a2aRunTool } from './tools/defs/a2a-run.js';
 
 export const CONTROLLER_DWEB_TOOL_NAMES = Object.freeze([
   'dweb_discover', 'dweb_share', 'dweb_install', 'dweb_peers',
   'dweb_block', 'dweb_discovery',
+  'a2a_run',
 ]);
 
 const tools = Object.freeze({
@@ -22,6 +24,7 @@ const tools = Object.freeze({
   dweb_peers: dwebPeersTool,
   dweb_block: dwebBlockTool,
   dweb_discovery: dwebDiscoveryTool,
+  a2a_run: a2aRunTool,
 });
 
 export const controllerHostsDwebTool = (/** @type {unknown} */ name) =>
@@ -52,6 +55,7 @@ export const executeControllerDwebTool = async (
       readPeers: authority.readPeers,
       setPeerBlocked: authority.setPeerBlocked,
       setDiscoveryEnabled: authority.setDiscoveryEnabled,
+      runMeshProgram: authority.runMeshProgram,
     }),
   }));
 };

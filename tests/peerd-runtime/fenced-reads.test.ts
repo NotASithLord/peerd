@@ -8,6 +8,7 @@ import { describe, test, expect } from 'bun:test';
 import { jsReadFileTool } from '../../extension/peerd-runtime/tools/defs/js-read-file.js';
 import { appReadFileTool } from '../../extension/peerd-runtime/tools/defs/app-read-file.js';
 import { scriptTool } from '../../extension/peerd-runtime/tools/defs/script.js';
+import { executionToolContext } from '../helpers/execution-tool.js';
 
 const FENCE_OPEN = '<untrusted_web_content';
 const FENCE_CLOSE = '</untrusted_web_content>';
@@ -55,7 +56,7 @@ describe('app_read_file — fenced content', () => {
 });
 
 describe('script — output fenced ONLY when the run used egress', () => {
-  const ctx = (result: object) => ({
+  const ctx = (result: object) => executionToolContext({
     session: { sessionId: 's1' },
     jsOffscreenClient: { execHeadless: async () => result },
   });

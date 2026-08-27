@@ -413,6 +413,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
                   sessionId: toolContext.session?.sessionId,
                   runtimeCapabilities: toolContext.runtimeCapabilities,
                 }
+              : authorityClass === 'execution'
+                ? {
+                  sessionId: toolContext.session?.sessionId,
+                  sessionKind: toolContext.session?.kind ?? 'chat',
+                }
               : authorityClass === 'introspection'
                 ? {
                   sessionId: toolContext.session?.sessionId,

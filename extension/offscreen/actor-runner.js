@@ -1,7 +1,7 @@
 // @ts-check
 // offscreen/actor-runner.js — hosts EVERY offscreen agent loop in dedicated Workers
 // (the heap split): ephemeral spawned reasoners AND bound actors alike (a reasoning
-// child just carries no tools, so its worker never sends a tool-request). Forks one
+// child just carries no tools, so its worker never prepares a tool). Forks one
 // Worker per turn, relays exact model-authority stream requests and tool-dispatch
 // requests to the SW, forwards loop events, and resolves with the turn result.
 
@@ -1228,6 +1228,71 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'execution-create-webvm-request') {
+          await relayExactToolMessage(m, 'execution-create-webvm-response', () =>
+            sendToSW('execution/create-webvm', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              plan: m.plan,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'execution-create-notebook-request') {
+          await relayExactToolMessage(m, 'execution-create-notebook-response', () =>
+            sendToSW('execution/create-notebook', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              plan: m.plan,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'execution-create-pod-request') {
+          await relayExactToolMessage(m, 'execution-create-pod-response', () =>
+            sendToSW('execution/create-pod', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              plan: m.plan,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'execution-create-app-request') {
+          await relayExactToolMessage(m, 'execution-create-app-response', () =>
+            sendToSW('execution/create-app', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              plan: m.plan,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'execution-run-script-request') {
+          await relayExactToolMessage(m, 'execution-run-script-response', () =>
+            sendToSW('execution/run-script', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              code: m.code, actors: m.actors, provider: m.provider,
+              workspace: m.workspace, timeoutMs: m.timeoutMs,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'execution-spill-script-request') {
+          await relayExactToolMessage(m, 'execution-spill-script-response', () =>
+            sendToSW('execution/spill-script', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              text: m.text, fenced: m.fenced, originLabel: m.originLabel,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'editing-read-target-request') {
+          await relayExactToolMessage(m, 'editing-read-target-response', () =>
+            sendToSW('editing/read-target', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              kind: m.kind, targetId: m.targetId, path: m.path,
+            }));
+          return;
+        }
+        if (m.type === 'editing-write-target-request') {
+          await relayExactToolMessage(m, 'editing-write-target-response', () =>
+            sendToSW('editing/write-target', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              kind: m.kind, targetId: m.targetId, path: m.path, content: m.content,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'introspection-actor-roster-request') {
           await relayExactToolMessage(m, 'introspection-actor-roster-response', () =>
             sendToSW('introspection/actor-roster', {
@@ -1347,64 +1412,20 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'dweb-run-mesh-program-request') {
+          await relayExactToolMessage(m, 'dweb-run-mesh-program-response', () =>
+            sendToSW('dweb/run-mesh-program', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              code: m.code, timeoutMs: m.timeoutMs,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'actor-tool-settle-request') {
           await relayExactToolMessage(m, 'actor-tool-settle-response', () =>
             sendToSW('actor/tool-settle', {
               ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
               result: m.result,
             }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'tool-request') {
-          // Count at the privileged relay boundary. The Worker result is not
-          // trusted to report whether an external action may have started.
-          relayedToolRequests += 1;
-          pendingToolRelays += 1;
-          try {
-            // The SW pins the bound instance + gates + dispatches (never trusts the
-            // worker's call args) and returns the ToolResult. The relay grant keys
-            // the actor ctx it builds — the session is no longer sent at all, so
-            // neither this runner nor any other first-party page can name one.
-            const reply = await sendToSW('actor/tool-dispatch', {
-              ...(relayToken ? { relayToken } : {}), call: m.call,
-            });
-            const result = reply?.result;
-            if (reply?.outcomeKnown === false || result?.outcomeKnown === false) relayedUnknown = true;
-            const performed = typeof reply?.performed === 'boolean'
-              ? reply.performed
-              : typeof result?.performed === 'boolean'
-                ? result.performed
-                : reply?.ok === true && result?.ok === true
-                  ? true
-                  : reply?.ok === false && reply?.outcomeKnown !== false
-                    ? false
-                    : undefined;
-            if (performed === true || (performed === false && relayedPerformed !== true)) {
-              relayedPerformed = performed;
-            }
-            if (!terminal) w.postMessage({ type: 'tool-response', rid: m.rid, reply });
-          } catch (e) {
-            const detail = /** @type {{ message?: string, code?: string, outcomeKnown?: boolean, performed?: boolean }} */ (e);
-            relayedUnknown ||= detail?.outcomeKnown !== true;
-            if (detail?.performed === true || (detail?.performed === false && relayedPerformed !== true)) {
-              relayedPerformed = detail.performed;
-            }
-            if (!terminal) {
-              w.postMessage({
-                type: 'tool-response', rid: m.rid,
-                reply: {
-                  ok: false, error: detail?.message ?? String(e),
-                  ...(typeof detail?.code === 'string' ? { code: detail.code } : {}),
-                  outcomeKnown: detail?.outcomeKnown === true,
-                  ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
-                  ...(detail?.outcomeKnown === true ? {} : { retryable: false }),
-                },
-              });
-            }
-          } finally {
-            pendingToolRelays -= 1;
-            settleTerminal();
-          }
           return;
         }
         if (m.type === 'loop-event') {

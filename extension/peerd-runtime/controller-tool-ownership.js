@@ -34,6 +34,12 @@ import {
   CONTROLLER_SITE_CLIENT_TOOL_NAMES,
 } from './controller-site-client-tools.js';
 import {
+  CONTROLLER_EXECUTION_TOOL_NAMES,
+} from './controller-execution-tools.js';
+import {
+  CONTROLLER_EDITING_TOOL_NAMES,
+} from './controller-editing-tools.js';
+import {
   CONTROLLER_INTROSPECTION_TOOL_NAMES,
 } from './controller-introspection-tools.js';
 import {
@@ -56,6 +62,8 @@ const authorityTools = [
   ['page', CONTROLLER_PAGE_TOOL_NAMES],
   ['resource', CONTROLLER_RESOURCE_TOOL_NAMES],
   ['siteclient', CONTROLLER_SITE_CLIENT_TOOL_NAMES],
+  ['execution', CONTROLLER_EXECUTION_TOOL_NAMES],
+  ['editing', CONTROLLER_EDITING_TOOL_NAMES],
   ['introspection', CONTROLLER_INTROSPECTION_TOOL_NAMES],
   ['schedule', CONTROLLER_SCHEDULE_TOOL_NAMES],
   ['dweb', CONTROLLER_DWEB_TOOL_NAMES],

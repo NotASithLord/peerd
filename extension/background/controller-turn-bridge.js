@@ -13,7 +13,6 @@ import {
   CONTROLLER_AUTHORITY_MANIFEST,
   controllerAuthorityClassAllowed,
 } from '../shared/controller-authority-manifest.js';
-import { legacyToolAllowed } from '../shared/legacy-tool-allowlist.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
 import { bindVmToolAuthority } from './vm-tool-authority.js';
@@ -23,6 +22,8 @@ import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { bindPageToolAuthority } from './page-tool-authority.js';
 import { bindResourceToolAuthority } from './resource-tool-authority.js';
 import { bindSiteClientToolAuthority } from './site-client-tool-authority.js';
+import { bindExecutionToolAuthority } from './execution-tool-authority.js';
+import { bindEditingToolAuthority } from './editing-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
@@ -183,8 +184,6 @@ export const makeControllerTurnBridge = ({
   const runs = new Map();
   /** @type {Map<string, number>} */
   const sessionGenerations = new Map();
-  const protocolEnabled = typeof prepareToolCall === 'function'
-    && typeof settleToolCall === 'function';
   if (!toolManifest || toolManifest.protocol !== TOOL_EXECUTION_PROTOCOL
       || typeof toolManifest.digest !== 'string' || !isRecord(toolManifest.tools)) {
     throw new TypeError('controller-authority-manifest-invalid');
@@ -619,6 +618,30 @@ export const makeControllerTurnBridge = ({
     });
     return entry;
   };
+  const executionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'execution', fields);
+    if (!entry) return null;
+    bindExecutionToolAuthority(entry.domainState, {
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const editingEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'editing', fields);
+    if (!entry) return null;
+    bindEditingToolAuthority(entry.domainState, {
+      call: entry.call, ctx: entry.custody?.ctx,
+    });
+    return entry;
+  };
   const introspectionExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
@@ -808,7 +831,6 @@ export const makeControllerTurnBridge = ({
             return failed('model egress unavailable', true);
           }
           run.modelToolCalls.clear();
-          run.legacyToolCalls.clear();
           return providerEgress.openInference(value, modelGrant(run));
         }
         case 'turn.model.read-inference':
@@ -867,7 +889,6 @@ export const makeControllerTurnBridge = ({
           return known(null);
         }
         case 'turn.tool.prepare': {
-          if (!protocolEnabled) return known({ mode: 'legacy' });
           const call = jsonUnwire(value.callJson, 'tool call');
           if (!isRecord(call) || !issuedToolCall(run, call)
               || !controllerAuthorityClassAllowed(value.authorityClass)) {
@@ -1718,6 +1739,70 @@ export const makeControllerTurnBridge = ({
           return runDomainEffect(run, entry, operation, 'resource', () =>
             entry.domainState.authority.stopOwnedCapture());
         }
+        case 'turn.execution.create-webvm': {
+          const entry = executionEntry(run, value, ['plan']);
+          if (!entry) return failed('webvm creation authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.createWebVm(value.plan));
+        }
+        case 'turn.execution.create-notebook': {
+          const entry = executionEntry(run, value, ['plan']);
+          if (!entry) return failed('notebook creation authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.createNotebook(value.plan));
+        }
+        case 'turn.execution.create-pod': {
+          const entry = executionEntry(run, value, ['plan']);
+          if (!entry) return failed('pod creation authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.createPod(value.plan));
+        }
+        case 'turn.execution.create-app': {
+          const entry = executionEntry(run, value, ['plan']);
+          if (!entry) return failed('app creation authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.createApp(value.plan));
+        }
+        case 'turn.execution.run-script': {
+          const entry = executionEntry(run, value, [
+            'code', 'actors', 'provider', 'workspace', 'timeoutMs',
+          ]);
+          if (!entry) return failed('headless script authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.runHeadlessScript({
+              code: value.code, actors: value.actors, provider: value.provider,
+              workspace: value.workspace, timeoutMs: value.timeoutMs,
+            }));
+        }
+        case 'turn.execution.spill-script': {
+          const entry = executionEntry(
+            run, value, ['text', 'fenced', 'originLabel'],
+          );
+          if (!entry) return failed('script spill authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'control', () =>
+            entry.domainState.authority.spillScriptValue({
+              text: value.text, fenced: value.fenced, originLabel: value.originLabel,
+            }));
+        }
+        case 'turn.editing.read-target': {
+          const entry = editingEntry(run, value, ['kind', 'targetId', 'path']);
+          if (!entry) return failed('edit target read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readEditTarget({
+              kind: value.kind, targetId: value.targetId, path: value.path,
+            }));
+        }
+        case 'turn.editing.write-target': {
+          const entry = editingEntry(
+            run, value, ['kind', 'targetId', 'path', 'content'],
+          );
+          if (!entry) return failed('edit target write authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.writeEditTarget({
+              kind: value.kind, targetId: value.targetId,
+              path: value.path, content: value.content,
+            }));
+        }
         case 'turn.introspection.actor-roster': {
           const entry = introspectionExecutionEntry(run, value, []);
           if (!entry) return failed('actor roster authority mismatch', true);
@@ -1821,6 +1906,12 @@ export const makeControllerTurnBridge = ({
           return runDomainEffect(run, entry, operation, 'commit', () =>
             entry.domainState.authority.setDiscoveryEnabled(value.enabled));
         }
+        case 'turn.dweb.run-mesh-program': {
+          const entry = dwebExecutionEntry(run, value, ['code', 'timeoutMs']);
+          if (!entry) return failed('mesh program authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.runMeshProgram(value.code, value.timeoutMs));
+        }
         case 'turn.tool.settle': {
           const entry = run.preparedExecutions.get(value.executionId);
           if (!entry || entry.open !== true || value.argsDigest !== entry.argsDigest
@@ -1877,36 +1968,6 @@ export const makeControllerTurnBridge = ({
           } finally {
             run.preparedExecutions.delete(entry.executionId);
             entry.release();
-          }
-        }
-        case 'turn.tool.dispatch': {
-          const call = jsonUnwire(value.callJson, 'tool call');
-          if (!isRecord(call) || typeof call.id !== 'string' || typeof call.name !== 'string'
-              || !run.toolNames.has(call.name)) {
-            return failed('tool grant mismatch', true);
-          }
-          if (!legacyToolAllowed(call.name)) {
-            return failed(Object.assign(new Error('controller tool cannot use legacy dispatch'), {
-              code: 'turn-controller-tool-legacy-dispatch-refused',
-            }), true);
-          }
-          if (!issuedToolCall(run, call)
-              && !issuedToolCall(run, call, run.legacyToolCalls)) {
-            return failed('tool call was not issued by the pinned model stream', true);
-          }
-          run.modelToolCalls.delete(call.id);
-          run.legacyToolCalls.delete(call.id);
-          try {
-            const result = await scheduleDispatch(
-              run,
-              dispatchIsConcurrencySafe(run, call.name),
-              () => run.ctx.toolDispatch(call),
-            );
-            if (result?.outcomeKnown === false) run.nestedUnknown = true;
-            return known(jsonWire(externalizeToolResult(run, result)));
-          } catch (cause) {
-            return /** @type {{code?:string}} */ (cause)?.code === 'turn-tool-not-dispatched'
-              ? failed(cause, true) : unknown(run, cause);
           }
         }
         case 'turn.event':
@@ -1984,7 +2045,6 @@ export const makeControllerTurnBridge = ({
       runId, sessionId: ctx.sessionId, turnGeneration,
       ctx, events, abort: localAbort, signal: localAbort.signal,
       opaque: new Map(), modelToolCalls: new Map(),
-      legacyToolCalls: new Map(),
       providerOwner: Object.freeze({ runId }), modelCandidates: [],
       maxOutputTokens: Number.isSafeInteger(ctx.maxOutputTokens)
         ? Math.max(1, Math.min(64_000, Number(ctx.maxOutputTokens))) : 64_000,
