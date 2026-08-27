@@ -172,7 +172,33 @@ describe('read_doc as the one public document reader', () => {
     expect(result.ok).toBe(true);
     expect(readPastCap).toBe(false);
     expect(spilled.text.length).toBe(MAX_SPILL_TEXT_CHARS);
-    expect(spilled.text).toEndWith(`[note] Stored PDF text capped at ${MAX_SPILL_TEXT_CHARS} characters.`);
+    expect(spilled.text).toEndWith('[note] PDF extraction stopped at its local safety cap; later PDF text was not stored.');
+    expect(result.content).toContain('retained text prefix');
+    expect(result.content).toContain('extraction cap reached');
+    expect(result.content).not.toContain('The full text');
+  });
+
+  test('propagates the offscreen extraction cap into honest query paging copy', async () => {
+    const middle = 'retained needle passage';
+    const result = await readDocTool.execute({
+      url: 'https://docs.example/capped.pdf', query: 'needle passage', maxChars: 500,
+    }, docContext({
+      docOffscreenClient: { extract: async () => ({
+        ...pdfResult,
+        pdf: {
+          ...pdfResult.pdf,
+          pages: [{ page: 1, text: `${'start '.repeat(500)}${middle}${' end'.repeat(500)}` }],
+          textCapped: true,
+        },
+      }) },
+      spillResult: async () => 'result:pdf-retained',
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain(middle);
+    expect(result.content).toContain('retained text prefix');
+    expect(result.content).toContain('extraction cap reached');
+    expect(result.content).not.toContain('from 5023 chars stored locally');
   });
 
   test('refuses private targets before the offscreen reader can fetch', async () => {

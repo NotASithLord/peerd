@@ -97,11 +97,13 @@ export const windowText = (text, budget) => {
  * OUTSIDE the untrusted fence (page content must never be able to forge or
  * suppress it) and contain ONLY caller-computed values, never fetched bytes.
  *
- * @param {{ key: string, total: number, headChars: number, tailChars: number }} p
+ * @param {{ key: string, total: number, headChars: number, tailChars: number, retainedPrefix?: boolean }} p
  * @returns {string}
  */
-export const pagingFooter = ({ key, total, headChars, tailChars }) => [
-  `[paging] The full text (${total} chars) is stored locally. You saw the first ${headChars} and last ${tailChars} chars.`,
+export const pagingFooter = ({ key, total, headChars, tailChars, retainedPrefix = false }) => [
+  retainedPrefix
+    ? `[paging] The retained text prefix (${total} chars; extraction cap reached) is stored locally. You saw the first ${headChars} and last ${tailChars} retained chars.`
+    : `[paging] The full text (${total} chars) is stored locally. You saw the first ${headChars} and last ${tailChars} chars.`,
   `To read more call read_result with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> } — e.g. offset ${headChars} continues where the head stopped.`,
 ].join('\n');
 
@@ -310,10 +312,14 @@ export const excerptRelevant = (text, query, budget, opts = {}) => {
  * model it saw the most-relevant passages, not a contiguous slice, and how to
  * read the rest.
  *
- * @param {{ key: string, total: number, passagesShown: number, passagesTotal: number, query: string }} p
+ * @param {{ key: string, total: number, passagesShown: number, passagesTotal: number, query: string, retainedPrefix?: boolean }} p
  * @returns {string}
  */
-export const excerptFooter = ({ key, total, passagesShown, passagesTotal, query }) => [
-  `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from ${total} chars stored locally — NOT a contiguous slice.`,
+export const excerptFooter = ({
+  key, total, passagesShown, passagesTotal, query, retainedPrefix = false,
+}) => [
+  retainedPrefix
+    ? `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from the retained text prefix (${total} chars; extraction cap reached) stored locally. This is not a contiguous slice.`
+    : `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from ${total} chars stored locally — NOT a contiguous slice.`,
   `To read the surrounding text or other sections call read_result with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> }.`,
 ].join('\n');

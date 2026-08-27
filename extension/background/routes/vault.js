@@ -48,14 +48,31 @@ export const makeVaultRoutes = (deps) => {
     VaultLockedError,
   } = deps;
 
-  const prfPayload = (/** @type {any} */ input) =>
-    typeof input?.credentialId === 'string' && typeof input?.prfSalt === 'string'
-      && typeof input?.prfOutput === 'string' ? {
+  const prfPayload = (/** @type {any} */ input) => {
+    if (typeof input?.credentialId !== 'string' || typeof input?.prfSalt !== 'string'
+        || typeof input?.prfOutput !== 'string') return null;
+    try {
+      return {
         prfOutput: base64ToBytes(input.prfOutput),
         credentialId: base64ToBytes(input.credentialId),
         prfSalt: base64ToBytes(input.prfSalt),
         transports: input.transports,
-      } : null;
+      };
+    } catch {
+      // Malformed bytes never crossed the mutation boundary, so rolling back
+      // here could destroy an already-existing vault.
+      return null;
+    }
+  };
+
+  const rollbackInitialization = async () => {
+    try { await vault.lock(); }
+    catch (error) { console.error('[sw] failed-init vault lock cleanup failed', error); }
+    try { await onLocked(); }
+    catch (error) { console.error('[sw] failed-init host cleanup failed', error); }
+    try { await purgeVaultBlob({ kv, idb }); }
+    catch (error) { console.error('[sw] failed-init blob cleanup failed', error); }
+  };
 
   return {
     'vault/initialize': async ({ passphrase }) => {
@@ -67,6 +84,7 @@ export const makeVaultRoutes = (deps) => {
         return { ok: true };
       } catch (e) {
         if (e instanceof VaultAlreadyInitializedError) return { ok: false, error: 'already-initialized' };
+        await rollbackInitialization();
         throw e;
       }
     },
@@ -94,9 +112,7 @@ export const makeVaultRoutes = (deps) => {
       } catch (e) {
         if (e instanceof VaultAlreadyInitializedError) return { ok: false, error: 'already-initialized' };
         console.error('[sw] initializeWithPasskey failed, rolling back', e);
-        await vault.lock();
-        await onLocked();
-        await purgeVaultBlob({ kv, idb });
+        await rollbackInitialization();
         throw e;
       }
       auditLog.append({ type: 'vault_initialized', details: { prf: true, passkeyOnly: true } }).catch(() => {});
@@ -122,10 +138,14 @@ export const makeVaultRoutes = (deps) => {
     },
 
     'vault/lock': async () => {
-      await vault.lock();
-      await onLocked();
-      auditLog.append({ type: 'vault_locked' }).catch(() => {});
-      pushState();
+      let failure = null;
+      try { await vault.lock(); }
+      catch (error) { failure = error; }
+      try { await onLocked(); }
+      catch (error) { failure ??= error; }
+      await auditLog.append({ type: 'vault_locked' }).catch(() => {});
+      await Promise.resolve(pushState()).catch(() => {});
+      if (failure) throw failure;
       return { ok: true };
     },
 

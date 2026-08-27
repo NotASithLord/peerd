@@ -425,7 +425,7 @@ export const TOOL_METADATA_RECORDS = {
   "read_doc": {
     "name": "read_doc",
     "primitive": "web",
-    "description": "Read a DOCUMENT FILE through content detection: PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), OpenDocument (.odt/.ods/.odp), RTF, EPUB, and CSV/TSV. Pass an explicit URL, or omit it on an active PDF tab whose built-in viewer has no readable DOM. PDFs return pdf.js text page by page ([page N] markers), title/author metadata, and optional on-device OCR for scanned pages. Other formats return structure-preserving Markdown. Long PDFs and other documents use the same session-owned read_result pager, with an optional query surfacing matching passages. For HTML use fetch_url or ordinary page tools.",
+    "description": "Read a DOCUMENT FILE through content detection: PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), OpenDocument (.odt/.ods/.odp), RTF, EPUB, and CSV/TSV. Pass an explicit URL, or omit it on an active PDF tab whose built-in viewer has no readable DOM. PDFs return bounded pdf.js text page by page ([page N] markers), title/author metadata, and optional on-device OCR for scanned pages; the result says when the extraction cap was reached. Other formats return structure-preserving Markdown. Long results use the same session-owned read_result pager over the locally retained text, with an optional query surfacing matching passages. For HTML use fetch_url or ordinary page tools.",
     "schema": {
       "type": "object",
       "properties": {
@@ -448,7 +448,7 @@ export const TOOL_METADATA_RECORDS = {
         },
         "maxChars": {
           "type": "integer",
-          "description": "Cap on the initial returned text or Markdown window. Longer documents remain available through read_result paging."
+          "description": "Cap on the initial returned text or Markdown window. Longer results remain available through read_result paging up to the documented local extraction/storage cap."
         },
         "query": {
           "type": "string",

@@ -169,6 +169,144 @@ describe('sealed vault authority channel', () => {
     client.close();
   });
 
+  test('an older successor finalizer cannot clear a newer connecting generation', async () => {
+    const storage = makeStorage();
+    let currentLease: any = vaultLease;
+    let listing = 0;
+    let rejectLeaseB = () => {};
+    const leaseBFailure = new Promise<void>((_, reject) => {
+      rejectLeaseB = () => reject(new Error('lease-b-host-retired'));
+    });
+    let leaseCOffer: any = null;
+    let leaseCPort: MessagePort | null = null;
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(currentLease),
+      listWindowClients: async () => {
+        listing += 1;
+        if (listing === 2) {
+          await leaseBFailure;
+        }
+        return [{
+          url: offscreenUrl,
+          postMessage: (offer: any, ports: MessagePort[]) => {
+            if (offer.lease.generation === 3) {
+              leaseCOffer = offer;
+              leaseCPort = ports[0];
+              return;
+            }
+            void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+          },
+        }];
+      },
+    });
+    await client.status();
+
+    currentLease = { ...vaultLease, leaseId: 'lease-b', generation: 2 };
+    const callB = client.status();
+    while (listing < 2) await Promise.resolve();
+    currentLease = { ...vaultLease, leaseId: 'lease-c', generation: 3 };
+    const callC = client.status();
+    while (listing < 3 || !leaseCPort) await Promise.resolve();
+
+    rejectLeaseB();
+    await expect(callB).rejects.toThrow('lease-b-host-retired');
+    const joiningC = client.status();
+    await Promise.resolve();
+    expect(listing).toBe(3);
+    void serveVaultAuthority({
+      port: /** @type {MessagePort} */ (leaseCPort),
+      channelId: leaseCOffer.channelId,
+    });
+    await expect(callC).resolves.toMatchObject({ locked: true });
+    await expect(joiningC).resolves.toMatchObject({ locked: true });
+    expect(listing).toBe(3);
+    client.close();
+  });
+
+  test('a rejected first-run mutation refreshes cached initialized status', async () => {
+    const storage = makeStorage();
+    storage.sessionCache.sessionSet = async () => {
+      throw new Error('session mirror unavailable');
+    };
+    storage.idb.del = async () => {
+      throw new Error('blob rollback unavailable');
+    };
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(vaultLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+
+    await expect(client.initializeWithPrfOnly({
+      prfOutput: new Uint8Array(32).fill(5),
+      credentialId: new Uint8Array([1, 2, 3]),
+      prfSalt: new Uint8Array(32).fill(6),
+    })).rejects.toThrow('session mirror unavailable');
+    expect(client.isInitialized()).toBe(true);
+    expect(client.isLocked()).toBe(true);
+    await expect(client.status()).resolves.toMatchObject({ initialized: true, locked: true });
+    client.close();
+  });
+
+  test('manual lock crosses the exact reverse fence when session deletion is unavailable', async () => {
+    const storage = makeStorage();
+    const deleteSession = storage.sessionCache.sessionDelete;
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(vaultLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    await client.initializeWithPrfOnly({
+      prfOutput: new Uint8Array(32).fill(5),
+      credentialId: new Uint8Array([1, 2, 3]),
+      prfSalt: new Uint8Array(32).fill(6),
+    });
+    // Bun's in-process MessageChannel needs one task turn after resolving a
+    // result handler before the same port can deliver a nested reverse call.
+    // A real second user action naturally has this separation.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    storage.sessionCache.sessionDelete = async () => {
+      throw new Error('session delete unavailable');
+    };
+
+    await expect(client.lock('manual')).resolves.toBeUndefined();
+    expect(client.isLocked()).toBe(true);
+    expect(storage.session.has('vault.unlocked.v1')).toBe(true);
+    expect(storage.local.get('vault.resume-fence.v1')).toMatchObject({ reason: 'manual' });
+
+    storage.sessionCache.sessionDelete = deleteSession;
+    await expect(client.attemptResume()).resolves.toBe(false);
+    expect(storage.session.has('vault.unlocked.v1')).toBe(false);
+    expect(storage.local.has('vault.resume-fence.v1')).toBe(false);
+    client.close();
+  });
+
   test('runs passkey vault and secret custody through exact reverse storage only', async () => {
     const storage = makeStorage();
     let depth = 0;

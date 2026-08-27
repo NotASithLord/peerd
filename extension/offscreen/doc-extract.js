@@ -27,6 +27,7 @@ import {
   DocFetchError, DocParseError, UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
 } from '/peerd-runtime/offscreen.js';
 import { extractPdfBytes } from './pdf-extract.js';
+import { readBoundedResponseBytes, ResponseTooLargeError } from './bounded-response.js';
 
 // Fetch far enough to preserve the PDF reader's existing ceiling, then apply
 // the lower structured-document cap after content sniffing. A large PDF is
@@ -47,7 +48,19 @@ const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
  * @returns {Promise<{ bytes: Uint8Array, contentType: string }>}
  */
 const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
-  if (bytesB64) return { bytes: base64ToBytes(bytesB64), contentType: '' };
+  if (bytesB64) {
+    // Reject obviously oversized inline input before decoding creates another
+    // large buffer. The post-decode check remains authoritative around base64
+    // padding and any unusual encoder spelling.
+    if (bytesB64.length > Math.ceil(MAX_FETCH_BYTES / 3) * 4 + 4) {
+      throw new DocFetchError(`document too large (limit ${MAX_FETCH_BYTES} bytes)`);
+    }
+    const bytes = base64ToBytes(bytesB64);
+    if (bytes.length > MAX_FETCH_BYTES) {
+      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_FETCH_BYTES})`);
+    }
+    return { bytes, contentType: '' };
+  }
   if (!url || typeof url !== 'string') throw new DocFetchError('no document url provided');
   if (url.startsWith('blob:')) {
     throw new DocFetchError('blob: URLs are not reachable from the extension; use the document\'s http(s) URL');
@@ -62,11 +75,16 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
     throw new DocFetchError('the URL redirected; redirects are refused to prevent SSRF to internal hosts');
   }
   if (!res.ok) throw new DocFetchError(`HTTP ${res.status} fetching the document`, { status: res.status });
-  const buf = await res.arrayBuffer();
-  if (buf.byteLength > MAX_FETCH_BYTES) {
-    throw new DocFetchError(`document too large: ${buf.byteLength} bytes (limit ${MAX_FETCH_BYTES})`);
+  let bytes;
+  try {
+    bytes = await readBoundedResponseBytes(res, MAX_FETCH_BYTES);
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      throw new DocFetchError(`document too large: ${error.bytes} bytes (limit ${MAX_FETCH_BYTES})`);
+    }
+    throw new DocFetchError(`could not read the document response: ${(/** @type {{message?:string}} */ (error))?.message ?? error}`);
   }
-  return { bytes: new Uint8Array(buf), contentType: res.headers.get('content-type') ?? '' };
+  return { bytes, contentType: res.headers.get('content-type') ?? '' };
 };
 
 /**

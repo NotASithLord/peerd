@@ -29,8 +29,9 @@
 import browser from '/shared/browser-api.js';
 import {
   chooseEngine, looksScanned, createOcrStore,
-  PdfParseError,
+  PdfParseError, MAX_SPILL_TEXT_CHARS,
 } from '/peerd-runtime/offscreen.js';
+import { extractBoundedPdfTextLayer } from './pdf-text-layer.js';
 
 // pdf.js is loaded LAZILY (dynamic import), not at module top level. The
 // offscreen document ALWAYS loads (voice + the SW keepalive port), but most
@@ -44,8 +45,8 @@ const loadPdfjs = () => (pdfjsPromise ??= import('/vendor/pdfjs/pdf.min.mjs').th
   return lib;
 }));
 
-// Hard caps so a pathological PDF can't wedge the offscreen renderer. The
-// text cap is applied later (pure formatter); these bound the PARSE work.
+// Hard caps so a pathological PDF cannot wedge the offscreen renderer or build
+// an unbounded pages array before the result crosses a MessagePort.
 const MAX_PAGES = 500;
 
 /** @type {ReturnType<typeof createOcrStore> | null} */
@@ -123,7 +124,7 @@ const renderPageToCanvas = async (page, scale) => {
  *
  * @param {Uint8Array} bytes
  * @param {{ dev?: boolean }} [opts]
- * @returns {Promise<{ pages: Array<{page:number,text:string}>, pageCount:number, info:object, chars:number }>}
+ * @returns {Promise<{ pages: Array<{page:number,text:string}>, pageCount:number, info:object, chars:number, textCapped:boolean }>}
  */
 const extractViaOcr = async (bytes, { dev = false } = {}) => {
   const engine = await getOcrStore().getEngine({ dev });
@@ -161,21 +162,26 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
     const limit = Math.min(pageCount, OCR_MAX_PAGES);
     const pages = [];
     let chars = 0;
-    for (let n = 1; n <= limit; n += 1) {
+    let textCapped = pageCount > limit;
+    for (let n = 1; n <= limit && chars < MAX_SPILL_TEXT_CHARS; n += 1) {
       const page = await pdf.getPage(n);
       const canvas = await renderPageToCanvas(page, OCR_RENDER_SCALE);
       page.cleanup();
       const { data } = await worker.recognize(canvas);
-      const text = String(data?.text ?? '');
+      const source = String(data?.text ?? '');
+      const text = source.slice(0, MAX_SPILL_TEXT_CHARS - chars);
       chars += text.length;
       pages.push({ page: n, text });
+      if (text.length < source.length || (chars === MAX_SPILL_TEXT_CHARS && n < pageCount)) {
+        textCapped = true;
+      }
     }
     const meta = await pdf.getMetadata().catch(() => null);
     const info = {
       title: meta?.info?.Title || '',
       author: meta?.info?.Author || '',
     };
-    return { pages, pageCount, info, chars };
+    return { pages, pageCount, info, chars, textCapped };
   } finally {
     try { if (worker) await worker.terminate(); } catch { /* best-effort */ }
     try { await task.destroy(); } catch { /* best-effort */ }
@@ -189,7 +195,7 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
  * data + document info; the pure formatter (formatPdfBody) caps + renders it.
  *
  * @param {Uint8Array} bytes
- * @returns {Promise<{ pages: Array<{page:number,text:string}>, pageCount:number, info:object, chars:number }>}
+ * @returns {Promise<{ pages: Array<{page:number,text:string}>, pageCount:number, info:object, chars:number, textCapped:boolean }>}
  */
 const extractTextLayer = async (bytes) => {
   const pdfjsLib = await loadPdfjs();
@@ -218,29 +224,11 @@ const extractTextLayer = async (bytes) => {
     );
   }
 
-  const pageCount = pdf.numPages;
-  const limit = Math.min(pageCount, MAX_PAGES);
-  const pages = [];
-  let chars = 0;
   try {
-    for (let n = 1; n <= limit; n += 1) {
-      const page = await pdf.getPage(n);
-      const tc = await page.getTextContent();
-      let text = '';
-      for (const item of tc.items) {
-        if (typeof item.str === 'string') text += item.str;
-        if (item.hasEOL) text += '\n';
-      }
-      page.cleanup();
-      chars += text.length;
-      pages.push({ page: n, text });
-    }
-    const meta = await pdf.getMetadata().catch(() => null);
-    const info = {
-      title: meta?.info?.Title || '',
-      author: meta?.info?.Author || '',
-    };
-    return { pages, pageCount, info, chars };
+    return await extractBoundedPdfTextLayer(pdf, {
+      maxPages: MAX_PAGES,
+      maxChars: MAX_SPILL_TEXT_CHARS,
+    });
   } finally {
     try { await task.destroy(); } catch { /* best-effort */ }
   }
@@ -282,6 +270,7 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
         result: {
           engine: 'ocr', pages: ocr.pages, pageCount: ocr.pageCount,
           info: ocr.info, scanned, ocrUsed: true, ocrAvailable,
+          textCapped: ocr.textCapped,
         },
       };
     }
@@ -309,6 +298,7 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
           result: {
             engine: 'ocr', pages: ocr.pages, pageCount: ocr.pageCount,
             info: ocr.info, scanned: ocrScanned, ocrUsed: true, ocrAvailable,
+            textCapped: ocr.textCapped,
           },
         };
       } catch (ocrErr) {
@@ -326,6 +316,7 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
         scanned,
         ocrUsed: false,
         ocrAvailable,
+        textCapped: layer.textCapped,
       },
     };
   } catch (e) {

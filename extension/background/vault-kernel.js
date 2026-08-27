@@ -86,6 +86,7 @@ import {
 import {
   makeKernelRouteProvenance,
   makeVaultKernelMessageHandler,
+  makeIndexedVaultRoutes,
   makeVaultKernelRoutes,
   makeSystemReadRoutes,
   prepareVaultKernel,
@@ -501,21 +502,9 @@ const vaultRoutes = makeVaultKernelRoutes({
     onLocked: lockFeatureHost,
   },
 });
-const indexedVaultRoutes = Object.freeze(Object.fromEntries(
-  Object.entries(vaultRoutes).map(([name, handler]) => [name, async (message = {}) => {
-    const indexed = vaultPosture.snapshot() ?? await vaultPosture.read();
-    if (name === 'vault/prfStatus' && indexed?.initialized === false
-        && !vault.isInitialized()) {
-      return { ok: true, enrolled: false };
-    }
-    const result = await handler(message);
-    if (result?.ok === true && name !== 'vault/lock') {
-      const status = await vault.status();
-      await vaultPosture.write(status);
-    }
-    return result;
-  }]),
-));
+const indexedVaultRoutes = makeIndexedVaultRoutes({
+  routes: vaultRoutes, posture: vaultPosture, vault, pushState,
+});
 const routeProvenance = makeKernelRouteProvenance({
   humanUi, homeUi, sidepanelUi, optionsUi, evalUi, appUi, voiceUi,
   actorSpawnUi: notebookUi,
