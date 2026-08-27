@@ -590,7 +590,7 @@ throw new Error('unrelated failure');`,
       {
         sendToSW: async (type, payload) => {
           calls.push({ type, payload });
-          return { ok: true, value: { reply: 'pass: 42 tests', failed: false } };
+          return { ok: true, reply: 'pass: 42 tests', failed: false };
         },
       },
     );
@@ -599,12 +599,52 @@ throw new Error('unrelated failure');`,
     expect(calls.length).toBe(1);
     const c = /** @type {any} */ (calls[0]);
     expect(c.type).toBe('actors/call');
-    expect(c.payload.method).toBe('ask');
     expect(c.payload.args).toEqual({ to: 'vm-9', goal: 'run pytest', oneShot: true });
     // owner identity rides from job params — the worker cannot spoof it
     expect(c.payload.ownerSessionId).toBe('chat-1');
     expect(c.payload.ownerToolUseId).toBe('tu-7');
     expect(c.payload.runId).toBe('run-1');
+  });
+
+  it('actors: shapes raw authority roster and failed-call replies for worker code', async () => {
+    const listed = await runJob(
+      {
+        code: 'return await actors.list();',
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-list',
+      },
+      {
+        sendToSW: async () => ({
+          ok: true,
+          roster: {
+            tabs: [{ id: 9, title: 'Report', url: 'https://docs.example/report', active: true }],
+          },
+        }),
+      },
+    );
+    expect(listed.error).toBe(null);
+    expect(listed.value).toEqual({ refs: [{
+      ref: '9', type: 'tab', name: 'Report', live: true, current: true,
+      detail: 'https://docs.example',
+    }] });
+
+    const failed = await runJob(
+      {
+        code: 'return await actors.call("vm-1", "run tests");',
+        actors: true, ownerSessionId: 'chat-1', runId: 'run-failed',
+      },
+      { sendToSW: async () => ({ ok: true, reply: 'tests failed', failed: true }) },
+    );
+    expect(failed.error).toBe(null);
+    expect(failed.value).toEqual({ reply: 'tests failed', failed: true });
+    const actorsTrace = /** @type {any[]} */ (failed.actorsTrace);
+    const codeTrace = /** @type {any[]} */ (failed.codeTrace);
+    expect(actorsTrace.length).toBe(1);
+    expect(actorsTrace[0].actorFailed).toBe(true);
+    expect(codeTrace.length).toBe(1);
+    expect(codeTrace[0].bridge).toBe('actors');
+    expect(codeTrace[0].method).toBe('call');
+    expect(codeTrace[0].outcome).toBe('error');
+    expect(codeTrace[0].ok).toBe(false);
   });
 
   it('actors: collects delivery custody outside the worker-visible call result', async () => {
@@ -621,7 +661,8 @@ throw new Error('unrelated failure');`,
         sendToSW: async (_type, payload) => ({
           ok: true,
           actorDeliveryId: `delivery-${/** @type {any} */ (payload).args.to}`,
-          value: { reply: /** @type {any} */ (payload).args.to, failed: false },
+          reply: /** @type {any} */ (payload).args.to,
+          failed: false,
         }),
       },
     );
@@ -644,7 +685,7 @@ throw new Error('unrelated failure');`,
         sendToSW: async () => ({
           ok: true,
           actorDeliveryId: 'delivery-before-import',
-          value: { reply: 'done', failed: false },
+          reply: 'done', failed: false,
         }),
       },
     );
@@ -668,7 +709,7 @@ throw new Error('unrelated failure');`,
         sendToSW: async (_type, payload) => (
           /** @type {any} */ (payload).args?.to === 'web'
             ? { ok: false, error: 'message_actor: refused by the sender gate' }
-            : { ok: true, value: { reply: 'ok', failed: false } }),
+            : { ok: true, reply: 'ok', failed: false }),
       },
     );
     expect(r.error).toBe(null);
@@ -695,7 +736,7 @@ throw new Error('unrelated failure');`,
     // actors:true but NO ownerSessionId — the host refuses the relay (fail closed)
     const noOwner = await runJob(
       { code: 'try { await actors.ask("vm-9", "x"); return "reached"; } catch (e) { return e.message; }', actors: true },
-      { sendToSW: async () => ({ ok: true, value: {} }) },
+      { sendToSW: async () => ({ ok: true }) },
     );
     expect(String(noOwner.value)).toContain('disabled');
     expect(noOwner.usedActors).toBe(false);
@@ -728,7 +769,7 @@ throw new Error('unrelated failure');`,
       {
         sendToSW: async (type, payload) => {
           calls.push({ type, payload });
-          return { ok: true, value: { reply: 'should not run', failed: false } };
+          return { ok: true, reply: 'should not run', failed: false };
         },
       },
     );

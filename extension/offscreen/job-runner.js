@@ -718,7 +718,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
                 args: translated.args,
                 ownerSessionId, ownerToolUseId, runId, seq,
               }),
-              (response) => response?.ok === true && response?.value?.failed !== true,
+              (response) => response?.ok === true && response?.failed !== true,
             );
             if (typeof resp?.actorDeliveryId === 'string') {
               actorDeliveryIds.add(resp.actorDeliveryId);

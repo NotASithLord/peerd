@@ -376,6 +376,30 @@ describe('session support cutover', () => {
       ok: true, outcomeKnown: true,
       value: { status: 'ok', candidates: [{ sessionId: 'chat-1', messages: ['leak'] }] },
     })).toMatchObject({ ok: false, code: 'feature-effect-result-invalid' });
+
+    const validCandidate = {
+      kind: 'chat', sessionId: 'chat-1', title: 'Chat', createdAt: 1,
+      lastMessageAt: 2, messageCount: 1, archivedAt: undefined,
+      provider: 'anthropic', model: 'model', hasCustomSystemPrompt: false,
+      toolManifest: { preset: 'web', allow: ['script'] },
+    };
+    const candidateCases: Array<[Record<string, unknown>, boolean]> = [
+      [validCandidate, true],
+      [(({ archivedAt: _, ...rest }) => rest)(validCandidate), false],
+      [{ ...validCandidate, messages: ['leak'] }, false],
+      [{
+        ...validCandidate, toolManifest: { preset: 'web', allow: ['script'], secret: true },
+      }, false],
+    ];
+    for (const [index, [candidate, ok]] of candidateCases.entries()) {
+      const quota = createKernelFeatureEffectQuota(KERNEL_FEATURE_DISPATCH_CAPABILITY, {
+        cluster: 'support', route: 'session/list', dispatchId: `support-shape-${index}`, message: {},
+      });
+      expect(quota.admit('support.sessions.list', {})).toMatchObject({ ok: true });
+      expect(quota.observe('support.sessions.list', {}, {
+        ok: true, outcomeKnown: true, value: { status: 'ok', candidates: [candidate] },
+      }).ok).toBe(ok);
+    }
   });
 
   test('denies generic and forged support operations', () => {

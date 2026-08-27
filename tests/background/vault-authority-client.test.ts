@@ -87,6 +87,40 @@ describe('sealed vault authority channel', () => {
     client.close();
   });
 
+  test('an unlocked vault resumes before the first call on a successor lease', async () => {
+    const storage = makeStorage();
+    let currentLease: any = vaultLease;
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(currentLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+
+    await client.initializeWithPrfOnly({
+      prfOutput: new Uint8Array(32).fill(5),
+      credentialId: new Uint8Array([1, 2, 3]),
+      prfSalt: new Uint8Array(32).fill(6),
+    });
+    await client.setSecret('provider:test', 'survives-host-replacement');
+    expect(client.isLocked()).toBe(false);
+    expect(storage.session.has('vault.unlocked.v1')).toBe(true);
+
+    currentLease = { ...vaultLease, leaseId: 'vault-lease-successor', generation: 2 };
+    await expect(client.getSecret('provider:test')).resolves.toBe('survives-host-replacement');
+    await expect(client.status()).resolves.toMatchObject({ initialized: true, locked: false });
+    client.close();
+  });
+
   test('runs passkey vault and secret custody through exact reverse storage only', async () => {
     const storage = makeStorage();
     let depth = 0;
