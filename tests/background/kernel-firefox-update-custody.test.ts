@@ -23,11 +23,30 @@ describe('Firefox preview update custody', () => {
       [manifest.browser_specific_settings.gecko.id]: { updates: [
         { ...candidate, update_link: 'https://github.com/other/repo/releases/download/v0.10.0/peerd-preview-firefox.xpi' },
         { ...candidate, update_link: 'https://github.com/NotASithLord/peerd/releases/download/v9.0.0/peerd-preview-firefox.xpi' },
+        { ...candidate, update_link: 'https://github.com:444/NotASithLord/peerd/releases/download/v0.10.0/peerd-preview-firefox.xpi' },
         candidate,
       ] },
     } }, manifest.browser_specific_settings.gecko.id)).toEqual({
       version: candidate.version, url: candidate.update_link,
     });
+  });
+
+  test('rejects a manifest feed on a non-default HTTPS port', async () => {
+    let fetches = 0;
+    const custody = createKernelFirefoxUpdateCustody({
+      runtime: { getManifest: () => ({
+        ...manifest,
+        browser_specific_settings: { gecko: {
+          ...manifest.browser_specific_settings.gecko,
+          update_url: 'https://peerd.ai:444/updates/firefox-preview.json',
+        } },
+      }) },
+      session: { get: async () => null, set: async () => {} },
+      fetchFn: async () => { fetches += 1; return { ok: false }; },
+      ready: async () => {}, isEnabled: () => true, notify: () => false,
+    });
+    expect(await custody.checkNow()).toBe(false);
+    expect(fetches).toBe(0);
   });
 
   test('persists a validated update and marks only a delivered notice', async () => {

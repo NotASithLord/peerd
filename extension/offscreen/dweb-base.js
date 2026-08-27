@@ -37,6 +37,7 @@ import { runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
 import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
+import { runDwebReseedPublication } from '/offscreen/dweb-reseed-publication.js';
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -56,6 +57,8 @@ let handle = null;    // { base, room, close } once the lobby is joined
 let meshGeneration = 0;
 /** @type {string | null} */
 let activeFeatureHostEpoch = null;
+/** @type {Map<string,string>} */
+const latestReseedAttempts = new Map();
 const reseedNotifier = createDwebReseedNotifier({
   send: async (notice, { signal }) => {
     if (signal.aborted) throw new Error('dweb-generation-retired');
@@ -112,8 +115,8 @@ const servedHashesForApp = (appId) => [...new Set(
 )];
 
 /** @param {any} h @param {{ appId: string, name: string, entry: string,
- *   created?: number, expectedHash?: string, release?: any, releaseSnapshot?: any }} msg @param {string} ownerSlot */
-const publishLocalApp = async (h, msg, ownerSlot) => {
+ *   created?: number, expectedHash?: string, release?: any, releaseSnapshot?: any }} msg @param {string} ownerId */
+const publishLocalApp = async (h, msg, ownerId) => {
   const supplied = msg.releaseSnapshot;
   if (supplied && (
     !msg.release
@@ -150,7 +153,7 @@ const publishLocalApp = async (h, msg, ownerSlot) => {
     created: msg.created,
     expectedHash: msg.expectedHash,
   });
-  const ownershipAdded = trackServedHash(appContentOwner(msg.appId, ownerSlot), published.hash);
+  const ownershipAdded = trackServedHash(ownerId, published.hash);
   return { ...published, size: published.packedBytes, storedBytes: snapshot.totalBytes, ownershipAdded };
 };
 // dwapp ROOMS hosted here — each is base.openRoom(id) ONCE, ref-counted across
@@ -578,11 +581,14 @@ export const adoptDwebFeatureLease = activateDwebFeatureLease;
 
 export const stopDwebFeatureLease = async () => {
   reseedNotifier.cancel();
+  // why: retire in-flight generation-bound publications before awaiting host
+  // close. Their next async boundary compensates against the retiring handle.
+  activeFeatureHostEpoch = null;
   try {
     await selfHost.stop();
     await baseLifecycle.stop();
   } finally {
-    activeFeatureHostEpoch = null;
+    latestReseedAttempts.clear();
     disconnectCustodyPort();
   }
   return status();
@@ -808,14 +814,15 @@ const handleRoomOp = async (msg) => {
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
     case 'publish-app': {
       const h = await start();
-      const { uri, hash, ownershipAdded } = await publishLocalApp(h, msg, 'room');
+      const ownerId = appContentOwner(msg.appId, 'room');
+      const { uri, hash, ownershipAdded } = await publishLocalApp(h, msg, ownerId);
       const recorded = await swCall('dweb/app-record-served', { appId: msg.appId, uri, hash });
       if (!recorded?.ok) {
-        if (ownershipAdded) unserveTrackedHash(h, appContentOwner(msg.appId, 'room'), hash);
+        if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
         throw new Error(recorded?.error ?? 'shared App version could not be recorded');
       }
       if (recorded.previousHash && recorded.previousHash !== hash) {
-        unserveTrackedHash(h, appContentOwner(msg.appId, 'room'), recorded.previousHash);
+        unserveTrackedHash(h, ownerId, recorded.previousHash);
       }
       return { ok: true, uri, hash };
     }
@@ -885,18 +892,28 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         // Share: publish the app's files as a signed bundle the base mesh serves,
         // then announce it (gossip + DHT). dwapp_id = content hash.
         case 'dweb/base-host/share-app': {
-          if (msg.reseed === true && (
-            msg.expectedHostEpoch !== activeFeatureHostEpoch
+          const reseed = msg.reseed === true;
+          const reseedAttemptId = typeof msg.reseedAttemptId === 'string'
+            && msg.reseedAttemptId.length >= 8 && msg.reseedAttemptId.length <= 128
+            && !/[\u0000-\u001f\u007f]/.test(msg.reseedAttemptId)
+            ? msg.reseedAttemptId : null;
+          if (reseed && (!reseedAttemptId
+            || typeof msg.appId !== 'string'
+            || msg.expectedHostEpoch !== activeFeatureHostEpoch
             || msg.expectedMeshGeneration !== meshGeneration
           )) {
             sendResponse({ ok: false, error: 'dweb-generation-retired' });
             return;
           }
+          if (reseed) latestReseedAttempts.set(msg.appId, reseedAttemptId);
           const h = await start();
-          if (msg.reseed === true && (
-            msg.expectedHostEpoch !== activeFeatureHostEpoch
-            || msg.expectedMeshGeneration !== meshGeneration
-          )) {
+          const reseedCurrent = () => !reseed || (
+            handle === h
+            && msg.expectedHostEpoch === activeFeatureHostEpoch
+            && msg.expectedMeshGeneration === meshGeneration
+            && latestReseedAttempts.get(msg.appId) === reseedAttemptId
+          );
+          if (!reseedCurrent()) {
             sendResponse({ ok: false, error: 'dweb-generation-retired' });
             return;
           }
@@ -909,9 +926,17 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           const previousCard = h.base.heardDwapps().find((/** @type {any} */ row) => (
             row.publisher === h.base.did && row.slug === slug
           )) ?? null;
-          const { published, announced } = await runPublishTransaction({
-            publish: () => publishLocalApp(h, msg, 'share'),
-            announce: ({ uri, hash, size }) => h.base.publishMeta({
+          const stableOwnerId = appContentOwner(msg.appId, 'share');
+          const publicationOwnerId = reseed
+            ? `${stableOwnerId}:reseed:${reseedAttemptId}` : stableOwnerId;
+          const rollbackPublishedBytes = (/** @type {any} */ published) => {
+            if (published.ownershipAdded) {
+              unserveTrackedHash(h, publicationOwnerId, published.hash);
+            }
+          };
+          const announce = (/** @type {any} */ {
+            uri, hash, size,
+          }) => h.base.publishMeta({
               slug, name: msg.name, description: msg.description ?? '',
               head: {
                 version_id: hash, content_addr: uri, size,
@@ -926,13 +951,69 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               // timestamp and sequence, and publishApp refuses changed bytes before
               // this card can be announced.
               ...(Number.isInteger(msg.seq) ? { seq: msg.seq } : {}),
-            }),
+            });
+          const publish = () => publishLocalApp(h, msg, publicationOwnerId);
+          const transaction = reseed ? await runDwebReseedPublication({
+            current: reseedCurrent,
+            publish,
+            announce,
+            rollbackBytes: rollbackPublishedBytes,
+            compensate: async (published, announced) => {
+              const newerAttemptOwnsThisHost = handle === h
+                && latestReseedAttempts.get(msg.appId) !== reseedAttemptId;
+              let metadataFailure = null;
+              if (!newerAttemptOwnsThisHost) {
+                try {
+                  await rollbackSharePublication({
+                    base: h,
+                    state: {
+                      appId: msg.appId,
+                      ownerId: publicationOwnerId,
+                      slug,
+                      name: msg.name,
+                      newHash: published.hash,
+                      ownershipAdded: false,
+                      previous: previousCard ? {
+                        name: previousCard.name,
+                        description: previousCard.description ?? '',
+                        head: previousCard.head,
+                        seq: previousCard.seq,
+                      } : null,
+                    },
+                    failedSeq: announced?.card?.seq,
+                    release: () => {},
+                  });
+                } catch (cause) { metadataFailure = cause; }
+              }
+              try { rollbackPublishedBytes(published); }
+              catch (cause) {
+                if (metadataFailure) {
+                  throw new AggregateError(
+                    [metadataFailure, cause], 'dweb reseed compensation failed',
+                  );
+                }
+                throw cause;
+              }
+              if (metadataFailure) throw metadataFailure;
+            },
+            commit: (published) => {
+              if (published.ownershipAdded
+                  && !contentOwnership.transfer(
+                    publicationOwnerId, stableOwnerId, published.hash,
+                  )) {
+                throw new Error('dweb-reseed-ownership-transfer-failed');
+              }
+            },
+          }) : await runPublishTransaction({
+            publish,
+            announce,
             rollback: ({ hash, ownershipAdded }) => {
               if (ownershipAdded && hash !== previousHash) {
-                unserveTrackedHash(h, appContentOwner(msg.appId, 'share'), hash);
+                unserveTrackedHash(h, stableOwnerId, hash);
               }
             },
           });
+          const { published, announced } = transaction;
           const { uri, hash, created, size } = published;
           const { dwapp_id, card } = announced;
           const transactionId = msg.reseed ? null : crypto.randomUUID();

@@ -173,7 +173,7 @@ export const createKernelDwebRouteOwner = (deps) => {
     active,
     locked: deps.vault.isLocked,
     appRegistry: engine.appRegistry,
-    withDwebPublication: engine.withDwebPublication,
+    withDwebReseedPublication: engine.withDwebReseedPublication,
     withAppLifecycle: engine.withAppLifecycle,
     repositories: engine.repositories,
     sendMessage,

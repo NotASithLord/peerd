@@ -2,15 +2,17 @@
 // Reconstruct durable local shares after one exact dweb host generation starts.
 
 import { toBase64 } from '../shared/bundle/bytes.js';
+import { withDeadline } from '../shared/cold-util.js';
 
 /** @param {any} deps */
 export const createKernelDwebReseedOwner = ({
-  active, locked, appRegistry, withDwebPublication, withAppLifecycle,
+  active, locked, appRegistry, withDwebReseedPublication, withAppLifecycle,
   repositories, sendMessage, currentHostEpoch, messageTimeoutMs = 10_000,
-  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout, log = console,
+  newId = () => crypto.randomUUID(), setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout, log = console,
 }) => {
   if (![active, locked, appRegistry?.list, appRegistry?.get,
-    withDwebPublication, withAppLifecycle, sendMessage, currentHostEpoch].every(
+    withDwebReseedPublication, withAppLifecycle, sendMessage, currentHostEpoch, newId].every(
     (value) => typeof value === 'function',
   ) || !Number.isFinite(messageTimeoutMs) || messageTimeoutMs <= 0) {
     throw new TypeError('kernel-dweb-reseed-owner-config-invalid');
@@ -28,6 +30,14 @@ export const createKernelDwebReseedOwner = ({
         && currentHostEpoch() === hostEpoch;
     } catch { return false; }
   };
+  /** @param {string} code @param {()=>Promise<any>} operation */
+  const readBounded = (code, operation) => withDeadline(
+    operation,
+    messageTimeoutMs,
+    () => new Error(code),
+    setTimeoutFn,
+    clearTimeoutFn,
+  );
   /** @param {any} message */
   const sendBounded = (message) => {
     let timer = /** @type {ReturnType<typeof setTimeoutFn>|null} */ (null);
@@ -79,6 +89,30 @@ export const createKernelDwebReseedOwner = ({
       },
     };
   };
+  /** @param {any} value */
+  const stableFileKinds = (value) => value && typeof value === 'object'
+    ? Object.entries(value).sort(([left], [right]) => left.localeCompare(right)) : [];
+  /** @param {any} app */
+  const reseedFingerprint = (app) => JSON.stringify({
+    id: app?.id,
+    name: app?.name,
+    entryFile: app?.entryFile,
+    fileKinds: stableFileKinds(app?.fileKinds),
+    dweb: {
+      local: app?.dweb?.local,
+      slug: app?.dweb?.slug,
+      manifestCreated: app?.dweb?.manifest_created,
+      hash: app?.dweb?.hash,
+      seq: app?.dweb?.seq,
+      description: app?.dweb?.description,
+      sourceGitOid: app?.dweb?.source_git_oid,
+      gitOid: app?.dweb?.git_oid,
+      previousVersionId: app?.dweb?.previous_version_id,
+      changelog: app?.dweb?.changelog,
+      releaseEntryFile: app?.dweb?.release_entry_file,
+      releaseFileKinds: stableFileKinds(app?.dweb?.release_file_kinds),
+    },
+  });
   const reseed = async (/** @type {string} */ hostEpoch,
     /** @type {number} */ meshGeneration) => {
     const exact = () => generationCurrent(hostEpoch, meshGeneration);
@@ -87,10 +121,15 @@ export const createKernelDwebReseedOwner = ({
     }
     let candidates;
     try {
-      candidates = (await appRegistry.list()).filter((/** @type {any} */ app) => app.shared
+      candidates = (await readBounded(
+        'dweb-reseed-list-timeout', () => appRegistry.list(),
+      )).filter((/** @type {any} */ app) => app.shared
         && app.dweb?.local === true && typeof app.dweb?.slug === 'string'
         && Number.isFinite(app.dweb?.manifest_created) && typeof app.dweb?.hash === 'string');
     } catch (cause) {
+      if (!exact()) {
+        return { ok: false, seeded: 0, cancelled: true, error: 'dweb-generation-retired' };
+      }
       log.warn('[kernel] dweb reseed listing failed', cause);
       return { ok: false, seeded: 0, error: 'dweb-reseed-list-failed' };
     }
@@ -100,16 +139,45 @@ export const createKernelDwebReseedOwner = ({
       if (!exact()) {
         return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
       }
+      /** @type {any} */
+      let prepared;
+      let release;
       try {
-        const outcome = await withDwebPublication((/** @type {()=>boolean} */ current) =>
+        prepared = await readBounded(
+          'dweb-reseed-read-timeout', () => appRegistry.get(candidate.id),
+        );
+        if (!prepared?.shared || prepared.dweb?.local !== true
+            || typeof prepared.dweb?.slug !== 'string'
+            || !Number.isFinite(prepared.dweb?.manifest_created)
+            || typeof prepared.dweb?.hash !== 'string') continue;
+        release = await readBounded(
+          'dweb-reseed-release-timeout', () => reconstructRelease(prepared),
+        );
+      } catch (cause) {
+        if (!exact()) {
+          return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+        }
+        failed += 1;
+        log.debug('[kernel] dweb reseed preparation failed', candidate.id, cause);
+        continue;
+      }
+      if (!exact()) {
+        return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+      }
+      const preparedFingerprint = reseedFingerprint(prepared);
+      try {
+        const outcome = await withDwebReseedPublication((/** @type {()=>boolean} */ current) =>
           withAppLifecycle(candidate.id, async () => {
-            const app = await appRegistry.get(candidate.id);
+            if (!current() || !exact()) return 'retired';
+            const app = await readBounded(
+              'dweb-reseed-read-timeout', () => appRegistry.get(candidate.id),
+            );
             if (!current() || !exact() || !active() || locked()
                 || !app?.shared || app.dweb?.local !== true
                 || typeof app.dweb?.slug !== 'string'
                 || !Number.isFinite(app.dweb?.manifest_created)
                 || typeof app.dweb?.hash !== 'string') return 'skipped';
-            const release = await reconstructRelease(app);
+            if (reseedFingerprint(app) !== preparedFingerprint) return 'retry';
             if (!current() || !exact()) return 'retired';
             const reply = await sendBounded({
               type: 'dweb/base-host/share-app',
@@ -125,17 +193,25 @@ export const createKernelDwebReseedOwner = ({
               seq: app.dweb.seq,
               description: app.dweb.description ?? '',
               reseed: true,
+              reseedAttemptId: newId(),
               ...release,
             });
             if (!current() || !exact()) return 'retired';
             return reply?.ok === true ? 'seeded' : 'failed';
-          }));
+          }), {
+          timeoutMs: messageTimeoutMs * 2,
+          setTimeoutFn,
+          clearTimeoutFn,
+        });
         if (outcome === 'seeded') seeded += 1;
-        else if (outcome === 'failed') failed += 1;
+        else if (outcome === 'failed' || outcome === 'retry') failed += 1;
         else if (outcome === 'retired') {
           return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
         }
       } catch (cause) {
+        if (!exact()) {
+          return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+        }
         failed += 1;
         log.debug('[kernel] dweb reseed failed', candidate.id, cause);
       }

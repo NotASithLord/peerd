@@ -21,6 +21,8 @@ const deps = (over: Record<string, any> = {}) => ({
     repositories: {},
     withDwebPublication: async (operation: (current: () => boolean) => Promise<any>) =>
       operation(() => true),
+    withDwebReseedPublication: async (operation: (current: () => boolean) => Promise<any>) =>
+      operation(() => true),
     withAppLifecycle: async (_id: string, operation: () => Promise<any>) => operation(),
     invalidateDwebPublications: () => {},
     dwebPublicationGeneration: () => 0,
