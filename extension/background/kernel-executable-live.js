@@ -149,6 +149,9 @@ export const createKernelEngineLive = async (deps) => {
     // why: releasing a timed-out recovery lane is safe only after the physical
     // host that may still be running it has been replaced.
     retireReseedHost: (reason) => deps.retireHost(reason),
+    ensureReseedHostRetired: () => deps.ensureHostRetirement(),
+    armReseedHost: (hostEpoch) => deps.armHostRetirement(hostEpoch),
+    disarmReseedHost: (hostEpoch) => deps.disarmHostRetirement(hostEpoch),
   });
   const appQuiescence = createAppQuiescence({
     tracker: appTabTracker,

@@ -62,6 +62,20 @@ describe('kernel dweb reseed owner', () => {
     });
   });
 
+  test('binds the write-ahead retirement fence to the exact reseed host epoch', async () => {
+    let fencedHostEpoch = '';
+    const h = owner({
+      withDwebReseedPublication: async (operation: any, options: any) => {
+        fencedHostEpoch = options.hostEpoch;
+        return operation(() => true);
+      },
+    });
+    await h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-exact', meshGeneration: 7,
+    });
+    expect(fencedHostEpoch).toBe('host-epoch-exact');
+  });
+
   test('reconstructs the exact signed release snapshot', async () => {
     const oid = 'a'.repeat(40);
     const released = {

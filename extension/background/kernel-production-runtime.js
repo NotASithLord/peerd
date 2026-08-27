@@ -90,6 +90,11 @@ export const createKernelProductionRuntime = async (deps) => {
     ensureOffscreen: deps.featureHost.ensureOffscreen,
     retireHost: (/** @type {string} */ reason) => deps.featureHost.runtime.retireActiveHost(reason),
     importLocalArtifact: deps.importArtifactCodec,
+    ensureHostRetirement: () => deps.featureHost.runtime.ensureHostRetirement(),
+    armHostRetirement: (/** @type {string} */ hostEpoch) =>
+      deps.featureHost.runtime.armHostRetirement(hostEpoch),
+    disarmHostRetirement: (/** @type {string} */ hostEpoch) =>
+      deps.featureHost.runtime.disarmHostRetirement(hostEpoch),
   };
   const transfer = {
     idb: deps.idb,
