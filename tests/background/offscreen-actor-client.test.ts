@@ -310,6 +310,69 @@ describe('isolated exact tool authority', () => {
     expect(cancelled).toBe('hook-task');
   });
 
+  test('binds actor creation and messaging to their post-hook arguments', async () => {
+    const effects: any[] = [];
+    const { client, during } = clientWithRelay({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor', depth: 0 },
+        inbound: false,
+        actorAuthority: {
+          spawnSync: async (request: any) => { effects.push(['spawn', request]); return 'done'; },
+          deliverMessage: async (request: any) => { effects.push(['message', request]); return 'sent'; },
+        },
+      }),
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx,
+        args: call.name === 'actor_create' ? {
+          task: 'hook task', sync: true, allowRecursion: true, tools: ['now'],
+          maxSteps: 4, maxDepth: 2,
+        } : {
+          to: 'hook actor', message: 'hook message', oneShot: true, await: true,
+        },
+      }),
+    });
+    const result = await during(async (relayToken) => {
+      const create: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'create-1', name: 'actor_create', args: {
+          task: 'model task', sync: true, allowRecursion: false,
+        } },
+      }, OFFSCREEN);
+      const rejectedCreate = await client.routes['actor/spawn-sync']({
+        relayToken, executionId: create.executionId, task: 'model task',
+        allowRecursion: false,
+      }, OFFSCREEN);
+      const acceptedCreate = await client.routes['actor/spawn-sync']({
+        relayToken, executionId: create.executionId, task: 'hook task',
+        allowRecursion: true, tools: ['now'], maxSteps: 4, maxDepth: 2,
+      }, OFFSCREEN);
+      const message: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'message-1', name: 'message_actor', args: {
+          to: 'model actor', message: 'model message', oneShot: false, await: false,
+        } },
+      }, OFFSCREEN);
+      const rejectedMessage = await client.routes['actor/message-deliver']({
+        relayToken, executionId: message.executionId,
+        to: 'model actor', message: 'model message', oneShot: false,
+        awaitReply: false, degradeToAsync: false, awaitCapMs: 1000,
+      }, OFFSCREEN);
+      const acceptedMessage = await client.routes['actor/message-deliver']({
+        relayToken, executionId: message.executionId,
+        to: 'hook actor', message: 'hook message', oneShot: true,
+        awaitReply: true, degradeToAsync: true, awaitCapMs: 1000,
+      }, OFFSCREEN);
+      return { create, rejectedCreate, acceptedCreate, message, rejectedMessage, acceptedMessage };
+    });
+    expect(result.create.args.task).toBe('hook task');
+    expect(result.rejectedCreate).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.acceptedCreate).toMatchObject({ ok: true, value: 'done' });
+    expect(result.message.args.to).toBe('hook actor');
+    expect(result.rejectedMessage).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.acceptedMessage).toMatchObject({ ok: true, value: 'sent' });
+    expect(effects.map(([kind]) => kind)).toEqual(['spawn', 'message']);
+  });
+
   test('keeps actor settlement retryable until durable settlement succeeds', async () => {
     let settlements = 0;
     const { client, during } = clientWithRelay({
@@ -339,6 +402,41 @@ describe('isolated exact tool authority', () => {
     expect(result.second).toMatchObject({ ok: true });
     expect(result.replay).toMatchObject({ ok: false, outcomeKnown: true });
     expect(settlements).toBe(2);
+  });
+
+  test('run teardown joins an in-flight durable settlement without duplicating it', async () => {
+    let releaseSettlement!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+    let settlements = 0;
+    const { client, during } = clientWithRelay({
+      settleToolCall: async (_prepared: any, execution: any) => {
+        settlements += 1;
+        markStarted();
+        await gate;
+        return execution.result;
+      },
+    });
+    const run = during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'settle-race', name: 'actor_cancel', args: { taskId: 'task-1' } },
+      }, OFFSCREEN);
+      const settling = client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: false, error: 'known failure' },
+      }, OFFSCREEN);
+      await started;
+      return { settling };
+    });
+    await started;
+    await Promise.resolve();
+    expect(settlements).toBe(1);
+    releaseSettlement();
+    const result = await run;
+    await expect(result.settling).resolves.toMatchObject({ ok: true });
+    expect(settlements).toBe(1);
   });
 
   test('enforces actor grants before semantic preparation', async () => {

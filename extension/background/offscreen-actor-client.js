@@ -289,15 +289,21 @@ export const makeOffscreenActorClient = ({
       if (typeof settleToolCall === 'function') {
         await Promise.allSettled([...grant.actorExecutions.values()].map(async (entry) => {
           if (entry.open !== true) return;
-          entry.open = false;
-          await settleToolCall(entry.prepared, { result: {
+          const cleanupResult = entry.settlementResult ?? {
             ok: false,
             error: 'actor semantic execution host was lost before settlement',
             code: 'actor-tool-host-lost',
             outcomeKnown: entry.effectEntered !== true,
             retryable: entry.effectEntered !== true,
             outcomeKind: entry.effectEntered === true ? 'host-lost' : 'pre-effect-failure',
-          } });
+          };
+          // why: run teardown may race the worker's durable settlement. Join
+          // that exact attempt; only retry serially if it failed, never issue a
+          // duplicate settlement while the first remains in flight.
+          let settled = await settleActorExecution(grant, entry, cleanupResult);
+          if (settled.ok !== true && entry.open === true) {
+            settled = await settleActorExecution(grant, entry, cleanupResult);
+          }
         }));
       }
       grant.actorExecutions.clear();
@@ -603,6 +609,35 @@ export const makeOffscreenActorClient = ({
         retryable: outcomeKnown && detail?.retryable !== false,
       };
     }
+  };
+
+  const settleActorExecution = (
+    /** @type {any} */ grant,
+    /** @type {any} */ entry,
+    /** @type {unknown} */ result,
+  ) => {
+    if (entry.settling) return entry.settling;
+    if (entry.settlementResult === null) entry.settlementResult = structuredClone(result);
+    const pending = (async () => {
+      try {
+        const settled = await /** @type {Function} */ (settleToolCall)(
+          entry.prepared, { result: entry.settlementResult },
+        );
+        entry.open = false;
+        grant.actorExecutions.delete(entry.executionId);
+        return { ok: true, result: settled };
+      } catch (cause) {
+        return {
+          ok: false, error: cause instanceof Error ? cause.message : String(cause),
+          outcomeKnown: entry.effectEntered !== true,
+          retryable: entry.effectEntered !== true,
+        };
+      } finally {
+        entry.settling = null;
+      }
+    })();
+    entry.settling = pending;
+    return pending;
   };
 
   const routes = {
@@ -916,7 +951,9 @@ export const makeOffscreenActorClient = ({
       }
       const executionId = `ae-${now().toString(36)}-${++seq}`;
       grant.actorExecutions.set(executionId, {
-        open: true, settling: false, effectEntered: false, unknownIrreversible: false,
+        executionId,
+        open: true, settling: null, settlementResult: null,
+        effectEntered: false, unknownIrreversible: false,
         domainCalls: new Set(), domainState: {}, prepared,
         call: authorityCall, toolName: call.name, authorityClass: domain,
       });
@@ -949,7 +986,7 @@ export const makeOffscreenActorClient = ({
       return {
         ok: true, mode: 'execute', executionId,
         callId: typeof call.id === 'string' && call.id ? call.id : executionId,
-        toolName: call.name, args: prepared.args,
+        toolName: call.name, args: authorityCall.args,
         projection,
       };
     },
@@ -959,7 +996,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
       const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
       const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
@@ -1011,7 +1048,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
       const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
       const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
@@ -1105,7 +1142,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       const sessionKind = entry?.prepared?.ctx?.session?.kind;
       if (!grant || !exactKeys(msg, [
         'executionId', 'to', 'message', 'oneShot', 'awaitReply',
@@ -1228,7 +1265,7 @@ export const makeOffscreenActorClient = ({
       const entry = domainEntry(grant, msg, 'pod', [
         'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
       ]);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       let program;
       let intents;
       try {
@@ -1267,7 +1304,7 @@ export const makeOffscreenActorClient = ({
       const entry = domainEntry(grant, msg, 'pod', [
         'podId', 'jobId', 'stream', 'offset', 'limit',
       ]);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       if (!entry || msg.podId !== args?.podId || msg.jobId !== args?.jobId
           || msg.stream !== args?.stream || msg.offset !== args?.offset
           || msg.limit !== args?.limit) {
@@ -1289,7 +1326,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = domainEntry(grant, msg, 'pod', ['podId', 'jobId']);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       if (!entry || typeof msg.jobId !== 'string' || msg.jobId !== args?.jobId
           || msg.podId !== args?.podId) {
         return { ok: false, error: 'pod/cancel: authority mismatch', outcomeKnown: true };
@@ -1308,7 +1345,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = domainEntry(grant, msg, 'pod', ['podId', 'path']);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       if (!entry || typeof msg.path !== 'string' || msg.path !== args?.path
           || msg.podId !== args?.podId) {
         return { ok: false, error: 'pod/read-file: authority mismatch', outcomeKnown: true };
@@ -1329,7 +1366,7 @@ export const makeOffscreenActorClient = ({
       const entry = domainEntry(grant, msg, 'pod', [
         'podId', 'path', 'content',
       ]);
-      const args = entry?.prepared?.call?.args;
+      const args = entry?.call?.args;
       if (!entry || typeof msg.path !== 'string' || typeof msg.content !== 'string'
           || msg.path !== args?.path || msg.content !== args?.content
           || msg.podId !== args?.podId) {
@@ -2181,33 +2218,24 @@ export const makeOffscreenActorClient = ({
       const policy = entry
         ? CONTROLLER_AUTHORITY_MANIFEST.tools[entry.authorityClass] : null;
       if (!grant || !exactKeys(msg, ['executionId', 'result'])
-          || !entry || entry.open !== true || entry.settling === true || !policy
+          || !entry || entry.open !== true || !policy
           || structuredClonePayloadBytes(msg.result) > policy.resultBytes
           || typeof settleToolCall !== 'function') {
         return { ok: false, error: 'actor/tool-settle: authority mismatch', outcomeKnown: true };
       }
-      entry.settling = true;
-      try {
-        const executionResult = entry.unknownIrreversible === true ? {
-          ok: false,
-          error: 'Tool outcome unknown. Check authority state before retrying.',
-          code: 'tool-outcome-unknown',
-          outcomeKnown: false,
-          retryable: false,
-          outcomeKind: 'host-lost',
-        } : msg.result;
-        const result = await settleToolCall(entry.prepared, { result: executionResult });
-        entry.open = false;
-        grant.actorExecutions.delete(msg.executionId);
-        return { ok: true, result };
-      } catch (cause) {
-        entry.settling = false;
-        return {
-          ok: false, error: cause instanceof Error ? cause.message : String(cause),
-          outcomeKnown: entry.effectEntered !== true,
-          retryable: entry.effectEntered !== true,
-        };
+      const executionResult = entry.unknownIrreversible === true ? {
+        ok: false,
+        error: 'Tool outcome unknown. Check authority state before retrying.',
+        code: 'tool-outcome-unknown',
+        outcomeKnown: false,
+        retryable: false,
+        outcomeKind: 'host-lost',
+      } : msg.result;
+      if (entry.settlementResult !== null
+          && !sameClone(entry.settlementResult, executionResult)) {
+        return { ok: false, error: 'actor/tool-settle: result mismatch', outcomeKnown: true };
       }
+      return settleActorExecution(grant, entry, executionResult);
     },
     /**
      * @param {{ relayToken?: string, event?: object }} [msg]

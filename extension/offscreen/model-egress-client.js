@@ -40,8 +40,12 @@ export const createControllerModelEgress = ({ call }) => {
       const close = async () => {
         if (closed) return;
         closed = true;
+        request.signal?.removeEventListener('abort', abort);
         await checked('turn.model.cancel-inference', { streamId }).catch(() => {});
       };
+      const abort = () => { void close(); };
+      if (request.signal?.aborted) abort();
+      else request.signal?.addEventListener('abort', abort, { once: true });
       const body = opened.hasBody === true ? new ReadableStream({
         pull: async (controller) => {
           if (closed) { controller.close(); return; }
@@ -49,6 +53,7 @@ export const createControllerModelEgress = ({ call }) => {
             const next = await checked('turn.model.read-inference', { streamId });
             if (next?.done === true) {
               closed = true;
+              request.signal?.removeEventListener('abort', abort);
               controller.close();
               return;
             }
@@ -58,11 +63,13 @@ export const createControllerModelEgress = ({ call }) => {
             controller.enqueue(next.chunk);
           } catch (cause) {
             closed = true;
+            request.signal?.removeEventListener('abort', abort);
             controller.error(cause);
           }
         },
         cancel: close,
       }) : null;
+      if (!body) void close();
       return new Response(body, {
         status: Number(opened.status),
         statusText: typeof opened.statusText === 'string' ? opened.statusText : '',
