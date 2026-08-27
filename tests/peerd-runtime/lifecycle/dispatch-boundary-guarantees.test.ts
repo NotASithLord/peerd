@@ -57,7 +57,7 @@ const baseCtx = (lifecycle: unknown, extra: Record<string, unknown> = {}) => ({
 });
 
 const RESOURCE_TOOL_NAMES = [
-  'sandbox_create', 'vm_boot', 'actor_create', 'request_review',
+  'sandbox_create', 'vm_boot', 'actor_create',
 ] as const;
 
 const resourceCall = (name: typeof RESOURCE_TOOL_NAMES[number]) => ({

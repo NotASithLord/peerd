@@ -122,7 +122,7 @@ const makeRuntime = (seams: any, calls: Record<string, any>, sessionCache = make
     prepareUserAttachmentsWithDocs: async ({ text }: any) => ({ text, attachments: [] }),
     runAgentTurn, runInit: async () => {}, handleSystemCommand: async () => {},
     handleToolsCommand: async () => {}, postChatNote: () => {},
-    spawnActor: async () => null, requestReview: async () => null,
+    spawnActor: async () => null,
     startGoalRun: async (request: any) => seams.withRun(async () => {
       calls.goals.push(request);
     }),

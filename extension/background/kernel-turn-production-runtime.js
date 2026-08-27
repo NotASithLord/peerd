@@ -61,7 +61,7 @@ export const createKernelTurnProductionRuntime = async (deps) => {
   }
   if (!relays.relayRoutes || KERNEL_TURN_RELAY_ROUTE_NAMES.some(
     (name) => typeof relays.relayRoutes[name] !== 'function',
-  ) || typeof relays.relayRoutes['review/run'] === 'function') {
+  )) {
     throw new TypeError('kernel-turn-production-relay-routes-invalid');
   }
   for (const key of [

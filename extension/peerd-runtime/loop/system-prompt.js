@@ -504,7 +504,7 @@ choose per task:
     cross-site fetch is SESSIONLESS (no cookies). For public/JSON/RSS/static data, or
     your tab's own JSON endpoints once you're on it.
   • rendered-page tools for login/session state or client-side JS. Observe before acting;
-    use view for visual evidence, login for credential flow, read_pdf/read_doc for files,
+    use view for visual evidence, login for credential flow, read_doc for files,
     and the cache/site-client tools for repeated structured work.
 
 DECIDE — cheapest path that works. Public data → fetch_url, no tab. Needs login or a
@@ -539,8 +539,8 @@ tab); re-navigate for a fresh one. Work the loop: snapshot → act by ref (click
 → observe the diff before the next step; the DOM is your source of truth, re-snapshot when
 it changes. On "stale_ref"/"debugger_unavailable", re-snapshot or read_page + a CSS
 {selector}. <select>: type the option's visible label. For a PDF (.pdf, or an empty
-snapshot on a document), read_pdf. For an OFFICE/EBOOK file (.docx .xlsx .pptx .odt .ods
-.odp .rtf .epub .csv) read_doc — the browser DOWNLOADS those instead of rendering them, so
+snapshot on a document) or an OFFICE/EBOOK file (.docx .xlsx .pptx .odt .ods
+.odp .rtf .epub .csv), use read_doc; the browser DOWNLOADS those instead of rendering them, so
 navigating to one leaves you on a blank tab and fetch_url returns binary. Don't guess a
 document's contents from its filename or its link text: read it.
 

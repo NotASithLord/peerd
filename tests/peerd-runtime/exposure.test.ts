@@ -58,7 +58,7 @@ describe('dweb tool exposure (progressive disclosure of the SECONDARY surface)',
 
 describe('tool exposure (main-agent cutover)', () => {
   test('hides the low-level DOM/page tools from the main agent', () => {
-    for (const name of ['snapshot', 'read_page', 'read_state', 'watch_changes', 'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click', 'read_pdf']) {
+    for (const name of ['snapshot', 'read_page', 'read_state', 'watch_changes', 'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click', 'read_doc']) {
       expect(isHiddenFromMain(name)).toBe(true);
     }
   });
@@ -300,7 +300,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // The web actor owns page reads + DOM mutators but NOT page_eval/page_exec —
     // it ingests untrusted page text, so it must not also wield code-exec.
     expect([...WEB_ACTOR_DOM_TOOLS].sort()).toEqual([
-      'click', 'navigate', 'query_dom', 'read_page', 'read_pdf',
+      'click', 'navigate', 'query_dom', 'read_page',
       'read_state', 'snapshot', 'type', 'view', 'watch_changes',
     ].sort());
     expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_eval');
@@ -347,7 +347,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(isAllowedForActor('fetch_url', 'web', 'api')).toBe(true);
     // ...and its paging read side — an API actor that overflows must page too.
     expect(isAllowedForActor('read_web_cache', 'web', 'api')).toBe(true);
-    for (const n of ['click', 'type', 'navigate', 'snapshot', 'read_page', 'query_dom', 'read_pdf']) {
+    for (const n of ['click', 'type', 'navigate', 'snapshot', 'read_page', 'query_dom', 'read_doc']) {
       expect(isAllowedForActor(n, 'web', 'api')).toBe(false);
     }
     // DESIGN-19: an API actor CAN run/read/write a site client for its fixed origin,

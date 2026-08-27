@@ -17,7 +17,7 @@ describe('om2w-actions — peerd tool calls to Grammar A', () => {
     expect(pageActionFor('open_tab', { url: 'https://x.com' })?.verb).toBe('NAVIGATE');
     // NOT page actions: perception, delegation, HTTP fetch, compute, code arm.
     for (const n of ['snapshot', 'read_page', 'read_state', 'query_dom', 'watch_changes',
-      'message_actor', 'actor_list', 'fetch_url', 'js_run', 'page_code', 'read_pdf', 'view', 'remember']) {
+      'message_actor', 'actor_list', 'fetch_url', 'js_run', 'page_code', 'read_doc', 'view', 'remember']) {
       expect(pageActionFor(n, {})).toBeNull();
     }
   });

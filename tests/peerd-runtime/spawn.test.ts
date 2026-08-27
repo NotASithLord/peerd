@@ -99,7 +99,6 @@ describe('restrictCtxCapabilities', () => {
       listTasks: () => {}, cancelTask: () => {}, deliverMessage: () => {},
     },
     messageActor: () => {},
-    requestReview: () => {},
     dweb: { share: () => {} },
     jsOffscreenClient: { execHeadless: () => {} },
     scriptRuns: { register: () => {} },
@@ -144,7 +143,6 @@ describe('restrictCtxCapabilities', () => {
     expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_page']))).toBe(true);
     expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_web_cache']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
-    expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
     for (const tool of ['site_client_read', 'site_client_run', 'site_client_write']) {
       const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
       expect('siteClients' in narrowed).toBe(true);
@@ -179,7 +177,7 @@ describe('restrictCtxCapabilities', () => {
 
   test('spawn closure is stripped for a non-recursive actor (no actor_create granted)', () => {
     // the inherit-all-but-spawn case: tools present but actor_create narrowed out.
-    const allowed = new Set(['fetch_url', 'read_memory', 'request_review']);
+    const allowed = new Set(['fetch_url', 'read_memory']);
     const out = restrictCtxCapabilities(fullCtx(), allowed);
     expect('actorAuthority' in out).toBe(false);
     expect('webFetch' in out).toBe(true);   // fetch_url needs it

@@ -285,7 +285,7 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     if (result.ok) throw new Error('expected a binary document refusal');
     expect(result.error).toBe('binary_document');
     expect((result as any).readerAvailable).toBe(false);
-    expect(result.content).not.toContain('read_pdf');
+    expect(result.content).not.toContain('read_doc');
     expect(result.content).toContain('Ask the user to attach this PDF directly');
   });
 });

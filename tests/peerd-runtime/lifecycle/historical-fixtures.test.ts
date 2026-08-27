@@ -633,7 +633,7 @@ describe.each(FIXTURES)('$name — byte-anchored no-loss sweep', ({ data, text }
 //   fixtures/profile-v0.4.0.json   the CURRENT release (86aaa0a, 0.4.0 —
 //     package.json). Everything above tests "can today's build read an OLD
 //     profile"; nothing tested "can today's build read ITS OWN". It carries
-//     the modern field set (todos / prewalk / toolManifest / review /
+//     the modern field set (todos / prewalk / toolManifest /
 //     originState / backing / grantedTools / spawnedTrusted), settings whose
 //     values are deliberately NON-default (§11 Option A: a stored value wins
 //     over CHANNEL_DEFAULTS, so an all-defaults fixture proves nothing), and
@@ -647,7 +647,7 @@ describe.each(FIXTURES)('$name — byte-anchored no-loss sweep', ({ data, text }
 //     mixes eras inside ONE profile, which is what a long-lived install
 //     actually is: pre-per-message-store v1 records carrying `actTier` next
 //     to v2 records; modern actors (origin-locked tab actor, DESIGN-18 API
-//     actor, the dweb daemon, a #160 review child); a PARTIALLY stamped
+//     actor, the dweb daemon, a narrowly granted spawned child); a PARTIALLY stamped
 //     storeVersions map (some surfaces at 1, the rest absent — an
 //     interrupted stamping run); memory at every scope; user hooks; and ~40
 //     sessions of bulk so the store path is exercised at a real size.

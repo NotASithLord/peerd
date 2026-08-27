@@ -16,7 +16,6 @@ export const TOOL_METADATA_ORDER = Object.freeze([
   "type",
   "click",
   "login",
-  "read_pdf",
   "read_doc",
   "fetch_url",
   "page_code",
@@ -66,7 +65,6 @@ export const TOOL_METADATA_ORDER = Object.freeze([
   "message_actor",
   "read_memory",
   "remember",
-  "request_review",
   "complete_goal",
   "schedule_create",
   "schedule_list",
@@ -508,20 +506,20 @@ export const TOOL_METADATA_RECORDS = {
       "kind": "active-tab"
     }
   },
-  "read_pdf": {
-    "name": "read_pdf",
-    "primitive": "tab",
-    "description": "Read the TEXT of a PDF open in a tab. Use this on a PDF tab — the regular page tools (snapshot/read_page) return nothing there because the browser renders PDFs in a non-HTML viewer. Returns the document text, page by page ([page N] markers), with title/author when present. By default reads the active tab; pass url to read a specific PDF link instead. Born-digital PDFs work immediately; a scanned/image-only PDF has no text layer and is reported as such (on-device OCR is an opt-in download in Settings).",
+  "read_doc": {
+    "name": "read_doc",
+    "primitive": "web",
+    "description": "Read a DOCUMENT FILE through content detection: PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), OpenDocument (.odt/.ods/.odp), RTF, EPUB, and CSV/TSV. Pass an explicit URL, or omit it on an active PDF tab whose built-in viewer has no readable DOM. PDFs return pdf.js text page by page ([page N] markers), title/author metadata, and optional on-device OCR for scanned pages. Other formats return structure-preserving Markdown; long documents are stored whole and paged, with an optional query surfacing matching passages. For HTML use fetch_url or ordinary page tools.",
     "schema": {
       "type": "object",
       "properties": {
         "tabId": {
           "type": "integer",
-          "description": "Optional tab id; defaults to the active tab."
+          "description": "Optional PDF tab id. Used only when url is omitted; defaults to the active tab."
         },
         "url": {
           "type": "string",
-          "description": "Optional explicit PDF URL (http(s) or data:). Defaults to the tab URL."
+          "description": "Optional absolute http(s) or data: URL. Omit to read the active PDF tab."
         },
         "engine": {
           "type": "string",
@@ -530,38 +528,11 @@ export const TOOL_METADATA_RECORDS = {
             "pdfjs",
             "ocr"
           ],
-          "description": "auto (default): text layer, OCR fallback when installed. pdfjs: text layer only. ocr: force OCR (must be installed)."
+          "description": "PDF only. auto (default): text layer with OCR fallback when installed; pdfjs: text layer only; ocr: force installed OCR."
         },
         "maxChars": {
           "type": "integer",
-          "description": "Cap on returned text (default 50000)."
-        }
-      }
-    },
-    "sideEffect": "read",
-    "originRule": {
-      "kind": "url-or-active",
-      "field": "url",
-      "mode": "display"
-    }
-  },
-  "read_doc": {
-    "name": "read_doc",
-    "primitive": "web",
-    "description": "Read a DOCUMENT FILE as Markdown: Word (.docx), Excel (.xlsx), PowerPoint (.pptx), OpenDocument (.odt/.ods/.odp), RTF, EPUB, and CSV/TSV. Use it whenever a link points at one of those — the browser downloads such files instead of rendering them, so navigate/snapshot show you nothing and fetch_url returns unreadable binary. Structure is preserved: headings, lists, tables, and links come back as Markdown; spreadsheets come back as one table per sheet, decks as one section per slide with speaker notes. You do NOT need to know the format in advance — it is detected from the bytes, and reported back. For a PDF use read_pdf; for an HTML page use fetch_url or open a tab. Long documents are stored whole and paged: pass a query to get the matching passages, and follow the [paging] footer to read any other part.",
-    "schema": {
-      "type": "object",
-      "required": [
-        "url"
-      ],
-      "properties": {
-        "url": {
-          "type": "string",
-          "description": "Absolute http(s) URL of the document file."
-        },
-        "maxChars": {
-          "type": "integer",
-          "description": "Cap on the returned Markdown (default 48000). Raise it to read a long document whole."
+          "description": "Cap on returned text or Markdown. Raise it to read a long document whole."
         },
         "query": {
           "type": "string",
@@ -583,11 +554,12 @@ export const TOOL_METADATA_RECORDS = {
           ],
           "description": "Force a format instead of detecting one. Only needed when detection got it wrong — normally omit."
         }
-      }
+      },
+      "required": []
     },
     "sideEffect": "read",
     "originRule": {
-      "kind": "url-field",
+      "kind": "url-or-active",
       "field": "url",
       "mode": "display"
     }
@@ -595,7 +567,7 @@ export const TOOL_METADATA_RECORDS = {
   "fetch_url": {
     "name": "fetch_url",
     "primitive": "web",
-    "description": "Secure fetch: a direct GET/POST to a URL — no tab, no rendering. The cheaper of your two web mechanisms. SESSIONLESS for every cross-origin request and whenever you own no tab (no cookies); it carries the user's session ONLY for a request same-origin to the tab you currently own. Use it for data reachable WITHOUT login (public / JSON APIs, RSS, static content, an endpoint a page just wraps). For a target you have NOT yet rendered that needs the login, or one that only renders client-side, drive a tab instead — but once you HAVE rendered a site, fetch_url carries its session, so hit that SAME origin's endpoints here instead of re-scraping. Rides the denylist + SSRF + audit egress chain; does NOT follow redirects. Returns status, final URL, body + parsed JSON (capped 16k). HTML is extracted to clean markdown by default (raw:true for the full HTML). A DOCUMENT FILE (.docx/.xlsx/.pptx/.odt/.rtf/.epub, or a PDF) is not readable here — those come back as binary; read_doc and read_pdf open them.",
+    "description": "Secure fetch: a direct GET/POST to a URL with no tab or rendering. The cheaper of your two web mechanisms. SESSIONLESS for every cross-origin request and whenever you own no tab (no cookies); it carries the user's session ONLY for a request same-origin to the tab you currently own. Use it for data reachable WITHOUT login (public / JSON APIs, RSS, static content, an endpoint a page just wraps). For a target you have NOT yet rendered that needs the login, or one that only renders client-side, drive a tab instead; once you HAVE rendered a site, fetch_url carries its session, so hit that SAME origin's endpoints here instead of re-scraping. Rides the denylist + SSRF + audit egress chain; does NOT follow redirects. Returns status, final URL, body + parsed JSON (capped 16k). HTML is extracted to clean markdown by default (raw:true for the full HTML). A DOCUMENT FILE (.docx/.xlsx/.pptx/.odt/.rtf/.epub, or a PDF) is not readable here because those come back as binary; read_doc opens them.",
     "schema": {
       "type": "object",
       "required": [
@@ -644,7 +616,7 @@ export const TOOL_METADATA_RECORDS = {
   "page_code": {
     "name": "page_code",
     "primitive": "web",
-    "description": "Drive YOUR tab by writing JavaScript. Async function body in a sealed worker. Exact client: page.goto(url), page.click(selectorOrRef, options?), page.fill(selectorOrRef, text, options?), page.snapshot(), page.content(), page.readState(selectorOrRef), page.watchChanges(), page.query(selector, options?), page.readPdf(options?), page.view(), page.fetch(url, options?), page.readDocument(url, options?), page.readCache(key, options?), page.readSiteClient(origin), page.writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body}), page.captureSite(\"start\"|\"stop\"), page.login(selectorOrRef, options?). Selectors are strict unless nth is supplied; snapshot refs such as @e12 are accepted by click/fill/login. Re-read snapshot after acting. Each call rejects on failure (denylist, no match, count mismatch) — wrap in try/catch to handle. `return <value>` returns your result; console output is captured. The worker has NO direct network, NO files, NO subagents — only the manifest-listed, gated page methods and pure compute. Keep scripts SHORT, then look at a fresh snapshot before the next step: pages change under you.",
+    "description": "Drive YOUR tab by writing JavaScript. Async function body in a sealed worker. Exact client: page.goto(url), page.click(selectorOrRef, options?), page.fill(selectorOrRef, text, options?), page.snapshot(), page.content(), page.readState(selectorOrRef), page.watchChanges(), page.query(selector, options?), page.view(), page.fetch(url, options?), page.readDocument(url?, options?), page.readCache(key, options?), page.readSiteClient(origin), page.writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body}), page.captureSite(\"start\"|\"stop\"), page.login(selectorOrRef, options?). Selectors are strict unless nth is supplied; snapshot refs such as @e12 are accepted by click/fill/login. Re-read snapshot after acting. Each call rejects on failure (denylist, no match, count mismatch), so wrap in try/catch to handle. `return <value>` returns your result; console output is captured. The worker has NO direct network, NO files, NO subagents, only the manifest-listed, gated page methods and pure compute. Keep scripts SHORT, then look at a fresh snapshot before the next step: pages change under you.",
     "schema": {
       "type": "object",
       "properties": {
@@ -2038,47 +2010,6 @@ export const TOOL_METADATA_RECORDS = {
       ]
     },
     "sideEffect": "write",
-    "originRule": {
-      "kind": "none"
-    }
-  },
-  "request_review": {
-    "name": "request_review",
-    "primitive": "spawned",
-    "description": "Spawn a clean-context reviewer to critique a diff and return a STRUCTURED summary (verdict, severity, issues with suggested fixes). The reviewer is a SECOND agent that has NOT seen this conversation — a fresh, skeptical pair of eyes — and it is READ-ONLY (it cannot edit, click, navigate, or run code; you remain the only writer). Use it after you finish a non-trivial change to catch bugs, security issues, and convention violations you rationalized past.  Provide the diff one of three ways: pass `before`/`after` file-tree snapshots (the standalone path), pass an explicit `diff` changeset, or omit both to review changes since the last checkpoint (when the checkpoint adapter is wired). Optional `focus` steers the review.  Returns the reviewer verdict (approve | request_changes | comment), the worst severity, and the list of issues with fixes. Incorporate the issues into your next edits; the full reviewer transcript is in the side panel by expanding this card.",
-    "schema": {
-      "type": "object",
-      "properties": {
-        "before": {
-          "type": "object",
-          "description": "Optional. {path: content} snapshot BEFORE your changes. With `after`, the reviewer diffs them.",
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
-        "after": {
-          "type": "object",
-          "description": "Optional. {path: content} snapshot AFTER your changes.",
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
-        "diff": {
-          "type": "object",
-          "description": "Optional. Explicit changeset {files:[{path,status,before,after}]} if you already have one."
-        },
-        "since": {
-          "type": "string",
-          "description": "Optional. Checkpoint ref to diff since (when the checkpoint adapter is wired). Omit for the latest."
-        },
-        "focus": {
-          "type": "string",
-          "description": "Optional. Steer the reviewer (\"focus on the auth path\", \"check accessibility\")."
-        }
-      },
-      "required": []
-    },
-    "sideEffect": "read",
     "originRule": {
       "kind": "none"
     }

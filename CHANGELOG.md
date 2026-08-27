@@ -972,9 +972,9 @@ open PRs on one verified branch. Three things get better:
   request, like a specific command or a read. The actor does the action
   and hands back the raw result instead of spending an extra model turn to
   restate it.
-- **PDF reading** (`read_pdf`). pdf.js text-layer extraction in the
-  offscreen document for born-digital PDFs. Runner-only, with output
-  wrapped as untrusted web content.
+- **PDF reading.** pdf.js text-layer extraction in the offscreen document for
+  born-digital PDFs, now reached through the content-detected `read_doc` tool.
+  Runner-only, with output wrapped as untrusted web content.
 - **On-device OCR for scanned PDFs.** The render→recognize pipeline is
   wired (Tesseract). `auto` escalates when a PDF looks scanned and the
   opt-in engine is installed. Fail-closed: it falls back to the text

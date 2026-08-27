@@ -34,7 +34,7 @@ import { resolveManifestAllow } from '../tools/manifests.js';
 // goes through the web actor via message_actor, never a raw grant); filterActorSurface
 // drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
 // fenced reads, already gate-refused for a non-actor). Both are pure.
-import { mainAgentDescriptors, filterActorSurface, filterByGoalActive, REVIEW_INSTANCE_READS } from '../tools/exposure.js';
+import { mainAgentDescriptors, filterActorSurface, filterByGoalActive } from '../tools/exposure.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../../shared/bounded-module-load.js';
 import { projectToolAuthority } from '../tools/metadata/descriptor.js';
 
@@ -162,7 +162,6 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   kv:                 ['inspect'],
   idb:                ['inspect'],
   actorAuthority:  ['actor_create', 'actor_tasks', 'actor_cancel', 'message_actor'],
-  requestReview:      ['request_review'],
   // sandbox_create's app arm reads ctx.dweb to decide whether to build a
   // dwapp, so it keeps the dweb closure alongside the dweb_* tools.
   dweb:               ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers',
@@ -375,13 +374,6 @@ export const makeSpawnActor = (deps) => {
    * @param {number} [req.maxOutputTokens]         per-call output cap (default 4096)
    * @param {number} [req.maxDepth]                depth ceiling (default 5)
    * @param {boolean} [req.allowRecursion]         keep actor_create in the subset
-   * @param {boolean} [req.review]                 issue 160 - SW-ONLY. Set solely by the
-   *   review orchestrator (review/orchestrator.js). Re-adds the four instance
-   *   READS (REVIEW_INSTANCE_READS) to the grantable surface and stamps
-   *   ctx.exposure='review', which the actor-tier gate admits for those four
-   *   names only. NOT reachable from the model: actor_create builds its spawn
-   *   request from an explicit field whitelist and never spreads args (pinned by
-   *   a test in review.test.ts). Never accept this from a worker or tool arg.
    * @param {string} req.parentSessionId           who is spawning this
    * @param {number} [req.parentDepth]             spawner's depth (child = +1)
    * @param {boolean} [req.parentInbound]          was the SPAWNING turn inbound
@@ -406,9 +398,6 @@ export const makeSpawnActor = (deps) => {
       maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
       maxDepth = DEFAULT_MAX_DEPTH,
       allowRecursion = false,
-      // #160: SW-ONLY flag (the review orchestrator). Grants the four instance
-      // reads + stamps the review exposure marker. Unreachable from model args.
-      review = false,
       parentSessionId,
       parentDepth = 0,
       parentInbound,
@@ -484,24 +473,10 @@ export const makeSpawnActor = (deps) => {
     // authority the spawning agent itself lacks. Filtering the grantable universe here is
     // the fix: an actor holds ⊆ what the main agent holds, delegating web/DOM work to
     // the web actor via message_actor like the main agent does.
-    // #160: a REVIEW spawn re-adds the four instance READS that filterActorSurface
-    // just dropped — by name, from the descriptors we already have. This is the
-    // whole exemption: a positive re-add, never "skip the narrowing for review"
-    // (which would restore fetch_url / read_page / site_client_run too, i.e. build
-    // the exfiltration channel the reviewer must not have). `review` can only be
-    // set by an SW-side caller — the review orchestrator — because actor_create
-    // builds its spawn request from an explicit field whitelist and never spreads
-    // model args (pinned by a test).
     const surface = filterByGoalActive(
       filterActorSurface(mainAgentDescriptors(getToolDescriptors())), false,
     );
-    const grantable = review
-      ? surface.concat(
-        getToolDescriptors().filter((t) => REVIEW_INSTANCE_READS.has(t.name)
-          && !surface.some((s) => s.name === t.name)),
-      )
-      : surface;
-    const subset = narrowTools(grantable, { tools, allowRecursion, allow: parentAllow });
+    const subset = narrowTools(surface, { tools, allowRecursion, allow: parentAllow });
     const allowedNames = new Set(subset.map((t) => t.name));
     const subsetDescriptors = subset.map(projectToolAuthority);
 
@@ -535,14 +510,6 @@ export const makeSpawnActor = (deps) => {
       // ctx from THIS list and re-checks every relayed call against it — the actor
       // analog of the actor instance-pin. The worker's call args are never trusted.
       grantedTools: [...allowedNames],
-      // #160: persist the review marker so the OFFSCREEN relay can re-stamp
-      // exposure:'review' when it rebuilds this child's ctx (the
-      // 'actor/tool-dispatch' route only has the session record — the in-SW
-      // fallback below stamps from this closure's `review` directly, so without
-      // this field the exemption was dead on the primary offscreen platform).
-      // Still SW-only: written here from the trusted spawn req at create;
-      // a worker or model arg can never reach it.
-      ...(review ? { review: true } : {}),
       // PR #134 phase 3 — the trusted-lineage hop verdict, stamped SERVER-SIDE
       // at create so the chain is never model-supplied. Trusted ONLY when the
       // spawning turn explicitly proved itself non-inbound; an inbound spawn

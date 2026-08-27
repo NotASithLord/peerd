@@ -65,9 +65,6 @@ export const resolveRuntimeCapabilities = ({ offscreenDocument, dwebPackaged = f
     sealedJobs: offscreen
       ? available('offscreen-worker')
       : unsupported('use_visible_notebook'),
-    pdfReader: offscreen
-      ? available('offscreen-document')
-      : unsupported('attach_pdf_or_page_images'),
     documentReader: offscreen
       ? available('offscreen-document')
       : unsupported('attach_pdf_or_plain_text'),
@@ -87,7 +84,7 @@ export const resolveRuntimeCapabilities = ({ offscreenDocument, dwebPackaged = f
   });
 };
 
-/** @typedef {'sealedJobs'|'pdfReader'|'documentReader'|'dwebMesh'} ToolRuntimeFacility */
+/** @typedef {'sealedJobs'|'documentReader'|'dwebMesh'} ToolRuntimeFacility */
 /** @type {Readonly<Record<string, ToolRuntimeFacility>>} */
 const TOOL_CAPABILITIES = Object.freeze({
   script: 'sealedJobs',
@@ -95,7 +92,6 @@ const TOOL_CAPABILITIES = Object.freeze({
   app_code: 'sealedJobs',
   site_client_run: 'sealedJobs',
   a2a_run: 'dwebMesh',
-  read_pdf: 'pdfReader',
   read_doc: 'documentReader',
 });
 
@@ -126,7 +122,6 @@ const adaptDescriptorToRuntime = (tool, capabilities) => {
   if (!capabilities) return tool;
   if (tool.name === 'fetch_url') {
     const markdownAvailable = capabilities.readableHtml?.mode === 'markdown';
-    const pdfAvailable = runtimeCapabilityAvailable(capabilities.pdfReader);
     const documentAvailable = runtimeCapabilityAvailable(capabilities.documentReader);
     let description = String(tool.description ?? '');
     if (!markdownAvailable) {
@@ -135,18 +130,14 @@ const adaptDescriptorToRuntime = (tool, capabilities) => {
         'HTML returns a sanitized raw response body in this runtime; raw:true keeps the raw response path.',
       );
     }
-    if (!pdfAvailable || !documentAvailable) {
-      const readerGuidance = pdfAvailable
-        ? 'PDF files can be opened with read_pdf. Other document files have no reader in this runtime; ask for a PDF, page images, or a plain-text export.'
-        : documentAvailable
-          ? 'Office and e-book files can be opened with read_doc. PDF files have no reader in this runtime; ask for page images or a plain-text export.'
-          : 'Document files come back as binary and no document reader is available in this runtime. Ask for a PDF, page images, or a plain-text export.';
+    if (!documentAvailable) {
+      const readerGuidance = 'Document files come back as binary and no document reader is available in this runtime. Ask for page images or a plain-text export.';
       description = description.replace(
-        /A DOCUMENT FILE .*read_doc and read_pdf open them\./,
+        /A DOCUMENT FILE .*read_doc opens them\./,
         readerGuidance,
       );
     }
-    if (markdownAvailable && pdfAvailable && documentAvailable) return tool;
+    if (markdownAvailable && documentAvailable) return tool;
     return /** @type {T} */ ({
       ...tool,
       description,

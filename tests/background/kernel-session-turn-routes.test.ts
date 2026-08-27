@@ -67,7 +67,6 @@ const harness = ({
     runInit: async () => {}, handleSystemCommand: async () => {},
     handleToolsCommand: async () => {}, postChatNote: () => {},
     spawnActor: async (input: any) => { calls.actors.push(input); return 'actor-result'; },
-    requestReview: async () => 'review-result',
     startGoalRun: async (input: any) => { calls.sequence.push('goal'); calls.goal = input; },
     haltGoalRun: async (id: string) => { calls.halted.push(id); },
     ensureSession: async () => 'root', actorRecoveryReady: async () => true,

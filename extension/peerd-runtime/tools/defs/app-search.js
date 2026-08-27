@@ -32,7 +32,7 @@ export const appSearchTool = composeTool("app_search", {
       return {
         ok: true,
         // why: names, tags, and especially body snippets are user-authored App
-        // bytes. A spawned child or clean-context reviewer may receive this
+        // bytes. A spawned child may receive this
         // otherwise-main-visible tool, so fence the result at the tool seam just
         // like app_read_file rather than letting saved HTML become instructions.
         content: wrapUntrusted({

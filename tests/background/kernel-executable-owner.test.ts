@@ -143,7 +143,7 @@ describe('kernel executable owner', () => {
       expect(admit(route, {}, sender)).toBe(true);
       expect(called).toEqual([owner]);
     }
-    expect(admit('review/run', {}, sender)).toBe(false);
+    expect(admit('legacy/semantic-route', {}, sender)).toBe(false);
     expect(admit('actor/spawn', {}, sender)).toBe(false);
   });
 
@@ -185,7 +185,7 @@ describe('kernel executable owner', () => {
     });
     expect(appOnly('dweb/audit', {}, sender)).toBe(true);
     expect(appOnly('dweb/base/start', {}, sender)).toBe(false);
-    expect(admit('review/run', {}, sender)).toBe(false);
+    expect(admit('legacy/semantic-route', {}, sender)).toBe(false);
   });
 
   test('refuses provenance before loading and demand-loads one exact runtime', async () => {

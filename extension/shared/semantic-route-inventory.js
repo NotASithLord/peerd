@@ -909,11 +909,6 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
     "source": "extension/background/kernel-turn-authority-adapter.js"
   },
   {
-    "route": "page-program/read-pdf",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
     "route": "page-program/view",
     "channels": ["store", "preview"],
     "source": "extension/background/kernel-turn-authority-adapter.js"

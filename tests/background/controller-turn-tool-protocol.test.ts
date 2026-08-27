@@ -24,7 +24,7 @@ import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/poli
 import { TOOL_EXECUTION_PROTOCOL } from '../../extension/shared/tool-execution-protocol.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
-const PROTOCOL_FIXTURE_TOOL = 'request_review';
+const PROTOCOL_FIXTURE_TOOL = 'a2a_run';
 const authorityDescriptor = (name: string) => projectToolAuthority(
   toToolDescriptor(getToolPolicy(name)),
 );

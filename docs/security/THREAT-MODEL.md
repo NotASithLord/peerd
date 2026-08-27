@@ -358,8 +358,8 @@ IPv4-mapped and NAT64 IPv6 encodings — plus the RFC 6598 shared/CGNAT (`100.64
 benchmarking (`198.18.0.0/15`), and reserved/broadcast (`240.0.0.0/4`) ranges that are
 internal-use on real deployments — before any network call, ahead of the denylist,
 and fails closed on redirects so a public host cannot pivot to an internal one. The same
-redirect refusal is applied by `read_pdf`'s byte fetch (`offscreen/pdf-extract.js`,
-`redirect:'manual'`), which previously validated only the pre-redirect host.
+redirect refusal is applied by `read_doc`'s byte fetch (`offscreen/doc-extract.js`,
+`redirect:'manual'`), before content detection selects the PDF or document engine.
 Browser automation applies the same lexical classifier before navigation and
 to the committed document. Driven tabs also receive tab-scoped DNR rules for
 private hosts and address ranges, covering redirects, forms, frames, and
@@ -659,7 +659,7 @@ Artifacts without a dweb mesh host omit the dweb module, controls, defaults,
 and model tools.
 
 Code: `peerd-runtime/runtime-capabilities.js`, `peerd-runtime/tools/gates.js`,
-`peerd-runtime/loop/turn-driver.js`, `packaging/gen-channel-config.ts`.
+`background/kernel-turn-authority-adapter.js`, `packaging/gen-channel-config.ts`.
 Red-team: scenario 08.
 
 <a id="inv-18"></a>

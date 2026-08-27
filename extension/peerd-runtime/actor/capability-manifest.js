@@ -48,10 +48,9 @@ export const CODE_CLIENT_MANIFESTS = Object.freeze({
     readState: { op: 'readState', signature: 'readState(selectorOrRef)', effect: 'read', tool: 'read_state', canonical: true, worker: "(target) => pageCall('readState', { target })" },
     watchChanges: { op: 'watchChanges', signature: 'watchChanges()', effect: 'read', tool: 'watch_changes', canonical: true, worker: "() => pageCall('watchChanges', {})" },
     query: { op: 'query', signature: 'query(selector, options?)', effect: 'read', tool: 'query_dom', canonical: true, worker: "(selector, options) => pageCall('query', { selector, options })" },
-    readPdf: { op: 'readPdf', signature: 'readPdf(options?)', effect: 'read', tool: 'read_pdf', canonical: true, worker: "(options) => pageCall('readPdf', { options })" },
     view: { op: 'view', signature: 'view()', effect: 'read', tool: 'view', canonical: true, worker: "() => pageCall('view', {})" },
     fetch: { op: 'fetch', signature: 'fetch(url, options?)', effect: 'read', tool: 'fetch_url', canonical: true, worker: "(url, options) => pageCall('fetch', { url, options })" },
-    readDocument: { op: 'readDocument', signature: 'readDocument(url, options?)', effect: 'read', tool: 'read_doc', canonical: true, worker: "(url, options) => pageCall('readDocument', { url, options })" },
+    readDocument: { op: 'readDocument', signature: 'readDocument(url?, options?)', effect: 'read', tool: 'read_doc', canonical: true, worker: "(url, options) => pageCall('readDocument', { url, options })" },
     readCache: { op: 'readCache', signature: 'readCache(key, options?)', effect: 'read', tool: 'read_web_cache', canonical: true, worker: "(key, options) => pageCall('readCache', { key, options })" },
     readSiteClient: { op: 'readSiteClient', signature: 'readSiteClient(origin)', effect: 'read', tool: 'site_client_read', canonical: true, worker: "(origin) => pageCall('readSiteClient', { origin })" },
     writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})', effect: 'write', tool: 'site_client_write', canonical: true, worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
@@ -271,7 +270,7 @@ const ENGINE_TOOLS = Object.freeze({
 
 export const WEB_ACTOR_DOM_TOOL_NAMES = Object.freeze([
   'snapshot', 'read_page', 'read_state', 'watch_changes', 'click', 'type',
-  'navigate', 'query_dom', 'read_pdf', 'view',
+  'navigate', 'query_dom', 'view',
 ]);
 
 // The tools represented inside one `page_code` run. Contributor Metrics uses

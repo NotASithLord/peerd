@@ -66,7 +66,6 @@ Routing by responsibility (the live tool descriptors are authoritative):
 
   actor (spawn an EPHEMERAL ACTOR — a focused child agent, fire-once)
     actor_create           — run a child actor on one task (async: its result returns on a LATER turn; sync:true to wait this turn)
-    request_review           — spawn a clean-context reviewer to critique a diff
 
   skill (load a task-specific playbook on demand)
     load_skill               — read an installed skill's full SKILL.md body

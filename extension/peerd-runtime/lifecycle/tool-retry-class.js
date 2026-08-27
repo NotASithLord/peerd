@@ -76,7 +76,6 @@ export const RETRY_CLASS_OVERRIDES = Object.freeze(
     // budget)" preconditions exist for. A LOCAL read (inspect, a page already
     // in the tab, a cache, a stored record) has none of that cost and stays A.
     fetch_url: 'B',
-    read_pdf: 'B',
     read_doc: 'B',
     // why: site_client_run reads at the tool boundary but EXECUTES the stored
     // client, whose every op is an origin-pinned fetch — requests on the wire,
@@ -124,10 +123,6 @@ export const RETRY_CLASS_OVERRIDES = Object.freeze(
     sandbox_create: 'F',
     vm_boot: 'F',
     actor_create: 'F',
-    // why: request_review declares `read` (the reviewer is read-only and
-    // cannot edit), but it SPAWNS a second agent session. The resource — not
-    // the read — is what recovery has to reason about.
-    request_review: 'F',
   }),
 );
 

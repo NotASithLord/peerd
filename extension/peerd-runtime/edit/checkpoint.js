@@ -84,9 +84,6 @@ export const createCheckpointManager = ({ store, workspaceFor, now = Date.now })
 
   /**
    * Files changed between a checkpoint and the CURRENT workspace state.
-   * The feature-08 review adapter: requestReview's `since` path consumes
-   * this shape directly (review/diff.js fromCheckpointDiff).
-   *
    * `ref` optional — defaults to the scope's latest checkpoint. Returns
    * { files: [{ path, status, before?, after? }], ref? }; empty files when
    * there is no checkpoint or no workspace adapter (nothing to diff is a

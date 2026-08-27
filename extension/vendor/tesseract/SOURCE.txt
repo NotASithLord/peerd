@@ -13,7 +13,7 @@ Status: VENDORED
 The two driver files are committed and SRI-pinned (below), and the runtime
 core+lang SRIs are pinned in OCR_ASSETS (ocr-store.js) — so hasValidOcrSris()
 is true and OCR is shippable: Settings → Voice & OCR offers the opt-in
-download, and a scanned PDF (read_pdf engine:'ocr'/'auto') escalates to
+download, and a scanned PDF (read_doc engine:'ocr'/'auto') escalates to
 recognition. The whole path stays fail-closed: a missing driver, an SRI
 mismatch, or a recognizer error falls back to the pdf.js text layer + the
 honest "looks scanned" note (offscreen/pdf-extract.js).
@@ -59,7 +59,7 @@ pdf-extract.js blobUrlFor). The extension_pages CSP now carries
 
 Validate locally (the one step that needs a browser)
 ----------------------------------------------------
-  - Smoke-test read_pdf with engine:'ocr' on a scanned PDF, then 'auto' on the
+  - Smoke-test read_doc with engine:'ocr' on a scanned PDF, then 'auto' on the
     same file (it should escalate), then 'auto' on a born-digital PDF (it should
     NOT escalate). Confirm the worker's blob:/wasm loads pass the CSP.
   - If the language loader insists on appending `<lang>.traineddata.gz` to a

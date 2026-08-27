@@ -154,7 +154,6 @@ describe('spot checks against the real defs', () => {
     ['now', 'A'],
     // B — reads that cross the network.
     ['fetch_url', 'B'],
-    ['read_pdf', 'B'],
     ['dweb_discover', 'B'],
     // C — deterministic local workspace writes.
     ['js_write_file', 'C'],
@@ -183,7 +182,6 @@ describe('spot checks against the real defs', () => {
     ['sandbox_create', 'F'],
     ['vm_boot', 'F'],
     ['actor_create', 'F'],
-    ['request_review', 'F'],
   ];
 
   for (const [name, expected] of EXPECTED) {

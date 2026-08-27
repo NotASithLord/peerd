@@ -282,15 +282,6 @@ export { createCheckpointManager } from './edit/checkpoint.js';
 export {
   defaultWritePermissions, resolveCanWrite,
 } from './edit/permissions-adapter.js';
-// --- review (clean-context read-only reviewer; see docs/REVIEW.md) ------
-export {
-  makeRequestReview,
-  parseReviewSummary, worstSeverity, SEVERITIES,
-  readOnlyToolNames, isReadOnlyTool, intersectReadOnly,
-  renderDiffForReview, synthesizeDiff, fromCheckpointDiff,
-  buildReviewTask,
-} from './review/index.js';
-
 // --- tools --------------------------------------------------------------
 export {
   registerTool,
@@ -313,9 +304,6 @@ export {
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
   // DESIGN-17: the actor capability tier vocabulary.
   EXPOSURE_ACTOR, ACTOR_ONLY_TOOLS, isActorOnlyTool,
-  // #160: the review-exemption marker — the SW injects it into the offscreen
-  // relay so a review child's persisted flag re-stamps ctx.exposure there.
-  EXPOSURE_REVIEW,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
   // DESIGN-18: backing-aware allow-set (an API actor has no DOM tools).
   actorAllowedToolsFor, isAllowedForActor,
@@ -462,7 +450,7 @@ export { detectVoiceCapability } from './voice/engine-picker.js';
 export { MicButton } from './voice/mic-button.js';
 export { normalizeVariant, normalizeEngine, VOICE_ENGINES } from './voice/settings.js';
 
-// --- pdf (read_pdf tool: pdf.js text layer + opt-in OCR) ----------------
+// --- PDF engine (used internally by read_doc: pdf.js + opt-in OCR) ------
 export {
   chooseEngine, looksScanned, requireEngine, DEFAULT_ENGINE, PDF_ENGINES,
   formatPdfBody, assemblePages, DEFAULT_MAX_CHARS,

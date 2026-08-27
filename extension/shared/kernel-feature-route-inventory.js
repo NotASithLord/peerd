@@ -30,7 +30,7 @@ export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze(
 export const KERNEL_PAGE_PROGRAM_ROUTE_NAMES = Object.freeze([
   'page-program/navigate', 'page-program/click', 'page-program/fill',
   'page-program/snapshot', 'page-program/read', 'page-program/read-state',
-  'page-program/watch-changes', 'page-program/query-dom', 'page-program/read-pdf',
+  'page-program/watch-changes', 'page-program/query-dom',
   'page-program/view', 'page-program/fetch', 'page-program/read-document',
   'page-program/read-cache', 'page-program/site-client-read',
   'page-program/site-client-write', 'page-program/site-capture',

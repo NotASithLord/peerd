@@ -13,8 +13,6 @@ export { detectInterruptedTurn, RESUME_NUDGE } from './loop/resume-detect.js';
 export { prepareUserAttachmentsWithDocs, DOC_TEXT_MAX_CHARS } from './loop/attachments.js';
 export { formatDocBody } from './doc/format.js';
 export { makeSpawnActor, restrictCtxCapabilities, finalActorTurnReply, finalAssistantText } from './actor/spawn.js';
-export { makeRequestReview } from './review/orchestrator.js';
-export { isReadOnlyTool } from './review/read-only.js';
 export {
   activityOverlayInjected, clearActivityOverlayInjected,
 } from './dom/activity-overlay-injected.js';
@@ -33,7 +31,7 @@ export {
   getToolDescriptor,
   listToolDescriptors,
 } from './tools/metadata-registry.js';
-export { mainAgentDescriptors, filterByDwebEnabled, filterByDwebActive, filterByGoalActive, actorAllowedToolsFor, EXPOSURE_ACTOR, EXPOSURE_REVIEW, pinActorCall, actorDescriptors } from './tools/exposure.js';
+export { mainAgentDescriptors, filterByDwebEnabled, filterByDwebActive, filterByGoalActive, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors } from './tools/exposure.js';
 export { resolveManifestAllow, manifestLabel, filterDescriptorsByManifest } from './tools/manifests.js';
 export { resolveRuntimeCapabilities, filterByRuntimeCapabilities, requireRuntimeCapability } from './runtime-capabilities.js';
 export { makeGoalRunner, GOAL_MAX_ITERATIONS } from './loop/goal-runner.js';

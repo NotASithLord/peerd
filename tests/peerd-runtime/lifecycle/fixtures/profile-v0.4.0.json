@@ -6,7 +6,6 @@
     "notes": [
       "peerd 0.4.0 (86aaa0a:package.json, the CURRENT release) — the shapes today's build itself writes, so this fixture is the 'no drift on the way out' anchor the three older files can't be: a regression here means the build stopped round-tripping its OWN records.",
       "Sessions are v2 (msgIndex + messagesV2:true, bodies in the sibling session_messages store) and carry the full modern field set: todos (todo/core.js TodoItem[]), prewalk (loop/prewalk.js PrewalkState), toolManifest (tools/manifests.js), trimSummary, customSystemPrompt, cost.",
-      "419ecb6 (#228, 0.3.0) added session.review — the SW-stamped review-exemption marker on a SPAWNED child (never on a chat), so the review child below is where the field can honestly appear.",
       "1455923 (#255, 0.3.0) added session.originState — a TAB-backed web actor's origin authority (actor/origin-lock.js ActorOriginState: mode, ownedOrigin, provisional, excursion, excursionsUsed). Durable BECAUSE it is the authority: losing it across an eviction turns a bound actor back into an unbounded one.",
       "There is no settings-level confirm toggle: the Act sub-axis is persisted PER SESSION as `confirmActions` (sessions/types.js; permissions/policy.js confirmActionsFromRecord). So 'confirmations disabled' is the explicit `confirmActions:false` on the two chats here — an explicit false, not an absent key, which is the only value that turns confirmation off.",
       "settings hold NON-DEFAULT values on purpose (advancedAutomationEnabled false against the preview default true, a 5-minute vaultAutoLockMs against 45 minutes, confirmWebWrites false, autoMemoryEnabled false, watchAgentTab true): §11 Option A says a stored value always wins over CHANNEL_DEFAULTS, so a fixture full of defaults would prove nothing about the upgrade path.",
@@ -183,11 +182,10 @@
       "task": "review the reconciliation notebook for off-by-one errors",
       "depth": 1,
       "spawnedTrusted": true,
-      "review": true,
       "grantedTools": ["js_read_file", "app_read_file", "read_doc"],
       "messagesV2": true,
       "msgIndex": ["01990a00-4001-7000-8000-000000011005"],
-      "futureReviewFieldFromANewerBuild": "keep-me"
+      "futureSpawnedFieldFromANewerBuild": "keep-me"
     }
   ],
 

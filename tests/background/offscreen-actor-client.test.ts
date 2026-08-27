@@ -45,7 +45,6 @@ const baseDeps = (over: any = {}) => ({
   sessions: { get: async () => null },
   buildToolContext: async () => ({}),
   dispatchToolCall: async () => ({ ok: true }),
-  reviewToolAllowed: () => true,
   pinActorCall: () => {},
   EXPOSURE_ACTOR: 'actor',
   inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
@@ -417,7 +416,7 @@ describe('inbound provenance — monotonic SW grant', () => {
     const names = [
       'dweb_discover', 'dweb_peers', 'dweb_block',
       'dweb_discovery', 'dweb_guide', 'dweb_share', 'dweb_install', 'a2a_run',
-      'message_actor', 'actor_create', 'request_review', 'script',
+      'message_actor', 'actor_create', 'script',
     ];
     await client.run({
       actorSessionId: 'dweb', message: 'peer bytes', systemPrompt: 's',
@@ -561,7 +560,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       pinActorCall: (call: any, at: string, id: string) => { pinned = { call, at, id }; },
       dispatchToolCall: async () => ({ ok: true, content: 'pdf' }),
     });
-    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'read_pdf', args: {} } }, OFFSCREEN));
+    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'read_doc', args: {} } }, OFFSCREEN));
     expect(out).toEqual({ ok: true, result: { ok: true, content: 'pdf' } });
     expect(ctxOpts.activeTabId).toBe(42);           // the owned tab reached the ctx
     expect(ctxOpts.actorType).toBe('web');
@@ -1055,66 +1054,6 @@ describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ct
     expect(out.result.ran).toBe('script');
     // the ctx was restricted to exactly the persisted granted set (never the worker's word)
     expect(out.result.restrictedTo.sort()).toEqual(['read_memory', 'script']);
-  });
-
-  // #160: the review exemption must fire on the LIVE relay path — the gate tests
-  // hand-build {exposure} ctxs, which would let a missing host-side stamp stay
-  // invisible. These pin the isolated relay's own logic:
-  // given a record with review:true it stamps, otherwise it doesn't. The OTHER
-  // half — that create() actually persists review so a real record carries it —
-  // is pinned in sessions/custom-system-prompt.test.ts (a real create→get
-  // round-trip); the two together close the gap, since a mocked get here can't
-  // prove the store keeps the field.
-  test('a REVIEW child re-stamps exposure from the PERSISTED record', async () => {
-    let seenCtx: any = null;
-    const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script'], review: true }) },
-      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
-    }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
-    expect(out.ok).toBe(true);
-    expect(seenCtx.exposure).toBe('review');
-  });
-
-  test('a REVIEW child is refused at call time when the live allowlist drops a stale grant', async () => {
-    let dispatched = false;
-    const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({
-        kind: 'spawned', parentSessionId: 'p1', depth: 1,
-        grantedTools: ['app_search'], review: true,
-      }) },
-      reviewToolAllowed: () => false,
-      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
-    }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({
-      relayToken, call: { name: 'app_search', args: { query: 'x' } },
-    }, OFFSCREEN));
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('tool_not_available_to_reviewer');
-    expect(dispatched).toBe(false);
-  });
-
-  test('a NON-review spawned child gets NO exposure from the relay (fail-closed)', async () => {
-    let seenCtx: any = null;
-    const { client, during } = clientWithRelay(subDeps({
-      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
-    }));
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
-    expect(seenCtx.exposure).toBeUndefined();
-  });
-
-  test('a truthy-but-not-true review field stamps nothing (strict boolean, like the record write)', async () => {
-    let seenCtx: any = null;
-    const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script'], review: 'yes' }) },
-      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
-    }));
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
-    expect(seenCtx.exposure).toBeUndefined();
   });
 
   test('an UNGRANTED tool the worker asks for is REFUSED before any dispatch (never trust the worker)', async () => {
