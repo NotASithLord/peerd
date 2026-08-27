@@ -540,6 +540,72 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('executes site_client_read through exact origin-owned storage authority', async () => {
+    const siteClientDescriptor = authorityDescriptor('site_client_read');
+    let legacy = 0;
+    let reads = 0;
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [siteClientDescriptor], refreshTools: async () => [siteClientDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-site-client-1', name: 'site_client_read' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-site-client-1',
+            partialJson: '{"origin":"https://api.example.test"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-site-client-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              session: { sessionId: 'actor-web-api', kind: 'actor' },
+              authorizeSiteClientOrigin: async (origin: string) =>
+                origin === 'https://api.example.test',
+              siteClients: {
+                get: async () => {
+                  reads += 1;
+                  return {
+                    meta: {
+                      origin: 'https://api.example.test', summary: 'inventory API',
+                      endpoints: [], auth: 'none', deriver: 'probe',
+                      updatedAt: Date.now(), failureCount: 0,
+                    },
+                    body: 'return { list: () => site.fetch("/items") };',
+                  };
+                },
+              },
+            },
+          },
+          args: call.args,
+          projection: { sessionId: 'actor-web-api' },
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(legacy).toBe(0);
+    expect(reads).toBe(1);
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      result: expect.objectContaining({
+        ok: true, content: expect.stringContaining('inventory API'),
+      }),
+    }));
+  });
+
   test('executes page_code through exact page-run authority', async () => {
     const pageDescriptor = authorityDescriptor('page_code');
     let legacy = 0;

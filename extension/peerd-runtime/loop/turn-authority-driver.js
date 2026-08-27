@@ -424,7 +424,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
                     sessionId: toolContext.session?.sessionId,
                     dwebAvailable: toolContext.dweb != null,
                   }
-                  : ['pod', 'vm', 'notebook', 'app', 'page', 'schedule']
+                  : ['pod', 'vm', 'notebook', 'app', 'page', 'siteclient', 'schedule']
                       .includes(authorityClass)
                     ? { sessionId: toolContext.session?.sessionId }
                     : {};

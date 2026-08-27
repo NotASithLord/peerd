@@ -53,6 +53,11 @@ export {
   executeControllerResourceTool,
 } from './controller-resource-tools.js';
 export {
+  CONTROLLER_SITE_CLIENT_TOOL_NAMES,
+  controllerHostsSiteClientTool,
+  executeControllerSiteClientTool,
+} from './controller-site-client-tools.js';
+export {
   CONTROLLER_INTROSPECTION_TOOL_NAMES,
   controllerHostsIntrospectionTool,
   executeControllerIntrospectionTool,

@@ -6,22 +6,9 @@ import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/
 import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
+import { createSiteClientToolAuthority } from '../../../extension/background/site-client-tool-authority.js';
 
 afterEach(() => clearTools());
-
-const context = (over: Record<string, unknown> = {}) => ({
-  audit: async () => {},
-  hooks: [],
-  session: { sessionId: 'bound-a' },
-  permission: { mode: 'act', confirmActions: true },
-  exposure: 'actor',
-  actorType: 'web',
-  backing: 'tab',
-  actorSurface: 'tools',
-  denylist: [],
-  canUseSiteClientOrigin: (origin: string) => origin === 'https://a.test',
-  ...over,
-});
 
 const call = {
   id: 'write-a',
@@ -30,6 +17,28 @@ const call = {
     origin: 'https://a.test', summary: 'own client', endpoints: [], auth: 'none',
     deriver: 'probe', body: 'return { own: true };',
   },
+};
+
+const context = (over: Record<string, unknown> = {}) => {
+  const authorityContext: any = {
+    audit: async () => {},
+    hooks: [],
+    session: { sessionId: 'bound-a' },
+    permission: { mode: 'act', confirmActions: true },
+    exposure: 'actor',
+    actorType: 'web',
+    backing: 'tab',
+    actorSurface: 'tools',
+    denylist: [],
+    canUseSiteClientOrigin: (origin: string) => origin === 'https://a.test',
+    ...over,
+  };
+  return {
+    ...authorityContext,
+    siteClientAuthority: createSiteClientToolAuthority({
+      call, ctx: authorityContext, signal: authorityContext.abortSignal,
+    }),
+  };
 };
 
 const trackedLifecycle = () => {

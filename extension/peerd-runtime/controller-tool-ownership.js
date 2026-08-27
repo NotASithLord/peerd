@@ -31,6 +31,9 @@ import {
   CONTROLLER_RESOURCE_TOOL_NAMES,
 } from './controller-resource-tools.js';
 import {
+  CONTROLLER_SITE_CLIENT_TOOL_NAMES,
+} from './controller-site-client-tools.js';
+import {
   CONTROLLER_INTROSPECTION_TOOL_NAMES,
 } from './controller-introspection-tools.js';
 import {
@@ -52,6 +55,7 @@ const authorityTools = [
   ['persistence', CONTROLLER_PERSISTENCE_TOOL_NAMES],
   ['page', CONTROLLER_PAGE_TOOL_NAMES],
   ['resource', CONTROLLER_RESOURCE_TOOL_NAMES],
+  ['siteclient', CONTROLLER_SITE_CLIENT_TOOL_NAMES],
   ['introspection', CONTROLLER_INTROSPECTION_TOOL_NAMES],
   ['schedule', CONTROLLER_SCHEDULE_TOOL_NAMES],
   ['dweb', CONTROLLER_DWEB_TOOL_NAMES],

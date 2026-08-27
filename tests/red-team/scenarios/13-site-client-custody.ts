@@ -18,6 +18,7 @@ import {
 import { actorTierGate } from '../../../extension/peerd-runtime/tools/gates.js';
 import { siteClientReadTool } from '../../../extension/peerd-runtime/tools/defs/site-client-read.js';
 import { siteClientRunTool } from '../../../extension/peerd-runtime/tools/defs/site-client-run.js';
+import { executeSiteClientTool } from '../../helpers/site-client-tool.js';
 import { siteClientWriteTool } from '../../../extension/peerd-runtime/tools/defs/site-client-write.js';
 
 const foreignToolProbe = async (kind: 'read' | 'run' | 'write' | 'delete'): Promise<Probe> => {
@@ -41,14 +42,14 @@ const foreignToolProbe = async (kind: 'read' | 'run' | 'write' | 'delete'): Prom
     jsOffscreenClient: { execHeadless: async () => { effects.push('execute(B sentinel source)'); return {}; } },
   };
   const result = kind === 'read'
-    ? await siteClientReadTool.execute({ origin: 'https://b.test' }, ctx)
+    ? await executeSiteClientTool(siteClientReadTool, { origin: 'https://b.test' }, ctx)
     : kind === 'write'
-      ? await siteClientWriteTool.execute({
+      ? await executeSiteClientTool(siteClientWriteTool, {
         origin: 'https://b.test', summary: 'poison', auth: 'none', deriver: 'probe', body: 'return { poisoned: true };',
       }, ctx)
       : kind === 'delete'
-        ? await siteClientWriteTool.execute({ origin: 'https://b.test', body: '' }, ctx)
-      : await siteClientRunTool.execute({ origin: 'https://b.test', code: 'return client.sentinel' }, ctx);
+        ? await executeSiteClientTool(siteClientWriteTool, { origin: 'https://b.test', body: '' }, ctx)
+      : await executeSiteClientTool(siteClientRunTool, { origin: 'https://b.test', code: 'return client.sentinel' }, ctx);
   const deniedBeforeEffect = result.ok === false
     && result.error.startsWith('site_client_origin_refused')
     && effects.length === 0;
@@ -129,7 +130,7 @@ export const scenario: Scenario = {
 
     let releaseAllowed = true;
     let releaseChecks = 0;
-    const lateResult = await siteClientRunTool.execute({
+    const lateResult = await executeSiteClientTool(siteClientRunTool, {
       origin: 'https://a.test', code: 'return client.value',
     }, {
       session: { sessionId: 'bound-a' },
