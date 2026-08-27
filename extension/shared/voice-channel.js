@@ -9,6 +9,27 @@ export const VOICE_COMMANDS = Object.freeze([
 ]);
 const COMMANDS = new Set(VOICE_COMMANDS);
 
+/** @param {unknown} value @returns {Readonly<Record<string,any>>|null} */
+export const parseVoiceCommand = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const command = /** @type {Record<string,any>} */ (value);
+  if (!COMMANDS.has(command.type)) return null;
+  const keys = Object.keys(command).sort().join('\n');
+  if (command.type === 'voice/init'
+      && (keys !== 'engine\ntype\nvariant'
+        || typeof command.variant !== 'string' || command.variant.length > 32
+        || !['auto', 'web-speech', 'moonshine'].includes(command.engine))) return null;
+  if (command.type === 'voice/listen'
+      && (keys !== 'targetId\ntype'
+        || typeof command.targetId !== 'string' || command.targetId.length > 256)) return null;
+  if (command.type === 'voice/silence'
+      && (keys !== 'ms\ntype'
+        || !Number.isFinite(command.ms) || command.ms < 100 || command.ms > 30_000)) return null;
+  if ((command.type === 'voice/stop' || command.type === 'voice/teardown')
+      && keys !== 'type') return null;
+  return Object.freeze({ ...command });
+};
+
 /**
  * @param {unknown} value
  * @returns {Readonly<{type:string,protocol:number,requestId:string,command:any,lease:any}>|null}
@@ -23,21 +44,9 @@ export const parseVoiceChannelOffer = (value) => {
       || offer.requestId.length > 128 || !COMMANDS.has(offer.command?.type)
       || !offer.lease || typeof offer.lease !== 'object' || Array.isArray(offer.lease)
       || offer.lease.scope !== 'media-host') return null;
-  const command = offer.command;
-  const keys = Object.keys(command).sort().join('\n');
-  if (command.type === 'voice/init'
-      && (keys !== 'engine\ntype\nvariant'
-        || typeof command.variant !== 'string' || command.variant.length > 32
-        || !['auto', 'web-speech', 'moonshine'].includes(command.engine))) return null;
-  if (command.type === 'voice/listen'
-      && (keys !== 'targetId\ntype'
-        || typeof command.targetId !== 'string' || command.targetId.length > 256)) return null;
-  if (command.type === 'voice/silence'
-      && (keys !== 'ms\ntype'
-        || !Number.isFinite(command.ms) || command.ms < 100 || command.ms > 30_000)) return null;
-  if ((command.type === 'voice/stop' || command.type === 'voice/teardown')
-      && keys !== 'type') return null;
+  const command = parseVoiceCommand(offer.command);
+  if (!command) return null;
   return Object.freeze(/** @type {any} */ ({
-    ...offer, command: Object.freeze({ ...command }),
+    ...offer, command,
   }));
 };

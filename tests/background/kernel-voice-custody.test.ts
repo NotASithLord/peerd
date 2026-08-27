@@ -47,6 +47,34 @@ const chromeHarness = (
 };
 
 describe('kernel voice custody', () => {
+  test('refuses the same malformed command before either browser host is touched', async () => {
+    for (const firefox of [false, true]) {
+      let touches = 0;
+      const custody = createKernelVoiceCustody({
+        featureHost: { runtime: {
+          snapshot: () => ({ leases: {} }),
+          acquire: async () => { touches += 1; return { ok: true, lease }; },
+          revoke: async () => ({ ok: true }),
+        } },
+        offscreenUrl: 'chrome-extension://id/offscreen/offscreen.html',
+        firefox,
+        emit: () => {},
+        listWindowClients: async () => { touches += 1; return []; },
+        getFirefoxLifetime: () => ({
+          createHandle: () => ({
+            start: async () => { touches += 1; }, stop: async () => {},
+          }),
+        }),
+        createFirefoxHost: () => { touches += 1; return { handle: async () => ({ ok: true }) }; },
+      });
+      await expect(custody.routes['voice/init']({
+        type: 'voice/init', variant: 'base', engine: 'forged', extra: true,
+      })).resolves.toEqual({
+        ok: false, error: 'voice-command-invalid', outcomeKnown: true,
+      });
+      expect(touches).toBe(0);
+    }
+  });
   test('holds one durable Chrome media lease until exact teardown', async () => {
     const h = chromeHarness({ ok: true, engine: 'moonshine' });
     expect(await h.custody.routes['voice/init']({

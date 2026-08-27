@@ -36,6 +36,7 @@ import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js'
 import { runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
+import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -55,6 +56,12 @@ let handle = null;    // { base, room, close } once the lobby is joined
 let meshGeneration = 0;
 /** @type {string | null} */
 let activeFeatureHostEpoch = null;
+const reseedNotifier = createDwebReseedNotifier({
+  send: (notice) => browser.runtime.sendMessage(notice),
+  current: (notice) => custodyIntended
+    && activeFeatureHostEpoch === notice.hostEpoch
+    && meshGeneration === notice.meshGeneration,
+});
 const contentOwnership = createContentOwnership();
 const shareRollbacks = createShareRollbackStore();
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -543,12 +550,12 @@ const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ leas
     // Do not hold the feature-host start receipt behind reseeding. The kernel
     // finishes the dweb lease transition first, then keeps this exact runtime
     // message alive while it rebuilds durable shares.
-    void browser.runtime.sendMessage({
+    void reseedNotifier.notify({
       type: 'dweb/base-host/generation',
       hostEpoch: activeFeatureHostEpoch,
       meshGeneration,
       did: current.did ?? null,
-    }).catch(() => {});
+    });
     return current;
   } catch (cause) {
     activeFeatureHostEpoch = null;
@@ -565,6 +572,7 @@ export const startDwebFeatureLease = activateDwebFeatureLease;
 export const adoptDwebFeatureLease = activateDwebFeatureLease;
 
 export const stopDwebFeatureLease = async () => {
+  reseedNotifier.cancel();
   try {
     await selfHost.stop();
     await baseLifecycle.stop();

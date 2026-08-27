@@ -159,7 +159,9 @@ export const createKernelFirefoxUpdateCustody = ({
   return Object.freeze({
     start: checkNow,
     checkNow,
-    onUiConnect: async () => { await postPending(); await checkNow(); },
+    // why: checkNow owns both the fresh-feed and throttled-pending paths. A UI
+    // reconnect must not display a cached offer before a due feed can withdraw it.
+    onUiConnect: checkNow,
     onQuiet: async () => false,
     onSettingsChanged: checkNow,
   });

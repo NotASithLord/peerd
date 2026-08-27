@@ -151,6 +151,31 @@ describe('Firefox preview update custody', () => {
     });
   });
 
+  test('a due UI reconnect refreshes a withdrawn offer before it can notify', async () => {
+    const values = new Map<string, any>([[FIREFOX_UPDATE_CUSTODY_KEY, {
+      schema: 1, lastCheckAt: 10_000,
+      pending: { version: candidate.version, url: candidate.update_link },
+      notifiedVersion: null,
+    }]]);
+    let notices = 0;
+    const custody = createKernelFirefoxUpdateCustody({
+      runtime: { getManifest: () => manifest },
+      session: {
+        get: async (key: string) => structuredClone(values.get(key)),
+        set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+      },
+      fetchFn: async () => ({ ok: true, json: async () => ({ addons: {} }) }),
+      ready: async () => {}, isEnabled: () => true,
+      notify: () => { notices += 1; return true; },
+      now: () => 10_000 + 6 * 60 * 60 * 1000,
+    });
+    await custody.onUiConnect();
+    expect(notices).toBe(0);
+    expect(values.get(FIREFOX_UPDATE_CUSTODY_KEY)).toMatchObject({
+      pending: null, notifiedVersion: null,
+    });
+  });
+
   test('an equal feed candidate clears a stale newer pending offer', async () => {
     const values = new Map<string, any>([[FIREFOX_UPDATE_CUSTODY_KEY, {
       schema: 1, lastCheckAt: null,
