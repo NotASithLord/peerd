@@ -183,9 +183,13 @@ describe('release artifact JavaScript minification', () => {
     });
     expect(built.success).toBe(true);
     expect(built.outputs).toHaveLength(1);
-    const bundled = join(root, 'errors-bundle.js');
-    writeFileSync(bundled, await built.outputs[0].text());
-    const module = await import(`${pathToFileURL(bundled).href}?${crypto.randomUUID()}`);
+    // Bun snapshots test-file resolution before this generated output exists.
+    // Import the self-contained bundle bytes directly so the assertion tests
+    // identifier minification, not the runner's temporary-path cache.
+    const bundleSource = await built.outputs[0].text();
+    const module = await import(
+      `data:text/javascript;base64,${Buffer.from(bundleSource).toString('base64')}`,
+    );
     const expected = [
       'EgressDeniedError',
       'VaultLockedError',

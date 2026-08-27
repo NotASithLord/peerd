@@ -11,20 +11,19 @@ describe('packaged Chrome lifecycle fault lane', () => {
   const kernelSource = readFileSync(
     join(REPO_ROOT, 'extension/background/vault-kernel.js'), 'utf8',
   );
-  const dispatcherSource = readFileSync(
-    join(REPO_ROOT, 'extension/peerd-runtime/tools/dispatcher.js'), 'utf8',
+  const trackingSource = readFileSync(
+    join(REPO_ROOT, 'extension/peerd-runtime/lifecycle/dispatch-tracking.js'), 'utf8',
   );
 
   test('injects production lifecycle recovery before Store packaging', () => {
     const worker = injectLifecycleFaultKernel(kernelSource);
-    expect(assertLifecycleFaultExecutionSeam(dispatcherSource)).toBeUndefined();
+    expect(assertLifecycleFaultExecutionSeam(trackingSource)).toBeUndefined();
     expect(worker).toContain("'lifecycle-fault/dispatch': async (message)");
     expect(worker).toContain('await getControllerRelays()');
     expect(worker).toContain('message?.recoverOnly === true');
     expect(worker).toContain('context.lifecycle.beginTracking({');
-    expect(worker).toContain('execute: async (prepared) =>');
-    expect(worker).toContain('return prepared.tool.execute(prepared.args, prepared.execCtx)');
-    expect(worker.match(/prepared\.tool\.execute/g)).toHaveLength(1);
+    expect(worker).toContain("['script', 'E', callId]");
+    expect(worker).toContain("{ toolName: 'script', at: Date.now() }");
 
     const harness = readFileSync(
       join(REPO_ROOT, 'scripts/cdp/run-lifecycle-faults.mjs'), 'utf8',
@@ -53,11 +52,11 @@ describe('packaged Chrome lifecycle fault lane', () => {
       ),
     )).toThrow('source fault route seam changed');
     expect(() => assertLifecycleFaultExecutionSeam(
-      dispatcherSource.replace(
-        'const execution = await executePreparedToolCall(prepared, options.execute);',
+      trackingSource.replace(
+        'await operationLog.markDispatched(operationId);',
         '',
       ),
-    )).toThrow('source dispatcher execution seam changed');
+    )).toThrow('source lifecycle dispatch seam changed');
   });
 
   test('keeps source and Store lanes independently gated in CI', () => {
