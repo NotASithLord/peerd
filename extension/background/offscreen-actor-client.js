@@ -617,7 +617,10 @@ export const makeOffscreenActorClient = ({
     /** @type {unknown} */ result,
   ) => {
     if (entry.settling) return entry.settling;
-    if (entry.settlementResult === null) entry.settlementResult = structuredClone(result);
+    if (entry.hasSettlementResult !== true) {
+      entry.settlementResult = structuredClone(result);
+      entry.hasSettlementResult = true;
+    }
     const pending = (async () => {
       try {
         const settled = await /** @type {Function} */ (settleToolCall)(
@@ -952,7 +955,7 @@ export const makeOffscreenActorClient = ({
       const executionId = `ae-${now().toString(36)}-${++seq}`;
       grant.actorExecutions.set(executionId, {
         executionId,
-        open: true, settling: null, settlementResult: null,
+        open: true, settling: null, hasSettlementResult: false, settlementResult: undefined,
         effectEntered: false, unknownIrreversible: false,
         domainCalls: new Set(), domainState: {}, prepared,
         call: authorityCall, toolName: call.name, authorityClass: domain,
@@ -2231,7 +2234,7 @@ export const makeOffscreenActorClient = ({
         retryable: false,
         outcomeKind: 'host-lost',
       } : msg.result;
-      if (entry.settlementResult !== null
+      if (entry.hasSettlementResult === true
           && !sameClone(entry.settlementResult, executionResult)) {
         return { ok: false, error: 'actor/tool-settle: result mismatch', outcomeKnown: true };
       }
