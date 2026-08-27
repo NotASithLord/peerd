@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 import { createProductionFeatureLeaseRuntime } from '../../extension/background/feature-lease-runtime.js';
 import { FEATURE_LEASE_INTENT_KEY } from '../../extension/background/feature-lease-coordinator.js';
 import {
@@ -331,6 +332,37 @@ describe('production feature-lease runtime', () => {
     releaseOperation.resolve();
     expect(await bounded).toBe('settled');
     expect(env.host?.snapshot().leases).toHaveLength(1);
+  });
+
+  test('a timed-out reseed replaces the real feature host before ordinary publication', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
+    await runtime.ready;
+    await runtime.acquire('dweb', { reason: 'vault-resume' });
+    const oldHostEpoch = env.host?.hostEpoch;
+    const started = deferred();
+    const release = deferred();
+    const effects: string[] = [];
+    const fence = createDwebPublicationFence({
+      retireReseedHost: (reason) => runtime.retireActiveHost(reason),
+    });
+    const reseed = fence.runReseed(async (current) => {
+      started.resolve();
+      await release.promise;
+      if (current()) effects.push('stale-reseed');
+    }, { timeoutMs: 5 });
+    await started.promise;
+    const ordinary = fence.run(async () => {
+      effects.push(`ordinary:${env.host?.hostEpoch}`);
+    });
+    await expect(reseed).rejects.toMatchObject({ outcomeKnown: false });
+    await ordinary;
+    release.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(env.closeCount).toBe(1);
+    expect(env.starts).toEqual(['dweb', 'dweb']);
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+    expect(effects).toEqual([`ordinary:${env.host?.hostEpoch}`]);
   });
 
   test('a timed-out stop retires the poisoned physical host before lock or keyed reuse', async () => {

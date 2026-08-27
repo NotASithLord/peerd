@@ -145,7 +145,11 @@ export const createKernelEngineLive = async (deps) => {
     try { return await current; }
     finally { if (appLifecycleTails.get(appId) === current) appLifecycleTails.delete(appId); }
   };
-  const dwebPublicationFence = createDwebPublicationFence();
+  const dwebPublicationFence = createDwebPublicationFence({
+    // why: releasing a timed-out recovery lane is safe only after the physical
+    // host that may still be running it has been replaced.
+    retireReseedHost: (reason) => deps.retireHost(reason),
+  });
   const appQuiescence = createAppQuiescence({
     tracker: appTabTracker,
     withLifecycle: withAppLifecycle,

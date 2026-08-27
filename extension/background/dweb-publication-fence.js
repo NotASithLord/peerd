@@ -3,9 +3,40 @@
 
 import { withDeadline } from '../shared/cold-util.js';
 
-export const createDwebPublicationFence = () => {
+/**
+ * @param {{
+ *   retireReseedHost?:(reason:string)=>Promise<unknown>|unknown,
+ *   retirementTimeoutMs?:number,
+ *   setTimeoutFn?:typeof setTimeout,
+ *   clearTimeoutFn?:typeof clearTimeout,
+ * }} [options]
+ */
+export const createDwebPublicationFence = ({
+  retireReseedHost = undefined,
+  retirementTimeoutMs = 30_000,
+  setTimeoutFn: retirementSetTimeout = setTimeout,
+  clearTimeoutFn: retirementClearTimeout = clearTimeout,
+} = {}) => {
+  if ((retireReseedHost !== undefined && typeof retireReseedHost !== 'function')
+      || !Number.isFinite(retirementTimeoutMs) || retirementTimeoutMs <= 0) {
+    throw new TypeError('dweb-publication-fence-config-invalid');
+  }
   let generation = 0;
   let tail = Promise.resolve();
+  let hostRetirementRequired = false;
+
+  const retireUncertainHost = async () => {
+    if (!hostRetirementRequired) return;
+    if (!retireReseedHost) throw new Error('dweb-reseed-host-retirement-unavailable');
+    await withDeadline(
+      () => retireReseedHost('dweb-reseed-outcome-unknown'),
+      retirementTimeoutMs,
+      () => new Error('dweb-reseed-host-retirement-timeout'),
+      retirementSetTimeout,
+      retirementClearTimeout,
+    );
+    hostRetirementRequired = false;
+  };
 
   const invalidate = () => { generation += 1; return generation; };
 
@@ -16,7 +47,12 @@ export const createDwebPublicationFence = () => {
    */
   const run = (operation) => {
     const requestedGeneration = generation;
-    const execute = () => operation(() => requestedGeneration === generation);
+    const execute = async () => {
+      // why: an uncertain reseed may still be executing in the offscreen realm.
+      // No later mutation may enter until that physical realm is gone.
+      await retireUncertainHost();
+      return operation(() => requestedGeneration === generation);
+    };
     const result = tail.then(execute, execute);
     tail = result.then(() => undefined, () => undefined);
     return result;
@@ -41,15 +77,37 @@ export const createDwebPublicationFence = () => {
     }
     const requestedGeneration = generation;
     let admitted = false;
-    const execute = () => {
+    const execute = async () => {
+      await retireUncertainHost();
       admitted = true;
-      return withDeadline(
-        () => operation(() => admitted && requestedGeneration === generation),
-        timeoutMs,
-        () => new Error('dweb-reseed-publication-timeout'),
-        setTimeoutFn,
-        clearTimeoutFn,
-      ).finally(() => { admitted = false; });
+      try {
+        return await withDeadline(
+          () => operation(() => admitted && requestedGeneration === generation),
+          timeoutMs,
+          () => Object.assign(new Error('dweb-reseed-publication-timeout'), {
+            code: 'dweb-reseed-publication-timeout', outcomeKnown: false,
+          }),
+          setTimeoutFn,
+          clearTimeoutFn,
+        );
+      } catch (cause) {
+        if (/** @type {any} */ (cause)?.outcomeKnown === false) {
+          // Retire the current predicate synchronously, then destroy the realm
+          // before the shared tail releases. A failed retirement poisons the
+          // lane; the next caller retries it and cannot touch the old host.
+          admitted = false;
+          hostRetirementRequired = true;
+          try { await retireUncertainHost(); }
+          catch (retirementCause) {
+            throw new AggregateError(
+              [cause, retirementCause], 'dweb reseed host retirement failed',
+            );
+          }
+        }
+        throw cause;
+      } finally {
+        admitted = false;
+      }
     };
     const bounded = tail.then(execute, execute);
     // why: unlike an ordinary user mutation, recovery may release its lane at

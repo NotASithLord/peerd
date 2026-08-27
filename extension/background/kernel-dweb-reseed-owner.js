@@ -49,10 +49,16 @@ export const createKernelDwebReseedOwner = ({
     return Promise.race([sent, timedOut]).then((outcome) => {
       if (timer !== null) clearTimeoutFn(timer);
       if (/** @type {any} */ (outcome)?.timeout) {
-        return { ok: false, error: 'dweb-reseed-host-timeout' };
+        throw Object.assign(new Error('dweb-reseed-host-timeout'), {
+          code: 'dweb-reseed-host-timeout', outcomeKnown: false,
+        });
       }
       const cause = /** @type {any} */ (outcome)?.cause;
-      if (cause) throw cause;
+      if (cause) {
+        throw Object.assign(new Error('dweb-reseed-host-disconnected', { cause }), {
+          code: 'dweb-reseed-host-disconnected', outcomeKnown: false,
+        });
+      }
       return /** @type {any} */ (outcome)?.reply;
     });
   };
@@ -197,6 +203,16 @@ export const createKernelDwebReseedOwner = ({
               ...release,
             });
             if (!current() || !exact()) return 'retired';
+            if (reply?.outcomeKnown === false) {
+              throw Object.assign(new Error(reply.error ?? 'dweb-reseed-outcome-unknown'), {
+                code: reply.code ?? 'dweb-reseed-outcome-unknown', outcomeKnown: false,
+              });
+            }
+            if (typeof reply?.ok !== 'boolean') {
+              throw Object.assign(new Error('dweb-reseed-host-reply-invalid'), {
+                code: 'dweb-reseed-host-reply-invalid', outcomeKnown: false,
+              });
+            }
             return reply?.ok === true ? 'seeded' : 'failed';
           }), {
           timeoutMs: messageTimeoutMs * 2,
