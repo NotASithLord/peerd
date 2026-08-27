@@ -41,12 +41,12 @@ const makeSessions = () => {
 
 // why: the final architecture has no generic dispatcher. Exercise saturation
 // through a real controller-owned tool and its exact execution authority.
-const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('script')));
+const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('read_result')));
 
-const waitFor = async (predicate: () => boolean, timeoutMs = 5_000) => {
+const waitFor = async (predicate: () => boolean, timeoutMs = 5_000, detail = () => '') => {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error('timed out waiting for controller progress');
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for controller progress${detail()}`);
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
 };
@@ -74,7 +74,7 @@ const connectHarness = async () => {
         mode: 'execute', custody: prepared, args: prepared.args,
         projection: {
           sessionId: ctx.session?.sessionId,
-          sessionKind: ctx.session?.kind,
+          runtimeCapabilities: ctx.runtimeCapabilities,
         },
         manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
       } : { mode: 'result', result: prepared };
@@ -131,22 +131,19 @@ const makeContext = ({
   hooks: [],
   permission: { mode: 'act', confirmActions: false },
   toolDispatch,
-  jsOffscreenClient: {
-    execHeadless: async (code: string, options: any) => {
-      const effect = Promise.resolve(toolDispatch({ id: code, name: 'script', args: { code } }));
-      let onAbort = () => {};
-      const aborted = new Promise((_, reject) => {
-        onAbort = () => reject(new DOMException('headless execution host lost', 'AbortError'));
-        if (options.signal?.aborted) onAbort();
-        else options.signal?.addEventListener('abort', onAbort, { once: true });
-      });
-      try {
-        const result: any = await Promise.race([effect, aborted]);
-        return { durationMs: 1, value: result?.content };
-      } finally {
-        options.signal?.removeEventListener?.('abort', onAbort);
-      }
+  // why: exercise the real read-only introspection authority instead of
+  // forging a read classification for the side-effecting script tool.
+  resultStore: {
+    get: async (key: string) => {
+      await toolDispatch({ id: key, name: 'read_result', args: { key } });
+      return {
+        key, ownerSessionId: 'session-backpressure', producer: 'script',
+        text: key, fenced: false, originLabel: 'script',
+      };
     },
+  },
+  actorIsolation: {
+    status: 'available', host: 'background-page-worker', reason: null, retryable: false,
   },
   getSystemPrompt: async () => 'PINNED-SYSTEM',
   appendAudit: async () => {},
@@ -165,7 +162,7 @@ const makeContext = ({
     for (let index = 0; index < toolCount; index += 1) {
       const id = `read-${index}`;
       yield { type: 'tool-use-start', id, name: descriptor.name };
-      yield { type: 'tool-use-delta', id, partialJson: `{"code":"${id}"}` };
+      yield { type: 'tool-use-delta', id, partialJson: `{"key":"${id}"}` };
       yield { type: 'tool-use-stop', id };
     }
     yield { type: 'message-stop', stopReason: 'tool_use' };
@@ -194,7 +191,7 @@ describe('production direct-controller tool backpressure', () => {
       signal: abort.signal, toolCount: 130, toolDispatch,
     })));
     try {
-      await waitFor(() => started.length === 64);
+      await waitFor(() => started.length >= 64, 5_000, () => ` (started=${started.length})`);
       expect(started).toEqual(Array.from({ length: 64 }, (_, index) => `read-${index}`));
       for (let index = 0; index < 64; index += 1) releases.get(`read-${index}`)?.();
 
