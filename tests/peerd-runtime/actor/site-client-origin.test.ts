@@ -13,6 +13,7 @@ import { isKnownIdpHost } from '../../../extension/peerd-runtime/actor/idp-regis
 import { actorTierGate, exposureGate } from '../../../extension/peerd-runtime/tools/gates.js';
 import { siteClientReadTool } from '../../../extension/peerd-runtime/tools/defs/site-client-read.js';
 import { siteClientRunTool } from '../../../extension/peerd-runtime/tools/defs/site-client-run.js';
+import { executeSiteClientTool } from '../../helpers/site-client-tool.js';
 import { siteClientWriteTool } from '../../../extension/peerd-runtime/tools/defs/site-client-write.js';
 
 describe('durable site-client custody policy', () => {
@@ -276,9 +277,9 @@ describe('site-client custody walls', () => {
     };
 
     const results = await Promise.all([
-      siteClientReadTool.execute({ origin: 'https://b.test' }, base),
-      siteClientWriteTool.execute({ origin: 'https://b.test', body: '' }, base),
-      siteClientRunTool.execute({ origin: 'https://b.test', code: 'return client.steal' }, base),
+      executeSiteClientTool(siteClientReadTool, { origin: 'https://b.test' }, base),
+      executeSiteClientTool(siteClientWriteTool, { origin: 'https://b.test', body: '' }, base),
+      executeSiteClientTool(siteClientRunTool, { origin: 'https://b.test', code: 'return client.steal' }, base),
     ]);
     expect(results.every((result) => result.ok === false && result.error.startsWith('site_client_origin_refused'))).toBe(true);
     expect(effects).toEqual([]);
@@ -300,7 +301,7 @@ describe('site-client custody walls', () => {
 
   test('a post-gate argument rewrite is still checked at execute time', async () => {
     let reads = 0;
-    const result = await siteClientReadTool.execute({ origin: 'https://b.test' }, {
+    const result = await executeSiteClientTool(siteClientReadTool, { origin: 'https://b.test' }, {
       canUseSiteClientOrigin: (origin: string) => origin === 'https://a.test',
       authorizeSiteClientOrigin: async (origin: string) => origin === 'https://a.test',
       siteClients: { get: async () => { reads += 1; return null; } },
@@ -312,7 +313,7 @@ describe('site-client custody walls', () => {
   test('custody loss during IDB keeps read bytes and run code sealed', async () => {
     let readAllowed = true;
     let readChecks = 0;
-    const read = await siteClientReadTool.execute({ origin: 'https://a.test' }, {
+    const read = await executeSiteClientTool(siteClientReadTool, { origin: 'https://a.test' }, {
       authorizeSiteClientOrigin: async () => { readChecks += 1; return readAllowed; },
       siteClients: {
         get: async () => {
@@ -333,7 +334,7 @@ describe('site-client custody walls', () => {
 
     let runAllowed = true;
     let executed = 0;
-    const run = await siteClientRunTool.execute({ origin: 'https://a.test', code: 'return 1' }, {
+    const run = await executeSiteClientTool(siteClientRunTool, { origin: 'https://a.test', code: 'return 1' }, {
       session: { sessionId: 'bound-a' },
       authorizeSiteClientOrigin: async () => runAllowed,
       siteClients: {
@@ -350,7 +351,7 @@ describe('site-client custody walls', () => {
     let allowed = true;
     let checks = 0;
     let puts = 0;
-    const result = await siteClientWriteTool.execute({
+    const result = await executeSiteClientTool(siteClientWriteTool, {
       origin: 'https://a.test', summary: 'change', endpoints: [], auth: 'none',
       deriver: 'probe', body: 'return { changed: true };',
     }, {
@@ -370,7 +371,7 @@ describe('site-client custody walls', () => {
   test('custody loss during a run suppresses its output and staleness mutation', async () => {
     let allowed = true;
     let recordRuns = 0;
-    const result = await siteClientRunTool.execute({ origin: 'https://a.test', code: 'return client.value' }, {
+    const result = await executeSiteClientTool(siteClientRunTool, { origin: 'https://a.test', code: 'return client.value' }, {
       session: { sessionId: 'bound-a' },
       authorizeSiteClientOrigin: async () => allowed,
       siteClients: {
@@ -391,7 +392,7 @@ describe('site-client custody walls', () => {
     for (const workerFailure of [false, true]) {
       let allowed = true;
       let checks = 0;
-      const result = await siteClientRunTool.execute({ origin: 'https://a.test', code: 'return client.value' }, {
+      const result = await executeSiteClientTool(siteClientRunTool, { origin: 'https://a.test', code: 'return client.value' }, {
         session: { sessionId: 'bound-a' },
         authorizeSiteClientOrigin: async () => { checks += 1; return allowed; },
         siteClients: {
@@ -415,7 +416,7 @@ describe('site-client custody walls', () => {
 
   test('own-origin read normalizes before authorization and returns the fenced record', async () => {
     const authorized: string[] = [];
-    const result = await siteClientReadTool.execute({
+    const result = await executeSiteClientTool(siteClientReadTool, {
       origin: 'HTTPS://A.TEST:443/path?ignored=1',
     }, {
       canUseSiteClientOrigin: () => true,
@@ -460,17 +461,17 @@ describe('site-client custody walls', () => {
       },
     };
 
-    const created = await siteClientWriteTool.execute({
+    const created = await executeSiteClientTool(siteClientWriteTool, {
       origin: 'https://a.test', summary: 'v1', endpoints: [], auth: 'none',
       deriver: 'probe', body: 'return { version: 1 };',
     }, ctx);
     expect(created.ok).toBe(true);
-    const overwritten = await siteClientWriteTool.execute({
+    const overwritten = await executeSiteClientTool(siteClientWriteTool, {
       origin: 'https://a.test', summary: 'v2', body: 'return { version: 2 };',
     }, ctx);
     expect(overwritten.ok).toBe(true);
     expect(record.meta.summary).toBe('v2');
-    const deleted = await siteClientWriteTool.execute({ origin: 'https://a.test', body: '' }, ctx);
+    const deleted = await executeSiteClientTool(siteClientWriteTool, { origin: 'https://a.test', body: '' }, ctx);
     expect(deleted.ok).toBe(true);
     expect(record).toBeNull();
     expect(operations).toEqual(['confirm', 'put', 'confirm', 'put', 'confirm', 'remove']);

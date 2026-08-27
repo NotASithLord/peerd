@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { siteClientRunTool } from '../../../extension/peerd-runtime/tools/defs/site-client-run.js';
+import { executeSiteClientTool } from '../../helpers/site-client-tool.js';
 
 describe('site_client_run code-run custody', () => {
   test('mints one owner-bound live run and threads it through the pinned site job', async () => {
     let options: any = null;
     let registered: any = null;
     let released = '';
-    const result = await siteClientRunTool.execute({
+    const result = await executeSiteClientTool(siteClientRunTool, {
       origin: 'https://api.example.com', code: 'return await client.list()',
     }, {
       session: { sessionId: 'api-actor-1' },
@@ -36,7 +37,7 @@ describe('site_client_run code-run custody', () => {
 
   test('a pre-aborted turn never starts a worker', async () => {
     let started = false;
-    const result = await siteClientRunTool.execute({ origin: 'https://api.example.com', code: 'return 1' }, {
+    const result = await executeSiteClientTool(siteClientRunTool, { origin: 'https://api.example.com', code: 'return 1' }, {
       session: { sessionId: 'api-actor-1' },
       canUseSiteClientOrigin: () => true,
       authorizeSiteClientOrigin: async () => true,
@@ -57,7 +58,7 @@ describe('site_client_run code-run custody', () => {
     let registered = false;
     let started = false;
     const controller = new AbortController();
-    const pending = siteClientRunTool.execute({
+    const pending = executeSiteClientTool(siteClientRunTool, {
       origin: 'https://api.example.com', code: 'return 1',
     }, {
       session: { sessionId: 'api-actor-1' },
@@ -92,7 +93,7 @@ describe('site_client_run code-run custody', () => {
     let markStarted = () => {};
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const running = new Promise((_resolve, reject) => { rejectRun = reject; });
-    const pending = siteClientRunTool.execute({
+    const pending = executeSiteClientTool(siteClientRunTool, {
       origin: 'https://api.example.com', code: 'return await client.list()',
     }, {
       session: { sessionId: 'api-actor-1' },

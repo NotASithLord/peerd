@@ -16,6 +16,7 @@ import {
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
   controllerHostsResourceTool,
+  controllerHostsSiteClientTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
@@ -30,6 +31,7 @@ import {
   executeControllerPersistenceTool,
   executeControllerPageTool,
   executeControllerResourceTool,
+  executeControllerSiteClientTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
@@ -163,6 +165,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'resource-extract-document-response'
       || m.type === 'resource-spill-result-response'
       || m.type === 'resource-read-result-response'
+      || m.type === 'site-client-read-response'
+      || m.type === 'site-client-run-response'
+      || m.type === 'site-client-commit-response'
+      || m.type === 'site-client-capture-start-response'
+      || m.type === 'site-client-capture-stop-response'
       || m.type === 'introspection-actor-roster-response'
       || m.type === 'introspection-provider-posture-response'
       || m.type === 'introspection-storage-snapshot-response'
@@ -657,6 +664,23 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           });
           result = await executeControllerResourceTool(
             prepared.toolName, prepared.args, resourceAuthority, prepared.projection,
+          );
+        } else if (controllerHostsSiteClientTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
+            authorityValue(actorToolRequest(type, { executionId, ...value }));
+          const siteClientAuthority = Object.freeze({
+            readStoredClient: (/** @type {string} */ origin) =>
+              request('site-client-read-request', { origin }),
+            runStoredClient: (/** @type {string} */ origin, /** @type {string} */ code,
+              /** @type {number} */ timeoutMs) =>
+              request('site-client-run-request', { origin, code, timeoutMs }),
+            commitConfirmedClient: (/** @type {string} */ origin) =>
+              request('site-client-commit-request', { origin }),
+            startOwnedCapture: () => request('site-client-capture-start-request'),
+            stopOwnedCapture: () => request('site-client-capture-stop-request'),
+          });
+          result = await executeControllerSiteClientTool(
+            prepared.toolName, prepared.args, siteClientAuthority,
           );
         } else if (controllerHostsIntrospectionTool(prepared.toolName)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>

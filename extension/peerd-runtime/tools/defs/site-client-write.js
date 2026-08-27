@@ -18,7 +18,6 @@ import {
   normalizeSiteOrigin,
   buildClientWriteProposal,
 } from '../../site-clients/core.js';
-import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const siteClientWriteTool = composeTool("site_client_write", {
@@ -32,22 +31,21 @@ export const siteClientWriteTool = composeTool("site_client_write", {
         outcomeKind: 'pre-effect-failure',
       };
     }
-    const refusal = await siteClientOriginRefusal(origin, ctx);
-    if (refusal) return refusal;
-    const store = /** @type {import('../../site-clients/store.js').SiteClientStore | undefined} */ (
-      /** @type {any} */ (ctx).siteClients);
-    if (!store) {
+    const authority = /** @type {{readStoredClient?:(origin:string)=>Promise<{ok:boolean,record?:any,error?:string,outcomeKind?:string}>,commitConfirmedClient?:(origin:string)=>Promise<{ok:boolean,op?:string,meta?:any,error?:string,content?:string,outcomeKind?:string}>}|undefined} */ (
+      /** @type {any} */ (ctx).siteClientAuthority);
+    if (!authority?.readStoredClient || !authority.commitConfirmedClient) {
       return { ok: false, error: 'site_clients_unavailable', outcomeKind: 'pre-effect-failure' };
     }
     if (args?.body !== undefined && typeof args.body !== 'string') {
       return { ok: false, error: 'body_must_be_string', outcomeKind: 'pre-effect-failure' };
     }
 
-    const prior = await store.get(origin).catch(() => null);
-    // The prior-record read yielded. Do not use its bytes to build a prompt if
-    // the actor lost custody during IDB.
-    const postReadRefusal = await siteClientOriginRefusal(origin, ctx);
-    if (postReadRefusal) return postReadRefusal;
+    const read = await authority.readStoredClient(origin);
+    if (read?.ok !== true) return {
+      ok: false, error: read?.error ?? 'site_clients_unavailable',
+      outcomeKind: read?.outcomeKind ?? 'pre-effect-failure',
+    };
+    const prior = read.record ?? null;
     /** @type {ReturnType<typeof buildClientWriteProposal>} */
     let proposal;
     try {
@@ -73,70 +71,22 @@ export const siteClientWriteTool = composeTool("site_client_write", {
 
     if (proposal.op === 'noop') return { ok: true, content: 'no change (identical to the stored client).' };
 
-    // Confirm round-trip — the DOSSIER + summarized deltas are the consent surface.
-    const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
-      /** @type {unknown} */ (ctx.confirm));
-    if (!confirmAny) {
-      return {
-        ok: false,
-        error: 'declined',
-        content: 'No confirmation channel available for a site-client write.',
-        outcomeKind: 'pre-effect-failure',
-      };
+    const committed = await authority.commitConfirmedClient(origin);
+    if (committed?.ok !== true) return {
+      ok: false, error: committed?.error ?? 'site_client_write_failed',
+      ...(committed?.content ? { content: committed.content } : {}),
+      ...(committed?.outcomeKind ? { outcomeKind: committed.outcomeKind } : {}),
+    };
+    if (committed.op === 'delete') {
+      return { ok: true, content: `deleted site client for ${origin}` };
     }
-    const ans = await confirmAny({
-      tool: 'site_client_write',
-      sideEffect: 'write',
-      kind: 'site_client_write',
-      // The proposal carries the full module `body` + `prevBody` + dossier so the
-      // confirm UI can render the executable code (not just this one-line summary) —
-      // the code is the dangerous half, so the summary NAMES it as runnable JS rather
-      // than reading like a benign prose edit.
-      proposal,
-      summary: `${proposal.op} site client ${origin} — persists ${proposal.bodyBytesAfter}B of `
-        + `RUNNABLE JS (was ${proposal.bodyBytesBefore}B) + ${proposal.dossier.endpoints.length} endpoint(s) `
-        + `(+${proposal.endpointDelta.added}/−${proposal.endpointDelta.removed}). Review the module before allowing.`,
-      // Name the origin on the card: a confirm that lists no origin cannot be
-      // audited against one, and this write persists runnable JS for that site.
-      origins: [origin],
-      sessionId: ctx.session?.sessionId ?? null,
-    }, ctx.abortSignal);
-    if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
-      return {
-        ok: false,
-        error: 'site_client_write_rejected',
-        content: 'User declined the site-client write.',
-        outcomeKind: 'pre-effect-failure',
-      };
-    }
-    if (ctx.abortSignal?.aborted) {
-      return {
-        ok: false,
-        error: 'site_client_write_aborted: the turn stopped during confirmation',
-        outcomeKind: 'pre-effect-failure',
-      };
-    }
-    // Confirmation is intentionally unbounded human time. Reauthorize after it
-    // and immediately before the mutation; approval is not durable custody.
-    const postConfirmRefusal = await siteClientOriginRefusal(origin, ctx);
-    if (postConfirmRefusal) return postConfirmRefusal;
-    if (ctx.abortSignal?.aborted) {
-      return {
-        ok: false,
-        error: 'site_client_write_aborted: the turn stopped before mutation',
-        outcomeKind: 'pre-effect-failure',
-      };
-    }
-
-    try {
-      if (proposal.op === 'delete') {
-        await store.remove(origin);
-        return { ok: true, content: `deleted site client for ${origin}` };
-      }
-      const meta = await store.put({ dossier: proposal.dossier, body: proposal.body });
-      return { ok: true, content: JSON.stringify({ op: proposal.op, origin: meta.origin, endpoints: meta.endpoints.length, sizeBytes: meta.sizeBytes }, null, 2) };
-    } catch (e) {
-      return { ok: false, error: `site_client_write_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
-    }
+    const meta = committed.meta;
+    return {
+      ok: true,
+      content: JSON.stringify({
+        op: committed.op, origin: meta.origin,
+        endpoints: meta.endpoints.length, sizeBytes: meta.sizeBytes,
+      }, null, 2),
+    };
   },
 });

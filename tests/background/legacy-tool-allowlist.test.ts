@@ -14,10 +14,6 @@ describe('temporary legacy tool strangler', () => {
     expect(Object.isFrozen(LEGACY_TOOL_ALLOWLIST)).toBe(true);
     expect(new Set(LEGACY_TOOL_ALLOWLIST).size).toBe(LEGACY_TOOL_ALLOWLIST.length);
     expect(LEGACY_TOOL_ALLOWLIST).toEqual([
-      'site_client_run',
-      'site_client_read',
-      'site_client_write',
-      'site_capture',
       'sandbox_create',
       'script',
       'edit_file',

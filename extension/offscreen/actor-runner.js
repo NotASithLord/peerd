@@ -1190,6 +1190,44 @@ export const runActor = async (job, {
             }));
           return;
         }
+        if (m.type === 'site-client-read-request') {
+          await relayExactToolMessage(m, 'site-client-read-response', () =>
+            sendToSW('site-client/read', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              origin: m.origin,
+            }));
+          return;
+        }
+        if (m.type === 'site-client-run-request') {
+          await relayExactToolMessage(m, 'site-client-run-response', () =>
+            sendToSW('site-client/run', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              origin: m.origin, code: m.code, timeoutMs: m.timeoutMs,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'site-client-commit-request') {
+          await relayExactToolMessage(m, 'site-client-commit-response', () =>
+            sendToSW('site-client/commit', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              origin: m.origin,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'site-client-capture-start-request') {
+          await relayExactToolMessage(m, 'site-client-capture-start-response', () =>
+            sendToSW('site-client/capture-start', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'site-client-capture-stop-request') {
+          await relayExactToolMessage(m, 'site-client-capture-stop-response', () =>
+            sendToSW('site-client/capture-stop', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'introspection-actor-roster-request') {
           await relayExactToolMessage(m, 'introspection-actor-roster-response', () =>
             sendToSW('introspection/actor-roster', {

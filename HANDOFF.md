@@ -53,12 +53,12 @@ The current product-surface deletion checkpoint does all of the following:
 - removes the old disposable web-cache object store during the normal schema
   upgrade.
 
-The public catalog contains 75 tools. Document/web/result semantics now run in
-the sealed controller through exact constrained-web, document-extraction and
-opaque-result operations. The temporary legacy set is the
+The public catalog contains 75 tools. Document/web/result and site-client
+semantics now run in the sealed controller through exact constrained-web,
+document-extraction, opaque-result, origin-owned store, confirmed mutation,
+pinned headless-run and document-capture operations. The temporary legacy set is the
 exact list in `extension/shared/legacy-tool-allowlist.js`:
 
-- `site_client_run`, `site_client_read`, `site_client_write`, `site_capture`;
 - `sandbox_create`, `script`, `edit_file`, `a2a_run`.
 
 The site-client subsystem is deliberately retained. It is Web-actor-only:
@@ -81,20 +81,22 @@ There is no substitute arbitrary byte target.
 ## Verification baseline
 
 The current Store-Chrome artifact packages and passes Store posture at
-1,258,927 bundled service-worker bytes, 419 staged inputs and a 347,603-byte
-release-minified cold graph. The preceding checkpoint was 1,263,238 bytes,
-425 inputs and the same cold-graph size. These values are observations, not
+1,258,793 bundled service-worker bytes, 415 staged inputs and a 347,603-byte
+release-minified cold graph. The preceding checkpoint was 1,258,927 bytes,
+419 inputs and the same cold-graph size. These values are observations, not
 goals.
 
 Static typecheck, lint, checked-file coverage, dweb boundary, controller
 identity, ownership boundaries and focused security tests pass. The full Bun
-suite passes 7,407 of 7,409 tests. The two inherited failures are the
+suite passes 7,411 of 7,413 tests. The two inherited failures are the
 session-support loss-accounting test and the typed-error minification harness
 that cannot import its temporary bundle. The in-browser suite passes 940 of
 942 and reproduces its two inherited UI-copy assertions. The functional E2E
 harness still refuses `settings/update` with the inherited
 `kernel-demand-routes-load-failed` startup result. Do not treat these debts as
-new regressions, and do not add new failures.
+new regressions, and do not add new failures. The extension artifacts package;
+the separate web target reproduces its inherited stale activity-overlay browser
+touch ledger at the preceding checkpoint.
 
 ## Remaining deletion sequence
 
@@ -108,10 +110,6 @@ legacy name/import in the same commit and keeps one execution path:
    engine file mutations, confirmation, audit and outcome custody.
 3. Mesh execution: `a2a_run`. Authority retains A2A grants, mesh identity,
    confirmation, lifecycle and settlement.
-4. Site clients: all four retained site-client tools move together while the
-   service worker keeps the exact origin-pinned store/runtime/capture effects
-   and every Web-actor restriction above.
-
 When the list reaches zero, physically delete
 `legacy-tool-allowlist.js`, `legacy-implementations.js`, `turn.tool.dispatch`,
 service-worker tool registration/execution and all strangler tests/docs. Do not

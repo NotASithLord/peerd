@@ -59,6 +59,10 @@ export { assembleDebugBundle, childSessionIdsOf } from './observability/debug-bu
 export { classifyFailure } from './observability/failure-classify.js';
 export { resolveRuntimeCapabilities } from './runtime-capabilities.js';
 export { createSiteClientStore } from './site-clients/store.js';
+export {
+  buildClientWriteProposal,
+  normalizeSiteOrigin,
+} from './site-clients/core.js';
 export { createSkillStore } from './skills/store.js';
 export { isAddressableBrowserTab } from './tools/browser-automation-policy.js';
 export { isDenylistedTab } from './browser-authority/dom-helpers.js';

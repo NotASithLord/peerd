@@ -22,6 +22,7 @@ import { bindAppToolAuthority } from './app-tool-authority.js';
 import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { bindPageToolAuthority } from './page-tool-authority.js';
 import { bindResourceToolAuthority } from './resource-tool-authority.js';
+import { bindSiteClientToolAuthority } from './site-client-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
@@ -602,6 +603,18 @@ export const makeControllerTurnBridge = ({
     const entry = domainExecutionEntry(run, value, 'resource', fields);
     if (!entry) return null;
     bindResourceToolAuthority(entry.domainState, {
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const siteClientExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'siteclient', fields);
+    if (!entry) return null;
+    bindSiteClientToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -1670,6 +1683,40 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('result read authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.readResult(value.key));
+        }
+        case 'turn.site-client.read': {
+          const entry = siteClientExecutionEntry(run, value, ['origin']);
+          if (!entry) return failed('site-client read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readStoredClient(value.origin));
+        }
+        case 'turn.site-client.run': {
+          const entry = siteClientExecutionEntry(
+            run, value, ['origin', 'code', 'timeoutMs'],
+          );
+          if (!entry) return failed('site-client run authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.runStoredClient(
+              value.origin, value.code, value.timeoutMs,
+            ));
+        }
+        case 'turn.site-client.commit': {
+          const entry = siteClientExecutionEntry(run, value, ['origin']);
+          if (!entry) return failed('site-client write authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.commitConfirmedClient(value.origin));
+        }
+        case 'turn.site-client.capture-start': {
+          const entry = siteClientExecutionEntry(run, value, []);
+          if (!entry) return failed('site capture start authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.startOwnedCapture());
+        }
+        case 'turn.site-client.capture-stop': {
+          const entry = siteClientExecutionEntry(run, value, []);
+          if (!entry) return failed('site capture stop authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.stopOwnedCapture());
         }
         case 'turn.introspection.actor-roster': {
           const entry = introspectionExecutionEntry(run, value, []);

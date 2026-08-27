@@ -10,27 +10,26 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { normalizeSiteOrigin, stalenessHeader } from '../../site-clients/core.js';
-import { siteClientOriginRefusal } from './site-client-origin.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const siteClientReadTool = composeTool("site_client_read", {
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
     if (!origin) return { ok: false, error: 'bad_origin: expected a public HTTP(S) site origin' };
-    const refusal = await siteClientOriginRefusal(origin, ctx);
-    if (refusal) return refusal;
-    const store = /** @type {import('../../site-clients/store.js').SiteClientStore | undefined} */ (
-      /** @type {any} */ (ctx).siteClients);
-    if (!store) return { ok: false, error: 'site_clients_unavailable' };
-    const record = await store.get(origin).catch(() => null);
-    // IDB yielded after the first check. Re-read live custody before record
-    // bytes cross into the model result; a tab may have moved meanwhile.
-    const postReadRefusal = await siteClientOriginRefusal(origin, ctx);
-    if (postReadRefusal) return postReadRefusal;
+    const authority = /** @type {{readStoredClient?:(origin:string)=>Promise<{ok:boolean,record?:any,error?:string,outcomeKind?:string}>}|undefined} */ (
+      /** @type {any} */ (ctx).siteClientAuthority);
+    if (!authority?.readStoredClient) return { ok: false, error: 'site_clients_unavailable' };
+    const read = await authority.readStoredClient(origin);
+    if (read?.ok !== true) return {
+      ok: false, error: read?.error ?? 'site_clients_unavailable',
+      ...(read?.outcomeKind ? { outcomeKind: read.outcomeKind } : {}),
+    };
+    const record = read.record;
     if (!record) return { ok: false, error: `no_site_client: none stored for ${origin}` };
     const header = stalenessHeader(record.meta);
     const endpoints = record.meta.endpoints?.length
-      ? record.meta.endpoints.map((e) => `  ${e.method} ${e.path}${e.note ? ` — ${e.note}` : ''}`).join('\n')
+      ? record.meta.endpoints.map((/** @type {{method:string,path:string,note?:string}} */ e) =>
+        `  ${e.method} ${e.path}${e.note ? ` — ${e.note}` : ''}`).join('\n')
       : '  (none recorded)';
     const fenced = wrapUntrusted({
       origin: `site-client(${origin})`,

@@ -36,7 +36,7 @@ const makeSessions = () => {
 
 // why: backpressure belongs to the frozen legacy lane until that lane is
 // deleted, so the fixture must not silently follow a controller-owned tool.
-const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('site_client_read')));
+const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('script')));
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;

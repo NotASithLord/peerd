@@ -13,6 +13,7 @@ import {
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
   controllerHostsResourceTool,
+  controllerHostsSiteClientTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
@@ -28,6 +29,7 @@ import {
   executeControllerPersistenceTool,
   executeControllerPageTool,
   executeControllerResourceTool,
+  executeControllerSiteClientTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
@@ -739,6 +741,30 @@ const runControllerTurnWith = async (payload, options) => {
             });
             const value = await executeControllerResourceTool(
               request.toolName, request.args, resourceAuthority, request.projection,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsSiteClientTool(request.toolName)) {
+            const siteClientAuthority = Object.freeze({
+              readStoredClient: (/** @type {string} */ origin) =>
+                rpc('turn.site-client.read', { ...binding, origin }),
+              runStoredClient: (/** @type {string} */ origin, /** @type {string} */ code,
+                /** @type {number} */ timeoutMs) =>
+                rpc('turn.site-client.run', { ...binding, origin, code, timeoutMs }),
+              commitConfirmedClient: (/** @type {string} */ origin) =>
+                rpc('turn.site-client.commit', { ...binding, origin }),
+              startOwnedCapture: () => rpc('turn.site-client.capture-start', binding),
+              stopOwnedCapture: () => rpc('turn.site-client.capture-stop', binding),
+            });
+            const value = await executeControllerSiteClientTool(
+              request.toolName, request.args, siteClientAuthority,
             );
             execution = {
               protocol: request.protocol,

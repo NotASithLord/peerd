@@ -28,6 +28,7 @@ import { bindAppToolAuthority } from './app-tool-authority.js';
 import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { bindPageToolAuthority } from './page-tool-authority.js';
 import { bindResourceToolAuthority } from './resource-tool-authority.js';
+import { bindSiteClientToolAuthority } from './site-client-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
@@ -486,6 +487,19 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'resource', fields);
     if (!entry) return null;
     bindResourceToolAuthority(entry.domainState, {
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
+    });
+    return entry;
+  };
+  const siteClientEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'siteclient', fields);
+    if (!entry) return null;
+    bindSiteClientToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
@@ -1921,6 +1935,38 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'resource/read-result: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'resource/read-result', 'read', () =>
         entry.domainState.authority.readResult(msg.key));
+    },
+    'site-client/read': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, ['origin']);
+      if (!entry) return { ok: false, error: 'site-client/read: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'site-client/read', 'read', () =>
+        entry.domainState.authority.readStoredClient(msg.origin));
+    },
+    'site-client/run': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = siteClientEntry(
+        grantFor(msg, sender, boundGrant), msg, ['origin', 'code', 'timeoutMs'],
+      );
+      if (!entry) return { ok: false, error: 'site-client/run: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'site-client/run', 'resource', () =>
+        entry.domainState.authority.runStoredClient(msg.origin, msg.code, msg.timeoutMs));
+    },
+    'site-client/commit': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, ['origin']);
+      if (!entry) return { ok: false, error: 'site-client/commit: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'site-client/commit', 'commit', () =>
+        entry.domainState.authority.commitConfirmedClient(msg.origin));
+    },
+    'site-client/capture-start': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
+      if (!entry) return { ok: false, error: 'site-client/capture-start: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'site-client/capture-start', 'resource', () =>
+        entry.domainState.authority.startOwnedCapture());
+    },
+    'site-client/capture-stop': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
+      if (!entry) return { ok: false, error: 'site-client/capture-stop: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'site-client/capture-stop', 'resource', () =>
+        entry.domainState.authority.stopOwnedCapture());
     },
     'introspection/actor-roster': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
