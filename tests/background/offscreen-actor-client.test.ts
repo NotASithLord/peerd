@@ -439,6 +439,109 @@ describe('isolated exact tool authority', () => {
     expect(settlements).toBe(2);
   });
 
+  test('closes direct effect authority before settlement and only retries its frozen result', async () => {
+    let markStarted!: () => void;
+    let releaseFirst!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let settlements = 0;
+    let cancellations = 0;
+    const { client, during } = clientWithRelay({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorAuthority: {
+          cancelTask: async () => { cancellations += 1; return { ok: true }; },
+        },
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => {
+        settlements += 1;
+        if (settlements === 1) {
+          markStarted();
+          await firstGate;
+          throw new Error('temporary settlement failure');
+        }
+        return execution.result;
+      },
+    });
+    const result = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'settlement-closes-effects', name: 'actor_cancel', args: { taskId: 'task-1' } },
+      }, OFFSCREEN);
+      const frozen = { ok: false, error: 'known failure' };
+      const settling = client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId, result: frozen,
+      }, OFFSCREEN);
+      await started;
+      const duringSettlement = await client.routes['actor/task-cancel']({
+        relayToken, executionId: prepared.executionId, taskId: 'task-1',
+      }, OFFSCREEN);
+      releaseFirst();
+      const first = await settling;
+      const afterFailure = await client.routes['actor/task-cancel']({
+        relayToken, executionId: prepared.executionId, taskId: 'task-1',
+      }, OFFSCREEN);
+      const changed = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { ok: false, error: 'known failure', extra: undefined },
+      }, OFFSCREEN);
+      const retry = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: { error: 'known failure', ok: false },
+      }, OFFSCREEN);
+      return { duringSettlement, first, afterFailure, changed, retry };
+    });
+    expect(result.duringSettlement).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.first).toMatchObject({ ok: false, error: 'temporary settlement failure' });
+    expect(result.afterFailure).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.changed).toMatchObject({
+      ok: false, error: 'actor/tool-settle: result mismatch', outcomeKnown: true,
+    });
+    expect(result.retry).toEqual({ ok: true, result: { ok: false, error: 'known failure' } });
+    expect(cancellations).toBe(0);
+    expect(settlements).toBe(2);
+  });
+
+  test('closes shared named-domain authority before settlement starts its hooks', async () => {
+    let markStarted!: () => void;
+    let releaseSettlement!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+    const { client, during } = clientWithRelay({
+      settleToolCall: async (_prepared: any, execution: any) => {
+        markStarted();
+        await gate;
+        return execution.result;
+      },
+    });
+    const result = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'page',
+        call: { id: 'page-settlement', name: 'page_code', args: { code: 'return 1' } },
+      }, OFFSCREEN);
+      const settling = client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId, result: { ok: true },
+      }, OFFSCREEN);
+      await started;
+      const effect = await client.routes['page/read']({
+        relayToken, executionId: prepared.executionId,
+      }, OFFSCREEN);
+      const nested = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'resource',
+        pageProgramParentExecutionId: prepared.executionId,
+        call: { id: 'late-nested', name: 'fetch_url', args: { url: 'https://example.com' } },
+      }, OFFSCREEN);
+      releaseSettlement();
+      await settling;
+      return { effect, nested };
+    }, 'actor-1', {
+      actorType: 'web', backing: 'tab', actorSurface: 'code',
+      tools: [{ name: 'page_code', primitive: 'web' }],
+    });
+    expect(result.effect).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.nested).toMatchObject({ ok: false });
+  });
+
   test('run teardown joins an in-flight durable settlement without duplicating it', async () => {
     let releaseSettlement!: () => void;
     let markStarted!: () => void;
@@ -472,6 +575,64 @@ describe('isolated exact tool authority', () => {
     const result = await run;
     await expect(result.settling).resolves.toMatchObject({ ok: true });
     expect(settlements).toBe(1);
+  });
+
+  test('Stop retires provider and relay custody when durable settlement never returns', async () => {
+    const controller = new AbortController();
+    let leakedToken = '';
+    let settlements = 0;
+    let providerCloses = 0;
+    let stoppedEffect: any = null;
+    let cancellations = 0;
+    let client: ReturnType<typeof makeOffscreenActorClient>;
+    client = makeOffscreenActorClient(baseDeps({
+      settlementCleanupMs: 10,
+      providerEgress: providerEgress({
+        closeOwner: async () => { providerCloses += 1; },
+      }),
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorAuthority: {
+          cancelTask: async () => { cancellations += 1; return { ok: true }; },
+        },
+      }),
+      settleToolCall: async () => {
+        settlements += 1;
+        return new Promise(() => {});
+      },
+      sendMessage: async (message: any) => {
+        if (message.type !== 'actor/run') return { ok: true };
+        leakedToken = message.job.relayToken;
+        const prepared: any = await client.routes['actor/tool-prepare']({
+          relayToken: leakedToken, authorityClass: 'actor',
+          call: { id: 'hung-settlement', name: 'actor_cancel', args: { taskId: 'task-1' } },
+        }, OFFSCREEN);
+        controller.abort();
+        stoppedEffect = await client.routes['actor/task-cancel']({
+          relayToken: leakedToken, executionId: prepared.executionId, taskId: 'task-1',
+        }, OFFSCREEN);
+        return { ok: false, started: true, finalText: '' };
+      },
+    }));
+    const run = client.run({
+      actorSessionId: 'actor-1', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any, { signal: controller.signal });
+    const completed = await Promise.race([
+      run.then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    const replay = await client.routes['actor/model-open-inference'](
+      inferenceInput(leakedToken), OFFSCREEN,
+    );
+    expect(completed).toBe('completed');
+    expect(settlements).toBe(1);
+    expect(providerCloses).toBeGreaterThan(0);
+    expect(stoppedEffect).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(cancellations).toBe(0);
+    expect(replay).toEqual({
+      ok: false, error: 'actor/model-open-inference: unauthorized relay',
+    });
   });
 
   test('enforces actor grants before semantic preparation', async () => {

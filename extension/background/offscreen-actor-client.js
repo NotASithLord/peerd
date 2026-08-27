@@ -41,9 +41,35 @@ const exactKeys = (
     && Object.keys(record).every((key) => allowed.has(key));
 };
 
+/** @returns {boolean} */
 const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); }
-  catch { return false; }
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameClone(value, right[index]));
+  }
+  if (left instanceof ArrayBuffer || right instanceof ArrayBuffer) {
+    if (!(left instanceof ArrayBuffer) || !(right instanceof ArrayBuffer)
+        || left.byteLength !== right.byteLength) return false;
+    const leftBytes = new Uint8Array(left);
+    const rightBytes = new Uint8Array(right);
+    return leftBytes.every((byte, index) => byte === rightBytes[index]);
+  }
+  if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) {
+    if (!ArrayBuffer.isView(left) || !ArrayBuffer.isView(right)
+        || left.constructor !== right.constructor || left.byteLength !== right.byteLength) return false;
+    const leftBytes = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
+    const rightBytes = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
+    return leftBytes.every((byte, index) => byte === rightBytes[index]);
+  }
+  const leftRecord = /** @type {Record<string,unknown>} */ (left);
+  const rightRecord = /** @type {Record<string,unknown>} */ (right);
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index]
+      && sameClone(leftRecord[key], rightRecord[key]));
 };
 
 // An inbound dweb wake is reasoning over bytes chosen by a remote peer. Keep its
@@ -109,6 +135,7 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * @param {number} [deps.maxModelRelaysPerRun]
  * @param {number} [deps.maxToolRelaysPerRun]
  * @param {number} [deps.maxLoopEventsPerRun]
+ * @param {number} [deps.settlementCleanupMs]
  */
 export const makeOffscreenActorClient = ({
   ensureHost, ensureOffscreen, sendMessage, runOnChannel, providerEgress,
@@ -125,6 +152,7 @@ export const makeOffscreenActorClient = ({
   maxModelRelaysPerRun = 100,
   maxToolRelaysPerRun = 128,
   maxLoopEventsPerRun = 256,
+  settlementCleanupMs = 250,
 }) => {
   const ensureActorHost = ensureHost ?? ensureOffscreen ?? (async () => {});
   const relaySenderAllowed = isRelaySender ?? isOffscreenSender ?? (() => false);
@@ -135,6 +163,20 @@ export const makeOffscreenActorClient = ({
     ? Math.floor(maxToolRelaysPerRun) : 128;
   const loopEventLimit = Number.isFinite(maxLoopEventsPerRun) && maxLoopEventsPerRun > 0
     ? Math.floor(maxLoopEventsPerRun) : 256;
+  const cleanupFuseMs = Number.isFinite(settlementCleanupMs) && settlementCleanupMs > 0
+    ? Math.floor(settlementCleanupMs) : 250;
+  const boundedCleanup = (/** @type {Promise<unknown>} */ pending) =>
+    new Promise((resolve) => {
+      let finished = false;
+      const finish = (/** @type {unknown} */ value) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(undefined), cleanupFuseMs);
+      pending.then(finish, () => finish(undefined));
+    });
   let seq = 0;
   /**
    * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, pageProgramToolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> }>} Firefox relay grants:
@@ -239,6 +281,9 @@ export const makeOffscreenActorClient = ({
       label: job.actorType ? `actor:${job.actorType}` : `actor d${job.depth ?? 1}`,
     });
     const abortRelays = () => {
+      // Stop/host loss closes new exact effects synchronously. Settlement may
+      // still join or retry its frozen result, but no effect can enter behind it.
+      for (const entry of grant.actorExecutions.values()) entry.effectsOpen = false;
       abortedRuns.add(runId);   // cover an inference open that has not reached the route yet
       relayController.abort();
       void providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
@@ -280,39 +325,40 @@ export const makeOffscreenActorClient = ({
       // runner-owned timeout/crash that never aborts the caller's turn signal.
       // Abort BEFORE retiring the grant so a route that already resolved it sees
       // the terminal signal and exits rather than continuing without a grant.
-      abortRelays();
-      // Drop the abort listener a completed-without-Stop run left attached (a no-op if
-      // it already fired under {once:true}); keeps nothing dangling on the turn signal.
-      signal?.removeEventListener('abort', abortRun);
-      relayController.abort();
-      await providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
-      if (typeof settleToolCall === 'function') {
-        await Promise.allSettled([...grant.actorExecutions.values()].map(async (entry) => {
-          if (entry.open !== true) return;
-          const cleanupResult = entry.settlementResult ?? {
-            ok: false,
-            error: 'actor semantic execution host was lost before settlement',
-            code: 'actor-tool-host-lost',
-            outcomeKnown: entry.effectEntered !== true,
-            retryable: entry.effectEntered !== true,
-            outcomeKind: entry.effectEntered === true ? 'host-lost' : 'pre-effect-failure',
-          };
-          // why: run teardown may race the worker's durable settlement. Join
-          // that exact attempt; only retry serially if it failed, never issue a
-          // duplicate settlement while the first remains in flight.
-          let settled = await settleActorExecution(grant, entry, cleanupResult);
-          if (settled.ok !== true && entry.open === true) {
-            settled = await settleActorExecution(grant, entry, cleanupResult);
-          }
-        }));
+      try {
+        abortRelays();
+        // Drop the abort listener a completed-without-Stop run left attached (a no-op if
+        // it already fired under {once:true}); keeps nothing dangling on the turn signal.
+        signal?.removeEventListener('abort', abortRun);
+        relayController.abort();
+        await providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
+        if (typeof settleToolCall === 'function') {
+          await Promise.allSettled([...grant.actorExecutions.values()].map(async (entry) => {
+            if (entry.open !== true) return;
+            const cleanupResult = entry.hasSettlementResult === true
+              ? entry.settlementResult
+              : {
+                ok: false,
+                error: 'actor semantic execution host was lost before settlement',
+                code: 'actor-tool-host-lost',
+                outcomeKnown: entry.effectEntered !== true,
+                retryable: entry.effectEntered !== true,
+                outcomeKind: entry.effectEntered === true ? 'host-lost' : 'pre-effect-failure',
+              };
+            // why: cleanup joins or starts the one durable attempt but cannot let a
+            // user hook pin provider custody and a live relay grant forever.
+            await boundedCleanup(settleActorExecution(grant, entry, cleanupResult));
+          }));
+        }
+      } finally {
+        grant.actorExecutions.clear();
+        // Retiring the grant is what makes it a liveness check: every relay for
+        // this run is refused from here on, so a late/replayed one can't dispatch.
+        if (!runOnChannel) grants.delete(relayToken);
+        runOnEvent.delete(runId);
+        runMeta.delete(runId);
+        abortedRuns.delete(runId);
       }
-      grant.actorExecutions.clear();
-      // Retiring the grant is what makes it a liveness check: every relay for
-      // this run is refused from here on, so a late/replayed one can't dispatch.
-      if (!runOnChannel) grants.delete(relayToken);
-      runOnEvent.delete(runId);
-      runMeta.delete(runId);
-      abortedRuns.delete(runId);
     }
   };
 
@@ -416,6 +462,7 @@ export const makeOffscreenActorClient = ({
     return grant && !grant.relaySignal.aborted
       && exactKeys(msg, ['executionId', ...fields])
       && entry?.open === true
+      && entry.effectsOpen === true
       && entry.authorityClass === domain ? entry : null;
   };
   const repositoryEntry = (
@@ -616,6 +663,9 @@ export const makeOffscreenActorClient = ({
     /** @type {any} */ entry,
     /** @type {unknown} */ result,
   ) => {
+    // Settlement freezes the result and synchronously closes every effect route.
+    // Durable persistence may retry, but authority can never reopen around it.
+    entry.effectsOpen = false;
     if (entry.settling) return entry.settling;
     if (entry.hasSettlementResult !== true) {
       entry.settlementResult = structuredClone(result);
@@ -913,6 +963,7 @@ export const makeOffscreenActorClient = ({
           || typeof prepareToolCall !== 'function'
           || typeof settleToolCall !== 'function'
           || (nestedPageProgram && (!parent || parent.open !== true
+            || parent.effectsOpen !== true
             || parent.toolName !== 'page_code' || parent.authorityClass !== 'page'
             || !isPageProgramSemanticTool(call?.name)))) {
         return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
@@ -955,7 +1006,8 @@ export const makeOffscreenActorClient = ({
       const executionId = `ae-${now().toString(36)}-${++seq}`;
       grant.actorExecutions.set(executionId, {
         executionId,
-        open: true, settling: null, hasSettlementResult: false, settlementResult: undefined,
+        open: true, effectsOpen: true, settling: null,
+        hasSettlementResult: false, settlementResult: undefined,
         effectEntered: false, unknownIrreversible: false,
         domainCalls: new Set(), domainState: {}, prepared,
         call: authorityCall, toolName: call.name, authorityClass: domain,
@@ -1005,7 +1057,8 @@ export const makeOffscreenActorClient = ({
       const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
       if (!grant || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
         'relayToken', 'tools', 'maxSteps', 'maxDepth',
-      ]) || !entry || entry.open !== true || entry.toolName !== 'actor_create'
+      ]) || !entry || entry.open !== true || entry.effectsOpen !== true
+          || entry.toolName !== 'actor_create'
           || args?.sync !== true || msg.task !== args?.task
           || msg.allowRecursion !== (args?.allowRecursion === true)
           || JSON.stringify(msg.tools) !== JSON.stringify(expectedTools)
@@ -1057,7 +1110,8 @@ export const makeOffscreenActorClient = ({
       const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
       if (!grant || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
         'relayToken', 'tools', 'maxSteps', 'maxDepth',
-      ]) || !entry || entry.open !== true || entry.toolName !== 'actor_create'
+      ]) || !entry || entry.open !== true || entry.effectsOpen !== true
+          || entry.toolName !== 'actor_create'
           || args?.sync === true || msg.task !== args?.task
           || msg.allowRecursion !== (args?.allowRecursion === true)
           || JSON.stringify(msg.tools) !== JSON.stringify(expectedTools)
@@ -1104,7 +1158,8 @@ export const makeOffscreenActorClient = ({
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
       if (!grant || !exactKeys(msg, ['executionId'])
-          || !entry || entry.open !== true || entry.toolName !== 'actor_tasks'
+          || !entry || entry.open !== true || entry.effectsOpen !== true
+          || entry.toolName !== 'actor_tasks'
           || entry.domainCalls.size > 0) {
         return { ok: false, error: 'actor/tasks-read: authority mismatch', outcomeKnown: true };
       }
@@ -1124,7 +1179,8 @@ export const makeOffscreenActorClient = ({
       const grant = grantFor(msg, sender, boundGrant);
       const entry = grant?.actorExecutions.get(msg.executionId);
       if (!grant || !exactKeys(msg, ['executionId', 'taskId'])
-          || !entry || entry.open !== true || entry.toolName !== 'actor_cancel'
+          || !entry || entry.open !== true || entry.effectsOpen !== true
+          || entry.toolName !== 'actor_cancel'
           || entry.domainCalls.size > 0 || typeof msg.taskId !== 'string' || !msg.taskId
           || msg.taskId !== entry.call?.args?.taskId) {
         return { ok: false, error: 'actor/task-cancel: authority mismatch', outcomeKnown: true };
@@ -1150,7 +1206,8 @@ export const makeOffscreenActorClient = ({
       if (!grant || !exactKeys(msg, [
         'executionId', 'to', 'message', 'oneShot', 'awaitReply',
         'degradeToAsync', 'awaitCapMs',
-      ]) || !entry || entry.open !== true || entry.toolName !== 'message_actor'
+      ]) || !entry || entry.open !== true || entry.effectsOpen !== true
+          || entry.toolName !== 'message_actor'
           || entry.domainCalls.size > 0 || typeof msg.to !== 'string'
           || msg.to !== args?.to || msg.message !== args?.message
           || msg.oneShot !== (args?.oneShot === true)
