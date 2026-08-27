@@ -32,6 +32,8 @@ import { plugin } from 'bun';
 import {
   REPO_ROOT, STORE_LOADER_TEMPLATE,
   DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
+  STORE_ACTOR_WORKER_TEMPLATE, STORE_OPTIONS_APP_TEMPLATE,
+  STORE_SEMANTIC_HOST_TEMPLATE,
 } from './lib.ts';
 import { STORE_STRIPPED_PERMISSIONS } from './gen-manifest.ts';
 
@@ -39,14 +41,26 @@ const DWEB_DISABLED_TEMPLATE_TARGETS = Object.freeze([
   ['shared/dweb-loader.js', STORE_LOADER_TEMPLATE],
   ['background/routes/dweb.js', DWEB_ROUTES_DISABLED_TEMPLATE],
   ['background/routes/dweb-self.js', DWEB_SELF_ROUTES_DISABLED_TEMPLATE],
+  ['offscreen/actor-worker.js', STORE_ACTOR_WORKER_TEMPLATE],
+  ['options/components/options-app.js', STORE_OPTIONS_APP_TEMPLATE],
+  ['offscreen/semantic-route-host.js', STORE_SEMANTIC_HOST_TEMPLATE],
 ] as const);
 const DWEB_ABSENT_TARGETS = Object.freeze([
   'background/kernel-preview-addon.js', 'background/vault-kernel-preview.js',
   'background/kernel-contributor-owner.js',
   'background/kernel-firefox-contributor-addon.js',
   'background/vault-kernel-firefox-preview.js',
+  'offscreen/contributor-channel-addon.js',
+  'offscreen/semantic-routes/contributor.js',
+  'options/sections/contributor-metrics.js',
+  'peerd-runtime/controller-contributor.js',
+  'peerd-runtime/observability/contributor-metrics.js',
+  'peerd-runtime/observability/contributor-store.js',
   'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
   'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
+]);
+const STORE_CONTRIBUTOR_FREE_TARGETS = Object.freeze([
+  'offscreen/actor-worker-runtime.js',
 ]);
 
 /** Byte-for-byte package boundary shared by the verifier and focused tests. */
@@ -65,6 +79,19 @@ export const dwebDisabledTemplateFailures = (artifactRoot: string): string[] => 
     if (existsSync(join(artifactRoot, relativePath))) {
       failures.push(`${relativePath} present in dweb-disabled artifact`);
     }
+  }
+  return failures;
+};
+
+/** Store workers retain no Contributor projection code or semantic import. */
+export const storeContributorBoundaryFailures = (artifactRoot: string): string[] => {
+  const failures: string[] = [];
+  for (const relativePath of STORE_CONTRIBUTOR_FREE_TARGETS) {
+    try {
+      if (/contributor/i.test(readFileSync(join(artifactRoot, relativePath), 'utf8'))) {
+        failures.push(`${relativePath} contains Contributor code`);
+      }
+    } catch { failures.push(`${relativePath} missing from artifact`); }
   }
   return failures;
 };
@@ -129,6 +156,7 @@ export const verifyStoreArtifact = async (
     // b. every dweb-disabled runtime entry is a committed reviewed template,
     // byte for byte. Route keys remain present so stale callers fail typed.
     failures.push(...dwebDisabledTemplateFailures(tmp));
+    failures.push(...storeContributorBoundaryFailures(tmp));
 
     // c. no file may contain the module's name at all
     for (const f of files) {

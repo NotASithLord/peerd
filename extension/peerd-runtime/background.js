@@ -95,9 +95,6 @@ export { actorIsolationCapability, actorIsolationAvailable, actorIsolationTempor
 export { actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_RUN_MAX_OPS, ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS } from './actor/actors-api.js';
 export { canonicalCodeTraceLabel, DWEB_INBOUND_TOOL_NAMES, resolveWebActorSurface, resolveWebActorSurfaceDecision } from './actor/capability-manifest.js';
 export { browserNetworkGuardUnavailableResult, classifyBrowserAutomationTarget, isAddressableBrowserTab } from './tools/browser-automation-policy.js';
-export { contributorActionForTool, contributorTurnResult } from './observability/contributor-metrics.js';
-export { contributorFeedbackContextKey, contributorFeedbackTargets } from './observability/contributor-feedback.js';
-export { makeContributorStore } from './observability/contributor-store.js';
 export { validateProviderCallArgs, providerQuotaError, foldProviderEvents } from './actor/provider-call-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';

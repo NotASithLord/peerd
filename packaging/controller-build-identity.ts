@@ -7,7 +7,9 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { collectStaticModuleGraph } from './static-module-graph.ts';
-import { SEMANTIC_HOST_BUILD_ENTRIES } from './semantic-host-entries.ts';
+import {
+  SEMANTIC_HOST_CORE_BUILD_ENTRIES,
+} from './semantic-host-entries.ts';
 
 export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   // The supervisor and every demand-owned operation host enforce the same
@@ -57,7 +59,7 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'offscreen/controller-turn-runtime.js',
   // Fixed-literal dynamic semantic dispatcher and its reviewed route bodies.
   // It must be bound even though the cold graph collector excludes lazy edges.
-  ...SEMANTIC_HOST_BUILD_ENTRIES,
+  ...SEMANTIC_HOST_CORE_BUILD_ENTRIES,
 ] as const);
 
 export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
@@ -68,6 +70,7 @@ export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
   // Firefox preview/dev owns its contributor registration in a distinct
   // background entry, so bind that channel-specific authority shell too.
   'background/vault-kernel-firefox-preview.js',
+  'offscreen/semantic-routes/contributor.js',
 ] as const);
 
 export const CONTROLLER_BUILD_ASSETS = Object.freeze([

@@ -5,7 +5,7 @@
 import m from '/vendor/mithril/mithril.js';
 import {
   CONTRIBUTOR_DISCLOSURE_VERSION, CONTRIBUTOR_SCHEMA_VERSION,
-} from '/peerd-runtime/index.js';
+} from '/peerd-runtime/controller-contributor.js';
 import { mutationFailureCopy, unknownMutationCopy } from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
@@ -16,6 +16,7 @@ export const ContributorMetricsSection = {
     vnode.state.status = null;
     vnode.state.busy = false;
     vnode.state.uncertain = false;
+    vnode.state.pendingAction = null;
     vnode.state.error = null;
     vnode.state.copied = false;
     ContributorMetricsSection.refresh(vnode);
@@ -26,8 +27,9 @@ export const ContributorMetricsSection = {
     try {
       const reply = await vnode.attrs.send({ type: 'contributor/status' });
       vnode.state.status = reply?.ok ? reply.status : null;
-      vnode.state.error = reply?.ok ? null : 'Contributor status is unavailable.';
-      if (reply?.ok) vnode.state.uncertain = false;
+      if (!vnode.state.uncertain) {
+        vnode.state.error = reply?.ok ? null : 'Contributor status is unavailable.';
+      }
       m.redraw();
       return reply?.ok === true;
     } catch {
@@ -39,20 +41,27 @@ export const ContributorMetricsSection = {
 
   /** @param {{ state: any, attrs: { send: Send } }} vnode @param {'enable'|'disable'} action */
   async act(vnode, action) {
-    if (vnode.state.busy || vnode.state.uncertain) return;
+    if (vnode.state.busy
+        || vnode.state.uncertain && vnode.state.pendingAction !== action) return;
     vnode.state.busy = true;
     vnode.state.error = null;
     try {
       let reply;
       try { reply = await vnode.attrs.send({ type: `contributor/${action}` }); }
       catch { reply = { ok: false, outcomeKnown: false }; }
-      if (reply?.ok) vnode.state.status = reply.status;
+      if (reply?.ok) {
+        vnode.state.status = reply.status;
+        vnode.state.uncertain = false;
+        vnode.state.pendingAction = null;
+        vnode.state.error = null;
+      }
       else if (reply?.outcomeKnown === false) {
         const copy = unknownMutationCopy(`${action === 'enable' ? 'enabling' : 'disabling'} Contributor Metrics`);
         vnode.state.uncertain = true;
+        vnode.state.pendingAction = action;
         vnode.state.error = copy;
-        const reconciled = await ContributorMetricsSection.refresh(vnode);
-        if (!reconciled) vnode.state.error = copy;
+        await ContributorMetricsSection.refresh(vnode);
+        vnode.state.error = copy;
       } else {
         vnode.state.error = mutationFailureCopy(reply, {
           action: `${action === 'enable' ? 'enabling' : 'disabling'} Contributor Metrics`,
@@ -85,6 +94,8 @@ export const ContributorMetricsSection = {
     const status = ui.status;
     if (!status && !ui.error) return m('p.muted', 'Loading contributor status…');
     const enabled = status?.enabled === true;
+    const action = ui.uncertain ? ui.pendingAction
+      : enabled || status?.diagnostic ? 'disable' : 'enable';
     return m('.contributor-metrics', [
       m('.provider-card.contributor-disclosure', [
         m('h3', 'Optional, content-free contribution'),
@@ -117,15 +128,17 @@ export const ContributorMetricsSection = {
             ]),
           ]),
         ]),
-        m('.contributor-actions', enabled || status?.diagnostic
+        m('.contributor-actions', action === 'disable'
           ? m('button.secondary', {
-              type: 'button', disabled: ui.busy || ui.uncertain,
+              type: 'button', disabled: ui.busy,
               onclick: () => ContributorMetricsSection.act(vnode, 'disable'),
-            }, ui.busy ? 'Clearing…' : 'Disable and clear')
+            }, ui.busy ? 'Clearing…' : ui.uncertain ? 'Retry disable and clear'
+              : 'Disable and clear')
           : m('button', {
-              type: 'button', disabled: ui.busy || ui.uncertain,
+              type: 'button', disabled: ui.busy,
               onclick: () => ContributorMetricsSection.act(vnode, 'enable'),
-            }, ui.busy ? 'Enabling…' : 'Enable Contributor Metrics')),
+            }, ui.busy ? 'Enabling…' : ui.uncertain ? 'Retry enable'
+              : 'Enable Contributor Metrics')),
       ]),
 
       ui.error ? m('p.error', ui.error) : null,

@@ -4,6 +4,7 @@
 // their public root separate prevents unrelated administrative hosts from
 // acquiring provider/model catalogs or observability code.
 export {
+  CONTRIBUTOR_DISCLOSURE_VERSION, CONTRIBUTOR_SCHEMA_VERSION,
   contributorActionForTool, contributorModelFamilyCode, contributorModelFamilyFromCode,
   contributorProviderCode, contributorProviderFromCode, contributorTurnResult,
   normalizeContributorModelFamily, normalizeContributorProvider,

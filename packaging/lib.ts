@@ -36,6 +36,9 @@ export const STORE_LOADER_TEMPLATE = join(TEMPLATES_DIR, 'dweb-loader.store.js')
 export const DWEB_ROUTES_DISABLED_TEMPLATE = join(TEMPLATES_DIR, 'routes-dweb.disabled.js');
 export const DWEB_SELF_ROUTES_DISABLED_TEMPLATE = join(TEMPLATES_DIR, 'routes-dweb-self.disabled.js');
 export const DEBUGGER_UNAVAILABLE_TEMPLATE = join(TEMPLATES_DIR, 'debugger-pool.unavailable.js');
+export const STORE_ACTOR_WORKER_TEMPLATE = join(TEMPLATES_DIR, 'actor-worker.store.js');
+export const STORE_OPTIONS_APP_TEMPLATE = join(TEMPLATES_DIR, 'options-app.store.js');
+export const STORE_SEMANTIC_HOST_TEMPLATE = join(TEMPLATES_DIR, 'semantic-route-host.store.js');
 
 /** The version single source of truth is package.json. Never hand-edit
  *  versions in manifests — they are generated. */

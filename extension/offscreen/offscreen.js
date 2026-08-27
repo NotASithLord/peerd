@@ -1,7 +1,7 @@
 // @ts-check
 
 import browser from '/shared/browser-api.js';
-import { CONTROLLER_BUILD_DIGEST, EXTENSION_VERSION } from '/shared/build-config.js';
+import { CHANNEL, CONTROLLER_BUILD_DIGEST, EXTENSION_VERSION } from '/shared/build-config.js';
 import {
   FEATURE_LEASE_HOST_PROTOCOL,
   FEATURE_LEASE_KEEPALIVE_PORT,
@@ -63,12 +63,17 @@ const actorPorts = new Set();
 /** @type {Set<Worker>} */
 const vaultAuthorityWorkers = new Set();
 const loadServiceWorkerChannels = makeBoundedModuleLoader(
-  () => import('./supervisor-channels.js').then(({ createServiceWorkerChannels }) => (
+  () => Promise.all([
+    import('./supervisor-channels.js'),
+    String(CHANNEL) === 'store' ? Promise.resolve({ contributorChannelAddon: {} })
+      : import('./contributor-channel-addon.js'),
+  ]).then(([{ createServiceWorkerChannels }, { contributorChannelAddon }]) => (
     createServiceWorkerChannels({
       getFeatureLeaseHost: () => featureLeaseHost,
       loadControllerBootstrap,
       loadRepositoryHost,
       loadVoiceHost: loadVoiceChannelHost,
+      ...contributorChannelAddon,
       actorPorts,
       vaultAuthorityWorkers,
     }).onMessage

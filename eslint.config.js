@@ -388,7 +388,7 @@ export default [
   },
 
   // --- heap-split Worker: a WORKER-SAFE subset, not the barrel ---
-  // offscreen/actor-worker.js is the ONE dedicated Worker (its own heap) that runs
+  // offscreen/actor-worker-runtime.js is the ONE dedicated Worker runtime (its own heap) that runs
   // the agent loop for every offscreen loop (reasoning actors + bound actors). It
   // must import a MINIMAL, worker-safe subset (agent-loop.js + actor-worker-core.js —
   // both verified to touch no chrome.*/DOM at import) rather than the full
@@ -396,7 +396,7 @@ export default [
   // chrome-touching modules into a context that has none, throwing at import. So the
   // cross-module rule is relaxed for THIS file only; the dweb/tests/eval guards stay.
   {
-    files: ['extension/offscreen/actor-worker.js'],
+    files: ['extension/offscreen/actor-worker-runtime.js'],
     rules: {
       'no-restricted-imports': ['error', { patterns: [DWEB_IMPORT, TESTS_IMPORT, EVAL_IMPORT] }],
     },

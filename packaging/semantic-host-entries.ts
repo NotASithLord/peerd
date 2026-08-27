@@ -13,7 +13,17 @@ export const SEMANTIC_HOST_CLUSTER_ENTRIES = Object.freeze([
   'offscreen/semantic-routes/providers.js',
 ] as const);
 
+export const SEMANTIC_HOST_CORE_CLUSTER_ENTRIES = Object.freeze(
+  SEMANTIC_HOST_CLUSTER_ENTRIES.filter((entry) =>
+    entry !== 'offscreen/semantic-routes/contributor.js'),
+);
+
 export const SEMANTIC_HOST_BUILD_ENTRIES = Object.freeze([
   'offscreen/semantic-route-host.js',
   ...SEMANTIC_HOST_CLUSTER_ENTRIES,
+] as const);
+
+export const SEMANTIC_HOST_CORE_BUILD_ENTRIES = Object.freeze([
+  'offscreen/semantic-route-host.js',
+  ...SEMANTIC_HOST_CORE_CLUSTER_ENTRIES,
 ] as const);

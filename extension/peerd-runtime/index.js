@@ -100,26 +100,6 @@ export {
   normalizeTally, addUsage, limitExceeded,
 } from './cost/accumulator.js';
 
-// Optional, local-only Contributor Metrics. A closed reducer/serializer plus
-// its injected-storage shell; there is deliberately no generic event API and
-// no network client in this issue.
-export {
-  CONTRIBUTOR_SCHEMA_VERSION, CONTRIBUTOR_DISCLOSURE_VERSION,
-  CONTRIBUTOR_LOCAL_VERSION, CONTRIBUTOR_MAX_ROWS, CONTRIBUTOR_MAX_COUNTER,
-  CONTRIBUTOR_MAX_LOCAL_DEDUPE, CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT,
-  CONTRIBUTOR_KNOWN_MODEL_FAMILIES,
-  ContributorSchemaError, emptyContributorLocalState, emptyContributorRow,
-  normalizeContributorProvider, normalizeContributorModelFamily,
-  normalizeContributorCohort, contributorDurationBucket, contributorTokenBucket,
-  contributorCohortKey, contributorActionForTool, contributorTurnResult,
-  recordContributorWebTurn, recordContributorWebAction,
-  adjustContributorFeedback, serializeContributorEnvelope,
-} from './observability/contributor-metrics.js';
-export { CONTRIBUTOR_LOCAL_KEY, ContributorReadOnlyError, makeContributorStore }
-  from './observability/contributor-store.js';
-export {
-  contributorFeedbackContextKey, contributorFeedbackTargets,
-} from './observability/contributor-feedback.js';
 // The per-turn imperative shell over the accumulator: fold usage events,
 // persist the session total, push the live meter, fire the hard-limit
 // halt once. All IO injected; the SW's streaming switch stays two lines.

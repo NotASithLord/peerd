@@ -36,6 +36,8 @@ import {
   REPO_ROOT, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE,
   DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
   DEBUGGER_UNAVAILABLE_TEMPLATE,
+  STORE_ACTOR_WORKER_TEMPLATE, STORE_OPTIONS_APP_TEMPLATE,
+  STORE_SEMANTIC_HOST_TEMPLATE,
   CHANNELS, BROWSERS, type Channel, type Browser,
   readVersion, parseArgs,
 } from './lib.ts';
@@ -76,6 +78,12 @@ const PRUNE_STORE = [
   'background/kernel-contributor-owner.js',
   'background/kernel-firefox-contributor-addon.js',
   'background/vault-kernel-firefox-preview.js',
+  'offscreen/contributor-channel-addon.js',
+  'offscreen/semantic-routes/contributor.js',
+  'options/sections/contributor-metrics.js',
+  'peerd-runtime/controller-contributor.js',
+  'peerd-runtime/observability/contributor-metrics.js',
+  'peerd-runtime/observability/contributor-store.js',
 ];
 const PRUNE_DWEB = [
   'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt',
@@ -263,6 +271,17 @@ export const packageArtifact = async (
     genChannelConfigSource(channel, browser, sourceDefaults),
   );
   applyDwebDisabledTemplates(staging, channel, browser);
+  if (channel === 'store') {
+    copyFileSync(STORE_ACTOR_WORKER_TEMPLATE, join(staging, 'offscreen', 'actor-worker.js'));
+    copyFileSync(
+      STORE_OPTIONS_APP_TEMPLATE,
+      join(staging, 'options', 'components', 'options-app.js'),
+    );
+    copyFileSync(
+      STORE_SEMANTIC_HOST_TEMPLATE,
+      join(staging, 'offscreen', 'semantic-route-host.js'),
+    );
+  }
   // CDP is a package-time capability, not a runtime grant: Store Chrome and
   // every Firefox artifact remove the debugger permission in gen-manifest.
   // Shipping the 50+ KiB pool and its custody/registry graph in those targets

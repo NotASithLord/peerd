@@ -84,6 +84,9 @@ export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
   'vendor/tesseract/worker.min.js',
 ] as const);
 
-export const packagedLazyModuleEntries = (dweb: boolean): readonly string[] => dweb
-  ? PACKAGED_LAZY_MODULE_ENTRIES
-  : PACKAGED_LAZY_MODULE_ENTRIES.filter((entry) => entry !== 'offscreen/dweb-base.js');
+export const packagedLazyModuleEntries = (
+  dweb: boolean,
+  contributor = true,
+): readonly string[] => PACKAGED_LAZY_MODULE_ENTRIES.filter((entry) =>
+  (dweb || entry !== 'offscreen/dweb-base.js')
+  && (contributor || entry !== 'offscreen/semantic-routes/contributor.js'));

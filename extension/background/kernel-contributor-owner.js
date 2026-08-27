@@ -158,10 +158,11 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     storage(() => kv.set(key, value));
   const remove = (/** @type {string} */ key) => storage(() => kv.delete(key));
   const list = (/** @type {string} */ prefix) => storage(() => kv.list(prefix));
-  // why: browser storage has no cancellation primitive. Once revocation is
-  // requested, an already-started late write must remain invisible even if
-  // the bounded wrapper has returned before the underlying promise settles.
+  // why: revocation hides uncancellable late writes now.
   let locallyRevoked = false;
+  // why: only explicit consent, not an ordinary read, resolves an uncertain mutation.
+  let consentUncertain = false;
+  let durableConsentUncertain = false;
   let lastIssuedRevision = 0;
   const stateSnapshot = (/** @type {unknown} */ value) => {
     const candidate = /** @type {any} */ (value);
@@ -183,19 +184,23 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
       throw new Error('contributor-state-snapshots-invalid');
     }
     /** @type {{key:string,value:any}|null} */ let latest = null;
+    let latestProposalRevision = 0;
     for (const [key, value] of Object.entries(entries)) {
       if (!key.startsWith(CONTRIBUTOR_STATE_PREFIX)) continue;
       const normalized = stateSnapshot(value);
       if (!normalized) throw new Error('contributor-state-snapshot-invalid');
-      // why: a proposal is durable before its commit write can begin. A
-      // successor observes every proposal's ceiling, while a first-write
-      // timeout can land late only as an inert uncommitted proposal.
+      // why: durable proposals preserve the revision ceiling across restart.
       lastIssuedRevision = Math.max(lastIssuedRevision, normalized.revision);
+      if (!normalized.committed) {
+        latestProposalRevision = Math.max(latestProposalRevision, normalized.revision);
+      }
       if (normalized.committed && (!latest || normalized.revision > latest.value.revision
           || normalized.revision === latest.value.revision && key > latest.key)) {
         latest = { key, value: normalized };
       }
     }
+    durableConsentUncertain = latestProposalRevision >= (latest?.value.revision ?? 0)
+      && latestProposalRevision > 0;
     return latest;
   };
   const observeRevisionCeiling = async () => {
@@ -253,9 +258,7 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     await set(key, proposal);
     const value = Object.freeze({ ...proposal, committed: true });
     await set(key, value);
-    // why: every key is generation-unique and cleanup only targets older
-    // revisions. A timed-out write/delete may finish late, but it can neither
-    // replace nor delete a later acknowledged generation.
+    // why: unique keys and older-only cleanup make late effects inert.
     void cleanupBefore(revision, key).catch(() => {});
     return value;
   };
@@ -291,13 +294,9 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     const run = async () => {
       if (kind === 'read' || kind.endsWith('-read')) return readActiveRecord();
       if (kind === 'clear') {
-        // why: an append-only revocation snapshot is the commit. Old aggregate
-        // cleanup may finish later without sharing a key with a future consent.
+        // why: the append-only revocation is the commit; cleanup can follow.
         locallyRevoked = true;
-        // why: commit the fail-closed marker before any cleanup or recovery
-        // read. If the clock moved backwards across a restart, observe the
-        // durable ceiling afterward and synchronously append one newer marker
-        // before acknowledging the user's revocation.
+        // why: repair above any rollback-era ceiling before acknowledging.
         const marker = await writeState(null);
         await observeRevisionCeiling();
         if (lastIssuedRevision > marker.revision) await writeState(null);
@@ -336,15 +335,26 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     };
     try {
       const value = write ? await effect(run) : await run();
+      if (kind === 'read' && (consentUncertain || durableConsentUncertain)) {
+        return { ok: false, code: 'semantic-contributor-state-uncertain',
+          outcomeKnown: false };
+      }
+      if (kind === 'enable' || kind === 'clear') {
+        consentUncertain = false;
+        durableConsentUncertain = false;
+      }
       return { ok: true, outcomeKnown: true, value };
     } catch {
+      if (kind === 'enable' || kind === 'clear') consentUncertain = true;
       return { ok: false, code: 'semantic-contributor-operation-failed',
         outcomeKnown: !write };
     }
   };
   const arm = async () => {
     await tail;
-    return armFromRecord(await readActiveRecord());
+    const active = armFromRecord(await readActiveRecord());
+    return consentUncertain || durableConsentUncertain
+      ? Object.freeze({ enabled: false, generation: null }) : active;
   };
   const pendingEntries = async () => {
     const receiptEntries = await list(CONTRIBUTOR_PENDING_RECEIPT_PREFIX);
@@ -408,7 +418,7 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     if (armSnapshot.enabled !== true || armSnapshot.generation !== settlement.consentGeneration) {
       return { ok: true, queued: false, reason: 'disabled' };
     }
-    // why: the durable outbox must never contain a raw run/session/tool identifier.
+    // why: raw run/session/tool identifiers never enter the durable outbox.
     const operationToken = await opaqueContributorToken(
       'operation', settlement.consentGeneration, settlement.operationKey,
     );
@@ -457,9 +467,7 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     const receipt = normalizePendingReceipt(await get(key));
     if (!receipt) return { found: false, dropped: false };
     if (receipt.attempts >= 1) {
-      // why: the durable drop marker is committed before receipt cleanup. A
-      // timed-out earlier attempt write can resurrect the receipt key, but it
-      // remains permanently invisible and therefore cannot poison FIFO.
+      // why: a committed drop marker makes late receipt writes inert.
       await set(dropKey, { version: 1, operationToken });
       await remove(key).catch(() => {});
       return { found: true, dropped: true };
@@ -656,8 +664,7 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
     return mutate(async () => {
       const result = await dispatch(route, {});
       if (route === 'contributor/disable' && result?.ok === true) {
-        // why: the revocation generation is already committed. Physical
-        // cleanup is best-effort and stale receipts are independently hidden.
+        // why: committed revocation hides stale receipts before cleanup.
         await authority.clearPending().catch(() => {});
         requestDrain();
       }
