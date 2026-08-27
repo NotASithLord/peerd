@@ -35,24 +35,6 @@ export const COLD_START_LANES = Object.freeze({
   }),
 });
 
-// Local evidence contract for the intended one-module Chrome cutover artifact.
-// It is deliberately separate from release lanes and changes no live ratchet.
-export const NATIVE_FLOOR_CONTRACT = Object.freeze({
-  schema: 1,
-  runtimeTarget: 'native-floor',
-  runtimeSurface: 'home',
-  coldBudgetMode: 'native-target',
-  browser: 'chrome',
-  channel: 'store',
-  freshProcesses: 3,
-  confirmedStopWakes: 3,
-  bundledStaticModules: 1,
-  hostQuiescenceWindowMs: 1_000,
-  hostLoad1PerCpuMax: 0.75,
-  hostBusyFractionMax: 0.35,
-  liveManifestClaimed: false,
-});
-
 // Complete raw phase contracts. Browser harnesses and policy validation both
 // consume this table so a new user-visible readiness phase cannot be measured
 // but silently omitted from release evidence (or vice versa).
@@ -134,14 +116,6 @@ export const COLD_START_PHASES = Object.freeze({
 export const COLD_START_COMPARISON = Object.freeze({
   relativeTolerance: 0.1,
   minimumToleranceMs: 100,
-});
-
-// A target cutover also needs interleaved base/head evidence from one device;
-// CI keeps its independent absolute ratchet.
-export const COLD_START_TARGET_CUTOVER = Object.freeze({
-  ready: false,
-  unmetGate: 'interleaved-candidate-base',
-  packagingContract: 'packageArtifact({ sourceRoot, artifactRoot, channel, browser, version })',
 });
 
 export const COLD_SOURCE_TARGETS = Object.freeze({

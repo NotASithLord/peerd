@@ -62,7 +62,7 @@ export async function buildVaultKernelArtifact({
   const version = readVersion();
   await packageArtifact({
     // Start from the readable target package, then transform only this copied
-    // native floor when releaseMinify is requested. The live artifact and its
+    // isolated diagnostic when releaseMinify is requested. The live artifact and its
     // legacy ratchet remain untouched.
     channel, browser, version, sign: false, verify: channel === 'store', minify: false,
     artifactRoot,

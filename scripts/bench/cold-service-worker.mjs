@@ -13,12 +13,11 @@ import {
   createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   rmSync, statSync, writeFileSync,
 } from 'node:fs';
-import { cpus, homedir, loadavg, release as osRelease, tmpdir, totalmem } from 'node:os';
+import { cpus, homedir, release as osRelease, tmpdir, totalmem } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageArtifact } from '../../packaging/package.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
-import { buildVaultKernelArtifact } from '../cdp/vault-kernel-artifact.mjs';
 import {
   PINNED_FIREFOX_VERSION as FIREFOX_PIN,
   PINNED_GECKODRIVER_VERSION as GECKODRIVER_PIN,
@@ -30,10 +29,7 @@ import {
   assessColdStartResult,
   COLD_START_LANES,
   COLD_START_PHASES,
-  COLD_START_TARGET_CUTOVER,
-  NATIVE_FLOOR_CONTRACT,
 } from './cold-start-policy.mjs';
-import { parseKernelIdentity } from '../../extension/shared/kernel-identity.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..');
@@ -59,66 +55,6 @@ const onPath = (name) => (process.env.PATH ?? '').split(delimiter)
   .map((directory) => join(directory, name))
   .find((path) => { try { return statSync(path).isFile(); } catch { return false; } });
 
-const cpuTimeTotals = (rows) => rows.reduce((total, row) => {
-  const times = row?.times;
-  if (!times || typeof times !== 'object') return total;
-  const values = Object.values(times);
-  if (values.some((value) => !Number.isFinite(value) || value < 0)) return total;
-  return {
-    idle: total.idle + Number(times.idle ?? 0),
-    total: total.total + values.reduce((sum, value) => sum + Number(value), 0),
-  };
-}, { idle: 0, total: 0 });
-
-export const assessHostQuiescence = ({ before, after, load1, logicalCpus, windowMs }) => {
-  const idleDelta = after?.idle - before?.idle;
-  const totalDelta = after?.total - before?.total;
-  const load1PerCpu = load1 / logicalCpus;
-  const busyFraction = 1 - (idleDelta / totalDelta);
-  const valid = [idleDelta, totalDelta, load1, logicalCpus, windowMs, load1PerCpu, busyFraction]
-    .every(Number.isFinite)
-    && idleDelta >= 0 && totalDelta > 0 && logicalCpus > 0 && windowMs > 0
-    && busyFraction >= 0 && busyFraction <= 1;
-  const failures = valid ? [
-    load1PerCpu > NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax
-      ? `load1PerCpu ${round(load1PerCpu)} exceeds ${NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax}` : null,
-    busyFraction > NATIVE_FLOOR_CONTRACT.hostBusyFractionMax
-      ? `busyFraction ${round(busyFraction)} exceeds ${NATIVE_FLOOR_CONTRACT.hostBusyFractionMax}` : null,
-  ].filter(Boolean) : ['host CPU evidence is invalid'];
-  return Object.freeze({
-    schema: 1,
-    clock: 'host-cpu-times',
-    windowMs,
-    logicalCpus,
-    load1: round(load1),
-    load1PerCpu: round(load1PerCpu),
-    busyFraction: round(busyFraction),
-    maxLoad1PerCpu: NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax,
-    maxBusyFraction: NATIVE_FLOOR_CONTRACT.hostBusyFractionMax,
-    ok: failures.length === 0,
-    failures: Object.freeze(failures),
-  });
-};
-
-export const measureHostQuiescence = async ({
-  readCpus = cpus,
-  readLoad1 = () => loadavg()[0],
-  wait = sleep,
-  windowMs = NATIVE_FLOOR_CONTRACT.hostQuiescenceWindowMs,
-} = {}) => {
-  const firstRows = readCpus();
-  const before = cpuTimeTotals(firstRows);
-  await wait(windowMs);
-  const secondRows = readCpus();
-  return assessHostQuiescence({
-    before,
-    after: cpuTimeTotals(secondRows),
-    load1: readLoad1(),
-    logicalCpus: secondRows.length,
-    windowMs,
-  });
-};
-
 const options = Object.fromEntries(process.argv.slice(2).map((arg) => {
   const [key, value = true] = arg.replace(/^--/, '').split('=', 2);
   return [key, value];
@@ -128,21 +64,16 @@ const allowedOptions = new Set([
   'firefox-wakes', 'firefox-processes', 'firefox-idle-ms',
   'cold-timeout-ms', 'diagnostic', 'allow-failures', 'no-sandbox',
   'graph-policy', 'require-timing-targets', 'comparison',
-  'runtime-target',
 ]);
 const unknownOption = Object.keys(options).find((name) => !allowedOptions.has(name));
 if (unknownOption) throw new Error(`unknown cold-start option --${unknownOption}`);
 const browserChoice = String(options.browser ?? 'all');
-const runtimeTarget = String(options['runtime-target'] ?? 'release');
-if (!['release', 'native-floor'].includes(runtimeTarget)) {
-  throw new Error('--runtime-target must be release or native-floor');
-}
-const nativeFloor = runtimeTarget === 'native-floor';
+const runtimeTarget = 'release';
 // why: CDP/WebDriver open extension documents as tabs. A tab-backed copy of
 // the browser-owned side panel is correctly refused by sender provenance, so
 // Home is the exact human surface these harnesses can exercise honestly.
 const runtimeSurface = 'home';
-const coldBudgetMode = nativeFloor ? 'native-target' : 'enforce';
+const coldBudgetMode = 'enforce';
 const intOption = (name, fallback, minimum) => {
   if (options[name] === undefined) return fallback;
   const parsed = Number(options[name]);
@@ -160,10 +91,8 @@ const boolOption = (name, fallback = false) => {
 const lane = String(options.lane ?? 'local');
 const laneContract = COLD_START_LANES[lane];
 if (!laneContract) throw new Error('--lane must be local, device, pr, main, or release');
-const chromeWakes = intOption('chrome-wakes', nativeFloor
-  ? NATIVE_FLOOR_CONTRACT.confirmedStopWakes : laneContract.chrome.wakes, 0);
-const chromeProcesses = intOption('chrome-processes', nativeFloor
-  ? NATIVE_FLOOR_CONTRACT.freshProcesses : laneContract.chrome.fresh, 1);
+const chromeWakes = intOption('chrome-wakes', laneContract.chrome.wakes, 0);
+const chromeProcesses = intOption('chrome-processes', laneContract.chrome.fresh, 1);
 const firefoxProcesses = intOption('firefox-processes', laneContract.firefox.fresh ?? 1, 1);
 const firefoxWakes = intOption('firefox-wakes', laneContract.firefox.wakes, 0);
 const firefoxIdleMs = intOption('firefox-idle-ms', laneContract.firefox.idleMs, 1);
@@ -173,13 +102,13 @@ const allowFailures = boolOption('allow-failures');
 const unsafeNoSandbox = boolOption('no-sandbox');
 const comparisonMode = String(options.comparison ?? 'absolute-ratchet');
 const requestedGraphPolicy = String(options['graph-policy'] ?? laneContract.graphPolicy);
-const graphPolicy = nativeFloor ? 'integrity' : lane === 'local'
+const graphPolicy = lane === 'local'
   ? requestedGraphPolicy
   : laneContract.graphPolicy;
 const requestedTimingTargets = boolOption(
   'require-timing-targets', laneContract.requireTimingTargets,
 );
-const requireTimingTargets = nativeFloor ? true : lane === 'local'
+const requireTimingTargets = lane === 'local'
   ? requestedTimingTargets
   : laneContract.requireTimingTargets;
 if (lane !== 'local' && allowFailures) throw new Error('--allow-failures is local-only');
@@ -188,28 +117,7 @@ if (!['absolute-ratchet', 'interleaved-candidate-base'].includes(comparisonMode)
   throw new Error('--comparison must be absolute-ratchet or interleaved-candidate-base');
 }
 if (!['local', 'device'].includes(lane) && comparisonMode !== 'absolute-ratchet') {
-  throw new Error('interleaved candidate/base comparison is not a required-lane gate before target cutover');
-}
-if (nativeFloor) {
-  if (lane !== 'local') throw new Error('--runtime-target=native-floor is local-only');
-  if (browserChoice !== 'chrome') {
-    throw new Error('--runtime-target=native-floor requires --browser=chrome');
-  }
-  if (comparisonMode !== 'absolute-ratchet') {
-    throw new Error('--runtime-target=native-floor does not support comparison mode');
-  }
-  if (allowFailures) throw new Error('--runtime-target=native-floor cannot allow failures');
-  if (unsafeNoSandbox) throw new Error('--runtime-target=native-floor requires the Chrome sandbox');
-  if (chromeProcesses !== NATIVE_FLOOR_CONTRACT.freshProcesses
-      || chromeWakes !== NATIVE_FLOOR_CONTRACT.confirmedStopWakes) {
-    throw new Error('--runtime-target=native-floor requires exactly three fresh launches and three wakes');
-  }
-  if (options['graph-policy'] !== undefined && requestedGraphPolicy !== 'integrity') {
-    throw new Error('--runtime-target=native-floor requires integrity graph policy');
-  }
-  if (options['require-timing-targets'] !== undefined && requestedTimingTargets !== true) {
-    throw new Error('--runtime-target=native-floor requires the timing target');
-  }
+  throw new Error('interleaved candidate/base comparison is not a required-lane gate');
 }
 if (lane !== 'local' && browserChoice !== 'all') throw new Error(`the ${lane} lane requires --browser=all`);
 if (lane !== 'local') {
@@ -277,25 +185,6 @@ const treeSha256 = (root) => {
     digest.update('\0');
   }
   return digest.digest('hex');
-};
-
-const plainRecord = (value) => value !== null && typeof value === 'object'
-  && !Array.isArray(value);
-const exactKeys = (value, keys) => plainRecord(value)
-  && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
-
-// The migration floor must prove which kernel ran without pretending the
-// intentionally incomplete route/event/port ledger is cutover-ready.
-export const inspectNativeFloorAssembly = (candidate) => {
-  if (!plainRecord(candidate)) throw new Error('native-floor assembly is invalid');
-  const assembly = /** @type {Record<string, any>} */ (candidate);
-  const identity = parseKernelIdentity(assembly.identity);
-  if (!identity) throw new Error('native-floor assembly identity is invalid');
-  if (!exactKeys(assembly.target, ['firefox', 'selfHostedChrome'])
-      || assembly.target.firefox !== false || assembly.target.selfHostedChrome !== false) {
-    throw new Error('native-floor assembly target posture is invalid');
-  }
-  return Object.freeze({ identity, report: candidate });
 };
 
 const materializeGitSource = (commitSha, destination) => {
@@ -466,39 +355,6 @@ const prepareBrowserArtifacts = async (browser, {
     for (const artifact of Object.values(prepared)) {
       rmSync(artifact.extensionDir, { recursive: true, force: true });
     }
-    throw error;
-  }
-};
-
-const prepareNativeFloorArtifacts = async (browser) => {
-  if (browser !== 'chrome') throw new Error('native floor currently supports Chrome only');
-  const prepared = {};
-  const artifactRoot = mkdtempSync(join(tmpdir(), 'peerd-cold-native-artifacts-'));
-  try {
-    for (const channel of ['store', 'preview']) {
-      const built = await buildVaultKernelArtifact({
-        browser, channel, releaseMinify: true, artifactRoot,
-      });
-      const extensionDir = unpackArtifact(built.artifact, `native-${channel}-${browser}`);
-      prepared[channel] = {
-        channel,
-        archive: built.artifact,
-        extensionDir,
-        sourceRoot: ROOT,
-        artifactRoot,
-        removeArtifactRoot: true,
-        coldBudgetMode: 'native-target',
-        verify: channel === 'store',
-        packageVersion: built.version,
-      };
-      prepared[channel].archiveSha256 = await sha256File(built.artifact);
-      prepared[channel].treeSha256 = treeSha256(extensionDir);
-      prepared[channel].graphs = (await packagedGraphStats(browser, extensionDir)).packagedGraphs;
-    }
-    return prepared;
-  } catch (error) {
-    cleanupPreparedArtifacts(prepared);
-    rmSync(artifactRoot, { recursive: true, force: true });
     throw error;
   }
 };
@@ -877,8 +733,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
     const [bootstrap, state, bootModuleFromLaunchMs, vaultGateReadyFromLaunchMs] = await within(Promise.all([
       bootstrapPromise, statePromise, bootModulePromise, vaultGatePromise,
     ]), remaining(), 'Chrome fresh sample');
-    const assembly = nativeFloor ? inspectNativeFloorAssembly(bootstrap.reply?.assembly) : null;
-    const assemblyIdentity = assembly?.identity ?? null;
     const vaultGateReadyFromWorkerTargetMs = Math.max(
       0, vaultGateReadyFromLaunchMs - workerTargetMs,
     );
@@ -1013,8 +867,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         const { target, elapsedMs: workerTargetFromWakeMs } = targetResult;
         if (!target) throw new Error('Chrome wake produced no service-worker target');
         if (target.targetId === current.targetId) throw new Error('Chrome reused the terminated worker target');
-        const wakeAssembly = nativeFloor
-          ? inspectNativeFloorAssembly(wakeBootstrap.reply?.assembly) : null;
         let wakeGraphReadyMs = null;
         if (diagnostic) {
           const wakeWorker = await within(
@@ -1041,8 +893,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           stateFromWakeMs,
           vaultGateReadyFromWakeMs,
           kernelTiming: wakeBootstrap.reply?.timing ?? null,
-          assemblyIdentity: wakeAssembly?.identity ?? null,
-          assembly: wakeAssembly?.report ?? null,
         });
         console.log(`  forced wake ${sample + 1}/${wakeSamples}: actionable in ${round(vaultGateReadyFromWakeMs)}ms`);
       } catch (error) {
@@ -1070,8 +920,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       workerActivationObservedByActionable: !!activatedVersion,
       workerVersionTimeline,
       kernelTiming: bootstrap.reply?.timing ?? null,
-      assemblyIdentity,
-      assembly: assembly?.report ?? null,
       wakes, wakeFailures,
     };
   } catch (error) {
@@ -1099,18 +947,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
 
 const runChromeSample = async (prepared, sample, role = 'candidate') => {
   console.log(`Chrome ${role} fresh profile ${sample + 1}/${chromeProcesses}`);
-  const hostQuiescence = nativeFloor ? await measureHostQuiescence() : null;
-  if (hostQuiescence && !hostQuiescence.ok) {
-    const failure = {
-      sample: sample + 1,
-      kind: 'host-overloaded',
-      elapsedMs: 0,
-      error: `host-overloaded: ${hostQuiescence.failures.join('; ')}`,
-      hostQuiescence,
-    };
-    console.log(`  ${role} fresh profile ${sample + 1}/${chromeProcesses}: ${failure.error}`);
-    return { failure };
-  }
   const started = hostNowMs();
   try {
     const processResult = await runChromeProcess({
@@ -1121,7 +957,6 @@ const runChromeSample = async (prepared, sample, role = 'candidate') => {
     processResult.clock = 'host-monotonic';
     processResult.diagnosticWorkerClock = 'realm-performance';
     processResult.boundary = COLD_START_PHASES.chrome.freshProfile.boundary;
-    if (hostQuiescence) processResult.hostQuiescence = hostQuiescence;
     processResult.wakes.forEach((wakeSample) => {
       wakeSample.sampleIndex = sample + 1;
       wakeSample.clock = 'host-monotonic';
@@ -1154,11 +989,6 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
     boundary: COLD_START_PHASES.chrome.freshProfile.boundary,
     failures: processFailures,
     rawSamples: processes,
-    ...(nativeFloor ? {
-      hostQuiescence: [...processes, ...processFailures]
-        .map((row) => ({ sampleIndex: row.sampleIndex ?? row.sample, ...row.hostQuiescence }))
-        .sort((left, right) => left.sampleIndex - right.sampleIndex),
-    } : {}),
   };
   for (const metric of freshMetrics) freshProfile[metric] = summarize(processes.map((row) => row[metric]));
   const forcedColdWake = {
@@ -1172,7 +1002,6 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
   return {
     browser: 'chrome',
     version: processes[0]?.browserProduct ?? 'unknown',
-    nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
     measurement,
     artifact: {
       channel: 'store',
@@ -1192,7 +1021,6 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
       packageVersion: store.packageVersion,
       sourceCommitSha: measurement.sourceCommitSha,
       sourceDirty: measurement.sourceDirty,
-      nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
     },
     packagedGraphs: store.graphs,
     packagedGraphsByChannel: Object.fromEntries(['store', 'preview']
@@ -1205,9 +1033,7 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
 };
 
 const benchmarkChrome = async (measurement) => {
-  const prepared = nativeFloor
-    ? await prepareNativeFloorArtifacts('chrome')
-    : await prepareBrowserArtifacts('chrome');
+  const prepared = await prepareBrowserArtifacts('chrome');
   try {
     const processes = [];
     const processFailures = [];
@@ -1569,7 +1395,6 @@ const buildFirefoxResult = async (
       packageVersion: store.packageVersion,
       sourceCommitSha: measurement.sourceCommitSha,
       sourceDirty: measurement.sourceDirty,
-      nativeFloor: null,
     },
     packagedGraphs: store.graphs,
     packagedGraphsByChannel: Object.fromEntries(['store', 'preview']
@@ -1654,7 +1479,7 @@ const benchmarkFirefoxPair = async (measurements, comparisonSources) => {
 
 export const main = async () => {
   if (options.help === true || options.help === 'true') {
-    console.log('usage: bun run bench:cold-sw -- --lane=<local|device|pr|main|release> [--browser=<all|chrome|firefox>] [--runtime-target=<release|native-floor>] [--comparison=<absolute-ratchet|interleaved-candidate-base>]');
+    console.log('usage: bun run bench:cold-sw -- --lane=<local|device|pr|main|release> [--browser=<all|chrome|firefox>] [--comparison=<absolute-ratchet|interleaved-candidate-base>]');
     console.log('Fixed lanes use the exact checked-in sample, timeout, graph, and timing profile.');
     return;
   }
@@ -1673,9 +1498,7 @@ export const main = async () => {
     throw new Error('cold-start evidence requires a readable Git commit, merge base, and worktree status');
   }
   const dirty = status !== '';
-  if ((nativeFloor || lane === 'device') && dirty) {
-    throw new Error(`${nativeFloor ? 'native-floor' : 'device'} evidence requires a clean committed worktree`);
-  }
+  if (lane === 'device' && dirty) throw new Error('device evidence requires a clean committed worktree');
   const host = {
     platform: process.platform,
     release: osRelease(),
@@ -1711,7 +1534,6 @@ export const main = async () => {
         runtimeTarget,
         runtimeSurface,
         coldBudgetMode: role === 'candidate' ? coldBudgetMode : 'measure-only',
-        nativeFloor: null,
         sourceCommitSha: source.commitSha,
         sourcePackageVersion: source.packageVersion,
         sourceDirty: false,
@@ -1729,7 +1551,6 @@ export const main = async () => {
         runtimeTarget,
         runtimeSurface,
         coldBudgetMode,
-        nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
         sourceCommitSha: commitSha,
         sourcePackageVersion: VERSION,
         sourceDirty: dirty,
@@ -1745,7 +1566,6 @@ export const main = async () => {
     runtimeTarget,
     runtimeSurface,
     coldBudgetMode,
-    nativeFloor: nativeFloor ? NATIVE_FLOOR_CONTRACT : null,
     commitSha,
     baseCommitSha,
     dirty,
@@ -1757,7 +1577,6 @@ export const main = async () => {
         : 'Candidate and merge-base commits were packaged by the same candidate toolchain and alternated per sample on one host.',
       ...(comparisonSources ? { scheduleByBrowser: {} } : {}),
     },
-    targetCutover: COLD_START_TARGET_CUTOVER,
     options: {
       browser: browserChoice,
       runtimeTarget,
@@ -1776,9 +1595,7 @@ export const main = async () => {
       unsafeNoSandbox,
     },
     host,
-    note: nativeFloor
-      ? 'Local native-floor diagnostic: Chrome runs the exact one-module release-minified copied Store kernel artifact named by archiveSha256 in three independent fresh profiles, with one confirmed-stop wake per profile. Every raw sample binds the native assembly identity and exact worker-relative timing schema while host-monotonic raw maxima remain gated at three seconds. Store runs physically; Preview contributes a separately hashed native graph. CDP cannot open the browser-owned side panel, so the runtime CTA is measured on the exact tab-owned Home authority surface. Full browser launch remains reported but is not charged to the service worker. This does not change or claim the live release manifest.'
-      : 'Every browser runs the exact unsigned Store artifact named by archiveSha256 and records both Store and Preview cold graphs against their own immutable archive/tree digests. Browser launch/install to visible shell, bootstrap, state and actionable-vault clocks are host-monotonic; page/worker clocks are diagnostic only and no benchmark source is injected into the extension.',
+    note: 'Every browser runs the exact unsigned Store artifact named by archiveSha256 and records both Store and Preview cold graphs against their own immutable archive/tree digests. Browser launch/install to visible shell, bootstrap, state and actionable-vault clocks are host-monotonic; page/worker clocks are diagnostic only and no benchmark source is injected into the extension.',
     results: {},
     ...(comparisonSources ? { baseResults: {}, pairAssessments: {} } : {}),
   };
@@ -1837,7 +1654,7 @@ export const main = async () => {
     expectedLane: lane,
     expectedCommitSha: commitSha,
     expectedBaseCommitSha: baseCommitSha,
-    requireClean: ['device', 'release'].includes(lane) || nativeFloor,
+    requireClean: ['device', 'release'].includes(lane),
   });
   writeFileSync(OUTPUT, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`wrote ${OUTPUT}`);

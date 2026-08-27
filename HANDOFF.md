@@ -77,10 +77,11 @@ Origin pinning, denylist/SSRF/egress policy, confirmation for persistence and
 writes, session/actor custody, untrusted fencing and capture document identity
 remain mandatory.
 
-The obsolete 300 KB artifact target is deleted. Normal packaging enforces the
-achieved per-channel no-growth graph ratchets and records bytes as telemetry;
-the browser harness enforces graph integrity plus actionable-readiness timing.
-There is no substitute arbitrary byte target.
+The obsolete 300 KB artifact target and its native-floor/target-cutover
+measurement lane are deleted. Normal packaging enforces the achieved
+per-channel no-growth graph ratchets and records bytes as telemetry; the browser
+harness enforces graph integrity plus actionable-readiness timing. There is no
+substitute arbitrary byte target.
 
 ## Verification baseline
 
