@@ -6,6 +6,7 @@ import { describe, expect, it } from '../../../framework.js';
 describe('voice host runtime', () => {
   it('keeps one transcriber across commands and emits bounded voice events', async () => {
     /** @type {any[]} */
+    /** @type {any[]} */
     const events = [];
     /** @type {(value:any)=>void} */
     let chunk = () => {};
@@ -149,5 +150,47 @@ describe('voice host runtime', () => {
     });
     expect(oldTrack.stopped).toBe(true);
     expect(newTrack.stopped).toBe(false);
+  });
+
+  it('a no-speech stop cannot race a successor listen', async () => {
+    /** @type {()=>void} */
+    let fireNoSpeech = () => {};
+    /** @type {()=>void} */
+    let releaseStop = () => {};
+    const stopGate = new Promise((resolve) => { releaseStop = () => resolve(undefined); });
+    let listens = 0;
+    let stops = 0;
+    /** @type {any[]} */
+    const events = [];
+    const transcriber = {
+      engine: 'web-speech',
+      init: async () => {},
+      listenFor: async () => { listens += 1; },
+      stop: async () => { stops += 1; await stopGate; },
+      teardown: async () => {},
+    };
+    const host = createVoiceHostRuntime({
+      emit: (event) => { events.push(event); },
+      loadEngine: async () => ({ createBestTranscriber: () => transcriber }),
+      navigatorEnv: {},
+      setTimeoutFn: /** @type {typeof setTimeout} */ ((/** @type {()=>void} */ callback) => {
+        fireNoSpeech = callback;
+        return /** @type {any} */ (1);
+      }),
+      clearTimeoutFn: () => {},
+    });
+    await host.handle({ type: 'voice/init', engine: 'web-speech', variant: 'base' });
+    await host.handle({ type: 'voice/listen', targetId: 'old' });
+    fireNoSpeech();
+    await Promise.resolve();
+    expect(stops).toBe(1);
+
+    const successor = host.handle({ type: 'voice/listen', targetId: 'new' });
+    await Promise.resolve();
+    expect(listens).toBe(1);
+    releaseStop();
+    expect(await successor).toEqual({ ok: true });
+    expect(listens).toBe(2);
+    expect(events).toEqual([]);
   });
 });

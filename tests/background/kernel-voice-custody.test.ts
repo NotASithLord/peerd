@@ -68,7 +68,12 @@ describe('kernel voice custody', () => {
         createFirefoxHost: () => { touches += 1; return { handle: async () => ({ ok: true }) }; },
       });
       await expect(custody.routes['voice/init']({
-        type: 'voice/init', variant: 'base', engine: 'forged', extra: true,
+        type: 'voice/init', variant: 'base', engine: 'moonshine', extra: true,
+      })).resolves.toEqual({
+        ok: false, error: 'voice-command-invalid', outcomeKnown: true,
+      });
+      await expect(custody.routes['voice/init']({
+        type: 'voice/stop', variant: 'base', engine: 'moonshine',
       })).resolves.toEqual({
         ok: false, error: 'voice-command-invalid', outcomeKnown: true,
       });

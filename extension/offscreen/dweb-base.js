@@ -57,7 +57,12 @@ let meshGeneration = 0;
 /** @type {string | null} */
 let activeFeatureHostEpoch = null;
 const reseedNotifier = createDwebReseedNotifier({
-  send: (notice) => browser.runtime.sendMessage(notice),
+  send: async (notice, { signal }) => {
+    if (signal.aborted) throw new Error('dweb-generation-retired');
+    const reply = await browser.runtime.sendMessage(notice);
+    if (signal.aborted) throw new Error('dweb-generation-retired');
+    return reply;
+  },
   current: (notice) => custodyIntended
     && activeFeatureHostEpoch === notice.hostEpoch
     && meshGeneration === notice.meshGeneration,
@@ -880,7 +885,21 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         // Share: publish the app's files as a signed bundle the base mesh serves,
         // then announce it (gossip + DHT). dwapp_id = content hash.
         case 'dweb/base-host/share-app': {
+          if (msg.reseed === true && (
+            msg.expectedHostEpoch !== activeFeatureHostEpoch
+            || msg.expectedMeshGeneration !== meshGeneration
+          )) {
+            sendResponse({ ok: false, error: 'dweb-generation-retired' });
+            return;
+          }
           const h = await start();
+          if (msg.reseed === true && (
+            msg.expectedHostEpoch !== activeFeatureHostEpoch
+            || msg.expectedMeshGeneration !== meshGeneration
+          )) {
+            sendResponse({ ok: false, error: 'dweb-generation-retired' });
+            return;
+          }
           // The UI passes an edited namespace on FIRST share (and the stored slug on
           // reshare); fall back to the name. A RESHARE reuses the same slug → same
           // dwapp_id → publishMeta amends the existing card (higher seq) instead of

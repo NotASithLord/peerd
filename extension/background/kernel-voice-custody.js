@@ -248,16 +248,13 @@ export const createKernelVoiceCustody = ({
   const dispatch = (/** @type {any} */ command) => queue(
     () => firefox ? callFirefox(command) : callChrome(command),
   );
-  const shapeCommand = (/** @type {string} */ type, /** @type {any} */ message) => {
-    if (type === 'voice/init') return { type, variant: message.variant, engine: message.engine };
-    if (type === 'voice/listen') return { type, targetId: message.targetId };
-    if (type === 'voice/silence') return { type, ms: message.ms };
-    return { type };
-  };
   const routes = Object.freeze(Object.fromEntries(VOICE_COMMANDS.map((type) => [
     type,
     (/** @type {any} */ message = {}) => {
-      const command = parseVoiceCommand(shapeCommand(type, message));
+      // why: parse the original authority-boundary value. Projecting known
+      // fields first would silently erase unknown fields and defeat the exact
+      // shared Chrome/Firefox command contract.
+      const command = message?.type === type ? parseVoiceCommand(message) : null;
       return command ? dispatch(command) : Promise.resolve({
         ok: false, error: 'voice-command-invalid', outcomeKnown: true,
       });

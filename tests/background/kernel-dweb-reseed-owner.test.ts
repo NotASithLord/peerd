@@ -8,6 +8,7 @@ const app = {
 
 const owner = (over: Record<string, any> = {}) => {
   const messages: any[] = [];
+  let currentEpoch = 'host-epoch-0001';
   const value = createKernelDwebReseedOwner({
     active: () => true,
     locked: () => false,
@@ -16,10 +17,20 @@ const owner = (over: Record<string, any> = {}) => {
     withAppLifecycle: async (_id: string, operation: any) => operation(),
     repositories: {},
     sendMessage: async (message: any) => { messages.push(message); return { ok: true }; },
+    currentHostEpoch: () => currentEpoch,
     log: { warn: () => {}, debug: () => {} },
     ...over,
   });
-  return { value, messages };
+  return {
+    value: Object.freeze({
+      onHostGeneration: (event: any) => {
+        if (!over.currentHostEpoch) currentEpoch = event.hostEpoch;
+        return value.onHostGeneration(event);
+      },
+    }),
+    messages,
+    setCurrentEpoch: (epoch: string) => { currentEpoch = epoch; },
+  };
 };
 
 describe('kernel dweb reseed owner', () => {
@@ -44,6 +55,7 @@ describe('kernel dweb reseed owner', () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0]).toMatchObject({
       type: 'dweb/base-host/share-app', appId: 'app-1', expectedHash: 'hash', reseed: true,
+      expectedHostEpoch: 'host-epoch-0001', expectedMeshGeneration: 1,
     });
   });
 
@@ -86,39 +98,45 @@ describe('kernel dweb reseed owner', () => {
     expect(attempts).toBe(2);
   });
 
-  test('serializes distinct generations and coalesces a duplicate while queued', async () => {
-    const starts: string[] = [];
-    let releaseFirst!: () => void;
-    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    let noteFirstStarted!: () => void;
-    const firstStarted = new Promise<void>((resolve) => { noteFirstStarted = resolve; });
-    let calls = 0;
+  test('retires a hung predecessor when a newer mesh generation arrives', async () => {
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => { firstStarted = resolve; });
     const h = owner({
       sendMessage: async (message: any) => {
-        calls += 1;
-        starts.push(`${message.appId}:${calls}`);
-        if (calls === 1) { noteFirstStarted(); await first; }
+        if (message.expectedMeshGeneration === 1) {
+          firstStarted();
+          return new Promise(() => {});
+        }
         return { ok: true };
       },
+      messageTimeoutMs: 5,
     });
     const generationOne = h.value.onHostGeneration({
       hostEpoch: 'host-epoch-0004', meshGeneration: 1,
     });
-    await firstStarted;
+    await started;
     const generationTwo = h.value.onHostGeneration({
       hostEpoch: 'host-epoch-0004', meshGeneration: 2,
     });
-    const generationTwoAgain = h.value.onHostGeneration({
-      hostEpoch: 'host-epoch-0004', meshGeneration: 2,
-    });
-    expect(starts).toEqual(['app-1:1']);
-    expect(generationTwoAgain).toBe(generationTwo);
-    releaseFirst();
-    expect(await generationOne).toEqual({ ok: true, seeded: 1 });
     expect(await generationTwo).toEqual({ ok: true, seeded: 1 });
-    expect(calls).toBe(2);
+    expect(await generationOne).toMatchObject({
+      ok: false, cancelled: true, error: 'dweb-generation-retired',
+    });
     expect(await h.value.onHostGeneration({
-      hostEpoch: 'host-epoch-0004', meshGeneration: 2,
-    })).toEqual({ ok: true, seeded: 0, coalesced: true });
+      hostEpoch: 'host-epoch-0004', meshGeneration: 1,
+    })).toMatchObject({ ok: false, cancelled: true });
+  });
+
+  test('rejects a delayed generation from a replaced physical host before reading state', async () => {
+    let lists = 0;
+    const h = owner({
+      currentHostEpoch: () => 'host-epoch-current',
+      appRegistry: { list: async () => { lists += 1; return [app]; }, get: async () => app },
+    });
+    expect(await h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-retired', meshGeneration: 4,
+    })).toMatchObject({ ok: false, cancelled: true, error: 'dweb-generation-retired' });
+    expect(lists).toBe(0);
+    expect(h.messages).toEqual([]);
   });
 });

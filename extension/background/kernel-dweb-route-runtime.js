@@ -28,7 +28,8 @@ const base64FileBytes = (/** @type {string} */ value) => {
 export const createKernelDwebRouteOwner = (deps) => {
   if (!deps?.enabled || !deps.engine || !deps.relays || !deps.transfer
       || typeof deps.ensureDwebFeature !== 'function'
-      || typeof deps.withIdentityMutation !== 'function') {
+      || typeof deps.withIdentityMutation !== 'function'
+      || typeof deps.currentDwebHostEpoch !== 'function') {
     throw new TypeError('kernel-dweb-route-runtime-config-invalid');
   }
   const { engine, relays, transfer } = deps;
@@ -176,6 +177,7 @@ export const createKernelDwebRouteOwner = (deps) => {
     withAppLifecycle: engine.withAppLifecycle,
     repositories: engine.repositories,
     sendMessage,
+    currentHostEpoch: deps.currentDwebHostEpoch,
   });
   return Object.freeze({ routes, reseed });
 };

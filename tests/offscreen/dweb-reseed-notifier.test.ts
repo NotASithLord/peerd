@@ -1,69 +1,102 @@
 import { describe, expect, test } from 'bun:test';
 import { createDwebReseedNotifier } from '../../extension/offscreen/dweb-reseed-notifier.js';
 
+const turn = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 describe('dweb reseed generation notification', () => {
-  test('retries a current generation only after failed acknowledgements', async () => {
-    const waits: Array<() => void> = [];
+  test('keeps retrying the live generation beyond the former finite ceiling', async () => {
     let calls = 0;
     const notice = { hostEpoch: 'host-epoch-0001', meshGeneration: 1 };
     const notifier = createDwebReseedNotifier({
       current: (candidate) => candidate === notice,
-      send: async () => ({ ok: ++calls >= 3 }),
-      retryDelaysMs: [1, 2],
-      setTimeoutFn: ((callback: () => void) => {
-        waits.push(callback);
-        return waits.length as unknown as ReturnType<typeof setTimeout>;
-      }) as typeof setTimeout,
-      clearTimeoutFn: (() => {}) as typeof clearTimeout,
+      send: async () => ({ ok: ++calls >= 7 }),
+      retryDelaysMs: [0],
+      attemptTimeoutMs: 100,
     });
-    const result = notifier.notify(notice);
-    const releaseNextWait = async () => {
-      for (let turn = 0; turn < 5 && waits.length === 0; turn += 1) await Promise.resolve();
-      const release = waits.shift();
-      expect(release).toBeFunction();
-      release?.();
-    };
-    await Promise.resolve();
-    expect(calls).toBe(1);
-    await releaseNextWait();
-    for (let turn = 0; turn < 5 && calls < 2; turn += 1) await Promise.resolve();
-    expect(calls).toBe(2);
-    await releaseNextWait();
-    expect(await result).toEqual({ ok: true });
-    expect(calls).toBe(3);
+    await expect(notifier.notify(notice)).resolves.toEqual({ ok: true });
+    expect(calls).toBe(7);
   });
 
-  test('cancellation retires the generation before another publication attempt', async () => {
-    const waits: Array<() => void> = [];
+  test('times out a hung attempt, aborts its signal, and recovers on retry', async () => {
     let calls = 0;
+    let firstSignal: AbortSignal | null = null;
     const notice = { hostEpoch: 'host-epoch-0002', meshGeneration: 2 };
     const notifier = createDwebReseedNotifier({
       current: () => true,
-      send: async () => { calls += 1; return { ok: false }; },
-      retryDelaysMs: [1],
-      setTimeoutFn: ((callback: () => void) => {
-        waits.push(callback);
-        return waits.length as unknown as ReturnType<typeof setTimeout>;
-      }) as typeof setTimeout,
-      clearTimeoutFn: (() => {}) as typeof clearTimeout,
+      send: async (_candidate, { signal }) => {
+        calls += 1;
+        if (calls === 1) {
+          firstSignal = signal;
+          return new Promise(() => {});
+        }
+        return { ok: true };
+      },
+      retryDelaysMs: [0],
+      attemptTimeoutMs: 2,
     });
-    const result = notifier.notify(notice);
-    await Promise.resolve();
-    notifier.cancel();
-    expect(await result).toMatchObject({ ok: false, cancelled: true });
-    expect(calls).toBe(1);
+    await expect(notifier.notify(notice)).resolves.toEqual({ ok: true });
+    expect(calls).toBe(2);
+    expect((firstSignal as AbortSignal | null)?.aborted).toBe(true);
   });
 
-  test('a permanently failed generation stops at the finite attempt ceiling', async () => {
-    let calls = 0;
+  test('cancellation aborts a hung in-flight send and settles the retired loop', async () => {
+    let signal: AbortSignal | null = null;
+    const notice = { hostEpoch: 'host-epoch-0003', meshGeneration: 3 };
     const notifier = createDwebReseedNotifier({
       current: () => true,
-      send: async () => { calls += 1; return { ok: false, error: 'still-unavailable' }; },
-      retryDelaysMs: [0, 0],
+      send: async (_candidate, options) => {
+        signal = options.signal;
+        return new Promise(() => {});
+      },
+      retryDelaysMs: [1],
+      attemptTimeoutMs: 1_000,
     });
-    await expect(notifier.notify({
-      hostEpoch: 'host-epoch-0003', meshGeneration: 3,
-    })).resolves.toEqual({ ok: false, error: 'still-unavailable' });
-    expect(calls).toBe(3);
+    const result = notifier.notify(notice);
+    for (let attempt = 0; attempt < 5 && !signal; attempt += 1) await Promise.resolve();
+    notifier.cancel();
+    await expect(result).resolves.toMatchObject({ ok: false, cancelled: true });
+    expect((signal as AbortSignal | null)?.aborted).toBe(true);
+  });
+
+  test('generation replacement aborts the predecessor and acknowledges only the successor', async () => {
+    const oldNotice = { hostEpoch: 'host-epoch-0004', meshGeneration: 1 };
+    const nextNotice = { hostEpoch: 'host-epoch-0004', meshGeneration: 2 };
+    let current = oldNotice;
+    let oldSignal: AbortSignal | null = null;
+    const notifier = createDwebReseedNotifier({
+      current: (notice) => notice === current,
+      send: async (notice, { signal }) => {
+        if (notice === oldNotice) {
+          oldSignal = signal;
+          return new Promise(() => {});
+        }
+        return { ok: true, generation: notice.meshGeneration };
+      },
+      retryDelaysMs: [0],
+      attemptTimeoutMs: 1_000,
+    });
+    const oldResult = notifier.notify(oldNotice);
+    for (let attempt = 0; attempt < 5 && !oldSignal; attempt += 1) await Promise.resolve();
+    current = nextNotice;
+    const nextResult = notifier.notify(nextNotice);
+    await expect(oldResult).resolves.toMatchObject({ ok: false, cancelled: true });
+    await expect(nextResult).resolves.toEqual({ ok: true, generation: 2 });
+    expect((oldSignal as AbortSignal | null)?.aborted).toBe(true);
+  });
+
+  test('cancellation during backoff prevents another attempt', async () => {
+    let calls = 0;
+    const notice = { hostEpoch: 'host-epoch-0005', meshGeneration: 1 };
+    const notifier = createDwebReseedNotifier({
+      current: () => true,
+      send: async () => { calls += 1; return { ok: false }; },
+      retryDelaysMs: [1_000],
+      attemptTimeoutMs: 100,
+    });
+    const result = notifier.notify(notice);
+    while (calls === 0) await turn();
+    notifier.cancel();
+    await expect(result).resolves.toMatchObject({ ok: false, cancelled: true });
+    expect(calls).toBe(1);
   });
 });
