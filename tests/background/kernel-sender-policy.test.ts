@@ -11,6 +11,7 @@ const policy = createKernelSenderPolicy({
   notebookTabUrl: `${origin}engine-tabs/notebook-tab/index.html`,
   offscreenUrl: `${origin}offscreen/offscreen.html`,
   appTabUrl: `${origin}engine-tabs/app-tab/index.html`,
+  micUrl: `${origin}permissions/mic.html`,
 });
 
 describe('kernel sender policy', () => {
@@ -29,5 +30,14 @@ describe('kernel sender policy', () => {
     expect(policy.appUi({ ...app, id: 'foreign' }, 'demo')).toBe(false);
     expect(policy.appUi({ ...app, url: `${origin}engine-tabs/app-tab/index.html?x#demo` }, 'demo'))
       .toBe(false);
+  });
+
+  test('mic permission results require the exact first-party grant page', () => {
+    const sender = {
+      id: 'runtime', tab: { id: 8 }, url: `${origin}permissions/mic.html`,
+    };
+    expect(policy.micUi(sender)).toBe(true);
+    expect(policy.micUi({ ...sender, id: 'foreign' })).toBe(false);
+    expect(policy.micUi({ ...sender, url: `${origin}permissions/mic.html?forged` })).toBe(false);
   });
 });

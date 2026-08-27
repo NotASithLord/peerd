@@ -233,6 +233,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
   });
   const runtimeCapabilities = resolveRuntimeCapabilities({
     offscreenDocument: !deps.firefox,
+    moonshineVoiceDocument: true,
     dwebPackaged: deps.dwebEnabled,
   });
   const dwebEngagedSessions = new Set();

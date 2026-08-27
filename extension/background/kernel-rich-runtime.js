@@ -28,12 +28,14 @@ export const createKernelRichRuntime = async (deps) => {
       makeExecutable({ ...deps.engine, engine, relays }),
       makeTransfer(deps.transfer),
     ]);
-    const dwebRoutes = typeof deps.createDwebRoutes === 'function'
-      ? await deps.createDwebRoutes({ engine, relays, transferLive }) : Object.freeze({});
+    const dwebOwner = typeof deps.createDwebOwner === 'function'
+      ? await deps.createDwebOwner({ engine, relays, transferLive }) : null;
+    const dwebRoutes = dwebOwner?.routes ?? Object.freeze({});
     return Object.freeze({
       turnRuntime, executableLive, transferLive, relays,
       relayRoutes: relays.relayRoutes,
       dwebRoutes,
+      reseedDwebShares: dwebOwner?.reseed?.onHostGeneration,
       close: () => turnRuntime.close(),
     });
   } catch (cause) {

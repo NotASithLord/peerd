@@ -14,11 +14,11 @@ import {
 export const createKernelSenderPolicy = (target) => {
   const {
     runtimeId, extensionOrigin, sidepanelUrl, homeUrl, optionsUrl,
-    evalRunnerUrl, notebookTabUrl, offscreenUrl, appTabUrl,
+    evalRunnerUrl, notebookTabUrl, offscreenUrl, appTabUrl, micUrl,
   } = target;
   if ([
     runtimeId, extensionOrigin, sidepanelUrl, homeUrl, optionsUrl,
-    evalRunnerUrl, notebookTabUrl, offscreenUrl, appTabUrl,
+    evalRunnerUrl, notebookTabUrl, offscreenUrl, appTabUrl, micUrl,
   ].some((value) => typeof value !== 'string')) {
     throw new TypeError('kernel-sender-policy-config-invalid');
   }
@@ -55,13 +55,15 @@ export const createKernelSenderPolicy = (target) => {
   const offscreenUi = (/** @type {any} */ sender) => isOffscreenSender(sender, {
     runtimeId, extensionOrigin, offscreenUrl,
   });
+  const micUi = (/** @type {any} */ sender) => trusted(sender)
+    && typeof sender?.tab?.id === 'number' && sender.url === micUrl;
   return Object.freeze({
     trusted, sidepanelUi, homeUi,
     humanUi: (/** @type {any} */ sender) => sidepanelUi(sender) || homeUi(sender),
     optionsUi, evalUi,
     voiceUi: (/** @type {any} */ sender) => sidepanelUi(sender) || optionsUi(sender),
     notebookUi,
-    appUi, offscreenUi,
+    appUi, offscreenUi, micUi,
     sidepanelPortUi: (/** @type {any} */ sender) => isSidepanelPortSender(sender, {
       runtimeId, extensionOrigin, sidepanelUrl,
     }),

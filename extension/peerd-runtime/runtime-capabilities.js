@@ -56,10 +56,13 @@ const unsupported = (alternativeCode) => Object.freeze({
  * Resolve facilities from host facts. Consumers must ask about the product
  * facility, never infer support from a browser name or a stored preference.
  *
- * @param {{ offscreenDocument: boolean, dwebPackaged?: boolean }} hosts
+ * @param {{ offscreenDocument: boolean, dwebPackaged?: boolean, moonshineVoiceDocument?: boolean }} hosts
  */
-export const resolveRuntimeCapabilities = ({ offscreenDocument, dwebPackaged = false }) => {
+export const resolveRuntimeCapabilities = ({
+  offscreenDocument, dwebPackaged = false, moonshineVoiceDocument = offscreenDocument,
+}) => {
   const offscreen = offscreenDocument === true;
+  const voiceDocument = moonshineVoiceDocument === true;
   return Object.freeze({
     version: RUNTIME_CAPABILITY_VERSION,
     sealedJobs: offscreen
@@ -69,8 +72,8 @@ export const resolveRuntimeCapabilities = ({ offscreenDocument, dwebPackaged = f
       ? available('offscreen-document')
       : unsupported('attach_pdf_or_plain_text'),
     readableHtml: Object.freeze({ mode: offscreen ? 'markdown' : 'snapshot_or_raw' }),
-    moonshineVoiceHost: offscreen
-      ? available('offscreen-document')
+    moonshineVoiceHost: voiceDocument
+      ? available(offscreen ? 'offscreen-document' : 'background-page')
       : unsupported('type_in_composer'),
     pdfOcr: offscreen
       ? available('offscreen-document')

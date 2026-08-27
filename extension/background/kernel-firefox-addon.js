@@ -5,6 +5,8 @@ import {
   makeDrivenChildRequestGuard,
   makeFirefoxDrivenChildMarkerStore,
 } from './driven-child-request-guard.js';
+import { createKernelFirefoxUpdateCustody } from './kernel-firefox-update-custody.js';
+import { createKernelFirefoxVoiceHost } from './kernel-firefox-voice-host.js';
 
 // why: Firefox must evaluate child-request custody at event-page startup, but
 // controller, lifetime, and repository owners have no synchronous listener duty.
@@ -59,6 +61,14 @@ export const createKernelFirefoxLazyAddon = ({
     firefoxLifetime: {
       enumerable: true,
       get: loadLifetime,
+    },
+    update: {
+      enumerable: true,
+      value: createKernelFirefoxUpdateCustody,
+    },
+    createVoiceHost: {
+      enumerable: true,
+      value: createKernelFirefoxVoiceHost,
     },
   }));
 };

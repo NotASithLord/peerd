@@ -31,11 +31,14 @@ describe('kernel rich runtime', () => {
         return { routes: {} };
       },
       makeTransfer: async () => { sequence.push('transfer'); return { routes: {} }; },
-      createDwebRoutes: async (input: any) => {
+      createDwebOwner: async (input: any) => {
         expect(input.engine).toBe(engine);
         expect(input.relays).toBe(relays);
         expect(input.transferLive).toEqual({ routes: {} });
-        return { 'dweb/peers': () => ({ ok: true }) };
+        return {
+          routes: { 'dweb/peers': () => ({ ok: true }) },
+          reseed: { onHostGeneration: () => ({ ok: true }) },
+        };
       },
     });
 
@@ -47,6 +50,7 @@ describe('kernel rich runtime', () => {
     expect(rich.relays).toBe(relays);
     expect(rich.relayRoutes).toBe(relays.relayRoutes);
     expect(rich.dwebRoutes['dweb/peers']()).toEqual({ ok: true });
+    expect(rich.reseedDwebShares()).toEqual({ ok: true });
     await rich.close();
     expect(closed).toBe(1);
   });

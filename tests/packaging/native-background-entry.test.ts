@@ -46,7 +46,7 @@ describe('target-specific native background entry', () => {
       .toBeLessThan(source.indexOf("from './vault-kernel.js'"));
   });
 
-  test('Firefox stays demand-loaded while Chrome declares its full native closure', async () => {
+  test('keeps Firefox demand-loaded with synchronous guards and exact host owners', async () => {
     const firefox = await collectStaticModuleGraph(
       EXTENSION, join(EXTENSION, FIREFOX_BACKGROUND_ENTRY),
     );
@@ -54,6 +54,15 @@ describe('target-specific native background entry', () => {
       EXTENSION, join(EXTENSION, NATIVE_BACKGROUND_ENTRY),
     );
     expect(firefox.has(join(EXTENSION, 'background/driven-child-request-guard.js'))).toBe(true);
+    for (const leaf of [
+      'background/kernel-firefox-update-custody.js',
+      'background/kernel-firefox-voice-host.js',
+      'peerd-runtime/voice/host-runtime.js',
+    ]) {
+      const path = join(EXTENSION, leaf);
+      expect(firefox.has(path), leaf).toBe(true);
+      expect(chrome.has(path), leaf).toBe(false);
+    }
     for (const leaf of [
       'background/direct-controller-client.js',
       'background/offscreen-controller-client.js',

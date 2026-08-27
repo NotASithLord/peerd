@@ -92,15 +92,15 @@ describe('offscreen production feature-lease wiring', () => {
 
   test('the offscreen shell has no unconditional generic keepalive', () => {
     const shell = source('offscreen/offscreen.js');
+    const channels = source('offscreen/supervisor-channels.js');
     expect(shell).not.toContain("'sw-keepalive'");
     expect(shell).not.toContain("type: 'heartbeat'");
     expect(shell).toContain('FEATURE_LEASE_KEEPALIVE_PORT');
     expect(shell).toContain("feature-lease/host-");
     expect(shell).toContain("claimLease('dweb'");
-    expect(source('offscreen/supervisor-channels.js'))
-      .toContain("ownsLease?.('controller', lease) === true");
+    expect(channels).toContain("ownsLease?.('controller', lease) === true");
     expect(shell).toContain("claimLease('dom-host'");
-    expect(shell).toContain("claimLease('media-host'");
+    expect(channels).toContain("ownsLease?.('media-host', offer.lease) === true");
   });
 
   test('a revoked controller claim cannot escape a delayed bootstrap load', async () => {
@@ -318,12 +318,12 @@ describe('offscreen production feature-lease wiring', () => {
   });
 
   test('voice media is accepted only from human UI and teardown revokes the durable hold', () => {
-    const voice = source('background/service-worker-control-plane.js');
-    expect(voice).toContain('deps.isSidepanelSender(sender)');
-    expect(voice).toContain('deps.isOptionsSender(sender)');
-    expect(voice).toContain('__peerdVoiceRelay: relayToken');
-    expect(voice).toContain("msg.type === 'voice/teardown'");
-    expect(voice).toContain("deps.featureLeases.revoke('media-host', 'feature-disabled')");
+    const custody = source('background/kernel-voice-custody.js');
+    const provenance = source('background/vault-kernel-core.js');
+    expect(provenance).toContain("add(['voice/init', 'voice/listen', 'voice/stop'");
+    expect(provenance).toContain('voiceUi);');
+    expect(custody).toContain('VOICE_CHANNEL_OFFER');
+    expect(custody).toContain("revoke('media-host', 'feature-disabled')");
   });
 
   test('voice teardown queues behind a pending init and then revokes the activated media lease', async () => {
@@ -428,7 +428,7 @@ describe('offscreen production feature-lease wiring', () => {
     expect(shell).toContain('abortRepositoryHostCalls()');
     expect(shell).toContain('abortAllJobs()');
     expect(shell).toContain('teardownLocalModel()');
-    expect(shell).toContain('releaseMicTracks()');
+    expect(shell).toContain('stopVoiceHost()');
     expect(shell).toContain('stopDwebFeatureLease()');
   });
 });
