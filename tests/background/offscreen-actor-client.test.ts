@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { makeOffscreenActorClient } from '../../extension/background/offscreen-actor-client.js';
+import { makeOffscreenActorChannelClient } from '../../extension/background/offscreen-actor-channel-client.js';
+import { bindActorChannel } from '../../extension/offscreen/actor-channel-host.js';
 import { DWEB_INBOUND_TOOL_NAMES } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 
 const OFFSCREEN = { id: 'ext', url: 'chrome-extension://ext/offscreen/offscreen.html' };
@@ -410,6 +412,47 @@ describe('isolated exact tool authority', () => {
       },
     });
     expect(spawns).toBe(1);
+  });
+
+  test('the real Chrome MessageChannel rejects shared settlement memory', async () => {
+    const channel = makeOffscreenActorChannelClient({
+      ensureOffscreen: async () => {},
+      newChannelId: () => 'shared-memory-channel',
+      findOffscreenClient: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => bindActorChannel({
+          port: transfer[0] as MessagePort,
+          channelId: offer.channelId,
+          workerUrl: '/offscreen/actor-worker.js',
+          abort: () => {},
+          run: async (_job, { sendToSW }) => {
+            const prepared = await sendToSW('actor/tool-prepare', {
+              authorityClass: 'actor',
+              call: {
+                id: 'shared-channel-result', name: 'actor_cancel',
+                args: { taskId: 'task-1' },
+              },
+            });
+            return sendToSW('actor/tool-settle', {
+              executionId: prepared.executionId,
+              result: { ok: true, content: new DataView(new SharedArrayBuffer(16)) },
+            });
+          },
+        }),
+      }),
+    });
+    const client = makeOffscreenActorClient(baseDeps({
+      runOnChannel: (job: any, options: any) => channel.run(job, {
+        ...options, lease: Object.freeze({ scope: 'controller', leaseId: 'security-test' }),
+      }),
+    }));
+    const result = await client.run({
+      actorSessionId: 'actor-1', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+      tools: [{ name: 'actor_cancel' }],
+    } as any);
+    expect(result).toMatchObject({
+      ok: false, error: 'actor/tool-settle: authority mismatch', outcomeKnown: true,
+    });
   });
 
   test('rejects altered arguments before an exact effect', async () => {
