@@ -446,6 +446,27 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('hosts document, web and result semantics only in controller graphs', async () => {
+    const resourceSemanticModules = new Set([
+      'peerd-runtime/controller-resource-tools.js',
+      'peerd-runtime/tools/defs/read-doc.js',
+      'peerd-runtime/tools/defs/fetch-url.js',
+      'peerd-runtime/tools/defs/read-result.js',
+    ]);
+    for (const entry of [
+      'background/kernel-turn-authority-adapter.js',
+      'background/controller-turn-bridge.js',
+      'background/offscreen-actor-client.js',
+    ]) {
+      const modules = await modulesFor(entry);
+      expect([...modules].filter((module) => resourceSemanticModules.has(module))).toEqual([]);
+    }
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+      const modules = await modulesFor(entry);
+      for (const module of resourceSemanticModules) expect(modules.has(module)).toBe(true);
+    }
+  });
+
   it('hosts introspection and skill semantics only in controller graphs', async () => {
     const semanticModules = new Set([
       'peerd-runtime/controller-introspection-tools.js',

@@ -20,60 +20,22 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // wrong. read_doc sniffs the bytes and reports what it found.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { resolveTargetTab, originOfUrl, isDenylistedTab } from '../../browser-authority/dom-helpers.js';
+import { originOfUrl } from '../../tool-origin-policy.js';
 import { requireEngine } from '../../pdf/engines.js';
 import { formatPdfBody, DEFAULT_MAX_CHARS as DEFAULT_PDF_MAX_CHARS } from '../../pdf/extract-format.js';
 import { formatDocBody, formatDocHead, DEFAULT_MAX_CHARS as DEFAULT_DOC_MAX_CHARS } from '../../doc/format.js';
 import { toMarkdown } from '../../doc/markdown.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
-// read_doc re-fetches bytes offscreen, so it applies the same shared lexical
-// private-network refusal as open-web egress. The denylist alone does not cover
-// loopback, LAN, or metadata targets.
-import { isPrivateOrLocalHost } from '../../../shared/private-network.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readDocTool = composeTool("read_doc", {
 
   execute: async (args, ctx) => {
-    // why: docOffscreenClient is injected into the tool context by the SW
-    // (background/offscreen-doc-client.js) but isn't part of the shared
-    // ToolContext typedef; narrow it locally to the surface this tool uses.
-    const docClient = /** @type {{ extract: (source: { url: string }, opts: { format?: string, engine?: string }) => Promise<{ format: string, doc?: any, pdf?: any, bytes: number, sniffedVia: string }> } | undefined} */ (
-      /** @type {any} */ (ctx).docOffscreenClient);
-    if (!docClient || typeof docClient.extract !== 'function') {
-      // Firefox has no offscreen-document API, so the converters have nowhere
-      // to run. Say so explicitly because an
-      // opaque code reads as "this document is broken" and invites a retry.
-      return {
-        ok: false,
-        error: 'doc_reader_unavailable',
-        content: 'Document conversion is not available in this browser build. '
-          + 'If the document has an HTML version, read that instead.',
-      };
-    }
+    const authority = /** @type {{extractDocument?:(request:{url:string|null,format?:string,engine:string})=>Promise<{ok:boolean,target?:string,result?:any,error?:string,content?:string}>,spillResult?:(record:Record<string,unknown>)=>Promise<string|null>}|undefined} */ (
+      /** @type {any} */ (ctx).resourceAuthority);
+    if (!authority?.extractDocument) return { ok: false, error: 'doc_reader_unavailable' };
 
     const explicitUrl = typeof args?.url === 'string' && args.url ? args.url : null;
-    let target = explicitUrl;
-    if (!target) {
-      const tab = await resolveTargetTab(args, ctx);
-      if (!tab?.id) return { ok: false, error: 'no_target_tab' };
-      target = typeof tab.url === 'string' ? tab.url : null;
-      if (!target) return { ok: false, error: 'no_document_url' };
-    }
-
-    let parsed;
-    try { parsed = new URL(target); }
-    catch { return { ok: false, error: `invalid_url: ${target}` }; }
-    if (!/^(https?|data):$/.test(parsed.protocol)) {
-      return { ok: false, error: `unsupported_scheme: ${parsed.protocol}` };
-    }
-
-    // These gates cover the exact target, whether explicit or active-tab. The
-    // offscreen reader issues a new fetch, so private/LAN/metadata hosts must
-    // be refused exactly like open-web egress.
-    if (isDenylistedTab(target, ctx.denylist)) return { ok: false, error: 'denylisted_target' };
-    if (isPrivateOrLocalHost(parsed.hostname)) return { ok: false, error: 'private_or_local_target_blocked' };
-
     let engine = 'auto';
     if (args?.engine && args.engine !== 'auto') {
       try { engine = requireEngine(args.engine); }
@@ -82,9 +44,11 @@ export const readDocTool = composeTool("read_doc", {
       }
     }
 
-    let result;
+    let extracted;
     try {
-      result = await docClient.extract({ url: target }, { format: args.format, engine });
+      extracted = await authority.extractDocument({
+        url: explicitUrl, format: args.format, engine,
+      });
     } catch (e) {
       const err = /** @type {{ code?: string, message?: string }} */ (e);
       // The failures ARE the API here: each names the tool that will work
@@ -93,6 +57,15 @@ export const readDocTool = composeTool("read_doc", {
       // typed errors); the code is what the agent can branch on.
       return { ok: false, error: err?.code ?? 'doc_read_failed', content: err?.message ?? String(e) };
     }
+    if (extracted?.ok !== true) {
+      return {
+        ok: false, error: extracted?.error ?? 'doc_read_failed',
+        ...(extracted?.content ? { content: extracted.content } : {}),
+      };
+    }
+    const target = extracted.target;
+    const result = extracted.result;
+    if (typeof target !== 'string' || !target) return { ok: false, error: 'no_document_url' };
     if (result?.pdf) {
       const maxChars = Number.isFinite(args?.maxChars) && args.maxChars > 0
         ? Math.floor(args.maxChars) : DEFAULT_PDF_MAX_CHARS;
@@ -128,10 +101,7 @@ export const readDocTool = composeTool("read_doc", {
     // head+tail. Same idiom, same pager, same footer the actor already knows.
     const markdown = toMarkdown(result.doc);
     const head = formatDocHead({ doc: result.doc, source: target });
-    const resultStore = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
-      /** @type {any} */ (ctx).resultStore);
-
-    if (!resultStore?.key || !resultStore?.put) {
+    if (!authority.spillResult) {
       // No spill capability → the plain capped render (which announces its cut).
       return {
         ok: true,
@@ -152,19 +122,19 @@ export const readDocTool = composeTool("read_doc", {
     /** @type {string | null} */
     let footer = null;
     if (truncated) {
-      const cacheKey = resultStore.key();
       try {
         // ownerSessionId stamps the OWNER — the spill store is one SW-level map
         // keyed by an opaque handle, so without it any actor holding a key could
         // page back a document a different actor fetched.
-        await resultStore.put({
-          key: cacheKey, url: target, format: 'markdown', text: markdown,
-          ownerSessionId: ctx.session?.sessionId ?? null,
+        const cacheKey = await authority.spillResult({
+          url: target, format: 'markdown', text: markdown,
           producer: 'read_doc', fenced: true, originLabel: originOfUrl(target),
         });
-        footer = ex
-          ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
-          : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+        if (cacheKey) {
+          footer = ex
+            ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
+            : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+        }
       } catch { /* spill failed — the window still ships, with its elision markers */ }
     }
 

@@ -18,8 +18,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // tool-supplied HEADERS (a laundered injection forging a credential); the real
 // same-origin cookies come from the browser's jar via the boundary, never a header.
 
-import { fetchUrl } from '../web/primitives.js';
-import { originOfUrl } from '../../browser-authority/dom-helpers.js';
+import { originOfUrl } from '../../tool-origin-policy.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { disarmMarkup, disarmText } from '../../dom/cdr.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
@@ -69,6 +68,11 @@ const stripSessionHeaders = (headers) => {
 /** @type {import('/shared/tool-types.js').Tool} */
 export const fetchUrlTool = composeTool("fetch_url", {
   execute: async (args, ctx) => {
+    const authority = /** @type {{confirmWebWrite?:(url:string,method:string)=>Promise<string>,requestWebText?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<{ok?:boolean,status:number,body:string,headers:Record<string,string>,finalUrl:string,reason?:string,error?:string}>,extractReadableMarkdown?:(html:string,url:string)=>Promise<{readerable:boolean,markdown?:string,title?:string|null}>,spillResult?:(record:Record<string,unknown>)=>Promise<string|null>}|undefined} */ (
+      /** @type {any} */ (ctx).resourceAuthority);
+    if (!authority?.requestWebText) {
+      return { ok: false, error: 'web_resource_authority_unavailable' };
+    }
     if (typeof args?.url !== 'string' || !args.url) return { ok: false, error: 'url_required' };
     let parsed;
     try { parsed = new URL(args.url); }
@@ -82,12 +86,8 @@ export const fetchUrlTool = composeTool("fetch_url", {
     // all). Fail closed: no confirm channel → refuse rather than send unconfirmed.
     // GET reads are never gated.
     if (needsWebWriteConfirm(method)) {
-      if (!ctx.confirm) return { ok: false, error: 'declined', content: 'No confirmation channel available for an outbound write.' };
-      const ans = await ctx.confirm(/** @type {any} */ ({
-        tool: 'web:write', kind: 'web_write', origins: [parsed.origin],
-        summary: `Allow a ${method} request to ${parsed.host}? This can send data out of the browser.`,
-        sessionId: ctx.session?.sessionId ?? null,
-      }), ctx.abortSignal);
+      if (!authority.confirmWebWrite) return { ok: false, error: 'declined', content: 'No confirmation channel available for an outbound write.' };
+      const ans = await authority.confirmWebWrite(args.url, method);
       if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined', content: 'User declined the outbound write.' };
     }
 
@@ -102,11 +102,12 @@ export const fetchUrlTool = composeTool("fetch_url", {
       // No credentials arg: the SESSION decision is the boundary's (ctx.webFetch is
       // session-scoped) — same-origin to the owned tab carries the session, every
       // cross-origin request stays sessionless. The tool can't override it.
-      const res = await fetchUrl(
-        args.url,
-        { method, headers, body: /** @type {string | undefined} */ (body) },
-        ctx,
-      );
+      const res = await authority.requestWebText({
+        url: args.url, method, headers, body: /** @type {string | undefined} */ (body),
+      });
+      if (res?.ok === false) {
+        throw Object.assign(new Error(res.error ?? 'fetch_failed'), { reason: res.reason });
+      }
       const ct = res.headers['content-type'] ?? '';
       // A DOCUMENT FILE, not a page. fetch_url's primitive decodes every
       // response with Response.text(), so a .docx/.xlsx/.pptx/PDF arrives as
@@ -172,11 +173,12 @@ export const fetchUrlTool = composeTool("fetch_url", {
       let workingBody = isMarkupType(ct) ? disarmMarkup(res.body) : disarmText(res.body);
       let format = 'raw';
       let title = null;
-      const webClient = /** @type {{ extractMarkdown?: (s: { html: string, url?: string }) => Promise<{ readerable: boolean, markdown?: string, title?: string | null }> } | null | undefined} */ (
-        /** @type {any} */ (ctx).webOffscreenClient);
-      if (args.raw !== true && /text\/html|application\/xhtml/i.test(ct) && webClient?.extractMarkdown) {
+      if (args.raw !== true && /text\/html|application\/xhtml/i.test(ct)
+          && authority.extractReadableMarkdown) {
         try {
-          const ex = await webClient.extractMarkdown({ html: workingBody, url: res.finalUrl || args.url });
+          const ex = await authority.extractReadableMarkdown(
+            workingBody, res.finalUrl || args.url,
+          );
           // Disarmed AGAIN after extraction, and it is not belt-and-braces:
           // extraction PARSES the HTML, so `&#8203;` — plain ASCII the first
           // sweep correctly left alone — is decoded into a literal zero-width
@@ -197,8 +199,6 @@ export const fetchUrlTool = composeTool("fetch_url", {
       // read_result paging call — instead of the old silent head-only slice
       // that lost the tail without saying so. Falls back to the old slice when
       // the spill capability is absent (a ctx without resultStore).
-      const resultStore = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
-        /** @type {any} */ (ctx).resultStore);
       // When the caller named a query AND the body is prose (not JSON — BM25 is
       // for paragraphs, not object trees), surface the most-relevant PASSAGES
       // instead of a blind head+tail window: a long page's answer usually sits
@@ -213,24 +213,24 @@ export const fetchUrlTool = composeTool("fetch_url", {
       const truncated = ex ? ex.excerpted : win.windowed;
       /** @type {string | null} */
       let footer = null;
-      if (truncated && resultStore?.key && resultStore?.put) {
-        const cacheKey = resultStore.key();
+      if (truncated && authority.spillResult) {
         try {
           // Stamp the OWNER. The spill store is one service-worker-level map keyed
           // by an opaque handle, so without this any actor holding a key could page
           // back bytes a different actor fetched - credentialed, from an origin it
           // is itself locked out of. read_result checks this before slicing.
-          await resultStore.put({
-            key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody,
-            ownerSessionId: ctx.session?.sessionId ?? null,
+          const cacheKey = await authority.spillResult({
+            url: res.finalUrl || args.url, format, text: workingBody,
             producer: 'fetch_url', fenced: true,
             originLabel: originOfUrl(res.finalUrl || args.url),
           });
-          footer = ex
-            ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
-            : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+          if (cacheKey) {
+            footer = ex
+              ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
+              : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+          }
         } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
-      } else if (truncated && !resultStore) {
+      } else if (truncated) {
         // No cache capability → the pre-spill behavior (head-only slice).
         text = workingBody.slice(0, MAX_BODY_CHARS);
       }

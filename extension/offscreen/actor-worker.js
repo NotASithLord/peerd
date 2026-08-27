@@ -15,6 +15,7 @@ import {
   controllerHostsAppTool,
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
+  controllerHostsResourceTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
@@ -28,6 +29,7 @@ import {
   executeControllerAppTool,
   executeControllerPersistenceTool,
   executeControllerPageTool,
+  executeControllerResourceTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
@@ -155,6 +157,12 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'page-run-program-response'
       || m.type === 'page-capture-foreground-response'
       || m.type === 'page-capture-owned-response'
+      || m.type === 'resource-confirm-web-write-response'
+      || m.type === 'resource-request-web-text-response'
+      || m.type === 'resource-extract-markdown-response'
+      || m.type === 'resource-extract-document-response'
+      || m.type === 'resource-spill-result-response'
+      || m.type === 'resource-read-result-response'
       || m.type === 'introspection-actor-roster-response'
       || m.type === 'introspection-provider-posture-response'
       || m.type === 'introspection-storage-snapshot-response'
@@ -628,6 +636,27 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           });
           result = await executeControllerPageTool(
             prepared.toolName, prepared.args, pageAuthority,
+          );
+        } else if (controllerHostsResourceTool(prepared.toolName)) {
+          const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
+            authorityValue(actorToolRequest(type, { executionId, ...value }));
+          const resourceAuthority = Object.freeze({
+            confirmWebWrite: (/** @type {string} */ url, /** @type {string} */ method) =>
+              request('resource-confirm-web-write-request', { url, method }),
+            requestWebText: (/** @type {any} */ webRequest) =>
+              request('resource-request-web-text-request', webRequest),
+            extractReadableMarkdown: (/** @type {string} */ html,
+              /** @type {string} */ url) =>
+              request('resource-extract-markdown-request', { html, url }),
+            extractDocument: (/** @type {any} */ documentRequest) =>
+              request('resource-extract-document-request', documentRequest),
+            spillResult: (/** @type {any} */ record) =>
+              request('resource-spill-result-request', record),
+            readResult: (/** @type {string} */ key) =>
+              request('resource-read-result-request', { key }),
+          });
+          result = await executeControllerResourceTool(
+            prepared.toolName, prepared.args, resourceAuthority, prepared.projection,
           );
         } else if (controllerHostsIntrospectionTool(prepared.toolName)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>

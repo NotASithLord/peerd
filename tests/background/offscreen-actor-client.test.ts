@@ -101,7 +101,7 @@ describe('run() — Stop-cascade aborted stamping', () => {
       dispatchToolCall: async () => ({ ok: true, content: 'ran' }),
       runOnChannel: async (job: any, { relay }: any) => {
         sentJob = job;
-        relayResult = await relay('actor/tool-dispatch', { call: { name: 'fetch_url', args: {} } });
+        relayResult = await relay('actor/tool-dispatch', { call: { name: 'site_client_read', args: {} } });
         return { ok: true, started: true, finalText: 'done' };
       },
     }));
@@ -560,7 +560,7 @@ describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab threa
       pinActorCall: (call: any, at: string, id: string) => { pinned = { call, at, id }; },
       dispatchToolCall: async () => ({ ok: true, content: 'pdf' }),
     });
-    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'read_doc', args: {} } }, OFFSCREEN));
+    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'site_client_read', args: {} } }, OFFSCREEN));
     expect(out).toEqual({ ok: true, result: { ok: true, content: 'pdf' } });
     expect(ctxOpts.activeTabId).toBe(42);           // the owned tab reached the ctx
     expect(ctxOpts.actorType).toBe('web');

@@ -32,11 +32,40 @@ const mockResponse = ({ status = 200, body = '', headers = {}, url = 'https://x.
 // Records what webFetch was handed so the sessionless invariants are assertable.
 const recordingCtx = (over: any = {}) => {
   const seen: { url?: string; init?: any } = {};
+  const webFetch = over.webFetch ?? (async (url: string, init: any) => {
+    seen.url = url; seen.init = init; return mockResponse({ body: 'ok' });
+  });
+  const resourceAuthority: any = {
+    requestWebText: async (request: any) => {
+      seen.url = request.url;
+      seen.init = { method: request.method, headers: request.headers, body: request.body };
+      const response = await webFetch(request.url, seen.init);
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value: string, name: string) => { headers[name] = value; });
+      return { status: response.status, body: await response.text(), headers, finalUrl: response.url };
+    },
+  };
+  if (typeof over.confirm === 'function') {
+    resourceAuthority.confirmWebWrite = (url: string, method: string) => over.confirm({
+      tool: 'web:write', kind: 'web_write', origins: [new URL(url).origin],
+      summary: `Allow a ${method} request to ${new URL(url).host}? This can send data out of the browser.`,
+      sessionId: 't',
+    });
+  }
+  if (over.webOffscreenClient?.extractMarkdown) {
+    resourceAuthority.extractReadableMarkdown = (html: string, url: string) =>
+      over.webOffscreenClient.extractMarkdown({ html, url });
+  }
+  if (over.resultStore?.key && over.resultStore?.put) {
+    resourceAuthority.spillResult = async (record: any) => {
+      const key = over.resultStore.key();
+      await over.resultStore.put({ ...record, key, ownerSessionId: 't' });
+      return key;
+    };
+  }
   const ctx: any = {
-    session: { sessionId: 't' },
-    audit: async () => {},
-    webFetch: async (url: string, init: any) => { seen.url = url; seen.init = init; return mockResponse({ body: 'ok' }); },
-    ...over,
+    resourceAuthority,
+    runtimeCapabilities: over.runtimeCapabilities,
   };
   return { ctx, seen };
 };

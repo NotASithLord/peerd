@@ -27,6 +27,7 @@ import { bindNotebookToolAuthority } from './notebook-tool-authority.js';
 import { bindAppToolAuthority } from './app-tool-authority.js';
 import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { bindPageToolAuthority } from './page-tool-authority.js';
+import { bindResourceToolAuthority } from './resource-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
@@ -477,6 +478,19 @@ export const makeOffscreenActorClient = ({
     });
     return entry;
   };
+  const resourceEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'resource', fields);
+    if (!entry) return null;
+    bindResourceToolAuthority(entry.domainState, {
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
+    });
+    return entry;
+  };
   const introspectionEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
@@ -885,6 +899,9 @@ export const makeOffscreenActorClient = ({
         sessionId: admittedContext.ctx.session?.sessionId,
         activeTabOrigin: admittedContext.ctx.activeTab?.origin,
         goalActive: !!admittedContext.ctx.todoStore,
+      } : domain === 'resource' ? {
+        sessionId: admittedContext.ctx.session?.sessionId,
+        runtimeCapabilities: admittedContext.ctx.runtimeCapabilities,
       } : call.name === 'load_skill' ? {
         sessionId: admittedContext.ctx.session?.sessionId,
         messageCount: admittedContext.ctx.session?.messageCount ?? 0,
@@ -1851,6 +1868,59 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'page/capture-owned: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/capture-owned', 'read', () =>
         entry.domainState.authority.captureOwnedTabPixels());
+    },
+    'resource/confirm-web-write': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = resourceEntry(
+        grantFor(msg, sender, boundGrant), msg, ['url', 'method'],
+      );
+      if (!entry) return { ok: false, error: 'resource/confirm-web-write: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'resource/confirm-web-write', 'commit', () =>
+        entry.domainState.authority.confirmWebWrite(msg.url, msg.method));
+    },
+    'resource/request-web-text': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = resourceEntry(
+        grantFor(msg, sender, boundGrant), msg, ['url', 'method', 'headers', 'body'],
+      );
+      if (!entry) return { ok: false, error: 'resource/request-web-text: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'resource/request-web-text', 'resource', () =>
+        entry.domainState.authority.requestWebText({
+          url: msg.url, method: msg.method, headers: msg.headers, body: msg.body,
+        }));
+    },
+    'resource/extract-markdown': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = resourceEntry(
+        grantFor(msg, sender, boundGrant), msg, ['html', 'url'],
+      );
+      if (!entry) return { ok: false, error: 'resource/extract-markdown: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'resource/extract-markdown', 'read', () =>
+        entry.domainState.authority.extractReadableMarkdown(msg.html, msg.url));
+    },
+    'resource/extract-document': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = resourceEntry(
+        grantFor(msg, sender, boundGrant), msg, ['url', 'format', 'engine'],
+      );
+      if (!entry) return { ok: false, error: 'resource/extract-document: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'resource/extract-document', 'read', () =>
+        entry.domainState.authority.extractDocument({
+          url: msg.url, format: msg.format, engine: msg.engine,
+        }));
+    },
+    'resource/spill-result': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = resourceEntry(grantFor(msg, sender, boundGrant), msg, [
+        'url', 'format', 'text', 'producer', 'fenced', 'originLabel',
+      ]);
+      if (!entry) return { ok: false, error: 'resource/spill-result: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'resource/spill-result', 'control', () =>
+        entry.domainState.authority.spillResult({
+          url: msg.url, format: msg.format, text: msg.text,
+          producer: msg.producer, fenced: msg.fenced, originLabel: msg.originLabel,
+        }));
+    },
+    'resource/read-result': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = resourceEntry(grantFor(msg, sender, boundGrant), msg, ['key']);
+      if (!entry) return { ok: false, error: 'resource/read-result: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'resource/read-result', 'read', () =>
+        entry.domainState.authority.readResult(msg.key));
     },
     'introspection/actor-roster': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);

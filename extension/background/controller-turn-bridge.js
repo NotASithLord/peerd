@@ -21,6 +21,7 @@ import { bindNotebookToolAuthority } from './notebook-tool-authority.js';
 import { bindAppToolAuthority } from './app-tool-authority.js';
 import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { bindPageToolAuthority } from './page-tool-authority.js';
+import { bindResourceToolAuthority } from './resource-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
@@ -589,6 +590,18 @@ export const makeControllerTurnBridge = ({
     const entry = domainExecutionEntry(run, value, 'page', []);
     if (!entry) return null;
     bindPageToolAuthority(entry.domainState, {
+      call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
+    });
+    return entry;
+  };
+  const resourceExecutionEntry = (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainExecutionEntry(run, value, 'resource', fields);
+    if (!entry) return null;
+    bindResourceToolAuthority(entry.domainState, {
       call: entry.call, ctx: entry.custody?.ctx, signal: run.signal,
     });
     return entry;
@@ -1607,6 +1620,56 @@ export const makeControllerTurnBridge = ({
           if (!entry) return failed('page owned capture authority mismatch', true);
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.captureOwnedTabPixels());
+        }
+        case 'turn.resource.confirm-web-write': {
+          const entry = resourceExecutionEntry(run, value, ['url', 'method']);
+          if (!entry) return failed('web write confirmation authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'commit', () =>
+            entry.domainState.authority.confirmWebWrite(value.url, value.method));
+        }
+        case 'turn.resource.request-web-text': {
+          const entry = resourceExecutionEntry(
+            run, value, ['url', 'method', 'headers', 'body'],
+          );
+          if (!entry) return failed('web resource authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'resource', () =>
+            entry.domainState.authority.requestWebText({
+              url: value.url, method: value.method, headers: value.headers, body: value.body,
+            }));
+        }
+        case 'turn.resource.extract-markdown': {
+          const entry = resourceExecutionEntry(run, value, ['html', 'url']);
+          if (!entry) return failed('markdown extraction authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.extractReadableMarkdown(value.html, value.url));
+        }
+        case 'turn.resource.extract-document': {
+          const entry = resourceExecutionEntry(
+            run, value, ['url', 'format', 'engine'],
+          );
+          if (!entry) return failed('document extraction authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.extractDocument({
+              url: value.url, format: value.format, engine: value.engine,
+            }));
+        }
+        case 'turn.resource.spill-result': {
+          const entry = resourceExecutionEntry(run, value, [
+            'url', 'format', 'text', 'producer', 'fenced', 'originLabel',
+          ]);
+          if (!entry) return failed('result spill authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'control', () =>
+            entry.domainState.authority.spillResult({
+              url: value.url, format: value.format, text: value.text,
+              producer: value.producer, fenced: value.fenced,
+              originLabel: value.originLabel,
+            }));
+        }
+        case 'turn.resource.read-result': {
+          const entry = resourceExecutionEntry(run, value, ['key']);
+          if (!entry) return failed('result read authority mismatch', true);
+          return runDomainEffect(run, entry, operation, 'read', () =>
+            entry.domainState.authority.readResult(value.key));
         }
         case 'turn.introspection.actor-roster': {
           const entry = introspectionExecutionEntry(run, value, []);

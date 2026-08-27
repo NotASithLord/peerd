@@ -23,8 +23,15 @@ const record = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const context = (records: Record<string, any>, sessionId = 'chat-1') => ({
-  session: { sessionId },
-  resultStore: { get: async (key: string) => records[key] },
+  resourceAuthority: {
+    readResult: async (key: string) => {
+      const found = records[key];
+      if (found && found.ownerSessionId !== sessionId) {
+        return { ok: false, error: `not_your_result: ${key} was spilled by another session.` };
+      }
+      return { ok: true, record: found };
+    },
+  },
 });
 
 describe('read_result', () => {
@@ -73,7 +80,7 @@ describe('read_result', () => {
 
     expect((await readResultTool.execute(
       { key: 'result:opaque-1' },
-      { resultStore: { get: async () => record() } } as any,
+      { resourceAuthority: { readResult: async () => ({ ok: false, error: 'not_your_result' }) } } as any,
     )).ok).toBe(false);
     expect((await readResultTool.execute(
       { key: 'result:missing' },
@@ -81,7 +88,7 @@ describe('read_result', () => {
     )).ok).toBe(false);
     expect((await readResultTool.execute(
       { key: 'result:opaque-1' },
-      { session: { sessionId: 'chat-1' } } as any,
+      {} as any,
     )).ok).toBe(false);
   });
 

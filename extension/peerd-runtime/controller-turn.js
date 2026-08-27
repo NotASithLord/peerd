@@ -48,6 +48,11 @@ export {
   executeControllerPageTool,
 } from './controller-page-tools.js';
 export {
+  CONTROLLER_RESOURCE_TOOL_NAMES,
+  controllerHostsResourceTool,
+  executeControllerResourceTool,
+} from './controller-resource-tools.js';
+export {
   CONTROLLER_INTROSPECTION_TOOL_NAMES,
   controllerHostsIntrospectionTool,
   executeControllerIntrospectionTool,

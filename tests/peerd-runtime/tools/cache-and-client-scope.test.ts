@@ -14,8 +14,11 @@ import { siteClientRunTool } from '../../../extension/peerd-runtime/tools/defs/s
 //     had nothing to check. site_client_run already declared its origin.
 
 const cacheCtx = (rec: any, sessionId: string | null) => ({
-  resultStore: { get: async () => rec },
-  session: sessionId ? { sessionId } : undefined,
+  resourceAuthority: {
+    readResult: async () => rec?.ownerSessionId === sessionId
+      ? { ok: true, record: rec }
+      : { ok: false, error: 'not_your_result' },
+  },
 } as any);
 
 const REC = {

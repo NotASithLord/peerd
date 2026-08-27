@@ -53,10 +53,11 @@ The current product-surface deletion checkpoint does all of the following:
 - removes the old disposable web-cache object store during the normal schema
   upgrade.
 
-The public catalog now contains 75 tools. The temporary legacy set is the
+The public catalog contains 75 tools. Document/web/result semantics now run in
+the sealed controller through exact constrained-web, document-extraction and
+opaque-result operations. The temporary legacy set is the
 exact list in `extension/shared/legacy-tool-allowlist.js`:
 
-- `read_doc`, `fetch_url`, `read_result`;
 - `site_client_run`, `site_client_read`, `site_client_write`, `site_capture`;
 - `sandbox_create`, `script`, `edit_file`, `a2a_run`.
 
@@ -80,9 +81,9 @@ There is no substitute arbitrary byte target.
 ## Verification baseline
 
 The current Store-Chrome artifact packages and passes Store posture at
-1,263,238 bundled service-worker bytes, 425 staged inputs and a 347,603-byte
-release-minified cold graph. The preceding checkpoint was 1,284,139 bytes,
-437 inputs and 347,832 cold-graph bytes. These values are observations, not
+1,258,927 bundled service-worker bytes, 419 staged inputs and a 347,603-byte
+release-minified cold graph. The preceding checkpoint was 1,263,238 bytes,
+425 inputs and the same cold-graph size. These values are observations, not
 goals.
 
 Static typecheck, lint, checked-file coverage, dweb boundary, controller
@@ -100,17 +101,14 @@ new regressions, and do not add new failures.
 Continue with cohesive controller migrations. Every retained cut removes its
 legacy name/import in the same commit and keeps one execution path:
 
-1. Document/web/result semantics: `read_doc`, `fetch_url`, `read_result`.
-   Authority retains fixed network policy, tab/document custody, conversion
-   hosts and the opaque session spill store.
-2. Sandbox/headless semantics: `sandbox_create`, `script`. Authority retains
+1. Sandbox/headless semantics: `sandbox_create`, `script`. Authority retains
    exact engine instance, job, cancellation, confirmation and settlement
    operations.
-3. Cross-kind editing: `edit_file`. Authority retains exact repository and
+2. Cross-kind editing: `edit_file`. Authority retains exact repository and
    engine file mutations, confirmation, audit and outcome custody.
-4. Mesh execution: `a2a_run`. Authority retains A2A grants, mesh identity,
+3. Mesh execution: `a2a_run`. Authority retains A2A grants, mesh identity,
    confirmation, lifecycle and settlement.
-5. Site clients: all four retained site-client tools move together while the
+4. Site clients: all four retained site-client tools move together while the
    service worker keeps the exact origin-pinned store/runtime/capture effects
    and every Web-actor restriction above.
 

@@ -40,12 +40,30 @@ const mockResponse = ({ body = '', headers = {}, url = 'https://site.test/a' } =
   url,
 });
 
-const fetchCtx = (body: string, over: any = {}) => ({
-  session: { sessionId: 't' },
-  audit: async () => {},
-  webFetch: async () => mockResponse({ body, headers: { 'content-type': 'text/html' } }),
-  ...over,
-});
+const fetchCtx = (body: string, over: any = {}) => {
+  const webFetch = over.webFetch
+    ?? (async () => mockResponse({ body, headers: { 'content-type': 'text/html' } }));
+  const authority: any = {
+    requestWebText: async (request: any) => {
+      const response = await webFetch(request.url, request);
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value: string, name: string) => { headers[name] = value; });
+      return { status: response.status, body: await response.text(), headers, finalUrl: response.url };
+    },
+  };
+  if (over.webOffscreenClient?.extractMarkdown) {
+    authority.extractReadableMarkdown = (html: string, url: string) =>
+      over.webOffscreenClient.extractMarkdown({ html, url });
+  }
+  if (over.resultStore?.key && over.resultStore?.put) {
+    authority.spillResult = async (record: any) => {
+      const key = over.resultStore.key();
+      await over.resultStore.put({ ...record, key, ownerSessionId: 't' });
+      return key;
+    };
+  }
+  return { resourceAuthority: authority };
+};
 
 describe('CDR at the fetch_url boundary (issue 244)', () => {
   test('invisible bytes are gone from the body the agent reads', async () => {

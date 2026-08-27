@@ -23,16 +23,13 @@ import { buildPagedResult, clampPageLimit, pageStatusLine } from '../web/spill.j
 export const readResultTool = composeTool('read_result', {
   execute: async (args, ctx) => {
     if (typeof args?.key !== 'string' || !args.key) return { ok: false, error: 'key_required' };
-    const resultStore = /** @type {{ get?: (key: string) => Promise<import('../result-store.js').ResultSpillRecord | undefined> } | undefined} */ (
-      /** @type {any} */ (ctx).resultStore);
-    if (!resultStore?.get) return { ok: false, error: 'result_store_unavailable' };
-    const rec = await resultStore.get(args.key).catch(() => undefined);
-    // Ownership is checked before contents are returned. A leaked handle never
-    // crosses a session/actor boundary, regardless of which producer wrote it.
-    const sid = ctx.session?.sessionId ?? '';
-    if (rec && (!sid || rec.ownerSessionId !== sid)) {
-      return { ok: false, error: `not_your_result: ${args.key} was spilled by another session.` };
-    }
+    const authority = /** @type {{readResult?:(key:string)=>Promise<{ok:boolean,record?:import('../result-store.js').ResultSpillRecord,error?:string}>}|undefined} */ (
+      /** @type {any} */ (ctx).resourceAuthority);
+    if (!authority?.readResult) return { ok: false, error: 'result_store_unavailable' };
+    const read = /** @type {{ok:boolean,record?:import('../result-store.js').ResultSpillRecord,error?:string}} */ (
+      await authority.readResult(args.key).catch(() => ({ ok: false })));
+    if (read?.ok !== true && read?.error) return { ok: false, error: read.error };
+    const rec = read?.record;
     if (!rec || typeof rec.text !== 'string') {
       return { ok: false, error: `no_such_result: ${args.key} — the spill may have been evicted; re-run the producing tool.` };
     }
