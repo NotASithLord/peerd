@@ -6,6 +6,7 @@ import {
   generateManifest,
   NATIVE_BACKGROUND_ENTRY,
   PREVIEW_CHROME_BACKGROUND_ENTRY,
+  PREVIEW_FIREFOX_BACKGROUND_ENTRY,
   targetBackgroundEntry,
 } from '../../packaging/gen-manifest.ts';
 import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
@@ -32,9 +33,11 @@ describe('target-specific native background entry', () => {
       .toBe(PREVIEW_CHROME_BACKGROUND_ENTRY);
     expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, 'store', 'chrome'))
       .toBe(NATIVE_BACKGROUND_ENTRY);
-    for (const channel of ['store', 'preview', 'dev'] as const) {
+    expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, 'store', 'firefox'))
+      .toBe(FIREFOX_BACKGROUND_ENTRY);
+    for (const channel of ['preview', 'dev'] as const) {
       expect(targetBackgroundEntry(NATIVE_BACKGROUND_ENTRY, channel, 'firefox'))
-        .toBe(FIREFOX_BACKGROUND_ENTRY);
+        .toBe(PREVIEW_FIREFOX_BACKGROUND_ENTRY);
     }
   });
 
@@ -44,6 +47,14 @@ describe('target-specific native background entry', () => {
     ), 'utf8');
     expect(source.indexOf("import './kernel-firefox-addon.js'"))
       .toBeLessThan(source.indexOf("from './vault-kernel.js'"));
+  });
+
+  test('adds contributor custody only to Preview/dev Firefox', () => {
+    const source = readFileSync(join(EXTENSION, PREVIEW_FIREFOX_BACKGROUND_ENTRY), 'utf8');
+    expect(source.indexOf("import './kernel-firefox-contributor-addon.js'"))
+      .toBeLessThan(source.indexOf("import './vault-kernel.js'"));
+    const storeSource = readFileSync(join(EXTENSION, FIREFOX_BACKGROUND_ENTRY), 'utf8');
+    expect(storeSource).not.toContain('contributor');
   });
 
   test('keeps Firefox demand-loaded with synchronous guards and exact host owners', async () => {
@@ -100,7 +111,8 @@ describe('target-specific native background entry', () => {
     for (const channel of ['store', 'preview', 'dev'] as const) {
       const firefox = generateManifest({ channel, browser: 'firefox', version: '0.0.0' });
       expect(firefox.background).toEqual({
-        scripts: [FIREFOX_BACKGROUND_ENTRY], type: 'module',
+        scripts: [channel === 'store'
+          ? FIREFOX_BACKGROUND_ENTRY : PREVIEW_FIREFOX_BACKGROUND_ENTRY], type: 'module',
       });
       expect(firefox.permissions).toContain('webRequest');
       expect(firefox.permissions).toContain('webRequestBlocking');

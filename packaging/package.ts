@@ -71,7 +71,12 @@ const PRUNE_ALWAYS = [
 ];
 // The home Lab is a preview-only dev tool. Dweb source and prompt text are
 // separately pruned from every artifact without a working mesh host.
-const PRUNE_STORE = ['eval'];
+const PRUNE_STORE = [
+  'eval',
+  'background/kernel-contributor-owner.js',
+  'background/kernel-firefox-contributor-addon.js',
+  'background/vault-kernel-firefox-preview.js',
+];
 const PRUNE_DWEB = [
   'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt',
   'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',

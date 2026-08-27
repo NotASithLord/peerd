@@ -11,6 +11,9 @@ import {
   recordContributorWebAction, recordContributorWebTurn,
   serializeContributorEnvelope,
 } from './contributor-metrics.js';
+import {
+  opaqueContributorToken, validContributorToken,
+} from '/shared/contributor-channel.js';
 
 export const CONTRIBUTOR_LOCAL_KEY = 'contributor_metrics.aggregate.v1';
 
@@ -48,13 +51,6 @@ const randomGeneration = () => {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
 };
 
-/** @param {string} kind @param {string} generation @param {string} value */
-const opaqueLocalToken = async (kind, generation, value) => {
-  const input = new TextEncoder().encode(`${kind}\u0000${generation}\u0000${value}`);
-  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', input));
-  return `${kind}:${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
-};
-
 /** @param {unknown} value */
 const localKey = (value) => typeof value === 'string' && value.length > 0 && value.length <= 200
   ? value
@@ -67,7 +63,7 @@ const localKey = (value) => typeof value === 'string' && value.length > 0 && val
  * @param {(kind: string, generation: string, value: string) => Promise<string>} [deps.tokenizeLocalKey]
  */
 export const makeContributorStore = ({
-  kv, makeGeneration = randomGeneration, tokenizeLocalKey = opaqueLocalToken,
+  kv, makeGeneration = randomGeneration, tokenizeLocalKey = opaqueContributorToken,
 }) => {
   let mutationTail = Promise.resolve();
   /** @template T @param {() => Promise<T>} operation @returns {Promise<T>} */
@@ -211,9 +207,9 @@ export const makeContributorStore = ({
   });
 
   const disableAndClear = () => mutate(async () => {
-    // Consent and pending bytes share ONE key, so this is one atomic browser
-    // storage operation. A failed delete is reported and cannot acknowledge a
-    // revoke that later re-enables stale rows.
+    // why: deleting consent is the revocation commit. The authority owner hides
+    // every outbox receipt without this exact generation and resumes physical
+    // outbox cleanup independently after a partial storage failure.
     await kv.delete(CONTRIBUTOR_LOCAL_KEY);
     return status();
   });
@@ -244,37 +240,35 @@ export const makeContributorStore = ({
    * One durable actor delivery becomes one aggregate transaction. The mailbox's
    * correlation id is the local-only operation key; replay after an MV3 restart
    * either commits the complete turn once or observes the same dedupe row.
-   * @param {{ consentGeneration?: unknown, operationKey?: unknown, feedbackContextKey?: unknown, turn?: unknown, actions?: unknown }} input
+   * @param {{ consentGeneration?: unknown, operationToken?: unknown, feedbackContextToken?: unknown, turn?: unknown, actions?: unknown }} input
    */
   const recordWebSettlement = (input) => mutate(async () => {
     requireExactKeys(input, [
-      'consentGeneration', 'operationKey', 'feedbackContextKey', 'turn', 'actions',
+      'consentGeneration', 'operationToken', 'feedbackContextToken', 'turn', 'actions',
     ], 'web settlement');
     const generation = localKey(input.consentGeneration);
-    const rawOperationKey = localKey(input.operationKey);
-    if (!generation || !rawOperationKey || !Array.isArray(input.actions)
+    const operationToken = validContributorToken(input.operationToken, 'operation')
+      ? /** @type {string} */ (input.operationToken) : null;
+    if (!generation || !operationToken || !Array.isArray(input.actions)
         || input.actions.length > CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT) return false;
     const record = await loadRecord();
     if (!record || !currentConsent(record) || record.consent.generation !== generation) return false;
-    const operationKey = localKey(await tokenizeLocalKey('operation', generation, rawOperationKey));
-    if (!operationKey) return false;
     let next = record.aggregate;
-    if (next.dedupe.includes(operationKey)) return false;
+    if (next.dedupe.includes(operationToken)) return false;
     for (const action of input.actions) {
       next = recordContributorWebAction(next, /** @type {Record<string, unknown>} */ (action));
     }
     next = recordContributorWebTurn(next, /** @type {Record<string, unknown>} */ (input.turn));
-    next = rememberDedupe(next, operationKey);
-    const rawFeedbackContextKey = localKey(input.feedbackContextKey);
-    if (rawFeedbackContextKey) {
-      const feedbackContextKey = localKey(await tokenizeLocalKey(
-        'context', generation, rawFeedbackContextKey,
-      ));
-      if (!feedbackContextKey) return false;
+    next = rememberDedupe(next, operationToken);
+    const feedbackContextToken = input.feedbackContextToken == null ? null
+      : validContributorToken(input.feedbackContextToken, 'context')
+        ? /** @type {string} */ (input.feedbackContextToken) : undefined;
+    if (feedbackContextToken === undefined) return false;
+    if (feedbackContextToken) {
       const cohortKey = contributorCohortKey(normalizeContributorCohort(
         /** @type {Record<string, unknown>} */ (input.turn),
       ));
-      next = rememberContext(next, feedbackContextKey, cohortKey);
+      next = rememberContext(next, feedbackContextToken, cohortKey);
     }
     await kv.set(CONTRIBUTOR_LOCAL_KEY, { ...record, aggregate: next });
     return true;

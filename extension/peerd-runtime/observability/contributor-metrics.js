@@ -16,16 +16,23 @@ import { WEB_ACTOR_CODE_CLIENT_TOOL_NAMES } from '../actor/capability-manifest.j
 import {
   CONTRIBUTOR_ACTION_KINDS, CONTRIBUTOR_BROWSERS, CONTRIBUTOR_CHANNELS,
   CONTRIBUTOR_FAILURES, CONTRIBUTOR_FALLBACKS, CONTRIBUTOR_FEATURES, CONTRIBUTOR_FEEDBACK,
-  CONTRIBUTOR_MODEL_FAMILIES, CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_PROVIDERS,
-  CONTRIBUTOR_SURFACES,
+  CONTRIBUTOR_CLASSIFICATION_CODE_MAX, CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_SURFACES,
 } from '/shared/contributor-channel.js';
 
 export {
   CONTRIBUTOR_ACTION_KINDS, CONTRIBUTOR_BROWSERS, CONTRIBUTOR_CHANNELS,
   CONTRIBUTOR_FAILURES, CONTRIBUTOR_FALLBACKS, CONTRIBUTOR_FEATURES, CONTRIBUTOR_FEEDBACK,
-  CONTRIBUTOR_MODEL_FAMILIES, CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_PROVIDERS,
-  CONTRIBUTOR_SURFACES,
+  CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_SURFACES,
 } from '/shared/contributor-channel.js';
+
+export const CONTRIBUTOR_PROVIDERS = Object.freeze([
+  'anthropic', 'openrouter', 'openai', 'glm', 'ollama', 'local-webgpu', 'custom',
+]);
+export const CONTRIBUTOR_MODEL_FAMILIES = Object.freeze([
+  'claude-opus', 'claude-sonnet', 'claude-haiku', 'gpt', 'openai-o', 'glm',
+  'gemini', 'qwen', 'llama', 'deepseek', 'mistral', 'grok', 'command',
+  'hermes', 'kimi', 'minimax', 'gemma', 'muse-glimmer', 'custom',
+]);
 
 export const CONTRIBUTOR_SCHEMA_VERSION = 1;
 export const CONTRIBUTOR_DISCLOSURE_VERSION = 1;
@@ -185,6 +192,24 @@ export const normalizeContributorModelFamily = (model) =>
     : typeof model === 'string' && CONTRIBUTOR_MODEL_FAMILIES.includes(model)
       ? model
     : 'custom';
+
+/** @param {unknown} provider */
+export const contributorProviderCode = (provider) =>
+  CONTRIBUTOR_PROVIDERS.indexOf(normalizeContributorProvider(provider));
+
+/** @param {unknown} model */
+export const contributorModelFamilyCode = (model) =>
+  CONTRIBUTOR_MODEL_FAMILIES.indexOf(normalizeContributorModelFamily(model));
+
+/** @param {unknown} code */
+export const contributorProviderFromCode = (code) => Number.isSafeInteger(code)
+  && Number(code) >= 0 && Number(code) <= CONTRIBUTOR_CLASSIFICATION_CODE_MAX
+  ? CONTRIBUTOR_PROVIDERS[Number(code)] : undefined;
+
+/** @param {unknown} code */
+export const contributorModelFamilyFromCode = (code) => Number.isSafeInteger(code)
+  && Number(code) >= 0 && Number(code) <= CONTRIBUTOR_CLASSIFICATION_CODE_MAX
+  ? CONTRIBUTOR_MODEL_FAMILIES[Number(code)] : undefined;
 
 /** @param {unknown} durationMs */
 export const contributorDurationBucket = (durationMs) => {

@@ -54,6 +54,7 @@ import {
 import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
 import { createActorModelEgress } from './actor-model-egress.js';
 import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
+import { projectContributorSettlement } from '/peerd-runtime/controller-contributor.js';
 
 let seq = 0;
 let runId = '';
@@ -926,10 +927,14 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       // sees BOTH the authoritative Stop signal AND whether any reply came back
       // (signal.aborted && !finalText). A stamp here — ignorant of finalText — would
       // mislabel a turn that produced a real reply just before Stop as 'cancelled'.
+      const contributor = metadata.actorType === 'web' && metadata.backing !== 'api'
+        ? projectContributorSettlement(result, program.provider, program.model)
+        : null;
       self.postMessage({
         type: 'done', runId,
         result: {
           ...result,
+          ...(contributor ? { contributor } : {}),
           price: costOf(program.model, result.usage, program.pricingOverrides, {
             localProvider: providerMetadata(program.provider)?.keyless === true,
           }),

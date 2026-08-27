@@ -2,15 +2,21 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  CONTRIBUTOR_PENDING_RECEIPTS_KEY, createPreviewContributorAuthority,
-  createPreviewContributorRoutes,
+  CONTRIBUTOR_ACTIVE_CONSENT_KEY, CONTRIBUTOR_PENDING_RECEIPTS_KEY,
+  createPreviewContributorAuthority,
+  createPreviewContributorRoutes, previewTargetAddon,
 } from '../../extension/background/kernel-preview-addon.js';
-import { acceptContributorOffer } from '../../extension/offscreen/semantic-routes/contributor.js';
+import {
+  acceptContributorOffer, dispatchContributorSemanticRoute,
+} from '../../extension/offscreen/semantic-routes/contributor.js';
 import {
   CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_OFFER, CONTRIBUTOR_CHANNEL_PROTOCOL,
   CONTRIBUTOR_CHANNEL_RESULT, parseContributorOffer,
 } from '../../extension/shared/contributor-channel.js';
 import { emptyContributorLocalState } from '../../extension/peerd-runtime/observability/contributor-metrics.js';
+import {
+  makeKernelFirefoxContributor,
+} from '../../extension/background/kernel-firefox-contributor-addon.js';
 
 const createLiveRoutes = createPreviewContributorRoutes;
 
@@ -29,14 +35,19 @@ const settlement = (operationKey = 'delivery-1', overrides: Record<string, any> 
   feedbackContextKey: 'chat-1:tool-1',
   decision: { requested: 'tools', resolved: 'tools', fallback: 'none' },
   browser: 'chrome', extensionVersion: '0.6.0', channel: 'preview',
-  provider: 'anthropic', modelFamily: 'claude-sonnet', durationMs: 42,
+  providerCode: 0, modelFamilyCode: 1, durationMs: 42,
   tokens: 15, outcome: 'completed', failure: 'none', actions: ['page_action'],
   ...overrides,
 });
 
 const storage = (initial: any) => {
   const values = new Map<string, any>();
-  if (initial != null) values.set('contributor_metrics.aggregate.v1', structuredClone(initial));
+  if (initial != null) {
+    values.set('contributor_metrics.aggregate.v1', structuredClone(initial));
+    values.set(CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
+      version: 1, generation: initial.consent.generation,
+    });
+  }
   return {
     kv: {
       get: async (key: string) => structuredClone(values.get(key) ?? null),
@@ -50,7 +61,8 @@ const storage = (initial: any) => {
 
 const routesFor = (state: ReturnType<typeof storage>, sender: any, postMessage?: any,
     feedback: { sidepanel?: any; home?: any; validate?: (message: any) => Promise<any>;
-      scheduleDrain?: (operation: () => void) => void; channelDeadlineMs?: number } = {}) => {
+      scheduleDrain?: (operation: () => void) => void; channelDeadlineMs?: number;
+      storageDeadlineMs?: number } = {}) => {
   const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
   const lease = { scope: 'controller', leaseId: 'contributor-lease' };
   const target = {
@@ -73,6 +85,7 @@ const routesFor = (state: ReturnType<typeof storage>, sender: any, postMessage?:
       operation(lease) } },
     scheduleDrain: feedback.scheduleDrain,
     channelDeadlineMs: feedback.channelDeadlineMs,
+    storageDeadlineMs: feedback.storageDeadlineMs,
   });
   return { owner, routes: owner.routes,
     restore: () => { (globalThis as any).clients = prior; } };
@@ -80,7 +93,7 @@ const routesFor = (state: ReturnType<typeof storage>, sender: any, postMessage?:
 
 describe('Preview Contributor Metrics private channel', () => {
   test('target addon is update plus one fixed contributor capability', () => {
-    const addon = (globalThis as any)[Symbol.for('peerd.kernel.target-addon.v1')];
+    const addon = previewTargetAddon;
     expect(addon).toMatchObject({
       target: 'preview-chrome', update: expect.any(Function),
       dwebCustody: expect.any(Function), contributor: expect.any(Function),
@@ -143,6 +156,146 @@ describe('Preview Contributor Metrics private channel', () => {
     } finally { live.restore(); }
   });
 
+  test('hashes identifiers before the first durable receipt write', async () => {
+    const state = storage(enabledRecord());
+    const sender = {};
+    const live = routesFor(state, sender, undefined, { scheduleDrain: () => {} });
+    try {
+      expect(await live.owner.recordWebSettlement(settlement('raw-operation-id', {
+        feedbackContextKey: 'raw-session-id:raw-tool-id',
+      }))).toEqual({ ok: true, queued: true });
+      const persisted = JSON.stringify(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
+      expect(persisted).not.toContain('raw-operation-id');
+      expect(persisted).not.toContain('raw-session-id');
+      expect(persisted).not.toContain('raw-tool-id');
+      expect(persisted).toContain('operation:');
+      expect(persisted).toContain('context:');
+    } finally { live.restore(); }
+  });
+
+  test('revocation hides stale receipts and resumes interrupted physical cleanup', async () => {
+    const state = storage(enabledRecord());
+    const sender = {};
+    const originalDelete = state.kv.delete;
+    let failPendingDelete = true;
+    state.kv.delete = async (key: string) => {
+      if (key === CONTRIBUTOR_PENDING_RECEIPTS_KEY && failPendingDelete) {
+        throw new Error('interrupted cleanup');
+      }
+      return originalDelete(key);
+    };
+    const live = routesFor(state, sender, undefined, { scheduleDrain: () => {} });
+    try {
+      await live.owner.recordWebSettlement(settlement('receipt-before-revoke'));
+      expect(await live.routes['contributor/disable']({ type: 'contributor/disable' }, sender))
+        .toMatchObject({ ok: true, status: { enabled: false } });
+      expect(state.value()).toBeNull();
+      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)?.receipts).toHaveLength(1);
+      await expect(live.owner.pending()).rejects.toThrow('interrupted cleanup');
+      failPendingDelete = false;
+      expect(await live.owner.pending()).toEqual([]);
+      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
+    } finally { live.restore(); }
+  });
+
+  test('a hung storage operation is bounded and cannot poison later settlements', async () => {
+    const state = storage(enabledRecord());
+    const sender = {};
+    const originalGet = state.kv.get;
+    let hangAggregateRead = true;
+    state.kv.get = async (key: string) => {
+      if (key === 'contributor_metrics.aggregate.v1' && hangAggregateRead) {
+        hangAggregateRead = false;
+        return new Promise(() => {});
+      }
+      return originalGet(key);
+    };
+    const live = routesFor(state, sender, undefined, {
+      scheduleDrain: () => {}, storageDeadlineMs: 5,
+    });
+    try {
+      expect(await live.owner.recordWebSettlement(settlement('hung-first')))
+        .toMatchObject({ ok: false, code: 'contributor-settlement-timeout' });
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      expect(await live.owner.recordWebSettlement(settlement('recovered-second')))
+        .toEqual({ ok: true, queued: true });
+      expect(await live.owner.pending()).toHaveLength(1);
+    } finally { live.restore(); }
+  });
+
+  test('a late aggregate write cannot resurrect consent after revocation', async () => {
+    const initial = enabledRecord();
+    const values = new Map<string, any>([
+      ['contributor_metrics.aggregate.v1', structuredClone(initial)],
+      [CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
+        version: 1, generation: initial.consent.generation,
+      }],
+    ]);
+    let releaseLateWrite: () => void = () => {};
+    const lateWrite = new Promise<void>((resolve) => { releaseLateWrite = resolve; });
+    let holdAggregateWrite = true;
+    const authority = createPreviewContributorAuthority({
+      storageDeadlineMs: 5,
+      kv: {
+        get: async (key: string) => structuredClone(values.get(key) ?? null),
+        set: async (key: string, value: any) => {
+          if (key === 'contributor_metrics.aggregate.v1' && holdAggregateWrite) {
+            holdAggregateWrite = false;
+            await lateWrite;
+          }
+          values.set(key, structuredClone(value));
+        },
+        delete: async (key: string) => { values.delete(key); },
+      },
+    });
+    const target = { authority: { target: 'semantic:contributor/settlement:runtime' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 100 };
+    expect(await authority.handle('semantic.contributor.settlement-record', {
+      expected: initial, value: structuredClone(initial),
+    }, target)).toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await authority.handle('semantic.contributor.clear', {}, {
+      authority: { target: 'semantic:contributor/disable:options' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 100,
+    })).toMatchObject({ ok: true, outcomeKnown: true });
+    releaseLateWrite();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await authority.arm()).toEqual({ enabled: false, generation: null });
+    expect(values.has('contributor_metrics.aggregate.v1')).toBe(false);
+  });
+
+  test('a timed-out revocation remains fail-closed while its delete finishes', async () => {
+    const initial = enabledRecord();
+    const values = new Map<string, any>([
+      ['contributor_metrics.aggregate.v1', structuredClone(initial)],
+      [CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
+        version: 1, generation: initial.consent.generation,
+      }],
+    ]);
+    let releaseDelete: () => void = () => {};
+    const delayedDelete = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    const authority = createPreviewContributorAuthority({
+      storageDeadlineMs: 5,
+      kv: {
+        get: async (key: string) => structuredClone(values.get(key) ?? null),
+        set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+        delete: async (key: string) => {
+          if (key === CONTRIBUTOR_ACTIVE_CONSENT_KEY) await delayedDelete;
+          values.delete(key);
+        },
+      },
+    });
+    expect(await authority.handle('semantic.contributor.clear', {}, {
+      authority: { target: 'semantic:contributor/disable:options' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 100,
+    })).toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await authority.arm()).toEqual({ enabled: false, generation: null });
+    expect(await authority.appendPending(settlement('after-revoke-request')))
+      .toEqual({ ok: true, queued: false, reason: 'disabled' });
+    releaseDelete();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await authority.arm()).toEqual({ enabled: false, generation: null });
+  });
+
   test('terminal settlement awaits only the durable receipt when the host is hung', async () => {
     const state = storage(enabledRecord());
     const sender = {};
@@ -154,9 +307,9 @@ describe('Preview Contributor Metrics private channel', () => {
         new Promise((resolve) => setTimeout(() => resolve('slow'), 25)),
       ]);
       expect(result).toEqual({ ok: true, queued: true });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(posted).toBe(1);
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)?.receipts).toHaveLength(1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(posted).toBe(2);
+      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
     } finally { live.restore(); }
   });
 
@@ -192,7 +345,7 @@ describe('Preview Contributor Metrics private channel', () => {
     expect({ guarded, leased }).toEqual({ guarded: 0, leased: 0 });
   });
 
-  test('enables idempotently and disables the one atomic local record', async () => {
+  test('enables idempotently and commits revocation before cleanup', async () => {
     const state = storage(null);
     const sender = {};
     const live = routesFor(state, sender);
@@ -284,7 +437,53 @@ describe('Preview Contributor Metrics private channel', () => {
     } finally { restarted.restore(); }
   });
 
-  test('keeps an idempotent receipt across host loss and drains it on retry', async () => {
+  test('drops a deterministic poison receipt after two attempts and advances FIFO', async () => {
+    const state = storage(enabledRecord());
+    const sender = {};
+    const attempts: number[] = [];
+    const owner = createPreviewContributorRoutes({
+      kv: state.kv, optionsUi: (candidate: any) => candidate === sender,
+      sidepanelUi: () => false, homeUi: () => false,
+      validateFeedback: async () => ({ ok: false }),
+      offscreenUrl: null, featureHost: null, scheduleDrain: () => {},
+      dispatchSemanticRoute: async (route: string, message: any, options: any) => {
+        if (route === 'contributor/settlement') attempts.push(message.durationMs);
+        if (route === 'contributor/settlement' && message.durationMs === 1) {
+          return { ok: false, error: 'deterministic poison', outcomeKnown: true };
+        }
+        return dispatchContributorSemanticRoute(route, message, options);
+      },
+    });
+    await owner.recordWebSettlement(settlement('poison', { durationMs: 1 }));
+    await owner.recordWebSettlement(settlement('healthy', { durationMs: 2 }));
+    expect(await owner.drainPending()).toEqual({ ok: true, drained: 2 });
+    expect(attempts).toEqual([1, 1, 2]);
+    expect(await owner.pending()).toEqual([]);
+    expect(Object.values(state.value().aggregate.rows)[0]).toMatchObject({ actorTurns: 1 });
+  });
+
+  test('Firefox preview uses the same contributor route and settlement owner', async () => {
+    const state = storage(null);
+    const sender = {};
+    const owner = makeKernelFirefoxContributor()({
+      kv: state.kv, optionsUi: (candidate: any) => candidate === sender,
+      sidepanelUi: () => false, homeUi: () => false,
+      validateFeedback: async () => ({ ok: false }), scheduleDrain: () => {},
+    });
+    expect(await owner.arm()).toEqual({ enabled: false, generation: null });
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true, status: { enabled: true } });
+    const generation = state.value().consent.generation;
+    expect(await owner.recordWebSettlement(settlement('firefox-delivery', {
+      consentGeneration: generation, browser: 'firefox',
+    }))).toEqual({ ok: true, queued: true });
+    expect(await owner.drainPending()).toEqual({ ok: true, drained: 1 });
+    expect(Object.values(state.value().aggregate.rows)[0]).toMatchObject({
+      actorTurns: 1, browser: 'firefox',
+    });
+  });
+
+  test('drops a deterministically unreachable host receipt after bounded retries', async () => {
     const state = storage(enabledRecord());
     const sender = {};
     const lost = routesFor(state, sender, () => {}, {
@@ -292,15 +491,15 @@ describe('Preview Contributor Metrics private channel', () => {
     });
     try {
       await lost.owner.recordWebSettlement(settlement('delivery-host-loss'));
-      expect(await lost.owner.drainPending()).toMatchObject({ ok: false });
-      expect(await lost.owner.pending()).toHaveLength(1);
+      expect(await lost.owner.drainPending()).toEqual({ ok: true, drained: 1 });
+      expect(await lost.owner.pending()).toEqual([]);
     } finally { lost.restore(); }
 
     const recovered = routesFor(state, sender, undefined, { scheduleDrain: () => {} });
     try {
-      expect(await recovered.owner.drainPending()).toEqual({ ok: true, drained: 1 });
+      expect(await recovered.owner.drainPending()).toEqual({ ok: true, drained: 0 });
       expect(await recovered.owner.pending()).toEqual([]);
-      expect(Object.values(state.value().aggregate.rows)[0]).toMatchObject({ actorTurns: 1 });
+      expect(state.value().aggregate.rows).toEqual({});
     } finally { recovered.restore(); }
   });
 
@@ -315,7 +514,7 @@ describe('Preview Contributor Metrics private channel', () => {
         actions: Array.from({ length: 129 }, () => 'page_action'),
       }))).toMatchObject({ ok: false, code: 'contributor-pending-receipt-invalid' });
       expect(await live.owner.recordWebSettlement(settlement('raw-cohort', {
-        provider: 'private-provider', modelFamily: 'private-model',
+        providerCode: 999, modelFamilyCode: 999,
       }))).toMatchObject({ ok: false, code: 'contributor-pending-receipt-invalid' });
       expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
     } finally { live.restore(); }
@@ -364,7 +563,7 @@ describe('Preview Contributor Metrics private channel', () => {
     const vault = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
     expect(actor).toContain('deps.contributor?.arm');
     expect(actor).toContain('deps.contributor.recordWebSettlement');
-    expect(vault).toContain('targetContributor?.recordWebSettlement?.(input)');
+    expect(vault).toContain('targetContributor.recordWebSettlement(input)');
     expect(vault).toContain('targetContributor?.routes ?? {}');
     expect(vault).toContain('validateContributorFeedback(message)');
   });

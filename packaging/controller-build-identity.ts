@@ -65,6 +65,9 @@ export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
   'offscreen/dweb-custody-host.js',
   'offscreen/dweb-transfer-host.js',
   'background/kernel-preview-addon.js',
+  // Firefox preview/dev owns its contributor registration in a distinct
+  // background entry, so bind that channel-specific authority shell too.
+  'background/vault-kernel-firefox-preview.js',
 ] as const);
 
 export const CONTROLLER_BUILD_ASSETS = Object.freeze([

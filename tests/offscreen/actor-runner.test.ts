@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { abortActor, runActor } from '../../extension/offscreen/actor-runner.js';
 import { ACTOR_WORKER_PROTOCOL } from '../../extension/offscreen/actor-worker-protocol.js';
 import { EXECUTION_PROTOCOL } from '../../extension/shared/execution-protocol.js';
+import { projectContributorSettlement } from '../../extension/peerd-runtime/controller-contributor.js';
 
 const REALM = {
   dedicatedWorker: true,
@@ -192,16 +193,22 @@ describe('actor worker startup proof', () => {
     const worker = new FakeWorker();
     worker.onPost = (message) => {
       answerProbe(worker, message);
-      if (message.type === 'run') queueMicrotask(() => worker.emit('message', { data: {
-        type: 'done', result: {
+      if (message.type === 'run') {
+        const actorResult = {
           error: 'Provider secret detail HTTP 429 should not cross the metrics boundary',
           finalText: '', stopReason: 'max_tokens',
           newMessages: [{
             role: 'assistant', error: 'Provider secret detail HTTP 429 should not cross',
             stopReason: 'max_tokens', toolUses: [{ name: 'snapshot' }],
           }],
-        },
-      } }));
+        };
+        queueMicrotask(() => worker.emit('message', { data: {
+          type: 'done', result: {
+            ...actorResult,
+            contributor: projectContributorSettlement(actorResult, 'anthropic', 'model'),
+          },
+        } }));
+      }
     };
     const result = await runActor({ ...job, actorType: 'web', backing: 'tab' }, {
       workerUrl: '/worker.js',
@@ -209,10 +216,50 @@ describe('actor worker startup proof', () => {
       sendToSW: async () => ({ ok: true }),
     });
     expect(result.contributor).toEqual({
-      provider: 'anthropic', modelFamily: 'custom',
+      providerCode: 0, modelFamilyCode: 18,
       outcome: 'error', failure: 'limits', actions: ['page_action'],
     });
     expect(JSON.stringify(result.contributor)).not.toContain('secret detail');
+  });
+
+  test('never projects Contributor Metrics for API-Web or non-Web actors', async () => {
+    for (const actor of [
+      { actorType: 'web', backing: 'api' },
+      { actorType: 'app', backing: 'tab' },
+    ]) {
+      const worker = new FakeWorker();
+      worker.onPost = (message) => {
+        answerProbe(worker, message);
+        if (message.type === 'run') queueMicrotask(() => worker.emit('message', { data: {
+          type: 'done', result: {
+            ok: true, finalText: 'done', newMessages: [{
+              role: 'assistant', toolUses: [{ name: 'snapshot' }],
+            }],
+            contributor: {
+              providerCode: 0, modelFamilyCode: 18,
+              outcome: 'completed', failure: 'none', actions: ['page_action'],
+            },
+          },
+        } }));
+      };
+      const result = await runActor({ ...job, ...actor, runId: `negative-${actor.actorType}-${actor.backing}` }, {
+        workerUrl: '/worker.js', createWorker: () => readyWorker(worker),
+        sendToSW: async () => ({ ok: true }),
+      });
+      expect(result.contributor).toBeUndefined();
+    }
+  });
+
+  test('keeps provider/model classification in the dedicated semantic Worker', () => {
+    const runnerSource = readFileSync(
+      new URL('../../extension/offscreen/actor-runner.js', import.meta.url), 'utf8',
+    );
+    const workerSource = readFileSync(
+      new URL('../../extension/offscreen/actor-worker.js', import.meta.url), 'utf8',
+    );
+    expect(runnerSource).not.toContain('controller-contributor.js');
+    expect(runnerSource).toContain('parseContributorProjection');
+    expect(workerSource).toContain('projectContributorSettlement');
   });
 
   test('refuses an invalid realm before run or relay', async () => {
