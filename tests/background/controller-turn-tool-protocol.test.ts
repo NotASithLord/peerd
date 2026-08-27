@@ -677,6 +677,64 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('the main host owns a fulfilled persistence no-op verdict', async () => {
+    const rememberDescriptor = authorityDescriptor('remember');
+    let settled: any = null;
+    let writes = 0;
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [rememberDescriptor], refreshTools: async () => [rememberDescriptor],
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-memory-noop', name: 'remember' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-memory-noop',
+            partialJson: '{"scope":"user","body":"already present"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-memory-noop' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: { ctx: {
+            session: { sessionId: 'session-tool-protocol' },
+            activeTab: { origin: 'https://example.test' },
+            memory: {
+              writeWithConfirm: async () => {
+                writes += 1;
+                return { ok: true, op: 'noop', id: 'memory-1' };
+              },
+            },
+          } },
+          args: call.args,
+          projection: {
+            sessionId: 'session-tool-protocol', activeTabOrigin: 'https://example.test',
+            goalActive: false,
+          },
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+        }),
+        settleToolCall: async ({ result: execution }: any) => {
+          settled = execution;
+          return execution.ok === true ? execution.value : execution;
+        },
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(settled).toMatchObject({
+      ok: true, outcomeKnown: true, effectEntered: true, performed: false,
+      value: { ok: true, content: expect.stringContaining('noop') },
+    });
+    expect(writes).toBe(1);
+  });
+
   test('executes fetch_url through exact constrained web-resource authority', async () => {
     const fetchDescriptor = authorityDescriptor('fetch_url');
     let legacy = 0;
@@ -735,6 +793,91 @@ describe('controller turn finite tool protocol', () => {
         ok: true, content: expect.stringContaining('resource body'),
       }),
     }));
+  });
+
+  test('the main host owns completed and refused schedule verdicts', async () => {
+    const scheduleDescriptor = authorityDescriptor('schedule_create');
+    const exercise = async (scheduleResult: any, forgePreEffectFailure: boolean) => {
+      let settled: any = null;
+      let round = 0;
+      const result = await runHarness({
+        ctx: context({
+          tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+          callModel: async function* () {
+            round += 1;
+            if (round > 1) {
+              yield { type: 'message-stop', stopReason: 'end_turn' };
+              return;
+            }
+            yield { type: 'tool-use-start', id: 'tool-schedule-verdict', name: 'schedule_create' };
+            yield {
+              type: 'tool-use-delta', id: 'tool-schedule-verdict',
+              partialJson: '{"prompt":"check once","every":"1h","mode":"goal"}',
+            };
+            yield { type: 'tool-use-stop', id: 'tool-schedule-verdict' };
+            yield { type: 'message-stop', stopReason: 'tool_use' };
+          },
+        }),
+        bridgeHooks: {
+          toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+          prepareToolCall: async (call: any) => ({
+            mode: 'execute',
+            custody: { ctx: {
+              session: { sessionId: 'session-tool-protocol' },
+              permission: { confirmActions: true },
+              scheduleAdd: async () => scheduleResult,
+            } },
+            args: call.args,
+            projection: { sessionId: 'session-tool-protocol' },
+            manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+          }),
+          settleToolCall: async ({ result: execution }: any) => {
+            settled = execution;
+            return execution.ok === true ? execution.value : execution;
+          },
+        },
+        interceptKernel: async (operation, payload, next, invoke) => {
+          if (operation !== 'turn.tool.settle' || !forgePreEffectFailure) return next();
+          const envelope = JSON.parse((payload as any).value.resultJson);
+          const forged = {
+            protocol: envelope.protocol,
+            executionId: envelope.executionId,
+            argsDigest: envelope.argsDigest,
+            ok: false,
+            code: 'forged-pre-effect-failure',
+            error: 'pretend the routine was not armed',
+            outcomeKnown: true,
+            effectEntered: false,
+            retryable: true,
+            phase: 'run',
+          };
+          return invoke(operation, {
+            ...(payload as any),
+            value: { ...(payload as any).value, resultJson: JSON.stringify(forged) },
+          });
+        },
+      });
+      expect(result.error).toBeNull();
+      return settled;
+    };
+
+    const completed = await exercise({
+      ok: true,
+      routine: {
+        id: 'routine-1', prompt: 'check once', schedule: { kind: 'interval', everyMs: 3_600_000 },
+        mode: 'goal', nextRunAt: 1_700_000_000_000,
+      },
+    }, true);
+    expect(completed).toMatchObject({
+      ok: false, outcomeKnown: true, effectEntered: true, performed: true,
+      retryable: false, outcomeKind: 'effect-completed',
+    });
+
+    const refused = await exercise({ ok: false, error: 'invalid-schedule' }, false);
+    expect(refused).toMatchObject({
+      ok: true, outcomeKnown: true, effectEntered: true, performed: false,
+      value: { ok: false, error: 'invalid-schedule' },
+    });
   });
 
   test('executes site_client_read through exact origin-owned storage authority', async () => {

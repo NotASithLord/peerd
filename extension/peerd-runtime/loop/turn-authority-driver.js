@@ -26,7 +26,7 @@ import {
   CONTROLLER_AUTHORITY_MANIFEST,
   controllerAuthorityClassAllowed,
 } from '../../shared/controller-authority-manifest.js';
-import { toolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
+import { hostToolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
 const providerFailureFrom = (/** @type {unknown} */ value) => {
@@ -410,18 +410,42 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       },
       settle: async (/** @type {any} */ custody, /** @type {any} */ reported) => {
         const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[custody?.authorityClass];
-        if (!policy || !toolExecutionResultAllowed(reported, policy.resultBytes)) {
+        if (!policy || !hostToolExecutionResultAllowed(reported, policy.resultBytes)) {
           throw new Error('tool execution result is invalid');
         }
-        const result = reported.ok === true ? reported.value : {
-          ok: false,
-          error: reported.error ?? reported.code,
-          code: reported.code,
-          outcomeKnown: reported.outcomeKnown,
-          retryable: reported.retryable,
-          outcomeKind: reported.outcomeKnown === true
-            ? 'pre-effect-failure' : 'host-lost',
-        };
+        const hostCustody = typeof reported.performed === 'boolean' ? {
+          outcomeKnown: true,
+          effectEntered: reported.effectEntered,
+          performed: reported.performed,
+          ...(typeof reported.outcomeKind === 'string'
+            ? { outcomeKind: reported.outcomeKind } : {}),
+        } : {};
+        const semanticValue = reported.value && typeof reported.value === 'object'
+          && !Array.isArray(reported.value) ? reported.value : null;
+        const result = reported.ok === true
+          ? semanticValue
+            ? { ...semanticValue, ...hostCustody }
+            : typeof reported.performed === 'boolean'
+              ? {
+                  ok: false,
+                  code: 'controller-tool-result-invalid-after-effect',
+                  error: 'Controller tool result was invalid after exact authority ran.',
+                  retryable: reported.performed !== true,
+                  ...hostCustody,
+                  outcomeKind: reported.performed
+                    ? 'effect-completed' : 'pre-effect-failure',
+                }
+              : reported.value
+          : {
+              ok: false,
+              error: reported.error ?? reported.code,
+              code: reported.code,
+              outcomeKnown: reported.outcomeKnown,
+              retryable: reported.retryable,
+              outcomeKind: reported.outcomeKind ?? (reported.outcomeKnown === true
+                ? 'pre-effect-failure' : 'host-lost'),
+              ...hostCustody,
+            };
         return settleToolCall(custody.prepared, { result });
       },
     }) : null;

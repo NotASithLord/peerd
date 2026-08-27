@@ -156,6 +156,48 @@ export const toolEffectLossSemantics = (riskClass, phase) => {
 };
 
 /**
+ * Validate an outcome explicitly supplied by one exact authority operation.
+ * Fulfillment alone is deliberately not evidence that an effect happened.
+ * @param {unknown} value
+ * @returns {'performed'|'not-performed'|'unknown'}
+ */
+export const normalizeHostEffectOutcome = (value) =>
+  value === 'performed' || value === 'not-performed' ? value : 'unknown';
+
+/**
+ * Replace controller/Worker custody claims with the authority host's verdict.
+ * Semantic result content remains useful, but only the host can say whether an
+ * exact irreversible/resource operation entered or completed.
+ * @param {unknown} reported
+ * @param {{effectEntered:boolean,performed:boolean,invalidCode?:string,invalidError?:string}} verdict
+ */
+export const stampHostEffectVerdict = (reported, verdict) => {
+  const result = record(reported);
+  const base = result ?? {
+    ok: false,
+    code: verdict.invalidCode ?? 'tool-result-invalid',
+    error: verdict.invalidError ?? 'Tool executor returned an invalid result.',
+  };
+  const {
+    effectEntered: _reportedEffectEntered,
+    performed: _reportedPerformed,
+    outcomeKind: _reportedOutcomeKind,
+    ...semantic
+  } = base;
+  const performed = verdict.performed === true;
+  return {
+    ...semantic,
+    outcomeKnown: true,
+    effectEntered: verdict.effectEntered === true,
+    performed,
+    ...(semantic.ok === false ? {
+      ...(performed ? { retryable: false } : {}),
+      outcomeKind: performed ? 'effect-completed' : 'pre-effect-failure',
+    } : {}),
+  };
+};
+
+/**
  * Compile the code-owned effect vocabulary. Each implementation receives only
  * the named methods listed for its tool; the generic reverse-RPC transport is
  * never exposed to tool code.
@@ -354,4 +396,31 @@ export const toolExecutionResultAllowed = (result, maxBytes) => {
         ].includes(key))))
       || !bounded(result, maxBytes)) return false;
   return true;
+};
+
+/**
+ * Validate the same execution envelope after the authority host has added its
+ * effect verdict. Controller-authored envelopes never enter through this lane.
+ * @param {unknown} result
+ * @param {number} maxBytes
+ */
+export const hostToolExecutionResultAllowed = (result, maxBytes) => {
+  const envelope = record(result);
+  if (!envelope) return false;
+  const hasVerdict = Object.hasOwn(envelope, 'performed')
+    || Object.hasOwn(envelope, 'outcomeKind');
+  if (!hasVerdict) return toolExecutionResultAllowed(result, maxBytes);
+  if (typeof envelope.performed !== 'boolean'
+      || envelope.outcomeKnown !== true
+      || (envelope.ok === false
+        && envelope.outcomeKind !== (envelope.performed
+          ? 'effect-completed' : 'pre-effect-failure'))
+      || (envelope.ok === true && envelope.outcomeKind !== undefined)) return false;
+  const {
+    performed: _performed,
+    outcomeKind: _outcomeKind,
+    ...controllerEnvelope
+  } = envelope;
+  return toolExecutionResultAllowed(controllerEnvelope, maxBytes)
+    && bounded(result, maxBytes);
 };
