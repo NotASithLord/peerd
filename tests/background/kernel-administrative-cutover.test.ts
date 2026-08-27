@@ -18,6 +18,7 @@ import {
   kernelFeatureAuthorityFor,
 } from '../../extension/shared/kernel-feature-policy.js';
 import { useFakeIndexedDB } from '../setup.ts';
+import { TEST_CONTROLLER_KERNEL_IDENTITY } from './controller-test-identity.ts';
 
 await useFakeIndexedDB();
 
@@ -509,6 +510,7 @@ describe('sealed administrative root cutover', () => {
       browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
       ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
       firefoxDirect: true, dwebEnabled: false,
+      kernelIdentity: TEST_CONTROLLER_KERNEL_IDENTITY,
       authorizeFeatureCall: feature.authorize,
       handleFeatureKernelCall: feature.handleKernelCall,
       withDirectLifetime: (operation: () => Promise<any>) => operation(),

@@ -69,8 +69,16 @@ const authorityTools = [
   ['dweb', CONTROLLER_DWEB_TOOL_NAMES],
 ];
 
-const ownership = new Map(authorityTools.flatMap(([authorityClass, names]) =>
-  names.map((name) => [name, authorityClass])));
+const ownedRows = authorityTools.flatMap(([authorityClass, names]) =>
+  names.map((name) => /** @type {[string,string]} */ ([name, authorityClass])));
+const ownedNames = ownedRows.map(([name]) => name);
+if (new Set(ownedNames).size !== ownedNames.length) {
+  throw new TypeError('controller-tool-owner-duplicate');
+}
+
+const ownership = new Map(ownedRows);
+
+export const CONTROLLER_OWNED_TOOL_NAMES = Object.freeze([...ownedNames]);
 
 export const controllerAuthorityClassForTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' ? ownership.get(name) ?? null : null;

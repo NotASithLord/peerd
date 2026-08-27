@@ -3,6 +3,10 @@ import { makeSemanticControllerClient } from '../../extension/background/offscre
 import { makeControllerOfferHandler } from '../../extension/offscreen/controller-shell.js';
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../../extension/shared/bounded-module-load.js';
+import {
+  TEST_CONTROLLER_KERNEL_IDENTITY,
+  withTestControllerLease,
+} from './controller-test-identity.ts';
 
 const makeLane = (controllerCall: () => Promise<any> | any) => {
   const workerUrl = 'chrome-extension://test/background/service-worker.js';
@@ -31,6 +35,8 @@ const makeLane = (controllerCall: () => Promise<any> | any) => {
     offscreenUrl: 'offscreen/offscreen.html',
     firefoxDirect: false,
     dwebEnabled: false,
+    kernelIdentity: TEST_CONTROLLER_KERNEL_IDENTITY,
+    withControllerLease: withTestControllerLease,
     fetchFn: (async () => new Response('template', { status: 200 })) as unknown as typeof fetch,
     listWindowClients: async () => [host],
   });
@@ -51,7 +57,7 @@ describe('semantic controller unavailable/retry behavior', () => {
     await expect(lane.semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
       .resolves.toBe('recovered prompt');
     expect(calls).toBe(2);
-    expect(lane.ensures()).toBe(2);
+    expect(lane.ensures()).toBe(3);
     lane.semantic.close();
   });
 
@@ -65,7 +71,7 @@ describe('semantic controller unavailable/retry behavior', () => {
     await expect(lane.semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
       .rejects.toThrow(STARTUP_UNAVAILABLE_USER_FAILURE);
     expect(calls).toBe(2);
-    expect(lane.ensures()).toBe(2);
+    expect(lane.ensures()).toBe(3);
     lane.semantic.close();
   });
 });

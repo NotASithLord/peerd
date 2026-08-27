@@ -43,12 +43,15 @@ const controllerLease = (identity: Record<string, any>, generation: number) => (
   generation,
 });
 const connectController = (deps: Omit<Parameters<typeof connectOffscreenController>[0],
-  'buildDigest' | 'authorizeCall'>) =>
-  connectOffscreenController({
-    ...deps,
+  'buildDigest' | 'authorizeCall'>) => {
+  const kernelIdentity = deps.kernelIdentity ?? KERNEL_IDENTITY;
+  return connectOffscreenController({
+    lease: deps.lease ?? controllerLease(kernelIdentity, 1),
+    ...deps, kernelIdentity,
     buildDigest: BUILD_DIGEST,
     authorizeCall: () => AUTHORITY,
   });
+};
 
 const ids = (...values: string[]) => {
   const queue = [...values];
@@ -77,7 +80,7 @@ describe('Chrome lazy controller private channel prototype', () => {
     const controller = await connectController({
       ensureOffscreen: async () => {},
       capabilities: ['state.read'],
-      newId: ids('channel-one', 'epoch-one', 'request-one'),
+      newId: ids('channel-one', 'request-one'),
       findHost: async () => ({
         postMessage: (offer: any, transfer: Transferable[]) => {
           offers.push(offer);
@@ -108,7 +111,9 @@ describe('Chrome lazy controller private channel prototype', () => {
       protocol: 2,
       channelId: 'channel-one',
       buildDigest: BUILD_DIGEST,
-      kernelEpoch: 'epoch-one',
+      kernelEpoch: KERNEL_IDENTITY.kernelEpoch,
+      kernelIdentity: KERNEL_IDENTITY,
+      lease: controllerLease(KERNEL_IDENTITY, 1),
       capabilities: ['state.read'],
     }]);
     expect(JSON.stringify(offers)).not.toContain('private-value');

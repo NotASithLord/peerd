@@ -534,7 +534,7 @@ const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
  * @param {string} deps.offscreenUrl
  * @param {boolean} deps.firefoxDirect
  * @param {boolean} deps.dwebEnabled
- * @param {import('../shared/kernel-identity.js').KernelIdentity} [deps.kernelIdentity]
+ * @param {import('../shared/kernel-identity.js').KernelIdentity} deps.kernelIdentity
  * @param {(payload:unknown)=>unknown} [deps.authorizeTurnCall]
  * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleTurnKernelCall]
  * @param {(payload:unknown)=>unknown} [deps.authorizeSemanticCall]
@@ -584,6 +584,15 @@ export const makeSemanticControllerClient = ({
       || !Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0
       || !Number.isFinite(promptLoadTimeoutMs) || promptLoadTimeoutMs <= 0) {
     throw new TypeError('semantic controller asset reader is required');
+  }
+  if (!parseKernelIdentity(kernelIdentity)) {
+    throw new TypeError('semantic controller kernel identity is required');
+  }
+  if (!firefoxDirect && typeof withLease !== 'function') {
+    throw new TypeError('semantic controller lease boundary is required');
+  }
+  if (firefoxDirect && typeof withDirectLifetime !== 'function') {
+    throw new TypeError('semantic controller direct lifetime is required');
   }
   const hasTurnAuthority = typeof authorizeTurnCall === 'function'
     && typeof handleTurnKernelCall === 'function';
@@ -689,7 +698,7 @@ export const makeSemanticControllerClient = ({
         capabilities: [...semanticCapabilities],
         supportedCapabilities: [...semanticCapabilities],
         buildDigest: CONTROLLER_BUILD_DIGEST,
-        ...(kernelIdentity ? { kernelIdentity } : {}),
+        kernelIdentity,
         authorizeCall: authorizeControllerCall,
         handleKernelCall: hasTurnAuthority || hasSemanticAuthority || hasRuntimeHandler
           || hasFeatureAuthority
@@ -711,7 +720,7 @@ export const makeSemanticControllerClient = ({
       capabilities: [...semanticCapabilities],
       buildDigest: CONTROLLER_BUILD_DIGEST,
       lease,
-      ...(kernelIdentity ? { kernelIdentity } : {}),
+      kernelIdentity,
       authorizeCall: authorizeControllerCall,
       handleKernelCall: hasTurnAuthority || hasSemanticAuthority || hasRuntimeHandler
         || hasFeatureAuthority
@@ -868,16 +877,32 @@ export const makeSemanticControllerClient = ({
   const renderSystemPromptUnleased = async (/** @type {Record<string, unknown>} */ ctx,
     /** @type {unknown} */ lease) => {
     const assets = await loadPromptAssets();
+    let client = null;
+    try {
+      client = await getClient(lease);
+      const result = await client.call(
+        'prompt.render', { ctx, ...assets }, { timeoutMs: 15_000 },
+      );
+      if (result?.ok === true && typeof result.prompt === 'string') return result.prompt;
+    } catch {}
+    if (client) retire(client);
+    return null;
+  };
+  const renderSystemPrompt = async (/** @type {Record<string, unknown>} */ ctx) => {
+    // why: a retired lease cannot be replayed into the sealed host. A startup
+    // retry therefore reacquires the lease boundary instead of reusing the
+    // identity that just lost its controller generation.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      let client = null;
-      try {
-        client = await getClient(lease);
-        const result = await client.call(
-          'prompt.render', { ctx, ...assets }, { timeoutMs: 15_000 },
-        );
-        if (result?.ok === true && typeof result.prompt === 'string') return result.prompt;
-      } catch {}
-      if (client) retire(client);
+      const prompt = await withControllerLease(async (/** @type {unknown} */ lease) => {
+        enterLeased();
+        try { return await renderSystemPromptUnleased(ctx, lease); }
+        finally { exitLeased(); }
+      }, {
+        outcomeKnownOnLoss: true,
+        code: 'controller-firefox-prompt-lifetime-lost',
+        onLost: retireActiveOnLifetimeLoss,
+      });
+      if (typeof prompt === 'string') return prompt;
     }
     throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
       code: 'controller-prompt-startup-failed',
@@ -886,22 +911,12 @@ export const makeSemanticControllerClient = ({
       retryable: true,
     });
   };
-  const renderSystemPrompt = (/** @type {Record<string, unknown>} */ ctx) =>
-    withControllerLease(async (/** @type {unknown} */ lease) => {
-      enterLeased();
-      try { return await renderSystemPromptUnleased(ctx, lease); }
-      finally { exitLeased(); }
-    }, {
-      outcomeKnownOnLoss: true,
-      code: 'controller-firefox-prompt-lifetime-lost',
-      onLost: retireActiveOnLifetimeLoss,
-    });
 
-  const projectTurnTools = (/** @type {Record<string, unknown>} */ input) =>
-    withControllerLease(async (/** @type {unknown} */ lease) => {
-      enterLeased();
-      try {
-        for (let attempt = 0; attempt < 2; attempt += 1) {
+  const projectTurnTools = async (/** @type {Record<string, unknown>} */ input) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const tools = await withControllerLease(async (/** @type {unknown} */ lease) => {
+        enterLeased();
+        try {
           let client = null;
           try {
             client = await getClient(lease);
@@ -914,17 +929,20 @@ export const makeSemanticControllerClient = ({
             if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
           }
           if (client) retire(client);
-        }
-        throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
-          code: 'controller-tool-projection-startup-failed',
-          outcomeKnown: true, phase: 'startup', retryable: true,
-        });
-      } finally { exitLeased(); }
-    }, {
-      outcomeKnownOnLoss: true,
-      code: 'controller-firefox-tool-projection-lifetime-lost',
-      onLost: retireActiveOnLifetimeLoss,
+          return null;
+        } finally { exitLeased(); }
+      }, {
+        outcomeKnownOnLoss: true,
+        code: 'controller-firefox-tool-projection-lifetime-lost',
+        onLost: retireActiveOnLifetimeLoss,
+      });
+      if (Array.isArray(tools)) return tools;
+    }
+    throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
+      code: 'controller-tool-projection-startup-failed',
+      outcomeKnown: true, phase: 'startup', retryable: true,
     });
+  };
 
   const callTurnUnleased = async (
     /** @type {unknown} */ payload,
