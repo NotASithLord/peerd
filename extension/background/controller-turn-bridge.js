@@ -409,7 +409,11 @@ export const makeControllerTurnBridge = ({
     return issued && issued.name === call.name && sameClone(issuedArgs, call.args ?? {})
       ? issued : null;
   };
-  const cleanupPrepared = async (/** @type {any} */ run, /** @type {string} */ code) => {
+  const cleanupPrepared = async (
+    /** @type {any} */ run,
+    /** @type {string} */ code,
+    /** @type {{detachSettlement?:boolean}} */ options = {},
+  ) => {
     const entries = [...run.preparedExecutions.values()];
     run.preparedExecutions.clear();
     for (const entry of entries) {
@@ -418,7 +422,7 @@ export const makeControllerTurnBridge = ({
       const state = executionCustody(entry);
       const outcomeKnown = state.outcomeKnown;
       if (!outcomeKnown) run.nestedUnknown = true;
-      try {
+      const settle = async () => {
         if (needsSettlement) await settleToolCall?.({
           custody: entry.custody,
           result: executionFailure(
@@ -432,7 +436,19 @@ export const makeControllerTurnBridge = ({
           ctx: run.ctx,
           binding: entry.binding,
         });
-      } catch { if (!outcomeKnown) run.nestedUnknown = true; }
+      };
+      if (options.detachSettlement) {
+        // why: emergency kernel teardown must not wait forever on an arbitrary
+        // asynchronous post-tool hook. Provider custody is released on the
+        // awaited lane below; this best-effort settlement owns no authority.
+        void settle().catch(() => {
+          if (!outcomeKnown) run.nestedUnknown = true;
+        });
+        entry.release();
+        continue;
+      }
+      try { await settle(); }
+      catch { if (!outcomeKnown) run.nestedUnknown = true; }
       finally { entry.release(); }
     }
   };
@@ -957,14 +973,19 @@ export const makeControllerTurnBridge = ({
             return unknown(run, 'tool execution preparation is invalid');
           }
           let argsDigest;
+          let effectiveArgs;
           let authorityCall;
           try {
-            argsDigest = await digestArgs(prepared.args);
+            // why: a trusted hook may retain its returned object. Clone once
+            // before the asynchronous digest so later mutations cannot split
+            // the digest, controller request, and exact authority snapshot.
+            effectiveArgs = structuredClone(prepared.args);
+            argsDigest = await digestArgs(effectiveArgs);
             // why: hooks may rewrite arguments after the model-issued call is
             // admitted. The original digest remains in baseBinding; exact
             // domain authority binds the separately-digested effective args.
             authorityCall = Object.freeze({
-              ...call, args: structuredClone(prepared.args),
+              ...call, args: effectiveArgs,
             });
           }
           catch (cause) { release(); return failed(cause, true); }
@@ -985,7 +1006,7 @@ export const makeControllerTurnBridge = ({
             authorityClass: value.authorityClass,
             argsDigest,
             manifestDigest: prepared.manifestDigest,
-            args: prepared.args,
+            args: effectiveArgs,
             projection: prepared.projection,
           };
           const parsedRequest = parseToolExecutionRequest(request, toolManifest);
@@ -2136,16 +2157,18 @@ export const makeControllerTurnBridge = ({
     handleKernelCall,
     runUserTurn,
     close: async () => {
-      const cleanup = [];
+      const providerCleanup = [];
       for (const run of runs.values()) {
         run.abort.abort();
         run.events.close();
-        cleanup.push(cleanupPrepared(run, 'tool-execution-kernel-closed'));
-        cleanup.push(closeProviderOwner(run));
+        await cleanupPrepared(run, 'tool-execution-kernel-closed', {
+          detachSettlement: true,
+        });
+        providerCleanup.push(closeProviderOwner(run));
       }
       runs.clear();
       sessionGenerations.clear();
-      await Promise.allSettled(cleanup);
+      await Promise.allSettled(providerCleanup);
     },
     activeCount: () => runs.size,
   });

@@ -4,6 +4,7 @@ import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { createKernelTurnOwner } from '../../extension/background/kernel-turn-owner.js';
 import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
+import { CONTROLLER_AUTHORITY_MANIFEST } from '../../extension/shared/controller-authority-manifest.js';
 import { makeAgentSendCustody } from '../../extension/peerd-egress/background.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
@@ -212,6 +213,77 @@ describe('native kernel turn owner', () => {
     expect(calls.loads).toBe(1);
     await owner.close();
     expect(calls).toMatchObject({ controllerCloses: 1, runtimeCloses: 1 });
+  });
+
+  test('close releases controller and provider custody while a prepared settlement is stuck', async () => {
+    const calls = makeCalls();
+    const providerOwners: object[] = [];
+    let markPrepared!: () => void;
+    const prepared = new Promise<void>((resolve) => { markPrepared = resolve; });
+    const owner = createKernelTurnOwner({
+      createController: ({ authorizeTurnCall, handleTurnKernelCall }: any) => ({
+        callTurn: async (payload: any, options: any) => {
+          const authority = authorizeTurnCall(payload);
+          const invoke = (operation: string, value: unknown) => handleTurnKernelCall(
+            operation, { runId: payload.runId, value }, {
+              capability: 'turn.run', authority, signal: options.signal,
+              deadlineAt: Date.now() + 60_000,
+            },
+          );
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-start', id: 'owner-close-tool', name: 'complete_goal',
+          });
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-delta', id: 'owner-close-tool', partialJson: '{"summary":"done"}',
+          });
+          await invoke('turn.tool.prepare', {
+            authorityClass: 'local',
+            callJson: JSON.stringify({
+              id: 'owner-close-tool', name: 'complete_goal', args: { summary: 'done' },
+            }),
+          });
+          markPrepared();
+          return new Promise(() => {});
+        },
+        renderSystemPrompt: async () => 'PINNED-SYSTEM',
+        projectTurnTools: async () => [],
+        withRun: async (operation: () => Promise<void>) => operation(),
+        release: () => { calls.controllerCloses += 1; },
+      }),
+      providerEgress: {
+        closeOwner: async (providerOwner: object) => { providerOwners.push(providerOwner); },
+      } as any,
+      loadRuntime: async (seams) => {
+        const runtime = makeRuntime(seams, calls);
+        runtime.turnDeps.runAgentTurn = async () => {
+          try {
+            for await (const event of seams.runUserTurn({
+              sessionId: 'root', userText: 'close', sessions: runtime.sessions,
+              tools: [{ name: 'complete_goal' }],
+              classifyToolCall: () => ({ actionClass: 'write', confirm: false }),
+              signal: new AbortController().signal,
+              toolExecution: {
+                prepare: async (call: any) => ({
+                  mode: 'execute', custody: {}, args: call.args, projection: {},
+                  manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+                }),
+                settle: async () => new Promise(() => {}),
+              },
+            })) calls.events.push(event);
+          } catch (cause) { calls.failures.push(cause); }
+          return { ok: false };
+        };
+        return runtime;
+      },
+      newId: () => 'owner-stuck-settlement',
+    });
+
+    await expect(owner.routes['agent/send']({ text: 'close' })).resolves.toEqual({ ok: true });
+    await prepared;
+    await owner.close();
+
+    expect(calls).toMatchObject({ controllerCloses: 1, runtimeCloses: 1 });
+    expect(providerOwners).toHaveLength(1);
   });
 
   test('publishes relays only after the current handoff reconciles', async () => {

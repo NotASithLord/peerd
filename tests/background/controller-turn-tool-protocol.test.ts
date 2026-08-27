@@ -384,6 +384,50 @@ describe('controller turn finite tool protocol', () => {
     expect(summaries).toEqual(['hook summary']);
   });
 
+  test('clones post-hook arguments before an asynchronous digest can race mutation', async () => {
+    const goalDescriptor = authorityDescriptor('complete_goal');
+    const summaries: string[] = [];
+    let retainedArgs: any = null;
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [goalDescriptor], refreshTools: async () => [goalDescriptor],
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) { yield { type: 'message-stop', stopReason: 'end_turn' }; return; }
+          yield { type: 'tool-use-start', id: 'tool-goal-race', name: 'complete_goal' };
+          yield { type: 'tool-use-delta', id: 'tool-goal-race', partialJson: '{"summary":"model summary"}' };
+          yield { type: 'tool-use-stop', id: 'tool-goal-race' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+        prepareToolCall: async () => {
+          retainedArgs = { summary: 'hook summary' };
+          return {
+            mode: 'execute', custody: { ctx: {
+              completeGoalRun: (summary: string) => { summaries.push(summary); return true; },
+            } },
+            args: retainedArgs, projection: {},
+            manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+          };
+        },
+        digestArgs: async (value: unknown) => {
+          const encoded = new TextEncoder().encode(JSON.stringify(value));
+          if (retainedArgs) retainedArgs.summary = 'late mutation';
+          const digest = await crypto.subtle.digest('SHA-256', encoded);
+          return [...new Uint8Array(digest)]
+            .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+        },
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(retainedArgs.summary).toBe('late mutation');
+    expect(summaries).toEqual(['hook summary']);
+  });
+
   test('executes actor_cancel through the exact actor authority operation', async () => {
     const actorCancelDescriptor = authorityDescriptor('actor_cancel');
     let legacy = 0;

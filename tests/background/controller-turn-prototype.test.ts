@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
+import { CONTROLLER_AUTHORITY_MANIFEST } from '../../extension/shared/controller-authority-manifest.js';
 import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
+import { createControllerModelEgress } from '../../extension/offscreen/model-egress-client.js';
 import { runUserTurn as runDirectTurn } from '../../extension/peerd-runtime/loop/agent-loop.js';
 import {
   buildTemporalBlock, buildTemporalContext,
@@ -170,6 +172,40 @@ const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]
 });
 
 describe('orchestrator controller turn boundary', () => {
+  test('Stop reaches both exact remote and local model cancellation operations', async () => {
+    const operations: string[] = [];
+    const modelEgress = createControllerModelEgress({
+      call: async (operation: string) => {
+        operations.push(operation);
+        if (operation === 'turn.model.open-inference') return {
+          streamId: 'remote-stream', status: 200, headers: {}, hasBody: true,
+        };
+        if (operation === 'turn.model.open-local') return { streamId: 'local-stream' };
+        if (operation === 'turn.model.read-local') return { done: true };
+        return null;
+      },
+    });
+    const remoteStop = new AbortController();
+    remoteStop.abort();
+    await modelEgress.openInference({
+      providerId: 'anthropic', modelId: 'model', nativeBody: {},
+      signal: remoteStop.signal,
+    });
+    const localStop = new AbortController();
+    localStop.abort();
+    const local = modelEgress.generateLocal({
+      providerId: 'local-webgpu', modelId: 'model', messages: [], system: '', tools: [],
+      maxTokens: 1, signal: localStop.signal,
+    });
+    await local.next();
+    for (let attempt = 0; attempt < 10
+      && !operations.includes('turn.model.cancel-inference'); attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(operations).toContain('turn.model.cancel-inference');
+    expect(operations).toContain('turn.model.cancel-local');
+  });
+
   test('emergency bridge close releases active provider owners', async () => {
     const released: object[] = [];
     const bridge = makeControllerTurnBridge({
@@ -192,6 +228,65 @@ describe('orchestrator controller turn boundary', () => {
     expect(bridge.activeCount()).toBe(1);
 
     await bridge.close();
+
+    expect(bridge.activeCount()).toBe(0);
+    expect(released).toHaveLength(1);
+  });
+
+  test('emergency close does not let a stuck tool post-hook block provider release', async () => {
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    let markPrepared!: () => void;
+    let markSettlement!: () => void;
+    const prepared = new Promise<void>((resolve) => { markPrepared = resolve; });
+    const settlement = new Promise<void>((resolve) => { markSettlement = resolve; });
+    const released: object[] = [];
+    bridge = makeControllerTurnBridge({
+      getClient: async () => ({
+        call: async (capability: string, payload: any, options: any) => {
+          const authority = bridge.authorize(payload);
+          const invoke = (operation: string, value: unknown) => bridge.handleKernelCall(
+            operation, { runId: payload.runId, value }, {
+              capability, authority, signal: options.signal,
+              deadlineAt: Date.now() + 60_000,
+            },
+          );
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-start', id: 'close-tool', name: 'complete_goal',
+          });
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-delta', id: 'close-tool', partialJson: '{"summary":"done"}',
+          });
+          await invoke('turn.tool.prepare', {
+            authorityClass: 'local',
+            callJson: JSON.stringify({
+              id: 'close-tool', name: 'complete_goal', args: { summary: 'done' },
+            }),
+          });
+          markPrepared();
+          return new Promise(() => {});
+        },
+      }),
+      prepareToolCall: async (call: any) => ({
+        mode: 'execute', custody: {}, args: call.args, projection: {},
+        manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+      }),
+      settleToolCall: async () => { markSettlement(); return new Promise(() => {}); },
+      providerEgress: {
+        closeOwner: async (owner: object) => { released.push(owner); },
+      } as any,
+      newId: () => 'stuck-settlement-run',
+    });
+    const turn = bridge.runUserTurn({
+      sessionId: 'session-stuck-settlement',
+      tools: [{ name: 'complete_goal' }],
+      classifyToolCall: () => ({ actionClass: 'write', confirm: false }),
+      signal: new AbortController().signal,
+    });
+    void turn.next();
+    await prepared;
+
+    await bridge.close();
+    await settlement;
 
     expect(bridge.activeCount()).toBe(0);
     expect(released).toHaveLength(1);
