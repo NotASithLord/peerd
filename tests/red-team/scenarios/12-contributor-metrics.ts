@@ -12,7 +12,9 @@ import {
   type Probe, type Scenario, blocked, leaked, summarize,
 } from '../harness.ts';
 import { EXTENSION_DIR } from '../../../packaging/lib.ts';
-import { makeContributorRoutes } from '../../../extension/background/routes/contributor-metrics.js';
+import {
+  createPreviewContributorRoutes,
+} from '../../../extension/background/kernel-preview-addon.js';
 import {
   ContributorSchemaError, emptyContributorLocalState,
   recordContributorWebTurn, serializeContributorEnvelope,
@@ -72,30 +74,30 @@ export const scenario: Scenario = {
     const optionsSender = Object.freeze({ surface: 'options' });
     const chatSender = Object.freeze({ surface: 'sidepanel' });
     const hostileSender = Object.freeze({ surface: 'engine' });
-    const routes = makeContributorRoutes({
-      contributorStore: {
-        status: async () => ({ enabled: false }),
-        enable: async () => { routeMutations += 1; return { enabled: true }; },
-        disableAndClear: async () => { routeMutations += 1; return { enabled: false }; },
-        recordFeedback: async () => { routeMutations += 1; return { recorded: true }; },
+    const owner = createPreviewContributorRoutes({
+      kv: {
+        get: async () => { routeMutations += 1; return null; },
+        set: async () => { routeMutations += 1; },
+        delete: async () => { routeMutations += 1; },
       },
-      sessions: { get: async () => null },
-      isActualOptionsSender: (sender: unknown) => sender === optionsSender,
-      isActualSidepanelSender: (sender: unknown) => sender === chatSender,
-      isActualHomeSender: () => false,
-      isSessionBusy: () => false,
-      hasInFlightFor: () => false,
-      actorRecoveryReady: async () => true,
-      contributorFeedbackTargets: () => new Map(),
-      channel: 'preview',
+      optionsUi: (sender: unknown) => sender === optionsSender,
+      sidepanelUi: (sender: unknown) => sender === chatSender,
+      homeUi: () => false,
+      validateFeedback: async () => { routeMutations += 1; return { ok: false }; },
+      offscreenUrl: 'chrome-extension://id/offscreen/offscreen.html',
+      featureHost: { runtime: { runWithLease: async () => {
+        routeMutations += 1; return { ok: false };
+      } } },
     });
-    const consentReply = await routes['contributor/enable']({}, hostileSender);
+    const consentReply = await owner.routes['contributor/enable']({
+      type: 'contributor/enable',
+    }, hostileSender);
     probes.push(consentReply.ok === false && routeMutations === 0
       ? blocked('forge consent from an actor or extension page', 'exact Options sender required; mutation function never ran')
       : leaked('forge consent from an actor or extension page', `ok=${consentReply.ok} mutations=${routeMutations}`));
 
-    const feedbackReply = await routes['contributor/feedback']({
-      sessionId: 'chat', messageId: 'answer', verdict: 'worked',
+    const feedbackReply = await owner.routes['contributor/feedback']({
+      type: 'contributor/feedback', sessionId: 'chat', messageId: 'answer', verdict: 'worked',
     }, hostileSender);
     probes.push(feedbackReply.ok === false && routeMutations === 0
       ? blocked('forge task feedback outside the exact chat surfaces', 'exact side-panel or Home sender required; mutation function never ran')
@@ -125,7 +127,8 @@ export const scenario: Scenario = {
       'peerd-runtime/observability/contributor-metrics.js',
       'peerd-runtime/observability/contributor-store.js',
       'peerd-runtime/observability/contributor-feedback.js',
-      'background/routes/contributor-metrics.js',
+      'background/kernel-contributor-feedback-guard.js',
+      'offscreen/semantic-routes/contributor.js',
     ].map((path) => stripComments(readFileSync(join(EXTENSION_DIR, path), 'utf8'))).join('\n');
     const hasNetwork = /\bfetch\s*\(|XMLHttpRequest|WebSocket|sendBeacon|https?:\/\//.test(localSources);
     probes.push(!hasNetwork

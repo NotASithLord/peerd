@@ -357,28 +357,28 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
     "channels": [
       "preview"
     ],
-    "source": "extension/background/routes/contributor-metrics.js"
+    "source": "extension/background/kernel-preview-addon.js"
   },
   {
     "route": "contributor/enable",
     "channels": [
       "preview"
     ],
-    "source": "extension/background/routes/contributor-metrics.js"
+    "source": "extension/background/kernel-preview-addon.js"
   },
   {
     "route": "contributor/feedback",
     "channels": [
       "preview"
     ],
-    "source": "extension/background/routes/contributor-metrics.js"
+    "source": "extension/background/kernel-preview-addon.js"
   },
   {
     "route": "contributor/status",
     "channels": [
       "preview"
     ],
-    "source": "extension/background/routes/contributor-metrics.js"
+    "source": "extension/background/kernel-preview-addon.js"
   },
   {
     "route": "cost/total",

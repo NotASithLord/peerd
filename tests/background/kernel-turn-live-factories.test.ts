@@ -95,6 +95,7 @@ const harness = async (
     firefox?: boolean,
     firefoxActorLifetime?: any,
     loadDirectActorHost?: () => Promise<any>,
+    contributor?: any,
   } = {},
 ) => {
   const idb = memoryStore();
@@ -286,6 +287,7 @@ const harness = async (
     firefoxActorLifetime: options.firefoxActorLifetime,
     loadDirectActorHost: options.loadDirectActorHost,
     channel: 'dev', offscreenUrl: 'offscreen.html',
+    contributor: options.contributor ?? null,
     dispatchEffectsRequired: true,
     isOffscreenSender: () => true,
     isTrustedSender: (sender: any) => typeof sender?.tab?.id === 'number',
@@ -584,6 +586,41 @@ describe('kernel live turn factories', () => {
     expect(await reply).toMatchObject({ ok: true, content: expect.stringContaining('finished') });
     expect(h.broadcasts.some((message) => message.type === 'turn/actor-cost')).toBe(true);
     expect(h.broadcasts.some((message) => message.type === 'turn/actor-done')).toBe(true);
+  });
+
+  test('records an armed tab-Web actor settlement through the production owner', async () => {
+    const calls: any[] = [];
+    const contributor = {
+      arm: async () => ({ enabled: true, generation: 'generation-1' }),
+      recordWebSettlement: async (input: any) => {
+        calls.push(input);
+        return { ok: true, recorded: true };
+      },
+    };
+    const h = await harness(async (job) => ({
+      ok: true, started: true,
+      newMessages: [{
+        role: 'assistant', content: 'finished', id: 'done-contributor', when: 2_000,
+        stopReason: 'end_turn', toolUses: [{ id: 'page-1', name: 'snapshot', input: {} }],
+      }],
+      usage: { inputTokens: 7, outputTokens: 5 },
+      price: { cost: 0.000096, estimated: true },
+    }), { contributor });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    expect(await ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-contributor', awaitReply: true,
+    })).toMatchObject({ ok: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      consentGeneration: 'generation-1', feedbackContextKey: `${h.root.sessionId}:tool-contributor`,
+      decision: { requested: 'tools', resolved: 'tools', fallback: 'none' },
+      browser: 'chrome', channel: 'dev', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      toolNames: ['snapshot'], assistantMessages: [{ stopReason: 'end_turn' }],
+      stopped: false,
+      usage: { inputTokens: 7, outputTokens: 5 },
+    });
+    expect(calls[0].operationKey).toBeString();
   });
 
   test('pins App runtime calls to the exact owner tab', async () => {

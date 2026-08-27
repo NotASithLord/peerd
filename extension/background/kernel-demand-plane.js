@@ -10,6 +10,7 @@ import {
   KERNEL_SEMANTIC_OWNER_ROUTE_NAMES,
 } from '../shared/kernel-feature-route-inventory.js';
 import { createKernelAdministrativeControl } from './kernel-administrative-control.js';
+import { guardKernelContributorFeedback } from './kernel-contributor-feedback-guard.js';
 import { createKernelDemandSupport } from './kernel-demand-support.js';
 import { createKernelExecutableControl } from './kernel-executable-owner.js';
 import { createKernelExecutableRuntime } from './kernel-executable-runtime.js';
@@ -290,6 +291,10 @@ export const createKernelDemandPlane = (deps) => {
     if (!liveProduction) throw new Error('kernel-rich-owner-unavailable');
     return liveProduction;
   };
+  const validateContributorFeedback = (/** @type {any} */ message) =>
+    guardKernelContributorFeedback(message, {
+      load: async () => (await getRichOwner()).turnRuntime?.turnDeps,
+    });
   const executableOwner = createKernelExecutableControl({
     runtimeId: deps.runtimeId,
     firefox: deps.firefox,
@@ -397,6 +402,7 @@ export const createKernelDemandPlane = (deps) => {
       (await loadControllerOwner()).routes['models/state-projection'](snapshot),
     controllerRelays,
     getControllerRelays,
+    validateContributorFeedback,
     makeTransferRoutes: executableOwner.makeTransferRoutes,
     listApps: support.appCatalog.list,
     reseedDwebShares: async (/** @type {any} */ generation) => {

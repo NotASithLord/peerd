@@ -17,7 +17,10 @@ const feedback = readFileSync(join(
   EXTENSION_DIR, 'peerd-runtime/observability/contributor-feedback.js',
 ), 'utf8');
 const routes = readFileSync(join(
-  EXTENSION_DIR, 'background/routes/contributor-metrics.js',
+  EXTENSION_DIR, 'offscreen/semantic-routes/contributor.js',
+), 'utf8');
+const guard = readFileSync(join(
+  EXTENSION_DIR, 'background/kernel-contributor-feedback-guard.js',
 ), 'utf8');
 const options = readFileSync(join(EXTENSION_DIR, 'options/sections/contributor-metrics.js'), 'utf8');
 const messageList = readFileSync(join(EXTENSION_DIR, 'sidepanel/components/message-list.js'), 'utf8');
@@ -37,7 +40,7 @@ describe('Contributor Metrics source invariants', () => {
   });
 
   test('the local core/store/routes contain no network primitive or origin', () => {
-    const source = stripComments([metrics, store, feedback, routes].join('\n'));
+    const source = stripComments([metrics, store, feedback, routes, guard].join('\n'));
     expect(source).not.toMatch(/\bfetch\s*\(|XMLHttpRequest|WebSocket|https?:\/\//);
     expect(source).not.toMatch(/collector|contributions\/v[0-9]/i);
   });

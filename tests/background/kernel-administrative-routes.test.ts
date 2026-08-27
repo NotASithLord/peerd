@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  makeKernelContributorFeedbackRoutes,
   makeKernelHooksRoutes,
   makeKernelMemoryInitRoutes,
   makeKernelSkillInstallRoutes,
@@ -179,78 +178,4 @@ describe('kernel administrative routes', () => {
     expect(notes).toEqual(['/init failed: profile schema is newer than this build']);
   });
 
-  test('feedback retains exact sender and turn-finality gates around one guarded write', async () => {
-    const sidepanel = {};
-    const stored = new Map<string, any>();
-    let guards = 0;
-    let reads = 0;
-    const session = {
-      kind: 'chat',
-      messages: [{ role: 'assistant', id: 'answer', stopReason: 'end_turn' }],
-    };
-    const routes = makeKernelContributorFeedbackRoutes({
-      channel: 'preview',
-      kv: {
-        get: async (key: string) => { reads += 1; return stored.get(key); },
-        set: async (key: string, value: any) => { stored.set(key, value); },
-        delete: async (key: string) => { stored.delete(key); },
-      },
-      canWrite: () => { guards += 1; },
-      makeContributorStore: ({ kv }: any) => ({
-        recordFeedback: async (input: any) => {
-          await kv.get('contributor');
-          await kv.set('contributor', input);
-          return { recorded: true, reason: null };
-        },
-      }),
-      sessions: { get: async () => session },
-      isActualSidepanelSender: (sender: any) => sender === sidepanel,
-      isActualHomeSender: () => false,
-      isSessionBusy: () => false,
-      hasInFlightFor: () => false,
-      actorRecoveryReady: async () => true,
-      contributorFeedbackTargets: () => new Map([['answer', {
-        humanMessageId: 'human', toolUseIds: ['tool'],
-      }]]),
-    });
-    const message = { sessionId: 'chat', messageId: 'answer', verdict: 'worked' };
-    expect(await routes['contributor/feedback'](message, {}))
-      .toEqual({ ok: false, error: 'trusted-chat-sender-required' });
-    expect(reads).toBe(0);
-    expect(guards).toBe(0);
-    expect(await routes['contributor/feedback'](message, sidepanel))
-      .toEqual({ ok: true, recorded: true, reason: null });
-    expect(guards).toBe(1);
-    expect(stored.get('contributor')).toEqual({
-      selectionKey: 'chat:human', verdict: 'worked', candidateContextKeys: ['chat:tool'],
-    });
-  });
-
-  test('feedback storage loss after dispatch is outcome-unknown', async () => {
-    const sender = {};
-    const routes = makeKernelContributorFeedbackRoutes({
-      channel: 'preview',
-      kv: {
-        get: async () => null,
-        set: async () => { throw new Error('lost'); },
-        delete: async () => {},
-      },
-      makeContributorStore: ({ kv }: any) => ({
-        recordFeedback: async () => { await kv.set('contributor', {}); },
-      }),
-      sessions: { get: async () => ({ kind: 'chat', messages: [] }) },
-      isActualSidepanelSender: (candidate: any) => candidate === sender,
-      isActualHomeSender: () => false,
-      isSessionBusy: () => false,
-      hasInFlightFor: () => false,
-      actorRecoveryReady: async () => true,
-      contributorFeedbackTargets: () => new Map([['answer', {
-        humanMessageId: 'human', toolUseIds: ['tool'],
-      }]]),
-    });
-    expect(await routes['contributor/feedback']({
-      sessionId: 'chat', messageId: 'answer', verdict: 'worked',
-    }, sender)).toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
-    expect(makeKernelContributorFeedbackRoutes({ channel: 'store' })).toEqual({});
-  });
 });
