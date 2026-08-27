@@ -96,6 +96,7 @@ const harness = async (
     firefoxActorLifetime?: any,
     loadDirectActorHost?: () => Promise<any>,
     contributor?: any,
+    durableApiOrigin?: string,
   } = {},
 ) => {
   const idb = memoryStore();
@@ -113,6 +114,20 @@ const harness = async (
       ],
     },
   });
+  const durableApiActor = options.durableApiOrigin
+    ? await sessions.create({
+      kind: 'actor', parentSessionId: root.sessionId,
+      provider: root.provider, model: root.model,
+      permissionMode: root.permissionMode, confirmActions: root.confirmActions,
+      toolManifest: root.toolManifest, depth: 1,
+      actorType: 'web', backing: 'api', instanceId: options.durableApiOrigin,
+    })
+    : null;
+  if (durableApiActor) {
+    await sessions.appendMessage(durableApiActor.sessionId, {
+      role: 'assistant', content: 'durable context', id: 'api-before-restart', when: 1_500,
+    });
+  }
   const appManifest = JSON.stringify({
     ...buildAppManifest({ entry: 'index.html', dwapp: true }),
     agent: {
@@ -346,7 +361,7 @@ const harness = async (
   };
   const runtime = await factories.makeActorRuntime(shared);
   return {
-    factories, runtime, shared, root, sessions, engine, browser, tabs,
+    factories, runtime, shared, root, durableApiActor, sessions, engine, browser, tabs,
     broadcasts, storageState, kvState, cache, settings, notifications, panelBehavior,
     siteCaptureEvents, providerRevision: () => providerRevision,
     sourceProjections,
@@ -624,6 +639,37 @@ describe('kernel live turn factories', () => {
       actions: ['page_action'], outcome: 'completed', failure: 'none', tokens: 12,
     });
     expect(calls[0].operationKey).toBeString();
+  });
+
+  test('reconnects a durable API actor when the ephemeral binding is absent', async () => {
+    const origin = 'https://api.example.com';
+    const jobs: any[] = [];
+    const h = await harness(async (job) => {
+      jobs.push(job);
+      return {
+        ok: true, started: true,
+        newMessages: [{ role: 'assistant', content: 'reconnected', id: 'api-1', when: 2_000 }],
+      };
+    }, { durableApiOrigin: origin });
+    if (!h.durableApiActor) throw new Error('durable-api-actor-not-seeded');
+    expect(h.cache.has('apiActorBindings')).toBe(false);
+
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    expect(await ctx.messageActor({
+      to: origin, message: 'continue', senderSessionId: h.root.sessionId,
+      toolUseId: 'api-reconnect-1', awaitReply: true,
+    })).toMatchObject({ ok: true, content: expect.stringContaining('reconnected') });
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].actorSessionId).toBe(h.durableApiActor.sessionId);
+    expect(jobs[0].priorMessages).toContainEqual(expect.objectContaining({
+      id: 'api-before-restart', content: 'durable context',
+    }));
+    expect((await h.sessions.list()).filter((session: any) =>
+      session.kind === 'actor' && session.backing === 'api')).toHaveLength(1);
+    expect(h.cache.get('apiActorBindings')).toContainEqual([
+      `${h.root.sessionId}\0${origin}`, h.durableApiActor.sessionId,
+    ]);
   });
 
   test('pins App runtime calls to the exact owner tab', async () => {
