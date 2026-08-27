@@ -130,6 +130,64 @@ describe('kernel dweb reseed owner', () => {
     })).toMatchObject({ ok: false, cancelled: true });
   });
 
+  test('marks a timed-out host message uncertain so production retires its realm', async () => {
+    const retirements: string[] = [];
+    const publicationFence = createDwebPublicationFence({
+      retireReseedHost: async (reason) => { retirements.push(reason); },
+    });
+    const h = owner({
+      sendMessage: async () => new Promise(() => {}),
+      withDwebReseedPublication: publicationFence.runReseed,
+      messageTimeoutMs: 5,
+    });
+    expect(await h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0007', meshGeneration: 1,
+    })).toEqual({
+      ok: false, seeded: 0, failed: 1, error: 'dweb-reseed-partial',
+    });
+    expect(retirements).toEqual(['dweb-reseed-outcome-unknown']);
+  });
+
+  test('retires the host when offscreen reports failed compensation', async () => {
+    const retirements: string[] = [];
+    const publicationFence = createDwebPublicationFence({
+      retireReseedHost: async (reason) => { retirements.push(reason); },
+    });
+    const h = owner({
+      sendMessage: async () => ({
+        ok: false, error: 'dweb reseed compensation failed',
+        code: 'dweb-reseed-compensation-failed', outcomeKnown: false,
+      }),
+      withDwebReseedPublication: publicationFence.runReseed,
+    });
+    expect(await h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0008', meshGeneration: 1,
+    })).toEqual({
+      ok: false, seeded: 0, failed: 1, error: 'dweb-reseed-partial',
+    });
+    expect(retirements).toEqual(['dweb-reseed-outcome-unknown']);
+  });
+
+  test('retires after a post-dispatch transport rejection or malformed receipt', async () => {
+    for (const sendMessage of [
+      async () => { throw new Error('receiving-end-disappeared'); },
+      async () => ({}),
+    ]) {
+      const retirements: string[] = [];
+      const publicationFence = createDwebPublicationFence({
+        retireReseedHost: async (reason) => { retirements.push(reason); },
+      });
+      const h = owner({
+        sendMessage,
+        withDwebReseedPublication: publicationFence.runReseed,
+      });
+      await h.value.onHostGeneration({
+        hostEpoch: 'host-epoch-0009', meshGeneration: 1,
+      });
+      expect(retirements).toEqual(['dweb-reseed-outcome-unknown']);
+    }
+  });
+
   test('the production publication and App fences release a hung predecessor', async () => {
     const publicationFence = createDwebPublicationFence();
     let appTail = Promise.resolve();

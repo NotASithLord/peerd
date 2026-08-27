@@ -49,6 +49,37 @@ describe('dweb reseed publication transaction', () => {
     expect(events).toEqual(['publish', 'announce', 'commit', 'compensate']);
   });
 
+  test('marks failed byte rollback as an uncertain host outcome', async () => {
+    let current = true;
+    const error = await runDwebReseedPublication({
+      current: () => current,
+      publish: async () => { current = false; return { hash: 'new' }; },
+      announce: async () => ({ seq: 2 }),
+      rollbackBytes: () => { throw new Error('unserve-failed'); },
+      compensate: () => {},
+      commit: () => {},
+    }).catch((cause) => cause);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error).toMatchObject({
+      code: 'dweb-reseed-compensation-failed', outcomeKnown: false,
+    });
+  });
+
+  test('marks failed metadata compensation as an uncertain host outcome', async () => {
+    let current = true;
+    const error = await runDwebReseedPublication({
+      current: () => current,
+      publish: async () => ({ hash: 'new' }),
+      announce: async () => { current = false; return { seq: 2 }; },
+      rollbackBytes: () => {},
+      compensate: () => { throw new Error('metadata-rollback-failed'); },
+      commit: () => {},
+    }).catch((cause) => cause);
+    expect(error).toMatchObject({
+      code: 'dweb-reseed-compensation-failed', outcomeKnown: false,
+    });
+  });
+
   test('commits exactly once while the generation remains current', async () => {
     const events: string[] = [];
     expect(await runDwebReseedPublication({

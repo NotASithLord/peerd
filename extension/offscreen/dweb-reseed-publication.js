@@ -17,7 +17,11 @@ const requireCurrent = (current) => {
 /** @param {unknown} cause @param {()=>Promise<unknown>|unknown} cleanup @param {string} message */
 const failAfterCleanup = async (cause, cleanup, message) => {
   try { await cleanup(); }
-  catch (cleanupCause) { throw new AggregateError([cause, cleanupCause], message); }
+  catch (cleanupCause) {
+    throw Object.assign(new AggregateError([cause, cleanupCause], message), {
+      code: 'dweb-reseed-compensation-failed', outcomeKnown: false,
+    });
+  }
   throw cause;
 };
 

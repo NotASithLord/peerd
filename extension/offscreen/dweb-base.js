@@ -1280,7 +1280,13 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
       }
     } catch (e) {
       warn('handler threw', msg.type, '—', /** @type {{ message?: string }} */ (e)?.message ?? e);
-      sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+      sendResponse({
+        ok: false,
+        error: /** @type {{ message?: string }} */ (e)?.message ?? String(e),
+        ...(typeof /** @type {any} */ (e)?.code === 'string'
+          ? { code: /** @type {any} */ (e).code } : {}),
+        ...(/** @type {any} */ (e)?.outcomeKnown === false ? { outcomeKnown: false } : {}),
+      });
     }
   })();
   return true; // async sendResponse
