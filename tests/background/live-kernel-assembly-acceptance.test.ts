@@ -7,19 +7,25 @@ import {
 
 describe('installed-artifact live kernel assembly contract', () => {
   test('pins the complete semantic, event, and Port inventories per target', () => {
-    expect(liveKernelAssemblyProfile('store-chrome')).toMatchObject({
-      semanticRoutes: 174, eventInventory: 16, portInventory: 6,
-      semanticPlacements: { kernel: 156, split: 18 },
-      requiredEvents: { length: 13 }, requiredPorts: { length: 4 },
+    const storeChrome = liveKernelAssemblyProfile('store-chrome');
+    expect(storeChrome).toMatchObject({
+      semanticRoutes: 169, eventInventory: 16, portInventory: 6,
+      semanticPlacements: { kernel: 151, split: 18 },
     });
-    expect(liveKernelAssemblyProfile('preview-chrome')).toMatchObject({
-      semanticRoutes: 174, eventInventory: 16, portInventory: 6,
-      requiredEvents: { length: 14 }, requiredPorts: { length: 5 },
+    expect(storeChrome.requiredEvents).toHaveLength(13);
+    expect(storeChrome.requiredPorts).toHaveLength(4);
+    const previewChrome = liveKernelAssemblyProfile('preview-chrome');
+    expect(previewChrome).toMatchObject({
+      semanticRoutes: 169, eventInventory: 16, portInventory: 6,
     });
-    expect(liveKernelAssemblyProfile('store-firefox')).toMatchObject({
-      semanticRoutes: 174, eventInventory: 16, portInventory: 6,
-      requiredEvents: { length: 15 }, requiredPorts: { length: 4 },
+    expect(previewChrome.requiredEvents).toHaveLength(14);
+    expect(previewChrome.requiredPorts).toHaveLength(5);
+    const storeFirefox = liveKernelAssemblyProfile('store-firefox');
+    expect(storeFirefox).toMatchObject({
+      semanticRoutes: 169, eventInventory: 16, portInventory: 6,
     });
+    expect(storeFirefox.requiredEvents).toHaveLength(15);
+    expect(storeFirefox.requiredPorts).toHaveLength(4);
     for (const target of ['store-chrome', 'preview-chrome', 'store-firefox'] as const) {
       const fixture = completeLiveKernelAssemblyFixture(target);
       expect(assertLiveKernelAssembly(fixture, target)).toBe(fixture);

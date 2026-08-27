@@ -123,9 +123,9 @@ const originOf = (/** @type {string} */ value) => {
 
 /**
  * @param {Record<string,any>} deps
- * @param {ReturnType<import('/peerd-runtime/controller-turn-semantics.js').createControllerTurnSemantics>} semanticOwner
+ * @param {ReturnType<import('/peerd-runtime/controller-turn-semantics.js').createControllerTurnSemantics>} semanticOwners
  */
-export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
+export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
   if (!deps?.engine || !deps.browser || !deps.vault || !deps.settingsStore
       || !deps.seams || !deps.confirmation || !deps.denylist
       || !deps.scriptRuns || !deps.contextSnapshots
@@ -134,60 +134,66 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
   }
   const {
     actorAllowedToolsFor,
-    applyComposer,
-    buildMintInjection,
-    confirmActionsFromRecord,
-    createSkillRegistry,
-    createSuggestionStore,
     describeLandingStop,
-    digestCapture,
-    DOC_TEXT_MAX_CHARS,
     DWEB_INBOUND_TOOL_NAMES,
-    drainFetchTapInjected,
     EXPOSURE_ACTOR,
     fenceApiActorSummary,
     fenceWebActorSummary,
-    filterByRuntimeCapabilities,
     finalActorTurnReply,
     finalAssistantText,
-    formatDocBody,
-    GOAL_MAX_ITERATIONS,
-    installFetchTapInjected,
     landingStopCard,
-    limitExceeded,
-    localStoreSource,
     mainAgentDescriptors,
-    makeAutoMemory,
-    makeCheapCall,
-    makeInitOrchestrator,
-    makeGoalRunner,
-    makeScheduler,
     makeSpawnActor,
-    makeToolsCommand,
-    makeTrimEnricher,
-    manifestLabel,
-    mergeSources,
     meshCallToOp,
     normalizeApiOrigin,
-    normalizeConfirmActions,
-    normalizeMode,
-    normalizeTally,
     originPhrase,
-    parseAppManifest,
     parseSiteHandle,
-    PERMISSION_MODES,
     pinActorCall,
-    prepareUserAttachmentsWithDocs,
-    resolveManifestAllow,
-    resolveSiteUrl,
     resolveWebActorSurface,
     restrictCtxCapabilities,
     safeWebActorSummaryOrigin,
     shapeMeshResult,
-    skillRegistrySource,
     siteHandleFor,
     wrapUntrusted,
-  } = semanticOwner;
+  } = semanticOwners.actor;
+  const {
+    PERMISSION_MODES,
+    confirmActionsFromRecord,
+    filterByRuntimeCapabilities,
+    limitExceeded,
+    manifestLabel,
+    normalizeConfirmActions,
+    normalizeMode,
+    normalizeTally,
+    resolveManifestAllow,
+  } = semanticOwners.policy;
+  const {
+    buildMintInjection,
+    digestCapture,
+    drainFetchTapInjected,
+    installFetchTapInjected,
+    parseAppManifest,
+    resolveSiteUrl,
+  } = semanticOwners.site;
+  const {
+    DOC_TEXT_MAX_CHARS,
+    GOAL_MAX_ITERATIONS,
+    applyComposer,
+    createSkillRegistry,
+    createSuggestionStore,
+    formatDocBody,
+    localStoreSource,
+    makeAutoMemory,
+    makeCheapCall,
+    makeGoalRunner,
+    makeInitOrchestrator,
+    makeScheduler,
+    makeToolsCommand,
+    makeTrimEnricher,
+    mergeSources,
+    prepareUserAttachmentsWithDocs,
+    skillRegistrySource,
+  } = semanticOwners.turn;
   const projectToolDescriptors = async (/** @type {Record<string,unknown>} */ input) => {
     const tools = await deps.seams.projectTurnTools(input);
     if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool.name !== 'string')) {

@@ -120,6 +120,7 @@ describe('controller runtime build identity', () => {
       candidate, 'background/vault-kernel.js',
     );
     expect(candidateBundle.inputs).toEqual(baselineBundle.inputs);
+    expect(candidateBundle.bytes).toBe(baselineBundle.bytes);
     expect(candidateBundle.inputs).not.toContain('peerd-runtime/controller-feature-fixture.js');
 
     const controllerGraph = await collectStaticModuleGraph(
