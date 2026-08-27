@@ -121,6 +121,54 @@ describe('sealed vault authority channel', () => {
     client.close();
   });
 
+  test('does not admit a concurrent lock ahead of successor resume', async () => {
+    const storage = makeStorage();
+    let currentLease: any = vaultLease;
+    let holdSuccessor = false;
+    let releaseSuccessor = () => {};
+    let successorListed = Promise.resolve();
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(currentLease),
+      listWindowClients: async () => {
+        if (holdSuccessor) {
+          successorListed = new Promise((resolve) => { releaseSuccessor = resolve; });
+          await successorListed;
+        }
+        return [{
+          url: offscreenUrl,
+          postMessage: (offer: any, ports: MessagePort[]) => {
+            void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+          },
+        }];
+      },
+    });
+    await client.initializeWithPrfOnly({
+      prfOutput: new Uint8Array(32).fill(5),
+      credentialId: new Uint8Array([1, 2, 3]),
+      prfSalt: new Uint8Array(32).fill(6),
+    });
+    await client.setSecret('provider:test', 'secret');
+
+    currentLease = { ...vaultLease, leaseId: 'vault-lease-successor', generation: 2 };
+    holdSuccessor = true;
+    const read = client.getSecret('provider:test');
+    await Promise.resolve();
+    const locking = client.lock('manual');
+    releaseSuccessor();
+
+    await expect(read).resolves.toBe('secret');
+    await expect(locking).resolves.toBeUndefined();
+    await expect(client.status()).resolves.toMatchObject({ locked: true });
+    expect(storage.session.has('vault.unlocked.v1')).toBe(false);
+    client.close();
+  });
+
   test('runs passkey vault and secret custody through exact reverse storage only', async () => {
     const storage = makeStorage();
     let depth = 0;

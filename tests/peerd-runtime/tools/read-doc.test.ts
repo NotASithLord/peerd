@@ -149,6 +149,13 @@ describe('read_doc as the one public document reader', () => {
 
   test('caps the stored PDF text at the shared spill limit', async () => {
     let spilled: any = null;
+    let readPastCap = false;
+    const pages: any[] = [{ page: 1, text: 'x'.repeat(MAX_SPILL_TEXT_CHARS + 10_000) }];
+    Object.defineProperty(pages, 1, {
+      enumerable: true,
+      get: () => { readPastCap = true; throw new Error('formatted past the PDF spill cap'); },
+    });
+    pages.length = 2;
     const result = await readDocTool.execute({
       url: 'https://docs.example/huge.pdf', maxChars: 1_000,
     }, docContext({
@@ -156,13 +163,14 @@ describe('read_doc as the one public document reader', () => {
         ...pdfResult,
         pdf: {
           ...pdfResult.pdf,
-          pages: [{ page: 1, text: 'x'.repeat(MAX_SPILL_TEXT_CHARS + 10_000) }],
+          pages,
         },
       }) },
       spillResult: async (record: any) => { spilled = record; return 'result:pdf-cap'; },
     }));
 
     expect(result.ok).toBe(true);
+    expect(readPastCap).toBe(false);
     expect(spilled.text.length).toBe(MAX_SPILL_TEXT_CHARS);
     expect(spilled.text).toEndWith(`[note] Stored PDF text capped at ${MAX_SPILL_TEXT_CHARS} characters.`);
   });
