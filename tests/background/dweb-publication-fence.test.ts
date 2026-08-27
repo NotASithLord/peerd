@@ -114,6 +114,70 @@ describe('dweb publication fence', () => {
     });
   });
 
+  test('a hung retirement releases the lane only into the same poisoned admission gate', async () => {
+    let retirements = 0;
+    const effects: string[] = [];
+    const fence = createDwebPublicationFence({
+      retirementTimeoutMs: 5,
+      retireReseedHost: async () => {
+        retirements += 1;
+        if (retirements === 1) return new Promise(() => {});
+      },
+    });
+    await expect(fence.runReseed(async () => {
+      throw Object.assign(new Error('unknown'), { outcomeKnown: false });
+    }, { timeoutMs: 20 })).rejects.toMatchObject({
+      code: 'dweb-reseed-host-retirement-failed', outcomeKnown: false,
+    });
+    await fence.run(async () => { effects.push('ordinary'); });
+    expect({ retirements, effects }).toEqual({ retirements: 2, effects: ['ordinary'] });
+  });
+
+  test('durably arms the exact host before a reseed effect and disarms only after settlement', async () => {
+    const events: string[] = [];
+    const fence = createDwebPublicationFence({
+      ensureReseedHostRetired: async () => { events.push('ensure'); },
+      armReseedHost: async (hostEpoch) => { events.push(`arm:${hostEpoch}`); },
+      disarmReseedHost: async (hostEpoch) => { events.push(`disarm:${hostEpoch}`); },
+      retireReseedHost: async () => { events.push('retire'); },
+    });
+    await expect(fence.runReseed(async () => {
+      events.push('effect');
+      return 'seeded';
+    }, { timeoutMs: 20, hostEpoch: 'host-epoch-durable' })).resolves.toBe('seeded');
+    expect(events).toEqual([
+      'ensure', 'arm:host-epoch-durable', 'effect', 'disarm:host-epoch-durable',
+    ]);
+  });
+
+  test('a failed durable arm is pre-effect and admits no later publication past the marker read', async () => {
+    let effects = 0;
+    const fence = createDwebPublicationFence({
+      ensureReseedHostRetired: async () => {},
+      armReseedHost: async () => { throw new Error('retirement-store-down'); },
+      disarmReseedHost: async () => {},
+      retireReseedHost: async () => {},
+    });
+    await expect(fence.runReseed(async () => { effects += 1; }, {
+      timeoutMs: 20, hostEpoch: 'host-epoch-durable',
+    })).rejects.toThrow('retirement-store-down');
+    expect(effects).toBe(0);
+  });
+
+  test('an uncertain armed reseed retires rather than clearing its write-ahead marker', async () => {
+    const events: string[] = [];
+    const fence = createDwebPublicationFence({
+      ensureReseedHostRetired: async () => {},
+      armReseedHost: async () => { events.push('arm'); },
+      disarmReseedHost: async () => { events.push('disarm'); },
+      retireReseedHost: async () => { events.push('retire'); },
+    });
+    await expect(fence.runReseed(async () => {
+      throw Object.assign(new Error('unknown'), { outcomeKnown: false });
+    }, { timeoutMs: 20, hostEpoch: 'host-epoch-durable' })).rejects.toThrow('unknown');
+    expect(events).toEqual(['arm', 'retire']);
+  });
+
   test('a successor that fails before mutation cannot revive the retired predecessor', async () => {
     let release!: () => void;
     let started!: () => void;

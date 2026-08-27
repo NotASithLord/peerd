@@ -216,6 +216,7 @@ export const createKernelDwebReseedOwner = ({
             return reply?.ok === true ? 'seeded' : 'failed';
           }), {
           timeoutMs: messageTimeoutMs * 2,
+          hostEpoch,
           setTimeoutFn,
           clearTimeoutFn,
         });

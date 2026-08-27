@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
-import { createProductionFeatureLeaseRuntime } from '../../extension/background/feature-lease-runtime.js';
+import {
+  createProductionFeatureLeaseRuntime,
+  FEATURE_HOST_RETIREMENT_KEY,
+} from '../../extension/background/feature-lease-runtime.js';
 import { FEATURE_LEASE_INTENT_KEY } from '../../extension/background/feature-lease-coordinator.js';
 import {
   createOffscreenFeatureLeaseHost,
@@ -39,6 +42,7 @@ const makePort = () => {
 const makeStore = () => {
   const values = new Map<string, any>();
   return {
+    values,
     async get(key: string) { return structuredClone(values.get(key)); },
     async set(key: string, value: any) { values.set(key, structuredClone(value)); },
   };
@@ -363,6 +367,196 @@ describe('production feature-lease runtime', () => {
     expect(env.starts).toEqual(['dweb', 'dweb']);
     expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
     expect(effects).toEqual([`ordinary:${env.host?.hostEpoch}`]);
+  });
+
+  test('a successor cannot adopt a retained reseed host until durable retirement succeeds', async () => {
+    const env = makeEnvironment();
+    const store = makeStore();
+    let closeAllowed = false;
+    let rejectedCloses = 0;
+    const closeOffscreen = async () => {
+      if (!closeAllowed) {
+        rejectedCloses += 1;
+        throw new Error('browser-refused-close');
+      }
+      await env.closeOffscreen();
+    };
+    const first = makeRuntime(env, store, 'kernel-epoch-a', {
+      closeOffscreen, recoveryAttempts: 1, wait: async () => {},
+    });
+    await first.ready;
+    await first.acquire('dweb', { reason: 'vault-resume' });
+    const oldHostEpoch = env.host?.hostEpoch;
+    await first.armHostRetirement(oldHostEpoch!, 'dweb-reseed-in-flight');
+    await expect(first.retireActiveHost('dweb-reseed-outcome-unknown'))
+      .rejects.toMatchObject({
+        code: 'feature-host-retirement-failed', outcomeKnown: false,
+      });
+    expect(env.host?.hostEpoch).toBe(oldHostEpoch);
+    expect(store.values.get(FEATURE_HOST_RETIREMENT_KEY)).toMatchObject({
+      hostEpoch: oldHostEpoch, reason: 'dweb-reseed-in-flight',
+    });
+
+    // MV3 may now replace the worker while the offscreen realm survives. The
+    // durable dweb lease becomes adoptable, but the retirement record outranks it.
+    env.ports[0].onDisconnect.fire();
+    const successor = makeRuntime(env, store, 'kernel-epoch-b', {
+      closeOffscreen, recoveryAttempts: 1, wait: async () => {},
+    });
+    await successor.ready;
+    const publicationEffects: string[] = [];
+    const publicationFence = createDwebPublicationFence({
+      retireReseedHost: (reason) => successor.retireActiveHost(reason),
+      ensureReseedHostRetired: successor.ensureHostRetirement,
+      armReseedHost: (hostEpoch) => successor.armHostRetirement(hostEpoch),
+      disarmReseedHost: (hostEpoch) => successor.disarmHostRetirement(hostEpoch),
+    });
+    await expect(successor.acquire('dweb', { reason: 'vault-resume' }))
+      .rejects.toMatchObject({
+        code: 'feature-host-retirement-failed', outcomeKnown: false,
+      });
+    await expect(publicationFence.run(async () => { publicationEffects.push('share'); }))
+      .rejects.toMatchObject({
+        code: 'feature-host-retirement-failed', outcomeKnown: false,
+      });
+    await expect(publicationFence.run(async () => { publicationEffects.push('delete'); }))
+      .rejects.toMatchObject({
+        code: 'feature-host-retirement-failed', outcomeKnown: false,
+      });
+    await expect(publicationFence.runReseed(async () => { publicationEffects.push('reseed'); }, {
+      timeoutMs: 20, hostEpoch: oldHostEpoch!,
+    })).rejects.toMatchObject({
+      code: 'feature-host-retirement-failed', outcomeKnown: false,
+    });
+    expect(env.adopts).toEqual([]);
+    expect(env.host?.hostEpoch).toBe(oldHostEpoch);
+    expect(rejectedCloses).toBeGreaterThanOrEqual(5);
+    expect(publicationEffects).toEqual([]);
+
+    closeAllowed = true;
+    expect(await successor.reconcile()).toEqual([
+      expect.objectContaining({ ok: true, scope: 'dweb' }),
+    ]);
+    expect(env.closeCount).toBe(1);
+    expect(env.adopts).toEqual([]);
+    expect(env.starts).toEqual(['dweb', 'dweb']);
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+    expect(store.values.get(FEATURE_HOST_RETIREMENT_KEY)).toBeNull();
+    await publicationFence.run(async () => { publicationEffects.push('share:new-host'); });
+    expect(publicationEffects).toEqual(['share:new-host']);
+  });
+
+  test('an unreadable durable retirement record fails closed before host admission', async () => {
+    const env = makeEnvironment();
+    const backing = makeStore();
+    const runtime = makeRuntime(env, {
+      get: async (key: string) => {
+        if (key === FEATURE_HOST_RETIREMENT_KEY) throw new Error('session-read-failed');
+        return backing.get(key);
+      },
+      set: (key: string, value: any) => backing.set(key, value),
+    } as any, 'kernel-epoch-a');
+    await runtime.ready;
+    await expect(runtime.acquire('controller')).rejects.toMatchObject({
+      code: 'feature-host-retirement-read-failed', outcomeKnown: false,
+    });
+    expect(env.ensureCount).toBe(0);
+    expect(env.host).toBeNull();
+  });
+
+  test('a failed write-ahead retirement record cannot arm an effectful host', async () => {
+    const env = makeEnvironment();
+    const backing = makeStore();
+    let rejectRetirementWrites = false;
+    const runtime = makeRuntime(env, {
+      get: (key: string) => backing.get(key),
+      set: async (key: string, value: any) => {
+        if (rejectRetirementWrites && key === FEATURE_HOST_RETIREMENT_KEY) {
+          throw new Error('session-write-failed');
+        }
+        await backing.set(key, value);
+      },
+    } as any, 'kernel-epoch-a');
+    await runtime.ready;
+    await runtime.acquire('dweb', { reason: 'vault-resume' });
+    rejectRetirementWrites = true;
+    await expect(runtime.armHostRetirement(
+      env.host!.hostEpoch, 'dweb-reseed-in-flight',
+    )).rejects.toMatchObject({
+      code: 'feature-host-retirement-write-failed', outcomeKnown: false,
+    });
+    expect(backing.values.get(FEATURE_HOST_RETIREMENT_KEY)).toBeUndefined();
+    expect(env.host?.snapshot().leases).toEqual([
+      expect.objectContaining({ scope: 'dweb', orphaned: false }),
+    ]);
+  });
+
+  test('a hung retirement-store write times out without wedging the lifecycle lane', async () => {
+    const env = makeEnvironment();
+    const backing = makeStore();
+    let hangRetirementWrites = false;
+    const runtime = makeRuntime(env, {
+      get: (key: string) => backing.get(key),
+      set: async (key: string, value: any) => {
+        if (hangRetirementWrites && key === FEATURE_HOST_RETIREMENT_KEY) {
+          return new Promise(() => {});
+        }
+        await backing.set(key, value);
+      },
+    } as any, 'kernel-epoch-a', { hostEffectTimeoutMs: 5 });
+    await runtime.ready;
+    await runtime.acquire('dweb', { reason: 'vault-resume' });
+    hangRetirementWrites = true;
+    await expect(runtime.armHostRetirement(
+      env.host!.hostEpoch, 'dweb-reseed-in-flight',
+    )).rejects.toMatchObject({
+      code: 'feature-host-retirement-write-failed', outcomeKnown: false,
+    });
+    hangRetirementWrites = false;
+    await expect(runtime.armHostRetirement(
+      env.host!.hostEpoch, 'dweb-reseed-in-flight',
+    )).resolves.toMatchObject({ hostEpoch: env.host!.hostEpoch });
+  });
+
+  test('a failed retirement-record clear keeps later host admission closed', async () => {
+    const env = makeEnvironment();
+    const backing = makeStore();
+    let rejectRetirementClears = false;
+    const runtime = makeRuntime(env, {
+      get: (key: string) => backing.get(key),
+      set: async (key: string, value: any) => {
+        if (rejectRetirementClears && key === FEATURE_HOST_RETIREMENT_KEY && value === null) {
+          throw new Error('session-clear-failed');
+        }
+        await backing.set(key, value);
+      },
+    } as any, 'kernel-epoch-a', { recoveryAttempts: 1, wait: async () => {} });
+    await runtime.ready;
+    await runtime.acquire('dweb', { reason: 'vault-resume' });
+    const oldHostEpoch = env.host!.hostEpoch;
+    await runtime.armHostRetirement(oldHostEpoch, 'dweb-reseed-in-flight');
+    rejectRetirementClears = true;
+    await expect(runtime.retireActiveHost('dweb-reseed-outcome-unknown'))
+      .rejects.toMatchObject({
+        code: 'feature-host-retirement-clear-failed', outcomeKnown: false,
+      });
+    expect(env.host).toBeNull();
+    expect(backing.values.get(FEATURE_HOST_RETIREMENT_KEY)).toMatchObject({
+      hostEpoch: oldHostEpoch,
+    });
+
+    await expect(runtime.acquire('dweb', { reason: 'vault-resume' }))
+      .rejects.toMatchObject({
+        code: 'feature-host-retirement-clear-failed', outcomeKnown: false,
+      });
+    expect(env.ensureCount).toBe(1);
+    expect(env.host).toBeNull();
+
+    rejectRetirementClears = false;
+    await expect(runtime.acquire('dweb', { reason: 'vault-resume' }))
+      .resolves.toMatchObject({ ok: true, scope: 'dweb' });
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+    expect(backing.values.get(FEATURE_HOST_RETIREMENT_KEY)).toBeNull();
   });
 
   test('a timed-out stop retires the poisoned physical host before lock or keyed reuse', async () => {
