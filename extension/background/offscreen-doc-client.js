@@ -22,7 +22,7 @@ export const makeOffscreenDocClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {{ url?: string, bytesB64?: string, name?: string, contentType?: string }} source
    * @param {{ format?: string, engine?: string }} [opts]
-   * @returns {Promise<{ format: string, doc?: import('/peerd-runtime/doc/model.js').Document, pdf?: { engine: string, pages: {page:number,text:string}[], pageCount: number, info: object, scanned: boolean, ocrUsed: boolean, ocrAvailable: boolean }, bytes: number, sniffedVia: string }>}
+   * @returns {Promise<{ format: string, doc?: import('/peerd-runtime/doc/model.js').Document, pdf?: { engine: string, pages: {page:number,text:string}[], pageCount: number, info: object, scanned: boolean, ocrUsed: boolean, ocrAvailable: boolean, textCapped: boolean }, bytes: number, sniffedVia: string }>}
    */
   extract: async (source, opts = {}) => {
     await ensureOffscreen();

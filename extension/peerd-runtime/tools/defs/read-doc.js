@@ -45,7 +45,7 @@ const boundedPdfPages = (/** @type {any[]} */ pages) => {
 
 const boundedPdfText = (/** @type {string} */ text, capped = false) => {
   if (!capped && text.length <= MAX_SPILL_TEXT_CHARS) return text;
-  const note = `\n[note] Stored PDF text capped at ${MAX_SPILL_TEXT_CHARS} characters.`;
+  const note = '\n[note] PDF extraction stopped at its local safety cap; later PDF text was not stored.';
   return `${text.slice(0, Math.max(0, MAX_SPILL_TEXT_CHARS - note.length))}${note}`;
 };
 
@@ -96,9 +96,10 @@ export const readDocTool = composeTool("read_doc", {
       );
       const pdf = result.pdf;
       const source = boundedPdfPages(pdf.pages);
+      const textCapped = pdf.textCapped === true || source.capped;
       const text = boundedPdfText(formatPdfBody({
         ...pdf, pages: source.pages, maxChars: MAX_SPILL_TEXT_CHARS,
-      }), source.capped);
+      }), textCapped);
       const query = typeof args.query === 'string' ? args.query.trim() : '';
       const ex = query ? excerptRelevant(text, query, maxChars) : null;
       const win = windowText(text, maxChars);
@@ -115,11 +116,12 @@ export const readDocTool = composeTool("read_doc", {
             footer = ex
               ? excerptFooter({
                 key: cacheKey, total: ex.total, passagesShown: ex.passagesShown,
-                passagesTotal: ex.passagesTotal, query,
+                passagesTotal: ex.passagesTotal, query, retainedPrefix: textCapped,
               })
               : pagingFooter({
                 key: cacheKey, total: win.total,
                 headChars: win.headChars, tailChars: win.tailChars,
+                retainedPrefix: textCapped,
               });
           }
         } catch { /* the bounded window still returns if best-effort spill fails */ }

@@ -3,6 +3,7 @@ import { makeVaultRoutes } from '../../extension/background/routes/vault.js';
 import {
   makeKernelRouteProvenance,
   makeVaultKernelMessageHandler,
+  makeIndexedVaultRoutes,
   makeVaultKernelRoutes,
   prepareVaultKernel,
   resolveVaultAutoLockMs,
@@ -667,6 +668,54 @@ describe('vault authority kernel boot and UI contract', () => {
     });
     await expect(routes['vault/prfStatus']()).rejects.toThrow('store blocked');
     expect(resume).toBe(0);
+  });
+
+  test('a rejected first-run mutation refreshes the posture and pushed state', async () => {
+    const writes: any[] = [];
+    let pushed = 0;
+    const failure = new Error('session mirror unavailable');
+    const routes = makeIndexedVaultRoutes({
+      routes: { 'vault/initialize': async () => { throw failure; } },
+      posture: {
+        snapshot: () => ({ initialized: false }),
+        read: async () => ({ initialized: false }),
+        write: async (status: any) => { writes.push(status); },
+      },
+      vault: {
+        isInitialized: () => true,
+        status: async () => ({
+          initialized: true, prfEnrolled: false, hasRecovery: true,
+          locked: true, unlockedAt: 0, lockReason: null,
+        }),
+      },
+      pushState: async () => { pushed += 1; },
+    });
+    await expect(routes['vault/initialize']()).rejects.toBe(failure);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ initialized: true, locked: true });
+    expect(pushed).toBe(1);
+  });
+
+  test('an already-initialized retry repairs a stale fresh-install posture', async () => {
+    const writes: any[] = [];
+    const routes = makeIndexedVaultRoutes({
+      routes: {
+        'vault/initialize': async () => ({ ok: false, error: 'already-initialized' }),
+      },
+      posture: {
+        snapshot: () => ({ initialized: false }),
+        read: async () => ({ initialized: false }),
+        write: async (status: any) => { writes.push(status); },
+      },
+      vault: {
+        isInitialized: () => true,
+        status: async () => ({ initialized: true, prfEnrolled: true, hasRecovery: false }),
+      },
+      pushState: () => {},
+    });
+    await expect(routes['vault/initialize']()).resolves
+      .toEqual({ ok: false, error: 'already-initialized' });
+    expect(writes).toEqual([{ initialized: true, prfEnrolled: true, hasRecovery: false }]);
   });
 
   test('auto-lock policy accepts only finite non-negative stored numbers', () => {

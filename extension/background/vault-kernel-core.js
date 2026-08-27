@@ -349,6 +349,42 @@ export const makeVaultKernelRoutes = ({ ready, deps }) => {
   ])));
 };
 
+/**
+ * Keep the nonsecret first-paint index coherent even when a vault mutation
+ * rejects after committing part of its storage work. The authority status is
+ * still the source of truth; reconciliation failures never replace the
+ * original route error.
+ *
+ * @param {{routes:Record<string,(message?:any)=>Promise<any>>,posture:any,vault:any,pushState:()=>any}} input
+ */
+export const makeIndexedVaultRoutes = ({ routes, posture, vault, pushState }) =>
+  Object.freeze(Object.fromEntries(Object.entries(routes).map(([name, handler]) => [
+    name,
+    async (message = {}) => {
+      const indexed = posture.snapshot() ?? await posture.read();
+      if (name === 'vault/prfStatus' && indexed?.initialized === false
+          && !vault.isInitialized()) {
+        return { ok: true, enrolled: false };
+      }
+      try {
+        const result = await handler(message);
+        const discoveredExistingVault = (name === 'vault/initialize'
+          || name === 'vault/initializeWithPasskey')
+          && result?.error === 'already-initialized';
+        if (name !== 'vault/lock' && (result?.ok === true || discoveredExistingVault)) {
+          await posture.write(await vault.status());
+        }
+        return result;
+      } catch (cause) {
+        try { await posture.write(await vault.status()); }
+        catch (error) { console.error('[kernel] vault posture reconciliation failed', error); }
+        try { await Promise.resolve(pushState()); }
+        catch (error) { console.error('[kernel] vault state reconciliation failed', error); }
+        throw cause;
+      }
+    },
+  ])));
+
 /** @param {unknown} value @param {number} fallback */
 export const resolveVaultAutoLockMs = (value, fallback) =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;

@@ -24,3 +24,4 @@ export {
   convertToDocument, sniffDocFormat, DocFetchError, DocParseError,
   UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
 } from './doc/index.js';
+export { MAX_SPILL_TEXT_CHARS } from './tools/result-store-policy.js';

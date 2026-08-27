@@ -82,6 +82,8 @@ export const makeVaultAuthorityClient = ({
   const listeners = new Set();
   /** @type {Promise<any>|null} */
   let connecting = null;
+  /** @type {any} */
+  let connectingLease = null;
   let sequence = 0;
   let cached = {
     initialized: false,
@@ -125,14 +127,15 @@ export const makeVaultAuthorityClient = ({
     const [first, second] = call.args;
     const secretKey = typeof first === 'string' && first.startsWith('secret:')
       && first.length > 'secret:'.length && first.length <= 263;
+    const vaultMetadataKey = first === 'vault.v1' || first === 'vault.resume-fence.v1';
     if (call.operation === 'kv.get') {
-      if (first === 'vault.v1' || secretKey) return kv.get(first);
+      if (vaultMetadataKey || secretKey) return kv.get(first);
       if (first === 'prefix:secret:') return kv.list('secret:');
     }
-    if (call.operation === 'kv.set' && (first === 'vault.v1' || secretKey)) {
+    if (call.operation === 'kv.set' && (vaultMetadataKey || secretKey)) {
       await kv.set(first, second); return null;
     }
-    if (call.operation === 'kv.delete' && (first === 'vault.v1' || secretKey)) {
+    if (call.operation === 'kv.delete' && (vaultMetadataKey || secretKey)) {
       await kv.delete(first); return null;
     }
     if (call.operation === 'idb.get' && first === 'vault' && second === 'vault.v1') {
@@ -162,7 +165,10 @@ export const makeVaultAuthorityClient = ({
     if (expected && active !== expected) return;
     const prior = active;
     active = null;
-    connecting = null;
+    if (prior && connecting && sameLease(connectingLease, prior.lease)) {
+      connecting = null;
+      connectingLease = null;
+    }
     if (!prior) return;
     rejectPending(cause);
     try { prior.port.close(); } catch { /* closed */ }
@@ -176,12 +182,19 @@ export const makeVaultAuthorityClient = ({
     // A connection is not callable until its successor-resume decision has
     // settled. `active` is published early so reverse storage calls can be
     // admitted during bootstrap, but ordinary callers must join `connecting`.
-    if (connecting) return connecting;
+    if (connecting) {
+      if (!offscreen || sameLease(connectingLease, lease)) return connecting;
+      // The older attempt may still settle, but it no longer owns admission
+      // for this generation. Its identity-guarded finalizer cannot clear the
+      // successor recorded below.
+      connecting = null;
+      connectingLease = null;
+    }
     if (active) {
       await active.ready;
       return active;
     }
-    connecting = (async () => {
+    const attempt = (async () => {
       // A successor host starts with a fresh sealed vault heap. If this client
       // was unlocked before its lease/channel changed, restore the DK from the
       // bounded session mirror before allowing the first caller onto the new
@@ -331,8 +344,16 @@ export const makeVaultAuthorityClient = ({
         retire(cause, connection);
         throw cause;
       }
-    })().finally(() => { connecting = null; });
-    return connecting;
+    })();
+    connecting = attempt;
+    connectingLease = lease;
+    void attempt.finally(() => {
+      if (connecting === attempt) {
+        connecting = null;
+        connectingLease = null;
+      }
+    }).catch(() => {});
+    return attempt;
   };
 
   const dispatch = (/** @type {NonNullable<typeof active>} */ connection,
@@ -375,8 +396,21 @@ export const makeVaultAuthorityClient = ({
     return Object.freeze({ ...cached });
   };
   const invokeAndRefresh = async (/** @type {string} */ method, /** @type {unknown} */ args) => {
-    const value = await call(method, args);
-    return value?.authorityStatus ? value.result : value;
+    try {
+      const value = await call(method, args);
+      return value?.authorityStatus ? value.result : value;
+    } catch (cause) {
+      // A rejected mutating call can still have committed before its mirror or
+      // reply failed. Refresh the nonsecret status so first-run UI does not
+      // remain pinned to an obsolete "Create vault" state.
+      // Outcome-unknown transport loss is different: the channel has already
+      // been retired and the UI explicitly requires a manual reconciliation;
+      // silently opening a second timed call would only delay that response.
+      if ((/** @type {{outcomeKnown?:unknown}} */ (cause))?.outcomeKnown !== false) {
+        await refreshStatus().catch(() => {});
+      }
+      throw cause;
+    }
   };
   const attemptResume = async () => {
     const value = await call('attemptResume');

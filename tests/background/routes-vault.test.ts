@@ -116,6 +116,19 @@ describe('vault routes — success paths', () => {
     expect(order).toEqual(['lock:start', 'lock:settled', 'host:retired']);
   });
 
+  test('lock: reconciles host, audit, and UI even when durable finality rejects', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps({
+      lock: async () => { order.push('lock'); throw new Error('mirror-and-fence-failed'); },
+    });
+    deps.onLocked = async () => { order.push('host'); };
+    deps.auditLog.append = async () => { order.push('audit'); };
+    deps.pushState = () => { order.push('state'); };
+    const result = makeVaultRoutes(deps)['vault/lock']();
+    await expect(result).rejects.toThrow('mirror-and-fence-failed');
+    expect(order).toEqual(['lock', 'host', 'audit', 'state']);
+  });
+
   test('unlockPrf: kicks base network with unlock-prf reason', async () => {
     const { r, calls } = routes();
     expect(await r['vault/unlockPrf']({ prfOutput: 'AAAA' })).toEqual({ ok: true });
@@ -216,7 +229,32 @@ describe('vault routes — payload validation', () => {
     expect(locked).toBe(true);
     expect(purged).toBe(true);
   });
-  test('malformed passkey bytes cross the same lock + purge rollback boundary', async () => {
+  test('passphrase initialization failure rolls back the same first-run state', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps({
+      initialize: async () => { throw new Error('mirror write failed'); },
+      lock: async () => { order.push('lock'); throw new Error('mirror delete failed'); },
+    });
+    deps.onLocked = async () => { order.push('host'); };
+    deps.purgeVaultBlob = async () => { order.push('purge'); };
+    await expect(makeVaultRoutes(deps)['vault/initialize']({ passphrase: 'pw' }))
+      .rejects.toThrow('mirror write failed');
+    expect(order).toEqual(['lock', 'host', 'purge']);
+  });
+
+  test('passkey rollback purges even when its lock cleanup rejects', async () => {
+    let purged = false;
+    const { deps } = makeDeps({
+      initializeWithPrfOnly: async () => { throw new Error('hardware'); },
+      lock: async () => { throw new Error('session unavailable'); },
+    });
+    deps.purgeVaultBlob = async () => { purged = true; };
+    await expect(makeVaultRoutes(deps)['vault/initializeWithPasskey']({
+      credentialId: 'a', prfSalt: 'b', prfOutput: 'c',
+    })).rejects.toThrow('hardware');
+    expect(purged).toBe(true);
+  });
+  test('malformed passkey bytes cannot cross the mutation or rollback boundary', async () => {
     let locked = false; let retired = false; let purged = false;
     const { deps } = makeDeps({ lock: () => { locked = true; } });
     deps.base64ToBytes = () => { throw new Error('invalid-base64'); };
@@ -225,8 +263,8 @@ describe('vault routes — payload validation', () => {
     const r = makeVaultRoutes(deps);
     await expect(r['vault/initializeWithPasskey']({
       credentialId: 'bad', prfSalt: 'bad', prfOutput: 'bad',
-    })).rejects.toThrow('invalid-base64');
-    expect({ locked, retired, purged }).toEqual({ locked: true, retired: true, purged: true });
+    })).resolves.toEqual({ ok: false, error: 'invalid-prf-payload' });
+    expect({ locked, retired, purged }).toEqual({ locked: false, retired: false, purged: false });
   });
   test('malformed enrollment bytes never dispatch a vault mutation', async () => {
     let enrolled = false;
@@ -235,7 +273,7 @@ describe('vault routes — payload validation', () => {
     const r = makeVaultRoutes(deps);
     await expect(r['vault/enrollPrf']({
       credentialId: 'bad', prfSalt: 'bad', prfOutput: 'bad',
-    })).rejects.toThrow('invalid-base64');
+    })).resolves.toEqual({ ok: false, error: 'invalid-prf-payload' });
     expect(enrolled).toBe(false);
   });
   test('setRecoveryPassphrase rejects short passphrase', async () => {

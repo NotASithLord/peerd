@@ -258,6 +258,15 @@ describe('lock() and the session mirror', () => {
     });
     await expect(initialized.initialize(PASS)).rejects.toThrow('session storage unavailable');
     expect(initialized.isLocked()).toBe(true);
+    expect(await initialized.isInitialized()).toBe(false);
+
+    const passkeyInitialized = createVault({
+      kv: makeKV(), sessionCache: failingSession(), argon2: fakeArgon2, autoLockMs: 0,
+    });
+    await expect(passkeyInitialized.initializeWithPrfOnly(PRF))
+      .rejects.toThrow('session storage unavailable');
+    expect(passkeyInitialized.isLocked()).toBe(true);
+    expect(await passkeyInitialized.isInitialized()).toBe(false);
 
     const kv = makeKV();
     const seed = createVault({ kv, argon2: fakeArgon2, autoLockMs: 0 });
@@ -268,6 +277,47 @@ describe('lock() and the session mirror', () => {
     });
     await expect(unlocked.unlock(PASS)).rejects.toThrow('session storage unavailable');
     expect(unlocked.isLocked()).toBe(true);
+  });
+
+  test('a failed mirror delete leaves a durable fence that every successor refuses', async () => {
+    const kv = makeKV();
+    const sessionCache = makeSession();
+    const originalDelete = sessionCache.sessionDelete;
+    const first = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    await first.initialize(PASS);
+    sessionCache.sessionDelete = async () => { throw new Error('session delete unavailable'); };
+
+    await expect(first.lock('manual')).resolves.toBeUndefined();
+    expect(first.isLocked()).toBe(true);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+    expect(kv.store.get('vault.resume-fence.v1')).toMatchObject({ reason: 'manual' });
+
+    const successor = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    expect(await successor.attemptResume()).toBe(false);
+    expect(successor.isLocked()).toBe(true);
+    expect(successor.lockReason()).toBe('manual');
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+
+    sessionCache.sessionDelete = originalDelete;
+    expect(await successor.attemptResume()).toBe(false);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
+    expect(kv.store.has('vault.resume-fence.v1')).toBe(false);
+  });
+
+  test('lock rejects only when neither mirror deletion nor durable fencing works', async () => {
+    const kv = makeKV();
+    const originalSet = kv.set;
+    const sessionCache = makeSession();
+    const vault = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    await vault.initialize(PASS);
+    kv.set = async (key: string, value: any) => {
+      if (key === 'vault.resume-fence.v1') throw new Error('fence unavailable');
+      return originalSet(key, value);
+    };
+    sessionCache.sessionDelete = async () => { throw new Error('delete unavailable'); };
+
+    await expect(vault.lock()).rejects.toThrow('delete unavailable');
+    expect(vault.isLocked()).toBe(true);
   });
 });
 
