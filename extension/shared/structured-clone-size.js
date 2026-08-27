@@ -25,12 +25,21 @@ export const structuredClonePayloadBytes = (
     if (typeof value === 'string') return encoder.encode(value).byteLength;
     if (typeof value !== 'object') return Infinity;
     if (value instanceof ArrayBuffer) return value.byteLength;
-    if (ArrayBuffer.isView(value)) return value.byteLength;
+    if (ArrayBuffer.isView(value)) {
+      // why: structuredClone() copies ordinary ArrayBuffers but preserves a
+      // SharedArrayBuffer backing store. Accepting a shared-backed view would
+      // let the sender mutate a supposedly frozen authority/result snapshot.
+      if (!(value.buffer instanceof ArrayBuffer)) return Infinity;
+      return value.byteLength;
+    }
     if (seen.has(value)) return Infinity;
     seen.add(value);
     try {
       if (Array.isArray(value)) {
-        let total = 0;
+        // JSON/provider consumers materialize holes as nulls. Charge every
+        // logical slot so a billion-slot sparse array cannot pass a tiny byte
+        // quota and become unbounded work after the structured-clone boundary.
+        let total = value.length;
         for (const [key, descriptor] of Object.entries(
           Object.getOwnPropertyDescriptors(value),
         )) {

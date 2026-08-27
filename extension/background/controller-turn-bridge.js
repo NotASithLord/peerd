@@ -186,6 +186,8 @@ export const makeControllerTurnBridge = ({
   const runs = new Map();
   /** @type {Map<string, number>} */
   const sessionGenerations = new Map();
+  const runIsLive = (/** @type {any} */ run) =>
+    runs.get(run.runId) === run && run.signal.aborted !== true;
   if (!toolManifest || toolManifest.protocol !== TOOL_EXECUTION_PROTOCOL
       || typeof toolManifest.digest !== 'string' || !isRecord(toolManifest.tools)) {
     throw new TypeError('controller-authority-manifest-invalid');
@@ -952,10 +954,18 @@ export const makeControllerTurnBridge = ({
           const release = await acquireDispatch(
             run, dispatchIsConcurrencySafe(run, call.name),
           );
+          if (!runIsLive(run)) {
+            release();
+            return failed('controller tool preparation lost its live run', true);
+          }
           const executionId = newId();
           const deadlineAt = Number.isSafeInteger(context.deadlineAt)
             ? Number(context.deadlineAt) : now() + TURN_DEADLINE_MS;
           const modelArgsDigest = await digestArgs(call.args ?? {});
+          if (!runIsLive(run)) {
+            release();
+            return failed('controller tool preparation lost its live run', true);
+          }
           const baseBinding = Object.freeze({
             runId: run.runId,
             callId: call.id,
@@ -975,6 +985,41 @@ export const makeControllerTurnBridge = ({
           } catch (cause) {
             release();
             return failed(cause, true);
+          }
+          const retirePrepared = (
+            /** @type {string} */ error,
+            /** @type {string} */ argsDigest = modelArgsDigest,
+            /** @type {Record<string,any>} */ settledCall = call,
+          ) => {
+            release();
+            if (!isRecord(prepared) || !Object.hasOwn(prepared, 'custody')
+                || typeof settleToolCall !== 'function') return;
+            const binding = Object.freeze({ ...baseBinding, argsDigest });
+            // why: preparation may already have opened lifecycle/confirmation
+            // custody. A Stop or invalid post-hook projection cannot leave that
+            // record orphaned merely because exact authority was never inserted.
+            void boundedCleanup(Promise.resolve().then(() => settleToolCall({
+              custody: /** @type {Record<string,any>} */ (prepared).custody,
+              result: {
+                protocol: TOOL_EXECUTION_PROTOCOL,
+                executionId,
+                argsDigest,
+                ok: false,
+                code: 'tool-execution-prepare-aborted',
+                error,
+                outcomeKnown: true,
+                effectEntered: false,
+                retryable: true,
+                phase: 'startup',
+              },
+              call: settledCall,
+              ctx: run.ctx,
+              binding,
+            })));
+          };
+          if (!runIsLive(run)) {
+            retirePrepared('Tool preparation completed after its run stopped.');
+            return failed('controller tool preparation lost its live run', true);
           }
           if (prepared === null) {
             release();
@@ -1000,7 +1045,7 @@ export const makeControllerTurnBridge = ({
               || typeof prepared.manifestDigest !== 'string'
               || !DIGEST.test(prepared.manifestDigest)
               || !Number.isSafeInteger(attempt) || Number(attempt) < 0) {
-            release();
+            retirePrepared('Tool preparation returned an invalid authority projection.');
             return unknown(run, 'tool execution preparation is invalid');
           }
           let argsDigest;
@@ -1019,9 +1064,20 @@ export const makeControllerTurnBridge = ({
               ...call, args: effectiveArgs,
             });
           }
-          catch (cause) { release(); return failed(cause, true); }
+          catch (cause) {
+            retirePrepared(
+              'Tool preparation arguments could not be frozen for exact authority.',
+            );
+            return failed(cause, true);
+          }
+          if (!runIsLive(run)) {
+            retirePrepared(
+              'Tool preparation completed after its run stopped.', argsDigest, authorityCall,
+            );
+            return failed('controller tool preparation lost its live run', true);
+          }
           if (!DIGEST.test(argsDigest)) {
-            release();
+            retirePrepared('Tool preparation produced an invalid argument digest.');
             return failed('tool argument digest is invalid', true);
           }
           const binding = Object.freeze({ ...baseBinding, argsDigest });
@@ -1042,8 +1098,18 @@ export const makeControllerTurnBridge = ({
           };
           const parsedRequest = parseToolExecutionRequest(request, toolManifest);
           if (!parsedRequest) {
-            release();
+            retirePrepared(
+              'Tool preparation fell outside its exact authority manifest.',
+              argsDigest,
+              authorityCall,
+            );
             return failed('tool execution request is outside its manifest', true);
+          }
+          if (!runIsLive(run)) {
+            retirePrepared(
+              'Tool preparation completed after its run stopped.', argsDigest, authorityCall,
+            );
+            return failed('controller tool preparation lost its live run', true);
           }
           run.preparedExecutions.set(executionId, {
             executionId, argsDigest, binding, call: authorityCall, custody: prepared.custody,
