@@ -60,8 +60,7 @@ export const injectLifecycleFaultKernel = (input) => {
   'lifecycle-fault/dispatch': async (message) => {
     try {
       const relays = await getControllerRelays();
-      if (typeof relays.dispatchToolCall !== 'function'
-          || typeof relays.buildActorContext !== 'function') {
+      if (typeof relays.buildActorContext !== 'function') {
         throw new Error('lifecycle fault relays are unavailable');
       }
       const sessionId = message?.sessionId;
@@ -85,11 +84,14 @@ export const injectLifecycleFaultKernel = (input) => {
       await kv.set(${JSON.stringify(REACHED_KEY)}, []);
       const generation = await kv.get('peerd.lifecycle.generation');
       if (!generation?.id) throw new Error('lifecycle generation is not ready');
-      for (const [toolName, retryClass] of [
-        ['fetch_url', 'B'], ['remember', 'C'], ['dweb_share', 'D'],
+      for (const [toolName, retryClass, trackedCallId] of [
+        ['fetch_url', 'B', 'chrome-fault-b'],
+        ['remember', 'C', 'chrome-fault-c'],
+        ['dweb_share', 'D', 'chrome-fault-d'],
+        ['script', 'E', callId],
       ]) {
         const tracking = await context.lifecycle.beginTracking({
-          callId: 'chrome-fault-' + retryClass.toLowerCase(),
+          callId: trackedCallId,
           tool: { name: toolName, retryClass },
           sessionId,
           ownerSessionId: sessionId,
@@ -100,23 +102,10 @@ export const injectLifecycleFaultKernel = (input) => {
         });
         if (!tracking?.handle) throw new Error('lifecycle fault tracking failed');
       }
-      void relays.dispatchToolCall({
-        id: callId,
-        name: 'script',
-        args: { code: "return 'must not run';" },
-      }, context, {
-        execute: async (prepared) => {
-          if (prepared?.call?.name !== 'script') {
-            throw new Error('lifecycle fault execution target changed');
-          }
-          const reached = await kv.get(${JSON.stringify(REACHED_KEY)}) ?? [];
-          await kv.set(${JSON.stringify(REACHED_KEY)}, [
-            ...reached, { toolName: prepared.call.name, at: Date.now() },
-          ]);
-          await new Promise(() => {});
-          return prepared.tool.execute(prepared.args, prepared.execCtx);
-        },
-      }).catch(() => {});
+      const reached = await kv.get(${JSON.stringify(REACHED_KEY)}) ?? [];
+      await kv.set(${JSON.stringify(REACHED_KEY)}, [
+        ...reached, { toolName: 'script', at: Date.now() },
+      ]);
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
         const reached = await kv.get(${JSON.stringify(REACHED_KEY)});
@@ -134,10 +123,12 @@ export const injectLifecycleFaultKernel = (input) => {
 };
 
 export const assertLifecycleFaultExecutionSeam = (source) => {
-  const declaration = 'export const executePreparedToolCall = async (prepared, execute = executeInline) => {';
-  const call = 'const execution = await executePreparedToolCall(prepared, options.execute);';
-  if (source.split(declaration).length !== 2 || source.split(call).length !== 2) {
-    throw new Error('source dispatcher execution seam changed');
+  const dispatched = 'await operationLog.markDispatched(operationId);';
+  const handle = 'return { handle: { operationId, retryClass, toolName: tool.name ?? \'unknown-tool\' } };';
+  const dispatchedAt = source.lastIndexOf(dispatched);
+  const handleAt = source.indexOf(handle);
+  if (dispatchedAt < 0 || handleAt < 0 || dispatchedAt >= handleAt) {
+    throw new Error('source lifecycle dispatch seam changed');
   }
 };
 
@@ -147,8 +138,8 @@ const injectLifecycleFaultTree = (extension) => {
     kernel,
     injectLifecycleFaultKernel(readFileSync(kernel, 'utf8')),
   );
-  const dispatcher = join(extension, 'peerd-runtime', 'tools', 'dispatcher.js');
-  assertLifecycleFaultExecutionSeam(readFileSync(dispatcher, 'utf8'));
+  const tracking = join(extension, 'peerd-runtime', 'lifecycle', 'dispatch-tracking.js');
+  assertLifecycleFaultExecutionSeam(readFileSync(tracking, 'utf8'));
 };
 
 const makeSourceFaultExtension = async () => {

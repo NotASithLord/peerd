@@ -15,7 +15,6 @@ import {
 } from '/peerd-runtime/loop/turn-authority-driver.js';
 import { projectControllerToolSurface } from '/peerd-runtime/controller-tool-projection.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
-import { runUserTurn } from '/peerd-runtime/loop/agent-loop.js';
 
 /** Minimal deps maybeAutoResume touches; the rest stay undefined (never invoked). */
 const deps = (/** @type {any} */ over: any = {}) => ({
@@ -277,10 +276,10 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     goalActiveFor: () => false,
     dwebEngagedSessions: new Set(),
     markDwebEngaged: () => {},
-    prepareToolCall: goalControl ? async (call: any, ctx: any) => ({
+    prepareToolCall: goalControl || dynamicIsolation ? async (call: any, ctx: any) => ({
       prepared: true, call, ctx, args: call.args ?? {},
     }) : undefined,
-    settleToolCall: goalControl ? async (_custody: any, execution: any) => {
+    settleToolCall: goalControl || dynamicIsolation ? async (_custody: any, execution: any) => {
       goalSettled = execution.result;
       return execution.result;
     } : undefined,
@@ -312,12 +311,33 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     postChatNote: (note: string) => { chatNotes.push(note); },
     recordModelCall: (call: any) => recordedModelCalls.push(call),
     runUserTurn: dynamicIsolation
-      ? (ctx: any) => runUserTurn({
-        ...ctx,
-        callModel,
-        getSecret: async () => { throw new Error('credential access is kernel-owned'); },
-        safeFetch: async () => { throw new Error('egress is kernel-owned'); },
-      })
+      ? async function* (ctx: any) {
+        // Mirror the sealed turn controller's exact authority protocol. The
+        // old fixture ran the raw loop in the SW shell, bypassing the
+        // controller-owned tool executor it was meant to cover.
+        await ctx.getSystemPrompt();
+        const firstTools = await ctx.refreshTools();
+        await ctx.getSystemPrompt();
+        modelCalls.push({ tools: firstTools });
+        const descriptor = firstTools.find((tool: any) => tool.name === 'message_actor');
+        const prepared = await ctx.toolExecution.prepare({
+          id: 'actor-tool', name: 'message_actor', args: { to: 'web', message: 'work' },
+        }, { authorityClass: 'actor', descriptor });
+        if (prepared?.mode !== 'execute') throw new Error('tool preparation did not enter custody');
+        actorIsolation = {
+          status: 'temporarily_unavailable', host: 'background-page-worker',
+          reason: 'worker startup failed', retryable: true,
+        };
+        await ctx.toolExecution.settle(prepared.custody, {
+          protocol: 1, executionId: 'actor-execution', argsDigest: 'a'.repeat(64),
+          ok: true, outcomeKnown: true, effectEntered: true,
+          value: { ok: false, error: 'actor worker unavailable' },
+        });
+        const nextTools = await ctx.refreshTools();
+        await ctx.getSystemPrompt();
+        modelCalls.push({ tools: nextTools });
+        yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
+      }
       : async function* (ctx: any) {
       loopCtx = ctx;
       if (goalControl) {
