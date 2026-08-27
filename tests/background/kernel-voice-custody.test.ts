@@ -140,6 +140,30 @@ describe('kernel voice custody', () => {
     expect(h.active()).toBe(true);
   });
 
+  test('a hung Chrome host lookup cannot pin teardown or later commands', async () => {
+    let active = false;
+    const calls: string[] = [];
+    const custody = createKernelVoiceCustody({
+      featureHost: { runtime: {
+        snapshot: () => ({ leases: { 'media-host': { status: active ? 'active' : 'idle' } } }),
+        acquire: async () => { active = true; calls.push('acquire'); return { ok: true, lease }; },
+        revoke: async () => { active = false; calls.push('revoke'); return { ok: true }; },
+      } },
+      offscreenUrl: 'chrome-extension://id/offscreen/offscreen.html',
+      firefox: false,
+      emit: () => {},
+      listWindowClients: async () => new Promise(() => {}),
+      timeoutMs: 5,
+    });
+    const initializing = custody.routes['voice/init']({
+      type: 'voice/init', variant: 'base', engine: 'moonshine',
+    });
+    const teardown = custody.teardown();
+    await expect(initializing).rejects.toThrow('voice-host-client-timeout');
+    await expect(teardown).resolves.toEqual({ ok: true, inactive: true });
+    expect(calls).toEqual(['acquire', 'revoke']);
+  });
+
   test('Firefox uses its exact background host and lifetime without offscreen acquisition', async () => {
     const calls: string[] = [];
     const custody = createKernelVoiceCustody({

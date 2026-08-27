@@ -49,6 +49,21 @@ describe('Firefox preview update custody', () => {
     expect(fetches).toBe(0);
   });
 
+  test('Store Firefox stays inert when its manifest has no self-hosted feed', async () => {
+    let fetches = 0;
+    const custody = createKernelFirefoxUpdateCustody({
+      runtime: { getManifest: () => ({
+        version: manifest.version,
+        browser_specific_settings: { gecko: { id: 'peerd@example.invalid' } },
+      }) },
+      session: { get: async () => null, set: async () => {} },
+      fetchFn: async () => { fetches += 1; return { ok: false }; },
+      ready: async () => {}, isEnabled: () => true, notify: () => false,
+    });
+    expect(await custody.start()).toBe(false);
+    expect(fetches).toBe(0);
+  });
+
   test('persists a validated update and marks only a delivered notice', async () => {
     const values = new Map<string, any>();
     const notices: any[] = [];
@@ -111,6 +126,50 @@ describe('Firefox preview update custody', () => {
     await custody.checkNow();
     fail = false;
     await custody.checkNow();
+    expect(fetches).toBe(2);
+  });
+
+  test('a hung feed is aborted and cannot pin later checks', async () => {
+    const values = new Map<string, any>();
+    let fetches = 0;
+    let aborted = false;
+    const custody = createKernelFirefoxUpdateCustody({
+      runtime: { getManifest: () => manifest },
+      session: {
+        get: async (key: string) => values.get(key),
+        set: async (key: string, value: any) => { values.set(key, value); },
+      },
+      fetchFn: async (_url: string, init: any) => {
+        fetches += 1;
+        if (fetches > 1) return { ok: true, json: async () => ({ addons: {} }) };
+        init.signal.addEventListener('abort', () => { aborted = true; }, { once: true });
+        return new Promise(() => {});
+      },
+      ready: async () => {}, isEnabled: () => true, notify: () => false,
+      feedTimeoutMs: 5,
+    });
+    await expect(custody.checkNow()).resolves.toBe(false);
+    expect(aborted).toBe(true);
+    await expect(custody.onUiConnect()).resolves.toBe(true);
+    expect(fetches).toBe(2);
+  });
+
+  test('a hung response body cannot pin later checks', async () => {
+    let fetches = 0;
+    const custody = createKernelFirefoxUpdateCustody({
+      runtime: { getManifest: () => manifest },
+      session: { get: async () => null, set: async () => {} },
+      fetchFn: async () => {
+        fetches += 1;
+        return fetches === 1
+          ? { ok: true, json: async () => new Promise(() => {}) }
+          : { ok: true, json: async () => ({ addons: {} }) };
+      },
+      ready: async () => {}, isEnabled: () => true, notify: () => false,
+      feedTimeoutMs: 5,
+    });
+    await expect(custody.checkNow()).resolves.toBe(false);
+    await expect(custody.checkNow()).resolves.toBe(true);
     expect(fetches).toBe(2);
   });
 

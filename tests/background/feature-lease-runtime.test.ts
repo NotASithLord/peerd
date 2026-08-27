@@ -464,6 +464,58 @@ describe('production feature-lease runtime', () => {
     expect(env.host).toBeNull();
   });
 
+  test('a malformed retirement marker retires the unidentified realm before self-healing', async () => {
+    const env = makeEnvironment();
+    const store = makeStore();
+    env.replaceHost();
+    const oldHostEpoch = env.host!.hostEpoch;
+    store.values.set(FEATURE_HOST_RETIREMENT_KEY, {
+      schema: 99, hostEpoch: oldHostEpoch, reason: 'corrupt',
+    });
+    const runtime = makeRuntime(env, store, 'kernel-epoch-a', {
+      recoveryAttempts: 1, wait: async () => {},
+    });
+    await runtime.ready;
+
+    await expect(runtime.acquire('controller')).resolves.toMatchObject({
+      ok: true, scope: 'controller',
+    });
+    expect(env.closeCount).toBe(1);
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+    expect(store.values.get(FEATURE_HOST_RETIREMENT_KEY)).toBeNull();
+  });
+
+  test('a malformed marker remains fail-closed while its unidentified realm cannot retire', async () => {
+    const env = makeEnvironment();
+    const store = makeStore();
+    env.replaceHost();
+    const oldHostEpoch = env.host!.hostEpoch;
+    store.values.set(FEATURE_HOST_RETIREMENT_KEY, {
+      schema: 99, hostEpoch: oldHostEpoch, reason: 'corrupt',
+    });
+    let closeAllowed = false;
+    const runtime = makeRuntime(env, store, 'kernel-epoch-a', {
+      recoveryAttempts: 1,
+      wait: async () => {},
+      closeOffscreen: async () => {
+        if (!closeAllowed) throw new Error('browser-refused-close');
+        await env.closeOffscreen();
+      },
+    });
+    await runtime.ready;
+
+    await expect(runtime.acquire('controller')).rejects.toMatchObject({
+      code: 'feature-host-retirement-failed', outcomeKnown: false,
+    });
+    expect(env.host?.hostEpoch).toBe(oldHostEpoch);
+    expect(store.values.get(FEATURE_HOST_RETIREMENT_KEY)).not.toBeNull();
+
+    closeAllowed = true;
+    await expect(runtime.acquire('controller')).resolves.toMatchObject({ ok: true });
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+    expect(store.values.get(FEATURE_HOST_RETIREMENT_KEY)).toBeNull();
+  });
+
   test('a failed write-ahead retirement record cannot arm an effectful host', async () => {
     const env = makeEnvironment();
     const backing = makeStore();

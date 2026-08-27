@@ -125,7 +125,9 @@ export const createProductionFeatureLeaseRuntime = ({
         || typeof value?.hostEpoch !== 'string' || value.hostEpoch.length < 8
         || typeof value?.reason !== 'string' || value.reason.length < 1
         || value.reason.length > 160) {
-      throw new Error('feature-host-retirement-record-invalid');
+      throw Object.assign(new Error('feature-host-retirement-record-invalid'), {
+        code: 'feature-host-retirement-record-invalid', outcomeKnown: false,
+      });
     }
     return Object.freeze({
       schema: /** @type {1} */ (HOST_RETIREMENT_SCHEMA),
@@ -380,7 +382,45 @@ export const createProductionFeatureLeaseRuntime = ({
 
   const ensureHostRetirementUnsafe = async () => {
     await coordinator.ready;
-    const record = await readHostRetirementUnsafe();
+    let record;
+    try { record = await readHostRetirementUnsafe(); }
+    catch (cause) {
+      if (/** @type {any} */ (cause)?.cause?.code
+          !== 'feature-host-retirement-record-invalid') throw cause;
+      // why: a malformed write-ahead marker cannot identify one generation.
+      // Retire the single physical realm before clearing it; deleting the
+      // marker first could admit work beside an untracked effectful host.
+      const attempts = Math.min(3, recoveryAttempts);
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const present = await hostStatus(hasOffscreen).catch(() => null);
+        if (present !== false) {
+          await hostEffect(closeOffscreen, 'close').catch(() => {});
+          try { await waitForOffscreenClosed(); }
+          catch (retirementCause) {
+            if (attempt + 1 < attempts) {
+              await wait(Math.min(500, 50 * (2 ** attempt)));
+              continue;
+            }
+            throw Object.assign(new Error('feature-host-retirement-failed', {
+              cause: retirementCause,
+            }), { code: 'feature-host-retirement-failed', outcomeKnown: false });
+          }
+        }
+        try {
+          await hostRetirementStore(() => store.set(FEATURE_HOST_RETIREMENT_KEY, null));
+        } catch (clearCause) {
+          hostRetirementLoaded = false;
+          throw Object.assign(new Error('feature-host-retirement-clear-failed', {
+            cause: clearCause,
+          }), { code: 'feature-host-retirement-clear-failed', outcomeKnown: false });
+        }
+        hostRetirement = null;
+        hostRetirementLoaded = true;
+        residentHostEpoch = null;
+        return Object.freeze({ ok: true, retired: true, malformed: true });
+      }
+      throw new Error('feature-host-retirement-failed');
+    }
     if (!record) return Object.freeze({ ok: true, retired: false });
     await retireMarkedHostUnsafe(record.hostEpoch);
     await clearHostRetirementUnsafe(record.hostEpoch);
