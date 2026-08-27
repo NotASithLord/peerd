@@ -125,4 +125,57 @@ describe('Firefox preview update custody', () => {
     expect(notices).toBe(1);
     expect(values.get(FIREFOX_UPDATE_CUSTODY_KEY).pending).toBeNull();
   });
+
+  test('a completed feed check clears a withdrawn pending offer before notification', async () => {
+    const values = new Map<string, any>([[FIREFOX_UPDATE_CUSTODY_KEY, {
+      schema: 1, lastCheckAt: null,
+      pending: { version: candidate.version, url: candidate.update_link },
+      notifiedVersion: null,
+    }]]);
+    let notices = 0;
+    const custody = createKernelFirefoxUpdateCustody({
+      runtime: { getManifest: () => manifest },
+      session: {
+        get: async (key: string) => structuredClone(values.get(key)),
+        set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+      },
+      fetchFn: async () => ({ ok: true, json: async () => ({ addons: {} }) }),
+      ready: async () => {}, isEnabled: () => true,
+      notify: () => { notices += 1; return true; },
+      now: () => 30_000,
+    });
+    await custody.checkNow();
+    expect(notices).toBe(0);
+    expect(values.get(FIREFOX_UPDATE_CUSTODY_KEY)).toMatchObject({
+      lastCheckAt: 30_000, pending: null, notifiedVersion: null,
+    });
+  });
+
+  test('an equal feed candidate clears a stale newer pending offer', async () => {
+    const values = new Map<string, any>([[FIREFOX_UPDATE_CUSTODY_KEY, {
+      schema: 1, lastCheckAt: null,
+      pending: { version: candidate.version, url: candidate.update_link },
+      notifiedVersion: candidate.version,
+    }]]);
+    const equal = {
+      version: manifest.version,
+      update_link: 'https://github.com/NotASithLord/peerd/releases/download/v0.9.0/peerd-preview-firefox.xpi',
+    };
+    const custody = createKernelFirefoxUpdateCustody({
+      runtime: { getManifest: () => manifest },
+      session: {
+        get: async (key: string) => structuredClone(values.get(key)),
+        set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+      },
+      fetchFn: async () => ({ ok: true, json: async () => ({ addons: {
+        [manifest.browser_specific_settings.gecko.id]: { updates: [equal] },
+      } }) }),
+      ready: async () => {}, isEnabled: () => true, notify: () => true,
+      now: () => 40_000,
+    });
+    await custody.checkNow();
+    expect(values.get(FIREFOX_UPDATE_CUSTODY_KEY)).toMatchObject({
+      pending: null, notifiedVersion: null,
+    });
+  });
 });

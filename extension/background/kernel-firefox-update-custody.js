@@ -139,11 +139,15 @@ export const createKernelFirefoxUpdateCustody = ({
     try { feed = await response.json(); }
     catch (cause) { log('[update] Firefox feed malformed', cause); return false; }
     const candidate = selectFirefoxPreviewUpdate(feed, source.addonId);
+    const pending = candidate
+      && compareFirefoxUpdateVersions(candidate.version, manifest.version) > 0
+      ? candidate : null;
     await update((latest) => ({
       ...latest,
       lastCheckAt: now(),
-      ...(candidate && compareFirefoxUpdateVersions(candidate.version, manifest.version) > 0
-        ? { pending: candidate } : {}),
+      pending,
+      notifiedVersion: pending?.version === latest.pending?.version
+        ? latest.notifiedVersion : null,
     }));
     await postPending();
     return true;

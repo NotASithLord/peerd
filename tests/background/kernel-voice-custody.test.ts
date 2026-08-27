@@ -137,4 +137,91 @@ describe('kernel voice custody', () => {
       'lifetime:stop',
     ]);
   });
+
+  test('Firefox lifetime loss tears down voice and reports a bounded UI error', async () => {
+    const calls: string[] = [];
+    const events: any[] = [];
+    let lose!: () => void;
+    const custody = createKernelVoiceCustody({
+      featureHost: { runtime: {
+        snapshot: () => ({ leases: {} }),
+        acquire: async () => { throw new Error('must not acquire offscreen'); },
+      } },
+      offscreenUrl: 'moz-extension://id/offscreen/offscreen.html',
+      firefox: true,
+      emit: (event: any) => { events.push(event); },
+      getFirefoxLifetime: () => ({
+        createHandle: ({ onLost }: any) => {
+          lose = () => onLost(new Error('heartbeat lost'));
+          return {
+            start: async () => { calls.push('lifetime:start'); },
+            stop: async () => { calls.push('lifetime:stop'); },
+          };
+        },
+      }),
+      createFirefoxHost: () => ({
+        handle: async () => ({ ok: true }),
+        teardown: async () => { calls.push('host:teardown'); },
+      }),
+    });
+    await custody.routes['voice/init']({
+      type: 'voice/init', variant: 'base', engine: 'moonshine',
+    });
+    lose();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(custody.active()).toBe(false);
+    expect(calls).toEqual(['lifetime:start', 'host:teardown', 'lifetime:stop']);
+    expect(events).toEqual([{
+      type: 'voice/error',
+      payload: {
+        name: 'VoiceHostLifetimeError',
+        message: 'Voice host stopped. Click the mic to try again.',
+        targetId: null,
+      },
+    }]);
+  });
+
+  test('Firefox lifetime loss retires a hung active voice call before its deadline', async () => {
+    let lose!: () => void;
+    let noteListenStarted!: () => void;
+    const listenStarted = new Promise<void>((resolve) => { noteListenStarted = resolve; });
+    const events: any[] = [];
+    const custody = createKernelVoiceCustody({
+      featureHost: { runtime: {
+        snapshot: () => ({ leases: {} }),
+        acquire: async () => { throw new Error('must not acquire offscreen'); },
+      } },
+      offscreenUrl: 'moz-extension://id/offscreen/offscreen.html',
+      firefox: true,
+      emit: (event: any) => { events.push(event); },
+      getFirefoxLifetime: () => ({
+        createHandle: ({ onLost }: any) => {
+          lose = () => onLost(new Error('heartbeat lost'));
+          return { start: async () => {}, stop: async () => {} };
+        },
+      }),
+      createFirefoxHost: () => ({
+        handle: async (command: any) => {
+          if (command.type === 'voice/listen') {
+            noteListenStarted();
+            return new Promise(() => {});
+          }
+          return { ok: true };
+        },
+        teardown: async () => {},
+      }),
+      timeoutMs: 100,
+    });
+    await custody.routes['voice/init']({
+      type: 'voice/init', variant: 'base', engine: 'moonshine',
+    });
+    const listening = custody.routes['voice/listen']({ type: 'voice/listen', targetId: 'chat' });
+    await listenStarted;
+    lose();
+    await expect(listening).rejects.toMatchObject({
+      code: 'voice-firefox-lifetime-lost', outcomeKnown: true, retryable: true,
+    });
+    expect(custody.active()).toBe(false);
+    expect(events).toHaveLength(1);
+  });
 });
