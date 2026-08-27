@@ -2,8 +2,11 @@
 
 import {
   CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_OFFER,
+  CONTRIBUTOR_ACTION_KINDS, CONTRIBUTOR_BROWSERS, CONTRIBUTOR_CHANNELS,
+  CONTRIBUTOR_FAILURES, CONTRIBUTOR_FALLBACKS, CONTRIBUTOR_MODEL_FAMILIES,
+  CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_PROVIDERS, CONTRIBUTOR_SURFACES,
   CONTRIBUTOR_CHANNEL_PROTOCOL, CONTRIBUTOR_CHANNEL_REPLY,
-  CONTRIBUTOR_CHANNEL_RESULT, parseContributorOffer,
+  CONTRIBUTOR_CHANNEL_RESULT, contributorPayloadFits, parseContributorOffer,
 } from '../shared/contributor-channel.js';
 import { withDeadline } from '../shared/cold-util.js';
 
@@ -959,11 +962,92 @@ const createUpdateCustody = (/** @type {any} */ c) => createKernelUpdateCustody(
   log: (/** @type {any[]} */ ...args) => console.log('[kernel]', ...args),
 });
 
+export const CONTRIBUTOR_PENDING_RECEIPTS_KEY = 'contributor_metrics.pending.v1';
+export const CONTRIBUTOR_PENDING_MAX_RECEIPTS = 64;
+const CONTRIBUTOR_RECORD_KEY = 'contributor_metrics.aggregate.v1';
+const CONTRIBUTOR_MAX_TEXT = 200;
+const CONTRIBUTOR_MAX_ACTIONS = 128;
+const CONTRIBUTOR_MAX_COUNTER = 1_000_000_000;
+const exactKeys = (/** @type {unknown} */ value, /** @type {string[]} */ keys) =>
+  !!value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+const boundedText = (/** @type {unknown} */ value, nullable = false) => nullable && value == null
+  ? null : typeof value === 'string' && value.length > 0 && value.length <= CONTRIBUTOR_MAX_TEXT
+    ? value : undefined;
+const armFromRecord = (/** @type {any} */ record) => {
+  if (!exactKeys(record, ['version', 'consent', 'aggregate']) || record.version !== 1
+      || !exactKeys(record.consent, [
+        'enabled', 'schemaVersion', 'disclosureVersion', 'generation',
+      ]) || record.consent.enabled !== true || record.consent.schemaVersion !== 1
+      || record.consent.disclosureVersion !== 1
+      || boundedText(record.consent.generation) === undefined
+      || !record.aggregate || typeof record.aggregate !== 'object'
+      || Array.isArray(record.aggregate)) {
+    return Object.freeze({ enabled: false, generation: null });
+  }
+  return Object.freeze({ enabled: true, generation: record.consent.generation });
+};
+const normalizePendingReceipt = (/** @type {any} */ value) => {
+  const keys = [
+    'version', 'consentGeneration', 'operationKey', 'feedbackContextKey', 'decision',
+    'browser', 'extensionVersion', 'channel', 'provider', 'modelFamily', 'durationMs',
+    'tokens', 'outcome', 'failure', 'actions',
+  ];
+  if (!exactKeys(value, keys) || value.version !== 1
+      || boundedText(value.consentGeneration) === undefined
+      || boundedText(value.operationKey) === undefined
+      || boundedText(value.feedbackContextKey, true) === undefined
+      || !exactKeys(value.decision, ['requested', 'resolved', 'fallback'])
+      || !CONTRIBUTOR_SURFACES.includes(value.decision.requested)
+      || !CONTRIBUTOR_SURFACES.includes(value.decision.resolved)
+      || !CONTRIBUTOR_FALLBACKS.includes(value.decision.fallback)
+      || !CONTRIBUTOR_BROWSERS.includes(value.browser)
+      || typeof value.extensionVersion !== 'string'
+      || !/^0\.[0-9]{1,4}\.[0-9]{1,4}$/.test(value.extensionVersion)
+      || !CONTRIBUTOR_CHANNELS.includes(value.channel)
+      || !CONTRIBUTOR_PROVIDERS.includes(value.provider)
+      || !CONTRIBUTOR_MODEL_FAMILIES.includes(value.modelFamily)
+      || !Number.isSafeInteger(value.durationMs) || value.durationMs < 0
+      || value.durationMs > CONTRIBUTOR_MAX_COUNTER
+      || !Number.isSafeInteger(value.tokens) || value.tokens < 0
+      || value.tokens > CONTRIBUTOR_MAX_COUNTER
+      || !CONTRIBUTOR_OUTCOMES.includes(value.outcome)
+      || !CONTRIBUTOR_FAILURES.includes(value.failure)
+      || !Array.isArray(value.actions) || value.actions.length > CONTRIBUTOR_MAX_ACTIONS
+      || value.actions.some((/** @type {unknown} */ action) =>
+        !CONTRIBUTOR_ACTION_KINDS.includes(/** @type {any} */ (action)))) return null;
+  return Object.freeze({
+    version: 1,
+    consentGeneration: value.consentGeneration,
+    operationKey: value.operationKey,
+    feedbackContextKey: value.feedbackContextKey,
+    decision: Object.freeze({ ...value.decision }),
+    browser: value.browser,
+    extensionVersion: value.extensionVersion,
+    channel: value.channel,
+    provider: value.provider,
+    modelFamily: value.modelFamily,
+    durationMs: value.durationMs,
+    tokens: value.tokens,
+    outcome: value.outcome,
+    failure: value.failure,
+    actions: Object.freeze([...value.actions]),
+  });
+};
+const normalizePendingRecord = (/** @type {any} */ value) => {
+  if (value == null) return Object.freeze({ version: 1, receipts: Object.freeze([]) });
+  if (!exactKeys(value, ['version', 'receipts']) || value.version !== 1
+      || !Array.isArray(value.receipts)
+      || value.receipts.length > CONTRIBUTOR_PENDING_MAX_RECEIPTS) return null;
+  const receipts = value.receipts.map(normalizePendingReceipt);
+  return receipts.every(Boolean)
+    ? Object.freeze({ version: 1, receipts: Object.freeze(receipts) }) : null;
+};
+
 export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => {
   if (!kv?.get || !kv?.set || !kv?.delete) {
     throw new TypeError('kernel-preview-contributor-config-invalid');
   }
-  const key = 'contributor_metrics.aggregate.v1';
   let tail = Promise.resolve();
   const effect = (/** @type {()=>Promise<any>} */ run) => {
     const task = tail.then(run, run);
@@ -976,7 +1060,6 @@ export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => 
     enable: 'contributor/enable',
     'disable-read': 'contributor/disable',
     clear: 'contributor/disable',
-    'arm-read': 'contributor/arm',
     'settlement-read': 'contributor/settlement',
     'settlement-record': 'contributor/settlement',
     'feedback-read': 'contributor/feedback',
@@ -987,7 +1070,7 @@ export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => 
     const kind = op.startsWith('semantic.contributor.') ? op.slice(21) : '';
     const route = routes[/** @type {keyof typeof routes} */ (kind)] ?? null;
     const surface = route === 'contributor/feedback' ? 'chat'
-      : route === 'contributor/arm' || route === 'contributor/settlement' ? 'runtime'
+      : route === 'contributor/settlement' ? 'runtime'
         : 'options';
     const write = kind === 'enable' || kind === 'clear' || kind.endsWith('-record');
     if (!route || ctx?.authority?.target !== `semantic:${route}:${surface}`) return null;
@@ -995,27 +1078,27 @@ export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => 
       return { ok: false, code: 'semantic-kernel-operation-expired', outcomeKnown: true };
     }
     const run = async () => {
-      if (kind === 'read' || kind.endsWith('-read')) return kv.get(key);
+      if (kind === 'read' || kind.endsWith('-read')) return kv.get(CONTRIBUTOR_RECORD_KEY);
       if (kind === 'clear') {
-        await kv.delete(key); return { ok: true };
+        await kv.delete(CONTRIBUTOR_RECORD_KEY); return { ok: true };
       }
       if (kind.endsWith('-record')) {
-        const current = await kv.get(key);
+        const current = await kv.get(CONTRIBUTOR_RECORD_KEY);
         const expected = payload?.expected ?? null;
         const value = payload?.value;
-        const exactKeys = value && typeof value === 'object' && !Array.isArray(value)
+        const exactRecordShape = value && typeof value === 'object' && !Array.isArray(value)
           && Object.keys(value).sort().join('\0') === ['aggregate', 'consent', 'version'].join('\0');
         const unchangedConsent = JSON.stringify(current?.consent ?? null)
           === JSON.stringify(value?.consent ?? null);
         if (JSON.stringify(current ?? null) !== JSON.stringify(expected)
-            || !exactKeys || value.version !== 1 || !unchangedConsent
+            || !exactRecordShape || value.version !== 1 || !unchangedConsent
             || current?.consent?.enabled !== true) {
           return { ok: false, error: 'contributor-state-changed' };
         }
-        await kv.set(key, value);
+        await kv.set(CONTRIBUTOR_RECORD_KEY, value);
         return { ok: true };
       }
-      const current = await kv.get(key);
+      const current = await kv.get(CONTRIBUTOR_RECORD_KEY);
       if (JSON.stringify(current ?? null) !== JSON.stringify(payload?.expected ?? null)) {
         return { ok: false, error: 'contributor-state-changed' };
       }
@@ -1024,7 +1107,7 @@ export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => 
           generation: crypto.randomUUID() },
         aggregate: { version: 1, rows: {}, dedupe: [], contexts: {}, contextOrder: [],
           feedback: {}, feedbackOrder: [] } };
-      await kv.set(key, value);
+      await kv.set(CONTRIBUTOR_RECORD_KEY, value);
       return { ok: true, value };
     };
     try {
@@ -1035,16 +1118,61 @@ export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => 
         outcomeKnown: !write };
     }
   };
+  const arm = async () => {
+    await tail;
+    return armFromRecord(await kv.get(CONTRIBUTOR_RECORD_KEY));
+  };
+  const pending = async () => {
+    await tail;
+    const record = normalizePendingRecord(await kv.get(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
+    if (!record) throw new Error('contributor-pending-record-invalid');
+    return [...record.receipts];
+  };
+  const appendPending = (/** @type {any} */ input) => effect(async () => {
+    const receipt = normalizePendingReceipt(input);
+    if (!receipt) return { ok: false, code: 'contributor-pending-receipt-invalid' };
+    const armSnapshot = armFromRecord(await kv.get(CONTRIBUTOR_RECORD_KEY));
+    if (armSnapshot.enabled !== true || armSnapshot.generation !== receipt.consentGeneration) {
+      return { ok: true, queued: false, reason: 'disabled' };
+    }
+    const current = normalizePendingRecord(await kv.get(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
+    if (!current) return { ok: false, code: 'contributor-pending-record-invalid' };
+    const existing = current.receipts.find((/** @type {any} */ item) =>
+      item.operationKey === receipt.operationKey);
+    if (existing) return { ok: true, queued: false, reason: 'duplicate' };
+    if (current.receipts.length >= CONTRIBUTOR_PENDING_MAX_RECEIPTS) {
+      return { ok: false, code: 'contributor-pending-receipts-full' };
+    }
+    await kv.set(CONTRIBUTOR_PENDING_RECEIPTS_KEY, {
+      version: 1, receipts: [...current.receipts, receipt],
+    });
+    return { ok: true, queued: true };
+  });
+  const removePending = (/** @type {string} */ operationKey) => effect(async () => {
+    const current = normalizePendingRecord(await kv.get(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
+    if (!current) throw new Error('contributor-pending-record-invalid');
+    const receipts = current.receipts.filter((/** @type {any} */ item) =>
+      item.operationKey !== operationKey);
+    if (receipts.length === current.receipts.length) return false;
+    if (receipts.length === 0) await kv.delete(CONTRIBUTOR_PENDING_RECEIPTS_KEY);
+    else await kv.set(CONTRIBUTOR_PENDING_RECEIPTS_KEY, { version: 1, receipts });
+    return true;
+  });
+  const clearPending = () => effect(() => kv.delete(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
   return Object.freeze({
-    handle,
+    handle, arm, pending, appendPending, removePending, clearPending,
   });
 };
 
 export const createPreviewContributorRoutes = (/** @type {any} */ {
   kv, optionsUi, sidepanelUi, homeUi, validateFeedback, offscreenUrl, featureHost,
+  scheduleDrain = (/** @type {()=>void} */ operation) => queueMicrotask(operation),
+  channelDeadlineMs = 15_000,
 }) => {
   if (![optionsUi, sidepanelUi, homeUi, validateFeedback].every(
-    (value) => typeof value === 'function') || typeof offscreenUrl !== 'string'
+    (value) => typeof value === 'function') || typeof scheduleDrain !== 'function'
+      || typeof offscreenUrl !== 'string' || !Number.isFinite(channelDeadlineMs)
+      || channelDeadlineMs <= 0
       || typeof featureHost?.runtime?.runWithLease !== 'function') {
     throw new TypeError('kernel-preview-contributor-routes-invalid');
   }
@@ -1063,7 +1191,6 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
     'contributor/disable': Object.freeze({
       'semantic.contributor.clear': 1, 'semantic.contributor.disable-read': 1,
     }),
-    'contributor/arm': Object.freeze({ 'semantic.contributor.arm-read': 1 }),
     'contributor/settlement': Object.freeze({
       'semantic.contributor.settlement-read': 1,
       'semantic.contributor.settlement-record': 1,
@@ -1080,7 +1207,7 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
     }
     let entered = false;
     const surface = route === 'contributor/feedback' ? 'chat'
-      : route === 'contributor/arm' || route === 'contributor/settlement' ? 'runtime'
+      : route === 'contributor/settlement' ? 'runtime'
         : 'options';
     const result = await featureHost.runtime.runWithLease('controller', async (/** @type {any} */ lease) => {
       entered = true;
@@ -1101,7 +1228,7 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
       }
       const { port1, port2 } = new MessageChannel();
       return new Promise((resolve) => {
-        const deadlineAt = Date.now() + 15_000;
+        const deadlineAt = Date.now() + channelDeadlineMs;
         const counts = new Map();
         let effectDispatched = false;
         let settled = false;
@@ -1116,17 +1243,20 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
           outcomeKnown: !effectDispatched,
           ...(effectDispatched ? { outcomeKind: 'unknown', retryable: false } : {}),
         });
-        const timer = setTimeout(lost, 15_000);
+        const timer = setTimeout(lost, channelDeadlineMs);
         port1.onmessage = (event) => {
           const packet = event.data;
           if (packet?.protocol !== CONTRIBUTOR_CHANNEL_PROTOCOL
               || packet.channelId !== channelId) { lost(); return; }
           if (packet.type === CONTRIBUTOR_CHANNEL_RESULT) {
+            if (!contributorPayloadFits(packet.result ?? {})) { lost(); return; }
             finish(packet.result ?? { ok: false, outcomeKnown: effectDispatched ? false : true });
             return;
           }
           if (packet.type !== CONTRIBUTOR_CHANNEL_CALL
-              || typeof packet.requestId !== 'string' || typeof packet.operation !== 'string') {
+              || typeof packet.requestId !== 'string' || packet.requestId.length > 128
+              || typeof packet.operation !== 'string' || packet.operation.length > 128
+              || !contributorPayloadFits(packet.payload ?? {})) {
             lost(); return;
           }
           const limits = /** @type {any} */ (allowed)[route];
@@ -1158,9 +1288,64 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
   };
   const optionsRoute = (/** @type {string} */ route) => (
     /** @type {any} */ message, /** @type {any} */ sender,
-  ) => message?.type === route && optionsUi(sender)
-    ? route === 'contributor/status' ? dispatch(route, {}) : mutate(() => dispatch(route, {}))
-    : { ok: false, code: 'contributor-channel-admission-denied', outcomeKnown: true };
+  ) => {
+    if (message?.type !== route || !optionsUi(sender)) {
+      return { ok: false, code: 'contributor-channel-admission-denied', outcomeKnown: true };
+    }
+    if (route === 'contributor/status') return dispatch(route, {});
+    return mutate(async () => {
+      const result = await dispatch(route, {});
+      if (route === 'contributor/disable' && result?.ok === true) {
+        await authority.clearPending();
+      }
+      return result;
+    });
+  };
+  let drainTail = Promise.resolve(/** @type {any} */ ({ ok: true, drained: 0 }));
+  const drainPending = () => {
+    const attempt = drainTail.then(async () => {
+      let drained = 0;
+      for (let index = 0; index < CONTRIBUTOR_PENDING_MAX_RECEIPTS; index += 1) {
+        const receipt = (await authority.pending())[0];
+        if (!receipt) return { ok: true, drained };
+        const result = await mutate(() => dispatch('contributor/settlement', receipt));
+        if (result?.ok !== true) return { ...result, drained };
+        await authority.removePending(receipt.operationKey);
+        drained += 1;
+      }
+      return (await authority.pending()).length === 0
+        ? { ok: true, drained }
+        : { ok: false, code: 'contributor-pending-drain-limit', drained };
+    });
+    const task = attempt.catch(() => ({
+      ok: false, code: 'contributor-pending-drain-failed', drained: 0,
+    }));
+    drainTail = task;
+    return task;
+  };
+  let drainScheduled = false;
+  let drainAgain = false;
+  const requestDrain = () => {
+    if (drainScheduled) { drainAgain = true; return; }
+    drainScheduled = true;
+    let lastDrainOk = false;
+    try {
+      scheduleDrain(() => {
+        void (async () => {
+          let result;
+          do {
+            drainAgain = false;
+            result = await drainPending();
+            lastDrainOk = result?.ok === true;
+          } while (lastDrainOk && drainAgain);
+        })().finally(() => {
+          const retry = lastDrainOk && drainAgain;
+          drainScheduled = false;
+          if (retry) requestDrain();
+        });
+      });
+    } catch { drainScheduled = false; }
+  };
   const routes = Object.freeze({
     'contributor/status': optionsRoute('contributor/status'),
     'contributor/enable': optionsRoute('contributor/enable'),
@@ -1174,27 +1359,36 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
       if (!['worked', 'didnt_work'].includes(message.verdict)) {
         return { ok: false, error: 'invalid-feedback', outcomeKnown: true };
       }
-      if (typeof message.sessionId !== 'string' || typeof message.messageId !== 'string') {
+      if (boundedText(message.sessionId) === undefined
+          || boundedText(message.messageId) === undefined) {
         return { ok: false, error: 'invalid-feedback-target', outcomeKnown: true };
       }
       const guarded = await validateFeedback(message);
       if (guarded?.ok !== true || !Array.isArray(guarded.messages)) return guarded;
+      const drained = await drainPending();
+      if (drained?.ok !== true) {
+        return { ok: false, error: 'Contributor Metrics settlement is still pending.',
+          outcomeKnown: true, retryable: true };
+      }
       return mutate(() => dispatch('contributor/feedback', {
         sessionId: message.sessionId, messageId: message.messageId,
         verdict: message.verdict, messages: guarded.messages,
       }));
     },
   });
-  return Object.freeze({
+  const owner = Object.freeze({
     routes,
-    arm: async () => {
-      const result = await dispatch('contributor/arm', {});
-      return result?.ok === true && result.arm?.enabled === true
-        ? result.arm : { enabled: false, generation: null };
+    arm: () => authority.arm(),
+    recordWebSettlement: async (/** @type {any} */ message) => {
+      const result = await authority.appendPending(message);
+      if (result?.ok === true && result.queued === true) requestDrain();
+      return result;
     },
-    recordWebSettlement: (/** @type {any} */ message) =>
-      mutate(() => dispatch('contributor/settlement', message)),
+    drainPending,
+    pending: () => authority.pending(),
   });
+  requestDrain();
+  return owner;
 };
 root[addonId] = Object.freeze({
   target: 'preview-chrome', update: createUpdateCustody,

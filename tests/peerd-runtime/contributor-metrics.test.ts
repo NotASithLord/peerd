@@ -154,6 +154,7 @@ describe('Contributor Metrics closed schema', () => {
     expect(normalizeContributorProvider('https://private.example')).toBe('custom');
     expect(normalizeContributorModelFamily('gpt-5-private.example/secret')).toBe('custom');
     expect(normalizeContributorModelFamily('claude-haiku-4-5')).toBe('claude-haiku');
+    expect(normalizeContributorModelFamily('claude-haiku')).toBe('claude-haiku');
   });
 
   test('every shipped static/catalog model has a reviewed family', () => {

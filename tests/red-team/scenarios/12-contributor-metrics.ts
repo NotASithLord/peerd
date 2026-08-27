@@ -88,6 +88,7 @@ export const scenario: Scenario = {
       featureHost: { runtime: { runWithLease: async () => {
         routeMutations += 1; return { ok: false };
       } } },
+      scheduleDrain: () => {},
     });
     const consentReply = await owner.routes['contributor/enable']({
       type: 'contributor/enable',

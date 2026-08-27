@@ -13,6 +13,19 @@
 
 import { FAILURE_KINDS, classifyFailure } from './failure-classify.js';
 import { WEB_ACTOR_CODE_CLIENT_TOOL_NAMES } from '../actor/capability-manifest.js';
+import {
+  CONTRIBUTOR_ACTION_KINDS, CONTRIBUTOR_BROWSERS, CONTRIBUTOR_CHANNELS,
+  CONTRIBUTOR_FAILURES, CONTRIBUTOR_FALLBACKS, CONTRIBUTOR_FEATURES, CONTRIBUTOR_FEEDBACK,
+  CONTRIBUTOR_MODEL_FAMILIES, CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_PROVIDERS,
+  CONTRIBUTOR_SURFACES,
+} from '/shared/contributor-channel.js';
+
+export {
+  CONTRIBUTOR_ACTION_KINDS, CONTRIBUTOR_BROWSERS, CONTRIBUTOR_CHANNELS,
+  CONTRIBUTOR_FAILURES, CONTRIBUTOR_FALLBACKS, CONTRIBUTOR_FEATURES, CONTRIBUTOR_FEEDBACK,
+  CONTRIBUTOR_MODEL_FAMILIES, CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_PROVIDERS,
+  CONTRIBUTOR_SURFACES,
+} from '/shared/contributor-channel.js';
 
 export const CONTRIBUTOR_SCHEMA_VERSION = 1;
 export const CONTRIBUTOR_DISCLOSURE_VERSION = 1;
@@ -22,25 +35,6 @@ export const CONTRIBUTOR_MAX_COUNTER = 1_000_000_000;
 export const CONTRIBUTOR_MAX_LOCAL_DEDUPE = 512;
 export const CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT = 128;
 
-export const CONTRIBUTOR_FEATURES = Object.freeze(['web_actor_surface']);
-export const CONTRIBUTOR_SURFACES = Object.freeze(['code', 'tools']);
-export const CONTRIBUTOR_FALLBACKS = Object.freeze([
-  'none', 'worker_unavailable', 'capability_grant_incomplete',
-]);
-export const CONTRIBUTOR_BROWSERS = Object.freeze(['chrome', 'firefox']);
-export const CONTRIBUTOR_CHANNELS = Object.freeze(['store', 'preview', 'dev', 'web']);
-export const CONTRIBUTOR_PROVIDERS = Object.freeze([
-  'anthropic', 'openrouter', 'openai', 'glm', 'ollama', 'local-webgpu', 'custom',
-]);
-export const CONTRIBUTOR_MODEL_FAMILIES = Object.freeze([
-  'claude-opus', 'claude-sonnet', 'claude-haiku', 'gpt', 'openai-o', 'glm',
-  'gemini', 'qwen', 'llama', 'deepseek', 'mistral', 'grok', 'command',
-  'hermes', 'kimi', 'minimax', 'gemma', 'muse-glimmer', 'custom',
-]);
-export const CONTRIBUTOR_OUTCOMES = Object.freeze(['completed', 'cancelled', 'error']);
-export const CONTRIBUTOR_FAILURES = Object.freeze(['none', ...FAILURE_KINDS]);
-export const CONTRIBUTOR_ACTION_KINDS = Object.freeze(['page_code', 'page_action']);
-export const CONTRIBUTOR_FEEDBACK = Object.freeze(['worked', 'didnt_work']);
 export const CONTRIBUTOR_DURATION_BUCKETS = Object.freeze([
   'under_1s', '1s_to_5s', '5s_to_15s', '15s_to_60s', '60s_or_more',
 ]);
@@ -188,6 +182,8 @@ export const normalizeContributorProvider = (provider) =>
 export const normalizeContributorModelFamily = (model) =>
   typeof model === 'string' && Object.hasOwn(CONTRIBUTOR_KNOWN_MODEL_FAMILIES, model)
     ? /** @type {Record<string, string>} */ (CONTRIBUTOR_KNOWN_MODEL_FAMILIES)[model]
+    : typeof model === 'string' && CONTRIBUTOR_MODEL_FAMILIES.includes(model)
+      ? model
     : 'custom';
 
 /** @param {unknown} durationMs */

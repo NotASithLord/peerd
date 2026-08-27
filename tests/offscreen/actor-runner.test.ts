@@ -188,6 +188,33 @@ describe('actor worker startup proof', () => {
     expect(worker.terminated).toBe(true);
   });
 
+  test('projects only fixed Contributor Metrics facts for a tab-Web actor', async () => {
+    const worker = new FakeWorker();
+    worker.onPost = (message) => {
+      answerProbe(worker, message);
+      if (message.type === 'run') queueMicrotask(() => worker.emit('message', { data: {
+        type: 'done', result: {
+          error: 'Provider secret detail HTTP 429 should not cross the metrics boundary',
+          finalText: '', stopReason: 'max_tokens',
+          newMessages: [{
+            role: 'assistant', error: 'Provider secret detail HTTP 429 should not cross',
+            stopReason: 'max_tokens', toolUses: [{ name: 'snapshot' }],
+          }],
+        },
+      } }));
+    };
+    const result = await runActor({ ...job, actorType: 'web', backing: 'tab' }, {
+      workerUrl: '/worker.js',
+      createWorker: () => readyWorker(worker),
+      sendToSW: async () => ({ ok: true }),
+    });
+    expect(result.contributor).toEqual({
+      provider: 'anthropic', modelFamily: 'custom',
+      outcome: 'error', failure: 'limits', actions: ['page_action'],
+    });
+    expect(JSON.stringify(result.contributor)).not.toContain('secret detail');
+  });
+
   test('refuses an invalid realm before run or relay', async () => {
     const worker = new FakeWorker();
     let relayCount = 0;

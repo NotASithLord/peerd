@@ -605,6 +605,10 @@ describe('kernel live turn factories', () => {
       }],
       usage: { inputTokens: 7, outputTokens: 5 },
       price: { cost: 0.000096, estimated: true },
+      contributor: {
+        provider: 'anthropic', modelFamily: 'claude-sonnet',
+        outcome: 'completed', failure: 'none', actions: ['page_action'],
+      },
     }), { contributor });
     const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
     expect(await ctx.messageActor({
@@ -613,12 +617,11 @@ describe('kernel live turn factories', () => {
     })).toMatchObject({ ok: true });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
+      version: 1,
       consentGeneration: 'generation-1', feedbackContextKey: `${h.root.sessionId}:tool-contributor`,
       decision: { requested: 'tools', resolved: 'tools', fallback: 'none' },
-      browser: 'chrome', channel: 'dev', provider: 'anthropic', model: 'claude-sonnet-4-6',
-      toolNames: ['snapshot'], assistantMessages: [{ stopReason: 'end_turn' }],
-      stopped: false,
-      usage: { inputTokens: 7, outputTokens: 5 },
+      browser: 'chrome', channel: 'dev', provider: 'anthropic', modelFamily: 'claude-sonnet',
+      actions: ['page_action'], outcome: 'completed', failure: 'none', tokens: 12,
     });
     expect(calls[0].operationKey).toBeString();
   });
