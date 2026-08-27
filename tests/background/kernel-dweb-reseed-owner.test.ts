@@ -69,4 +69,56 @@ describe('kernel dweb reseed owner', () => {
       releaseSnapshot: { oid, totalBytes: 8, record: { entryFile: 'index.html' } },
     });
   });
+
+  test('does not retire a generation whose publication failed', async () => {
+    let attempts = 0;
+    const h = owner({
+      sendMessage: async () => {
+        attempts += 1;
+        return attempts === 1 ? { ok: false, error: 'host-not-ready' } : { ok: true };
+      },
+    });
+    const generation = { hostEpoch: 'host-epoch-0003', meshGeneration: 3 };
+    expect(await h.value.onHostGeneration(generation)).toEqual({
+      ok: false, seeded: 0, failed: 1, error: 'dweb-reseed-partial',
+    });
+    expect(await h.value.onHostGeneration(generation)).toEqual({ ok: true, seeded: 1 });
+    expect(attempts).toBe(2);
+  });
+
+  test('serializes distinct generations and coalesces a duplicate while queued', async () => {
+    const starts: string[] = [];
+    let releaseFirst!: () => void;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let noteFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { noteFirstStarted = resolve; });
+    let calls = 0;
+    const h = owner({
+      sendMessage: async (message: any) => {
+        calls += 1;
+        starts.push(`${message.appId}:${calls}`);
+        if (calls === 1) { noteFirstStarted(); await first; }
+        return { ok: true };
+      },
+    });
+    const generationOne = h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0004', meshGeneration: 1,
+    });
+    await firstStarted;
+    const generationTwo = h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0004', meshGeneration: 2,
+    });
+    const generationTwoAgain = h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0004', meshGeneration: 2,
+    });
+    expect(starts).toEqual(['app-1:1']);
+    expect(generationTwoAgain).toBe(generationTwo);
+    releaseFirst();
+    expect(await generationOne).toEqual({ ok: true, seeded: 1 });
+    expect(await generationTwo).toEqual({ ok: true, seeded: 1 });
+    expect(calls).toBe(2);
+    expect(await h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0004', meshGeneration: 2,
+    })).toEqual({ ok: true, seeded: 0, coalesced: true });
+  });
 });

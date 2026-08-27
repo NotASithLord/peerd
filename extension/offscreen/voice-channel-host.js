@@ -21,7 +21,9 @@ export const acceptVoiceChannelOffer = (event, ownsLease) => {
     try { port?.close(); } catch {}
     return false;
   }
-  Promise.resolve(runtime.handle(offer.command)).then(
+  Promise.resolve(runtime.handle(offer.command, {
+    current: () => ownsLease(offer.lease),
+  })).then(
     (result) => {
       try { port.postMessage({
         type: VOICE_CHANNEL_RESULT,

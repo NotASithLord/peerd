@@ -59,6 +59,10 @@ export const createKernelVoiceCustody = ({
   /** @type {any|null} */
   let firefoxLifetimeHandle = null;
   let firefoxActive = false;
+  /** @type {Promise<void>} */
+  let firefoxRetirement = Promise.resolve();
+  /** @type {Promise<{error:Error,retirement:Promise<void>}>|null} */
+  let firefoxLifetimeLoss = null;
   let tail = Promise.resolve();
   const queue = (/** @type {()=>Promise<any>} */ operation) => {
     const pending = tail.then(operation, operation);
@@ -75,25 +79,92 @@ export const createKernelVoiceCustody = ({
     return firefoxHost;
   };
   const releaseFirefox = async (/** @type {boolean} */ teardownHost = true) => {
-    try { if (teardownHost) await firefoxHost?.teardown?.(); }
-    finally {
-      firefoxActive = false;
-      const handle = firefoxLifetimeHandle;
-      firefoxLifetimeHandle = null;
-      await handle?.stop?.();
-    }
+    const handle = firefoxLifetimeHandle;
+    firefoxLifetimeHandle = null;
+    firefoxActive = false;
+    firefoxLifetimeLoss = null;
+    const retirement = (async () => {
+      try {
+        if (teardownHost) {
+          await withDeadline(
+            () => Promise.resolve(firefoxHost?.teardown?.()),
+            timeoutMs,
+            () => new Error('voice-host-teardown-timeout'),
+            setTimeoutFn,
+            clearTimeoutFn,
+          );
+        }
+      } finally { await handle?.stop?.(); }
+    })();
+    firefoxRetirement = retirement.catch(() => {}).then(() => {});
+    return retirement;
   };
   const callFirefox = async (/** @type {any} */ command) => {
     try {
+      await firefoxRetirement;
+      /** @type {Promise<{error:Error,retirement:Promise<void>}>|null} */
+      let lifetimeLoss = firefoxLifetimeLoss;
       if (STARTS_MEDIA.has(command.type) && !firefoxActive) {
         const lifetime = getFirefoxLifetime();
         if (!lifetime?.createHandle) throw new Error('voice-firefox-lifetime-unavailable');
-        firefoxLifetimeHandle = lifetime.createHandle();
-        await firefoxLifetimeHandle.start();
+        /** @type {any} */
+        let handle = null;
+        /** @type {(loss:{error:Error,retirement:Promise<void>})=>void} */
+        let signalLoss = () => {};
+        lifetimeLoss = new Promise((resolve) => { signalLoss = resolve; });
+        firefoxLifetimeLoss = lifetimeLoss;
+        handle = lifetime.createHandle({
+          onLost: (/** @type {unknown} */ cause) => {
+            if (firefoxLifetimeHandle !== handle) return;
+            firefoxLifetimeHandle = null;
+            firefoxActive = false;
+            firefoxLifetimeLoss = null;
+            const error = Object.assign(
+              cause instanceof Error ? cause : new Error(String(cause)),
+              { code: 'voice-firefox-lifetime-lost', outcomeKnown: true, retryable: true },
+            );
+            const retirement = (async () => {
+              try {
+                await withDeadline(
+                  () => Promise.resolve(firefoxHost?.teardown?.()),
+                  timeoutMs,
+                  () => new Error('voice-host-teardown-timeout'),
+                  setTimeoutFn,
+                  clearTimeoutFn,
+                );
+              } catch { /* generation fencing makes late teardown harmless */ }
+              finally { await handle?.stop?.(); }
+              emit({
+                type: 'voice/error',
+                payload: {
+                  name: 'VoiceHostLifetimeError',
+                  message: 'Voice host stopped. Click the mic to try again.',
+                  targetId: null,
+                },
+              });
+            })();
+            firefoxRetirement = retirement.catch(() => {}).then(() => {});
+            signalLoss({ error, retirement });
+          },
+        });
+        firefoxLifetimeHandle = handle;
+        await handle.start();
         firefoxActive = true;
       } else if (!firefoxActive) return { ok: true, inactive: true };
       const result = await withDeadline(
-        () => directFirefoxHost().then((host) => host.handle(command)),
+        async () => {
+          const work = directFirefoxHost().then((host) => host.handle(command));
+          if (!lifetimeLoss) return work;
+          const settled = await Promise.race([
+            work.then((value) => ({ value })),
+            lifetimeLoss.then((loss) => ({ loss })),
+          ]);
+          if ('loss' in settled) {
+            await settled.loss.retirement;
+            throw settled.loss.error;
+          }
+          return settled.value;
+        },
         timeoutMs,
         () => new Error('voice-host-timeout'),
         setTimeoutFn,
@@ -103,7 +174,8 @@ export const createKernelVoiceCustody = ({
       if (command.type === 'voice/teardown') await releaseFirefox(false);
       return result;
     } catch (cause) {
-      await releaseFirefox().catch(() => {});
+      if (firefoxLifetimeHandle || firefoxActive) await releaseFirefox().catch(() => {});
+      else await firefoxRetirement;
       throw cause;
     }
   };

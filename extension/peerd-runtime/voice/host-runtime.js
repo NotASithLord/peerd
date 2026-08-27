@@ -53,24 +53,40 @@ export const createVoiceHostRuntime = ({
   });
   /** @type {any|null} */
   let transcriber = null;
-  /** @type {Set<MediaStream>} */
-  const liveMicStreams = new Set();
+  let generation = 0;
+  /** @type {Map<MediaStream, number>} */
+  const liveMicStreams = new Map();
   const mediaDevices = navigatorEnv?.mediaDevices;
   const originalGetUserMedia = mediaDevices?.getUserMedia?.bind(mediaDevices);
   if (originalGetUserMedia) {
     mediaDevices.getUserMedia = async (/** @type {MediaStreamConstraints} */ constraints) => {
+      const owner = generation;
       const stream = await originalGetUserMedia(constraints);
-      if (constraints?.audio) liveMicStreams.add(stream);
+      // why: a retired getUserMedia promise may resolve after a successor
+      // listen starts. Keep the stream attached to the requesting generation
+      // so stale cleanup cannot stop its successor's microphone.
+      if (constraints?.audio) liveMicStreams.set(stream, owner);
       return stream;
     };
   }
-  const releaseMicTracks = () => {
-    for (const stream of liveMicStreams) {
+  /** @param {number|null} [owner] */
+  const releaseMicTracks = (owner = null) => {
+    for (const [stream, streamOwner] of liveMicStreams) {
+      if (owner !== null && streamOwner !== owner) continue;
       for (const track of stream.getTracks()) {
         try { track.stop(); } catch { /* already stopped */ }
       }
+      liveMicStreams.delete(stream);
     }
-    liveMicStreams.clear();
+  };
+  /** @param {MediaStream[]} streams */
+  const releaseExactMicTracks = (streams) => {
+    for (const stream of streams) {
+      for (const track of stream.getTracks()) {
+        try { track.stop(); } catch { /* already stopped */ }
+      }
+      liveMicStreams.delete(stream);
+    }
   };
   /** @type {ReturnType<typeof setTimeoutFn>|null} */
   let noSpeechTimer = null;
@@ -78,72 +94,138 @@ export const createVoiceHostRuntime = ({
     if (noSpeechTimer !== null) clearTimeoutFn(noSpeechTimer);
     noSpeechTimer = null;
   };
+  /** @param {unknown} value @param {number} max */
+  const boundedString = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
+  /** @param {unknown} value */
+  const targetId = (value) => typeof value === 'string' ? value.slice(0, 256) : null;
   /** @param {any} event */
   const push = (event) => { void Promise.resolve(emit(event)).catch(() => {}); };
   /** @param {any} error */
-  const onError = (error) => {
+  const pushError = (error) => {
     clearNoSpeechTimer();
     releaseMicTracks();
-    push({ type: 'voice/error', payload: error });
+    push({
+      type: 'voice/error',
+      payload: {
+        name: boundedString(error?.name, 64) || 'TranscriberError',
+        message: boundedString(error?.message, 512),
+        ...(boundedString(error?.code, 64) ? { code: boundedString(error.code, 64) } : {}),
+        targetId: targetId(error?.targetId),
+      },
+    });
   };
-  /** @param {string|undefined} targetId */
-  const armNoSpeechTimer = (targetId) => {
+  /** @param {number} owner @param {()=>boolean} current */
+  const operationCurrent = (owner, current) => generation === owner && current();
+  /** @param {string|undefined} ownerTargetId @param {number} owner @param {any} active @param {()=>boolean} current */
+  const armNoSpeechTimer = (ownerTargetId, owner, active, current) => {
     clearNoSpeechTimer();
     noSpeechTimer = setTimeoutFn(() => {
-      void Promise.resolve(transcriber?.stop?.()).catch(() => {}).finally(() => {
+      if (!operationCurrent(owner, current) || transcriber !== active) return;
+      void Promise.resolve(active?.stop?.()).catch(() => {}).finally(() => {
+        if (!operationCurrent(owner, current) || transcriber !== active) return;
         releaseMicTracks();
-        onError({
+        pushError({
           name: 'VoiceNoSpeechError',
           message: 'Heard nothing — mic released. Click the mic to try again.',
-          targetId,
+          targetId: ownerTargetId,
         });
       });
     }, noSpeechMs);
   };
   const teardown = async () => {
+    generation += 1;
     clearNoSpeechTimer();
-    try { await transcriber?.teardown?.(); }
-    finally {
-      transcriber = null;
-      releaseMicTracks();
-    }
+    const active = transcriber;
+    transcriber = null;
+    // why: release the exact retiring microphones before a possibly slow
+    // engine teardown. A successor may then start without a late finally
+    // stopping streams acquired by its newer generation.
+    const retiringStreams = [...liveMicStreams.keys()];
+    releaseExactMicTracks(retiringStreams);
+    try { await active?.teardown?.(); }
+    finally { releaseExactMicTracks(retiringStreams); }
     return { ok: true };
   };
-  const handle = async (/** @type {any} */ command) => {
+  /** @param {any} active @param {number} owner */
+  const retireStale = async (active, owner) => {
+    if (transcriber === active) transcriber = null;
+    try { await active?.teardown?.(); } catch {}
+    releaseMicTracks(owner);
+    return {
+      ok: false, error: 'voice-host-generation-retired', outcomeKnown: true, retryable: true,
+    };
+  };
+  /**
+   * @param {any} command
+   * @param {{current?:()=>boolean}} [custody]
+   */
+  const handle = async (command, { current = () => true } = {}) => {
+    if (typeof current !== 'function') return { ok: false, error: 'voice-custody-invalid' };
+    if (command?.type === 'voice/teardown') {
+      try { return await teardown(); } catch (cause) { return voiceFailure(cause); }
+    }
+    if (command?.type === 'voice/stop') generation += 1;
+    const owner = command?.type === 'voice/init' || command?.type === 'voice/listen'
+      ? ++generation : generation;
     try {
       if (command?.type === 'voice/init') {
-        if (!transcriber) {
+        let active = transcriber;
+        if (!active) {
           const { createBestTranscriber } = await getEngine();
-          transcriber = createBestTranscriber({}, command.engine);
+          if (!operationCurrent(owner, current)) return retireStale(null, owner);
+          active = createBestTranscriber({}, command.engine);
+          if (!operationCurrent(owner, current)) return retireStale(active, owner);
+          transcriber = active;
         }
-        if (transcriber.engine === 'moonshine') {
+        if (active.engine === 'moonshine') {
           const store = await getModelStore();
+          if (!operationCurrent(owner, current)) return retireStale(active, owner);
           const { files } = await store.getModel(command.variant, { dev: true });
-          await transcriber.init({ files });
-        } else await transcriber.init();
-        return { ok: true, engine: transcriber.engine };
+          if (!operationCurrent(owner, current)) return retireStale(active, owner);
+          await active.init({ files });
+        } else await active.init();
+        if (!operationCurrent(owner, current)) return retireStale(active, owner);
+        return { ok: true, engine: active.engine };
       }
       if (command?.type === 'voice/listen') {
-        if (!transcriber) return { ok: false, error: 'not-initialized' };
-        await transcriber.listenFor(
+        const active = transcriber;
+        if (!active) return { ok: false, error: 'not-initialized' };
+        if (!operationCurrent(owner, current)) return retireStale(active, owner);
+        await active.listenFor(
           command.targetId,
           (/** @type {any} */ chunk) => {
-            if (noSpeechTimer !== null) armNoSpeechTimer(chunk?.targetId);
-            push({ type: 'voice/chunk', payload: chunk });
+            if (!operationCurrent(owner, current) || transcriber !== active) return;
+            if (noSpeechTimer !== null) {
+              armNoSpeechTimer(chunk?.targetId, owner, active, current);
+            }
+            push({
+              type: 'voice/chunk',
+              payload: {
+                text: boundedString(chunk?.text, 65_536),
+                committed: chunk?.committed === true,
+                targetId: targetId(chunk?.targetId),
+              },
+            });
           },
-          onError,
+          (/** @type {any} */ error) => {
+            if (!operationCurrent(owner, current) || transcriber !== active) return;
+            pushError(error);
+          },
           (/** @type {{targetId?:string|null}} */ info = {}) => {
+            if (!operationCurrent(owner, current) || transcriber !== active) return;
             clearNoSpeechTimer();
             releaseMicTracks();
-            push({ type: 'voice/auto-stop', payload: { targetId: info.targetId } });
+            push({ type: 'voice/auto-stop', payload: { targetId: targetId(info.targetId) } });
           },
         );
-        armNoSpeechTimer(command.targetId);
+        if (!operationCurrent(owner, current)) return retireStale(active, owner);
+        armNoSpeechTimer(command.targetId, owner, active, current);
         return { ok: true };
       }
       if (command?.type === 'voice/stop') {
         clearNoSpeechTimer();
-        try { await transcriber?.stop?.(); }
+        const active = transcriber;
+        try { await active?.stop?.(); }
         finally { releaseMicTracks(); }
         return { ok: true };
       }
@@ -151,7 +233,6 @@ export const createVoiceHostRuntime = ({
         transcriber?.setSilenceThreshold?.(command.ms);
         return { ok: true };
       }
-      if (command?.type === 'voice/teardown') return teardown();
       return { ok: false, error: 'unknown-voice-command' };
     } catch (cause) {
       return voiceFailure(cause);

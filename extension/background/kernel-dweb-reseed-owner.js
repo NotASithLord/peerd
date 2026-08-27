@@ -12,12 +12,10 @@ export const createKernelDwebReseedOwner = ({
     withDwebPublication, withAppLifecycle, sendMessage].every(
     (value) => typeof value === 'function',
   )) throw new TypeError('kernel-dweb-reseed-owner-config-invalid');
-  /** @type {string|null} */
-  let lastGeneration = null;
-  /** @type {string|null} */
-  let pendingGeneration = null;
-  /** @type {Promise<any>|null} */
-  let inFlight = null;
+  const completedGenerations = new Set();
+  /** @type {Map<string, Promise<any>>} */
+  const pendingGenerations = new Map();
+  let tail = Promise.resolve();
   const reconstructRelease = async (/** @type {any} */ app) => {
     const oid = app.dweb.source_git_oid;
     if (oid == null) return {};
@@ -63,16 +61,17 @@ export const createKernelDwebReseedOwner = ({
       return { ok: false, seeded: 0, error: 'dweb-reseed-list-failed' };
     }
     let seeded = 0;
+    let failed = 0;
     for (const candidate of candidates) {
       try {
-        await withDwebPublication((/** @type {()=>boolean} */ current) =>
+        const outcome = await withDwebPublication((/** @type {()=>boolean} */ current) =>
           withAppLifecycle(candidate.id, async () => {
             const app = await appRegistry.get(candidate.id);
             if (!current() || !active() || locked()
                 || !app?.shared || app.dweb?.local !== true
                 || typeof app.dweb?.slug !== 'string'
                 || !Number.isFinite(app.dweb?.manifest_created)
-                || typeof app.dweb?.hash !== 'string') return;
+                || typeof app.dweb?.hash !== 'string') return 'skipped';
             const release = await reconstructRelease(app);
             const reply = await sendMessage({
               type: 'dweb/base-host/share-app',
@@ -88,13 +87,18 @@ export const createKernelDwebReseedOwner = ({
               reseed: true,
               ...release,
             });
-            if (reply?.ok) seeded += 1;
+            return reply?.ok === true ? 'seeded' : 'failed';
           }));
+        if (outcome === 'seeded') seeded += 1;
+        else if (outcome === 'failed') failed += 1;
       } catch (cause) {
+        failed += 1;
         log.debug('[kernel] dweb reseed failed', candidate.id, cause);
       }
     }
-    return { ok: true, seeded };
+    return failed > 0
+      ? { ok: false, seeded, failed, error: 'dweb-reseed-partial' }
+      : { ok: true, seeded };
   };
   const onHostGeneration = (/** @type {{hostEpoch?:unknown,meshGeneration?:unknown}} */ event) => {
     const meshGeneration = event?.meshGeneration;
@@ -104,19 +108,28 @@ export const createKernelDwebReseedOwner = ({
       return Promise.resolve({ ok: false, seeded: 0, error: 'dweb-generation-invalid' });
     }
     const generation = `${event.hostEpoch}:${meshGeneration}`;
-    if (generation === pendingGeneration && inFlight) return inFlight;
-    if (generation === lastGeneration) {
-      return inFlight ?? Promise.resolve({ ok: true, seeded: 0, coalesced: true });
+    const existing = pendingGenerations.get(generation);
+    if (existing) return existing;
+    if (completedGenerations.has(generation)) {
+      return Promise.resolve({ ok: true, seeded: 0, coalesced: true });
     }
-    pendingGeneration = generation;
-    inFlight = reseed().then((result) => {
-      if (result?.ok === true) lastGeneration = generation;
+    const operation = tail.then(reseed).then((result) => {
+      if (result?.ok === true) {
+        completedGenerations.add(generation);
+        // why: host generations are only a replay fence for this background
+        // lifetime. Bound the history without letting a delayed duplicate of
+        // the immediately prior generations repeat a full publication pass.
+        while (completedGenerations.size > 32) {
+          completedGenerations.delete(completedGenerations.values().next().value);
+        }
+      }
       return result;
     }).finally(() => {
-      if (pendingGeneration === generation) pendingGeneration = null;
-      inFlight = null;
+      pendingGenerations.delete(generation);
     });
-    return inFlight;
+    pendingGenerations.set(generation, operation);
+    tail = operation.then(() => {}, () => {});
+    return operation;
   };
   return Object.freeze({ onHostGeneration });
 };
