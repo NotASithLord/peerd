@@ -10,8 +10,6 @@ import {
   COLD_START_LANES,
   COLD_START_PHASES,
   COLD_START_TIMING_TARGETS,
-  COLD_START_TARGET_CUTOVER,
-  NATIVE_FLOOR_CONTRACT,
   COLD_GRAPH_RATCHETS,
   PACKAGE_COLD_GRAPH_RATCHETS,
   COLD_SOURCE_RATCHETS,
@@ -26,8 +24,6 @@ export {
   COLD_START_LANES,
   COLD_START_PHASES,
   COLD_START_TIMING_TARGETS,
-  COLD_START_TARGET_CUTOVER,
-  NATIVE_FLOOR_CONTRACT,
   COLD_GRAPH_RATCHETS,
   PACKAGE_COLD_GRAPH_RATCHETS,
   COLD_SOURCE_RATCHETS,
@@ -61,141 +57,6 @@ const requireMetric = (failures, label, summary, key, ceiling) => {
 const validSha256 = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const validGitSha = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const sameSummary = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
-  && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
-const safeIdentityId = (value) => typeof value === 'string' && value.length >= 8
-  && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
-const KERNEL_TIMING_KEYS = Object.freeze([
-  'bundleExecutionBeforeKernelMs', 'clock', 'kernelReadyAfterModuleMs',
-  'moduleEvaluationMs', 'replyAfterBundleStartMs', 'replyAfterModuleMs',
-  'replyFromWorkerTimeOriginMs', 'vaultReadyAfterModuleMs',
-]);
-const HOST_QUIESCENCE_KEYS = Object.freeze([
-  'busyFraction', 'clock', 'failures', 'load1', 'load1PerCpu', 'logicalCpus',
-  'maxBusyFraction', 'maxLoad1PerCpu', 'ok', 'schema', 'windowMs',
-]);
-const timingClose = (left, right) => Math.abs(left - right) <= 0.1;
-
-const validHostQuiescence = (value) => exactKeys(value, HOST_QUIESCENCE_KEYS)
-  && value.schema === 1
-  && value.clock === 'host-cpu-times'
-  && value.windowMs === NATIVE_FLOOR_CONTRACT.hostQuiescenceWindowMs
-  && Number.isInteger(value.logicalCpus) && value.logicalCpus > 0
-  && finite(value.load1) && value.load1 >= 0
-  && finite(value.load1PerCpu) && value.load1PerCpu >= 0
-  && finite(value.busyFraction) && value.busyFraction >= 0 && value.busyFraction <= 1
-  && value.maxLoad1PerCpu === NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax
-  && value.maxBusyFraction === NATIVE_FLOOR_CONTRACT.hostBusyFractionMax
-  && value.load1PerCpu <= value.maxLoad1PerCpu
-  && value.busyFraction <= value.maxBusyFraction
-  && value.ok === true
-  && Array.isArray(value.failures) && value.failures.length === 0;
-
-const validateNativeKernelSample = (failures, label, sample) => {
-  const timing = sample?.kernelTiming;
-  if (!exactKeys(timing, KERNEL_TIMING_KEYS)) {
-    failures.push(`${label} kernel timing schema is invalid`);
-  } else {
-    const numeric = KERNEL_TIMING_KEYS.filter((key) => key !== 'clock');
-    if (timing.clock !== 'worker-performance-now-diagnostic'
-        || numeric.some((key) => !finite(timing[key]) || timing[key] < 0)) {
-      failures.push(`${label} kernel timing values are invalid`);
-    } else {
-      if (timing.vaultReadyAfterModuleMs > timing.kernelReadyAfterModuleMs
-          || timing.kernelReadyAfterModuleMs > timing.replyAfterModuleMs
-          || timing.moduleEvaluationMs > timing.replyFromWorkerTimeOriginMs
-          || timing.bundleExecutionBeforeKernelMs > timing.replyAfterBundleStartMs
-          || !timingClose(
-            timing.replyFromWorkerTimeOriginMs,
-            timing.moduleEvaluationMs + timing.replyAfterModuleMs,
-          )
-          || !timingClose(
-            timing.replyAfterBundleStartMs,
-            timing.bundleExecutionBeforeKernelMs + timing.replyAfterModuleMs,
-          )) {
-        failures.push(`${label} kernel timing order is invalid`);
-      }
-      const ceiling = COLD_START_TIMING_TARGETS.chrome.usableMaxMs;
-      if (timing.replyFromWorkerTimeOriginMs > ceiling) {
-        failures.push(`${label} replyFromWorkerTimeOriginMs ${timing.replyFromWorkerTimeOriginMs}ms exceeds ${ceiling}ms`);
-      }
-    }
-  }
-  const identity = sample?.assemblyIdentity;
-  if (!exactKeys(identity, ['bootId', 'buildId', 'kernelEpoch', 'schema'])
-      || identity.schema !== 1 || !safeIdentityId(identity.buildId)
-      || !safeIdentityId(identity.bootId) || !safeIdentityId(identity.kernelEpoch)
-      || identity.bootId === identity.kernelEpoch) {
-    failures.push(`${label} assembly identity is invalid`);
-  }
-  const assembly = sample?.assembly;
-  if (!assembly || typeof assembly !== 'object' || Array.isArray(assembly)
-      || !sameSummary(assembly.identity, identity)
-      || !exactKeys(assembly.target, ['firefox', 'selfHostedChrome'])
-      || assembly.target.firefox !== false || assembly.target.selfHostedChrome !== false) {
-    failures.push(`${label} Store target assembly posture is invalid`);
-  }
-};
-
-const nativeFloorFailures = (result) => {
-  const failures = [];
-  const metadata = NATIVE_FLOOR_CONTRACT;
-  for (const [label, value] of [
-    ['result', result?.nativeFloor],
-    ['measurement', result?.measurement?.nativeFloor],
-    ['artifact', result?.artifact?.nativeFloor],
-  ]) {
-    if (!sameSummary(value, metadata)) failures.push(`chrome native-floor ${label} metadata is invalid`);
-  }
-  if (result?.measurement?.sourceDirty !== false || result?.artifact?.sourceDirty !== false) {
-    failures.push('chrome native-floor must be measured from a clean commit');
-  }
-  const fresh = result?.freshProfile?.rawSamples ?? [];
-  const wakes = result?.forcedColdWake?.rawSamples ?? [];
-  const hostQuiescence = result?.freshProfile?.hostQuiescence;
-  if (!Array.isArray(hostQuiescence)
-      || hostQuiescence.length !== metadata.freshProcesses) {
-    failures.push('chrome native-floor host quiescence evidence is incomplete');
-  } else {
-    hostQuiescence.forEach((sample, index) => {
-      const { sampleIndex, ...evidence } = sample ?? {};
-      if (sampleIndex !== index + 1 || !validHostQuiescence(evidence)) {
-        failures.push(`chrome native-floor host quiescence sample ${index + 1} is invalid`);
-      }
-      const raw = fresh.find((candidate) => candidate?.sampleIndex === sampleIndex);
-      if (raw && !sameSummary(raw.hostQuiescence, evidence)) {
-        failures.push(`chrome native-floor host quiescence sample ${index + 1} is not bound to its fresh run`);
-      }
-    });
-  }
-  const bootIds = new Set();
-  const kernelEpochs = new Set();
-  fresh.forEach((sample, index) => {
-    const label = `chrome native-floor fresh sample ${index + 1}`;
-    validateNativeKernelSample(failures, label, sample);
-    const identity = sample?.assemblyIdentity;
-    if (identity) { bootIds.add(identity.bootId); kernelEpochs.add(identity.kernelEpoch); }
-    const wake = wakes.find((candidate) => candidate?.sampleIndex === sample?.sampleIndex);
-    if (!wake) return;
-    const wakeIdentity = wake.assemblyIdentity;
-    if (identity?.buildId !== wakeIdentity?.buildId
-        || identity?.bootId === wakeIdentity?.bootId
-        || identity?.kernelEpoch === wakeIdentity?.kernelEpoch) {
-      failures.push(`${label} identity did not rotate on confirmed-stop wake`);
-    }
-  });
-  wakes.forEach((sample, index) => {
-    validateNativeKernelSample(failures, `chrome native-floor wake sample ${index + 1}`, sample);
-    const identity = sample?.assemblyIdentity;
-    if (identity) { bootIds.add(identity.bootId); kernelEpochs.add(identity.kernelEpoch); }
-  });
-  const expectedIdentities = metadata.freshProcesses + metadata.confirmedStopWakes;
-  if (bootIds.size !== expectedIdentities || kernelEpochs.size !== expectedIdentities) {
-    failures.push('chrome native-floor worker identities are not unique across fresh and wake samples');
-  }
-  return failures;
-};
-
 const graphFailures = (browser, result, policy) => {
   const failures = [];
   const channels = ['store', 'preview'];
@@ -354,8 +215,7 @@ const completenessFailures = (browser, result, lane) => {
     failures.push(`${browser} measurement clock is not host-monotonic`);
   }
   const runtimeTarget = result.measurement?.runtimeTarget;
-  if (!['release', 'native-floor'].includes(runtimeTarget)
-      || result.artifact?.runtimeTarget !== runtimeTarget) {
+  if (runtimeTarget !== 'release' || result.artifact?.runtimeTarget !== runtimeTarget) {
     failures.push(`${browser} runtime target binding is invalid`);
   }
   if (typeof result.measurement?.runtimeSurface !== 'string'
@@ -375,13 +235,7 @@ const completenessFailures = (browser, result, lane) => {
   if (typeof result.measurement?.sourceDirty !== 'boolean') failures.push(`${browser} source dirty flag is missing`);
   if (!validSha256(result.measurement?.hostSha256)) failures.push(`${browser} host identity SHA-256 is missing`);
   if (!['candidate', 'base'].includes(result.measurement?.role)) failures.push(`${browser} measurement role is invalid`);
-  const contract = runtimeTarget === NATIVE_FLOOR_CONTRACT.runtimeTarget
-    && browser === NATIVE_FLOOR_CONTRACT.browser
-    ? {
-      fresh: NATIVE_FLOOR_CONTRACT.freshProcesses,
-      wakes: NATIVE_FLOOR_CONTRACT.confirmedStopWakes,
-    }
-    : COLD_START_LANES[lane]?.[browser];
+  const contract = COLD_START_LANES[lane]?.[browser];
   if (!contract) return [...failures, `no sample contract for ${lane}/${browser}`];
   const phases = COLD_START_PHASES[browser];
   for (const [groupName, phase] of Object.entries(phases)) {
@@ -401,11 +255,6 @@ const completenessFailures = (browser, result, lane) => {
         failures.push(`chrome forcedColdWake sample ${index + 1} lacks authoritative stop state`);
       }
     });
-  }
-  if (runtimeTarget === NATIVE_FLOOR_CONTRACT.runtimeTarget) {
-    if (browser !== NATIVE_FLOOR_CONTRACT.browser) {
-      failures.push(`${browser} is not supported by the native-floor contract`);
-    } else failures.push(...nativeFloorFailures(result));
   }
   return failures;
 };
@@ -557,7 +406,7 @@ export const assessColdStartReport = (report, {
 } = {}) => {
   const failures = [];
   if (report?.schema !== 3) failures.push('report schema is unsupported');
-  if (!['release', 'native-floor'].includes(report?.runtimeTarget)
+  if (report?.runtimeTarget !== 'release'
       || report?.options?.runtimeTarget !== report?.runtimeTarget) {
     failures.push('report runtime target binding is invalid');
   }
@@ -568,20 +417,6 @@ export const assessColdStartReport = (report, {
   if (typeof report?.coldBudgetMode !== 'string'
       || report?.options?.coldBudgetMode !== report?.coldBudgetMode) {
     failures.push('report cold budget mode binding is invalid');
-  }
-  if (report?.runtimeTarget === NATIVE_FLOOR_CONTRACT.runtimeTarget) {
-    if (!sameSummary(report?.nativeFloor, NATIVE_FLOOR_CONTRACT)) {
-      failures.push('report native-floor metadata is invalid');
-    }
-    if (report?.runtimeSurface !== NATIVE_FLOOR_CONTRACT.runtimeSurface
-        || report?.coldBudgetMode !== NATIVE_FLOOR_CONTRACT.coldBudgetMode
-        || report?.options?.browser !== NATIVE_FLOOR_CONTRACT.browser
-        || report?.options?.chromeProcesses !== NATIVE_FLOOR_CONTRACT.freshProcesses
-        || report?.options?.chromeWakes !== NATIVE_FLOOR_CONTRACT.confirmedStopWakes) {
-      failures.push('report native-floor execution contract is invalid');
-    }
-  } else if (report?.nativeFloor != null) {
-    failures.push('non-native report carries native-floor metadata');
   }
   const measuredAtMs = Date.parse(report?.measuredAt ?? '');
   if (!finite(measuredAtMs) || measuredAtMs > nowMs || nowMs - measuredAtMs > maxAgeMs) {
@@ -620,12 +455,7 @@ export const assessColdStartReport = (report, {
     failures.push('report comparison mode is invalid');
   }
   if (ciReport && comparisonMode !== 'absolute-ratchet') {
-    failures.push('required report comparison mode changed before target cutover');
-  }
-  if (report?.targetCutover?.ready !== COLD_START_TARGET_CUTOVER.ready
-      || report?.targetCutover?.unmetGate !== COLD_START_TARGET_CUTOVER.unmetGate
-      || report?.targetCutover?.packagingContract !== COLD_START_TARGET_CUTOVER.packagingContract) {
-    failures.push('report omits or alters the explicit target-cutover comparison gate');
+    failures.push('required report comparison mode is invalid');
   }
   const profile = COLD_START_LANES[report?.lane];
   const requiredReport = report?.lane !== 'local' && profile;

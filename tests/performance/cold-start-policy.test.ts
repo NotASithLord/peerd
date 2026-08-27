@@ -5,9 +5,7 @@ import {
   assessColdStartResult,
   COLD_START_LANES,
   COLD_START_PHASES,
-  COLD_START_TARGET_CUTOVER,
   PACKAGE_COLD_GRAPH_RATCHETS,
-  NATIVE_FLOOR_CONTRACT,
   summarizeRaw,
 } from '../../scripts/bench/cold-start-policy.mjs';
 
@@ -80,7 +78,6 @@ const chromeResult = ({
     browser: 'chrome',
     version: 'Chrome/140.0.0.0',
     failed: false,
-    nativeFloor: null,
     measurement: {
       role,
       clock: 'host-monotonic:node-hrtime',
@@ -88,7 +85,6 @@ const chromeResult = ({
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
-      nativeFloor: null,
       sourceCommitSha,
       sourcePackageVersion: '0.7.3',
       sourceDirty: false,
@@ -115,7 +111,6 @@ const chromeResult = ({
       packageVersion: '0.7.3',
       sourceCommitSha,
       sourceDirty: false,
-      nativeFloor: null,
     },
     packagedGraphs: packagedGraphsByChannel.store,
     packagedGraphsByChannel,
@@ -155,7 +150,6 @@ const firefoxResult = ({
     browser: 'firefox',
     version: '140.0',
     failed: false,
-    nativeFloor: null,
     measurement: {
       role,
       clock: 'host-monotonic:node-hrtime',
@@ -163,7 +157,6 @@ const firefoxResult = ({
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
-      nativeFloor: null,
       sourceCommitSha,
       sourcePackageVersion: '0.7.3',
       sourceDirty: false,
@@ -193,7 +186,6 @@ const firefoxResult = ({
       packageVersion: '0.7.3',
       sourceCommitSha,
       sourceDirty: false,
-      nativeFloor: null,
     },
     packagedGraphs: packagedGraphsByChannel.store,
     packagedGraphsByChannel,
@@ -227,97 +219,6 @@ const interleavedSchedule = (samples: number) => Array.from(
 const assessChrome = (result: ReturnType<typeof chromeResult>, extra = {}) =>
   assessColdStartResult('chrome', result, {
     lane: 'pr', graphPolicy: 'ratchet', requireTimingTargets: false, ...extra,
-  });
-
-const kernelTiming = () => ({
-  clock: 'worker-performance-now-diagnostic',
-  moduleEvaluationMs: 100,
-  bundleExecutionBeforeKernelMs: 50,
-  vaultReadyAfterModuleMs: 10,
-  kernelReadyAfterModuleMs: 20,
-  replyAfterModuleMs: 100,
-  replyAfterBundleStartMs: 150,
-  replyFromWorkerTimeOriginMs: 200,
-});
-
-const hostQuiescence = () => ({
-  schema: 1,
-  clock: 'host-cpu-times',
-  windowMs: NATIVE_FLOOR_CONTRACT.hostQuiescenceWindowMs,
-  logicalCpus: 10,
-  load1: 2,
-  load1PerCpu: 0.2,
-  busyFraction: 0.1,
-  maxLoad1PerCpu: NATIVE_FLOOR_CONTRACT.hostLoad1PerCpuMax,
-  maxBusyFraction: NATIVE_FLOOR_CONTRACT.hostBusyFractionMax,
-  ok: true,
-  failures: [],
-});
-
-const nativeResult = () => {
-  const result: any = chromeResult({ lane: 'local' });
-  result.nativeFloor = NATIVE_FLOOR_CONTRACT;
-  Object.assign(result.measurement, {
-    runtimeTarget: 'native-floor', runtimeSurface: 'home',
-    coldBudgetMode: 'native-target', nativeFloor: NATIVE_FLOOR_CONTRACT,
-  });
-  Object.assign(result.artifact, {
-    runtimeTarget: 'native-floor', runtimeSurface: 'home',
-    coldBudgetMode: 'native-target', nativeFloor: NATIVE_FLOOR_CONTRACT,
-  });
-  for (const channel of ['store', 'preview'] as const) {
-    result.packagedGraphsByChannel[channel] = Object.fromEntries(
-      Object.entries(PACKAGE_COLD_GRAPH_RATCHETS[channel].chrome)
-        .map(([name, value]) => [name, graph(name === 'serviceWorker'
-          ? { modules: 1, graphBytes: 200_000, entryBytes: 200_000 }
-          : value as { modules: number; graphBytes: number; entryBytes: number })]),
-    );
-  }
-  result.packagedGraphs = result.packagedGraphsByChannel.store;
-  result.freshProfile = summarizedGroup(
-    COLD_START_PHASES.chrome.freshProfile, NATIVE_FLOOR_CONTRACT.freshProcesses,
-    { vaultGateReadyFromWorkerTargetMs: 2_000 },
-  );
-  result.forcedColdWake = summarizedGroup(
-    COLD_START_PHASES.chrome.forcedColdWake, NATIVE_FLOOR_CONTRACT.confirmedStopWakes,
-    { vaultGateReadyFromWakeMs: 1_000 },
-  );
-  result.freshProfile.rawSamples.forEach((sample: any, index: number) => {
-    sample.hostQuiescence = hostQuiescence();
-    sample.kernelTiming = kernelTiming() as any;
-    const identity = {
-      schema: 1, buildId: 'native-build-identity',
-      bootId: `fresh-boot-${index + 1}`, kernelEpoch: `fresh-epoch-${index + 1}`,
-    };
-    sample.assemblyIdentity = identity as any;
-    sample.assembly = {
-      identity, target: { firefox: false, selfHostedChrome: false },
-      cutoverReady: false, semantic: { migrated: 86, total: 161, ready: false },
-    } as any;
-  });
-  result.freshProfile.hostQuiescence = result.freshProfile.rawSamples.map((sample: any) => ({
-    sampleIndex: sample.sampleIndex,
-    ...sample.hostQuiescence,
-  }));
-  result.forcedColdWake.rawSamples.forEach((sample: any, index: number) => {
-    sample.stoppedRunningStatus = 'stopped';
-    sample.kernelTiming = kernelTiming() as any;
-    const identity = {
-      schema: 1, buildId: 'native-build-identity',
-      bootId: `wake-boot-${index + 1}`, kernelEpoch: `wake-epoch-${index + 1}`,
-    };
-    sample.assemblyIdentity = identity as any;
-    sample.assembly = {
-      identity, target: { firefox: false, selfHostedChrome: false },
-      cutoverReady: false, semantic: { migrated: 86, total: 161, ready: false },
-    } as any;
-  });
-  return result;
-};
-
-const assessNative = (result: ReturnType<typeof nativeResult>) =>
-  assessColdStartResult('chrome', result, {
-    lane: 'local', graphPolicy: 'integrity', requireTimingTargets: true,
   });
 
 describe('cold-start policy', () => {
@@ -378,98 +279,6 @@ describe('cold-start policy', () => {
     transitional.forcedColdWake.rawSamples[0].stoppedRunningStatus = 'stopping';
     expect(assessChrome(transitional).failures)
       .toContain('chrome forcedColdWake sample 1 lacks authoritative stop state');
-  });
-
-  test('native floor requires three exact timing-and-identity-bound fresh/wake pairs', () => {
-    expect(assessNative(nativeResult())).toEqual({ ok: true, failures: [] });
-
-    const missingTiming = nativeResult();
-    delete (missingTiming.freshProfile.rawSamples[0].kernelTiming as any)
-      .replyFromWorkerTimeOriginMs;
-    expect(assessNative(missingTiming).failures)
-      .toContain('chrome native-floor fresh sample 1 kernel timing schema is invalid');
-
-    const staleIdentity = nativeResult();
-    staleIdentity.forcedColdWake.rawSamples[0].assemblyIdentity =
-      staleIdentity.freshProfile.rawSamples[0].assemblyIdentity;
-    expect(assessNative(staleIdentity).failures).toEqual(expect.arrayContaining([
-      'chrome native-floor fresh sample 1 identity did not rotate on confirmed-stop wake',
-      'chrome native-floor worker identities are not unique across fresh and wake samples',
-    ]));
-
-    const incomplete = nativeResult();
-    incomplete.freshProfile.attempted = 2;
-    expect(assessNative(incomplete).failures)
-      .toContain('chrome freshProfile attempted 2; lane requires exactly 3');
-
-    const missingHostEvidence = nativeResult();
-    missingHostEvidence.freshProfile.hostQuiescence.pop();
-    expect(assessNative(missingHostEvidence).failures)
-      .toContain('chrome native-floor host quiescence evidence is incomplete');
-
-    const overloaded = nativeResult();
-    overloaded.freshProfile.hostQuiescence[0].busyFraction = 0.9;
-    overloaded.freshProfile.hostQuiescence[0].ok = false;
-    overloaded.freshProfile.hostQuiescence[0].failures = ['busy'];
-    expect(assessNative(overloaded).failures)
-      .toContain('chrome native-floor host quiescence sample 1 is invalid');
-  });
-
-  test('native floor caps every worker-origin reply at the checked-in timing ceiling', () => {
-    const result = nativeResult();
-    Object.assign(result.freshProfile.rawSamples[0].kernelTiming as any, {
-      replyAfterModuleMs: 2_901,
-      replyAfterBundleStartMs: 2_951,
-      replyFromWorkerTimeOriginMs: 3_001,
-    });
-    expect(assessNative(result).failures).toContain(
-      'chrome native-floor fresh sample 1 replyFromWorkerTimeOriginMs 3001ms exceeds 3000ms',
-    );
-  });
-
-  test('native floor cannot be relabeled or detached from its clean commit metadata', () => {
-    const result = nativeResult();
-    result.artifact.runtimeTarget = 'release';
-    result.artifact.sourceDirty = true;
-    result.artifact.nativeFloor = { ...NATIVE_FLOOR_CONTRACT, liveManifestClaimed: true };
-    expect(assessNative(result).failures).toEqual(expect.arrayContaining([
-      'chrome runtime target binding is invalid',
-      'chrome artifact source commit binding is invalid',
-      'chrome native-floor artifact metadata is invalid',
-      'chrome native-floor must be measured from a clean commit',
-    ]));
-  });
-
-  test('native-floor report binds its local execution contract end to end', () => {
-    const now = Date.UTC(2026, 7, 22, 12);
-    const result = nativeResult();
-    const report = {
-      schema: 3,
-      measuredAt: new Date(now - 1_000).toISOString(),
-      lane: 'local',
-      packageVersion: '0.7.3',
-      runtimeTarget: 'native-floor',
-      runtimeSurface: 'home',
-      coldBudgetMode: 'native-target',
-      nativeFloor: NATIVE_FLOOR_CONTRACT,
-      commitSha: result.measurement.sourceCommitSha,
-      baseCommitSha: result.measurement.sourceCommitSha,
-      dirty: false,
-      hostSha256: HASH.host,
-      comparison: { mode: 'absolute-ratchet' },
-      targetCutover: COLD_START_TARGET_CUTOVER,
-      options: {
-        browser: 'chrome', runtimeTarget: 'native-floor', runtimeSurface: 'home',
-        coldBudgetMode: 'native-target', graphPolicy: 'integrity', requireTimingTargets: true,
-        chromeProcesses: 3, chromeWakes: 3,
-      },
-      results: { chrome: result },
-    };
-    expect(assessColdStartReport(report, { nowMs: now, requireClean: true }))
-      .toEqual({ ok: true, failures: [] });
-    report.options.runtimeTarget = 'release';
-    expect(assessColdStartReport(report, { nowMs: now, requireClean: true }).failures)
-      .toContain('report runtime target binding is invalid');
   });
 
   test('fails one byte of growth in either shipped channel', () => {
@@ -621,7 +430,6 @@ describe('cold-start policy', () => {
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
-      nativeFloor: null,
       commitSha: '3'.repeat(40),
       baseCommitSha: '4'.repeat(40),
       dirty: false,
@@ -634,7 +442,6 @@ describe('cold-start policy', () => {
           firefox: interleavedSchedule(profile.firefox.fresh),
         },
       },
-      targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'all', allowFailures: false, unsafeNoSandbox: false,
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
@@ -671,7 +478,6 @@ describe('cold-start policy', () => {
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
-      nativeFloor: null,
       commitSha: '1'.repeat(40),
       baseCommitSha: '2'.repeat(40),
       dirty: false,
@@ -681,7 +487,6 @@ describe('cold-start policy', () => {
         kernel: { platform: 'linux', release: '6.11.0', arch: 'x64' },
       },
       comparison: { mode: 'absolute-ratchet' },
-      targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'all', allowFailures: false, unsafeNoSandbox: false,
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
@@ -699,10 +504,6 @@ describe('cold-start policy', () => {
     };
     expect(assessColdStartReport(report, { nowMs: now }).failures)
       .toContain('chrome: store packaged graph set is missing');
-    (report as any).targetCutover = { ...COLD_START_TARGET_CUTOVER, ready: true };
-    expect(assessColdStartReport(report, { nowMs: now }).failures)
-      .toContain('report omits or alters the explicit target-cutover comparison gate');
-    (report as any).targetCutover = COLD_START_TARGET_CUTOVER;
     report.options.chromeProcesses -= 1;
     report.dirty = true;
     delete (report.results as any).firefox;
@@ -726,13 +527,11 @@ describe('cold-start policy', () => {
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
-      nativeFloor: null,
       commitSha: result.measurement.sourceCommitSha,
       baseCommitSha: result.measurement.sourceCommitSha,
       dirty: false,
       hostSha256: HASH.host,
       comparison: { mode: 'absolute-ratchet' },
-      targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
@@ -755,7 +554,6 @@ describe('cold-start policy', () => {
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
-      nativeFloor: null,
       commitSha: candidate.measurement.sourceCommitSha,
       baseCommitSha: base.measurement.sourceCommitSha,
       dirty: true,
@@ -764,7 +562,6 @@ describe('cold-start policy', () => {
         mode: 'interleaved-candidate-base',
         scheduleByBrowser: { chrome: [{ sampleIndex: 1, order: ['base', 'candidate'] }] },
       },
-      targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
