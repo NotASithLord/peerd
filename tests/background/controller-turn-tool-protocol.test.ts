@@ -297,7 +297,7 @@ describe('controller turn finite tool protocol', () => {
       code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
     });
     expect(settlements).toEqual([expect.objectContaining({
-      code: 'tool-execution-stopped-before-effect',
+      code: 'tool-execution-prepare-aborted', phase: 'startup',
       outcomeKnown: true,
       effectEntered: false,
       retryable: true,

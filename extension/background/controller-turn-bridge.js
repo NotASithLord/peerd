@@ -213,11 +213,17 @@ export const makeControllerTurnBridge = ({
     /** @type {any} */ run,
     /** @type {()=>Promise<any>} */ open,
   ) => {
-    const result = await open();
+    let result;
+    try {
+      result = await open();
+    } finally {
+      // why: even a rejected admission may have made owner-scoped provider
+      // state visible before failing. Advance custody so finalization cannot
+      // reuse a close that completed while the admission was still pending.
+      run.providerCustodyGeneration += 1;
+      if (run.signal.aborted) await closeProviderOwner(run);
+    }
     if (!run.signal.aborted) return result;
-    // why: Stop can close an owner while an admission is still awaiting the
-    // provider. Close again after the late stream becomes owner-visible.
-    await closeProviderOwner(run);
     return { ok: false, code: 'turn-run-aborted', outcomeKnown: true };
   };
 
@@ -486,9 +492,14 @@ export const makeControllerTurnBridge = ({
   };
   const closeProviderOwner = (/** @type {any} */ run) => {
     // why: bridge shutdown and ordinary turn finalization can race. One exact
-    // bounded owner-close promise makes cleanup idempotent without pinning the
-    // controller lifecycle forever on an unresponsive provider stream.
-    run.providerClose ??= providerEgress?.closeOwner
+    // bounded close per custody generation makes cleanup idempotent without
+    // masking a stream admitted after Stop's prior close already settled.
+    if (run.providerClose
+        && run.providerCloseGeneration === run.providerCustodyGeneration) {
+      return run.providerClose;
+    }
+    run.providerCloseGeneration = run.providerCustodyGeneration;
+    run.providerClose = providerEgress?.closeOwner
       ? boundedCleanup(Promise.resolve().then(() => providerEgress.closeOwner(run.providerOwner)))
       : Promise.resolve();
     return run.providerClose;
@@ -2227,6 +2238,7 @@ export const makeControllerTurnBridge = ({
         ? Math.max(1, Math.min(64_000, Number(ctx.maxOutputTokens))) : 64_000,
       preparedExecutions: new Map(),
       providerClose: null,
+      providerCustodyGeneration: 0, providerCloseGeneration: -1,
       tools: [], toolNames: new Set(), toolDescriptors: new Map(),
       classifications: {}, system: null,
       nestedUnknown: false, abortFinalized: false,

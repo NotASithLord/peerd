@@ -266,6 +266,7 @@ describe('orchestrator controller turn boundary', () => {
     const openStarted = new Promise<void>((resolve) => { markOpenStarted = resolve; });
     let closes = 0;
     let observed: any = null;
+    let lateOpening: Promise<any> | null = null;
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     bridge = makeControllerTurnBridge({
       getClient: async () => ({
@@ -280,15 +281,15 @@ describe('orchestrator controller turn boundary', () => {
           await invoke('turn.model.bind', {
             candidates: [{ provider: 'local-webgpu', model: 'model-1' }],
           });
-          const opening = invoke('turn.model.open-local', {
+          lateOpening = invoke('turn.model.open-local', {
             providerId: 'local-webgpu', modelId: 'model-1',
             messages: [], system: '', tools: [], maxTokens: 128,
           });
           await openStarted;
           controller.abort();
-          releaseOpen();
-          observed = await opening;
-          return observed;
+          // Match the real controller client: transport rejects immediately
+          // on Stop while the admitted kernel operation may settle later.
+          return { ok: false, code: 'controller-call-aborted', outcomeKnown: true };
         },
       }),
       providerEgress: {
@@ -317,8 +318,12 @@ describe('orchestrator controller turn boundary', () => {
       new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
     ]);
     expect(completed).toBe('completed');
+    expect(closes).toBe(1);
+    releaseOpen();
+    if (!lateOpening) throw new Error('late-provider-open-not-started');
+    observed = await lateOpening;
     expect(observed).toMatchObject({ ok: false, code: 'turn-run-aborted' });
-    expect(closes).toBeGreaterThanOrEqual(2);
+    expect(closes).toBe(2);
     expect(bridge.activeCount()).toBe(0);
   });
 

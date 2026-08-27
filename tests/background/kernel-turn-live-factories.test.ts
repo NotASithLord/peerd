@@ -300,7 +300,15 @@ const harness = async (
     postChatNote: () => {}, pushState: async () => {},
     dwebEnabled: false, firefox: options.firefox === true,
     firefoxActorLifetime: options.firefoxActorLifetime,
-    loadDirectActorHost: options.loadDirectActorHost,
+    loadDirectActorHost: options.loadDirectActorHost ?? (options.firefox
+      ? async () => ({
+        makeDirectActorHost: () => ({
+          sendMessage: async () => ({ ok: true }),
+          bindRelayRoutes: () => {}, isRelaySender: () => false,
+          failKeepAlive: () => {},
+        }),
+      })
+      : undefined),
     channel: 'dev', offscreenUrl: 'offscreen.html',
     contributor: options.contributor ?? null,
     dispatchEffectsRequired: true,
