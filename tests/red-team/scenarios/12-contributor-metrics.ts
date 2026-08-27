@@ -53,13 +53,13 @@ export const scenario: Scenario = {
         delete: async (key: string) => { writes += 1; records.delete(key); },
       },
       makeGeneration: () => 'consent-generation',
-      tokenizeLocalKey: async (kind: string) => `${kind}:opaque`,
+      tokenizeLocalKey: async (kind: string) => `${kind}:${'a'.repeat(64)}`,
     });
 
     const armed = await store.arm();
     const settled = await store.recordWebSettlement({
-      consentGeneration: 'forged-generation', operationKey: 'forged-operation',
-      feedbackContextKey: null, turn, actions: [],
+      consentGeneration: 'forged-generation', operationToken: `operation:${'a'.repeat(64)}`,
+      feedbackContextToken: null, turn, actions: [],
     });
     const feedback = await store.recordFeedback({
       selectionKey: 'forged-selection', verdict: 'worked', candidateContextKeys: ['forged-context'],

@@ -244,7 +244,7 @@
       },
       "background": {
         "scripts": [
-          "background/vault-kernel-firefox.js"
+          "background/vault-kernel-firefox-preview.js"
         ],
         "type": "module"
       },
@@ -411,7 +411,7 @@
       },
       "background": {
         "scripts": [
-          "background/vault-kernel-firefox.js"
+          "background/vault-kernel-firefox-preview.js"
         ],
         "type": "module"
       },

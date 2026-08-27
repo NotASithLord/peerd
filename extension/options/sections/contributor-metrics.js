@@ -100,9 +100,9 @@ export const ContributorMetricsSection = {
           m('li', 'URLs, origins, hosts, page content, prompts, responses, selectors, search terms, form values, or filenames.'),
           m('li', 'Raw errors, credentials, free text, timestamps, stable user or device IDs, or session, message, tool, and install IDs.'),
         ]),
-        m('p', 'A bounded local record uses consent-rotated opaque tokens for restart-safe deduplication and binary-vote grouping. The tokens contain no content or raw identifier, never appear in the payload preview, and are deleted when you disable and clear metrics.'),
+        m('p', 'A bounded local record uses consent-rotated opaque tokens for restart-safe deduplication and binary-vote grouping. The tokens contain no content or raw identifier, never appear in the payload preview, and are revoked immediately when you disable and clear metrics; interrupted physical cleanup resumes locally.'),
         m('p', 'This local groundwork is limited to preview and dev. This build has no upload client, endpoint, alarm, or network path.'),
-        m('p', 'Disabling clears all local metrics, tokens, and feedback. A future accepted aggregate row would contain no identity, so it could not be linked back to you or individually deleted. Any uploader requires a separate transport, retention, and policy review and the current disclosure version.'),
+        m('p', 'Disabling immediately makes all local metrics, tokens, and feedback unavailable and resumes deletion if browser storage was interrupted. A future accepted aggregate row would contain no identity, so it could not be linked back to you or individually deleted. Any uploader requires a separate transport, retention, and policy review and the current disclosure version.'),
       ]),
 
       m('.provider-card', [

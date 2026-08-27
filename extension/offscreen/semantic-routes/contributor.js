@@ -3,8 +3,9 @@
 // exposes one read-only record and retains every storage/mutation capability.
 
 import {
-  contributorFeedbackTargets, makeContributorStore,
-} from '/peerd-runtime/controller-administrative.js';
+  contributorFeedbackTargets, contributorModelFamilyFromCode,
+  contributorProviderFromCode, makeContributorStore,
+} from '/peerd-runtime/controller-contributor.js';
 import {
   CONTRIBUTOR_CHANNEL_CALL, contributorPayloadFits,
   CONTRIBUTOR_CHANNEL_PROTOCOL,
@@ -57,8 +58,8 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
   };
   if (route === 'contributor/settlement') {
     const keys = [
-      'version', 'consentGeneration', 'operationKey', 'feedbackContextKey', 'decision',
-      'browser', 'extensionVersion', 'channel', 'provider', 'modelFamily',
+      'version', 'consentGeneration', 'operationToken', 'feedbackContextToken', 'decision',
+      'browser', 'extensionVersion', 'channel', 'providerCode', 'modelFamilyCode',
       'durationMs', 'tokens', 'outcome', 'failure', 'actions',
     ];
     if (Object.keys(message).sort().join('\0') !== keys.sort().join('\0')
@@ -69,20 +70,26 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
       'semantic.contributor.settlement-read', 'semantic.contributor.settlement-record',
     );
     try {
+      const provider = contributorProviderFromCode(message.providerCode);
+      const model = contributorModelFamilyFromCode(message.modelFamilyCode);
+      if (!provider || !model) {
+        return { ok: false, error: 'invalid-contributor-settlement', outcomeKnown: true,
+          retryable: false };
+      }
       const actions = message.actions.map((/** @type {any} */ action) => ({
           feature: 'web_actor_surface', ...message.decision,
           browser: message.browser, extensionVersion: message.extensionVersion,
-          channel: message.channel, provider: message.provider, model: message.modelFamily,
+          channel: message.channel, provider, model,
           action,
         }));
       const recorded = await mutation.store.recordWebSettlement({
         consentGeneration: message.consentGeneration,
-        operationKey: message.operationKey,
-        feedbackContextKey: message.feedbackContextKey,
+        operationToken: message.operationToken,
+        feedbackContextToken: message.feedbackContextToken,
         turn: {
           feature: 'web_actor_surface', ...message.decision,
           browser: message.browser, extensionVersion: message.extensionVersion,
-          channel: message.channel, provider: message.provider, model: message.modelFamily,
+          channel: message.channel, provider, model,
           outcome: message.outcome, failure: message.failure,
           durationMs: message.durationMs, tokens: message.tokens,
         },

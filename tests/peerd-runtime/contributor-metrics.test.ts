@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import {
   CONTRIBUTOR_LOCAL_KEY,
   ContributorReadOnlyError, makeContributorStore,
@@ -46,12 +47,16 @@ const turn = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const opaqueToken = (kind: string, generation: string, value: string) =>
+  `${kind}:${createHash('sha256').update(`${kind}\0${generation}\0${value}`).digest('hex')}`;
+
 const settlement = (generation: string, operationKey: string, overrides: {
   turn?: Record<string, unknown>, actions?: Record<string, unknown>[], feedbackContextKey?: string | null,
 } = {}) => ({
   consentGeneration: generation,
-  operationKey,
-  feedbackContextKey: overrides.feedbackContextKey ?? null,
+  operationToken: opaqueToken('operation', generation, operationKey),
+  feedbackContextToken: overrides.feedbackContextKey == null ? null
+    : opaqueToken('context', generation, overrides.feedbackContextKey),
   turn: overrides.turn ?? turn(),
   actions: overrides.actions ?? [],
 });

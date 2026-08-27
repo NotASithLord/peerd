@@ -136,6 +136,9 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   modules: 81, graphBytes: 571_818, entryBytes: 239, directImports: 3,
 });
+export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
+  modules: 81, graphBytes: 574_061, entryBytes: 90, directImports: 2,
+});
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
 // absolute ratchet was also never achieved. Pin the real deletion instead: the

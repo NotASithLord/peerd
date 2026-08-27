@@ -606,7 +606,7 @@ describe('kernel live turn factories', () => {
       usage: { inputTokens: 7, outputTokens: 5 },
       price: { cost: 0.000096, estimated: true },
       contributor: {
-        provider: 'anthropic', modelFamily: 'claude-sonnet',
+        providerCode: 0, modelFamilyCode: 1,
         outcome: 'completed', failure: 'none', actions: ['page_action'],
       },
     }), { contributor });
@@ -620,7 +620,7 @@ describe('kernel live turn factories', () => {
       version: 1,
       consentGeneration: 'generation-1', feedbackContextKey: `${h.root.sessionId}:tool-contributor`,
       decision: { requested: 'tools', resolved: 'tools', fallback: 'none' },
-      browser: 'chrome', channel: 'dev', provider: 'anthropic', modelFamily: 'claude-sonnet',
+      browser: 'chrome', channel: 'dev', providerCode: 0, modelFamilyCode: 1,
       actions: ['page_action'], outcome: 'completed', failure: 'none', tokens: 12,
     });
     expect(calls[0].operationKey).toBeString();

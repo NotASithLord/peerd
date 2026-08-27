@@ -42,6 +42,9 @@ const DWEB_DISABLED_TEMPLATE_TARGETS = Object.freeze([
 ] as const);
 const DWEB_ABSENT_TARGETS = Object.freeze([
   'background/kernel-preview-addon.js', 'background/vault-kernel-preview.js',
+  'background/kernel-contributor-owner.js',
+  'background/kernel-firefox-contributor-addon.js',
+  'background/vault-kernel-firefox-preview.js',
   'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
   'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
 ]);

@@ -91,6 +91,6 @@ test('the physical kernel owners cover the route inventory once', () => {
   expect(owned.length + directlyOwned.length).toBe(SEMANTIC_ROUTE_INVENTORY.length);
   expect(source).toContain("names: ['debug/originLock']");
   expect(source).toContain("'debug/originLock': (await getControllerRelays()).debugOriginLock");
-  expect(source).toContain('targetAddon?.contributor(');
+  expect(source).toContain('(targetAddon || makeFirefoxGuard)?.contributor?.(');
   expect(source).toContain('...executableOwner.routes');
 });

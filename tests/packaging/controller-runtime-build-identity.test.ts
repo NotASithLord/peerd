@@ -207,6 +207,7 @@ describe('controller runtime build identity', () => {
       'offscreen/dweb-custody-host.js',
       'offscreen/dweb-transfer-host.js',
       'background/kernel-preview-addon.js',
+      'background/vault-kernel-firefox-preview.js',
     ]) expect(CONTROLLER_OPTIONAL_BUILD_ENTRIES).toContain(entry as any);
     const root = mkdtempSync(join(tmpdir(), 'peerd-dweb-runtime-digest-'));
     roots.push(root);

@@ -34,10 +34,13 @@ type GenBrowser = 'chrome' | 'firefox';
 export const NATIVE_BACKGROUND_ENTRY = 'background/vault-kernel-chrome.js';
 export const PREVIEW_CHROME_BACKGROUND_ENTRY = 'background/vault-kernel-preview.js';
 export const FIREFOX_BACKGROUND_ENTRY = 'background/vault-kernel-firefox.js';
+export const PREVIEW_FIREFOX_BACKGROUND_ENTRY =
+  'background/vault-kernel-firefox-preview.js';
 export const targetBackgroundEntry = (
   entry: string, channel: GenChannel, browser: GenBrowser,
 ): string => entry !== NATIVE_BACKGROUND_ENTRY ? entry
-  : browser === 'firefox' ? FIREFOX_BACKGROUND_ENTRY
+  : browser === 'firefox' ? channel === 'store'
+      ? FIREFOX_BACKGROUND_ENTRY : PREVIEW_FIREFOX_BACKGROUND_ENTRY
   : channel !== 'store' ? PREVIEW_CHROME_BACKGROUND_ENTRY : entry;
 
 // Keys Chrome doesn't know (would log warnings on load) get stripped from

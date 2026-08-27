@@ -1493,8 +1493,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
             browser: deps.firefox ? 'firefox' : 'chrome',
             extensionVersion: deps.browser.runtime.getManifest().version,
             channel: deps.channel,
-            provider: projected.provider,
-            modelFamily: projected.modelFamily,
+            providerCode: projected.providerCode,
+            modelFamilyCode: projected.modelFamilyCode,
             durationMs: Math.min(1_000_000_000, Date.now() - contributorStartedAt),
             tokens: Math.min(1_000_000_000, tally.inputTokens + tally.outputTokens
               + tally.cacheReadTokens + tally.cacheWriteTokens),

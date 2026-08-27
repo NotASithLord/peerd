@@ -15,12 +15,7 @@ import {
   releasePageProgramSemanticOwner,
   settlePageProgramSemanticResponse,
 } from './page-program-semantic-owner.js';
-import {
-  contributorActionForTool,
-  contributorTurnResult,
-  normalizeContributorModelFamily,
-  normalizeContributorProvider,
-} from '/peerd-runtime/controller-administrative.js';
+import { parseContributorProjection } from '/shared/contributor-channel.js';
 
 const MAX_CONCURRENT = 4;
 let active = 0;
@@ -34,51 +29,6 @@ const liveWorkers = new Map();
 const abortedEarly = new Map();
 const EARLY_ABORT_MAX = 64;
 const EARLY_ABORT_TTL_MS = 60_000;
-const CONTRIBUTOR_MAX_ACTIONS = 128;
-
-/**
- * Keep optional Contributor Metrics semantics in the sealed actor host. Only
- * fixed enums cross back to the authority kernel; raw page/model text already
- * needed for the actor reply never enters the durable metrics outbox.
- * @param {any} result @param {unknown} provider @param {unknown} model
- */
-const projectContributorSettlement = (result, provider, model) => {
-  const messages = Array.isArray(result?.newMessages) ? result.newMessages : [];
-  const actions = messages.flatMap((/** @type {any} */ entry) => Array.isArray(entry?.toolUses)
-    ? entry.toolUses.flatMap((/** @type {any} */ toolUse) => {
-      const action = contributorActionForTool(toolUse?.name);
-      return action ? [action] : [];
-    }) : []);
-  if (actions.length > CONTRIBUTOR_MAX_ACTIONS) return null;
-  if (result?.aborted === true) {
-    return Object.freeze({
-      provider: normalizeContributorProvider(provider),
-      modelFamily: normalizeContributorModelFamily(model),
-      outcome: 'cancelled', failure: 'none', actions,
-    });
-  }
-  const assistantMessages = messages.flatMap((/** @type {any} */ entry) => entry?.role === 'assistant'
-    ? [{
-      ...(typeof entry.error === 'string' ? { error: entry.error } : {}),
-      ...(typeof entry.stopReason === 'string' ? { stopReason: entry.stopReason } : {}),
-    }] : []);
-  if (typeof result?.error === 'string'
-      && !assistantMessages.some((/** @type {any} */ entry) => typeof entry.error === 'string')) {
-    assistantMessages.push({ error: result.error, stopReason: result?.stopReason });
-  }
-  const terminal = contributorTurnResult({
-    assistantMessages,
-    stopped: result?.ok !== true,
-    result: result?.error ?? result?.finalText ?? '',
-  });
-  return Object.freeze({
-    provider: normalizeContributorProvider(provider),
-    modelFamily: normalizeContributorModelFamily(model),
-    ...terminal,
-    actions,
-  });
-};
-
 /**
  * Project the actor-specific job into the host-neutral execution description.
  * Tool descriptors still ride beside it for the model; SW grants remain the
@@ -165,7 +115,7 @@ export const abortActor = (runId) => {
  * Run one BOUND-actor turn in a dedicated Worker.
  * @param {{ runId?: string, relayToken?: string, actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoningEnabled?: boolean, reasoningEffort?: string, contextWindowOverrides?:Record<string,number>, runtimeCapabilities?: object, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, tabOrigin?: string, origin?: string, inbound?: boolean, preflightReply?: string }} job
  * @param {{ workerUrl: string, sendToSW: (type: string, payload: object) => Promise<any>, onRelayDrain?: () => void, createWorker?: (url: string) => Worker, startupMs?: number, relayDrainMs?: number, maxLoopEvents?: number }} deps
- * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, price?:{cost:number,estimated:boolean}, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean, contributor?:{provider:string,modelFamily:string,outcome:string,failure:string,actions:string[]} }>}
+ * @returns {Promise<{ ok: boolean, started?: boolean, phase?: string, code?: string, finalText?: string, newMessages?: any[], usage?: object, price?:{cost:number,estimated:boolean}, stopReason?: string, toolCalls?: number, error?: string, aborted?: boolean, performed?: boolean, outcomeKnown?: boolean, retryable?: boolean, contributor?:{providerCode:number,modelFamilyCode:number,outcome:string,failure:string,actions:string[]} }>}
  */
 export const runActor = async (job, {
   workerUrl,
@@ -240,8 +190,12 @@ export const runActor = async (job, {
         try { w.terminate(); } catch { /* gone */ }
         try { delete globalThis[/** @type {keyof typeof globalThis} */ (canaryName)]; } catch { /* best effort */ }
         const contributor = job.actorType === 'web' && job.backing !== 'api'
-          ? projectContributorSettlement(value, job.provider, job.model) : null;
-        resolve(contributor ? { ...value, contributor } : value);
+          ? parseContributorProjection(value?.contributor) : null;
+        if (!Object.hasOwn(value ?? {}, 'contributor')) resolve(value);
+        else {
+          const { contributor: _untrustedContributor, ...settledValue } = value;
+          resolve(contributor ? { ...settledValue, contributor } : settledValue);
+        }
       };
       const settleTerminal = () => {
         if (!terminal || pendingToolRelays > 0 || pendingModelRelays > 0) return;
@@ -1534,10 +1488,17 @@ export const runActor = async (job, {
               ok: false, started: true, error: r.error,
               finalText: r.finalText ?? '', newMessages: r.newMessages ?? [],
               usage: r.usage, price: r.price, stopReason: r.stopReason, toolCalls,
+              ...(r.contributor ? { contributor: r.contributor } : {}),
               outcomeKnown: true,
             });
           }
-          else requestFinish({ ok: true, started: true, finalText: r.finalText ?? '', newMessages: r.newMessages ?? [], usage: r.usage, price: r.price, stopReason: r.stopReason, toolCalls: relayedToolRequests });
+          else requestFinish({
+            ok: true, started: true,
+            finalText: r.finalText ?? '', newMessages: r.newMessages ?? [],
+            usage: r.usage, price: r.price, stopReason: r.stopReason,
+            toolCalls: relayedToolRequests,
+            ...(r.contributor ? { contributor: r.contributor } : {}),
+          });
         }
         if (m.type === 'error') {
           requestFinish({ ok: false, started: true, phase: 'run', code: 'actor_worker_error', error: m.error ?? 'actor worker error' });

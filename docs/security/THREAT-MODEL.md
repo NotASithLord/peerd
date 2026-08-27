@@ -634,7 +634,9 @@ Unknown keys fail closed. Unknown provider and model strings collapse to `custom
 a caller cannot encode a URL, prompt, identifier, or other content in a cohort field.
 Restart-safe operation and feedback tokens are consent-rotated, bounded, local-only,
 and absent from the canonical payload bytes shown in Settings. Disabling deletes the
-consent, aggregate, tokens, and pending feedback in one storage key.
+consent and aggregate as the revocation commit. Pending receipts are then generation-
+fenced and unavailable for processing or display; bounded physical cleanup resumes if
+browser storage interrupts the first deletion attempt.
 
 This stage has no uploader, endpoint, alarm, collector origin, or network primitive.
 Store and web channels register no Contributor Metrics routes or UI. A later uploader

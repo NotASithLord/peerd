@@ -642,12 +642,10 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     waitForBrowserChildPolicyNotice: browserChildOutcomes.wait,
     hasPendingBrowserChildPolicy: browserChildOutcomes.has,
     childGuard: () => childGuard,
-    contributor: targetAddon ? Object.freeze({
-      arm: () => targetContributor?.arm?.()
-        ?? Promise.resolve({ enabled: false, generation: null }),
+    contributor: targetContributor ? Object.freeze({
+      arm: () => targetContributor.arm(),
       recordWebSettlement: (/** @type {any} */ input) =>
-        targetContributor?.recordWebSettlement?.(input)
-        ?? Promise.resolve({ ok: false, outcomeKnown: true }),
+        targetContributor.recordWebSettlement(input),
     }) : null,
     VaultLockedError,
   });
@@ -845,7 +843,7 @@ if (kernelFirefox) {
   void browser.tabs.query({}).then((tabs) => childGuard.reconcile(tabs))
     .catch(() => { /* restored exact markers remain fail-closed */ });
 }
-targetContributor = targetAddon?.contributor({
+targetContributor = (targetAddon || makeFirefoxGuard)?.contributor?.({
   kv, optionsUi, sidepanelUi, homeUi, offscreenUrl, featureHost,
   validateFeedback: async (/** @type {any} */ message) =>
     (await loadDemandPlane()).validateContributorFeedback(message),

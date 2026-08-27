@@ -18,14 +18,6 @@ export const CONTRIBUTOR_FALLBACKS = Object.freeze([
 ]);
 export const CONTRIBUTOR_BROWSERS = Object.freeze(['chrome', 'firefox']);
 export const CONTRIBUTOR_CHANNELS = Object.freeze(['store', 'preview', 'dev', 'web']);
-export const CONTRIBUTOR_PROVIDERS = Object.freeze([
-  'anthropic', 'openrouter', 'openai', 'glm', 'ollama', 'local-webgpu', 'custom',
-]);
-export const CONTRIBUTOR_MODEL_FAMILIES = Object.freeze([
-  'claude-opus', 'claude-sonnet', 'claude-haiku', 'gpt', 'openai-o', 'glm',
-  'gemini', 'qwen', 'llama', 'deepseek', 'mistral', 'grok', 'command',
-  'hermes', 'kimi', 'minimax', 'gemma', 'muse-glimmer', 'custom',
-]);
 export const CONTRIBUTOR_OUTCOMES = Object.freeze(['completed', 'cancelled', 'error']);
 export const CONTRIBUTOR_FAILURES = Object.freeze([
   'none', 'policy', 'auth', 'limits', 'provider', 'timeout', 'aborted',
@@ -33,6 +25,7 @@ export const CONTRIBUTOR_FAILURES = Object.freeze([
 ]);
 export const CONTRIBUTOR_ACTION_KINDS = Object.freeze(['page_code', 'page_action']);
 export const CONTRIBUTOR_FEEDBACK = Object.freeze(['worked', 'didnt_work']);
+export const CONTRIBUTOR_CLASSIFICATION_CODE_MAX = 255;
 const ROUTES = new Set([
   'contributor/status', 'contributor/enable', 'contributor/disable',
   'contributor/settlement', 'contributor/feedback',
@@ -69,6 +62,40 @@ export const contributorPayloadFits = (payload) => {
     return total;
   };
   return size(payload, 0) <= CONTRIBUTOR_CHANNEL_MAX_PAYLOAD_BYTES;
+};
+
+/**
+ * Consent-rotated opaque identifier used before the first durable write.
+ * Keeping this primitive on the authority wire avoids importing semantic
+ * provider/model catalogs into the service worker.
+ * @param {string} kind @param {string} generation @param {string} value
+ */
+export const opaqueContributorToken = async (kind, generation, value) => {
+  const input = new TextEncoder().encode(`${kind}\u0000${generation}\u0000${value}`);
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', input));
+  return `${kind}:${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+};
+
+/** @param {unknown} value @param {'operation'|'context'|'selection'} kind */
+export const validContributorToken = (value, kind) => typeof value === 'string'
+  && new RegExp(`^${kind}:[0-9a-f]{64}$`).test(value);
+
+/** @param {unknown} value */
+export const parseContributorProjection = (value) => {
+  const candidate = /** @type {any} */ (value);
+  const keys = ['providerCode', 'modelFamilyCode', 'outcome', 'failure', 'actions'];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+      || Object.keys(candidate).sort().join('\0') !== keys.sort().join('\0')
+      || !Number.isSafeInteger(candidate.providerCode) || candidate.providerCode < 0
+      || candidate.providerCode > CONTRIBUTOR_CLASSIFICATION_CODE_MAX
+      || !Number.isSafeInteger(candidate.modelFamilyCode) || candidate.modelFamilyCode < 0
+      || candidate.modelFamilyCode > CONTRIBUTOR_CLASSIFICATION_CODE_MAX
+      || !CONTRIBUTOR_OUTCOMES.includes(candidate.outcome)
+      || !CONTRIBUTOR_FAILURES.includes(candidate.failure)
+      || !Array.isArray(candidate.actions) || candidate.actions.length > 128
+      || candidate.actions.some((/** @type {unknown} */ action) =>
+        !CONTRIBUTOR_ACTION_KINDS.includes(/** @type {any} */ (action)))) return null;
+  return Object.freeze({ ...candidate, actions: Object.freeze([...candidate.actions]) });
 };
 
 /** @param {unknown} value */

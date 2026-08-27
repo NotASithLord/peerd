@@ -14,6 +14,7 @@ import {
 import {
   COLD_SOURCE_TARGETS,
   FIREFOX_KERNEL_SOURCE_CONTRACT,
+  PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT,
   COLD_SOURCE_RATCHETS,
   OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT,
   PREVIEW_KERNEL_SOURCE_CONTRACT,
@@ -181,6 +182,22 @@ describe('cold entry graphs', () => {
     ]) expect(measured.modulesSet.has(file), `Firefox imports ${file}`).toBe(false);
   });
 
+  test('Preview Firefox adds only the contributor registration shell', async () => {
+    const measured = await nativeKernelStats('background/vault-kernel-firefox-preview.js');
+    expect(measured.modules)
+      .toBeLessThanOrEqual(PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT.modules);
+    expect(measured.graphBytes)
+      .toBeLessThanOrEqual(PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT.graphBytes);
+    expect(measured.entryBytes)
+      .toBeLessThanOrEqual(PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT.entryBytes);
+    expect(measured.directImports)
+      .toBeLessThanOrEqual(PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT.directImports);
+    expect(measured.modulesSet.has('background/kernel-firefox-contributor-addon.js'))
+      .toBe(true);
+    expect(measured.modulesSet.has('peerd-runtime/observability/contributor-metrics.js'))
+      .toBe(false);
+  });
+
   test('browser network custody is static and reaches exact kernel surfaces', async () => {
     const measured = await nativeKernelStats();
     expect(PACKAGED_LAZY_MODULE_ENTRIES)
@@ -226,6 +243,7 @@ describe('cold entry graphs', () => {
       .toBe(common.graphBytes - storeExclusiveBytes + exclusiveBytes);
     expect(storeExclusive).toEqual(['background/vault-kernel-chrome.js']);
     expect(exclusive).toEqual([
+      'background/kernel-contributor-owner.js',
       'background/kernel-preview-addon.js',
       'background/vault-kernel-preview.js',
       'shared/contributor-channel.js',
