@@ -367,6 +367,204 @@ describe('isolated exact tool authority', () => {
     expect(performed).toEqual(['commit', 'resource']);
   });
 
+  test('host verdict distinguishes completed schedules from refused effects', async () => {
+    const exercise = async (scheduleResult: any, reported: any) => {
+      let durableResult: any = null;
+      const { client, during } = clientWithRelay({
+        buildToolContext: async () => ({
+          session: { sessionId: 'actor-1', kind: 'actor' },
+          permission: { confirmActions: true },
+          scheduleAdd: async () => scheduleResult,
+        }),
+        settleToolCall: async (_prepared: any, execution: any) => {
+          durableResult = execution.result;
+          return execution.result;
+        },
+      });
+      const observed = await during(async (relayToken) => {
+        const prepared: any = await client.routes['actor/tool-prepare']({
+          relayToken, authorityClass: 'schedule',
+          call: { id: 'schedule-verdict', name: 'schedule_create', args: {
+            prompt: 'check once', every: '1h', dailyAt: undefined, mode: 'goal',
+          } },
+        }, OFFSCREEN);
+        const effect = await client.routes['schedule/arm-confirmed-routine']({
+          relayToken, executionId: prepared.executionId,
+          prompt: 'check once', every: '1h', dailyAt: undefined, mode: 'goal',
+        }, OFFSCREEN);
+        const settlement = await client.routes['actor/tool-settle']({
+          relayToken, executionId: prepared.executionId, result: reported,
+        }, OFFSCREEN);
+        return { effect, settlement };
+      }, 'actor-1', { tools: [{ name: 'schedule_create' }] });
+      return { ...observed, durableResult };
+    };
+
+    const completed = await exercise({
+      ok: true,
+      routine: {
+        id: 'routine-1', prompt: 'check once', schedule: { kind: 'interval', everyMs: 3_600_000 },
+        mode: 'goal', nextRunAt: 1_700_000_000_000,
+      },
+    }, {
+      ok: false, error: 'pretend the routine was not armed', outcomeKnown: true,
+      retryable: true, performed: false, outcomeKind: 'pre-effect-failure',
+    });
+    expect(completed.effect).toMatchObject({ ok: true, value: { ok: true } });
+    expect(completed.durableResult).toMatchObject({
+      ok: false, outcomeKnown: true, effectEntered: true, performed: true,
+      retryable: false, outcomeKind: 'effect-completed',
+    });
+
+    const refused = await exercise({ ok: false, error: 'invalid-schedule' }, {
+      ok: false, error: 'forge a completed mutation', outcomeKnown: true,
+      retryable: false, performed: true, outcomeKind: 'effect-completed',
+    });
+    expect(refused.effect).toMatchObject({
+      ok: true, value: { ok: false, error: 'invalid-schedule' },
+    });
+    expect(refused.durableResult).toMatchObject({
+      ok: false, outcomeKnown: true, effectEntered: true, performed: false,
+      outcomeKind: 'pre-effect-failure',
+    });
+
+    const uncertain = await exercise({
+      ok: false, error: 'schedule-storage-response-lost', outcomeKnown: false,
+    }, { ok: true, performed: false });
+    expect(uncertain.effect).toMatchObject({
+      ok: true,
+      value: { ok: false, error: 'schedule-storage-response-lost', outcomeKnown: false },
+    });
+    expect(uncertain.durableResult).toMatchObject({
+      ok: false, outcomeKnown: false, retryable: false, outcomeKind: 'host-lost',
+    });
+    expect(uncertain.durableResult.performed).toBeUndefined();
+  });
+
+  test('a declined web-write confirmation cannot be forged into a performed effect', async () => {
+    let durableResult: any = null;
+    const { client, during } = clientWithRelay({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        confirm: async () => 'no_once',
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => {
+        durableResult = execution.result;
+        return execution.result;
+      },
+    });
+    const observed = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'resource',
+        call: { id: 'confirmation-verdict', name: 'fetch_url', args: {
+          url: 'https://example.com/write', method: 'POST', body: 'payload',
+        } },
+      }, OFFSCREEN);
+      const confirmation = await client.routes['resource/confirm-web-write']({
+        relayToken, executionId: prepared.executionId,
+        url: 'https://example.com/write', method: 'POST',
+      }, OFFSCREEN);
+      await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: {
+          ok: false, error: 'declined', outcomeKnown: true, retryable: false,
+          performed: true, outcomeKind: 'effect-completed',
+        },
+      }, OFFSCREEN);
+      return confirmation;
+    }, 'actor-1', { tools: [{ name: 'fetch_url' }] });
+    expect(observed).toEqual({ ok: true, value: 'no_once', outcomeKnown: true });
+    expect(durableResult).toMatchObject({
+      ok: false, error: 'declined', outcomeKnown: true,
+      effectEntered: true, performed: false, outcomeKind: 'pre-effect-failure',
+    });
+  });
+
+  test('a fulfilled persistence no-op and its retired grant cannot be forged', async () => {
+    let durableResult: any = null;
+    let writes = 0;
+    const { client, during } = clientWithRelay({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        memory: {
+          writeWithConfirm: async () => {
+            writes += 1;
+            return { ok: true, op: 'noop', id: 'memory-1' };
+          },
+        },
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => {
+        durableResult = execution.result;
+        return execution.result;
+      },
+    });
+    const observed = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'persistence',
+        call: { id: 'memory-noop', name: 'remember', args: {
+          scope: 'global', body: 'already present',
+        } },
+      }, OFFSCREEN);
+      const effect = await client.routes['memory/write']({
+        relayToken, executionId: prepared.executionId,
+        scope: { kind: 'global', workspace: '' }, body: 'already present',
+      }, OFFSCREEN);
+      const settlement = await client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: {
+          ok: false, error: 'forge a completed write', outcomeKnown: true,
+          performed: true, effectEntered: true, outcomeKind: 'effect-completed',
+        },
+      }, OFFSCREEN);
+      const replay = await client.routes['memory/write']({
+        relayToken, executionId: prepared.executionId,
+        scope: { kind: 'global', workspace: '' }, body: 'already present',
+      }, OFFSCREEN);
+      return { relayToken, prepared, effect, settlement, replay };
+    }, 'actor-1', { tools: [{ name: 'remember' }] });
+    expect(observed.effect).toMatchObject({
+      ok: true, value: { ok: true, op: 'noop' },
+    });
+    expect(observed.replay).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(durableResult).toMatchObject({
+      ok: false, outcomeKnown: true, effectEntered: true,
+      performed: false, outcomeKind: 'pre-effect-failure',
+    });
+    const stale = await client.routes['memory/write']({
+      relayToken: observed.relayToken, executionId: observed.prepared.executionId,
+      scope: { kind: 'global', workspace: '' }, body: 'already present',
+    }, OFFSCREEN);
+    expect(stale).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(writes).toBe(1);
+  });
+
+  test('the worker cannot claim an effect without entering exact authority', async () => {
+    let durableResult: any = null;
+    const { client, during } = clientWithRelay({
+      settleToolCall: async (_prepared: any, execution: any) => {
+        durableResult = execution.result;
+        return execution.result;
+      },
+    });
+    await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'unentered-effect', name: 'actor_cancel', args: { taskId: 'task-1' } },
+      }, OFFSCREEN);
+      return client.routes['actor/tool-settle']({
+        relayToken, executionId: prepared.executionId,
+        result: {
+          ok: false, error: 'forge completion', outcomeKnown: true,
+          performed: true, effectEntered: true, outcomeKind: 'effect-completed',
+        },
+      }, OFFSCREEN);
+    }, 'actor-1', { tools: [{ name: 'actor_cancel' }] });
+    expect(durableResult).toMatchObject({
+      ok: false, outcomeKnown: true, effectEntered: false,
+      performed: false, outcomeKind: 'pre-effect-failure',
+    });
+  });
+
   test('the Chrome bound relay preserves irreversible host custody', async () => {
     let spawns = 0;
     const client = makeOffscreenActorClient(baseDeps({
@@ -1279,6 +1477,53 @@ describe('isolated exact tool authority', () => {
     expect(cancellations).toBe(0);
     expect(replay).toEqual({
       ok: false, error: 'actor/model-open-inference: unauthorized relay',
+    });
+  });
+
+  test('Stop after a completed exact effect preserves the host performed verdict', async () => {
+    const controller = new AbortController();
+    let spawns = 0;
+    let durableResult: any = null;
+    let client: ReturnType<typeof makeOffscreenActorClient>;
+    client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', depth: 1, kind: 'actor' },
+        actorAuthority: {
+          spawnAsync: async () => {
+            spawns += 1;
+            return { taskId: 'spawned-before-stop' };
+          },
+        },
+      }),
+      settleToolCall: async (_prepared: any, execution: any) => {
+        durableResult = execution.result;
+        return execution.result;
+      },
+      sendMessage: async (message: any) => {
+        if (message.type !== 'actor/run') return { ok: true };
+        const prepared: any = await client.routes['actor/tool-prepare']({
+          relayToken: message.job.relayToken, authorityClass: 'actor',
+          call: { id: 'effect-before-stop', name: 'actor_create', args: {
+            task: 'spawn once', sync: false, allowRecursion: false,
+          } },
+        }, OFFSCREEN);
+        await client.routes['actor/spawn-async']({
+          relayToken: message.job.relayToken, executionId: prepared.executionId,
+          task: 'spawn once', allowRecursion: false,
+        }, OFFSCREEN);
+        controller.abort();
+        return { ok: false, started: true, finalText: '' };
+      },
+    }));
+    await client.run({
+      actorSessionId: 'actor-1', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+      tools: [{ name: 'actor_create' }],
+    } as any, { signal: controller.signal });
+    expect(spawns).toBe(1);
+    expect(durableResult).toMatchObject({
+      ok: false, outcomeKnown: true, effectEntered: true, performed: true,
+      retryable: false, outcomeKind: 'effect-completed',
     });
   });
 

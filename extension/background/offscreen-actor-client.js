@@ -12,6 +12,11 @@ import {
   controllerAuthorityClassAllowed,
 } from '/shared/controller-authority-manifest.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
+import {
+  normalizeHostEffectOutcome,
+  stampHostEffectVerdict,
+} from '/shared/tool-execution-protocol.js';
+import { HOST_EFFECT_OUTCOME } from './host-effect-verdict.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
 import { bindVmToolAuthority } from './vm-tool-authority.js';
@@ -502,6 +507,7 @@ export const makeOffscreenActorClient = ({
     const unknown = entry.unknownIrreversible === true || entry.effectPending > 0
       || entry.pendingIrreversible > 0;
     const settledIrreversible = entry.settledIrreversible === true;
+    const effectVerdictObserved = entry.effectVerdictObserved === true;
     const seen = new Set([entry.executionId]);
     let parentId = entry.parentExecutionId;
     while (typeof parentId === 'string') {
@@ -511,6 +517,7 @@ export const makeOffscreenActorClient = ({
       if (effectEntered) parent.effectEntered = true;
       if (unknown) parent.unknownIrreversible = true;
       if (settledIrreversible) parent.settledIrreversible = true;
+      if (effectVerdictObserved) parent.effectVerdictObserved = true;
       parentId = parent.parentExecutionId;
     }
   };
@@ -688,27 +695,45 @@ export const makeOffscreenActorClient = ({
     /** @type {string} */ operation,
     /** @type {'read'|'control'|'commit'|'resource'} */ riskClass,
     /** @type {()=>Promise<any>|any} */ execute,
+    /** @type {boolean} */ recordEffectVerdict = false,
+    /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome = null,
   ) => {
     if (entry.domainCalls.has(operation)) {
       return { ok: false, error: `${operation}: authority already used`, outcomeKnown: true };
     }
-    entry.domainCalls.add(operation);
     const replayable = riskClass === 'read' || riskClass === 'control';
+    if ((!replayable || recordEffectVerdict)
+        && (typeof effectOutcome?.fulfilled !== 'function'
+          || typeof effectOutcome?.rejected !== 'function')) {
+      return {
+        ok: false, error: `${operation}: effect verdict contract unavailable`,
+        outcomeKnown: true, retryable: false,
+      };
+    }
+    entry.domainCalls.add(operation);
+    if (!replayable || recordEffectVerdict) entry.effectVerdictObserved = true;
     entry.effectEntered = true;
     entry.effectPending += 1;
     if (!replayable) entry.pendingIrreversible += 1;
     try {
       const value = await execute();
-      if (!replayable) entry.settledIrreversible = true;
+      if (!replayable || recordEffectVerdict) {
+        const verdict = normalizeHostEffectOutcome(effectOutcome?.fulfilled?.(value));
+        if (verdict === 'performed') entry.settledIrreversible = true;
+        else if (verdict === 'unknown') entry.unknownIrreversible = true;
+      }
       return { ok: true, value, outcomeKnown: true };
     }
     catch (cause) {
       const detail = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-      const outcomeKnown = replayable || detail?.outcomeKnown === true;
+      const verdict = replayable && !recordEffectVerdict ? 'not-performed'
+        : normalizeHostEffectOutcome(effectOutcome?.rejected?.(cause));
+      if (verdict === 'performed') entry.settledIrreversible = true;
+      const outcomeKnown = replayable || verdict !== 'unknown';
       if (!outcomeKnown) entry.unknownIrreversible = true;
       return {
         ok: false, error: detail?.message ?? String(cause), outcomeKnown,
-        retryable: outcomeKnown && detail?.retryable !== false,
+        retryable: verdict === 'not-performed' && detail?.retryable !== false,
       };
     } finally {
       entry.effectPending = Math.max(0, entry.effectPending - 1);
@@ -723,8 +748,11 @@ export const makeOffscreenActorClient = ({
     /** @type {string} */ operation,
     /** @type {'read'|'control'|'commit'} */ riskClass,
     /** @type {()=>Promise<any>|any} */ execute,
+    /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome = null,
   ) => {
-    const result = await runDomainEffect(entry, operation, riskClass, execute);
+    const result = await runDomainEffect(
+      entry, operation, riskClass, execute, false, effectOutcome,
+    );
     return result.ok === true ? { ok: true, value: result.value } : result;
   };
 
@@ -766,32 +794,22 @@ export const makeOffscreenActorClient = ({
           retryable: false,
           outcomeKind: 'host-lost',
         };
-      } else if (entry.settledIrreversible === true) {
-        const reported = effectiveResult && typeof effectiveResult === 'object'
+      } else if (entry.effectVerdictObserved === true
+          || effectiveResult && typeof effectiveResult === 'object'
           && !Array.isArray(effectiveResult)
-          ? /** @type {Record<string,any>} */ (effectiveResult) : null;
-        // why: the SW observed a commit/resource operation finish. The isolated
-        // semantic heap may shape its value, but it cannot turn that host fact
-        // into a replayable pre-effect failure and cause a duplicate action.
-        effectiveResult = reported ? {
-          ...reported,
-          outcomeKnown: true,
-          effectEntered: true,
-          performed: true,
-          ...(reported.ok === false ? {
-            retryable: false,
-            outcomeKind: 'effect-completed',
-          } : {}),
-        } : {
-          ok: false,
-          error: 'Actor semantic result was invalid after an irreversible effect completed.',
-          code: 'actor-tool-result-invalid-after-effect',
-          outcomeKnown: true,
-          effectEntered: true,
-          performed: true,
-          retryable: false,
-          outcomeKind: 'effect-completed',
-        };
+          && (Object.hasOwn(effectiveResult, 'performed')
+            || Object.hasOwn(effectiveResult, 'effectEntered')
+            || /** @type {any} */ (effectiveResult).outcomeKind === 'effect-completed')) {
+        // why: the isolated semantic heap may shape content, but only the SW
+        // observed whether an exact irreversible/resource operation completed.
+        effectiveResult = stampHostEffectVerdict(effectiveResult, {
+          effectEntered: entry.effectEntered === true,
+          performed: entry.settledIrreversible === true,
+          invalidCode: 'actor-tool-result-invalid-after-effect',
+          invalidError: entry.settledIrreversible === true
+            ? 'Actor semantic result was invalid after an irreversible effect completed.'
+            : 'Actor semantic result was invalid.',
+        });
       }
       entry.settlementResult = structuredClone(effectiveResult);
       entry.hasSettlementResult = true;
@@ -1190,6 +1208,7 @@ export const makeOffscreenActorClient = ({
         hasSettlementResult: false, settlementResult: undefined,
         effectEntered: false, effectPending: 0, pendingIrreversible: 0,
         settledIrreversible: false, unknownIrreversible: false,
+        effectVerdictObserved: false,
         parentExecutionId: nestedPageProgram ? pageProgramParentExecutionId : null,
         childExecutionIds: new Set(),
         domainCalls: new Set(), domainState: {}, prepared,
@@ -1259,6 +1278,8 @@ export const makeOffscreenActorClient = ({
       const ctx = entry.prepared.ctx;
       if (typeof ctx?.actorAuthority?.spawnSync !== 'function') {
         entry.domainCalls.add('actor/spawn-sync');
+        entry.effectEntered = true;
+        entry.effectVerdictObserved = true;
         return { ok: true, value: { refused: true, result: 'actor_orchestrator_unavailable' } };
       }
       return runDirectActorEffect(entry, 'actor/spawn-sync', 'commit', () =>
@@ -1272,7 +1293,7 @@ export const makeOffscreenActorClient = ({
           parentDepth: ctx.session?.depth ?? 0,
           parentInbound: ctx.inbound === false ? false : true,
           parentToolUseId: entry.call?.id,
-        }));
+        }), HOST_EFFECT_OUTCOME.actorResult);
     },
     'actor/spawn-async': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1304,6 +1325,8 @@ export const makeOffscreenActorClient = ({
       const ctx = entry.prepared.ctx;
       if (typeof ctx?.actorAuthority?.spawnAsync !== 'function') {
         entry.domainCalls.add('actor/spawn-async');
+        entry.effectEntered = true;
+        entry.effectVerdictObserved = true;
         return { ok: true, value: { ok: false, error: 'async_actor_unavailable' } };
       }
       return runDirectActorEffect(entry, 'actor/spawn-async', 'commit', () =>
@@ -1317,7 +1340,7 @@ export const makeOffscreenActorClient = ({
           parentDepth: ctx.session?.depth ?? 0,
           parentInbound: ctx.inbound === false ? false : true,
           parentToolUseId: entry.call?.id,
-        }));
+        }), HOST_EFFECT_OUTCOME.actorResult);
     },
     'actor/tasks-read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1378,6 +1401,8 @@ export const makeOffscreenActorClient = ({
       const ctx = entry.prepared.ctx;
       if (typeof ctx?.actorAuthority?.deliverMessage !== 'function') {
         entry.domainCalls.add('actor/message-deliver');
+        entry.effectEntered = true;
+        entry.effectVerdictObserved = true;
         return { ok: true, value: { ok: false, error: 'message_actor is not enabled' } };
       }
       return runDirectActorEffect(entry, 'actor/message-deliver', 'commit', () =>
@@ -1390,7 +1415,7 @@ export const makeOffscreenActorClient = ({
           awaitSignal: /** @type {any} */ (grant).relaySignal,
           degradeToAsync: msg.degradeToAsync,
           awaitCapMs: msg.awaitCapMs,
-        }));
+        }), HOST_EFFECT_OUTCOME.actorResult);
     },
     'pod/resolve': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1501,7 +1526,7 @@ export const makeOffscreenActorClient = ({
         background: expectedBackground,
         remoteGitGrant: expectedGrant,
         signal: expectedBackground ? undefined : /** @type {any} */ (grant).relaySignal,
-      }));
+      }), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'pod/status': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1587,7 +1612,7 @@ export const makeOffscreenActorClient = ({
         msg.path, msg.content, {
           sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
         },
-      ));
+      ), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/read-pod': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1607,7 +1632,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['podId']);
       if (!entry) return { ok: false, error: 'repository/destroy-pod: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/destroy-pod', 'commit', () =>
-        entry.domainState.authority.destroyPod(msg.podId));
+        entry.domainState.authority.destroyPod(msg.podId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/read-status': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1667,7 +1692,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['message']);
       if (!entry) return { ok: false, error: 'repository/checkpoint: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/checkpoint', 'commit', () =>
-        entry.domainState.authority.checkpoint(msg.message));
+        entry.domainState.authority.checkpoint(msg.message), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/branch': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1677,7 +1702,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['name']);
       if (!entry) return { ok: false, error: 'repository/branch: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/branch', 'commit', () =>
-        entry.domainState.authority.branch(msg.name));
+        entry.domainState.authority.branch(msg.name), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/checkout': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1687,7 +1712,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['name']);
       if (!entry) return { ok: false, error: 'repository/checkout: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/checkout', 'commit', () =>
-        entry.domainState.authority.checkout(msg.name));
+        entry.domainState.authority.checkout(msg.name), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/restore': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1697,7 +1722,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['to']);
       if (!entry) return { ok: false, error: 'repository/restore: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/restore', 'commit', () =>
-        entry.domainState.authority.restore(msg.to));
+        entry.domainState.authority.restore(msg.to), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/confirm-remote': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1719,7 +1744,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['url']);
       if (!entry) return { ok: false, error: 'repository/link: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/link', 'commit', () =>
-        entry.domainState.authority.link(msg.url));
+        entry.domainState.authority.link(msg.url), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/fetch': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1729,7 +1754,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['target']);
       if (!entry) return { ok: false, error: 'repository/fetch: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/fetch', 'commit', () =>
-        entry.domainState.authority.fetch(msg.target));
+        entry.domainState.authority.fetch(msg.target), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'repository/push': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1739,7 +1764,7 @@ export const makeOffscreenActorClient = ({
       const entry = repositoryEntry(grant, msg, ['target', 'branch']);
       if (!entry) return { ok: false, error: 'repository/push: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/push', 'resource', () =>
-        entry.domainState.authority.push(msg.target, msg.branch));
+        entry.domainState.authority.push(msg.target, msg.branch), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'vm/read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1779,7 +1804,7 @@ export const makeOffscreenActorClient = ({
       const entry = vmEntry(grant, msg, ['command', 'timeoutMs', 'vmId']);
       if (!entry) return { ok: false, error: 'vm/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/run', 'resource', () =>
-        entry.domainState.authority.runVm(msg.command, msg.timeoutMs, msg.vmId));
+        entry.domainState.authority.runVm(msg.command, msg.timeoutMs, msg.vmId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'vm/import-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1789,7 +1814,7 @@ export const makeOffscreenActorClient = ({
       const entry = vmEntry(grant, msg, ['url', 'path', 'maxBytes']);
       if (!entry) return { ok: false, error: 'vm/import-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/import-file', 'resource', () =>
-        entry.domainState.authority.importFile(msg.url, msg.path, msg.maxBytes));
+        entry.domainState.authority.importFile(msg.url, msg.path, msg.maxBytes), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'vm/write-text-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1799,7 +1824,7 @@ export const makeOffscreenActorClient = ({
       const entry = vmEntry(grant, msg, ['path', 'content']);
       if (!entry) return { ok: false, error: 'vm/write-text-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/write-text-file', 'commit', () =>
-        entry.domainState.authority.writeTextFile(msg.path, msg.content));
+        entry.domainState.authority.writeTextFile(msg.path, msg.content), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'vm/destroy': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1809,7 +1834,7 @@ export const makeOffscreenActorClient = ({
       const entry = vmEntry(grant, msg, ['vmId']);
       if (!entry) return { ok: false, error: 'vm/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/destroy', 'commit', () =>
-        entry.domainState.authority.destroyVm(msg.vmId));
+        entry.domainState.authority.destroyVm(msg.vmId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'notebook/read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1853,7 +1878,7 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry) return { ok: false, error: 'notebook/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/run', 'resource', () =>
-        entry.domainState.authority.runNotebook(msg.code, msg.timeoutMs, msg.notebookId));
+        entry.domainState.authority.runNotebook(msg.code, msg.timeoutMs, msg.notebookId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'notebook/write-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1865,7 +1890,7 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry) return { ok: false, error: 'notebook/write-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/write-file', 'commit', () =>
-        entry.domainState.authority.writeFile(msg.path, msg.content, msg.notebookId));
+        entry.domainState.authority.writeFile(msg.path, msg.content, msg.notebookId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'notebook/read-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1887,7 +1912,7 @@ export const makeOffscreenActorClient = ({
       const entry = notebookEntry(grant, msg, ['notebookId']);
       if (!entry) return { ok: false, error: 'notebook/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/destroy', 'commit', () =>
-        entry.domainState.authority.destroyNotebook(msg.notebookId));
+        entry.domainState.authority.destroyNotebook(msg.notebookId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'app/update': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1901,7 +1926,7 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'app/update', 'commit', () =>
         entry.domainState.authority.updateApp(
           msg.appId, msg.name, msg.html, msg.tags, msg.entryFile,
-        ));
+        ), false, HOST_EFFECT_OUTCOME.valueResult);
     },
     'app/open': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1911,7 +1936,7 @@ export const makeOffscreenActorClient = ({
       const entry = appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/open: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/open', 'resource', () =>
-        entry.domainState.authority.openApp(msg.appId));
+        entry.domainState.authority.openApp(msg.appId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'app/search': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1941,7 +1966,7 @@ export const makeOffscreenActorClient = ({
       const entry = appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/delete: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/delete', 'commit', () =>
-        entry.domainState.authority.deleteApp(msg.appId));
+        entry.domainState.authority.deleteApp(msg.appId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'app/write-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1953,7 +1978,7 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry) return { ok: false, error: 'app/write-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/write-file', 'commit', () =>
-        entry.domainState.authority.writeFile(msg.appId, msg.path, msg.content));
+        entry.domainState.authority.writeFile(msg.appId, msg.path, msg.content), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'app/read-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -1983,7 +2008,7 @@ export const makeOffscreenActorClient = ({
       const entry = appEntry(grant, msg, ['appId', 'path']);
       if (!entry) return { ok: false, error: 'app/delete-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/delete-file', 'commit', () =>
-        entry.domainState.authority.deleteFile(msg.appId, msg.path));
+        entry.domainState.authority.deleteFile(msg.appId, msg.path), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'app/observe': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -2003,7 +2028,7 @@ export const makeOffscreenActorClient = ({
       const entry = appEntry(grant, msg, ['action', 'params']);
       if (!entry) return { ok: false, error: 'app/act: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/act', 'resource', () =>
-        entry.domainState.authority.actRuntime(msg.action, msg.params));
+        entry.domainState.authority.actRuntime(msg.action, msg.params), false, HOST_EFFECT_OUTCOME.runResult);
     },
     'app/run-code': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -2013,7 +2038,7 @@ export const makeOffscreenActorClient = ({
       const entry = appEntry(grant, msg, ['code', 'timeoutMs']);
       if (!entry) return { ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/run-code', 'resource', () =>
-        entry.domainState.authority.runCode(msg.code, msg.timeoutMs));
+        entry.domainState.authority.runCode(msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.runResult);
     },
     'memory/read-scope': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -2045,7 +2070,7 @@ export const makeOffscreenActorClient = ({
       const entry = persistenceEntry(grant, msg, ['scope', 'body']);
       if (!entry) return { ok: false, error: 'memory/write: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'memory/write', 'commit', () =>
-        entry.domainState.authority.writeMemory(msg.scope, msg.body));
+        entry.domainState.authority.writeMemory(msg.scope, msg.body), false, HOST_EFFECT_OUTCOME.memoryResult);
     },
     'todo/read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -2069,13 +2094,13 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry) return { ok: false, error: 'todo/replace: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'todo/replace', 'commit', () =>
-        entry.domainState.authority.replaceTodos(msg.version, msg.todos));
+        entry.domainState.authority.replaceTodos(msg.version, msg.todos), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'page/open-tab': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/open-tab: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/open-tab', 'resource', () =>
-        entry.domainState.authority.openProtectedBackgroundTab());
+        entry.domainState.authority.openProtectedBackgroundTab(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'page/read': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
@@ -2111,25 +2136,25 @@ export const makeOffscreenActorClient = ({
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/navigate: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/navigate', 'resource', () =>
-        entry.domainState.authority.navigateOwnedTab());
+        entry.domainState.authority.navigateOwnedTab(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'page/fill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/fill: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/fill', 'resource', () =>
-        entry.domainState.authority.fillOwnedTarget());
+        entry.domainState.authority.fillOwnedTarget(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'page/click': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/click: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/click', 'resource', () =>
-        entry.domainState.authority.clickOwnedTarget());
+        entry.domainState.authority.clickOwnedTarget(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'page/login': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/login: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/login', 'resource', () =>
-        entry.domainState.authority.performConfirmedOwnedLogin());
+        entry.domainState.authority.performConfirmedOwnedLogin(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'page/run-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(
@@ -2141,7 +2166,7 @@ export const makeOffscreenActorClient = ({
         return { ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true };
       }
       return runDomainEffect(entry, 'page/run-program', 'resource', () =>
-        entry.domainState.authority.runOwnedPageProgram());
+        entry.domainState.authority.runOwnedPageProgram(), false, HOST_EFFECT_OUTCOME.runResult);
     },
     'page/capture-foreground': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
@@ -2160,8 +2185,8 @@ export const makeOffscreenActorClient = ({
         grantFor(msg, sender, boundGrant), msg, ['url', 'method'],
       );
       if (!entry) return { ok: false, error: 'resource/confirm-web-write: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'resource/confirm-web-write', 'commit', () =>
-        entry.domainState.authority.confirmWebWrite(msg.url, msg.method));
+      return runDomainEffect(entry, 'resource/confirm-web-write', 'control', () =>
+        entry.domainState.authority.confirmWebWrite(msg.url, msg.method), true, HOST_EFFECT_OUTCOME.confirmation);
     },
     'resource/request-web-text': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = resourceEntry(
@@ -2171,7 +2196,7 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'resource/request-web-text', 'resource', () =>
         entry.domainState.authority.requestWebText({
           url: msg.url, method: msg.method, headers: msg.headers, body: msg.body,
-        }));
+        }), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'resource/extract-markdown': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = resourceEntry(
@@ -2220,49 +2245,49 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry) return { ok: false, error: 'site-client/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/run', 'resource', () =>
-        entry.domainState.authority.runStoredClient(msg.origin, msg.code, msg.timeoutMs));
+        entry.domainState.authority.runStoredClient(msg.origin, msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'site-client/commit': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, ['origin']);
       if (!entry) return { ok: false, error: 'site-client/commit: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/commit', 'commit', () =>
-        entry.domainState.authority.commitConfirmedClient(msg.origin));
+        entry.domainState.authority.commitConfirmedClient(msg.origin), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'site-client/capture-start': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'site-client/capture-start: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/capture-start', 'resource', () =>
-        entry.domainState.authority.startOwnedCapture());
+        entry.domainState.authority.startOwnedCapture(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'site-client/capture-stop': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'site-client/capture-stop: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/capture-stop', 'resource', () =>
-        entry.domainState.authority.stopOwnedCapture());
+        entry.domainState.authority.stopOwnedCapture(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-webvm': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-webvm: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-webvm', 'commit', () =>
-        entry.domainState.authority.createWebVm(msg.plan));
+        entry.domainState.authority.createWebVm(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-notebook': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-notebook: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-notebook', 'commit', () =>
-        entry.domainState.authority.createNotebook(msg.plan));
+        entry.domainState.authority.createNotebook(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-pod': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-pod: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-pod', 'commit', () =>
-        entry.domainState.authority.createPod(msg.plan));
+        entry.domainState.authority.createPod(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-app', 'commit', () =>
-        entry.domainState.authority.createApp(msg.plan));
+        entry.domainState.authority.createApp(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/run-script': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, [
@@ -2273,7 +2298,7 @@ export const makeOffscreenActorClient = ({
         entry.domainState.authority.runHeadlessScript({
           code: msg.code, actors: msg.actors, provider: msg.provider,
           workspace: msg.workspace, timeoutMs: msg.timeoutMs,
-        }));
+        }), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/spill-script': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = executionEntry(
@@ -2303,7 +2328,7 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'editing/write-target', 'commit', () =>
         entry.domainState.authority.writeEditTarget({
           kind: msg.kind, targetId: msg.targetId, path: msg.path, content: msg.content,
-        }));
+        }), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'introspection/actor-roster': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
@@ -2362,13 +2387,13 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'schedule/arm-confirmed-routine', 'commit', () =>
         entry.domainState.authority.armConfirmedRoutine({
           prompt: msg.prompt, every: msg.every, dailyAt: msg.dailyAt, mode: msg.mode,
-        }));
+        }), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'schedule/cancel-routine': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['id']);
       if (!entry) return { ok: false, error: 'schedule/cancel-routine: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'schedule/cancel-routine', 'commit', () =>
-        entry.domainState.authority.cancelRoutine(msg.id));
+        entry.domainState.authority.cancelRoutine(msg.id), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'dweb/discover-apps': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
@@ -2380,13 +2405,13 @@ export const makeOffscreenActorClient = ({
       const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['appId']);
       if (!entry) return { ok: false, error: 'dweb/publish-confirmed-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/publish-confirmed-app', 'commit', () =>
-        entry.domainState.authority.publishConfirmedApp(msg.appId));
+        entry.domainState.authority.publishConfirmedApp(msg.appId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'dweb/install-confirmed-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['uri', 'name']);
       if (!entry) return { ok: false, error: 'dweb/install-confirmed-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/install-confirmed-app', 'commit', () =>
-        entry.domainState.authority.installConfirmedApp(msg.uri, msg.name));
+        entry.domainState.authority.installConfirmedApp(msg.uri, msg.name), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'dweb/read-peers': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
@@ -2400,13 +2425,13 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry) return { ok: false, error: 'dweb/set-peer-blocked: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/set-peer-blocked', 'commit', () =>
-        entry.domainState.authority.setPeerBlocked(msg.did, msg.block, msg.reason));
+        entry.domainState.authority.setPeerBlocked(msg.did, msg.block, msg.reason), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'dweb/set-discovery-enabled': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['enabled']);
       if (!entry) return { ok: false, error: 'dweb/set-discovery-enabled: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/set-discovery-enabled', 'commit', () =>
-        entry.domainState.authority.setDiscoveryEnabled(msg.enabled));
+        entry.domainState.authority.setDiscoveryEnabled(msg.enabled), false, HOST_EFFECT_OUTCOME.fulfilledResult);
     },
     'dweb/run-mesh-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = dwebEntry(
@@ -2414,7 +2439,7 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry) return { ok: false, error: 'dweb/run-mesh-program: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/run-mesh-program', 'resource', () =>
-        entry.domainState.authority.runMeshProgram(msg.code, msg.timeoutMs));
+        entry.domainState.authority.runMeshProgram(msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

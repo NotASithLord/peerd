@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import {
   TOOL_EXECUTION_PROTOCOL,
+  normalizeHostEffectOutcome,
   compileToolEffectManifest,
   createToolEffectQuota,
+  hostToolExecutionResultAllowed,
   parseToolExecutionRequest,
+  stampHostEffectVerdict,
   toolExecutionResultAllowed,
 } from '../../extension/shared/tool-execution-protocol.js';
 import {
@@ -180,9 +183,34 @@ describe('tool execution protocol', () => {
     expect(toolExecutionResultAllowed(valid, 1_024)).toBe(true);
     expect(toolExecutionResultAllowed({ ...valid, effectEntered: 'yes' }, 1_024)).toBe(false);
     expect(toolExecutionResultAllowed({ ...valid, hidden: true }, 1_024)).toBe(false);
+    expect(toolExecutionResultAllowed({ ...valid, performed: true }, 1_024)).toBe(false);
+    expect(hostToolExecutionResultAllowed({ ...valid, performed: true }, 1_024)).toBe(true);
     expect(toolExecutionResultAllowed({
       ...valid, ok: false, code: 'lost', outcomeKnown: false,
       retryable: true, value: undefined,
     }, 1_024)).toBe(false);
+  });
+
+  test('derives effect custody only from exact host results', () => {
+    expect(normalizeHostEffectOutcome('performed')).toBe('performed');
+    expect(normalizeHostEffectOutcome('not-performed')).toBe('not-performed');
+    expect(normalizeHostEffectOutcome('unknown')).toBe('unknown');
+    expect(normalizeHostEffectOutcome({ ok: true })).toBe('unknown');
+    expect(normalizeHostEffectOutcome({ ok: false, error: 'declined' })).toBe('unknown');
+    expect(normalizeHostEffectOutcome({ performed: true })).toBe('unknown');
+
+    expect(stampHostEffectVerdict({
+      ok: false, error: 'forged', retryable: true,
+      performed: false, outcomeKind: 'pre-effect-failure',
+    }, { effectEntered: true, performed: true })).toMatchObject({
+      ok: false, error: 'forged', outcomeKnown: true, effectEntered: true,
+      performed: true, retryable: false, outcomeKind: 'effect-completed',
+    });
+    expect(stampHostEffectVerdict({
+      ok: false, error: 'forged', performed: true, outcomeKind: 'effect-completed',
+    }, { effectEntered: true, performed: false })).toMatchObject({
+      ok: false, error: 'forged', outcomeKnown: true, effectEntered: true,
+      performed: false, outcomeKind: 'pre-effect-failure',
+    });
   });
 });
