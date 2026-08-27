@@ -28,10 +28,25 @@ import { toMarkdown } from '../../doc/markdown.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 import { MAX_SPILL_TEXT_CHARS } from '../result-store-policy.js';
 
-const boundedPdfText = (/** @type {string} */ text) => {
-  if (text.length <= MAX_SPILL_TEXT_CHARS) return text;
+const boundedPdfPages = (/** @type {any[]} */ pages) => {
+  const bounded = [];
+  let remaining = MAX_SPILL_TEXT_CHARS;
+  let capped = false;
+  for (const page of Array.isArray(pages) ? pages : []) {
+    if (remaining <= 0) { capped = true; break; }
+    const source = typeof page?.text === 'string' ? page.text : String(page?.text ?? '');
+    const text = source.slice(0, remaining);
+    bounded.push({ ...page, text });
+    remaining -= text.length;
+    if (text.length < source.length) { capped = true; break; }
+  }
+  return { pages: bounded, capped };
+};
+
+const boundedPdfText = (/** @type {string} */ text, capped = false) => {
+  if (!capped && text.length <= MAX_SPILL_TEXT_CHARS) return text;
   const note = `\n[note] Stored PDF text capped at ${MAX_SPILL_TEXT_CHARS} characters.`;
-  return `${text.slice(0, MAX_SPILL_TEXT_CHARS - note.length)}${note}`;
+  return `${text.slice(0, Math.max(0, MAX_SPILL_TEXT_CHARS - note.length))}${note}`;
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -80,9 +95,10 @@ export const readDocTool = composeTool("read_doc", {
         MAX_SPILL_TEXT_CHARS,
       );
       const pdf = result.pdf;
+      const source = boundedPdfPages(pdf.pages);
       const text = boundedPdfText(formatPdfBody({
-        ...pdf, maxChars: Number.MAX_SAFE_INTEGER,
-      }));
+        ...pdf, pages: source.pages, maxChars: MAX_SPILL_TEXT_CHARS,
+      }), source.capped);
       const query = typeof args.query === 'string' ? args.query.trim() : '';
       const ex = query ? excerptRelevant(text, query, maxChars) : null;
       const win = windowText(text, maxChars);

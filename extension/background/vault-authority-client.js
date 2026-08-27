@@ -173,11 +173,14 @@ export const makeVaultAuthorityClient = ({
     if (active && offscreen && !sameLease(active.lease, lease)) {
       retire('vault authority lease changed', active);
     }
+    // A connection is not callable until its successor-resume decision has
+    // settled. `active` is published early so reverse storage calls can be
+    // admitted during bootstrap, but ordinary callers must join `connecting`.
+    if (connecting) return connecting;
     if (active) {
       await active.ready;
       return active;
     }
-    if (connecting) return connecting;
     connecting = (async () => {
       // A successor host starts with a fresh sealed vault heap. If this client
       // was unlocked before its lease/channel changed, restore the DK from the
@@ -321,8 +324,13 @@ export const makeVaultAuthorityClient = ({
       } finally {
         if (bootstrapTimer !== null) clearTimeout(bootstrapTimer);
       }
-      if (resumeSuccessor) await dispatch(connection, 'attemptResume', null);
-      return connection;
+      try {
+        if (resumeSuccessor) await dispatch(connection, 'attemptResume', null);
+        return connection;
+      } catch (cause) {
+        retire(cause, connection);
+        throw cause;
+      }
     })().finally(() => { connecting = null; });
     return connecting;
   };
