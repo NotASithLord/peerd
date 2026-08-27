@@ -13,6 +13,10 @@ import {
   REPOSITORY_CHANNEL_OFFER, REPOSITORY_CHANNEL_PROTOCOL,
   parseLocalModelChannelOffer, parseRepositoryChannelOffer,
 } from '../shared/feature-lease-protocol.js';
+import {
+  VOICE_CHANNEL_OFFER, VOICE_CHANNEL_PROTOCOL, VOICE_CHANNEL_RESULT,
+  parseVoiceChannelOffer,
+} from '../shared/voice-channel.js';
 import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 import {
   backgroundScriptUrl, isServiceWorkerSender, isTrustedSender,
@@ -62,6 +66,7 @@ export const admitLocalModelChannelOffer = (event, workerUrl, ownsLease) => {
  *   loadLocalModelHost?:()=>Promise<any>,
  *   loadContributorHost?:()=>Promise<any>,
  *   loadArtifactHost?:()=>Promise<any>,
+ *   loadVoiceHost?:()=>Promise<any>,
  *   loadActorHost?:()=>Promise<any>,
  *   actorPorts?:Set<MessagePort>,
  *   vaultAuthorityWorkers?:Set<Worker>,
@@ -75,6 +80,7 @@ export const createServiceWorkerChannels = ({
   loadLocalModelHost = () => import('./local-model.js'),
   loadContributorHost = () => import('./semantic-routes/contributor.js'),
   loadArtifactHost = () => import('./artifact-host.js'),
+  loadVoiceHost = () => import('./voice-channel-host.js'),
   loadActorHost = () => Promise.all([
     import('./actor-channel-host.js'), import('./actor-runner.js'),
   ]),
@@ -96,6 +102,7 @@ export const createServiceWorkerChannels = ({
   const loadLocalModel = bounded(loadLocalModelHost, 'local-model-host');
   const loadContributor = bounded(loadContributorHost, 'contributor-host');
   const loadArtifact = bounded(loadArtifactHost, 'artifact-host');
+  const loadVoice = bounded(loadVoiceHost, 'voice-host');
   const loadActor = bounded(loadActorHost, 'actor-host');
   const loadContributorOffer = makeBoundedModuleLoader(
     () => import('../shared/contributor-channel.js').then((module) => module.parseContributorOffer),
@@ -132,6 +139,39 @@ export const createServiceWorkerChannels = ({
             });
           } catch { /* channel already gone */ }
           event.ports[0].close();
+        },
+      );
+      return;
+    }
+    if (event.data?.type === VOICE_CHANNEL_OFFER) {
+      const port = event.ports?.[0];
+      const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
+      const offer = parseVoiceChannelOffer(event.data);
+      const admitted = event.isTrusted === true && source?.scriptURL === backgroundScriptUrl
+        && event.ports?.length === 1 && !!port && !!offer
+        && getFeatureLeaseHost()?.ownsLease?.('media-host', offer.lease) === true;
+      if (!admitted || !offer) {
+        try { port?.close(); } catch {}
+        return;
+      }
+      loadVoice().then(
+        ({ acceptVoiceChannelOffer }) => acceptVoiceChannelOffer(
+          event,
+          (/** @type {any} */ lease) => getFeatureLeaseHost()
+            ?.ownsLease?.('media-host', lease) === true,
+        ),
+        () => {
+          try { port.postMessage({
+            type: VOICE_CHANNEL_RESULT,
+            protocol: VOICE_CHANNEL_PROTOCOL,
+            requestId: offer.requestId,
+            result: {
+              ok: false, code: 'voice-host-load-failed',
+              error: 'Feature unavailable. Try again.', outcomeKnown: true,
+              retryable: true, phase: 'startup',
+            },
+          }); } catch {}
+          try { port.close(); } catch {}
         },
       );
       return;

@@ -77,6 +77,7 @@ import {
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import { createKernelRecoveryCustody } from './kernel-recovery-custody.js';
+import { createKernelVoiceCustody } from './kernel-voice-custody.js';
 import { createContextSnapshots } from './context-snapshots.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import {
@@ -160,6 +161,7 @@ const sidepanelUrl = browser.runtime.getURL('sidepanel/sidepanel.html');
 const homeUrl = browser.runtime.getURL('home/home.html');
 const optionsUrl = browser.runtime.getURL('options/options.html');
 const evalRunnerUrl = browser.runtime.getURL('eval/runner.html');
+const micUrl = browser.runtime.getURL('permissions/mic.html');
 const notebookTabUrl = browser.runtime.getURL('engine-tabs/notebook-tab/index.html');
 const vmTabUrl = browser.runtime.getURL('engine-tabs/vm-tab/index.html');
 const podTabUrl = browser.runtime.getURL('engine-tabs/pod-tab/index.html');
@@ -169,11 +171,11 @@ const appTabUrl = browser.runtime.getURL('engine-tabs/app-tab/index.html');
 const packagedFetch = (/** @type {string|URL|Request} */ input,
   /** @type {RequestInit|undefined} */ init = undefined) => globalThis.fetch(input, init);
 const {
-  trusted, sidepanelUi, homeUi, humanUi, optionsUi, evalUi, voiceUi,
+  trusted, sidepanelUi, homeUi, humanUi, optionsUi, evalUi, voiceUi, micUi,
   notebookUi, appUi, offscreenUi, sidepanelPortUi,
 } = createKernelSenderPolicy({
   runtimeId, extensionOrigin, sidepanelUrl, homeUrl, optionsUrl, evalRunnerUrl,
-  notebookTabUrl, offscreenUrl, appTabUrl,
+  notebookTabUrl, offscreenUrl, appTabUrl, micUrl,
 });
 const writeGuard = makeWriteGuard();
 const kv = writeGuard.wrapKv(rawKv);
@@ -335,11 +337,48 @@ if (firefoxActorLifetime) {
   });
 }
 
+const forwardVoiceEvent = (/** @type {any} */ event) => {
+  uiPorts.broadcast(event);
+  if (event?.type === 'voice/error') {
+    void voiceCustody.teardown().catch(() => {});
+  }
+  return { ok: true };
+};
+const voiceCustody = createKernelVoiceCustody({
+  featureHost,
+  offscreenUrl,
+  firefox: kernelFirefox,
+  emit: forwardVoiceEvent,
+  getFirefoxLifetime: () => firefoxActorLifetime,
+  createFirefoxHost: kernelFirefox ? makeFirefoxGuard.createVoiceHost : undefined,
+});
+
+const kernelUpdateContext = {
+  browser, kernelReady, settingsStore, uiPorts, featureHost, offscreenUrl,
+};
 const kernelUpdateCustody = kernelSelfHostedChrome && targetAddon
-  ? targetAddon.update({
-    browser, kernelReady, settingsStore, uiPorts, featureHost, offscreenUrl,
-  }) : null;
-if (kernelUpdateCustody) {
+  ? targetAddon.update(kernelUpdateContext)
+  : kernelFirefox && typeof makeFirefoxGuard.update === 'function'
+    ? makeFirefoxGuard.update({
+      runtime: browser.runtime,
+      session: {
+        get: async (/** @type {string} */ key) =>
+          (await browser.storage.session.get(key))?.[key],
+        set: async (/** @type {string} */ key, /** @type {any} */ value) => {
+          await browser.storage.session.set({ [key]: value });
+        },
+      },
+      fetchFn: packagedFetch,
+      ready: async () => { await kernelReady; },
+      isEnabled: () => settingsStore.get().autoUpdateEnabled === true,
+      notify: (/** @type {string} */ text, /** @type {any} */ action) => {
+        if (uiPorts.size < 1) return false;
+        uiPorts.broadcast({ type: 'turn/system-note', text, action });
+        return true;
+      },
+      log: (/** @type {any[]} */ ...args) => console.log('[kernel]', ...args),
+    }) : null;
+if (kernelSelfHostedChrome && kernelUpdateCustody) {
   coldReceipts.registerRecovery({
     event: 'runtime.onUpdateAvailable',
     owner: 'kernel-update-custody',
@@ -457,7 +496,7 @@ const onKernelSettingsChanged = async (/** @type {Record<string,any>} */ patch) 
     autoLockMs = settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS;
     if (vault.isInitialized()) await vault.setAutoLockMs(autoLockMs);
   }
-  if (patch.voiceEnabled === false) await featureHost.runtime.disable('media');
+  if (patch.voiceEnabled === false) await voiceCustody.teardown();
   if (Object.hasOwn(patch, 'autoUpdateEnabled')) {
     await kernelUpdateCustody?.onSettingsChanged();
   }
@@ -471,7 +510,9 @@ let featureLockInFlight = null;
 const lockFeatureHost = () => {
   if (featureLockInFlight) return featureLockInFlight;
   controllerGateway.retire();
-  const run = Promise.resolve(featureHost.vaultLocked()).finally(() => {
+  const run = Promise.resolve(voiceCustody.teardown())
+    .catch(() => {})
+    .then(() => featureHost.vaultLocked()).finally(() => {
     if (featureLockInFlight === run) featureLockInFlight = null;
   });
   featureLockInFlight = run;
@@ -506,7 +547,7 @@ const indexedVaultRoutes = makeIndexedVaultRoutes({
   routes: vaultRoutes, posture: vaultPosture, vault, pushState,
 });
 const routeProvenance = makeKernelRouteProvenance({
-  humanUi, homeUi, sidepanelUi, optionsUi, evalUi, appUi, voiceUi,
+  humanUi, homeUi, sidepanelUi, optionsUi, evalUi, appUi, voiceUi, offscreenUi, micUi,
   actorSpawnUi: notebookUi,
   vaultRoutes: Object.keys(indexedVaultRoutes),
 });
@@ -918,6 +959,17 @@ const routes = {
   ...indexedVaultRoutes,
   ...confirmation.routes,
   ...privateTransferRoutes,
+  ...voiceCustody.routes,
+  'voice/chunk': forwardVoiceEvent,
+  'voice/auto-stop': forwardVoiceEvent,
+  'voice/error': forwardVoiceEvent,
+  'voice/permission-result': forwardVoiceEvent,
+  ...(DWEB_ENABLED ? {
+    'dweb/base-host/generation': async (message = {}) => {
+      await kernelReady;
+      return (await loadDemandPlane()).reseedDwebShares(message);
+    },
+  } : {}),
   'onboarding/complete': async (message = {}) => {
     await vaultReady;
     if (vault.isLocked()) return { ok: false, error: 'vault-locked' };

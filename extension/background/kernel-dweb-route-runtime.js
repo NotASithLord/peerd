@@ -13,6 +13,7 @@ import { makeDwebRoutes } from './routes/dweb.js';
 import { makeDwebSelfRoutes } from './routes/dweb-self.js';
 import { createDwebRollbackGuard } from './dweb-rollback-guard.js';
 import { makeDwebShare } from './dweb-share.js';
+import { createKernelDwebReseedOwner } from './kernel-dweb-reseed-owner.js';
 
 const base64FileBytes = (/** @type {string} */ value) => {
   const binary = atob(value);
@@ -24,7 +25,7 @@ const base64FileBytes = (/** @type {string} */ value) => {
 };
 
 /** @param {Record<string,any>} deps */
-export const createKernelDwebRouteRuntime = (deps) => {
+export const createKernelDwebRouteOwner = (deps) => {
   if (!deps?.enabled || !deps.engine || !deps.relays || !deps.transfer
       || typeof deps.ensureDwebFeature !== 'function'
       || typeof deps.withIdentityMutation !== 'function') {
@@ -129,7 +130,7 @@ export const createKernelDwebRouteRuntime = (deps) => {
     },
     sendMessage,
   });
-  return Object.freeze({
+  const routes = Object.freeze({
     ...makeDwebRoutes({
       vault: deps.vault,
       auditLog: deps.auditLog,
@@ -167,4 +168,14 @@ export const createKernelDwebRouteRuntime = (deps) => {
       auditLog: deps.auditLog,
     }),
   });
+  const reseed = createKernelDwebReseedOwner({
+    active,
+    locked: deps.vault.isLocked,
+    appRegistry: engine.appRegistry,
+    withDwebPublication: engine.withDwebPublication,
+    withAppLifecycle: engine.withAppLifecycle,
+    repositories: engine.repositories,
+    sendMessage,
+  });
+  return Object.freeze({ routes, reseed });
 };

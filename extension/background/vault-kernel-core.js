@@ -274,6 +274,7 @@ export const VAULT_KERNEL_HUMAN_ROUTE_NAMES = Object.freeze([
 /** Exact document ownership; handler-pinned routes stay outside. @param {any} deps */
 export const makeKernelRouteProvenance = ({
   humanUi, homeUi, sidepanelUi, optionsUi, appUi, voiceUi,
+  offscreenUi = () => false, micUi = () => false,
   evalUi = () => false, activityStopUi = () => false,
   actorSpawnUi = () => false, vaultRoutes,
 }) => {
@@ -293,6 +294,9 @@ export const makeKernelRouteProvenance = ({
     'session/list', 'permission/set', 'audit/list', 'cost/total', 'state/get',
   ], anyHumanUi);
   add(['audit/voice-fetch'], voiceUi);
+  add(['voice/init', 'voice/listen', 'voice/stop', 'voice/silence', 'voice/teardown'], voiceUi);
+  add(['voice/chunk', 'voice/auto-stop', 'voice/error', 'dweb/base-host/generation'], offscreenUi);
+  add(['voice/permission-result'], micUi);
   add(['contacts/list', 'contacts/set', 'contacts/forget'], homeUi);
   add([
     'session/get', 'session/setModel', 'session/contextSnapshots', 'commands/list',

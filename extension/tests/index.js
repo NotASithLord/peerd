@@ -62,6 +62,7 @@ import './unit/peerd-runtime/voice/model-store.test.js';
 import './unit/peerd-runtime/voice/manager.test.js';
 import './unit/peerd-runtime/voice/transcriber.test.js';
 import './unit/peerd-runtime/voice/engine-picker.test.js';
+import './unit/peerd-runtime/voice/host-runtime.test.js';
 import './unit/peerd-runtime/vm-tools.test.js';
 
 // --- peerd-engine ---

@@ -540,7 +540,10 @@ const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ leas
     // use this generation to rejoin their stable room member after a renderer
     // replacement. A successor service worker adopts the same hostEpoch, so it
     // does not trigger a duplicate room join.
-    await browser.runtime.sendMessage({
+    // Do not hold the feature-host start receipt behind reseeding. The kernel
+    // finishes the dweb lease transition first, then keeps this exact runtime
+    // message alive while it rebuilds durable shares.
+    void browser.runtime.sendMessage({
       type: 'dweb/base-host/generation',
       hostEpoch: activeFeatureHostEpoch,
       meshGeneration,

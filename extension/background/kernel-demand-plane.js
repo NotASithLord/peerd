@@ -399,6 +399,13 @@ export const createKernelDemandPlane = (deps) => {
     getControllerRelays,
     makeTransferRoutes: executableOwner.makeTransferRoutes,
     listApps: support.appCatalog.list,
+    reseedDwebShares: async (/** @type {any} */ generation) => {
+      const owner = await getRichOwner();
+      if (typeof owner.reseedDwebShares !== 'function') {
+        return { ok: false, error: 'dweb-reseed-owner-unavailable' };
+      }
+      return owner.reseedDwebShares(generation);
+    },
     abortProviderTests: () => controllerOwner?.abortProviderTests?.(),
   });
 };

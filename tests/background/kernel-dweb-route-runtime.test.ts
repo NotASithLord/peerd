@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createKernelDwebRouteRuntime } from '../../extension/background/kernel-dweb-route-runtime.js';
+import { createKernelDwebRouteOwner } from '../../extension/background/kernel-dweb-route-runtime.js';
 import { KERNEL_DWEB_ROUTE_NAMES } from '../../extension/shared/kernel-feature-route-inventory.js';
 
 const registry = {
@@ -49,14 +49,15 @@ const deps = (over: Record<string, any> = {}) => ({
 
 describe('kernel dweb route runtime', () => {
   test('assembles the complete Preview route owner over one shared graph', async () => {
-    const routes = createKernelDwebRouteRuntime(deps());
+    const { routes, reseed } = createKernelDwebRouteOwner(deps());
     expect(Object.keys(routes).sort()).toEqual([...KERNEL_DWEB_ROUTE_NAMES].sort());
     expect(await routes['dweb/base/status']()).toEqual({ ok: false, error: 'dweb-disabled' });
     expect(await routes['dweb/self-status']()).toEqual({ ok: false, error: 'dweb-disabled' });
+    expect(typeof reseed.onHostGeneration).toBe('function');
   });
 
   test('refuses construction without shared identity custody', () => {
-    expect(() => createKernelDwebRouteRuntime(deps({ withIdentityMutation: null })))
+    expect(() => createKernelDwebRouteOwner(deps({ withIdentityMutation: null })))
       .toThrow('kernel-dweb-route-runtime-config-invalid');
   });
 });

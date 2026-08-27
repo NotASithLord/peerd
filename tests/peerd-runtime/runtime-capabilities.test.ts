@@ -41,6 +41,18 @@ describe('runtime host capabilities', () => {
     expect(runtimeCapabilityPromptBlock(capability)).toContain('visible Notebook actor');
   });
 
+  test('a Firefox background document can host voice without claiming other offscreen facilities', () => {
+    const capability = resolveRuntimeCapabilities({
+      offscreenDocument: false,
+      moonshineVoiceDocument: true,
+    });
+    expect(capability.moonshineVoiceHost).toMatchObject({
+      status: 'available', host: 'background-page',
+    });
+    expect(capability.documentReader.status).toBe('unsupported');
+    expect(capability.sealedJobs.status).toBe('unsupported');
+  });
+
   test('web descriptors describe the snapshot and raw fallbacks without naming absent readers', () => {
     const capability = resolveRuntimeCapabilities({ offscreenDocument: false });
     const webDescriptors = filterByRuntimeCapabilities([

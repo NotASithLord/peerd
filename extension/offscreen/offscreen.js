@@ -23,6 +23,12 @@ const loadRepositoryHost = makeBoundedModuleLoader(
   () => import('./repository-host.js').then((module) => (repositoryHost = module)),
   { loadCode: 'repository-host-load-failed', timeoutCode: 'repository-host-load-timeout' },
 );
+/** @type {typeof import('./voice-channel-host.js')|null} */
+let voiceChannelHost = null;
+const loadVoiceChannelHost = makeBoundedModuleLoader(
+  () => import('./voice-channel-host.js').then((module) => (voiceChannelHost = module)),
+  { loadCode: 'voice-host-load-failed', timeoutCode: 'voice-host-load-timeout' },
+);
 const loadDwebHost = makeBoundedModuleLoader(
   () => import('./dweb-base.js'),
   { loadCode: 'dweb-host-load-failed', timeoutCode: 'dweb-host-load-timeout' },
@@ -62,6 +68,7 @@ const loadServiceWorkerChannels = makeBoundedModuleLoader(
       getFeatureLeaseHost: () => featureLeaseHost,
       loadControllerBootstrap,
       loadRepositoryHost,
+      loadVoiceHost: loadVoiceChannelHost,
       actorPorts,
       vaultAuthorityWorkers,
     }).onMessage
@@ -127,201 +134,6 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
   );
   return true;
 }));
-
-/** @type {ReturnType<import('/peerd-runtime/voice/transcriber-picker.js').createBestTranscriber> | null} */
-let transcriber = null;
-const loadVoiceHost = makeBoundedModuleLoader(() => import('/peerd-voice-host/index.js'));
-
-const getVoiceModelStore = makeBoundedModuleLoader(() => import('/peerd-runtime/offscreen.js')
-  .then(({ createModelStore }) => createModelStore()));
-
-// --- mic kill switch (field bug 2026-06-12: macOS mic indicator stayed
-// hot after stop). The engines acquire audio internally (the vendored
-// Moonshine runs its own getUserMedia), so a wedged engine can strand a
-// live MediaStream no stop() of ours reaches. Wrapping getUserMedia in
-// THIS document records every audio stream handed to anyone here, and
-// releaseMicTracks() force-stops them on voice/stop, voice/teardown,
-// engine error, and the no-speech watchdog — the OS indicator must
-// never outlive the user's intent. (Web Speech captures inside the
-// browser, not this doc — abort() is the only lever there.)
-/** @type {Set<MediaStream>} */
-const liveMicStreams = new Set();
-if (navigator.mediaDevices?.getUserMedia) {
-  const realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-  navigator.mediaDevices.getUserMedia = async (constraints) => {
-    const stream = await realGetUserMedia(constraints);
-    if (constraints?.audio) liveMicStreams.add(stream);
-    return stream;
-  };
-}
-const releaseMicTracks = () => {
-  for (const stream of liveMicStreams) {
-    for (const track of stream.getTracks()) {
-      try { track.stop(); } catch { /* already dead */ }
-    }
-  }
-  liveMicStreams.clear();
-};
-
-// No-speech watchdog: if listening produces ZERO chunks for this long,
-// stop everything and tell the panel — a recognizer that wedges without
-// erroring must fail visibly, not sit silent with the mic burning.
-const NO_SPEECH_MS = 15_000;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let noSpeechTimer = null;
-const clearNoSpeechTimer = () => {
-  if (noSpeechTimer) { clearTimeout(noSpeechTimer); noSpeechTimer = null; }
-};
-/** @param {string} [targetId] */
-const armNoSpeechTimer = (targetId) => {
-  clearNoSpeechTimer();
-  noSpeechTimer = setTimeout(async () => {
-    console.warn('[offscreen] no speech within', NO_SPEECH_MS, 'ms — releasing mic');
-    try { if (transcriber) await transcriber.stop(); } catch { /* best effort */ }
-    releaseMicTracks();
-    onTranscriberError({
-      name: 'VoiceNoSpeechError',
-      message: 'Heard nothing — mic released. Click the mic to try again.',
-      targetId,
-    });
-  }, NO_SPEECH_MS);
-};
-
-/** @param {any} chunk */
-const onTranscriberChunk = (chunk) => {
-  // A live chunk proves the pipeline works — push the watchdog out.
-  if (noSpeechTimer) armNoSpeechTimer(chunk?.targetId);
-  // Push directly via runtime.sendMessage; the SW (and any open side
-  // panel port subscribers) receive it. Fire-and-forget — we never
-  // block the audio pipeline on consumer ack.
-  browser.runtime.sendMessage({ type: 'voice/chunk', payload: chunk })
-    .catch((e) => console.debug('[offscreen] voice/chunk send failed', e));
-};
-
-/** @param {any} err */
-const onTranscriberError = (err) => {
-  // why: the recognizer just gave up mid-listen (permission denied,
-  // mic disconnected, network gone, etc.). Tell the side panel so the
-  // manager can revert status and surface a clear error. The error
-  // shape is { name, message, code?, targetId } — name is the typed
-  // class so the UI can branch. An erroring engine forfeits the mic:
-  // clear the watchdog and force-release any stranded tracks.
-  clearNoSpeechTimer();
-  releaseMicTracks();
-  browser.runtime.sendMessage({ type: 'voice/error', payload: err })
-    .catch((e) => console.debug('[offscreen] voice/error send failed', e));
-};
-
-/** @param {{ targetId?: string | null }} [arg] */
-const onTranscriberAutoStop = ({ targetId } = {}) => {
-  // why: the transcriber's silence timer fired (end of speech) and
-  // stopped the mic on its own. The side panel doesn't know — it only
-  // learns of stops it initiated — so its mic button would stay lit.
-  // Release the mic and push voice/auto-stop so the manager reverts to
-  // 'available' and the button de-highlights. (The whole receive chain
-  // SW → side panel → manager already existed; nothing ever SENT it.)
-  clearNoSpeechTimer();
-  releaseMicTracks();
-  browser.runtime.sendMessage({ type: 'voice/auto-stop', payload: { targetId } })
-    .catch((e) => console.debug('[offscreen] voice/auto-stop send failed', e));
-};
-
-// why the cast at addListener: the polyfill's OnMessageListenerCallback types
-// the return as the literal `true`, so a handler that also `return undefined`s
-// to decline a message can't satisfy it. The body stays fully typed.
-/**
- * @param {any} msg
- * @param {import('webextension-polyfill').Runtime.MessageSender} sender
- * @param {(response: any) => void} sendResponse
- */
-const onVoiceMessage = (msg, sender, sendResponse) => {
-  if (!msg?.type?.startsWith?.('voice/')) return undefined;
-  // Side panel/options originate these commands, but the service worker owns
-  // the media lease and forwards the same command after acquisition. Decline
-  // the original page message without responding so it cannot race the
-  // authority response; accept only the worker-forwarded copy.
-  if (!isServiceWorkerSender(sender)) return undefined;
-  const claim = claimLease('media-host', sendResponse);
-  if (!claim) return true;
-  (async () => {
-    try {
-      switch (msg.type) {
-        case 'voice/init': {
-          let activeTranscriber = transcriber;
-          if (!activeTranscriber) {
-            const { createBestTranscriber } = await loadVoiceHost();
-            if (rejectStaleClaim('media-host', claim, sendResponse)) return;
-            activeTranscriber = createBestTranscriber({}, msg.engine);
-            transcriber = activeTranscriber;
-          }
-          if (!activeTranscriber) throw new Error('voice-transcriber-unavailable');
-          // why: Moonshine needs model bytes; Web Speech doesn't. The
-          // bytes can't ride the message (sendMessage drops ArrayBuffers
-          // on Chrome), so we read them from the shared origin IDB the
-          // side panel just populated — a cache hit, no re-download.
-          if (activeTranscriber.engine === 'moonshine') {
-            const store = await getVoiceModelStore();
-            if (rejectStaleClaim('media-host', claim, sendResponse)) return;
-            const { files } = await store.getModel(msg.variant, { dev: true });
-            await activeTranscriber.init({ files });
-          } else {
-            await activeTranscriber.init();
-          }
-          sendResponse({ ok: true, engine: activeTranscriber.engine });
-          return;
-        }
-        case 'voice/listen': {
-          if (!transcriber) {
-            sendResponse({ ok: false, error: 'not-initialized' });
-            return;
-          }
-          await transcriber.listenFor(msg.targetId, onTranscriberChunk, onTranscriberError, onTranscriberAutoStop);
-          armNoSpeechTimer(msg.targetId);
-          sendResponse({ ok: true });
-          return;
-        }
-        case 'voice/stop': {
-          clearNoSpeechTimer();
-          if (transcriber) await transcriber.stop();
-          // Belt-and-suspenders: the user said stop — no engine state
-          // may keep the OS mic indicator lit past this line.
-          releaseMicTracks();
-          sendResponse({ ok: true });
-          return;
-        }
-        case 'voice/silence': {
-          if (transcriber) transcriber.setSilenceThreshold(msg.ms);
-          sendResponse({ ok: true });
-          return;
-        }
-        case 'voice/teardown': {
-          clearNoSpeechTimer();
-          if (transcriber) {
-            await transcriber.teardown();
-            transcriber = null;
-          }
-          releaseMicTracks();
-          sendResponse({ ok: true });
-          return;
-        }
-        default:
-          sendResponse({ ok: false, error: `unknown-voice-msg:${msg.type}` });
-          return;
-      }
-    } catch (e) {
-      console.error('[offscreen] voice handler threw', msg.type, e);
-      if (/** @type {any} */ (e)?.phase === 'startup') {
-        sendResponse(errorResponse(e));
-        return;
-      }
-      const err = /** @type {{ name?: string, message?: string }} */ (e);
-      sendResponse({ ok: false, error: err?.name === 'TypedError' || err?.name
-        ? err.name : (err?.message ?? String(e)) });
-    }
-  })();
-  return true;     // async sendResponse contract
-};
-browser.runtime.onMessage.addListener(/** @type {any} */ (onVoiceMessage));
 
 // --- headless JS jobs (script tool → engine.runJob) ---
 // Spawns the sealed Worker here and relays its egress/actor bridges back to
@@ -554,16 +366,7 @@ const stopDomFeature = async () => {
 };
 
 const stopMediaFeature = async () => {
-  clearNoSpeechTimer();
-  try {
-    if (transcriber) {
-      await transcriber.teardown();
-      transcriber = null;
-    }
-  } finally {
-    // A broken engine is never allowed to retain OS microphone custody.
-    releaseMicTracks();
-  }
+  await voiceChannelHost?.stopVoiceHost();
   return { stopped: true };
 };
 
