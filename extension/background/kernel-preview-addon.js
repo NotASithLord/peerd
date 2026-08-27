@@ -5,6 +5,7 @@ import {
   CONTRIBUTOR_CHANNEL_PROTOCOL, CONTRIBUTOR_CHANNEL_REPLY,
   CONTRIBUTOR_CHANNEL_RESULT, parseContributorOffer,
 } from '../shared/contributor-channel.js';
+import { withDeadline } from '../shared/cold-util.js';
 
 export const KERNEL_UPDATE_CUSTODY_KEY = 'kernel.updateCustody.v1';
 const VERSION = /^\d+(?:\.\d+)*$/;
@@ -24,10 +25,11 @@ export const createKernelUpdateCustody = (/** @type {any} */ {
   notify = () => false, now = Date.now,
   scheduleRetry = (/** @type {()=>void} */ fn, /** @type {number} */ delayMs) => setTimeout(fn, delayMs),
   cancelRetry = (/** @type {unknown} */ handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)),
-  log = () => {},
+  log = () => {}, operationTimeoutMs = 15_000,
 }) => {
   if (![runtime?.reload, runtime?.getManifest, session?.get, session?.set, ready, isEnabled,
-    isBusy, listWindowClients, isBlockingWindow].every((value) => typeof value === 'function')) {
+    isBusy, listWindowClients, isBlockingWindow].every((value) => typeof value === 'function')
+      || !Number.isFinite(operationTimeoutMs) || operationTimeoutMs <= 0) {
     throw new TypeError('kernel-update-custody-config-invalid');
   }
 
@@ -36,6 +38,10 @@ export const createKernelUpdateCustody = (/** @type {any} */ {
   /** @type {Promise<boolean>|null} */ let check = null;
   /** @type {unknown|null} */ let timer = null;
   let attempts = 0;
+  /** @param {()=>Promise<any>|any} operation @param {string} code */
+  const bounded = (operation, code) => withDeadline(
+    operation, operationTimeoutMs, () => new Error(code),
+  );
 
   const read = async () => normalize(await session.get(KERNEL_UPDATE_CUSTODY_KEY));
   /** @param {(state:ReturnType<typeof normalize>)=>ReturnType<typeof normalize>} mutate */
@@ -79,7 +85,7 @@ export const createKernelUpdateCustody = (/** @type {any} */ {
     }
     if (isBusy()) { await notePending(version); retry(); return false; }
     let windows;
-    try { windows = await listWindowClients(); }
+    try { windows = await bounded(listWindowClients, 'kernel-update-window-timeout'); }
     catch (error) { log('[update] window unavailable', error); retry(); return false; }
     if (!Array.isArray(windows) || windows.some(isBlockingWindow) || isBusy()) {
       await notePending(version); retry(); return false;
@@ -110,7 +116,11 @@ export const createKernelUpdateCustody = (/** @type {any} */ {
       if (!isEnabled() || typeof runtime.requestUpdateCheck !== 'function') return false;
       const state = await read();
       if (state.lastCheckAt !== null && now() - state.lastCheckAt < 21_600_000) return false;
-      try { await runtime.requestUpdateCheck(); }
+      try {
+        await bounded(
+          () => runtime.requestUpdateCheck(), 'kernel-update-check-timeout',
+        );
+      }
       catch (error) { log('[update] request failed', error); return false; }
       await update((latest) => ({ ...latest, lastCheckAt: now() }));
       return true;
