@@ -1,8 +1,6 @@
 // @ts-check
 
-// Preview/dev Firefox alone installs the optional Contributor Metrics owner.
-// Store Firefox imports only kernel-firefox-addon.js, keeping this feature and
-// its schema out of the shipped event-page cold graph.
+// Store Firefox omits this Preview-only owner.
 import './kernel-firefox-addon.js';
 
 const CONTRIBUTOR_RECORD_KEY = 'contributor_metrics.aggregate.v1';
@@ -11,6 +9,7 @@ const CONTRIBUTOR_STATE_PREFIX = 'contributor_metrics.state.v2.';
 const CONTRIBUTOR_STORAGE_DEADLINE_MS = 750;
 const CONTRIBUTOR_MAX_STATE_SNAPSHOTS = 128;
 const CONTRIBUTOR_MAX_REVISION = 8_000_000_000_000_000;
+const DISARMED = Object.freeze({ enabled: false, generation: null });
 const exactKeys = (/** @type {unknown} */ value, /** @type {string[]} */ keys) =>
   !!value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
@@ -61,9 +60,10 @@ const firefoxContributorArm = async (/** @type {any} */ kv) => {
   );
   if (!snapshots || typeof snapshots !== 'object' || Array.isArray(snapshots)
       || Object.keys(snapshots).length > CONTRIBUTOR_MAX_STATE_SNAPSHOTS) {
-    return Object.freeze({ enabled: false, generation: null });
+    return DISARMED;
   }
   /** @type {{key:string,value:any}|null} */ let latest = null;
+  let latestProposalRevision = 0;
   for (const [key, value] of Object.entries(snapshots)) {
     const valid = key.startsWith(CONTRIBUTOR_STATE_PREFIX)
       && value && typeof value === 'object' && !Array.isArray(value)
@@ -74,33 +74,33 @@ const firefoxContributorArm = async (/** @type {any} */ kv) => {
       && typeof value.committed === 'boolean'
       && ['active', 'revoked'].includes(value.state)
       && (value.state === 'revoked' ? value.record === null : !!value.record);
-    if (!valid) return Object.freeze({ enabled: false, generation: null });
+    if (!valid) return DISARMED;
+    if (!value.committed) latestProposalRevision = Math.max(
+      latestProposalRevision, value.revision,
+    );
     if (value.committed && (!latest || value.revision > latest.value.revision
         || value.revision === latest.value.revision && key > latest.key)) latest = { key, value };
   }
-  if (latest) {
-    if (latest.value.state !== 'active') {
-      return Object.freeze({ enabled: false, generation: null });
-    }
-    return armFromRecord(latest.value.record);
+  // why: an unresolved write may become a revocation after this realm dies.
+  if (latestProposalRevision >= (latest?.value.revision ?? 0)
+      && latestProposalRevision > 0) {
+    return DISARMED;
   }
+  if (latest) return latest.value.state === 'active'
+    ? armFromRecord(latest.value.record) : DISARMED;
   const active = /** @type {any} */ (
     await bounded(() => kv.get(CONTRIBUTOR_ACTIVE_CONSENT_KEY))
   );
   if (active?.version !== 1 || typeof active.generation !== 'string'
       || active.generation.length === 0 || active.generation.length > 200) {
-    return Object.freeze({ enabled: false, generation: null });
+    return DISARMED;
   }
   return armFromRecord(
     await bounded(() => kv.get(CONTRIBUTOR_RECORD_KEY)), active.generation,
   );
 };
 
-/**
- * @param {Object} [loaders]
- * @param {()=>Promise<any>} [loaders.contributorOwner]
- * @param {()=>Promise<any>} [loaders.contributorSemantic]
- */
+/** @param {{contributorOwner?:()=>Promise<any>, contributorSemantic?:()=>Promise<any>}} [loaders] */
 export const makeKernelFirefoxContributor = ({
   contributorOwner = () => import('./kernel-contributor-owner.js'),
   contributorSemantic = () => import('../offscreen/semantic-routes/contributor.js'),
