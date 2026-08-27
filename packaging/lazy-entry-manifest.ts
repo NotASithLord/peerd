@@ -55,7 +55,6 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'background/kernel-keyed-origin-authority.js',
   'offscreen/job-runner.js',
   'offscreen/web-extract-core.js',
-  'offscreen/toolbox-parse.js',
   'offscreen/artifact-host.js',
   'offscreen/artifact-worker.js',
   'offscreen/local-model.js',

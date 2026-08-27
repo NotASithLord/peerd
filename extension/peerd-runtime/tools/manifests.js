@@ -43,12 +43,12 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // web_search/call_api/read_article/submit_form were all removed — the web
       // actor searches by navigating to an engine + reading results, and reads via
       // fetch_url or its drive-a-tab DOM tools.
-      // read_web_cache MUST ride along with any spill producer (fetch_url /
+      // read_result MUST ride along with any spill producer (fetch_url /
       // read_page mode:'content'): an overflowing read spills to the cache and
-      // emits a trusted footer instructing read_web_cache — omit it and the
+      // emits a trusted footer instructing read_result — omit it and the
       // pager the model is told to call is refused by the manifest gate, the
       // spilled tail is unreachable, and turns burn on guaranteed-refused calls.
-      'fetch_url', 'read_web_cache', 'capture',
+      'fetch_url', 'read_result', 'capture',
       // the main agent's browser surface: enumerate actors (instances/tabs/
       // integrations) + open a tab + message a tab's web actor to read or act.
       'actor_list', 'open_tab', 'message_actor',
@@ -61,7 +61,7 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // sovereignty / sessions introspection (one kind-discriminated tool)
       'inspect',
       // temporal grounding
-      'now', 'wait_until',
+      'now',
     ]),
   }),
   'browse-only': Object.freeze({
@@ -74,10 +74,10 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // read-only DOM subset (observe, never mutate) — inherited by the web actor.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_doc', 'view',
       // web reads: fetch_url (the web actor's sessionless fetch) + its pager.
-      // read_web_cache pages a spilled fetch_url / read_page body — it must be
+      // read_result pages a spilled fetch_url / read_page body — it must be
       // present wherever a spill producer is, or the trusted paging footer names
       // a tool this manifest refuses (read-only, local cache, no new authority).
-      'fetch_url', 'read_web_cache',
+      'fetch_url', 'read_result',
       // temporal grounding (reads)
       'now',
     ]),

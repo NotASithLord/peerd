@@ -24,7 +24,7 @@ export const KERNEL_CREDENTIAL_ROUTE_NAMES = Object.freeze(
 );
 
 export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze(
-  'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status apps/repository/status apps/repository/history apps/repository/diff apps/repository/commit apps/repository/restore apps/repository/branch apps/repository/checkout apps/repository/link apps/repository/fetch apps/repository/push apps/import-git session/archive session/debugBundle session/reset session/switch toolbox/read toolbox/record'.split(' '),
+  'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status apps/repository/status apps/repository/history apps/repository/diff apps/repository/commit apps/repository/restore apps/repository/branch apps/repository/checkout apps/repository/link apps/repository/fetch apps/repository/push apps/import-git session/archive session/debugBundle session/reset session/switch'.split(' '),
 );
 
 export const KERNEL_PAGE_PROGRAM_ROUTE_NAMES = Object.freeze([
@@ -32,7 +32,7 @@ export const KERNEL_PAGE_PROGRAM_ROUTE_NAMES = Object.freeze([
   'page-program/snapshot', 'page-program/read', 'page-program/read-state',
   'page-program/watch-changes', 'page-program/query-dom',
   'page-program/view', 'page-program/fetch', 'page-program/read-document',
-  'page-program/read-cache', 'page-program/site-client-read',
+  'page-program/read-result', 'page-program/site-client-read',
   'page-program/site-client-write', 'page-program/site-capture',
   'page-program/login',
 ]);

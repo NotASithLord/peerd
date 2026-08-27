@@ -38,7 +38,7 @@ import {
 // Every web READ is the actor's, reached via message_actor.
 export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
-  'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click',
+  'navigate', 'type', 'click',
   // read_doc returns untrusted PDF/Office/OpenDocument text, so it sits on the
   // same actor-only tier as page content.
   'read_doc',
@@ -56,9 +56,6 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // page_code is the code-surface web actor's action tool (PR #119 A/B arm) —
   // same boundary as the DOM tools it wraps: page-driving stays off the main agent.
   'page_code',
-  // read_web_cache pages a SPILLED fetch_url body — the same fetched page
-  // content, so the same web-actor-only tier.
-  'read_web_cache',
   // DESIGN-19 site clients — per-origin derived API clients. All web-actor-only:
   // run executes a client (untrusted-provenance code) behind an origin-pinned
   // fetch; read/capture ingest page/response bytes; write persists them. Same
@@ -149,9 +146,8 @@ export const ACTOR_ONLY_TOOLS = Object.freeze(new Set(
 export const isActorOnlyTool = (name) => ACTOR_ONLY_TOOLS.has(name);
 
 // DESIGN-17 web actor — the DOM toolset it owns. This list is the sole source
-// of truth for that set. why these and not page_eval/page_exec: the web actor
-// ingests untrusted page text, so it must not also wield code-exec — the
-// exclusion IS the boundary.
+// of truth for that set. The retired arbitrary page-code tools are not part of
+// any actor surface; page_code exposes only the named manifest below.
 export const WEB_ACTOR_DOM_TOOLS = WEB_ACTOR_DOM_TOOL_NAMES;
 
 // PR #119 — the CODE-surface web actor's toolset (the Aside-style A/B arm: the
@@ -378,19 +374,11 @@ export const filterByDwebEnabled = (descriptors, dwebOn) =>
   dwebOn ? [...descriptors] : descriptors.filter((t) => !isDwebTool(t));
 
 // ── dweb tools: progressive disclosure of the SECONDARY surface ──────────────
-// The dweb family has ENTRY tools — discover/share/install AND dweb_guide — always
-// on when the dweb is enabled, so a session can start a dweb flow (or read the
-// bridge reference BEFORE building a multiplayer dwapp) in one call. The SECONDARY
-// tools below (the sovereign controls) stay hidden until the session has ENGAGED
+// The dweb family has discover/share/install as entry tools whenever the dweb
+// is enabled. The SECONDARY tools below (the sovereign controls) stay hidden
+// until the session has ENGAGED
 // the dweb — i.e. a dweb tool was actually called this session. Then they appear
 // the next step, exactly like an instance-gated op after a create.
-//
-// why dweb_guide is ENTRY, not secondary: the prompt tells the agent to call it
-// FIRST when building a shared app — which is BEFORE any other dweb tool, so
-// dwebActive is still false. Gating it created a chicken-and-egg (the agent
-// couldn't see the tool it was told to call first, and fell back to load_skill).
-// The tool schema is tiny; the bulky guide text only loads when it's CALLED, so
-// keeping it always-visible costs ~nothing and keeps the bridge how-to reachable.
 //
 // why ENGAGEMENT, not connectivity (for the rest): the base network is always-on
 // and auto-connects to whatever peers are online, so "has peers" is true within

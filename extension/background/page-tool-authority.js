@@ -6,9 +6,6 @@ import { snapshotTool } from './page-authority/snapshot.js';
 import { readStateTool } from './page-authority/read-state.js';
 import { watchChangesTool } from './page-authority/watch-changes.js';
 import { queryDomTool } from './page-authority/query-dom.js';
-import { pageEvalTool } from './page-authority/page-eval.js';
-import { pageExecTool } from './page-authority/page-exec.js';
-import { pageKeysTool } from './page-authority/page-keys.js';
 import { navigateTool } from './page-authority/navigate.js';
 import { typeTool } from './page-authority/type.js';
 import { clickTool } from './page-authority/click.js';
@@ -37,9 +34,6 @@ export const createPageToolAuthority = ({ call, ctx, signal }) => {
     readOwnedFrameworkState: () => run('read_state', readStateTool),
     drainOwnedDomChanges: () => run('watch_changes', watchChangesTool),
     queryOwnedDom: () => run('query_dom', queryDomTool),
-    evaluateOwnedPageMainWorld: () => run('page_eval', pageEvalTool),
-    evaluateOwnedPageDebugger: () => run('page_exec', pageExecTool),
-    readTrustedKeysAvailability: () => run('page_keys', pageKeysTool),
     navigateOwnedTab: () => run('navigate', navigateTool),
     fillOwnedTarget: () => run('type', typeTool),
     clickOwnedTarget: () => run('click', clickTool),

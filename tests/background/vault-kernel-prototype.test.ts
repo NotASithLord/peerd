@@ -184,10 +184,6 @@ describe('minimal vault authority-kernel prototype', () => {
       EXTENSION_DIR,
       join(EXTENSION_DIR, 'background/vault-kernel.js'),
     )].map((path) => path.slice(EXTENSION_DIR.length + 1));
-    expect(graph).not.toContain('background/routes/toolbox.js');
-    expect(graph).not.toContain('background/kernel-toolbox-store.js');
-    expect(graph).not.toContain('peerd-runtime/toolbox/store.js');
-    expect(graph).not.toContain('peerd-runtime/toolbox/core.js');
     expect(graph).not.toContain('peerd-runtime/tools/prompt-wrap.js');
     expect(graph).toContain('background/context-snapshots.js');
     expect(graph).not.toContain('background/routes/contacts.js');

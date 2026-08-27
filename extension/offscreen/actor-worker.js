@@ -148,9 +148,6 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'page-read-state-response'
       || m.type === 'page-watch-changes-response'
       || m.type === 'page-query-dom-response'
-      || m.type === 'page-evaluate-main-response'
-      || m.type === 'page-evaluate-debugger-response'
-      || m.type === 'page-keys-availability-response'
       || m.type === 'page-navigate-response'
       || m.type === 'page-fill-response'
       || m.type === 'page-click-response'
@@ -621,9 +618,6 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             readOwnedFrameworkState: () => request('page-read-state-request'),
             drainOwnedDomChanges: () => request('page-watch-changes-request'),
             queryOwnedDom: () => request('page-query-dom-request'),
-            evaluateOwnedPageMainWorld: () => request('page-evaluate-main-request'),
-            evaluateOwnedPageDebugger: () => request('page-evaluate-debugger-request'),
-            readTrustedKeysAvailability: () => request('page-keys-availability-request'),
             navigateOwnedTab: () => request('page-navigate-request'),
             fillOwnedTarget: () => request('page-fill-request'),
             clickOwnedTarget: () => request('page-click-request'),

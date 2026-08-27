@@ -223,9 +223,9 @@ targets where Preview enables literal static remote modules, they cross the
 audited web-fetch path, have source and graph
 caps, and may carry an optional SHA-256 pin. Any remote module marks the whole
 resolved graph as untrusted compute. Runtime network and file access, agents,
-model calls, browser and site clients, and dweb are disabled for that run. A
-remote module cannot import a local toolbox module. Generated worker shims and
-independent host relay checks enforce the same profile. Firefox links the
+model calls, browser and site clients, and dweb are disabled for that run.
+Generated worker shims and independent host relay checks enforce the same
+profile. Firefox links the
 authorized graph and realm seal in a disposable compiler Worker, then runs the
 result through a sandboxed opaque-origin host with no extension APIs, string
 compilation, or network. Stop terminates the compiler or code Worker and
@@ -335,9 +335,8 @@ at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
 field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
-includes remote code, the entire run uses the compute-only profile. The resolver
-blocks remote access to local toolbox modules. The worker and host both refuse
-every authority-bearing relay, and the tool boundary fences all remote-controlled
+includes remote code, the entire run uses the compute-only profile. The worker
+and host both refuse every authority-bearing relay, and the tool boundary fences all remote-controlled
 output.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `engine-tabs/notebook-tab/worker-source.js`,
@@ -932,7 +931,7 @@ evaluating peerd should know. Each cites where it lives in the code.
   with no tool call, a page redirecting itself) into one check no redirect chain walks
   around. The same policy is asked synchronously inside the credential-scope getter, so
   a self-redirect onto a credentialed origin cannot be spent by `fetch_url`,
-  `read_web_cache` or a site-client fetch in the window before a DOM tool re-enters
+  `read_result` or a site-client fetch in the window before a DOM tool re-enters
   the chokepoint. Durable client record custody is a separate invariant (INV-18).
   (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
   `browser-authority/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)

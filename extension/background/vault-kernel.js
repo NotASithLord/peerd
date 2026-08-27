@@ -142,7 +142,7 @@ const packagedFetch = (/** @type {string|URL|Request} */ input,
   /** @type {RequestInit|undefined} */ init = undefined) => globalThis.fetch(input, init);
 const {
   trusted, sidepanelUi, homeUi, humanUi, optionsUi, evalUi, voiceUi,
-  notebookUi, toolboxUi, appUi, offscreenUi, sidepanelPortUi,
+  notebookUi, appUi, offscreenUi, sidepanelPortUi,
 } = createKernelSenderPolicy({
   runtimeId, extensionOrigin, sidepanelUrl, homeUrl, optionsUrl, evalRunnerUrl,
   notebookTabUrl, offscreenUrl, appTabUrl,
@@ -492,7 +492,7 @@ const indexedVaultRoutes = Object.freeze(Object.fromEntries(
   }]),
 ));
 const routeProvenance = makeKernelRouteProvenance({
-  humanUi, homeUi, sidepanelUi, optionsUi, evalUi, appUi, voiceUi, toolboxUi,
+  humanUi, homeUi, sidepanelUi, optionsUi, evalUi, appUi, voiceUi,
   actorSpawnUi: notebookUi,
   vaultRoutes: Object.keys(indexedVaultRoutes),
 });

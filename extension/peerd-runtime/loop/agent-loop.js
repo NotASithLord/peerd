@@ -1050,8 +1050,8 @@ export async function* runUserTurn(ctx) {
             && typeof im.data === 'string' && im.data.length > 0);
         if (imgs.length > 0) liveToolImages.set(tu.id, imgs);
       }
-      // why the paged raise: an EXPLICITLY-PAGED reader result (read_web_cache /
-      // read_run_cache / the self-paging file reads flag `paged`) is one slice
+      // why the paged raise: an EXPLICITLY-PAGED reader result (read_result or
+      // the self-paging file reads flag `paged`) is one slice
       // the model asked for — redact it at the larger paged ceiling so the
       // requested page survives instead of being re-cut by the 8k backstop.
       // Guarded to `ok && paged` so a normal firehose result still gets 8k'd.

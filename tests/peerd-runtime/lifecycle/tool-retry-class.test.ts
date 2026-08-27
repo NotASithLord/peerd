@@ -150,7 +150,7 @@ describe('spot checks against the real defs', () => {
     // A — local reads; a duplicate is invisible.
     ['inspect', 'A'],
     ['read_page', 'A'],
-    ['read_web_cache', 'A'],
+    ['read_result', 'A'],
     ['now', 'A'],
     // B — reads that cross the network.
     ['fetch_url', 'B'],

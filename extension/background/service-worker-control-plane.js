@@ -24,21 +24,6 @@ export const isAuthorizedUiPortSender = (name, sender, predicates) => {
 
 /**
  * @param {{
- *   ensureOffscreen: () => Promise<void>,
- *   sendMessage: (message: object) => Promise<any>,
- * }} deps
- * @returns {(name: string, body: string) => Promise<void>}
- */
-export const makeOffscreenToolboxParseClient = ({ ensureOffscreen, sendMessage }) => (
-  async (name, body) => {
-    await ensureOffscreen();
-    const reply = await sendMessage({ type: 'toolbox/parse-check', name, body });
-    if (!reply?.ok) throw new Error(reply?.error ?? 'toolbox module validation failed');
-  }
-);
-
-/**
- * @param {{
  *   sessions: { get: (id: string) => Promise<any>, setCost: (id: string, cost: any) => Promise<any> },
  *   addUsage: (current: any, usage: any, cost: number) => any,
  *   normalizeTally: (value: any) => any,

@@ -21,7 +21,5 @@ So "build X and share it to the dwapp store" = sandbox_create({kind:'app', dwapp
 its id. "What are my friends running?" = dweb_discover.
 
 To build a MULTIPLAYER / shared dwapp (a game friends play together, a shared
-whiteboard, a chat), the App talks to the network through the dwapp BRIDGE. Call
-the dweb_guide tool FIRST for the full client + ops/events reference (it is a
-normal tool — not a skill, so do NOT use load_skill). The commons app in the
-Library is the worked example.
+whiteboard, a chat), the App talks to the network through its consent-gated
+dwapp bridge. The commons app in the Library is the worked example.

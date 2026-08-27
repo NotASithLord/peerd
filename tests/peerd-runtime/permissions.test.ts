@@ -39,7 +39,6 @@ const TOOLS = {
   app_write:     { name: 'app_write_file', sideEffect: 'write',          primitive: 'app' },
   vm_boot:       { name: 'vm_boot',       sideEffect: 'write',           primitive: 'webvm' },
   js_notebook:       { name: 'js_notebook',       sideEffect: 'write',           primitive: 'notebook' },
-  page_exec:     { name: 'page_exec',     sideEffect: 'write',           primitive: 'tab' },
   script:        { name: 'script',        sideEffect: 'write',           primitive: 'notebook' },
   click:         { name: 'click',         sideEffect: 'write',           primitive: 'tab' },
   type:          { name: 'type',          sideEffect: 'write',           primitive: 'tab' },
@@ -69,7 +68,6 @@ describe('classifyAction', () => {
   test('code execution → SHELL (even on a workspace primitive)', () => {
     expect(classifyAction(TOOLS.vm_boot)).toBe(ACTION_CLASSES.SHELL);
     expect(classifyAction(TOOLS.js_notebook)).toBe(ACTION_CLASSES.SHELL);
-    expect(classifyAction(TOOLS.page_exec)).toBe(ACTION_CLASSES.SHELL);
     // design 7.4: script (headless JS with egress + delegation) must not carry
     // a softer confirm class than the other code lanes via its notebook primitive.
     expect(classifyAction(TOOLS.script)).toBe(ACTION_CLASSES.SHELL);
@@ -98,7 +96,7 @@ describe('PLAN mode is read-only (plus the navigation carve-out)', () => {
   // of the confirm toggle.
   test.each([
     ['workspace write', TOOLS.vm_write_file],
-    ['shell / page_exec', TOOLS.page_exec],
+    ['shell / script', TOOLS.script],
     ['DOM click', TOOLS.click],
     ['DOM type', TOOLS.type],
     ['destructive delete', TOOLS.vm_delete],
@@ -157,7 +155,7 @@ describe('ACT + confirmActions ON confirms every non-read', () => {
   });
 
   test.each([
-    TOOLS.vm_write_file, TOOLS.js_notebook, TOOLS.vm_boot, TOOLS.page_exec, TOOLS.script,
+    TOOLS.vm_write_file, TOOLS.js_notebook, TOOLS.vm_boot, TOOLS.script,
     TOOLS.click, TOOLS.type, TOOLS.navigate, TOOLS.open_tab, TOOLS.vm_delete,
   ])('confirms %o', (tool) => {
     const v = decideAction({ mode: PERMISSION_MODES.ACT, confirmActions: true, tool });

@@ -60,7 +60,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
     for (const name of ['message_actor', 'snapshot', 'read_page', 'read_state', 'query_dom', 'read_doc', 'view']) {
       expect(allow.has(name)).toBe(true);
     }
-    for (const name of ['do', 'get', 'check', 'click', 'type', 'page_keys', 'watch_changes']) {
+    for (const name of ['do', 'get', 'check', 'click', 'type', 'watch_changes']) {
       expect(allow.has(name)).toBe(false);
     }
   });
@@ -71,7 +71,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
       for (const name of [
         'vm_boot', 'vm_create', 'vm_delete', 'js_notebook', 'js_create',
         'app_create', 'app_update', 'edit_file', 'actor_create',
-        'page_eval', 'page_exec', 'load_skill',
+        'load_skill',
       ]) {
         expect(allow.has(name)).toBe(false);
       }

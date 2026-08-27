@@ -181,7 +181,7 @@ describe('selectHooks / hookMatches', () => {
     expect(hookMatches(undefined, 'anything')).toBe(true);
     expect(hookMatches('click', 'click')).toBe(true);
     expect(hookMatches('click', 'type')).toBe(false);
-    expect(hookMatches('page_*', 'page_exec')).toBe(true);
+    expect(hookMatches('page_*', 'page_code')).toBe(true);
     expect(hookMatches('page_*', 'click')).toBe(false);
   });
 

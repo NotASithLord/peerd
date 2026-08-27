@@ -275,7 +275,7 @@ export const VAULT_KERNEL_HUMAN_ROUTE_NAMES = Object.freeze([
 export const makeKernelRouteProvenance = ({
   humanUi, homeUi, sidepanelUi, optionsUi, appUi, voiceUi,
   evalUi = () => false, activityStopUi = () => false,
-  toolboxUi = () => false, actorSpawnUi = toolboxUi, vaultRoutes,
+  actorSpawnUi = () => false, vaultRoutes,
 }) => {
   /** @type {Map<string,(sender:any,message:any)=>boolean>} */
   const table = new Map();
@@ -294,7 +294,6 @@ export const makeKernelRouteProvenance = ({
   ], anyHumanUi);
   add(['audit/voice-fetch'], voiceUi);
   add(['contacts/list', 'contacts/set', 'contacts/forget'], homeUi);
-  add(['toolbox/read', 'toolbox/record'], toolboxUi);
   add([
     'session/get', 'session/setModel', 'session/contextSnapshots', 'commands/list',
     'onboarding/complete',

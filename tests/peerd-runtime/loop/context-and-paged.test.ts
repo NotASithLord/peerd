@@ -76,7 +76,7 @@ describe('runUserTurn — the paged redact ceiling (design 04)', () => {
       call++;
       return (async function* () {
         if (call === 1) {
-          yield { type: 'tool-use-start', id: 'p1', name: 'read_run_cache' };
+          yield { type: 'tool-use-start', id: 'p1', name: 'read_result' };
           yield { type: 'tool-use-stop', id: 'p1' };
           yield { type: 'tool-use-start', id: 'p2', name: 'inspect' };
           yield { type: 'tool-use-stop', id: 'p2' };
@@ -89,15 +89,15 @@ describe('runUserTurn — the paged redact ceiling (design 04)', () => {
     };
     // 17k of body — above the 8k backstop, below the paged ceiling.
     const BIG = 'x'.repeat(17_000);
-    const toolDispatch = async (c: any) => (c.name === 'read_run_cache'
-      ? { ok: true, content: BIG, paged: true, meta: { toolName: 'read_run_cache', primitive: 'notebook', gates: [], durationMs: 1 } }
+    const toolDispatch = async (c: any) => (c.name === 'read_result'
+      ? { ok: true, content: BIG, paged: true, meta: { toolName: 'read_result', primitive: 'web', gates: [], durationMs: 1 } }
       : { ok: true, content: BIG, meta: { toolName: 'inspect', primitive: 'inspect', gates: [], durationMs: 1 } });
 
     await drain(runUserTurn({
       sessionId: 's2', userText: 'read', callModel,
       getSecret: async () => 'sk', safeFetch: async () => new Response('ok'),
       sessions: store, getSystemPrompt: async () => 'sys', appendAudit: async () => {},
-      tools: [{ name: 'read_run_cache', description: 'r', schema: {} }, { name: 'inspect', description: 'i', schema: {} }],
+      tools: [{ name: 'read_result', description: 'r', schema: {} }, { name: 'inspect', description: 'i', schema: {} }],
       toolDispatch,
     } as any));
 

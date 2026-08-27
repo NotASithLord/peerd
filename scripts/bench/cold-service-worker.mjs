@@ -173,7 +173,7 @@ const allowFailures = boolOption('allow-failures');
 const unsafeNoSandbox = boolOption('no-sandbox');
 const comparisonMode = String(options.comparison ?? 'absolute-ratchet');
 const requestedGraphPolicy = String(options['graph-policy'] ?? laneContract.graphPolicy);
-const graphPolicy = nativeFloor ? 'target' : lane === 'local'
+const graphPolicy = nativeFloor ? 'integrity' : lane === 'local'
   ? requestedGraphPolicy
   : laneContract.graphPolicy;
 const requestedTimingTargets = boolOption(
@@ -204,8 +204,8 @@ if (nativeFloor) {
       || chromeWakes !== NATIVE_FLOOR_CONTRACT.confirmedStopWakes) {
     throw new Error('--runtime-target=native-floor requires exactly three fresh launches and three wakes');
   }
-  if (options['graph-policy'] !== undefined && requestedGraphPolicy !== 'target') {
-    throw new Error('--runtime-target=native-floor requires target graph policy');
+  if (options['graph-policy'] !== undefined && requestedGraphPolicy !== 'integrity') {
+    throw new Error('--runtime-target=native-floor requires integrity graph policy');
   }
   if (options['require-timing-targets'] !== undefined && requestedTimingTargets !== true) {
     throw new Error('--runtime-target=native-floor requires the timing target');
@@ -1661,8 +1661,8 @@ export const main = async () => {
   if (!['all', 'chrome', 'firefox'].includes(browserChoice)) {
     throw new Error('--browser must be all, chrome, or firefox');
   }
-  if (!['ratchet', 'target'].includes(graphPolicy)) {
-    throw new Error('--graph-policy must be ratchet or target');
+  if (!['ratchet', 'integrity'].includes(graphPolicy)) {
+    throw new Error('--graph-policy must be ratchet or integrity');
   }
   mkdirSync(dirname(OUTPUT), { recursive: true });
   const processor = cpus()[0];

@@ -85,9 +85,9 @@ describe('dispatcher phases', () => {
 
   test('prepare arms quarantine before the injected executor', async () => {
     const events: string[] = [];
-    registerTool(tool({ name: 'page_eval', primitive: 'tab', sideEffect: 'write' }) as any);
+    registerTool(tool({ name: 'click', primitive: 'tab', sideEffect: 'write' }) as any);
     const prepared: any = await prepareToolCall(
-      { id: 'call-2', name: 'page_eval', args: {} } as any,
+      { id: 'call-2', name: 'click', args: {} } as any,
       context({
         activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
         browserChildQuarantineRequired: true,

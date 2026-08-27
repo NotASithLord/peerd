@@ -456,7 +456,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('Chrome arms navigation and direct page-action tools before their effect', async () => {
-    for (const name of ['navigate', 'click', 'type', 'page_eval', 'page_exec', 'page_keys']) {
+    for (const name of ['navigate', 'click', 'type']) {
       clearTools();
       const calls: string[] = [];
       registerTool(baseTool({
@@ -490,11 +490,11 @@ describe('dispatcher lineage spine fields', () => {
   test('a failed Chrome quarantine never reaches the page effect', async () => {
     let effects = 0;
     registerTool(baseTool({
-      name: 'page_eval', primitive: 'tab', sideEffect: 'write',
+      name: 'click', primitive: 'tab', sideEffect: 'write',
       execute: async () => { effects += 1; return { ok: true }; },
     }) as any);
     const result: any = await dispatchToolCall(
-      { id: 'quarantine-failed', name: 'page_eval', args: {} } as any,
+      { id: 'quarantine-failed', name: 'click', args: {} } as any,
       {
         ...ctx,
         activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
@@ -548,7 +548,7 @@ describe('dispatcher lineage spine fields', () => {
 
   test('a guarded authority failure is retryable without exposing its destination', async () => {
     registerTool(baseTool({
-      name: 'page_eval', primitive: 'tab', sideEffect: 'write',
+      name: 'click', primitive: 'tab', sideEffect: 'write',
       execute: async () => ({ ok: true, content: 'evaluated' }),
     }) as any);
     const notice = {
@@ -557,7 +557,7 @@ describe('dispatcher lineage spine fields', () => {
     };
     let queued: any[] = [];
     const result: any = await dispatchToolCall(
-      { id: 'authority-unavailable', name: 'page_eval', args: {} } as any,
+      { id: 'authority-unavailable', name: 'click', args: {} } as any,
       {
         ...ctx,
         activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },

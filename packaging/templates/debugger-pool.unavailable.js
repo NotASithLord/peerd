@@ -11,8 +11,6 @@ export const createDebuggerPool = () => Object.freeze({
   attach: unavailable,
   // Cleanup is idempotent when this target can never own debugger custody.
   detach: async () => {},
-  evaluate: unavailable,
-  dispatchKeys: unavailable,
   getAxTree: unavailable,
   captureScreenshot: unavailable,
   clickBackendNode: unavailable,

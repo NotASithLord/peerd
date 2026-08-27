@@ -66,7 +66,7 @@ describe('pageCallToToolCall — validation fails closed', () => {
   test('PAGE_API_METHODS lists exactly the supported surface', () => {
     expect([...PAGE_API_METHODS].sort()).toEqual([
       'captureSite', 'click', 'content', 'fetch', 'fill', 'goto',
-      'login', 'query', 'readCache', 'readDocument', 'readSiteClient',
+      'login', 'query', 'readDocument', 'readResult', 'readSiteClient',
       'readState', 'snapshot', 'view', 'watchChanges', 'writeSiteClient',
     ]);
   });
@@ -80,8 +80,8 @@ describe('pageCallToToolCall — web capability parity', () => {
       .toEqual({ name: 'read_doc', args: { url: 'https://example.com/a.docx', maxChars: 9 } });
     expect(pageCallToToolCall({ method: 'readDocument', args: { options: { engine: 'ocr' } } }))
       .toEqual({ name: 'read_doc', args: { engine: 'ocr' } });
-    expect(pageCallToToolCall({ method: 'readCache', args: { key: 'cache-1', options: { offset: 10 } } }))
-      .toEqual({ name: 'read_web_cache', args: { key: 'cache-1', offset: 10 } });
+    expect(pageCallToToolCall({ method: 'readResult', args: { key: 'result:opaque-1', options: { offset: 10 } } }))
+      .toEqual({ name: 'read_result', args: { key: 'result:opaque-1', offset: 10 } });
   });
 
   test('safe site-client metadata and login methods map only to existing gated tools', () => {

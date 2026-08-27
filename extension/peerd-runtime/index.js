@@ -249,15 +249,6 @@ export {
   stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
   createSiteClientStore, digestCapture, redactHeaders, shapeSketch,
 } from './site-clients/index.js';
-// design js-superpower/06: the toolbox — durable agent-authored ES modules
-// imported as peerd:toolbox/<name> from the own-compute lanes. Pure core
-// (validation, confirm-gated proposal, write-time parse check, fenced list
-// rendering) + the two-tier store. See toolbox/index.js.
-// Only the SW's wiring needs (store + write-time parse check) cross the module
-// boundary; everything else is consumed intra-module by the toolbox_* tools.
-export {
-  createToolboxStore, makeToolboxParseCheck,
-} from './toolbox/index.js';
 // PR #119: the host-side handler for the web actor's code-REPL arm — turns a
 // page.<method> RPC (made inside the sealed worker) into the SAME gated tool
 // dispatch the tool-call web actor uses, pinned to the actor's owned tab.
@@ -320,8 +311,8 @@ export {
 export { makeToolsCommand, describePresets } from './tools/manifest-command.js';
 export { wrapUntrusted } from './tools/prompt-wrap.js';
 // The script value-spill store (run cache) — the SW instantiates it and
-// injects it into tool contexts (read_run_cache pages it back).
-export { createRunCacheStore } from './tools/run-cache.js';
+// injects it into tool contexts (read_result pages it back).
+export { createResultStore } from './tools/result-store.js';
 // The shared spill-cache entry cap — the SW's web extract cache uses the same
 // number as the run cache, imported from ONE home so the twins never drift.
 export { SPILL_CACHE_MAX_ENTRIES } from './tools/web/spill.js';
@@ -432,7 +423,6 @@ export {
 // --- clock (temporal grounding) -----------------------------------------
 export {
   buildTemporalBlock,
-  CLOCK_TOOLS,
 } from './clock/index.js';
 
 // --- web (capture wrapper) ----------------------------------------------

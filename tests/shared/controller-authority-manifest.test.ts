@@ -80,13 +80,13 @@ describe('controller authority manifest', () => {
     expect(existsSync(`${EXTENSION_DIR}/shared/controller-tool-manifest.js`)).toBe(false);
   });
 
-  test('the controller tool graph owns the wait implementation', async () => {
+  test('the controller tool graph owns semantics without the deleted wait feature', async () => {
     const graph = await collectStaticModuleGraph(
       EXTENSION_DIR, `${EXTENSION_DIR}/offscreen/controller-turn-runtime.js`,
     );
     const files = new Set([...graph].map((path) => relative(EXTENSION_DIR, path)));
     expect(files.has('peerd-runtime/controller-tool-ownership.js')).toBe(true);
-    expect(files.has('peerd-runtime/clock/wait-execute.js')).toBe(true);
-    expect(files.has('peerd-runtime/clock/tools.js')).toBe(true);
+    expect(files.has('peerd-runtime/clock/wait-execute.js')).toBe(false);
+    expect(files.has('peerd-runtime/clock/tools.js')).toBe(false);
   });
 });

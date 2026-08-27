@@ -6,9 +6,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // Exported: the ONE per-file write ceiling for agent-authored OPFS content.
 // The workspace relay (offscreen/job-runner.js, via /peerd-runtime/index.js)
 // enforces the same number on worker-side writes, so `script` can't dodge the
-// tool-side cap by writing from inside the sealed worker. Mirrored by
-// peerd-runtime/toolbox/core.js MAX_TOOLBOX_BODY_CHARS (a toolbox module is the
-// same order of agent-written source) — move them together.
+// tool-side cap by writing from inside the sealed worker.
 export const MAX_FILE_CONTENT_CHARS = 500_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */

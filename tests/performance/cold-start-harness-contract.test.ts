@@ -143,7 +143,7 @@ describe('cold-start browser harness contract', () => {
     const attacks = [
       ['--cold-timeout-ms=10001', '--cold-timeout-ms cannot alter the immutable pr lane'],
       ['--firefox-idle-ms=1', '--firefox-idle-ms cannot alter the immutable pr lane'],
-      ['--graph-policy=ratchet', '--graph-policy cannot alter the immutable pr lane'],
+      ['--graph-policy=integrity', '--graph-policy cannot alter the immutable pr lane'],
       ['--require-timing-targets=false', '--require-timing-targets cannot alter the immutable pr lane'],
       ['--browser=chrome', 'the pr lane requires --browser=all'],
     ];
@@ -162,7 +162,7 @@ describe('cold-start browser harness contract', () => {
       ['--firefox-processes=14', '--firefox-processes cannot alter the immutable device lane'],
       ['--firefox-wakes=14', '--firefox-wakes cannot alter the immutable device lane'],
       ['--firefox-idle-ms=1', '--firefox-idle-ms cannot alter the immutable device lane'],
-      ['--graph-policy=ratchet', '--graph-policy cannot alter the immutable device lane'],
+      ['--graph-policy=integrity', '--graph-policy cannot alter the immutable device lane'],
       ['--require-timing-targets=false', '--require-timing-targets cannot alter the immutable device lane'],
       ['--browser=firefox', 'the device lane requires --browser=all'],
       ['--allow-failures=true', '--allow-failures is local-only'],
@@ -187,7 +187,7 @@ describe('cold-start browser harness contract', () => {
       ['--chrome-wakes=4', 'requires exactly three fresh launches and three wakes'],
       ['--chrome-processes=2', 'requires exactly three fresh launches and three wakes'],
       ['--chrome-processes=4', 'requires exactly three fresh launches and three wakes'],
-      ['--graph-policy=ratchet', 'requires target graph policy'],
+      ['--graph-policy=ratchet', 'requires integrity graph policy'],
       ['--require-timing-targets=false', 'requires the timing target'],
       ['--allow-failures=true', 'cannot allow failures'],
       ['--comparison=interleaved-candidate-base', 'does not support comparison mode'],

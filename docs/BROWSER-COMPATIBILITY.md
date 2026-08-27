@@ -21,7 +21,7 @@ extension.
 | Pod JavaScript | `js` runs Web-standard JavaScript in a sealed module Worker | `js` is refused; the shell, OPFS, Git, HTTP bridge, and WASI remain available | Platform behavior under review plus a Peerd guard |
 | Apps | Opaque-origin manifest-sandbox runner is available | Unavailable in the current Peerd Firefox package | Upstream fixed for Firefox 154; Peerd adoption pending |
 | Headless/offscreen services | Headless `script`/`page_code`, site-client and A2A code runners, PDF/document conversion, rich HTML extraction, voice/local-model hosts, and per-actor Worker heaps are available | Those offscreen-hosted tools are absent or fall back; notably, bound actors fall back to the service-worker heap and lose the dedicated memory boundary | Peerd architecture gap; upstream API request is WONTFIX |
-| Advanced tab automation | Preview/dev builds can use CDP; the store build uses the scripting fallback | Uses the scripting fallback: core read/navigate/click/type work, but `page_exec`, trusted `page_keys`, cross-frame accessibility snapshots, and some hardened-site flows are unavailable | Accepted fallback around a missing API |
+| Advanced tab automation | Preview/dev builds can use CDP; the store build uses the scripting fallback | Uses the scripting fallback: core read/navigate/click/type work, but cross-frame accessibility snapshots, exact-tab vision, network capture, and some hardened-site flows are unavailable | Accepted fallback around a missing API |
 
 The side panel/sidebar naming difference is not a capability loss. Minor UI
 differences such as tab grouping are also omitted unless they begin preventing
@@ -101,7 +101,7 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
 
 - **Peerd impact:** Firefox uses the same `chrome.scripting`/DOM-walk path as the
   initial Chromium store build. It cannot provide CDP-only trusted input,
-  `page_exec` on Trusted-Types pages, or the full cross-frame accessibility
+  exact-tab vision, site-client network capture, or the full cross-frame accessibility
   tree.
 - **Upstream:** [Mozilla Bug 1316741](https://bugzilla.mozilla.org/show_bug.cgi?id=1316741)
   remains `NEW`; the older direct Chrome-parity request,

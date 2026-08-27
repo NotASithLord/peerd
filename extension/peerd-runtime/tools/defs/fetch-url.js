@@ -154,7 +154,7 @@ export const fetchUrlTool = composeTool("fetch_url", {
       // CDR (dom/cdr.js) runs HERE, on the whole body, BEFORE anything derived
       // from it exists. why here and not later: everything below measures or
       // slices this string — excerptRelevant/windowText report character
-      // offsets, and webCache.put stores the text read_web_cache pages back.
+      // offsets, and resultStore.put stores the text read_result pages back.
       // Disarming after windowing would make those offsets describe pre-strip
       // text and would leave undisarmed bytes sitting in the cache.
       //
@@ -194,11 +194,11 @@ export const fetchUrlTool = composeTool("fetch_url", {
       }
       // Spill-and-page for an oversized body (Hermes-style): the FULL text is
       // stored locally and the model sees a head+tail WINDOW plus the exact
-      // read_web_cache paging call — instead of the old silent head-only slice
+      // read_result paging call — instead of the old silent head-only slice
       // that lost the tail without saying so. Falls back to the old slice when
-      // the cache capability is absent (a ctx without webCache).
-      const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
-        /** @type {any} */ (ctx).webCache);
+      // the spill capability is absent (a ctx without resultStore).
+      const resultStore = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
+        /** @type {any} */ (ctx).resultStore);
       // When the caller named a query AND the body is prose (not JSON — BM25 is
       // for paragraphs, not object trees), surface the most-relevant PASSAGES
       // instead of a blind head+tail window: a long page's answer usually sits
@@ -213,22 +213,24 @@ export const fetchUrlTool = composeTool("fetch_url", {
       const truncated = ex ? ex.excerpted : win.windowed;
       /** @type {string | null} */
       let footer = null;
-      if (truncated && webCache?.key && webCache?.put) {
-        const cacheKey = webCache.key();
+      if (truncated && resultStore?.key && resultStore?.put) {
+        const cacheKey = resultStore.key();
         try {
           // Stamp the OWNER. The spill store is one service-worker-level map keyed
           // by an opaque handle, so without this any actor holding a key could page
           // back bytes a different actor fetched - credentialed, from an origin it
-          // is itself locked out of. read_web_cache checks this before slicing.
-          await webCache.put({
+          // is itself locked out of. read_result checks this before slicing.
+          await resultStore.put({
             key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody,
             ownerSessionId: ctx.session?.sessionId ?? null,
+            producer: 'fetch_url', fenced: true,
+            originLabel: originOfUrl(res.finalUrl || args.url),
           });
           footer = ex
             ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
             : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
         } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
-      } else if (truncated && !webCache) {
+      } else if (truncated && !resultStore) {
         // No cache capability → the pre-spill behavior (head-only slice).
         text = workingBody.slice(0, MAX_BODY_CHARS);
       }

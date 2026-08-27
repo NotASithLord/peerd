@@ -15,7 +15,7 @@ import { packageArtifact } from '../../packaging/package.ts';
 import { FIREFOX_BACKGROUND_ENTRY } from '../../packaging/gen-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
-  assertVaultKernelReleaseTarget,
+  assertVaultKernelArtifactShape,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
@@ -53,28 +53,25 @@ describe('test-only vault kernel package target', () => {
     expect(source.background.service_worker).toBe('background/service-worker.js');
   });
 
-  test('release-minified floor cannot exceed the native service-worker target', () => {
-    expect(() => assertVaultKernelReleaseTarget({
-      browser: 'chrome', modules: 76, graphBytes: 300_000, entryBytes: 30_000,
+  test('release-minified floor validates metrics and the bundled module shape', () => {
+    expect(() => assertVaultKernelArtifactShape({
+      modules: 76, graphBytes: 900_000, entryBytes: 30_000,
     })).not.toThrow();
-    expect(() => assertVaultKernelReleaseTarget({
-      browser: 'chrome', modules: 76, graphBytes: 300_001, entryBytes: 30_000,
-    })).toThrow('graphBytes 300001 exceeds 300000');
-    expect(() => assertVaultKernelReleaseTarget({
-      browser: 'chrome', modules: 0, graphBytes: 1, entryBytes: 1,
+    expect(() => assertVaultKernelArtifactShape({
+      modules: 0, graphBytes: 1, entryBytes: 1,
     })).toThrow('invalid native modules');
-    expect(() => assertVaultKernelReleaseTarget({
-      browser: 'chrome', modules: 1, graphBytes: 300_000, entryBytes: 300_000,
+    expect(() => assertVaultKernelArtifactShape({
+      modules: 1, graphBytes: 1_300_000, entryBytes: 1_300_000,
       bundled: true,
     })).not.toThrow();
-    expect(() => assertVaultKernelReleaseTarget({
-      browser: 'chrome', modules: 2, graphBytes: 190_000, entryBytes: 190_000,
+    expect(() => assertVaultKernelArtifactShape({
+      modules: 2, graphBytes: 190_000, entryBytes: 190_000,
       bundled: true,
     })).toThrow('exactly one static module');
-    expect(() => assertVaultKernelReleaseTarget({
-      browser: 'chrome', modules: 1, graphBytes: 300_001, entryBytes: 300_001,
+    expect(() => assertVaultKernelArtifactShape({
+      modules: 1, graphBytes: 1_300_000, entryBytes: 1_299_999,
       bundled: true,
-    })).toThrow('graphBytes 300001 exceeds 300000');
+    })).toThrow('exactly one static module');
   });
 
   test('Chrome ships one module bundle and prunes both Firefox runtime edges', async () => {
@@ -241,7 +238,7 @@ describe('test-only vault kernel package target', () => {
     expect(source).toContain("verify: channel === 'store', minify: false");
     expect(source).toContain('minifyColdArtifactModules(staging, browser, channel)');
     expect(source).toContain('bundleChromeNativeKernel(staging, nativeEntry(browser, channel))');
-    expect(source).toContain('assertVaultKernelReleaseTarget({');
+    expect(source).toContain('assertVaultKernelArtifactShape({');
     expect(source).toContain('dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser');
     expect(source).toContain('writeControllerBuildIdentity(staging)');
     expect(source).not.toContain('generateManifest(');
@@ -269,7 +266,7 @@ describe('test-only vault kernel package target', () => {
       'const nativeChromeKernel = isChromeNativeKernelEntry(chromeBackgroundEntry)',
     );
     expect(source).toContain('if (minify && nativeChromeKernel)');
-    expect(source).toContain('nativeChromeKernel ? COLD_START_TARGETS.chrome : undefined');
+    expect(source).toContain('assertColdArtifactBudgets(report)');
     expect(stampAt).toBeGreaterThan(0);
     expect(bundleAt).toBeGreaterThan(stampAt);
     expect(packageAt).toBeGreaterThan(bundleAt);
@@ -307,7 +304,8 @@ describe('test-only vault kernel package target', () => {
           ? FIREFOX_BACKGROUND_ENTRY : 'background/vault-kernel.js');
         expect(graph.size > 1).toBe(browser === 'firefox');
         if (browser === 'chrome') {
-          expect(statSync(join(staging, entryRelative)).size).toBeLessThan(300_000);
+          expect(graph.size).toBe(1);
+          expect(statSync(join(staging, entryRelative)).size).toBeGreaterThan(0);
         } else {
           expect(graph.has(join(staging, 'background/driven-child-request-guard.js'))).toBe(true);
           for (const leaf of [

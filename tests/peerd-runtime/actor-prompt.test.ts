@@ -165,14 +165,13 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
   test('the code-WRITING actors carry the relocated style/correctness notes', () => {
     // App writes UI code → compact style + runtime lore; Notebook writes compute
     // → style + correctness. The App lore is local because the shared legacy note
-    // incorrectly tells this actor to call an unavailable dweb_guide tool.
+    // does not advertise a removed guide tool.
     const app = actorBlock('app');
     expect(app.includes('<code-style>')).toBe(true);
     expect(app.includes('blob worker')).toBe(true);
     expect(app.includes('NO ambient network')).toBe(true);
     expect(app.includes('full fetch')).toBe(false);
     expect(app.includes('parent-bridge contract')).toBe(true);
-    expect(app.includes('dweb_guide')).toBe(false);
     const nb = actorBlock('notebook');
     expect(nb.includes('<code-style>')).toBe(true);
     expect(nb.includes('<js-correctness>')).toBe(true);

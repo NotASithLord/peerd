@@ -13,7 +13,19 @@ describe('temporary legacy tool strangler', () => {
   test('is explicit, frozen, unique, and disjoint from controller ownership', () => {
     expect(Object.isFrozen(LEGACY_TOOL_ALLOWLIST)).toBe(true);
     expect(new Set(LEGACY_TOOL_ALLOWLIST).size).toBe(LEGACY_TOOL_ALLOWLIST.length);
-    expect(LEGACY_TOOL_ALLOWLIST).toHaveLength(15);
+    expect(LEGACY_TOOL_ALLOWLIST).toEqual([
+      'read_doc',
+      'fetch_url',
+      'read_result',
+      'site_client_run',
+      'site_client_read',
+      'site_client_write',
+      'site_capture',
+      'sandbox_create',
+      'script',
+      'edit_file',
+      'a2a_run',
+    ]);
     expect(LEGACY_TOOL_ALLOWLIST.filter(controllerHostsTool)).toEqual([]);
   });
 

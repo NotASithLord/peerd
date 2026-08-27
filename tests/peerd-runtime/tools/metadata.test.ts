@@ -39,13 +39,12 @@ import { CONTROLLER_PAGE_TOOL_NAMES } from '../../../extension/peerd-runtime/con
 const { BUILTIN_TOOLS } = await import(
   '../../../extension/peerd-runtime/tools/defs/index.js'
 );
-const { CLOCK_TOOLS } = await import('../../../extension/peerd-runtime/clock/tools.js');
 const { WEB_TOOLS } = await import('../../../extension/peerd-runtime/tools/web/index.js');
 const { loadSkillTool } = await import(
   '../../../extension/peerd-runtime/skills/load-skill-tool.js'
 );
 
-const ALL_TOOLS = [...BUILTIN_TOOLS, ...CLOCK_TOOLS, ...WEB_TOOLS, loadSkillTool];
+const ALL_TOOLS = [...BUILTIN_TOOLS, ...WEB_TOOLS, loadSkillTool];
 const EXECUTION_TOOL_NAMES = new Set(ALL_TOOLS.map((tool) => tool.name));
 const CONTROLLER_ONLY_TOOL_NAMES = new Set(
   [
@@ -221,7 +220,6 @@ describe('tool metadata anti-drift', () => {
     const files = [
       ...sourceFiles(join(extension, 'tools', 'defs')),
       ...sourceFiles(join(extension, 'tools', 'web')),
-      join(extension, 'clock', 'tools.js'),
       join(extension, 'skills', 'load-skill-tool.js'),
     ];
     const composed: string[] = [];

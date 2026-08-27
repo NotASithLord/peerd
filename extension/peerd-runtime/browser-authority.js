@@ -7,7 +7,6 @@ export {
   AUTH_WAITING_FOR_USER_CODE,
   AUTH_WAITING_FOR_USER_MESSAGE,
   browserDocumentIdentity,
-  cdpUnavailableError,
   isDenylistedTab,
   originOfUrl,
   resolveTargetTab,

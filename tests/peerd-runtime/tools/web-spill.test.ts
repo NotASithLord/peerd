@@ -1,6 +1,6 @@
 // The spill-and-page pure core (tools/web/spill.js): head+tail windowing for an
 // oversized fetched body, the trusted paging footer, and the offset/limit
-// slicer read_web_cache serves. Pure functions — the invariants that keep the
+// slicer read_result serves. Pure functions — the invariants that keep the
 // paging contract honest live here.
 
 import { describe, test, expect } from 'bun:test';
@@ -29,9 +29,9 @@ describe('windowText', () => {
 });
 
 describe('pagingFooter', () => {
-  test('names the exact read_web_cache call with the caller-computed values only', () => {
+  test('names the exact read_result call with the caller-computed values only', () => {
     const f = pagingFooter({ key: 'wc-abc-1', total: 90_000, headChars: 12_000, tailChars: 4_000 });
-    expect(f).toContain('read_web_cache');
+    expect(f).toContain('read_result');
     expect(f).toContain('"key": "wc-abc-1"');
     expect(f).toContain('90000 chars');
     // The continuation offset the model should use = where the head stopped.
@@ -155,9 +155,9 @@ describe('excerptRelevant (BM25 query-relevant excerpting)', () => {
 });
 
 describe('excerptFooter', () => {
-  test('names the passages shown, the query, and the read_web_cache call', () => {
+  test('names the passages shown, the query, and the read_result call', () => {
     const f = excerptFooter({ key: 'wc-abc-1', total: 90_000, passagesShown: 3, passagesTotal: 55, query: 'baggage allowance' });
-    expect(f).toContain('read_web_cache');
+    expect(f).toContain('read_result');
     expect(f).toContain('"key": "wc-abc-1"');
     expect(f).toContain('3 passage(s)');
     expect(f).toContain('baggage allowance');

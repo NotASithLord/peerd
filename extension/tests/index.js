@@ -46,9 +46,6 @@ import './unit/peerd-runtime/introspection-tools.test.js';
 import './unit/peerd-runtime/query-dom.test.js';
 import './unit/peerd-runtime/dom-walk.test.js';
 import './unit/peerd-runtime/activity-overlay.test.js';
-import './unit/peerd-runtime/page-eval.test.js';
-import './unit/peerd-runtime/page-exec.test.js';
-import './unit/peerd-runtime/page-keys.test.js';
 import './unit/peerd-runtime/default-hooks.test.js';
 import './unit/peerd-runtime/prompt-wrap.test.js';
 import './unit/peerd-runtime/system-prompt.test.js';
@@ -60,7 +57,6 @@ import './unit/peerd-runtime/lifecycle-recovery.test.js';
 import './unit/peerd-runtime/trim.test.js';
 import './unit/peerd-runtime/clock/now.test.js';
 import './unit/peerd-runtime/clock/context.test.js';
-import './unit/peerd-runtime/clock/tools.test.js';
 import './unit/peerd-runtime/web/tools.test.js';
 import './unit/peerd-runtime/voice/model-store.test.js';
 import './unit/peerd-runtime/voice/manager.test.js';
@@ -91,7 +87,6 @@ import './unit/peerd-engine/repository.test.js';
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
 import './unit/offscreen/job-runner-workspace.test.js';
-import './unit/offscreen/job-runner-toolbox.test.js';
 import './unit/offscreen/controller-worker.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---

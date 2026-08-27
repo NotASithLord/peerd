@@ -27,7 +27,7 @@
 
 import {
   opfsHelpers, makeFetchRemote,
-  MODULE_SYNTAX_ERROR_CODE, TOOLBOX_SPECIFIER_PREFIX,
+  MODULE_SYNTAX_ERROR_CODE,
   remoteModuleCapabilityBlockedMessage,
   UnsupportedNativeModuleImportError,
 } from '/peerd-engine/offscreen.js';
@@ -62,9 +62,8 @@ const WORKSPACE_BUDGET_BYTES = 200 * 1024 * 1024;
  * @param {any} job
  * @param {string} executionId
  * @param {Record<string, boolean>} profile
- * @param {boolean} toolboxOn
  */
-export const describeCodeExecution = (job, executionId, profile, toolboxOn = false) => describeExecution({
+export const describeCodeExecution = (job, executionId, profile) => describeExecution({
   id: executionId,
   program: { kind: JAVASCRIPT_PROGRAM, source: job.code },
   state: job.workspaceSessionId ? { workspaceSessionId: job.workspaceSessionId } : null,
@@ -73,7 +72,6 @@ export const describeCodeExecution = (job, executionId, profile, toolboxOn = fal
     ...(job.a2a === true ? ['mesh'] : []),
     ...(job.actors === true ? ['actors'] : []),
     ...(job.siteFetch ? ['site'] : []),
-    ...(toolboxOn ? ['toolbox'] : []),
     ...(job.workspaceSessionId && profile.opfs === true ? ['workspace'] : []),
   ],
   metadata: {
@@ -169,7 +167,7 @@ const RELAYING_MESSAGE_TYPES = Object.freeze(new Set([
   'page-program/snapshot', 'page-program/read', 'page-program/read-state',
   'page-program/watch-changes', 'page-program/query-dom',
   'page-program/view', 'page-program/fetch', 'page-program/read-document',
-  'page-program/read-cache', 'page-program/site-client-read',
+  'page-program/read-result', 'page-program/site-client-read',
   'page-program/site-client-write', 'page-program/site-capture',
   'page-program/login', 'app-code/observe',
   'app-code/act',
@@ -187,14 +185,12 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical
  *   script surface; the distributed cap is not a caller knob here — headless
  *   forces it off unconditionally); caps.page needs ownerSessionId — the actor
  *   session this job runs FOR, set by the SW (trusted), the worker can never
  *   supply it.
- *   toolbox: this job may resolve peerd:toolbox/<name> modules (the script
- *   lane's trusted job param; refused for a2a/site-client runs regardless).
  *   workspaceSessionId: mount the durable per-session workspace (trusted,
  *   SW-set) instead of the ephemeral scratch. workspaceBudgetBytes is a
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
@@ -247,7 +243,7 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, toolbox?: boolean, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
  *   delegation client (the orchestrator's script surface); caps: capability
  *   profile (default DEFAULT_WORKER_CAPS; caps.page is the web actor's
@@ -260,7 +256,7 @@ export const runJob = async (job, deps) => {
  *   extractMarkdown is the LOCAL web-extract entry (same offscreen document),
  *   injected so the in-browser tests can stub it without the vendored parsers.
  */
-const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = '', toolbox = false, caps, ownerSessionId, ownerToolUseId, runId, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {
+const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = '', caps, ownerSessionId, ownerToolUseId, runId, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {
   // One ABSOLUTE deadline spans resolution + execution. Phase-local timers
   // derive only the remaining budget; no phase may mint a fresh timeout and
   // quietly make the advertised wall-clock additive.
@@ -307,21 +303,9 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
     ? { page: false, app: false, egress: false, subagent: false, opfs: false, provider: false, distributed: false }
     : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}), distributed: false };
   const jobId = `job-${Date.now().toString(36)}-${++jobSeq}`;
-  // design js-superpower/06 — the toolbox resolution LANE GATE, enforced at
-  // this host: only a job whose TRUSTED params carry the flag (the script tool
-  // sets it) resolves peerd:toolbox modules, and never an a2a/site-client run —
-  // their profiles promise "this code + the pinned capability and nothing
-  // else", and a stored module would be a side-channel into that promise. The
-  // gate is dep INJECTION (the resolver refuses when the dep is absent), so
-  // there is no request for a sealed worker to forge.
-  // why !caps?.page too: a page_code run (PR #119) is a pinned "this code + the
-  // page bridge and nothing else" lane — same promise a2a/site-client make — so
-  // it is refused by an EXPLICIT denial, mirroring the a2a/siteFetch exclusion,
-  // not merely by the toolbox flag being unset.
-  const toolboxOn = toolbox === true && !a2a && !siteFetch && !caps?.page && !caps?.app;
   const execution = describeCodeExecution({
     code, a2a, actors, siteFetch, ownerSessionId, workspaceSessionId,
-  }, runId || jobId, profile, toolboxOn);
+  }, runId || jobId, profile);
   // The OPFS root: per-job EPHEMERAL scratch by default (peerd.self.* +
   // relative imports work within the run, then it's nuked) — or, for a
   // workspace run, the DURABLE per-session subtree, which survives the run
@@ -500,14 +484,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         return remoteModuleFetch(url);
       },
     } : {}),
-    ...(toolboxOn ? {
-      /** @param {string} name */
-      readToolboxModule: async (name) => {
-        const resp = await runCodeOp('toolbox', 'read', () => sendToSW('toolbox/read', { name }), (response) => response?.ok === true);
-        if (!resp?.ok) throw new Error(resp?.error ?? 'toolbox read failed');
-        return String(resp.body);
-      },
-    } : {}),
   };
 
   // The deadline + Stop now cover RESOLUTION too: a remote import graph hits
@@ -609,19 +585,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   let usedProvider = false;
   let providerCalls = 0;
   let providerTokens = 0;
-  // design 06 rot bookkeeping: when the run settles, report which toolbox
-  // modules it imported and whether it succeeded (runCount/failCount on the
-  // meta — the treat-as-cache signal toolbox_list surfaces). Fire-and-forget;
-  // bookkeeping must never fail a run. A Stop is deliberately NOT recorded —
-  // an aborted run says nothing about the module.
-  const recordToolboxUse = (/** @type {boolean} */ ok) => {
-    if (!toolboxOn) return;
-    const names = [...cache.keys()]
-      .filter((k) => k.startsWith(TOOLBOX_SPECIFIER_PREFIX))
-      .map((k) => k.slice(TOOLBOX_SPECIFIER_PREFIX.length));
-    if (names.length) Promise.resolve(sendToSW('toolbox/record', { names, ok })).catch(() => {});
-  };
-
   const blobUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
   let worker;
   try { worker = new Worker(blobUrl, { type: 'module' }); }
@@ -637,7 +600,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
       const timer = setTimeout(() => {
         abortHostOperations();
         try { worker.terminate(); } catch {}
-        recordToolboxUse(false);
         resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       }, Math.ceil(remainingMs()));
       // Stop plumbing: a runId-carrying job can be terminated from the SW
@@ -1021,7 +983,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
             clearTimeout(timer);
             abortHostOperations();
             try { worker.terminate(); } catch {}
-            recordToolboxUse(false);
             resolve({
               value: undefined, consoleOutput: [], durationMs: 0,
               error: `import resolution failed: ${error.message}`,
@@ -1095,7 +1056,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           const error = appOutcomeUnknown
             ? `app action outcome unknown: ${appOutcomeError}`
             : workerError;
-          recordToolboxUse(!error);
           resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
         }
       });
@@ -1107,7 +1067,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         const detail = mapWorkerError(
           e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
           blobUrl, bodyLine, 'job.js');
-        recordToolboxUse(false);
         resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
       });
     });

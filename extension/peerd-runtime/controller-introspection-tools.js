@@ -5,17 +5,15 @@
 // authority reads; it carries no registry, browser, storage, or vault handle.
 import { actorListTool } from './tools/defs/actor-list.js';
 import { inspectTool } from './tools/defs/inspect.js';
-import { waitUntilTool } from './clock/tools.js';
 import { loadSkillTool } from './skills/load-skill-tool.js';
 
 export const CONTROLLER_INTROSPECTION_TOOL_NAMES = Object.freeze([
-  'actor_list', 'inspect', 'wait_until', 'load_skill',
+  'actor_list', 'inspect', 'load_skill',
 ]);
 
 const tools = Object.freeze({
   actor_list: actorListTool,
   inspect: inspectTool,
-  wait_until: waitUntilTool,
   load_skill: loadSkillTool,
 });
 

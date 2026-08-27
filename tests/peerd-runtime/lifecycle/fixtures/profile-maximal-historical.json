@@ -137,7 +137,7 @@
         "preset": "research",
         "allow": [
           "fetch_url",
-          "read_web_cache",
+          "read_result",
           "message_actor",
           "inspect"
         ]
@@ -200,7 +200,7 @@
         "type",
         "navigate",
         "fetch_url",
-        "read_web_cache",
+        "read_result",
         "site_capture"
       ],
       "originState": {
@@ -238,7 +238,7 @@
       "spawnedTrusted": true,
       "grantedTools": [
         "fetch_url",
-        "read_web_cache",
+        "read_result",
         "site_client_run",
         "site_client_read",
         "site_client_write"

@@ -90,8 +90,6 @@ describe('kernel semantic runtime', () => {
   test('all direct routes execute without crossing the controller channel', async () => {
     const state = makeRuntime();
     const calls: [string, any][] = [
-      ['toolbox/read', { name: 'missing' }],
-      ['toolbox/record', { names: [], ok: true }],
       ['apps/list', {}],
       ['contacts/list', {}],
       ['memory/export', {}],

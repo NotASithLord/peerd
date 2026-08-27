@@ -86,7 +86,6 @@ describe('native local authority boundary', () => {
   test('refuses operations whose custody remains fully in the kernel', async () => {
     const authority = makeAuthority();
     for (const [operation, route] of [
-      ['semantic.toolbox.read-body', 'toolbox/read'],
       ['semantic.skills.list', 'skills/list'],
       ['semantic.memory.export', 'memory/export'],
     ]) {

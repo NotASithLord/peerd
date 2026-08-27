@@ -106,8 +106,8 @@ export const defaults = {
   // small built-in OpenRouter catalog until they curate. Same on both channels.
   openrouterModels: { store: [], preview: [] },
 
-  // Whether tool contexts get the CDP pool (snapshot refs, page_exec on
-  // Trusted-Types sites, page_keys, runner pre-seeding). The `debugger`
+  // Whether tool contexts get the CDP pool (snapshot refs, exact-tab vision,
+  // framework state, and site capture). The `debugger`
   // PERMISSION is required at install where it ships — Chrome refuses to
   // treat it as optional ("Permission 'debugger' cannot be listed as
   // optional") — so the user-facing control is this SETTING.

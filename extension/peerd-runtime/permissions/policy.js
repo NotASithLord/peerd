@@ -45,7 +45,7 @@ export const PERMISSION_MODES = Object.freeze({
   // navigation carve-out below), but may NOT mutate anything: no
   // file/workspace writes, no shell, no side-effecting fetch, and — the
   // browser-native part — no side-effecting DOM actions (click/type/
-  // navigate/page_exec). Bigger blast radius than a terminal's
+  // navigation). Bigger blast radius than a terminal's
   // "plan", so the block list is bigger too.
   PLAN: /** @type {const} */ ('plan'),
   // ACT — writes allowed, subject to the confirmActions toggle.
@@ -88,8 +88,8 @@ export const ACTION_CLASSES = Object.freeze({
   // OPFS, App bodies. Reversible, sandboxed, no effect on the user's live
   // web session.
   WORKSPACE_WRITE: /** @type {const} */ ('workspace_write'),
-  // Code execution: booting a VM, eval in the Notebook, page_exec/page_eval
-  // (arbitrary JS in a live page). Higher stakes than a file write — can
+  // Code execution: booting a VM or evaluating code in a sealed engine.
+  // Higher stakes than a file write — can
   // do anything within its runtime.
   SHELL: /** @type {const} */ ('shell'),
   // Acts on the user's LIVE web session or the outside world: DOM
@@ -117,8 +117,6 @@ const SHELL_TOOLS = Object.freeze(new Set([
   'vm_boot',     // boots/executes the Linux VM
   'js_notebook',     // runs arbitrary JS in the Notebook worker
   'pod_exec',    // runs shell/JS/WASI with files, Git, and brokered egress
-  'page_exec',   // CDP Runtime.evaluate in a live page
-  'page_eval',   // executeScript in a live page
   'script',      // headless JS with egress + delegation — the strongest code lane must not confirm softer than the rest
 ]));
 // Deliberately NOT in SHELL_TOOLS — don't "fix" these:
@@ -201,7 +199,7 @@ export const PLAN_DELEGATION_TOOLS = Object.freeze(new Set(['message_actor']));
  *
  * Plan mode: anything that isn't READ is blocked (allowed:false). This is
  * the read-only guarantee — and it's browser-native: it blocks not just
- * file writes but click/type/navigate/page_exec and side-effecting fetch.
+ * file writes but click/type/navigation and side-effecting fetch.
  *
  * Act mode:
  *   confirmActions ON   READ auto · everything else confirms

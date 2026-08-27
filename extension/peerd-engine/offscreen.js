@@ -3,7 +3,7 @@
 // CodeMirror editor and tab/registry shells are page/background concerns.
 
 export {
-  buildEntry, buildModule, isRemoteSpecifier, makeFetchRemote, TOOLBOX_SPECIFIER_PREFIX,
+  buildEntry, buildModule, isRemoteSpecifier, makeFetchRemote,
 } from './module-resolver.js';
 export { opfsHelpers } from './opfs.js';
 export {

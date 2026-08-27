@@ -53,11 +53,9 @@ const authWaitError = () => Object.assign(
  * How long the live probe gets before the chokepoint gives up on it.
  *
  * why a timeout at all: the probe is the only thing on this path that depends
- * on the RENDERER answering. A tool that drives the page through CDP (page_exec,
- * page_keys) never needed the renderer's cooperation, and a wedged main thread
- * must not turn into a hung tool call. Short enough to be invisible next to the
- * injections the DOM tools already do, long enough that an ordinary busy page
- * still answers.
+ * on the RENDERER answering. A wedged main thread must not turn into a hung
+ * tool call. Short enough to be invisible next to the injections the DOM tools
+ * already do, long enough that an ordinary busy page still answers.
  */
 const LIVE_PROBE_TIMEOUT_MS = 1000;
 
@@ -373,46 +371,6 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
  * @param {string | undefined} url
  * @param {readonly string[] | undefined} denylist
  */
-/**
- * Model-facing error for a CDP-only capability that has no fallback
- * (page_exec's Trusted-Types evaluation, page_keys' trusted input — the
- * gaps we deliberately do NOT fake with scripting). The wording depends
- * on WHY the pool is absent (ctx.cdpUnavailableReason, set by the SW):
- *
- *   'setting_off'         — Chrome, user turned advanced automation off:
- *                           the capability exists, point at the switch.
- *   'browser_unsupported' — the debugger (CDP) API isn't present in this
- *                           build at all: either Firefox (no chrome.debugger
- *                           API ever) OR the store Chrome package, which ships
- *                           WITHOUT the `debugger` permission until it's
- *                           re-added post-approval (see docs/store/
- *                           OPEN-DECISIONS.md). Neither has a switch to flip,
- *                           so the message must NOT name a specific browser or
- *                           offer a phantom toggle — and must NOT leak the
- *                           build channel to the agent (CLAUDE.md: channel
- *                           never reaches the model).
- *
- * Always starts with "debugger_unavailable" — the SW's nudge matcher and
- * the runner prompt's fallback guidance both key on that prefix.
- *
- * @param {{ cdpUnavailableReason?: string|null }} ctx
- * @param {string} gap   what cannot happen, e.g. 'running JS on Trusted-Types pages'
- * @param {string} hint  what the model should do instead
- */
-export const cdpUnavailableError = (ctx, gap, hint) => {
-  const reason = ctx?.cdpUnavailableReason;
-  if (reason === 'browser_unsupported') {
-    return `debugger_unavailable: this build of peerd has no debugger (CDP) API, so ${gap} is not `
-      + `possible here — a platform/build limit, not a setting you can flip. ${hint}`;
-  }
-  if (reason === 'setting_off') {
-    return `debugger_unavailable: advanced automation (the Chrome debugger) is off in Settings → `
-      + `Advanced, so ${gap} is unavailable. ${hint}`;
-  }
-  return `debugger_unavailable: advanced automation (Chrome debugger) is unavailable, so ${gap} `
-    + `is unavailable. ${hint}`;
-};
-
 /**
  * Best-effort URL → origin extraction. chrome:// and about: pages don't
  * have an "origin" in the network sense; return their scheme as a

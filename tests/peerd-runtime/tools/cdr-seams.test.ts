@@ -8,8 +8,8 @@
 //
 //   IN  — disarm the raw body BEFORE windowing, excerpting, and CACHING. Skip
 //         this and a zero-width run can split a word the excerpt matcher is
-//         looking for, and undisarmed bytes get PERSISTED into the web cache to
-//         be served later by read_web_cache, past every boundary.
+//         looking for, and undisarmed bytes get PERSISTED into the result store
+//         to be served later by read_result, past every boundary.
 //   OUT — disarm the extracted markdown AFTER extraction. Extraction PARSES the
 //         HTML, so `&#8203;` — seven plain ASCII characters the first pass has
 //         no reason to touch — comes out the far side as a literal zero-width
@@ -122,14 +122,14 @@ describe('CDR at the fetch_url boundary (issue 244)', () => {
   });
 
   test('the SPILLED cache record is disarmed too — the pass is before the write', async () => {
-    // read_web_cache serves this record on a later turn, through a different
+    // read_result serves this record on a later turn, through a different
     // code path. Disarming only the windowed excerpt would leave the payload
     // sitting in storage waiting for the paging call that reads past it.
     const stored: any[] = [];
     const big = `${SMUGGLED} ${'M'.repeat(60_000)}`;
     const ctx = fetchCtx(big, {
       webFetch: async () => mockResponse({ body: big, headers: { 'content-type': 'text/plain' } }),
-      webCache: { key: () => 'wc-1', put: async (rec: any) => { stored.push(rec); } },
+      resultStore: { key: () => 'result:opaque-cdr', put: async (rec: any) => { stored.push(rec); } },
     });
     const r = await fetchUrlTool.execute({ url: 'https://site.test/a' }, ctx as any);
     if (!r.ok) throw new Error('expected ok');

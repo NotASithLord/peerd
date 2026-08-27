@@ -9,11 +9,10 @@ import { dwebInstallTool } from './tools/defs/dweb-install.js';
 import { dwebPeersTool } from './tools/defs/dweb-peers.js';
 import { dwebBlockTool } from './tools/defs/dweb-block.js';
 import { dwebDiscoveryTool } from './tools/defs/dweb-discovery.js';
-import { dwebGuideTool } from './tools/defs/dweb-guide.js';
 
 export const CONTROLLER_DWEB_TOOL_NAMES = Object.freeze([
   'dweb_discover', 'dweb_share', 'dweb_install', 'dweb_peers',
-  'dweb_block', 'dweb_discovery', 'dweb_guide',
+  'dweb_block', 'dweb_discovery',
 ]);
 
 const tools = Object.freeze({
@@ -23,7 +22,6 @@ const tools = Object.freeze({
   dweb_peers: dwebPeersTool,
   dweb_block: dwebBlockTool,
   dweb_discovery: dwebDiscoveryTool,
-  dweb_guide: dwebGuideTool,
 });
 
 export const controllerHostsDwebTool = (/** @type {unknown} */ name) =>

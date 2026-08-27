@@ -16,7 +16,7 @@ import {
   moduleImportPolicyMessage, MODULE_SYNTAX_ERROR_CODE,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
   remoteModuleCapabilityBlockedMessage,
-  TOOLBOX_SPECIFIER_PREFIX, UnsupportedNativeModuleImportError,
+  UnsupportedNativeModuleImportError,
 } from '/peerd-engine/index.js';
 import { renderReturnValue } from './output-render.js';
 // The sealed worker source (realm seal + peerd.* surface + bridges) is shared
@@ -147,20 +147,6 @@ const clearModuleCache = () => {
   entryCache = new Map();
 };
 
-/** @param {string} [url] */
-// design 06 rot bookkeeping: when a run settles, report which toolbox modules
-// it imported and whether it succeeded (runCount/failCount on the meta the
-// agent reads via toolbox_list). Fire-and-forget — bookkeeping never fails a run.
-/** @param {boolean} ok */
-const recordToolboxUse = (ok) => {
-  const names = [...entryCache.keys()]
-    .filter((k) => k.startsWith(TOOLBOX_SPECIFIER_PREFIX))
-    .map((k) => k.slice(TOOLBOX_SPECIFIER_PREFIX.length));
-  if (names.length) {
-    browser.runtime.sendMessage({ type: 'toolbox/record', names, ok }).catch(() => {});
-  }
-};
-
 /** @param {AbortSignal | undefined} signal */
 const throwIfAborted = (signal) => {
   if (!signal?.aborted) return;
@@ -221,18 +207,6 @@ const makeResolverDeps = (onRemoteFetch, signal, deadlineAt) => ({
   },
   // peerd:std for entry and nested static imports.
   builtins: NOTEBOOK_BUILTINS,
-  // design 06: toolbox modules resolve through the SW body store. The Notebook
-  // is an own-compute lane, so the dep is ALWAYS injected here (the lane gate
-  // is dep injection — job hosts that must not resolve toolbox modules simply
-  // never inject it).
-  /** @param {string} name */
-  readToolboxModule: async (name) => {
-    throwIfAborted(signal);
-    const resp = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'toolbox/read', name }));
-    throwIfAborted(signal);
-    if (!resp?.ok) throw new Error(resp?.error ?? 'toolbox read failed');
-    return String(resp.body);
-  },
 });
 
 // ---------------------------------------------------------------------------
@@ -504,7 +478,6 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
       const onAbort = () => {
         clearTimeout(timer);
         try { worker.terminate(); } catch {}
-        recordToolboxUse(false);
         resolve(signal?.reason === 'deadline'
           ? timedOutResult(timeoutMs, usedRemoteModules)
           : stoppedResult());
@@ -512,7 +485,6 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
       workerAbortListener = onAbort;
       const timer = setTimeout(() => {
         try { worker.terminate(); } catch {}
-        recordToolboxUse(false);
         resolve(timedOutResult(timeoutMs, usedRemoteModules));
       }, Math.max(0, deadlineAt - Date.now()));
       if (signal?.aborted) onAbort();
@@ -527,7 +499,6 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
         if (m.type === 'seal-failed') {
           clearTimeout(timer);
           try { worker.terminate(); } catch {}
-          recordToolboxUse(false);
           appendLine('log-error', `[realm seal failed] ${m.error}`);
           resolve({
             value: undefined, consoleOutput: [], durationMs: 0,
@@ -627,7 +598,6 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
             const error = new UnsupportedNativeModuleImportError();
             clearTimeout(timer);
             try { worker.terminate(); } catch {}
-            recordToolboxUse(false);
             appendLine('log-error', `import resolution failed: ${error.message}`);
             resolve({
               value: undefined, consoleOutput: [], durationMs: 0,
@@ -686,7 +656,6 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
           const error = m.error
             ? mapWorkerError(m.error, workerUrl, bodyLine, entryPath, entryCache)
             : null;
-          recordToolboxUse(!error);
           if (error) appendLine('log-error', error);
           resolve({
             value: m.value, consoleOutput: m.consoleOutput,
@@ -715,10 +684,6 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
           : '';
         const loc = mappedLocation ? ` (${mappedLocation})` : '';
         appendLine('log-error', `[worker crashed] ${detail}${loc}`);
-        // A crash (e.g. a top-level throw in an imported module body) is a
-        // failed run — record it, matching the timeout path and the headless
-        // job-runner's worker-error path.
-        recordToolboxUse(false);
         resolve({
           value: undefined, consoleOutput: [], durationMs: 0,
           error: `worker error: ${detail}${loc}`, errorCode: undefined,
