@@ -46,7 +46,7 @@ const ENTRY = fileURLToPath(import.meta.url);
 const PIN_PATH = join(__dirname, 'chrome-version.txt');
 export const REPORT_DIR = join(ARTIFACTS_DIR, 'e2e');
 export const REPORT_PATH = join(REPORT_DIR, 'passkey-signup-report.json');
-export const PRODUCTION_BACKGROUND_ENTRY = 'background/vault-kernel.js';
+export const PRODUCTION_BACKGROUND_ENTRY = 'background/vault-kernel-chrome.js';
 export const PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY =
   'background/vault-kernel-preview.js';
 

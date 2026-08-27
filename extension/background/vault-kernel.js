@@ -98,6 +98,33 @@ import {
   makeSessionSupportPreflight,
 } from './vault-kernel-core.js';
 import { openHome } from '/shared/open-home.js';
+
+const TARGET_RUNTIME_MODULE_KEYS = Object.freeze([
+  'controllerClient',
+  'demandPlane',
+  'productionRuntime',
+  'sessionAuthority',
+  'supportControl',
+  'turnFactories',
+]);
+
+/**
+ * Install the shared authority kernel with one browser-exact module owner.
+ * Chrome supplies static factories; Firefox supplies its supported demand
+ * loaders. The exact keys prevent this composition seam becoming a function
+ * bag or feature registry.
+ * @param {Record<string,()=>Promise<any>>} runtimeModules
+ */
+export const installVaultKernel = (runtimeModules) => {
+const requiredRuntimeModuleKeys = BROWSER === 'firefox'
+  ? [...TARGET_RUNTIME_MODULE_KEYS, 'artifactCodec', 'directActorHost']
+  : TARGET_RUNTIME_MODULE_KEYS;
+const runtimeModuleKeys = Object.keys(runtimeModules ?? {}).sort();
+if (runtimeModuleKeys.length !== requiredRuntimeModuleKeys.length
+    || requiredRuntimeModuleKeys.some((name) => typeof runtimeModules?.[name] !== 'function')
+    || runtimeModuleKeys.some((name) => !requiredRuntimeModuleKeys.includes(name))) {
+  throw new TypeError('kernel-runtime-module-owner-invalid');
+}
 const kernelClockNow = () => globalThis.performance?.now?.() ?? Date.now();
 const kernelBundleStartedAt = Number(
   /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.bundle-start.v1')],
@@ -217,9 +244,7 @@ const featureHost = createKernelFeatureHost({
     ? () => Promise.resolve(makeFirefoxGuard.firefoxLifetime) : undefined,
 });
 const controllerGateway = createKernelControllerGateway({
-  loadController: async () => (await import(
-    './offscreen-controller-client.js'
-  )).makeSemanticControllerClient,
+  loadController: runtimeModules.controllerClient,
   controller: {
     browser,
     ensureOffscreen: featureHost.ensureOffscreen,
@@ -505,7 +530,7 @@ const systemReadRoutes = makeSystemReadRoutes({
   uiPorts,
 });
 const loadProductionRuntimeModule = makeBoundedModuleLoader(
-  () => import('./kernel-production-runtime.js'),
+  runtimeModules.productionRuntime,
   {
     timeoutMs: 15_000,
     loadCode: 'kernel-production-runtime-load-failed',
@@ -515,17 +540,24 @@ const loadProductionRuntimeModule = makeBoundedModuleLoader(
 /** @type {any} */
 let demandPlane = null;
 const loadDemandPlane = makeBoundedModuleLoader(async () => {
-  const { createKernelDemandPlane } = await import('./kernel-demand-plane.js');
+  const createKernelDemandPlane = await runtimeModules.demandPlane();
   demandPlane = createKernelDemandPlane({
     createProductionRuntime: async (/** @type {any} */ deps) => {
-      const { createKernelProductionRuntime } = await loadProductionRuntimeModule();
-      return createKernelProductionRuntime(deps);
+      const [createKernelProductionRuntime, createKernelTurnLiveFactories] = await Promise.all([
+        loadProductionRuntimeModule(), runtimeModules.turnFactories(),
+      ]);
+      return createKernelProductionRuntime({
+        ...deps,
+        createTurnFactories: createKernelTurnLiveFactories,
+      });
     },
     browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts,
     denylist: denylistPolicy,
     firefox: kernelFirefox,
     dwebEnabled: DWEB_ENABLED,
     firefoxAddon: makeFirefoxGuard,
+    loadDirectActorHost: kernelFirefox ? runtimeModules.directActorHost : undefined,
+    importArtifactCodec: kernelFirefox ? runtimeModules.artifactCodec : undefined,
     getFirefoxLifetime: () => firefoxActorLifetime,
     featureHost,
     offscreenUrl,
@@ -591,9 +623,9 @@ const getControllerRelays = async () => (await loadDemandPlane()).getControllerR
 const supportAdmitted = (/** @type {string} */ name, /** @type {any} */ message,
   /** @type {any} */ sender) => routeProvenance.get(name)?.(sender, message) === true;
 const loadSessionSupport = makeBoundedModuleLoader(async () => {
-  const [{ createKernelSessionAuthority }, { createKernelSupportControl }] = await Promise.all([
-    import('./kernel-session-authority.js'),
-    import('./kernel-support-control.js'),
+  const [createKernelSessionAuthority, createKernelSupportControl] = await Promise.all([
+    runtimeModules.sessionAuthority(),
+    runtimeModules.supportControl(),
   ]);
   const authority = createKernelSessionAuthority({
     ready: vaultReady,
@@ -1004,3 +1036,4 @@ void kernelReady.then(() => coldReceipts.recover()).catch((error) => {
 void kernelUpdateCustody?.start().catch((/** @type {unknown} */ error) => {
   console.error('[kernel] update custody start failed', error);
 });
+};

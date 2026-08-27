@@ -475,7 +475,7 @@ async function waitForCdpPort(profile) {
 }
 
 export const PEERD_BACKGROUND_ENTRIES = Object.freeze([
-  'background/vault-kernel.js',
+  'background/vault-kernel-chrome.js',
   'background/vault-kernel-preview.js',
 ]);
 

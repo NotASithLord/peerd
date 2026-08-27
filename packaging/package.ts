@@ -55,6 +55,7 @@ import {
   writeControllerBuildIdentity,
 } from './controller-build-identity.ts';
 import {
+  assertNativeChromeBundleRatchet,
   bundleChromeNativeKernel,
   isChromeNativeKernelEntry,
 } from './bundle-chrome-native-kernel.ts';
@@ -314,7 +315,10 @@ export const packageArtifact = async (
 
   if (minify && nativeChromeKernel) {
     const bundled = await bundleChromeNativeKernel(staging, chromeBackgroundEntry);
-    console.log(`bundled native Chrome kernel ${bundled.bytes} bytes (${bundled.inputs.length} staged inputs)`);
+    if (coldBudgetMode === 'enforce') {
+      assertNativeChromeBundleRatchet(chromeBackgroundEntry, bundled);
+    }
+    console.log(`bundled native Chrome kernel ${bundled.bytes} bytes (${bundled.inputs.length} staged inputs; ${bundled.inputSha256})`);
   }
 
   // Package. AMO takes .xpi (a zip); Chrome Web Store takes .zip; the

@@ -43,10 +43,10 @@ describe('target-specific native background entry', () => {
       import.meta.dir, '..', '..', 'extension', FIREFOX_BACKGROUND_ENTRY,
     ), 'utf8');
     expect(source.indexOf("import './kernel-firefox-addon.js'"))
-      .toBeLessThan(source.indexOf("import './vault-kernel.js'"));
+      .toBeLessThan(source.indexOf("from './vault-kernel.js'"));
   });
 
-  test('statically owns only the synchronous Firefox guard', async () => {
+  test('Firefox stays demand-loaded while Chrome declares its full native closure', async () => {
     const firefox = await collectStaticModuleGraph(
       EXTENSION, join(EXTENSION, FIREFOX_BACKGROUND_ENTRY),
     );
@@ -62,8 +62,12 @@ describe('target-specific native background entry', () => {
     ]) {
       const path = join(EXTENSION, leaf);
       expect(firefox.has(path), leaf).toBe(false);
-      expect(chrome.has(path), leaf).toBe(false);
     }
+    expect(chrome.has(join(EXTENSION, 'background/offscreen-controller-client.js'))).toBe(true);
+    expect(chrome.has(join(EXTENSION, 'background/kernel-turn-live-factories.js'))).toBe(true);
+    expect(chrome.has(join(EXTENSION, 'background/direct-controller-client.js'))).toBe(false);
+    expect(chrome.has(join(EXTENSION, 'background/firefox-storage-keepalive.js'))).toBe(false);
+    expect(chrome.has(join(EXTENSION, 'background/repository-local-client.js'))).toBe(false);
     for (const root of [
       'background/direct-controller-client.js',
       'background/firefox-storage-keepalive.js',
@@ -73,8 +77,13 @@ describe('target-specific native background entry', () => {
     expect(addon).toContain("import('./direct-controller-client.js')");
     expect(addon).toContain("import('./firefox-storage-keepalive.js')");
     expect(addon).toContain("import('./repository-local-client.js')");
+    const firefoxModules = readFileSync(
+      join(EXTENSION, 'background/kernel-firefox-runtime-modules.js'), 'utf8',
+    );
+    expect(firefoxModules).toContain("'./kernel-demand-plane.js'");
+    expect(firefoxModules).toContain("'./kernel-turn-live-factories.js'");
     const kernel = readFileSync(join(EXTENSION, 'background', 'vault-kernel.js'), 'utf8');
-    expect(kernel).not.toContain("import('./firefox-storage-keepalive.js')");
+    expect(kernel).not.toContain('import(');
     expect(kernel).toContain('makeFirefoxGuard?.connectDirectController');
   });
 

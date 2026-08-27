@@ -64,7 +64,7 @@ export const makeArtifactEngineClient = ({
     if (typeof clientApi?.matchAll !== 'function') return [];
     return clientApi.matchAll({ type: 'window', includeUncontrolled: true });
   },
-  importLocal = () => import('/peerd-engine/export.js'),
+  importLocal,
   withLocalLifetime = (operation) => operation(),
   newId = () => crypto.randomUUID(),
   timeoutMs,
@@ -73,11 +73,14 @@ export const makeArtifactEngineClient = ({
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
 }) => {
-  const loadLocal = makeBoundedModuleLoader(importLocal, {
+  if (!offscreen && typeof importLocal !== 'function') {
+    throw new TypeError('artifact-local-loader-invalid');
+  }
+  const loadLocal = typeof importLocal === 'function' ? makeBoundedModuleLoader(importLocal, {
     timeoutMs: localLoadTimeoutMs,
     loadCode: 'artifact-local-load-failed',
     timeoutCode: 'artifact-local-load-timeout',
-  });
+  }) : null;
   /** @type {Set<string>} */
   const issuedChannelIds = new Set();
   /** @type {string[]} */
@@ -94,7 +97,7 @@ export const makeArtifactEngineClient = ({
   };
   const callLocal = async (/** @type {string} */ operation, /** @type {any[]} */ args) =>
     withLocalLifetime(async () => {
-      const module = await loadLocal();
+      const module = await loadLocal?.();
       const fn = module?.[operation];
       if (typeof fn !== 'function') throw new Error('artifact operation unavailable');
       return fn(...args);

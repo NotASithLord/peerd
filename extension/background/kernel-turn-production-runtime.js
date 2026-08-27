@@ -65,7 +65,7 @@ export const createKernelTurnProductionRuntime = async (deps) => {
     throw new TypeError('kernel-turn-production-relay-routes-invalid');
   }
   for (const key of [
-    'validateGeneration', 'retireStale', 'buildActorContext',
+    'validateGeneration', 'retireStale',
     'appActorChat', 'activeGoalStates', 'broadcastAgentTab', 'onUiConnect',
     'showWebTabHint', 'isDrivenSource', 'webActorSessionForTab',
     'resumeSchedules',

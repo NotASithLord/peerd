@@ -35,6 +35,13 @@ const KERNEL_IDENTITY = Object.freeze({
   bootId: 'boot-controller-a',
   kernelEpoch: 'kernel-controller-a',
 });
+const controllerLease = (identity: Record<string, any>, generation: number) => ({
+  ...identity,
+  scope: 'controller',
+  leaseId: `controller-lease-${String(generation).padStart(8, '0')}`,
+  hostEpoch: 'controller-host-epoch',
+  generation,
+});
 const connectController = (deps: Omit<Parameters<typeof connectOffscreenController>[0],
   'buildDigest' | 'authorizeCall'>) =>
   connectOffscreenController({
@@ -1046,6 +1053,7 @@ describe('Chrome lazy controller private channel prototype', () => {
           type: 'peerd/controller-channel', protocol: 2,
           buildDigest: BUILD_DIGEST, channelId, capabilities: ['state.read'],
           kernelEpoch: identity.kernelEpoch, kernelIdentity: identity,
+          lease: controllerLease(identity, 1),
         },
         ports: [channel.port2],
       } as unknown as MessageEvent);
@@ -1061,6 +1069,43 @@ describe('Chrome lazy controller private channel prototype', () => {
       bootId: 'boot-controller-b', kernelEpoch: 'kernel-controller-b',
     }, 'strict-channel-b')).toBe(true);
     handler.close();
+  });
+
+  test('fresh leases may reacquire one kernel epoch without reopening a retired lease', () => {
+    const expectedWorkerUrl = 'chrome-extension://id/background/kernel.js';
+    const handler = makeControllerOfferHandler({
+      expectedWorkerUrl,
+      expectedBuildDigest: BUILD_DIGEST,
+      supportedCaps: ['state.read'],
+      loadController: async () => ({ call: async () => ({ ok: true }) }),
+    });
+    const offer = (generation: number, lease = controllerLease(KERNEL_IDENTITY, generation)) => {
+      const channel = new MessageChannel();
+      const accepted = handler({
+        isTrusted: true,
+        source: { scriptURL: expectedWorkerUrl },
+        data: {
+          type: 'peerd/controller-channel', protocol: 2,
+          buildDigest: BUILD_DIGEST,
+          channelId: `controller-channel-${String(generation).padStart(8, '0')}`,
+          capabilities: ['state.read'],
+          kernelEpoch: KERNEL_IDENTITY.kernelEpoch,
+          kernelIdentity: KERNEL_IDENTITY,
+          lease,
+        },
+        ports: [channel.port2],
+      } as unknown as MessageEvent);
+      channel.port1.close();
+      return accepted;
+    };
+
+    for (let generation = 1; generation <= 256; generation += 1) {
+      expect(offer(generation)).toBe(true);
+      handler.close();
+    }
+    expect(offer(1)).toBe(false);
+    expect(offer(257, { ...controllerLease(KERNEL_IDENTITY, 257), hostEpoch: '' }))
+      .toBe(false);
   });
 
   test('sealed Worker disables ambient network/storage before dynamic import', () => {

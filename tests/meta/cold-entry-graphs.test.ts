@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { init, parse } from 'es-module-lexer';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import {
   collectStaticModuleGraph,
@@ -24,7 +25,7 @@ const entries = {
   offscreen: 'offscreen/offscreen.js',
 } as const;
 
-const nativeKernelEntry = 'background/vault-kernel.js';
+const nativeKernelEntry = 'background/vault-kernel-chrome.js';
 const previewKernelEntry = 'background/vault-kernel-preview.js';
 
 const stats = async (name: keyof typeof entries) => {
@@ -59,6 +60,15 @@ const nativeKernelStats = async (entryName = nativeKernelEntry) => {
 
 describe('cold entry graphs', () => {
   test('every cold graph stays at or below its achieved no-growth ratchet', async () => {
+    const kernel = await nativeKernelStats();
+    expect(kernel.modules, 'kernel modules')
+      .toBeLessThanOrEqual(COLD_SOURCE_RATCHETS.kernel.modules);
+    expect(kernel.graphBytes, 'kernel graph bytes')
+      .toBeLessThanOrEqual(COLD_SOURCE_RATCHETS.kernel.graphBytes);
+    expect(kernel.entryBytes, 'kernel entry bytes')
+      .toBeLessThanOrEqual(COLD_SOURCE_RATCHETS.kernel.entryBytes);
+    expect(kernel.directImports, 'kernel direct imports')
+      .toBeLessThanOrEqual(COLD_SOURCE_RATCHETS.kernel.directImports);
     for (const name of ['sidepanel', 'home'] as const) {
       const measured = await stats(name);
       const ratchet = COLD_SOURCE_RATCHETS[name];
@@ -93,45 +103,42 @@ describe('cold entry graphs', () => {
     }
   });
 
-  test('the native authority kernel excludes controller and feature implementations', async () => {
+  test('the honest native closure excludes growing controller owners and Firefox-only hosts', async () => {
     const measured = await nativeKernelStats();
     for (const forbidden of [
-      'peerd-runtime/loop/agent-loop.js',
       'offscreen/controller-runtime.js',
       'offscreen/controller-turn-runtime.js',
       'offscreen/semantic-route-host.js',
       'offscreen/artifact-host.js',
       'offscreen/artifact-worker.js',
-      'background/offscreen-artifact-client.js',
-      'background/actor-live-projection.js',
       'peerd-engine/repository/repository-service.js',
       'vendor/isomorphic-git/index.js',
       'background/direct-actor-host.js',
       'offscreen/actor-runner.js',
-      'shared/argon2id.js',
-      'vendor/argon2/argon2.js',
-      'peerd-egress/vault/vault.js',
-      'peerd-egress/vault/keys.js',
-      'background/kernel-skills-authority.js',
-      'peerd-runtime/skills/parse.js',
+      'peerd-runtime/controller-tool-projection.js',
+      'peerd-runtime/controller-actor-tools.js',
+      'peerd-runtime/controller-schedule-tools.js',
+      'peerd-provider/adapters/anthropic.js',
     ]) {
       expect(measured.modulesSet.has(forbidden), `native kernel imports ${forbidden}`).toBe(false);
     }
-    // Repository and Firefox storage-heartbeat implementations are exact
-    // first-demand branches and never enter Chrome's static graph.
-    expect(measured.modulesSet.has('background/repository-client.js')).toBe(false);
+    // Firefox storage-heartbeat ownership remains a true background-page
+    // first-demand branch. Chrome repository custody is part of the fixed
+    // authority shell and therefore belongs in the honest static closure.
     expect(measured.modulesSet.has('background/firefox-storage-keepalive.js')).toBe(false);
     expect(measured.modulesSet.has('background/vault-authority-client.js')).toBe(true);
     expect(measured.modulesSet.has('shared/cold-util.js')).toBe(true);
-    expect(measured.modulesSet.has('shared/util.js')).toBe(false);
-    expect(measured.modulesSet.has('background/routes/contacts.js')).toBe(false);
+    expect(measured.modulesSet.has('shared/util.js')).toBe(true);
     expect(measured.modulesSet.has('background/routes/toolbox.js')).toBe(false);
     expect(measured.modulesSet.has('background/kernel-semantic-demand.js')).toBe(false);
     expect(measured.modulesSet.has('background/semantic-demand-client.js')).toBe(false);
-    expect(measured.modulesSet.has('shared/semantic-demand-policy.js')).toBe(false);
-    expect(measured.modulesSet.has('peerd-engine/app-manifest.js')).toBe(false);
+    // Contacts and semantic-demand policy remain finite storage/route custody,
+    // while their controller-owned tool semantics stay outside this graph.
+    expect(measured.modulesSet.has('background/routes/contacts.js')).toBe(true);
+    expect(measured.modulesSet.has('shared/semantic-demand-policy.js')).toBe(true);
+    expect(measured.modulesSet.has('peerd-engine/app-manifest.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/semantic.js')).toBe(false);
-    expect(measured.modulesSet.has('peerd-runtime/contacts/aggregate.js')).toBe(false);
+    expect(measured.modulesSet.has('peerd-runtime/contacts/aggregate.js')).toBe(true);
   });
 
   test('demand runtimes do not inherit the composer policy family', async () => {
@@ -185,7 +192,7 @@ describe('cold entry graphs', () => {
     expect(measured.modulesSet.has('peerd-egress/denylist/dnr-rules.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/tools/browser-automation-policy.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/actor/idp-registry.js')).toBe(true);
-    expect(measured.modulesSet.has('peerd-egress/background.js')).toBe(false);
+    expect(measured.modulesSet.has('peerd-egress/background.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/background.js')).toBe(false);
   });
 
@@ -194,6 +201,8 @@ describe('cold entry graphs', () => {
     const preview = await nativeKernelStats(previewKernelEntry);
     const exclusive = [...preview.modulesSet]
       .filter((file) => !common.modulesSet.has(file)).sort();
+    const storeExclusive = [...common.modulesSet]
+      .filter((file) => !preview.modulesSet.has(file)).sort();
     const exclusiveBytes = exclusive.reduce((total, file) =>
       total + statSync(join(EXTENSION_DIR, file)).size, 0);
     expect(common.modules).toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.shared.modules);
@@ -210,8 +219,12 @@ describe('cold entry graphs', () => {
       .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.entryBytesCeiling);
     expect(preview.directImports)
       .toBeLessThanOrEqual(PREVIEW_KERNEL_SOURCE_CONTRACT.directImportsCeiling);
-    expect(preview.modules).toBe(common.modules + exclusive.length);
-    expect(preview.graphBytes).toBe(common.graphBytes + exclusiveBytes);
+    expect(preview.modules).toBe(common.modules - storeExclusive.length + exclusive.length);
+    const storeExclusiveBytes = storeExclusive.reduce((total, file) =>
+      total + statSync(join(EXTENSION_DIR, file)).size, 0);
+    expect(preview.graphBytes)
+      .toBe(common.graphBytes - storeExclusiveBytes + exclusiveBytes);
+    expect(storeExclusive).toEqual(['background/vault-kernel-chrome.js']);
     expect(exclusive).toEqual([
       'background/kernel-preview-addon.js',
       'background/vault-kernel-preview.js',
@@ -220,48 +233,32 @@ describe('cold entry graphs', () => {
     expect(common.modulesSet.has('background/kernel-preview-addon.js')).toBe(false);
     const source = readFileSync(join(EXTENSION_DIR, previewKernelEntry), 'utf8');
     expect(source.indexOf("import './kernel-preview-addon.js'"))
-      .toBeLessThan(source.indexOf("import './vault-kernel.js'"));
+      .toBeLessThan(source.indexOf("from './vault-kernel.js'"));
   });
 
   test('the native Chrome authority entry has no reachable runtime module import', async () => {
     const measured = await nativeKernelStats();
+    await init;
     const offenders = [];
     for (const relativePath of measured.modulesSet) {
       const source = readFileSync(join(EXTENSION_DIR, relativePath), 'utf8');
-      const executable = source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
-      if (/\bimport\(\s*(['"])[^'"]+\1\s*\)/.test(executable)) offenders.push(relativePath);
+      const [imports] = parse(source);
+      if (imports.some((entry) => entry.d >= 0)) offenders.push(relativePath);
     }
     // Target-specific direct Workers stay behind exact Firefox-only branches.
     // The Chrome semantic path is a static private-channel client; it contains
     // no runtime import expression of its own.
-    expect(offenders.sort()).toEqual([
-      'background/vault-kernel.js',
-    ]);
+    expect(offenders.sort()).toEqual([]);
     expect(readFileSync(join(EXTENSION_DIR, 'background/vault-kernel.js'), 'utf8'))
       .not.toContain('createKernelSemanticDemand');
     const kernelSource = readFileSync(join(EXTENSION_DIR, 'background/vault-kernel.js'), 'utf8');
-    const executableKernel = kernelSource.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
-    const runtimeImports = [...executableKernel.matchAll(/\bimport\(\s*(['"])([^'"]+)\1\s*\)/g)]
-      .map((match) => match[2]);
-    expect(runtimeImports).toEqual([
-      './offscreen-controller-client.js',
-      './kernel-production-runtime.js',
-      './kernel-demand-plane.js',
-      './kernel-session-authority.js',
-      './kernel-support-control.js',
-    ]);
-    expect(kernelSource).toContain(
-      "const { createKernelDemandPlane } = await import('./kernel-demand-plane.js');",
-    );
-    expect(kernelSource).toContain(
-      'const { createKernelProductionRuntime } = await loadProductionRuntimeModule();',
-    );
-    for (const specifier of runtimeImports) {
-      expect(PACKAGED_LAZY_MODULE_ENTRIES)
-        .toContain(`background/${specifier.replace(/^\.\//, '')}` as any);
-    }
+    expect(kernelSource).not.toContain('import(');
+    expect(kernelSource).toContain('const createKernelDemandPlane = await runtimeModules.demandPlane();');
+    expect(measured.modulesSet.has('background/kernel-chrome-runtime-modules.js')).toBe(true);
+    expect(measured.modulesSet.has('background/kernel-demand-plane.js')).toBe(true);
+    expect(measured.modulesSet.has('background/kernel-turn-live-factories.js')).toBe(true);
     expect(kernelSource).not.toContain('createDeferredRepositoryClient');
-    expect(measured.modulesSet.has('background/kernel-demand-support.js')).toBe(false);
+    expect(measured.modulesSet.has('background/kernel-demand-support.js')).toBe(true);
     expect(readFileSync(
       join(EXTENSION_DIR, 'background/kernel-demand-support.js'), 'utf8',
     )).toContain('createDeferredRepositoryClient(async () => {');

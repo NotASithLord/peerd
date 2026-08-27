@@ -156,7 +156,7 @@ export const createKernelDemandPlane = (deps) => {
   const loadRichOwner = async (/** @type {any} */ seams) => {
     const sourceProjectionGeneration = crypto.randomUUID();
     let sourceProjectionRevision = 0;
-    const runtime = await deps.createProductionRuntime({
+    const runtime = await deps.controllerGateway.withRun(() => deps.createProductionRuntime({
       ...deps,
       seams,
       turnCustody,
@@ -184,7 +184,7 @@ export const createKernelDemandPlane = (deps) => {
           revision: ++sourceProjectionRevision,
         }),
       ),
-    });
+    }));
     const owner = Object.freeze({
       ...runtime,
       sourceProjectionGeneration,
@@ -214,6 +214,7 @@ export const createKernelDemandPlane = (deps) => {
         deps.featureHost.runtime.retireActiveHost(reason),
       loadTurnRuntime: async (/** @type {any} */ seams) =>
         (await loadRichOwner(seams)).turnRuntime,
+      withProductionRun: deps.controllerGateway.withRun,
       onTurnRuntimeLoaded: async (/** @type {any} */ runtime, /** @type {any} */ custody) => {
         const owner = productionOwners.get(runtime);
         if (!owner) throw new Error('kernel-production-owner-missing');

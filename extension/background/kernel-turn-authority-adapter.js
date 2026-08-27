@@ -1692,7 +1692,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       onLost: (/** @type {Error} */ error) => directActorHost?.failKeepAlive(error),
     });
     const directActorModule = deps.firefox
-      ? await (deps.loadDirectActorHost?.() ?? import('./direct-actor-host.js')) : null;
+      ? await deps.loadDirectActorHost?.() : null;
+    if (deps.firefox && typeof directActorModule?.makeDirectActorHost !== 'function') {
+      throw new TypeError('kernel-firefox-actor-host-invalid');
+    }
     directActorHost = deps.firefox
       ? directActorModule.makeDirectActorHost({
         workerUrl: deps.browser.runtime.getURL('offscreen/actor-worker.js'),

@@ -160,7 +160,7 @@ describe('production semantic controller slice', () => {
     }
   });
 
-  test('prompt.render is byte-identical through the Chrome private channel', async () => {
+  test('prompt.render accepts the production absolute Chrome offscreen URL', async () => {
     const workerUrl = 'chrome-extension://test/background/service-worker.js';
     const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
     const offerHandler = makeControllerOfferHandler({
@@ -188,7 +188,7 @@ describe('production semantic controller slice', () => {
     const semantic = makeSemanticControllerClient({
       browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
       ensureOffscreen: async () => { ensures += 1; },
-      offscreenUrl: 'offscreen/offscreen.html',
+      offscreenUrl,
       firefoxDirect: false,
       dwebEnabled: true,
       fetchFn,
@@ -538,6 +538,57 @@ describe('production semantic controller slice', () => {
       code: 'controller-firefox-feature-lifetime-lost',
     });
     semantic.close();
+  });
+
+  test('Chrome retries one replay-safe feature after transient host startup loss', async () => {
+    const workerUrl = 'chrome-extension://test/background/service-worker.js';
+    const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
+    let discoveries = 0;
+    let leases = 0;
+    let calls = 0;
+    const offerHandler = makeControllerOfferHandler({
+      expectedWorkerUrl: workerUrl,
+      expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
+      supportedCaps: ['feature.dispatch'],
+      loadController: async () => ({
+        call: async () => {
+          calls += 1;
+          return { ok: true, value: { rows: [] }, outcomeKnown: true };
+        },
+      }),
+    });
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl,
+      firefoxDirect: false, dwebEnabled: false,
+      authorizeFeatureCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+        origin: null, target: 'feature:session/list', replayClass: 'A',
+      }),
+      handleFeatureKernelCall: async () => ({ ok: true }),
+      withControllerLease: async (operation) => {
+        leases += 1;
+        return operation();
+      },
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+      listWindowClients: async () => {
+        discoveries += 1;
+        if (discoveries <= 2) return [];
+        return [{
+          url: offscreenUrl,
+          postMessage: (data: unknown, transfer: Transferable[]) => offerHandler({
+            isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+          } as unknown as MessageEvent),
+        }];
+      },
+    });
+
+    await expect(semantic.callFeature({
+      cluster: 'support', route: 'session/list', dispatchId: 'feature-read-1', message: {},
+    })).resolves.toMatchObject({ ok: true, value: { rows: [] } });
+    expect({ discoveries, leases, calls }).toEqual({ discoveries: 3, leases: 2, calls: 1 });
+    semantic.close();
+    offerHandler.close();
   });
 
   test('Firefox carries all session support routes through the sealed controller', async () => {
