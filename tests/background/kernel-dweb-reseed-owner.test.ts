@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 import { createKernelDwebReseedOwner } from '../../extension/background/kernel-dweb-reseed-owner.js';
 
 const app = {
@@ -13,11 +14,12 @@ const owner = (over: Record<string, any> = {}) => {
     active: () => true,
     locked: () => false,
     appRegistry: { list: async () => [app], get: async () => app },
-    withDwebPublication: async (operation: any) => operation(() => true),
+    withDwebReseedPublication: async (operation: any) => operation(() => true),
     withAppLifecycle: async (_id: string, operation: any) => operation(),
     repositories: {},
     sendMessage: async (message: any) => { messages.push(message); return { ok: true }; },
     currentHostEpoch: () => currentEpoch,
+    newId: () => 'reseed-attempt-0001',
     log: { warn: () => {}, debug: () => {} },
     ...over,
   });
@@ -55,6 +57,7 @@ describe('kernel dweb reseed owner', () => {
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0]).toMatchObject({
       type: 'dweb/base-host/share-app', appId: 'app-1', expectedHash: 'hash', reseed: true,
+      reseedAttemptId: 'reseed-attempt-0001',
       expectedHostEpoch: 'host-epoch-0001', expectedMeshGeneration: 1,
     });
   });
@@ -125,6 +128,89 @@ describe('kernel dweb reseed owner', () => {
     expect(await h.value.onHostGeneration({
       hostEpoch: 'host-epoch-0004', meshGeneration: 1,
     })).toMatchObject({ ok: false, cancelled: true });
+  });
+
+  test('the production publication and App fences release a hung predecessor', async () => {
+    const publicationFence = createDwebPublicationFence();
+    let appTail = Promise.resolve();
+    const withAppLifecycle = (_id: string, operation: () => Promise<any>) => {
+      const result = appTail.then(operation, operation);
+      appTail = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    let reads = 0;
+    let predecessorStarted!: () => void;
+    const started = new Promise<void>((resolve) => { predecessorStarted = resolve; });
+    const h = owner({
+      appRegistry: {
+        list: async () => [app],
+        get: async () => {
+          reads += 1;
+          if (reads === 2) {
+            predecessorStarted();
+            return new Promise(() => {});
+          }
+          return app;
+        },
+      },
+      withDwebReseedPublication: publicationFence.runReseed,
+      withAppLifecycle,
+      messageTimeoutMs: 5,
+    });
+    const predecessor = h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0005', meshGeneration: 1,
+    });
+    await started;
+    const successor = h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0005', meshGeneration: 2,
+    });
+    expect(await successor).toEqual({ ok: true, seeded: 1 });
+    expect(await predecessor).toMatchObject({
+      ok: false, cancelled: true, error: 'dweb-generation-retired',
+    });
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].expectedMeshGeneration).toBe(2);
+  });
+
+  test('repository preparation is bounded outside publication custody', async () => {
+    const oid = 'b'.repeat(40);
+    const released = {
+      ...app,
+      dweb: {
+        ...app.dweb, git_oid: oid, source_git_oid: oid,
+        release_entry_file: 'index.html', release_file_kinds: { 'index.html': 'text' },
+      },
+    };
+    const publicationFence = createDwebPublicationFence();
+    let snapshots = 0;
+    let predecessorStarted!: () => void;
+    const started = new Promise<void>((resolve) => { predecessorStarted = resolve; });
+    const h = owner({
+      appRegistry: { list: async () => [released], get: async () => released },
+      repositories: { snapshot: async () => {
+        snapshots += 1;
+        if (snapshots === 1) {
+          predecessorStarted();
+          return new Promise(() => {});
+        }
+        return { 'index.html': new TextEncoder().encode('released') };
+      } },
+      withDwebReseedPublication: publicationFence.runReseed,
+      messageTimeoutMs: 5,
+    });
+    const predecessor = h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0006', meshGeneration: 1,
+    });
+    await started;
+    const successor = h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-0006', meshGeneration: 2,
+    });
+    expect(await successor).toEqual({ ok: true, seeded: 1 });
+    expect(await predecessor).toMatchObject({
+      ok: false, cancelled: true, error: 'dweb-generation-retired',
+    });
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0].expectedMeshGeneration).toBe(2);
   });
 
   test('rejects a delayed generation from a replaced physical host before reading state', async () => {

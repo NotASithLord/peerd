@@ -34,7 +34,7 @@ export const selectFirefoxPreviewUpdate = (feed, addonId) => {
     try { url = new URL(item.update_link); } catch { continue; }
     const releaseVersion = RELEASE.exec(url.pathname)?.[1];
     if (url.protocol !== 'https:' || url.hostname !== 'github.com'
-        || url.username || url.password || url.search || url.hash
+        || url.port || url.username || url.password || url.search || url.hash
         || releaseVersion !== item.version) continue;
     if (!selected || compareFirefoxUpdateVersions(item.version, selected.version) > 0) {
       selected = { version: item.version, url: url.href };
@@ -66,7 +66,7 @@ const manifestFeed = (manifest) => {
   try { url = new URL(gecko.update_url); } catch { return null; }
   if (url.protocol !== 'https:' || url.hostname !== 'peerd.ai'
       || url.pathname !== '/updates/firefox-preview.json'
-      || url.username || url.password || url.search || url.hash) return null;
+      || url.port || url.username || url.password || url.search || url.hash) return null;
   return { addonId: gecko.id, url: url.href };
 };
 

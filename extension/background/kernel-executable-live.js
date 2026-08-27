@@ -190,6 +190,7 @@ export const createKernelEngineLive = async (deps) => {
         ?? (webHost ? (source) => webHost.extractMarkdown(source) : null),
     }),
     withDwebPublication: dwebPublicationFence.run,
+    withDwebReseedPublication: dwebPublicationFence.runReseed,
     invalidateDwebPublications: dwebPublicationFence.invalidate,
     dwebPublicationGeneration: dwebPublicationFence.generation,
     withAppLifecycle,
