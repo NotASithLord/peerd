@@ -275,6 +275,72 @@ describe('isolated exact tool authority', () => {
     expect(cancelled).toBe(false);
   });
 
+  test('binds actor authority to post-hook arguments', async () => {
+    let cancelled = '';
+    const { client, during } = clientWithRelay({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorAuthority: {
+          cancelTask: async (taskId: string) => {
+            cancelled = taskId;
+            return { ok: true, content: `cancelled ${taskId}` };
+          },
+        },
+      }),
+      prepareToolCall: async (call: any, ctx: any) => ({
+        prepared: true, call, ctx, args: { taskId: 'hook-task' },
+      }),
+    });
+    const result = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'call-hook', name: 'actor_cancel', args: { taskId: 'model-task' } },
+      }, OFFSCREEN);
+      const original = await client.routes['actor/task-cancel']({
+        relayToken, executionId: prepared.executionId, taskId: 'model-task',
+      }, OFFSCREEN);
+      const modified = await client.routes['actor/task-cancel']({
+        relayToken, executionId: prepared.executionId, taskId: 'hook-task',
+      }, OFFSCREEN);
+      return { prepared, original, modified };
+    });
+    expect(result.prepared.args).toEqual({ taskId: 'hook-task' });
+    expect(result.original).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.modified).toMatchObject({ ok: true });
+    expect(cancelled).toBe('hook-task');
+  });
+
+  test('keeps actor settlement retryable until durable settlement succeeds', async () => {
+    let settlements = 0;
+    const { client, during } = clientWithRelay({
+      settleToolCall: async (_prepared: any, execution: any) => {
+        settlements += 1;
+        if (settlements === 1) throw new Error('temporary settlement failure');
+        return execution.result;
+      },
+    });
+    const result = await during(async (relayToken) => {
+      const prepared: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'call-settle', name: 'actor_cancel', args: { taskId: 'task-1' } },
+      }, OFFSCREEN);
+      const message = {
+        relayToken, executionId: prepared.executionId,
+        result: { ok: false, error: 'known failure' },
+      };
+      const first = await client.routes['actor/tool-settle'](message, OFFSCREEN);
+      const second = await client.routes['actor/tool-settle'](message, OFFSCREEN);
+      const replay = await client.routes['actor/tool-settle'](message, OFFSCREEN);
+      return { first, second, replay };
+    });
+    expect(result.first).toMatchObject({
+      ok: false, error: 'temporary settlement failure', outcomeKnown: true,
+    });
+    expect(result.second).toMatchObject({ ok: true });
+    expect(result.replay).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(settlements).toBe(2);
+  });
+
   test('enforces actor grants before semantic preparation', async () => {
     let prepared = false;
     const { client, during } = clientWithRelay({

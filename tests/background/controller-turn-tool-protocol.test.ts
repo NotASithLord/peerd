@@ -338,6 +338,52 @@ describe('controller turn finite tool protocol', () => {
     expect(completed).toBe(true);
   });
 
+  test('binds exact authority to post-hook arguments while retaining model admission', async () => {
+    const goalDescriptor = authorityDescriptor('complete_goal');
+    const summaries: string[] = [];
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [goalDescriptor], refreshTools: async () => [goalDescriptor],
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-goal-modified', name: 'complete_goal' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-goal-modified',
+            partialJson: '{"summary":"model summary"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-goal-modified' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              completeGoalRun: (summary: string) => {
+                summaries.push(summary);
+                return true;
+              },
+            },
+          },
+          // This is the effective post-hook argument set. The model-issued
+          // call above remains independently admitted and digested.
+          args: { summary: 'hook summary' },
+          projection: {}, manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(summaries).toEqual(['hook summary']);
+  });
+
   test('executes actor_cancel through the exact actor authority operation', async () => {
     const actorCancelDescriptor = authorityDescriptor('actor_cancel');
     let legacy = 0;
@@ -861,6 +907,10 @@ describe('controller turn finite tool protocol', () => {
     expect(quota.admit('turn.tool.settle', settle).ok).toBe(true);
     expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.prepare')).toBe(false);
     expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.goal.complete')).toBe(false);
+    expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.model.cancel-inference'))
+      .toBe(true);
+    expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.model.cancel-local'))
+      .toBe(true);
     expect(controllerOperationAllowedAfterCancel('turn.run', 'turn.tool.settle')).toBe(true);
   });
 

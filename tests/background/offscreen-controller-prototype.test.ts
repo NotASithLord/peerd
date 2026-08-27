@@ -1132,6 +1132,10 @@ describe('Chrome lazy controller private channel prototype', () => {
       'WebTransport', 'RTCPeerConnection', 'RTCDataChannel', 'indexedDB',
       'caches', 'Worker', 'SharedWorker', 'BroadcastChannel', 'serviceWorker', 'locks',
     ]) expect(source).toContain(`'${name}'`);
+    for (const operation of [
+      'turn.model.cancel-inference', 'turn.model.cancel-local',
+      'turn.tool.settle', 'turn.abort.finalize', 'turn.finalize',
+    ]) expect(source).toContain(`'${operation}'`);
   });
 });
 

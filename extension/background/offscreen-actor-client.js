@@ -420,7 +420,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'repository', fields);
     if (!entry) return null;
     bindRepositoryToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -433,7 +433,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'vm', fields);
     if (!entry) return null;
     bindVmToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
     });
     return entry;
   };
@@ -445,7 +445,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'notebook', fields);
     if (!entry) return null;
     bindNotebookToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -458,7 +458,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'app', fields);
     if (!entry) return null;
     bindAppToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -471,7 +471,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'persistence', fields);
     if (!entry) return null;
     bindPersistenceToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
     });
     return entry;
   };
@@ -483,7 +483,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'page', fields);
     if (!entry) return null;
     bindPageToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
       ...(typeof msg.pageProgramSemanticToken === 'string'
         ? { pageProgramSemanticToken: msg.pageProgramSemanticToken }
@@ -499,7 +499,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'resource', fields);
     if (!entry) return null;
     bindResourceToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -512,7 +512,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'siteclient', fields);
     if (!entry) return null;
     bindSiteClientToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -525,7 +525,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'execution', fields);
     if (!entry) return null;
     bindExecutionToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -538,7 +538,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'editing', fields);
     if (!entry) return null;
     bindEditingToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
     });
     return entry;
   };
@@ -550,7 +550,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'introspection', fields);
     if (!entry) return null;
     bindIntrospectionToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
     });
     return entry;
   };
@@ -562,7 +562,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'schedule', fields);
     if (!entry) return null;
     bindScheduleToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -575,7 +575,7 @@ export const makeOffscreenActorClient = ({
     const entry = domainEntry(grant, msg, 'dweb', fields);
     if (!entry) return null;
     bindDwebToolAuthority(entry.domainState, {
-      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      call: entry.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
     });
     return entry;
@@ -903,11 +903,22 @@ export const makeOffscreenActorClient = ({
       if (!policy || structuredClonePayloadBytes(prepared.args) > policy.argumentBytes) {
         return { ok: false, error: 'actor/tool-prepare: semantic arguments exceed authority limits' };
       }
+      let authorityCall;
+      try {
+        // why: the model-issued call remains the admission proof, while exact
+        // authority compares against the post-hook args sent to the isolated
+        // semantic executor.
+        authorityCall = Object.freeze({
+          ...call, args: structuredClone(prepared.args),
+        });
+      } catch {
+        return { ok: false, error: 'actor/tool-prepare: semantic arguments are not cloneable' };
+      }
       const executionId = `ae-${now().toString(36)}-${++seq}`;
       grant.actorExecutions.set(executionId, {
-        open: true, effectEntered: false, unknownIrreversible: false,
+        open: true, settling: false, effectEntered: false, unknownIrreversible: false,
         domainCalls: new Set(), domainState: {}, prepared,
-        toolName: call.name, authorityClass: domain,
+        call: authorityCall, toolName: call.name, authorityClass: domain,
       });
       const projection = domain === 'actor' ? {
         sessionId: admittedContext.ctx.session?.sessionId,
@@ -983,7 +994,7 @@ export const makeOffscreenActorClient = ({
           parentSessionId: ctx.session?.sessionId,
           parentDepth: ctx.session?.depth ?? 0,
           parentInbound: ctx.inbound === false ? false : true,
-          parentToolUseId: entry.prepared.call?.id,
+          parentToolUseId: entry.call?.id,
         }) };
       } catch (cause) {
         const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
@@ -1035,7 +1046,7 @@ export const makeOffscreenActorClient = ({
           parentSessionId: ctx.session?.sessionId,
           parentDepth: ctx.session?.depth ?? 0,
           parentInbound: ctx.inbound === false ? false : true,
-          parentToolUseId: entry.prepared.call?.id,
+          parentToolUseId: entry.call?.id,
         }) };
       } catch (cause) {
         const failure = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
@@ -1075,7 +1086,7 @@ export const makeOffscreenActorClient = ({
       if (!grant || !exactKeys(msg, ['executionId', 'taskId'])
           || !entry || entry.open !== true || entry.toolName !== 'actor_cancel'
           || entry.domainCalls.size > 0 || typeof msg.taskId !== 'string' || !msg.taskId
-          || msg.taskId !== entry.prepared.call?.args?.taskId) {
+          || msg.taskId !== entry.call?.args?.taskId) {
         return { ok: false, error: 'actor/task-cancel: authority mismatch', outcomeKnown: true };
       }
       entry.domainCalls.add('actor/task-cancel');
@@ -1122,7 +1133,7 @@ export const makeOffscreenActorClient = ({
           to: msg.to, message: msg.message, oneShot: msg.oneShot,
           senderSessionId: ctx.session?.sessionId,
           inbound: ctx.inbound === true,
-          toolUseId: entry.prepared.call?.id,
+          toolUseId: entry.call?.id,
           awaitReply: msg.awaitReply,
           awaitSignal: grant.relaySignal,
           degradeToAsync: msg.degradeToAsync,
@@ -1143,7 +1154,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = domainEntry(grant, msg, 'pod', ['podId']);
-      if (!entry || msg.podId !== entry.prepared.call?.args?.podId) {
+      if (!entry || msg.podId !== entry.call?.args?.podId) {
         return { ok: false, error: 'pod/resolve: authority mismatch', outcomeKnown: true };
       }
       const resolve = entry.prepared.ctx?.podClient?.resolveId;
@@ -1164,7 +1175,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = domainEntry(grant, msg, 'pod', ['podId']);
-      const intent = entry ? podGitRemoteIntents(entry.prepared.call?.args?.command ?? '')[0] : null;
+      const intent = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '')[0] : null;
       if (!entry || typeof msg.podId !== 'string' || msg.podId !== entry.domainState.podId
           || !intent || intent.url) {
         return { ok: false, error: 'pod/read-remote: authority mismatch', outcomeKnown: true };
@@ -1182,7 +1193,7 @@ export const makeOffscreenActorClient = ({
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = domainEntry(grant, msg, 'pod', ['op']);
-      const intents = entry ? podGitRemoteIntents(entry.prepared.call?.args?.command ?? '') : [];
+      const intents = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '') : [];
       const intent = intents.length === 1 ? intents[0] : null;
       const target = intent?.url ?? entry?.domainState?.remote?.url;
       if (!entry || typeof entry.domainState.podId !== 'string'
@@ -2170,12 +2181,12 @@ export const makeOffscreenActorClient = ({
       const policy = entry
         ? CONTROLLER_AUTHORITY_MANIFEST.tools[entry.authorityClass] : null;
       if (!grant || !exactKeys(msg, ['executionId', 'result'])
-          || !entry || entry.open !== true || !policy
+          || !entry || entry.open !== true || entry.settling === true || !policy
           || structuredClonePayloadBytes(msg.result) > policy.resultBytes
           || typeof settleToolCall !== 'function') {
         return { ok: false, error: 'actor/tool-settle: authority mismatch', outcomeKnown: true };
       }
-      entry.open = false;
+      entry.settling = true;
       try {
         const executionResult = entry.unknownIrreversible === true ? {
           ok: false,
@@ -2186,9 +2197,11 @@ export const makeOffscreenActorClient = ({
           outcomeKind: 'host-lost',
         } : msg.result;
         const result = await settleToolCall(entry.prepared, { result: executionResult });
+        entry.open = false;
         grant.actorExecutions.delete(msg.executionId);
         return { ok: true, result };
       } catch (cause) {
+        entry.settling = false;
         return {
           ok: false, error: cause instanceof Error ? cause.message : String(cause),
           outcomeKnown: entry.effectEntered !== true,
