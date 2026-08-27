@@ -24,6 +24,7 @@ import {
   controllerAuthorityClassForTool,
   controllerHostsTool,
 } from '../../extension/peerd-runtime/controller-tool-ownership.js';
+import { TOOL_METADATA_ORDER } from '../../extension/peerd-runtime/tools/metadata/catalog.js';
 import {
   CONTROLLER_AUTHORITY_MANIFEST,
   controllerAuthorityClassAllowed,
@@ -52,6 +53,9 @@ const semanticOwnership = [
 
 describe('controller authority manifest', () => {
   test('keeps fixed authority classes separate from semantic tool ownership', () => {
+    const ownedNames = semanticOwnership.flatMap(([, names]) => names);
+    expect(new Set(ownedNames).size).toBe(ownedNames.length);
+    expect([...ownedNames].sort()).toEqual([...TOOL_METADATA_ORDER].sort());
     expect(Object.keys(CONTROLLER_AUTHORITY_MANIFEST.tools)).toEqual(
       semanticOwnership.map(([authorityClass]) => authorityClass),
     );
