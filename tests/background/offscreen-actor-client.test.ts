@@ -296,6 +296,122 @@ describe('isolated exact tool authority', () => {
     expect(cancelled).toBe('task-7');
   });
 
+  test('host custody overrides retryable failures after commit and resource effects', async () => {
+    const performed: string[] = [];
+    const { client, during } = clientWithRelay({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', depth: 1, kind: 'actor' },
+        actorAuthority: {
+          spawnAsync: async () => {
+            performed.push('commit');
+            return { taskId: 'spawned-1' };
+          },
+        },
+        webFetch: async (url: string) => {
+          performed.push('resource');
+          return {
+            status: 200, url, headers: new Headers(), text: async () => 'ok',
+          };
+        },
+      }),
+    });
+    const result = await during(async (relayToken) => {
+      const commit: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id: 'commit-effect', name: 'actor_create', args: {
+          task: 'spawn once', sync: false, allowRecursion: false,
+        } },
+      }, OFFSCREEN);
+      await client.routes['actor/spawn-async']({
+        relayToken, executionId: commit.executionId,
+        task: 'spawn once', allowRecursion: false,
+      }, OFFSCREEN);
+      const commitSettlement = await client.routes['actor/tool-settle']({
+        relayToken, executionId: commit.executionId,
+        result: {
+          ok: false, error: 'pretend the spawn did not happen',
+          outcomeKnown: true, retryable: true, outcomeKind: 'pre-effect-failure',
+        },
+      }, OFFSCREEN);
+
+      const resource: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'resource',
+        call: { id: 'resource-effect', name: 'fetch_url', args: {
+          url: 'https://example.com/data', method: 'GET',
+        } },
+      }, OFFSCREEN);
+      await client.routes['resource/request-web-text']({
+        relayToken, executionId: resource.executionId,
+        url: 'https://example.com/data', method: 'GET', headers: {}, body: undefined,
+      }, OFFSCREEN);
+      const resourceSettlement = await client.routes['actor/tool-settle']({
+        relayToken, executionId: resource.executionId,
+        result: {
+          ok: false, error: 'pretend the request never completed',
+          outcomeKnown: true, retryable: true, outcomeKind: 'pre-effect-failure',
+        },
+      }, OFFSCREEN);
+      return { commitSettlement, resourceSettlement };
+    });
+    for (const settlement of [result.commitSettlement, result.resourceSettlement]) {
+      expect(settlement).toMatchObject({
+        ok: true,
+        result: {
+          ok: false, outcomeKnown: true, retryable: false,
+          effectEntered: true, performed: true, outcomeKind: 'effect-completed',
+        },
+      });
+    }
+    expect(performed).toEqual(['commit', 'resource']);
+  });
+
+  test('the Chrome bound relay preserves irreversible host custody', async () => {
+    let spawns = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', depth: 1, kind: 'actor' },
+        actorAuthority: {
+          spawnAsync: async () => {
+            spawns += 1;
+            return { taskId: 'spawned-channel' };
+          },
+        },
+      }),
+      runOnChannel: async (_job: any, { relay }: any) => {
+        const prepared = await relay('actor/tool-prepare', {
+          authorityClass: 'actor',
+          call: { id: 'channel-commit', name: 'actor_create', args: {
+            task: 'spawn once', sync: false, allowRecursion: false,
+          } },
+        });
+        await relay('actor/spawn-async', {
+          executionId: prepared.executionId,
+          task: 'spawn once', allowRecursion: false,
+        });
+        return relay('actor/tool-settle', {
+          executionId: prepared.executionId,
+          result: {
+            ok: false, error: 'pretend the bound relay did not commit',
+            outcomeKnown: true, retryable: true, outcomeKind: 'pre-effect-failure',
+          },
+        });
+      },
+    }));
+    const result = await client.run({
+      actorSessionId: 'actor-1', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+      tools: [{ name: 'actor_create' }],
+    } as any);
+    expect(result).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, outcomeKnown: true, retryable: false,
+        effectEntered: true, performed: true, outcomeKind: 'effect-completed',
+      },
+    });
+    expect(spawns).toBe(1);
+  });
+
   test('rejects altered arguments before an exact effect', async () => {
     let cancelled = false;
     const { client, during } = clientWithRelay({
@@ -518,6 +634,99 @@ describe('isolated exact tool authority', () => {
     });
     expect(result.settlementsAfterRetry).toBe(1);
     expect(settlements).toBe(2);
+  });
+
+  test('rejects pathological sparse and shared-memory settlement payloads', async () => {
+    const { client, during } = clientWithRelay();
+    const result = await during(async (relayToken) => {
+      const prepare = (id: string) => client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'actor',
+        call: { id, name: 'actor_cancel', args: { taskId: id } },
+      }, OFFSCREEN);
+      const sparseEntry: any = await prepare('sparse-result');
+      const sparse: unknown[] = [];
+      sparse.length = 1_000_000_000;
+      const sparseReply = await client.routes['actor/tool-settle']({
+        relayToken, executionId: sparseEntry.executionId,
+        result: { ok: true, content: sparse },
+      }, OFFSCREEN);
+
+      const shared = new SharedArrayBuffer(16);
+      const typedEntry: any = await prepare('shared-typed-result');
+      const typedReply = await client.routes['actor/tool-settle']({
+        relayToken, executionId: typedEntry.executionId,
+        result: { ok: true, content: new Uint8Array(shared) },
+      }, OFFSCREEN);
+      const viewEntry: any = await prepare('shared-view-result');
+      const viewReply = await client.routes['actor/tool-settle']({
+        relayToken, executionId: viewEntry.executionId,
+        result: { ok: true, content: new DataView(shared) },
+      }, OFFSCREEN);
+      return { sparseReply, typedReply, viewReply };
+    });
+    for (const reply of [result.sparseReply, result.typedReply, result.viewReply]) {
+      expect(reply).toMatchObject({
+        ok: false, error: 'actor/tool-settle: authority mismatch', outcomeKnown: true,
+      });
+    }
+  });
+
+  test('ordinary typed and DataView settlements are copied before retry', async () => {
+    const attempts = new Map<string, number>();
+    const { client, during } = clientWithRelay({
+      settleToolCall: async (prepared: any, execution: any) => {
+        const next = (attempts.get(prepared.call.id) ?? 0) + 1;
+        attempts.set(prepared.call.id, next);
+        if (next === 1) throw new Error('temporary settlement failure');
+        return execution.result;
+      },
+    });
+    const result = await during(async (relayToken) => {
+      const exercise = async (id: string, view: Uint8Array | DataView) => {
+        const prepared: any = await client.routes['actor/tool-prepare']({
+          relayToken, authorityClass: 'actor',
+          call: { id, name: 'actor_cancel', args: { taskId: id } },
+        }, OFFSCREEN);
+        const originalBytes = [...new Uint8Array(view.buffer, view.byteOffset, view.byteLength)];
+        const first = await client.routes['actor/tool-settle']({
+          relayToken, executionId: prepared.executionId,
+          result: { ok: true, content: view },
+        }, OFFSCREEN);
+        new Uint8Array(view.buffer, view.byteOffset, view.byteLength)[0] = 99;
+        const changed = await client.routes['actor/tool-settle']({
+          relayToken, executionId: prepared.executionId,
+          result: { ok: true, content: view },
+        }, OFFSCREEN);
+        const retryBuffer = new ArrayBuffer(originalBytes.length);
+        new Uint8Array(retryBuffer).set(originalBytes);
+        const retryView = view instanceof DataView
+          ? new DataView(retryBuffer) : new Uint8Array(retryBuffer);
+        const retry = await client.routes['actor/tool-settle']({
+          relayToken, executionId: prepared.executionId,
+          result: { ok: true, content: retryView },
+        }, OFFSCREEN);
+        return { first, changed, retry };
+      };
+      const typedBuffer = new ArrayBuffer(4);
+      new Uint8Array(typedBuffer).set([1, 2, 3, 4]);
+      const dataBuffer = new ArrayBuffer(4);
+      new Uint8Array(dataBuffer).set([5, 6, 7, 8]);
+      return {
+        typed: await exercise('typed-copy', new Uint8Array(typedBuffer)),
+        data: await exercise('data-copy', new DataView(dataBuffer)),
+      };
+    });
+    for (const exercise of [result.typed, result.data]) {
+      expect(exercise.first).toMatchObject({
+        ok: false, error: 'temporary settlement failure',
+      });
+      expect(exercise.changed).toMatchObject({
+        ok: false, error: 'actor/tool-settle: result mismatch', outcomeKnown: true,
+      });
+      expect(exercise.retry).toMatchObject({ ok: true, result: { ok: true } });
+    }
+    expect([...new Uint8Array(result.typed.retry.result.content.buffer)]).toEqual([1, 2, 3, 4]);
+    expect([...new Uint8Array(result.data.retry.result.content.buffer)]).toEqual([5, 6, 7, 8]);
   });
 
   test('closes direct effect authority before settlement and only retries its frozen result', async () => {
@@ -837,6 +1046,56 @@ describe('isolated exact tool authority', () => {
     });
     expect(result.childSettlement).toEqual({ ok: true, result: { ok: true } });
     expect(result.parentSettlement).toEqual({ ok: true, result: { ok: true } });
+  });
+
+  test('a settled irreversible child leaves sticky custody on its parent', async () => {
+    const { client, during } = clientWithRelay({
+      pageProgramToolDescriptors: [{ name: 'fetch_url', primitive: 'web' }],
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        webFetch: async (url: string) => ({
+          status: 200, url, headers: new Headers(), text: async () => 'done',
+        }),
+      }),
+    });
+    const result = await during(async (relayToken) => {
+      const parent: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'page',
+        call: { id: 'parent-sticky', name: 'page_code', args: { code: 'return 1' } },
+      }, OFFSCREEN);
+      const child: any = await client.routes['actor/tool-prepare']({
+        relayToken, authorityClass: 'resource',
+        pageProgramParentExecutionId: parent.executionId,
+        call: { id: 'child-sticky', name: 'fetch_url', args: {
+          url: 'https://example.com/data', method: 'GET',
+        } },
+      }, OFFSCREEN);
+      await client.routes['resource/request-web-text']({
+        relayToken, executionId: child.executionId,
+        url: 'https://example.com/data', method: 'GET', headers: {}, body: undefined,
+      }, OFFSCREEN);
+      const childSettlement = await client.routes['actor/tool-settle']({
+        relayToken, executionId: child.executionId, result: { ok: true },
+      }, OFFSCREEN);
+      const parentSettlement = await client.routes['actor/tool-settle']({
+        relayToken, executionId: parent.executionId,
+        result: {
+          ok: false, error: 'pretend no child effect happened',
+          outcomeKnown: true, retryable: true, outcomeKind: 'pre-effect-failure',
+        },
+      }, OFFSCREEN);
+      return { childSettlement, parentSettlement };
+    }, 'actor-1', {
+      actorType: 'web', backing: 'tab', actorSurface: 'code',
+      tools: [{ name: 'page_code', primitive: 'web' }],
+    });
+    expect(result.childSettlement.result).toMatchObject({
+      ok: true, performed: true, effectEntered: true,
+    });
+    expect(result.parentSettlement.result).toMatchObject({
+      ok: false, outcomeKnown: true, retryable: false,
+      performed: true, effectEntered: true, outcomeKind: 'effect-completed',
+    });
   });
 
   test('parent settlement wins an already-started nested preparation', async () => {

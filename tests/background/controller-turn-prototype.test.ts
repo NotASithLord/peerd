@@ -322,6 +322,85 @@ describe('orchestrator controller turn boundary', () => {
     expect(bridge.activeCount()).toBe(0);
   });
 
+  test('Stop during exact preparation retires custody before a late insertion', async () => {
+    const controller = new AbortController();
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    let releasePrepare!: () => void;
+    let markPrepareStarted!: () => void;
+    const prepareGate = new Promise<void>((resolve) => { releasePrepare = resolve; });
+    const prepareStarted = new Promise<void>((resolve) => { markPrepareStarted = resolve; });
+    let pendingPrepare!: Promise<any>;
+    const settlements: any[] = [];
+    bridge = makeControllerTurnBridge({
+      getClient: async () => ({
+        call: async (capability: string, payload: any, options: any) => {
+          const authority = bridge.authorize(payload);
+          const invoke = (operation: string, value: unknown) => bridge.handleKernelCall(
+            operation, { runId: payload.runId, value }, {
+              capability, authority, signal: options.signal,
+              deadlineAt: Date.now() + 60_000,
+            },
+          );
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-start', id: 'late-prepare', name: 'complete_goal',
+          });
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-delta', id: 'late-prepare', partialJson: '{"summary":"done"}',
+          });
+          pendingPrepare = invoke('turn.tool.prepare', {
+            authorityClass: 'local',
+            callJson: JSON.stringify({
+              id: 'late-prepare', name: 'complete_goal', args: { summary: 'done' },
+            }),
+          });
+          await prepareStarted;
+          if (!options.signal.aborted) {
+            await new Promise((resolve) => options.signal.addEventListener(
+              'abort', resolve, { once: true },
+            ));
+          }
+          return { ok: false, code: 'controller-call-aborted', outcomeKnown: true };
+        },
+      }),
+      prepareToolCall: async (call: any) => {
+        markPrepareStarted();
+        await prepareGate;
+        return {
+          mode: 'execute', custody: { opened: true }, args: call.args, projection: {},
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+        };
+      },
+      settleToolCall: async (input: any) => {
+        settlements.push(input);
+        return input.result;
+      },
+      newId: () => 'late-preparation-run',
+    });
+    const turn = drain(bridge.runUserTurn({
+      sessionId: 'session-late-preparation', tools: [{ name: 'complete_goal' }],
+      classifyToolCall: () => ({ actionClass: 'write', confirm: false }),
+      signal: controller.signal,
+    })).catch(() => []);
+    await prepareStarted;
+    controller.abort();
+    await turn;
+    expect(bridge.activeCount()).toBe(0);
+
+    releasePrepare();
+    const lateReply = await pendingPrepare;
+    await Promise.resolve();
+
+    expect(lateReply).toMatchObject({
+      ok: false, code: 'turn-kernel-call-failed', outcomeKnown: true,
+    });
+    expect(lateReply.value).toBeUndefined();
+    expect(settlements).toHaveLength(1);
+    expect(settlements[0].result).toMatchObject({
+      code: 'tool-execution-prepare-aborted', outcomeKnown: true,
+      effectEntered: false, retryable: true,
+    });
+  });
+
   test('emergency close does not let a stuck tool post-hook block provider release', async () => {
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let markPrepared!: () => void;

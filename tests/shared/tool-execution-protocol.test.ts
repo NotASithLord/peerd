@@ -6,6 +6,9 @@ import {
   parseToolExecutionRequest,
   toolExecutionResultAllowed,
 } from '../../extension/shared/tool-execution-protocol.js';
+import {
+  structuredClonePayloadBytes, structuredClonePayloadFits,
+} from '../../extension/shared/structured-clone-size.js';
 
 const digest = 'a'.repeat(64);
 const manifest = () => compileToolEffectManifest({
@@ -54,6 +57,21 @@ const request = (over: Record<string, unknown> = {}) => ({
 });
 
 describe('tool execution protocol', () => {
+  test('charges sparse array length and rejects shared-memory views', () => {
+    const sparse: unknown[] = [];
+    sparse.length = 1_000_000_000;
+    expect(structuredClonePayloadBytes({ content: sparse })).toBeGreaterThan(900_000_000);
+    expect(structuredClonePayloadFits({ content: sparse }, 16 * 1024 * 1024)).toBe(false);
+
+    const shared = new SharedArrayBuffer(16);
+    expect(structuredClonePayloadBytes(new Uint8Array(shared))).toBe(Infinity);
+    expect(structuredClonePayloadBytes(new DataView(shared))).toBe(Infinity);
+
+    const owned = new ArrayBuffer(16);
+    expect(structuredClonePayloadBytes(new Uint8Array(owned))).toBe(16);
+    expect(structuredClonePayloadBytes(new DataView(owned))).toBe(16);
+  });
+
   test('compiles a frozen exact effect vocabulary', () => {
     const compiled = manifest();
     expect(Object.isFrozen(compiled.tools.remember.effects[0])).toBe(true);

@@ -497,6 +497,23 @@ export const makeOffscreenActorClient = ({
       closeEntryEffects(grant, grant.actorExecutions.get(childId), seen);
     }
   };
+  const propagateSettledCustody = (/** @type {any} */ grant, /** @type {any} */ entry) => {
+    const effectEntered = entry.effectEntered === true;
+    const unknown = entry.unknownIrreversible === true || entry.effectPending > 0
+      || entry.pendingIrreversible > 0;
+    const settledIrreversible = entry.settledIrreversible === true;
+    const seen = new Set([entry.executionId]);
+    let parentId = entry.parentExecutionId;
+    while (typeof parentId === 'string') {
+      const parent = grant.actorExecutions.get(parentId);
+      if (!parent || seen.has(parent.executionId)) return;
+      seen.add(parent.executionId);
+      if (effectEntered) parent.effectEntered = true;
+      if (unknown) parent.unknownIrreversible = true;
+      if (settledIrreversible) parent.settledIrreversible = true;
+      parentId = parent.parentExecutionId;
+    }
+  };
   const repositoryEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
@@ -676,12 +693,17 @@ export const makeOffscreenActorClient = ({
       return { ok: false, error: `${operation}: authority already used`, outcomeKnown: true };
     }
     entry.domainCalls.add(operation);
+    const replayable = riskClass === 'read' || riskClass === 'control';
     entry.effectEntered = true;
     entry.effectPending += 1;
-    try { return { ok: true, value: await execute(), outcomeKnown: true }; }
+    if (!replayable) entry.pendingIrreversible += 1;
+    try {
+      const value = await execute();
+      if (!replayable) entry.settledIrreversible = true;
+      return { ok: true, value, outcomeKnown: true };
+    }
     catch (cause) {
       const detail = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-      const replayable = riskClass === 'read' || riskClass === 'control';
       const outcomeKnown = replayable || detail?.outcomeKnown === true;
       if (!outcomeKnown) entry.unknownIrreversible = true;
       return {
@@ -690,6 +712,9 @@ export const makeOffscreenActorClient = ({
       };
     } finally {
       entry.effectPending = Math.max(0, entry.effectPending - 1);
+      if (!replayable) {
+        entry.pendingIrreversible = Math.max(0, entry.pendingIrreversible - 1);
+      }
     }
   };
 
@@ -741,6 +766,32 @@ export const makeOffscreenActorClient = ({
           retryable: false,
           outcomeKind: 'host-lost',
         };
+      } else if (entry.settledIrreversible === true) {
+        const reported = effectiveResult && typeof effectiveResult === 'object'
+          && !Array.isArray(effectiveResult)
+          ? /** @type {Record<string,any>} */ (effectiveResult) : null;
+        // why: the SW observed a commit/resource operation finish. The isolated
+        // semantic heap may shape its value, but it cannot turn that host fact
+        // into a replayable pre-effect failure and cause a duplicate action.
+        effectiveResult = reported ? {
+          ...reported,
+          outcomeKnown: true,
+          effectEntered: true,
+          performed: true,
+          ...(reported.ok === false ? {
+            retryable: false,
+            outcomeKind: 'effect-completed',
+          } : {}),
+        } : {
+          ok: false,
+          error: 'Actor semantic result was invalid after an irreversible effect completed.',
+          code: 'actor-tool-result-invalid-after-effect',
+          outcomeKnown: true,
+          effectEntered: true,
+          performed: true,
+          retryable: false,
+          outcomeKind: 'effect-completed',
+        };
       }
       entry.settlementResult = structuredClone(effectiveResult);
       entry.hasSettlementResult = true;
@@ -750,6 +801,9 @@ export const makeOffscreenActorClient = ({
         const settled = await /** @type {Function} */ (settleToolCall)(
           entry.prepared, { result: entry.settlementResult },
         );
+        // A child may be unlinked after durable settlement, but its custody
+        // facts remain part of the parent page_code execution forever.
+        propagateSettledCustody(grant, entry);
         entry.open = false;
         grant.actorExecutions.delete(entry.executionId);
         if (typeof entry.parentExecutionId === 'string') {
@@ -1134,7 +1188,8 @@ export const makeOffscreenActorClient = ({
         open: true, effectsOpen: true, settling: null,
         hasReportedSettlementResult: false, reportedSettlementResult: undefined,
         hasSettlementResult: false, settlementResult: undefined,
-        effectEntered: false, effectPending: 0, unknownIrreversible: false,
+        effectEntered: false, effectPending: 0, pendingIrreversible: 0,
+        settledIrreversible: false, unknownIrreversible: false,
         parentExecutionId: nestedPageProgram ? pageProgramParentExecutionId : null,
         childExecutionIds: new Set(),
         domainCalls: new Set(), domainState: {}, prepared,
