@@ -14,9 +14,6 @@ describe('temporary legacy tool strangler', () => {
     expect(Object.isFrozen(LEGACY_TOOL_ALLOWLIST)).toBe(true);
     expect(new Set(LEGACY_TOOL_ALLOWLIST).size).toBe(LEGACY_TOOL_ALLOWLIST.length);
     expect(LEGACY_TOOL_ALLOWLIST).toEqual([
-      'read_doc',
-      'fetch_url',
-      'read_result',
       'site_client_run',
       'site_client_read',
       'site_client_write',

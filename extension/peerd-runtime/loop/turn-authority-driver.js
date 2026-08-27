@@ -408,6 +408,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
                 activeTabOrigin: toolContext.activeTab?.origin,
                 goalActive: !!toolContext.todoStore,
               }
+              : authorityClass === 'resource'
+                ? {
+                  sessionId: toolContext.session?.sessionId,
+                  runtimeCapabilities: toolContext.runtimeCapabilities,
+                }
               : authorityClass === 'introspection'
                 ? {
                   sessionId: toolContext.session?.sessionId,

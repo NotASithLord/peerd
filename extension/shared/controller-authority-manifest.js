@@ -10,7 +10,7 @@ import {
 // existing classes without changing the service-worker authority graph.
 const authorityManifestSource = {
   protocol: TOOL_EXECUTION_PROTOCOL,
-  digest: '5fd19cb4619a708d78e69020c499378d5445c1f5a278fe6a1a62a35a67ba9bbb',
+  digest: '68e0cc1e30a8c98c9f133288b8c4bdaadfe275cae224a7c2889332971c80984b',
   tools: {
     local: {
       projectionKeys: [], effects: [], argumentBytes: 256 * 1024,
@@ -47,6 +47,10 @@ const authorityManifestSource = {
     page: {
       projectionKeys: ['sessionId'], effects: [], argumentBytes: 1024 * 1024,
       resultBytes: 8 * 1024 * 1024,
+    },
+    resource: {
+      projectionKeys: ['sessionId', 'runtimeCapabilities'], effects: [],
+      argumentBytes: 1024 * 1024, resultBytes: 8 * 1024 * 1024,
     },
     introspection: {
       projectionKeys: ['sessionId', 'messageCount', 'trimCovered'], effects: [],

@@ -12,6 +12,7 @@ import {
   controllerHostsAppTool,
   controllerHostsPersistenceTool,
   controllerHostsPageTool,
+  controllerHostsResourceTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
@@ -26,6 +27,7 @@ import {
   executeControllerAppTool,
   executeControllerPersistenceTool,
   executeControllerPageTool,
+  executeControllerResourceTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
@@ -708,6 +710,35 @@ const runControllerTurnWith = async (payload, options) => {
             });
             const value = await executeControllerPageTool(
               request.toolName, request.args, pageAuthority,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsResourceTool(request.toolName)) {
+            const resourceAuthority = Object.freeze({
+              confirmWebWrite: (/** @type {string} */ url, /** @type {string} */ method) =>
+                rpc('turn.resource.confirm-web-write', { ...binding, url, method }),
+              requestWebText: (/** @type {any} */ webRequest) =>
+                rpc('turn.resource.request-web-text', { ...binding, ...webRequest }),
+              extractReadableMarkdown: (/** @type {string} */ html,
+                /** @type {string} */ url) => rpc('turn.resource.extract-markdown', {
+                ...binding, html, url,
+              }),
+              extractDocument: (/** @type {any} */ documentRequest) =>
+                rpc('turn.resource.extract-document', { ...binding, ...documentRequest }),
+              spillResult: (/** @type {any} */ record) =>
+                rpc('turn.resource.spill-result', { ...binding, ...record }),
+              readResult: (/** @type {string} */ key) =>
+                rpc('turn.resource.read-result', { ...binding, key }),
+            });
+            const value = await executeControllerResourceTool(
+              request.toolName, request.args, resourceAuthority, request.projection,
             );
             execution = {
               protocol: request.protocol,

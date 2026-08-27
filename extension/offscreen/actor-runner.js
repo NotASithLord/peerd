@@ -1141,6 +1141,55 @@ export const runActor = async (job, {
             }));
           return;
         }
+        if (m.type === 'resource-confirm-web-write-request') {
+          await relayExactToolMessage(m, 'resource-confirm-web-write-response', () =>
+            sendToSW('resource/confirm-web-write', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              url: m.url, method: m.method,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'resource-request-web-text-request') {
+          await relayExactToolMessage(m, 'resource-request-web-text-response', () =>
+            sendToSW('resource/request-web-text', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              url: m.url, method: m.method, headers: m.headers, body: m.body,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'resource-extract-markdown-request') {
+          await relayExactToolMessage(m, 'resource-extract-markdown-response', () =>
+            sendToSW('resource/extract-markdown', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              html: m.html, url: m.url,
+            }));
+          return;
+        }
+        if (m.type === 'resource-extract-document-request') {
+          await relayExactToolMessage(m, 'resource-extract-document-response', () =>
+            sendToSW('resource/extract-document', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              url: m.url, format: m.format, engine: m.engine,
+            }));
+          return;
+        }
+        if (m.type === 'resource-spill-result-request') {
+          await relayExactToolMessage(m, 'resource-spill-result-response', () =>
+            sendToSW('resource/spill-result', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              url: m.url, format: m.format, text: m.text, producer: m.producer,
+              fenced: m.fenced, originLabel: m.originLabel,
+            }), { observeResult: true });
+          return;
+        }
+        if (m.type === 'resource-read-result-request') {
+          await relayExactToolMessage(m, 'resource-read-result-response', () =>
+            sendToSW('resource/read-result', {
+              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+              key: m.key,
+            }));
+          return;
+        }
         if (m.type === 'introspection-actor-roster-request') {
           await relayExactToolMessage(m, 'introspection-actor-roster-response', () =>
             sendToSW('introspection/actor-roster', {

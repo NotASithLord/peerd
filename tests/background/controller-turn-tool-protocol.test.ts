@@ -480,6 +480,66 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('executes fetch_url through exact constrained web-resource authority', async () => {
+    const fetchDescriptor = authorityDescriptor('fetch_url');
+    let legacy = 0;
+    let requested: any = null;
+    let round = 0;
+    const result = await runHarness({
+      ctx: context({
+        tools: [fetchDescriptor], refreshTools: async () => [fetchDescriptor],
+        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
+        callModel: async function* () {
+          round += 1;
+          if (round > 1) {
+            yield { type: 'message-stop', stopReason: 'end_turn' };
+            return;
+          }
+          yield { type: 'tool-use-start', id: 'tool-fetch-1', name: 'fetch_url' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-fetch-1',
+            partialJson: '{"url":"https://example.test/data"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-fetch-1' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+        prepareToolCall: async (call: any) => ({
+          mode: 'execute',
+          custody: {
+            ctx: {
+              session: { sessionId: 'session-tool-protocol' },
+              webFetch: async (url: string, init: any) => {
+                requested = { url, init };
+                return new Response('resource body', {
+                  status: 200, headers: { 'content-type': 'text/plain' },
+                });
+              },
+            },
+          },
+          args: call.args,
+          projection: { sessionId: 'session-tool-protocol', runtimeCapabilities: {} },
+          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+        }),
+        settleToolCall: async ({ result: execution }: any) => execution.value,
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(legacy).toBe(0);
+    expect(requested).toMatchObject({
+      url: 'https://example.test/data',
+      init: { method: 'GET', headers: {} },
+    });
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'tool-result',
+      result: expect.objectContaining({
+        ok: true, content: expect.stringContaining('resource body'),
+      }),
+    }));
+  });
+
   test('executes page_code through exact page-run authority', async () => {
     const pageDescriptor = authorityDescriptor('page_code');
     let legacy = 0;
