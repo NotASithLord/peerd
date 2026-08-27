@@ -8,7 +8,10 @@ export const CONTRIBUTOR_CHANNEL_PROTOCOL = 1;
 export const CONTRIBUTOR_CHANNEL_CALL = 'contributor/kernel-call';
 export const CONTRIBUTOR_CHANNEL_REPLY = 'contributor/kernel-reply';
 export const CONTRIBUTOR_CHANNEL_RESULT = 'contributor/result';
-const ROUTES = new Set(['contributor/status', 'contributor/enable', 'contributor/disable']);
+const ROUTES = new Set([
+  'contributor/status', 'contributor/enable', 'contributor/disable',
+  'contributor/arm', 'contributor/settlement', 'contributor/feedback',
+]);
 
 /** @param {unknown} value */
 export const parseContributorOffer = (value) => {

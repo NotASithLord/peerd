@@ -1446,13 +1446,65 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
           preflightReply = AUTH_STATE_UNAVAILABLE_MESSAGE;
         }
       }
+      const requestedContributorSurface = deps.settingsStore.get().webActorActionSurface === 'code'
+        ? 'code' : 'tools';
       const actorSurface = latchedActorSurface ?? record.actorSurface
         ?? (kind === 'web' && record.backing !== 'api'
           ? resolveWebActorSurface({
-            requested: deps.settingsStore.get().webActorActionSurface,
+            requested: requestedContributorSurface,
             allowedTools: resolveManifestAllow(record.toolManifest),
             headlessAvailable: !deps.firefox,
           }) : undefined);
+      const contributorStartedAt = Date.now();
+      const contributorDecision = kind === 'web' && record.backing !== 'api'
+        ? Object.freeze({
+          requested: requestedContributorSurface,
+          resolved: actorSurface === 'code' ? 'code' : 'tools',
+          fallback: requestedContributorSurface === (actorSurface === 'code' ? 'code' : 'tools')
+            ? 'none' : deps.firefox ? 'worker_unavailable' : 'capability_grant_incomplete',
+        }) : null;
+      const contributorArm = contributorDecision && deps.contributor?.arm
+        ? await deps.contributor.arm().catch(() => ({ enabled: false, generation: null }))
+        : null;
+      const finishContributor = async (/** @type {any} */ reply,
+        /** @type {any[]} */ messages, /** @type {any} */ usage) => {
+        const finalReply = withLandingStop(reply);
+        if (!contributorDecision || contributorArm?.enabled !== true
+            || typeof deps.contributor?.recordWebSettlement !== 'function') return finalReply;
+        try {
+          const toolNames = messages.flatMap((entry) =>
+            Array.isArray(entry?.toolUses)
+              ? entry.toolUses.flatMap((/** @type {any} */ toolUse) =>
+                typeof toolUse?.name === 'string' ? [toolUse.name] : []) : []);
+          const assistantMessages = messages.flatMap((entry) => entry?.role === 'assistant'
+            ? [{
+              ...(typeof entry.error === 'string' ? { error: entry.error } : {}),
+              ...(typeof entry.stopReason === 'string' ? { stopReason: entry.stopReason } : {}),
+            }] : []);
+          await deps.contributor.recordWebSettlement({
+            consentGeneration: contributorArm.generation,
+            operationKey: correlationId,
+            feedbackContextKey: typeof parentSessionId === 'string'
+                && typeof parentToolUseId === 'string'
+              ? `${parentSessionId}:${parentToolUseId}` : null,
+            decision: contributorDecision,
+            browser: deps.firefox ? 'firefox' : 'chrome',
+            extensionVersion: deps.browser.runtime.getManifest().version,
+            channel: deps.channel,
+            provider: record.provider,
+            model: record.model,
+            durationMs: Date.now() - contributorStartedAt,
+            toolNames,
+            assistantMessages,
+            stopped: finalReply.stopped === true,
+            result: typeof finalReply.result === 'string' ? finalReply.result : '',
+            usage: normalizeTally(usage),
+          });
+        } catch (cause) {
+          console.warn('[contributor] local settlement skipped', cause);
+        }
+        return finalReply;
+      };
       const tools = await projectToolDescriptors({
         surface: 'actor', actorType: kind,
         backing: record.backing,
@@ -1577,12 +1629,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         messages: [...(record.messages ?? []), ...newMessages],
         usage: { ...normalizeTally(result.usage) },
       };
-      if (!persisted) return withLandingStop({
+      if (!persisted) return await finishContributor({
         result: 'the actor ran, but its response could not be saved reliably; the outcome is unknown.',
         stopped: true, executionFailed: true, outcomeKnown: false,
         persistenceFailure: { performed: true, outcomeKnown: false, retryable: false },
         turnSnapshot,
-      });
+      }, newMessages, result.usage);
       const reply = finalActorTurnReply(/** @type {any} */ ({ messages: newMessages }));
       const terminalError = [...newMessages].reverse()
         .find((entry) => entry?.role === 'assistant' && typeof entry?.error === 'string')?.error
@@ -1604,19 +1656,19 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
           });
         }
       }
-      if (terminalError) return withLandingStop({
+      if (terminalError) return await finishContributor({
         result: terminalError, stopped: true, executionFailed: true,
         outcomeKnown, executionFailure: result, turnSnapshot,
-      });
-      if (result.aborted) return withLandingStop({
+      }, newMessages, result.usage);
+      if (result.aborted) return await finishContributor({
         ...reply, stopped: true, aborted: true, turnSnapshot,
-      });
-      if (!result.ok) return withLandingStop({
+      }, newMessages, result.usage);
+      if (!result.ok) return await finishContributor({
         result: result.error ?? reply.result, stopped: true,
         executionFailed: true, outcomeKnown: result.outcomeKnown === true,
         turnSnapshot,
-      });
-      return withLandingStop({ ...reply, turnSnapshot });
+      }, newMessages, result.usage);
+      return await finishContributor({ ...reply, turnSnapshot }, newMessages, result.usage);
     } finally {
       projection.finishBound(parentToolUseId ? {
         parentToolUseId, rootSessionId, actorCorrelationId: correlationId,

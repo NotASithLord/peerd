@@ -970,20 +970,50 @@ export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => 
     tail = task.then(() => {}, () => {});
     return task;
   };
+  const routes = Object.freeze({
+    read: 'contributor/status',
+    'enable-read': 'contributor/enable',
+    enable: 'contributor/enable',
+    'disable-read': 'contributor/disable',
+    clear: 'contributor/disable',
+    'arm-read': 'contributor/arm',
+    'settlement-read': 'contributor/settlement',
+    'settlement-record': 'contributor/settlement',
+    'feedback-read': 'contributor/feedback',
+    'feedback-record': 'contributor/feedback',
+  });
   const handle = async (/** @type {string} */ op, /** @type {any} */ payload,
     /** @type {any} */ ctx) => {
     const kind = op.startsWith('semantic.contributor.') ? op.slice(21) : '';
-    const route = kind === 'read' ? 'status' : kind.startsWith('enable') ? 'enable'
-      : kind === 'disable-read' || kind === 'clear' ? 'disable' : null;
-    const write = kind === 'enable' || kind === 'clear';
-    if (!route || ctx?.authority?.target !== `semantic:contributor/${route}:options`) return null;
+    const route = routes[/** @type {keyof typeof routes} */ (kind)] ?? null;
+    const surface = route === 'contributor/feedback' ? 'chat'
+      : route === 'contributor/arm' || route === 'contributor/settlement' ? 'runtime'
+        : 'options';
+    const write = kind === 'enable' || kind === 'clear' || kind.endsWith('-record');
+    if (!route || ctx?.authority?.target !== `semantic:${route}:${surface}`) return null;
     if (ctx.signal?.aborted || ctx.deadlineAt <= Date.now()) {
       return { ok: false, code: 'semantic-kernel-operation-expired', outcomeKnown: true };
     }
     const run = async () => {
-      if (kind.endsWith('read')) return kv.get(key);
+      if (kind === 'read' || kind.endsWith('-read')) return kv.get(key);
       if (kind === 'clear') {
         await kv.delete(key); return { ok: true };
+      }
+      if (kind.endsWith('-record')) {
+        const current = await kv.get(key);
+        const expected = payload?.expected ?? null;
+        const value = payload?.value;
+        const exactKeys = value && typeof value === 'object' && !Array.isArray(value)
+          && Object.keys(value).sort().join('\0') === ['aggregate', 'consent', 'version'].join('\0');
+        const unchangedConsent = JSON.stringify(current?.consent ?? null)
+          === JSON.stringify(value?.consent ?? null);
+        if (JSON.stringify(current ?? null) !== JSON.stringify(expected)
+            || !exactKeys || value.version !== 1 || !unchangedConsent
+            || current?.consent?.enabled !== true) {
+          return { ok: false, error: 'contributor-state-changed' };
+        }
+        await kv.set(key, value);
+        return { ok: true };
       }
       const current = await kv.get(key);
       if (JSON.stringify(current ?? null) !== JSON.stringify(payload?.expected ?? null)) {
@@ -1010,14 +1040,21 @@ export const createPreviewContributorAuthority = (/** @type {any} */ { kv }) => 
   });
 };
 
-const createPreviewContributorRoutes = (/** @type {any} */ {
-  kv, optionsUi, offscreenUrl, featureHost,
+export const createPreviewContributorRoutes = (/** @type {any} */ {
+  kv, optionsUi, sidepanelUi, homeUi, validateFeedback, offscreenUrl, featureHost,
 }) => {
-  if (typeof optionsUi !== 'function' || typeof offscreenUrl !== 'string'
+  if (![optionsUi, sidepanelUi, homeUi, validateFeedback].every(
+    (value) => typeof value === 'function') || typeof offscreenUrl !== 'string'
       || typeof featureHost?.runtime?.runWithLease !== 'function') {
     throw new TypeError('kernel-preview-contributor-routes-invalid');
   }
   const authority = createPreviewContributorAuthority({ kv });
+  let mutationTail = Promise.resolve();
+  const mutate = (/** @type {()=>Promise<any>} */ operation) => {
+    const result = mutationTail.then(operation, operation);
+    mutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  };
   const allowed = Object.freeze({
     'contributor/status': Object.freeze({ 'semantic.contributor.read': 1 }),
     'contributor/enable': Object.freeze({
@@ -1026,13 +1063,25 @@ const createPreviewContributorRoutes = (/** @type {any} */ {
     'contributor/disable': Object.freeze({
       'semantic.contributor.clear': 1, 'semantic.contributor.disable-read': 1,
     }),
+    'contributor/arm': Object.freeze({ 'semantic.contributor.arm-read': 1 }),
+    'contributor/settlement': Object.freeze({
+      'semantic.contributor.settlement-read': 1,
+      'semantic.contributor.settlement-record': 1,
+    }),
+    'contributor/feedback': Object.freeze({
+      'semantic.contributor.feedback-read': 1,
+      'semantic.contributor.feedback-record': 1,
+    }),
   });
   const dispatch = async (/** @type {string} */ route,
-    /** @type {any} */ message, /** @type {any} */ sender) => {
-    if (!Object.hasOwn(allowed, route) || message?.type !== route || !optionsUi(sender)) {
+    /** @type {any} */ message) => {
+    if (!Object.hasOwn(allowed, route)) {
       return { ok: false, code: 'contributor-channel-admission-denied', outcomeKnown: true };
     }
     let entered = false;
+    const surface = route === 'contributor/feedback' ? 'chat'
+      : route === 'contributor/arm' || route === 'contributor/settlement' ? 'runtime'
+        : 'options';
     const result = await featureHost.runtime.runWithLease('controller', async (/** @type {any} */ lease) => {
       entered = true;
       const clients = await /** @type {any} */ (globalThis).clients?.matchAll?.({
@@ -1045,7 +1094,7 @@ const createPreviewContributorRoutes = (/** @type {any} */ {
       const channelId = crypto.randomUUID();
       const offer = {
         type: CONTRIBUTOR_CHANNEL_OFFER, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
-        channelId, route, lease,
+        channelId, route, lease, message,
       };
       if (!parseContributorOffer(offer)) {
         return { ok: false, code: 'contributor-channel-offer-invalid', outcomeKnown: true };
@@ -1085,9 +1134,10 @@ const createPreviewContributorRoutes = (/** @type {any} */ {
           if (used >= (limits[packet.operation] ?? 0)) { lost(); return; }
           counts.set(packet.operation, used + 1);
           if (packet.operation === 'semantic.contributor.enable'
-              || packet.operation === 'semantic.contributor.clear') effectDispatched = true;
+              || packet.operation === 'semantic.contributor.clear'
+              || packet.operation.endsWith('-record')) effectDispatched = true;
           Promise.resolve(authority.handle(packet.operation, packet.payload, {
-            authority: { target: `semantic:${route}:options` },
+            authority: { target: `semantic:${route}:${surface}` },
             signal: { aborted: false }, deadlineAt,
           })).then((value) => {
             try { port1.postMessage({
@@ -1106,10 +1156,45 @@ const createPreviewContributorRoutes = (/** @type {any} */ {
     return entered ? result
       : { ok: false, code: 'contributor-channel-host-unavailable', outcomeKnown: true };
   };
-  return Object.freeze(Object.fromEntries(Object.keys(allowed).map((route) => [
-    route, (/** @type {any} */ message, /** @type {any} */ sender) =>
-      dispatch(route, message, sender),
-  ])));
+  const optionsRoute = (/** @type {string} */ route) => (
+    /** @type {any} */ message, /** @type {any} */ sender,
+  ) => message?.type === route && optionsUi(sender)
+    ? route === 'contributor/status' ? dispatch(route, {}) : mutate(() => dispatch(route, {}))
+    : { ok: false, code: 'contributor-channel-admission-denied', outcomeKnown: true };
+  const routes = Object.freeze({
+    'contributor/status': optionsRoute('contributor/status'),
+    'contributor/enable': optionsRoute('contributor/enable'),
+    'contributor/disable': optionsRoute('contributor/disable'),
+    'contributor/feedback': async (/** @type {any} */ message = {},
+      /** @type {any} */ sender = undefined) => {
+      if (message?.type !== 'contributor/feedback'
+          || !sidepanelUi(sender) && !homeUi(sender)) {
+        return { ok: false, error: 'trusted-chat-sender-required', outcomeKnown: true };
+      }
+      if (!['worked', 'didnt_work'].includes(message.verdict)) {
+        return { ok: false, error: 'invalid-feedback', outcomeKnown: true };
+      }
+      if (typeof message.sessionId !== 'string' || typeof message.messageId !== 'string') {
+        return { ok: false, error: 'invalid-feedback-target', outcomeKnown: true };
+      }
+      const guarded = await validateFeedback(message);
+      if (guarded?.ok !== true || !Array.isArray(guarded.messages)) return guarded;
+      return mutate(() => dispatch('contributor/feedback', {
+        sessionId: message.sessionId, messageId: message.messageId,
+        verdict: message.verdict, messages: guarded.messages,
+      }));
+    },
+  });
+  return Object.freeze({
+    routes,
+    arm: async () => {
+      const result = await dispatch('contributor/arm', {});
+      return result?.ok === true && result.arm?.enabled === true
+        ? result.arm : { enabled: false, generation: null };
+    },
+    recordWebSettlement: (/** @type {any} */ message) =>
+      mutate(() => dispatch('contributor/settlement', message)),
+  });
 };
 root[addonId] = Object.freeze({
   target: 'preview-chrome', update: createUpdateCustody,

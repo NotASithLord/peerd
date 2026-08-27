@@ -1,5 +1,4 @@
 // @ts-check
-import { makeContributorRoutes } from './routes/contributor-metrics.js';
 import { makeHooksRoutes } from './routes/hooks.js';
 import { makeMemoryRoutes } from './routes/memory.js';
 import { makeSkillsRoutes } from './routes/skills.js';
@@ -82,33 +81,3 @@ export const makeKernelSkillInstallRoutes = (deps) => {
 
 /** @param {Record<string, any>} deps
  * @returns {Readonly<Record<string, Function>>} */
-export const makeKernelContributorFeedbackRoutes = (deps) => {
-  if (deps.channel !== 'preview' && deps.channel !== 'dev') return Object.freeze({});
-  const load = makeKernelLazyOwner(deps, (live) => live);
-  const write = makeSerialLane();
-  const feedback = async (/** @type {any} */ message = {}, /** @type {any} */ sender = undefined) => {
-    if (!deps.isActualSidepanelSender(sender) && !deps.isActualHomeSender(sender)) {
-      return { ok: false, error: 'trusted-chat-sender-required' };
-    }
-    const live = await load();
-    const state = makeKernelEffectState();
-    const kv = {
-      get: (/** @type {string} */ key) => live.kv.get(key),
-      set: trackKernelEffect(live.kv.set.bind(live.kv), state, live.canWrite ?? null),
-      delete: (/** @type {string} */ key) => live.kv.delete(key),
-    };
-    const store = live.makeContributorStore({ kv });
-    const contributorStore = {
-      recordFeedback: (/** @type {any} */ input) => write(() => store.recordFeedback(input)),
-    };
-    const route = makeContributorRoutes(/** @type {any} */ ({
-      ...live,
-      contributorStore,
-      isActualOptionsSender: () => false,
-    }))['contributor/feedback'];
-    return settleKernelEffect(
-      () => route(message, sender), state, 'contributor-feedback-outcome-unknown',
-    );
-  };
-  return Object.freeze({ 'contributor/feedback': feedback });
-};

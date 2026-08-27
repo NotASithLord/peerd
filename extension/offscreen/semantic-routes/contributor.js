@@ -2,7 +2,10 @@
 // Preview Contributor Metrics are formatted in the sealed host. The kernel
 // exposes one read-only record and retains every storage/mutation capability.
 
-import { makeContributorStore } from '/peerd-runtime/observability/contributor-store.js';
+import {
+  contributorActionForTool, contributorFeedbackTargets, contributorTurnResult,
+  makeContributorStore,
+} from '/peerd-runtime/controller-administrative.js';
 import {
   CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_PROTOCOL,
   CONTRIBUTOR_CHANNEL_REPLY, CONTRIBUTOR_CHANNEL_RESULT,
@@ -12,11 +15,134 @@ import {
 /** @param {string} route @param {any} _message
  * @param {{kernelCall?:(operation:string,payload:unknown)=>Promise<any>}} options */
 export const dispatchContributorSemanticRoute = async (route, _message, options) => {
-  if (!['contributor/status', 'contributor/enable', 'contributor/disable'].includes(route)
+  if (![
+    'contributor/status', 'contributor/enable', 'contributor/disable',
+    'contributor/arm', 'contributor/settlement', 'contributor/feedback',
+  ].includes(route)
       || typeof options.kernelCall !== 'function') {
     return { ok: false, code: 'semantic-contributor-route-refused', outcomeKnown: true };
   }
   const kernelCall = options.kernelCall;
+  const message = _message && typeof _message === 'object' && !Array.isArray(_message)
+    ? _message : {};
+  const recordStore = (/** @type {string} */ readOperation,
+    /** @type {string} */ writeOperation) => {
+    /** @type {any} */ let expected = null;
+    /** @type {any} */ let failure = null;
+    let writeRequested = false;
+    const unwrap = (/** @type {any} */ result) => {
+      if (result?.ok === true) return result.value;
+      failure = result ?? { outcomeKnown: false };
+      throw new Error('contributor-kernel-operation-failed');
+    };
+    return {
+      store: makeContributorStore({ kv: {
+        get: async () => {
+          expected = unwrap(await kernelCall(readOperation, {})) ?? null;
+          return expected;
+        },
+        set: async (_key, value) => {
+          writeRequested = true;
+          const action = unwrap(await kernelCall(writeOperation, { expected, value }));
+          if (action?.ok !== true) {
+            failure = { outcomeKnown: true };
+            throw new Error('contributor-state-changed');
+          }
+          expected = value;
+        },
+        delete: async () => { throw new Error('contributor-record-delete-refused'); },
+      } }),
+      failure: () => failure ?? { outcomeKnown: !writeRequested },
+    };
+  };
+  if (route === 'contributor/arm') {
+    const result = await kernelCall('semantic.contributor.arm-read', {});
+    if (result?.ok !== true) return { ok: true, arm: { enabled: false, generation: null } };
+    const store = makeContributorStore({ kv: {
+      get: async () => result.value ?? null,
+      set: async () => { throw new Error('contributor-arm-read-only'); },
+      delete: async () => { throw new Error('contributor-arm-read-only'); },
+    } });
+    return { ok: true, arm: await store.arm() };
+  }
+  if (route === 'contributor/settlement') {
+    const keys = [
+      'consentGeneration', 'operationKey', 'feedbackContextKey', 'decision',
+      'browser', 'extensionVersion', 'channel', 'provider', 'model',
+      'durationMs', 'toolNames', 'assistantMessages', 'stopped', 'result', 'usage',
+    ];
+    if (Object.keys(message).sort().join('\0') !== keys.sort().join('\0')
+        || !message.decision || !Array.isArray(message.toolNames)
+        || !Array.isArray(message.assistantMessages)) {
+      return { ok: false, error: 'invalid-contributor-settlement', outcomeKnown: true };
+    }
+    const mutation = recordStore(
+      'semantic.contributor.settlement-read', 'semantic.contributor.settlement-record',
+    );
+    try {
+      const actions = message.toolNames.flatMap((/** @type {any} */ toolName) => {
+        const action = contributorActionForTool(toolName);
+        return action ? [{
+          feature: 'web_actor_surface', ...message.decision,
+          browser: message.browser, extensionVersion: message.extensionVersion,
+          channel: message.channel, provider: message.provider, model: message.model,
+          action,
+        }] : [];
+      });
+      const { outcome, failure } = contributorTurnResult({
+        assistantMessages: message.assistantMessages,
+        stopped: message.stopped,
+        result: message.result,
+      });
+      const usage = message.usage && typeof message.usage === 'object' ? message.usage : {};
+      const tokens = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']
+        .reduce((sum, key) => sum + (Number.isFinite(usage[key]) ? Math.max(0, usage[key]) : 0), 0);
+      const recorded = await mutation.store.recordWebSettlement({
+        consentGeneration: message.consentGeneration,
+        operationKey: message.operationKey,
+        feedbackContextKey: message.feedbackContextKey,
+        turn: {
+          feature: 'web_actor_surface', ...message.decision,
+          browser: message.browser, extensionVersion: message.extensionVersion,
+          channel: message.channel, provider: message.provider, model: message.model,
+          outcome, failure, durationMs: message.durationMs, tokens,
+        },
+        actions,
+      });
+      return { ok: true, recorded };
+    } catch {
+      const known = mutation.failure()?.outcomeKnown === true;
+      return { ok: false, error: 'Contributor Metrics settlement could not be recorded.',
+        outcomeKnown: known, retryable: known };
+    }
+  }
+  if (route === 'contributor/feedback') {
+    const keys = ['sessionId', 'messageId', 'verdict', 'messages'];
+    if (Object.keys(message).sort().join('\0') !== keys.sort().join('\0')
+        || typeof message.sessionId !== 'string' || typeof message.messageId !== 'string'
+        || !['worked', 'didnt_work'].includes(message.verdict)
+        || !Array.isArray(message.messages)) {
+      return { ok: false, error: 'invalid-feedback-target', outcomeKnown: true };
+    }
+    const target = contributorFeedbackTargets(message.messages).get(message.messageId);
+    if (!target) return { ok: false, error: 'invalid-feedback-target', outcomeKnown: true };
+    const mutation = recordStore(
+      'semantic.contributor.feedback-read', 'semantic.contributor.feedback-record',
+    );
+    try {
+      const result = await mutation.store.recordFeedback({
+        selectionKey: `${message.sessionId}:${target.humanMessageId}`,
+        verdict: message.verdict,
+        candidateContextKeys: target.toolUseIds.map((toolUseId) =>
+          `${message.sessionId}:${toolUseId}`),
+      });
+      return { ok: true, ...result };
+    } catch {
+      const known = mutation.failure()?.outcomeKnown === true;
+      return { ok: false, error: 'Contributor Metrics feedback could not be recorded.',
+        outcomeKnown: known, retryable: known };
+    }
+  }
   if (route === 'contributor/status') {
     const result = await kernelCall('semantic.contributor.read', {});
     if (result?.ok !== true) return {
@@ -116,7 +242,7 @@ export const acceptContributorOffer = (
   port.onmessageerror = finish;
   port.addEventListener?.('close', finish, { once: true });
   port.start();
-  dispatchContributorSemanticRoute(offer.route, {}, { kernelCall }).then(
+  dispatchContributorSemanticRoute(offer.route, offer.message ?? {}, { kernelCall }).then(
     (result) => {
       try { port.postMessage({
         type: CONTRIBUTOR_CHANNEL_RESULT, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,

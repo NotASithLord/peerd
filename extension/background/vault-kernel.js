@@ -569,6 +569,8 @@ const loadProductionRuntimeModule = makeBoundedModuleLoader(
 );
 /** @type {any} */
 let demandPlane = null;
+/** @type {any} */
+let targetContributor = null;
 const loadDemandPlane = makeBoundedModuleLoader(async () => {
   const createKernelDemandPlane = await runtimeModules.demandPlane();
   demandPlane = createKernelDemandPlane({
@@ -640,6 +642,13 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     waitForBrowserChildPolicyNotice: browserChildOutcomes.wait,
     hasPendingBrowserChildPolicy: browserChildOutcomes.has,
     childGuard: () => childGuard,
+    contributor: targetAddon ? Object.freeze({
+      arm: () => targetContributor?.arm?.()
+        ?? Promise.resolve({ enabled: false, generation: null }),
+      recordWebSettlement: (/** @type {any} */ input) =>
+        targetContributor?.recordWebSettlement?.(input)
+        ?? Promise.resolve({ ok: false, outcomeKnown: true }),
+    }) : null,
     VaultLockedError,
   });
   return demandPlane;
@@ -836,9 +845,12 @@ if (kernelFirefox) {
   void browser.tabs.query({}).then((tabs) => childGuard.reconcile(tabs))
     .catch(() => { /* restored exact markers remain fail-closed */ });
 }
-const targetContributorRoutes = targetAddon?.contributor({
-  kv, optionsUi, offscreenUrl, featureHost,
-}) ?? {};
+targetContributor = targetAddon?.contributor({
+  kv, optionsUi, sidepanelUi, homeUi, offscreenUrl, featureHost,
+  validateFeedback: async (/** @type {any} */ message) =>
+    (await loadDemandPlane()).validateContributorFeedback(message),
+}) ?? null;
+const targetContributorRoutes = targetContributor?.routes ?? {};
 
 const assemblyReport = () => Object.freeze({
   ...createVaultKernelAssemblyReport({

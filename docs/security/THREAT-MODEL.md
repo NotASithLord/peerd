@@ -642,7 +642,8 @@ is a separate security boundary and cannot inherit consent if the disclosure ver
 changes.
 Code: `peerd-runtime/observability/contributor-metrics.js`,
 `peerd-runtime/observability/contributor-store.js`,
-`background/routes/contributor-metrics.js`, and
+`background/kernel-contributor-feedback-guard.js`,
+`offscreen/semantic-routes/contributor.js`, and
 `options/sections/contributor-metrics.js`. Red-team: scenario 12.
 
 <a id="inv-17"></a>
