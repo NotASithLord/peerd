@@ -189,7 +189,7 @@ export const runActor = async (job, {
         }
         try { w.terminate(); } catch { /* gone */ }
         try { delete globalThis[/** @type {keyof typeof globalThis} */ (canaryName)]; } catch { /* best effort */ }
-        const contributor = job.actorType === 'web' && job.backing !== 'api'
+        const contributor = job.actorType === 'web' && job.backing === 'tab'
           ? parseContributorProjection(value?.contributor) : null;
         if (!Object.hasOwn(value ?? {}, 'contributor')) resolve(value);
         else {

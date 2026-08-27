@@ -142,6 +142,40 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
     } });
     return { ok: true, status: await store.status() };
   }
+  if (route === 'contributor/enable') {
+    // why: an explicit re-enable must mint a later consent generation even
+    // when a timed-out pre-restart revocation is not visible yet. Treating an
+    // apparently-active record as an idempotent no-op would let that stale
+    // revocation disable a later acknowledged user choice when it lands.
+    const current = await kernelCall('semantic.contributor.enable-read', {});
+    if (current?.ok !== true) return {
+      ok: false,
+      error: 'Contributor Metrics could not be updated.',
+      outcomeKnown: current?.outcomeKnown === true,
+      retryable: current?.outcomeKnown === true,
+    };
+    /** @type {any} */ let value = null;
+    const store = makeContributorStore({ kv: {
+      // why: explicit consent always starts from an empty semantic record so
+      // the controller, not the authority kernel, owns schema construction.
+      get: async () => value,
+      set: async (_key, next) => { value = next; },
+      delete: async () => { throw new Error('contributor-enable-delete-refused'); },
+    } });
+    const status = await store.enable();
+    const enabled = await kernelCall('semantic.contributor.enable', {
+      expected: current.value ?? null, value,
+    });
+    if (enabled?.ok !== true || enabled.value?.ok !== true) return {
+      ok: false,
+      error: enabled?.outcomeKnown === true
+        ? 'Contributor Metrics could not be updated.'
+        : 'The Contributor Metrics update outcome could not be confirmed.',
+      outcomeKnown: enabled?.outcomeKnown === true,
+      retryable: enabled?.outcomeKnown === true,
+    };
+    return { ok: true, status };
+  }
   const readOperation = route === 'contributor/status' ? 'semantic.contributor.read'
     : `semantic.contributor.${route.slice('contributor/'.length)}-read`;
   /** @type {any} */ let expected = null;
@@ -171,8 +205,7 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
     },
   });
   try {
-    const status = route === 'contributor/enable'
-      ? await store.enable() : await store.disableAndClear();
+    const status = await store.disableAndClear();
     return { ok: true, status };
   } catch {
     const known = failure?.outcomeKnown === true;

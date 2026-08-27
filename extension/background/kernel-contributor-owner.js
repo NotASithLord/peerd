@@ -12,9 +12,15 @@ import {
 
 export const CONTRIBUTOR_PENDING_RECEIPTS_KEY = 'contributor_metrics.pending.v1';
 export const CONTRIBUTOR_PENDING_MAX_RECEIPTS = 64;
+export const CONTRIBUTOR_PENDING_RECEIPT_PREFIX = 'contributor_metrics.receipt.v2.';
+export const CONTRIBUTOR_PENDING_DROP_PREFIX = 'contributor_metrics.receipt_drop.v2.';
 const CONTRIBUTOR_RECORD_KEY = 'contributor_metrics.aggregate.v1';
 export const CONTRIBUTOR_ACTIVE_CONSENT_KEY = 'contributor_metrics.active.v1';
+export const CONTRIBUTOR_STATE_PREFIX = 'contributor_metrics.state.v2.';
 const CONTRIBUTOR_STORAGE_DEADLINE_MS = 750;
+const CONTRIBUTOR_MAX_STATE_SNAPSHOTS = 128;
+const CONTRIBUTOR_REVISION_SCALE = 1024;
+const CONTRIBUTOR_MAX_REVISION = 8_000_000_000_000_000;
 const CONTRIBUTOR_MAX_TEXT = 200;
 const CONTRIBUTOR_MAX_ACTIONS = 128;
 const CONTRIBUTOR_MAX_COUNTER = 1_000_000_000;
@@ -89,7 +95,7 @@ const normalizePendingReceipt = (/** @type {any} */ value) => {
   const keys = [
     'version', 'consentGeneration', 'operationToken', 'feedbackContextToken', 'decision',
     'browser', 'extensionVersion', 'channel', 'providerCode', 'modelFamilyCode', 'durationMs',
-    'tokens', 'outcome', 'failure', 'actions', 'attempts',
+    'tokens', 'outcome', 'failure', 'actions', 'attempts', 'sequence',
   ];
   if (!exactKeys(value, keys) || value.version !== 1
       || boundedText(value.consentGeneration) === undefined
@@ -117,25 +123,19 @@ const normalizePendingReceipt = (/** @type {any} */ value) => {
       || !Array.isArray(value.actions) || value.actions.length > CONTRIBUTOR_MAX_ACTIONS
       || value.actions.some((/** @type {unknown} */ action) =>
         !CONTRIBUTOR_ACTION_KINDS.includes(/** @type {any} */ (action)))
-      || !Number.isSafeInteger(value.attempts) || value.attempts < 0 || value.attempts > 2) return null;
+      || !Number.isSafeInteger(value.attempts) || value.attempts < 0 || value.attempts > 2
+      || !Number.isSafeInteger(value.sequence) || value.sequence <= 0
+      || value.sequence > CONTRIBUTOR_MAX_REVISION) return null;
   return Object.freeze({ ...value, decision: Object.freeze({ ...value.decision }),
     actions: Object.freeze([...value.actions]) });
 };
-const normalizePendingRecord = (/** @type {any} */ value) => {
-  if (value == null) return Object.freeze({ version: 1, receipts: Object.freeze([]) });
-  if (!exactKeys(value, ['version', 'receipts']) || value.version !== 1
-      || !Array.isArray(value.receipts)
-      || value.receipts.length > CONTRIBUTOR_PENDING_MAX_RECEIPTS) return null;
-  const receipts = value.receipts.map(normalizePendingReceipt);
-  return receipts.every(Boolean)
-    ? Object.freeze({ version: 1, receipts: Object.freeze(receipts) }) : null;
-};
-
 export const createPreviewContributorAuthority = (/** @type {any} */ {
   kv, storageDeadlineMs = CONTRIBUTOR_STORAGE_DEADLINE_MS,
+  now = () => Date.now(), makeId = () => crypto.randomUUID(),
 }) => {
-  if (!kv?.get || !kv?.set || !kv?.delete || !Number.isFinite(storageDeadlineMs)
-      || storageDeadlineMs <= 0) {
+  if (!kv?.get || !kv?.set || !kv?.delete || !kv?.list
+      || !Number.isFinite(storageDeadlineMs) || storageDeadlineMs <= 0
+      || typeof now !== 'function' || typeof makeId !== 'function') {
     throw new TypeError('kernel-preview-contributor-config-invalid');
   }
   const storage = (/** @type {()=>Promise<any>} */ operation) => new Promise((resolve, reject) => {
@@ -157,24 +157,100 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
   const set = (/** @type {string} */ key, /** @type {any} */ value) =>
     storage(() => kv.set(key, value));
   const remove = (/** @type {string} */ key) => storage(() => kv.delete(key));
+  const list = (/** @type {string} */ prefix) => storage(() => kv.list(prefix));
   // why: browser storage has no cancellation primitive. Once revocation is
   // requested, an already-started late write must remain invisible even if
   // the bounded wrapper has returned before the underlying promise settles.
   let locallyRevoked = false;
-  const activeGeneration = async () => {
-    if (locallyRevoked) return null;
-    const value = await get(CONTRIBUTOR_ACTIVE_CONSENT_KEY);
-    return exactKeys(value, ['version', 'generation']) && value.version === 1
-      && boundedText(value.generation) !== undefined ? value.generation : null;
-  };
-  const readActiveRecord = async () => {
-    const generation = await activeGeneration();
-    if (!generation) {
-      await remove(CONTRIBUTOR_RECORD_KEY).catch(() => {});
+  let lastIssuedRevision = 0;
+  const stateSnapshot = (/** @type {unknown} */ value) => {
+    const candidate = /** @type {any} */ (value);
+    if (!exactKeys(candidate, ['version', 'revision', 'state', 'record'])
+        || candidate.version !== 2 || !Number.isSafeInteger(candidate.revision)
+        || candidate.revision <= 0 || candidate.revision > CONTRIBUTOR_MAX_REVISION
+        || !['active', 'revoked'].includes(candidate.state)
+        || candidate.state === 'revoked' && candidate.record !== null
+        || candidate.state === 'active' && armFromRecord(candidate.record).enabled !== true) {
       return null;
     }
+    return Object.freeze({ ...candidate });
+  };
+  const readLatestState = async () => {
+    const entries = await list(CONTRIBUTOR_STATE_PREFIX);
+    if (!entries || typeof entries !== 'object' || Array.isArray(entries)
+        || Object.keys(entries).length > CONTRIBUTOR_MAX_STATE_SNAPSHOTS) {
+      throw new Error('contributor-state-snapshots-invalid');
+    }
+    /** @type {{key:string,value:any}|null} */ let latest = null;
+    for (const [key, value] of Object.entries(entries)) {
+      if (!key.startsWith(CONTRIBUTOR_STATE_PREFIX)) continue;
+      const normalized = stateSnapshot(value);
+      if (!normalized) throw new Error('contributor-state-snapshot-invalid');
+      if (!latest || normalized.revision > latest.value.revision
+          || normalized.revision === latest.value.revision && key > latest.key) {
+        latest = { key, value: normalized };
+      }
+    }
+    if (latest) lastIssuedRevision = Math.max(lastIssuedRevision, latest.value.revision);
+    return latest;
+  };
+  const observeRevisionCeiling = async () => {
+    const entries = await list(CONTRIBUTOR_STATE_PREFIX);
+    for (const value of Object.values(entries ?? {})) {
+      const revision = /** @type {any} */ (value)?.revision;
+      if (Number.isSafeInteger(revision) && revision > 0
+          && revision <= CONTRIBUTOR_MAX_REVISION) {
+        lastIssuedRevision = Math.max(lastIssuedRevision, revision);
+      }
+    }
+  };
+  const legacyRecord = async () => {
+    const marker = await get(CONTRIBUTOR_ACTIVE_CONSENT_KEY);
+    if (!exactKeys(marker, ['version', 'generation']) || marker.version !== 1
+        || boundedText(marker.generation) === undefined) return null;
     const record = await get(CONTRIBUTOR_RECORD_KEY);
-    return armFromRecord(record).generation === generation ? record : null;
+    return armFromRecord(record).generation === marker.generation ? record : null;
+  };
+  const readActiveRecord = async () => {
+    if (locallyRevoked) return null;
+    const latest = await readLatestState();
+    if (latest) return latest.value.state === 'active' ? latest.value.record : null;
+    return legacyRecord();
+  };
+  const issueRevision = () => {
+    const wall = Math.max(1, Math.floor(Number(now()))) * CONTRIBUTOR_REVISION_SCALE;
+    const revision = Math.max(lastIssuedRevision + 1, wall);
+    if (!Number.isSafeInteger(revision) || revision > CONTRIBUTOR_MAX_REVISION) {
+      throw new Error('contributor-revision-invalid');
+    }
+    lastIssuedRevision = revision;
+    return revision;
+  };
+  const cleanupBefore = async (/** @type {number} */ revision,
+    /** @type {string} */ currentKey) => {
+    const entries = await list(CONTRIBUTOR_STATE_PREFIX);
+    await Promise.all(Object.entries(entries ?? {}).flatMap(([key, value]) => {
+      const normalized = stateSnapshot(value);
+      return key !== currentKey && (!normalized || normalized.revision < revision)
+        ? [remove(key).catch(() => {})] : [];
+    }));
+    await Promise.all([
+      remove(CONTRIBUTOR_RECORD_KEY).catch(() => {}),
+      remove(CONTRIBUTOR_ACTIVE_CONSENT_KEY).catch(() => {}),
+    ]);
+  };
+  const writeState = async (/** @type {any|null} */ record) => {
+    const revision = issueRevision();
+    const key = `${CONTRIBUTOR_STATE_PREFIX}${String(revision).padStart(16, '0')}-${makeId()}`;
+    const value = Object.freeze({
+      version: 2, revision, state: record ? 'active' : 'revoked', record,
+    });
+    await set(key, value);
+    // why: every key is generation-unique and cleanup only targets older
+    // revisions. A timed-out write/delete may finish late, but it can neither
+    // replace nor delete a later acknowledged generation.
+    void cleanupBefore(revision, key).catch(() => {});
+    return value;
   };
   let tail = Promise.resolve();
   const effect = (/** @type {()=>Promise<any>} */ run) => {
@@ -208,11 +284,16 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     const run = async () => {
       if (kind === 'read' || kind.endsWith('-read')) return readActiveRecord();
       if (kind === 'clear') {
-        // why: this small marker is the revocation commit. Aggregate cleanup
-        // may finish later, but no stale or late write can become observable.
+        // why: an append-only revocation snapshot is the commit. Old aggregate
+        // cleanup may finish later without sharing a key with a future consent.
         locallyRevoked = true;
-        await remove(CONTRIBUTOR_ACTIVE_CONSENT_KEY);
-        await remove(CONTRIBUTOR_RECORD_KEY).catch(() => {});
+        // why: commit the fail-closed marker before any cleanup or recovery
+        // read. If the clock moved backwards across a restart, observe the
+        // durable ceiling afterward and synchronously append one newer marker
+        // before acknowledging the user's revocation.
+        const marker = await writeState(null);
+        await observeRevisionCeiling();
+        if (lastIssuedRevision > marker.revision) await writeState(null);
         return { ok: true };
       }
       if (kind.endsWith('-record')) {
@@ -228,22 +309,21 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
             || current?.consent?.enabled !== true) {
           return { ok: false, error: 'contributor-state-changed' };
         }
-        await set(CONTRIBUTOR_RECORD_KEY, value);
+        await writeState(value);
         return { ok: true };
       }
       const current = await readActiveRecord();
       if (JSON.stringify(current ?? null) !== JSON.stringify(payload?.expected ?? null)) {
         return { ok: false, error: 'contributor-state-changed' };
       }
-      const value = { version: 1,
-        consent: { enabled: true, schemaVersion: 1, disclosureVersion: 1,
-          generation: crypto.randomUUID() },
-        aggregate: { version: 1, rows: {}, dedupe: [], contexts: {}, contextOrder: [],
-          feedback: {}, feedbackOrder: [] } };
-      await set(CONTRIBUTOR_RECORD_KEY, value);
-      await set(CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
-        version: 1, generation: value.consent.generation,
-      });
+      const value = payload?.value;
+      const nextArm = armFromRecord(value);
+      if (nextArm.enabled !== true
+          || nextArm.generation === armFromRecord(current).generation) {
+        return { ok: false, error: 'contributor-state-changed' };
+      }
+      await readLatestState();
+      await writeState(value);
       locallyRevoked = false;
       return { ok: true, value };
     };
@@ -259,20 +339,59 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     await tail;
     return armFromRecord(await readActiveRecord());
   };
+  const pendingEntries = async () => {
+    const receiptEntries = await list(CONTRIBUTOR_PENDING_RECEIPT_PREFIX);
+    if (!receiptEntries || typeof receiptEntries !== 'object' || Array.isArray(receiptEntries)
+        || Object.keys(receiptEntries).length > CONTRIBUTOR_PENDING_MAX_RECEIPTS) {
+      throw new Error('contributor-pending-record-invalid');
+    }
+    const receipts = Object.entries(receiptEntries).map(([key, value]) => {
+      const receipt = normalizePendingReceipt(value);
+      return receipt && key === `${CONTRIBUTOR_PENDING_RECEIPT_PREFIX}${receipt.operationToken}`
+        ? receipt : null;
+    });
+    if (receipts.some((receipt) => !receipt)) {
+      throw new Error('contributor-pending-record-invalid');
+    }
+    const normalized = /** @type {any[]} */ (receipts);
+    for (const receipt of normalized) {
+      lastIssuedRevision = Math.max(lastIssuedRevision, receipt.sequence);
+    }
+    return normalized.sort((left, right) => left.sequence - right.sequence
+      || left.operationToken.localeCompare(right.operationToken));
+  };
+  const pendingDrops = async () => {
+    const entries = await list(CONTRIBUTOR_PENDING_DROP_PREFIX);
+    if (!entries || typeof entries !== 'object' || Array.isArray(entries)
+        || Object.keys(entries).length > CONTRIBUTOR_PENDING_MAX_RECEIPTS) {
+      throw new Error('contributor-pending-drops-invalid');
+    }
+    const tokens = Object.entries(entries).map(([key, value]) => {
+      const token = value?.operationToken;
+      return exactKeys(value, ['version', 'operationToken']) && value.version === 1
+        && validContributorToken(token, 'operation')
+        && key === `${CONTRIBUTOR_PENDING_DROP_PREFIX}${token}` ? token : null;
+    });
+    if (tokens.some((token) => !token)) throw new Error('contributor-pending-drops-invalid');
+    return /** @type {string[]} */ (tokens);
+  };
   const pending = () => effect(async () => {
-    const armSnapshot = armFromRecord(await readActiveRecord());
-    const record = normalizePendingRecord(await get(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
-    if (!record) {
-      await remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY);
-      return [];
-    }
+    const activeRecord = await readActiveRecord();
+    const armSnapshot = armFromRecord(activeRecord);
+    const [receipts, dropTokens] = await Promise.all([pendingEntries(), pendingDrops()]);
+    const dropped = new Set(dropTokens);
+    const settled = new Set(Array.isArray(activeRecord?.aggregate?.dedupe)
+      ? activeRecord.aggregate.dedupe : []);
     const active = armSnapshot.enabled === true
-      ? record.receipts.filter((/** @type {any} */ receipt) =>
-        receipt.consentGeneration === armSnapshot.generation) : [];
-    if (active.length !== record.receipts.length) {
-      if (active.length === 0) await remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY);
-      else await set(CONTRIBUTOR_PENDING_RECEIPTS_KEY, { version: 1, receipts: active });
-    }
+      ? receipts.filter((/** @type {any} */ receipt) =>
+        receipt.consentGeneration === armSnapshot.generation
+          && !settled.has(receipt.operationToken)
+          && !dropped.has(receipt.operationToken)) : [];
+    const keep = new Set(active.map((receipt) => receipt.operationToken));
+    await Promise.all(receipts.flatMap((receipt) => !keep.has(receipt.operationToken)
+      ? [remove(`${CONTRIBUTOR_PENDING_RECEIPT_PREFIX}${receipt.operationToken}`).catch(() => {})]
+      : []));
+    await remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY).catch(() => {});
     return active;
   });
   const appendPending = (/** @type {any} */ input) => effect(async () => {
@@ -293,56 +412,62 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
     const {
       operationKey: _operationKey, feedbackContextKey: _feedbackContextKey, ...durableFacts
     } = settlement;
-    const receipt = normalizePendingReceipt({
-      ...durableFacts, operationToken, feedbackContextToken, attempts: 0,
-    });
-    if (!receipt) return { ok: false, code: 'contributor-pending-receipt-invalid' };
-    let current = normalizePendingRecord(await get(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
-    if (!current) {
-      await remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY);
-      current = Object.freeze({ version: 1, receipts: Object.freeze([]) });
+    const [current, dropTokens] = await Promise.all([pendingEntries(), pendingDrops()]);
+    if (current.some((/** @type {any} */ item) => item.operationToken === operationToken)
+        || dropTokens.includes(operationToken)) {
+      return { ok: true, queued: false, reason: 'duplicate' };
     }
-    const existing = current.receipts.find((/** @type {any} */ item) =>
-      item.operationToken === receipt.operationToken);
-    if (existing) return { ok: true, queued: false, reason: 'duplicate' };
-    if (current.receipts.length >= CONTRIBUTOR_PENDING_MAX_RECEIPTS) {
+    if (current.length + dropTokens.length >= CONTRIBUTOR_PENDING_MAX_RECEIPTS) {
       return { ok: false, code: 'contributor-pending-receipts-full' };
     }
-    await set(CONTRIBUTOR_PENDING_RECEIPTS_KEY, {
-      version: 1, receipts: [...current.receipts, receipt],
+    const receipt = normalizePendingReceipt({
+      ...durableFacts, operationToken, feedbackContextToken,
+      attempts: 0, sequence: issueRevision(),
     });
+    if (!receipt) return { ok: false, code: 'contributor-pending-receipt-invalid' };
+    await set(`${CONTRIBUTOR_PENDING_RECEIPT_PREFIX}${receipt.operationToken}`, receipt);
     return { ok: true, queued: true };
   });
   const removePending = (/** @type {string} */ operationToken) => effect(async () => {
-    const current = normalizePendingRecord(await get(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
-    if (!current) throw new Error('contributor-pending-record-invalid');
-    const receipts = current.receipts.filter((/** @type {any} */ item) =>
-      item.operationToken !== operationToken);
-    if (receipts.length === current.receipts.length) return false;
-    if (receipts.length === 0) await remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY);
-    else await set(CONTRIBUTOR_PENDING_RECEIPTS_KEY, { version: 1, receipts });
+    if (!validContributorToken(operationToken, 'operation')) return false;
+    const key = `${CONTRIBUTOR_PENDING_RECEIPT_PREFIX}${operationToken}`;
+    const current = normalizePendingReceipt(await get(key));
+    if (!current) return false;
+    await remove(key);
     return true;
   });
   const notePendingFailure = (/** @type {string} */ operationToken) => effect(async () => {
-    const current = normalizePendingRecord(await get(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
-    if (!current) throw new Error('contributor-pending-record-invalid');
-    const index = current.receipts.findIndex((/** @type {any} */ receipt) =>
-      receipt.operationToken === operationToken);
-    if (index < 0) return { found: false, dropped: false };
-    const receipt = current.receipts[index];
-    if (receipt.attempts >= 1) {
-      const receipts = current.receipts.filter((/** @type {any} */ _receipt,
-        /** @type {number} */ receiptIndex) => receiptIndex !== index);
-      if (receipts.length === 0) await remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY);
-      else await set(CONTRIBUTOR_PENDING_RECEIPTS_KEY, { version: 1, receipts });
+    if (!validContributorToken(operationToken, 'operation')) {
+      return { found: false, dropped: false };
+    }
+    const key = `${CONTRIBUTOR_PENDING_RECEIPT_PREFIX}${operationToken}`;
+    const dropKey = `${CONTRIBUTOR_PENDING_DROP_PREFIX}${operationToken}`;
+    const dropped = await get(dropKey);
+    if (exactKeys(dropped, ['version', 'operationToken']) && dropped.version === 1
+        && dropped.operationToken === operationToken) {
       return { found: true, dropped: true };
     }
-    const receipts = [...current.receipts];
-    receipts[index] = { ...receipt, attempts: receipt.attempts + 1 };
-    await set(CONTRIBUTOR_PENDING_RECEIPTS_KEY, { version: 1, receipts });
+    const receipt = normalizePendingReceipt(await get(key));
+    if (!receipt) return { found: false, dropped: false };
+    if (receipt.attempts >= 1) {
+      // why: the durable drop marker is committed before receipt cleanup. A
+      // timed-out earlier attempt write can resurrect the receipt key, but it
+      // remains permanently invisible and therefore cannot poison FIFO.
+      await set(dropKey, { version: 1, operationToken });
+      await remove(key).catch(() => {});
+      return { found: true, dropped: true };
+    }
+    await set(key, { ...receipt, attempts: receipt.attempts + 1 });
     return { found: true, dropped: false };
   });
-  const clearPending = () => effect(() => remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
+  const clearPending = () => effect(async () => {
+    const [entries, drops] = await Promise.all([
+      list(CONTRIBUTOR_PENDING_RECEIPT_PREFIX), list(CONTRIBUTOR_PENDING_DROP_PREFIX),
+    ]);
+    await Promise.all([...Object.keys(entries ?? {}), ...Object.keys(drops ?? {})]
+      .map((key) => remove(key).catch(() => {})));
+    await remove(CONTRIBUTOR_PENDING_RECEIPTS_KEY).catch(() => {});
+  });
   return Object.freeze({
     handle, arm, pending, appendPending, removePending, notePendingFailure, clearPending,
   });
@@ -376,7 +501,7 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
   const allowed = Object.freeze({
     'contributor/status': Object.freeze({ 'semantic.contributor.read': 1 }),
     'contributor/enable': Object.freeze({
-      'semantic.contributor.enable-read': 2, 'semantic.contributor.enable': 1,
+      'semantic.contributor.enable-read': 1, 'semantic.contributor.enable': 1,
     }),
     'contributor/disable': Object.freeze({
       'semantic.contributor.clear': 1, 'semantic.contributor.disable-read': 1,
@@ -524,8 +649,8 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
     return mutate(async () => {
       const result = await dispatch(route, {});
       if (route === 'contributor/disable' && result?.ok === true) {
-        // why: aggregate deletion is the revocation commit; cleanup is best-effort and
-        // stale receipts are independently hidden and deleted by pending().
+        // why: the revocation generation is already committed. Physical
+        // cleanup is best-effort and stale receipts are independently hidden.
         await authority.clearPending().catch(() => {});
         requestDrain();
       }
@@ -539,7 +664,7 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
       for (let index = 0; index < CONTRIBUTOR_PENDING_MAX_RECEIPTS; index += 1) {
         const receipt = (await authority.pending())[0];
         if (!receipt) return { ok: true, drained };
-        const { attempts: _attempts, ...settlement } = receipt;
+        const { attempts: _attempts, sequence: _sequence, ...settlement } = receipt;
         const result = await mutate(() => dispatch('contributor/settlement', settlement));
         if (result?.ok !== true) {
           if (result?.outcomeKnown !== true) return { ...result, drained };

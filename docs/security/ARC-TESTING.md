@@ -113,6 +113,7 @@ surface.
 | Inspect browser network activity while enabling, recording, previewing, and voting. | No Contributor Metrics request, endpoint, alarm, or upload exists. |
 | Use the worked or didn’t-work control on a final answer. | The control is a named binary group, creates no chat message, and contributes only while consent is current. |
 | Disable and clear, then reopen Settings. | Consent, pending rows, local dedupe tokens, and feedback are gone. |
+| Force an enable or disable storage timeout, make the opposite choice, then release the old write and restart the background. | The later acknowledged choice remains authoritative; stale writes and cleanup stay inert. |
 | Attempt consent or feedback from an engine tab or other extension surface. | The background refuses the sender before any contribution mutation. |
 
 ## Recovery and Stop

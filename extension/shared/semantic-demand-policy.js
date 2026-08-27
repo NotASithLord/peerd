@@ -18,7 +18,7 @@ const POLICIES = Object.freeze({
   'contacts/set': Object.freeze({ 'semantic.contacts.upsert': 1 }),
   'provider/status': Object.freeze({ 'semantic.providers.key-status': 1 }),
   'contributor/enable': Object.freeze({
-    'semantic.contributor.enable-read': 2, 'semantic.contributor.enable': 1,
+    'semantic.contributor.enable-read': 1, 'semantic.contributor.enable': 1,
   }),
   'contributor/disable': Object.freeze({
     'semantic.contributor.clear': 1, 'semantic.contributor.disable-read': 1,

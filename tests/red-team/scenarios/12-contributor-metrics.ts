@@ -79,6 +79,7 @@ export const scenario: Scenario = {
         get: async () => { routeMutations += 1; return null; },
         set: async () => { routeMutations += 1; },
         delete: async () => { routeMutations += 1; },
+        list: async () => { routeMutations += 1; return {}; },
       },
       optionsUi: (sender: unknown) => sender === optionsSender,
       sidepanelUi: (sender: unknown) => sender === chatSender,
@@ -129,7 +130,9 @@ export const scenario: Scenario = {
       'peerd-runtime/observability/contributor-store.js',
       'peerd-runtime/observability/contributor-feedback.js',
       'background/kernel-contributor-feedback-guard.js',
+      'background/kernel-contributor-owner.js',
       'offscreen/semantic-routes/contributor.js',
+      'shared/contributor-channel.js',
     ].map((path) => stripComments(readFileSync(join(EXTENSION_DIR, path), 'utf8'))).join('\n');
     const hasNetwork = /\bfetch\s*\(|XMLHttpRequest|WebSocket|sendBeacon|https?:\/\//.test(localSources);
     probes.push(!hasNetwork

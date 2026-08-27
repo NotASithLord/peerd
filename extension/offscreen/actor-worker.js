@@ -927,7 +927,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       // sees BOTH the authoritative Stop signal AND whether any reply came back
       // (signal.aborted && !finalText). A stamp here — ignorant of finalText — would
       // mislabel a turn that produced a real reply just before Stop as 'cancelled'.
-      const contributor = metadata.actorType === 'web' && metadata.backing !== 'api'
+      const contributor = metadata.actorType === 'web' && metadata.backing === 'tab'
         ? projectContributorSettlement(result, program.provider, program.model)
         : null;
       self.postMessage({

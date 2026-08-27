@@ -633,10 +633,11 @@ The schema accepts reviewed enums, bounded counters, and named histogram buckets
 Unknown keys fail closed. Unknown provider and model strings collapse to `custom`, so
 a caller cannot encode a URL, prompt, identifier, or other content in a cohort field.
 Restart-safe operation and feedback tokens are consent-rotated, bounded, local-only,
-and absent from the canonical payload bytes shown in Settings. Disabling deletes the
-consent and aggregate as the revocation commit. Pending receipts are then generation-
-fenced and unavailable for processing or display; bounded physical cleanup resumes if
-browser storage interrupts the first deletion attempt.
+and absent from the canonical payload bytes shown in Settings. Disabling first appends
+a newer revocation generation, making every older consent snapshot and pending receipt
+unavailable for processing or display. Physical deletion is bounded and resumes after
+interruption; generation-unique keys ensure a timed-out stale write or cleanup cannot
+replace or delete a later acknowledged choice.
 
 This stage has no uploader, endpoint, alarm, collector origin, or network primitive.
 Store and web channels register no Contributor Metrics routes or UI. A later uploader
@@ -644,6 +645,7 @@ is a separate security boundary and cannot inherit consent if the disclosure ver
 changes.
 Code: `peerd-runtime/observability/contributor-metrics.js`,
 `peerd-runtime/observability/contributor-store.js`,
+`background/kernel-contributor-owner.js`,
 `background/kernel-contributor-feedback-guard.js`,
 `offscreen/semantic-routes/contributor.js`, and
 `options/sections/contributor-metrics.js`. Red-team: scenario 12.

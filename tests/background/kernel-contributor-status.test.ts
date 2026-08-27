@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   CONTRIBUTOR_ACTIVE_CONSENT_KEY, CONTRIBUTOR_PENDING_RECEIPTS_KEY,
+  CONTRIBUTOR_PENDING_DROP_PREFIX, CONTRIBUTOR_PENDING_RECEIPT_PREFIX,
+  CONTRIBUTOR_STATE_PREFIX,
   createPreviewContributorAuthority,
   createPreviewContributorRoutes, previewTargetAddon,
 } from '../../extension/background/kernel-preview-addon.js';
@@ -20,11 +22,11 @@ import {
 
 const createLiveRoutes = createPreviewContributorRoutes;
 
-const enabledRecord = () => ({
+const enabledRecord = (generation = 'consent-generation-1') => ({
   version: 1,
   consent: {
     enabled: true, schemaVersion: 1, disclosureVersion: 1,
-    generation: 'consent-generation-1',
+    generation,
   },
   aggregate: emptyContributorLocalState(),
 });
@@ -53,9 +55,22 @@ const storage = (initial: any) => {
       get: async (key: string) => structuredClone(values.get(key) ?? null),
       set: async (key: string, next: any) => { values.set(key, structuredClone(next)); },
       delete: async (key: string) => { values.delete(key); },
+      list: async (prefix: string) => Object.fromEntries([...values.entries()]
+        .filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key, structuredClone(value)])),
     },
-    value: () => structuredClone(values.get('contributor_metrics.aggregate.v1') ?? null),
+    value: () => {
+      const snapshots = [...values.entries()]
+        .filter(([key]) => key.startsWith('contributor_metrics.state.v2.'))
+        .sort((left, right) => right[1].revision - left[1].revision);
+      if (snapshots.length > 0) {
+        return snapshots[0][1].state === 'active'
+          ? structuredClone(snapshots[0][1].record) : null;
+      }
+      return structuredClone(values.get('contributor_metrics.aggregate.v1') ?? null);
+    },
     read: (key: string) => structuredClone(values.get(key) ?? null),
+    listed: (prefix: string) => Object.fromEntries([...values.entries()]
+      .filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key, structuredClone(value)])),
   };
 };
 
@@ -90,6 +105,20 @@ const routesFor = (state: ReturnType<typeof storage>, sender: any, postMessage?:
   return { owner, routes: owner.routes,
     restore: () => { (globalThis as any).clients = prior; } };
 };
+
+const directRoutesFor = (state: ReturnType<typeof storage>, sender: any,
+    storageDeadlineMs = 5) => createPreviewContributorRoutes({
+  kv: state.kv,
+  optionsUi: (candidate: any) => candidate === sender,
+  sidepanelUi: () => false,
+  homeUi: () => false,
+  validateFeedback: async () => ({ ok: false }),
+  offscreenUrl: null,
+  featureHost: null,
+  dispatchSemanticRoute: dispatchContributorSemanticRoute,
+  scheduleDrain: () => {},
+  storageDeadlineMs,
+});
 
 describe('Preview Contributor Metrics private channel', () => {
   test('target addon is update plus one fixed contributor capability', () => {
@@ -140,7 +169,7 @@ describe('Preview Contributor Metrics private channel', () => {
     try {
       expect(await live.owner.arm()).toEqual({ enabled: false, generation: null });
       expect(posted).toBe(0);
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
+      expect(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX)).toEqual({});
     } finally { live.restore(); }
   });
 
@@ -164,7 +193,7 @@ describe('Preview Contributor Metrics private channel', () => {
       expect(await live.owner.recordWebSettlement(settlement('raw-operation-id', {
         feedbackContextKey: 'raw-session-id:raw-tool-id',
       }))).toEqual({ ok: true, queued: true });
-      const persisted = JSON.stringify(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY));
+      const persisted = JSON.stringify(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX));
       expect(persisted).not.toContain('raw-operation-id');
       expect(persisted).not.toContain('raw-session-id');
       expect(persisted).not.toContain('raw-tool-id');
@@ -179,7 +208,7 @@ describe('Preview Contributor Metrics private channel', () => {
     const originalDelete = state.kv.delete;
     let failPendingDelete = true;
     state.kv.delete = async (key: string) => {
-      if (key === CONTRIBUTOR_PENDING_RECEIPTS_KEY && failPendingDelete) {
+      if (key.startsWith(CONTRIBUTOR_PENDING_RECEIPT_PREFIX) && failPendingDelete) {
         throw new Error('interrupted cleanup');
       }
       return originalDelete(key);
@@ -190,11 +219,12 @@ describe('Preview Contributor Metrics private channel', () => {
       expect(await live.routes['contributor/disable']({ type: 'contributor/disable' }, sender))
         .toMatchObject({ ok: true, status: { enabled: false } });
       expect(state.value()).toBeNull();
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)?.receipts).toHaveLength(1);
-      await expect(live.owner.pending()).rejects.toThrow('interrupted cleanup');
+      expect(Object.keys(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX))).toHaveLength(1);
+      expect(await live.owner.pending()).toEqual([]);
+      expect(Object.keys(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX))).toHaveLength(1);
       failPendingDelete = false;
       expect(await live.owner.pending()).toEqual([]);
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
+      expect(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX)).toEqual({});
     } finally { live.restore(); }
   });
 
@@ -223,77 +253,336 @@ describe('Preview Contributor Metrics private channel', () => {
     } finally { live.restore(); }
   });
 
-  test('a late aggregate write cannot resurrect consent after revocation', async () => {
-    const initial = enabledRecord();
-    const values = new Map<string, any>([
-      ['contributor_metrics.aggregate.v1', structuredClone(initial)],
-      [CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
-        version: 1, generation: initial.consent.generation,
-      }],
-    ]);
+  test('a timed-out enable cannot overwrite a later acknowledged generation', async () => {
+    const values = new Map<string, any>();
     let releaseLateWrite: () => void = () => {};
     const lateWrite = new Promise<void>((resolve) => { releaseLateWrite = resolve; });
-    let holdAggregateWrite = true;
-    const authority = createPreviewContributorAuthority({
-      storageDeadlineMs: 5,
-      kv: {
-        get: async (key: string) => structuredClone(values.get(key) ?? null),
-        set: async (key: string, value: any) => {
-          if (key === 'contributor_metrics.aggregate.v1' && holdAggregateWrite) {
-            holdAggregateWrite = false;
-            await lateWrite;
-          }
-          values.set(key, structuredClone(value));
-        },
-        delete: async (key: string) => { values.delete(key); },
+    let holdFirstStateWrite = true;
+    const kv = {
+      get: async (key: string) => structuredClone(values.get(key) ?? null),
+      set: async (key: string, value: any) => {
+        if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && holdFirstStateWrite) {
+          holdFirstStateWrite = false;
+          await lateWrite;
+        }
+        values.set(key, structuredClone(value));
       },
+      delete: async (key: string) => { values.delete(key); },
+      list: async (prefix: string) => Object.fromEntries([...values.entries()]
+        .filter(([key]) => key.startsWith(prefix))),
+    };
+    const authority = createPreviewContributorAuthority({
+      kv, storageDeadlineMs: 5, now: () => 100, makeId: () => crypto.randomUUID(),
     });
-    const target = { authority: { target: 'semantic:contributor/settlement:runtime' },
+    const target = { authority: { target: 'semantic:contributor/enable:options' },
       signal: { aborted: false }, deadlineAt: Date.now() + 100 };
-    expect(await authority.handle('semantic.contributor.settlement-record', {
-      expected: initial, value: structuredClone(initial),
-    }, target)).toMatchObject({ ok: false, outcomeKnown: false });
-    expect(await authority.handle('semantic.contributor.clear', {}, {
-      authority: { target: 'semantic:contributor/disable:options' },
-      signal: { aborted: false }, deadlineAt: Date.now() + 100,
-    })).toMatchObject({ ok: true, outcomeKnown: true });
+    expect(await authority.handle('semantic.contributor.enable', {
+      expected: null, value: enabledRecord('late-consent'),
+    }, target))
+      .toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await authority.handle('semantic.contributor.enable', {
+      expected: null, value: enabledRecord('acknowledged-consent'),
+    }, target))
+      .toMatchObject({ ok: true, outcomeKnown: true });
+    const acknowledged = await authority.arm();
+    expect(acknowledged.enabled).toBe(true);
     releaseLateWrite();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(await authority.arm()).toEqual({ enabled: false, generation: null });
-    expect(values.has('contributor_metrics.aggregate.v1')).toBe(false);
+    expect(await authority.arm()).toEqual(acknowledged);
   });
 
-  test('a timed-out revocation remains fail-closed while its delete finishes', async () => {
-    const initial = enabledRecord();
-    const values = new Map<string, any>([
-      ['contributor_metrics.aggregate.v1', structuredClone(initial)],
-      [CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
-        version: 1, generation: initial.consent.generation,
-      }],
-    ]);
-    let releaseDelete: () => void = () => {};
-    const delayedDelete = new Promise<void>((resolve) => { releaseDelete = resolve; });
+  test('an unseen pre-crash enable cannot win after a restarted owner acknowledges consent', async () => {
+    const values = new Map<string, any>();
+    let releaseLateWrite: () => void = () => {};
+    const lateWrite = new Promise<void>((resolve) => { releaseLateWrite = resolve; });
+    let holdFirstStateWrite = true;
+    const kv = {
+      get: async (key: string) => structuredClone(values.get(key) ?? null),
+      set: async (key: string, value: any) => {
+        if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && holdFirstStateWrite) {
+          holdFirstStateWrite = false;
+          await lateWrite;
+        }
+        values.set(key, structuredClone(value));
+      },
+      delete: async (key: string) => { values.delete(key); },
+      list: async (prefix: string) => Object.fromEntries([...values.entries()]
+        .filter(([key]) => key.startsWith(prefix))),
+    };
+    const target = { authority: { target: 'semantic:contributor/enable:options' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 100 };
+    const beforeCrash = createPreviewContributorAuthority({
+      kv, storageDeadlineMs: 5, now: () => 100, makeId: () => crypto.randomUUID(),
+    });
+    expect(await beforeCrash.handle('semantic.contributor.enable', {
+      expected: null, value: enabledRecord('pre-crash-consent'),
+    }, target))
+      .toMatchObject({ ok: false, outcomeKnown: false });
+    const restarted = createPreviewContributorAuthority({
+      kv, storageDeadlineMs: 5, now: () => 200, makeId: () => crypto.randomUUID(),
+    });
+    expect(await restarted.handle('semantic.contributor.enable', {
+      expected: null, value: enabledRecord('restarted-consent'),
+    }, target))
+      .toMatchObject({ ok: true, outcomeKnown: true });
+    const acknowledged = await restarted.arm();
+    releaseLateWrite();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await restarted.arm()).toEqual(acknowledged);
+  });
+
+  test('timed-out revocation and late cleanup cannot delete a re-enabled generation', async () => {
+    const state = storage(enabledRecord());
+    const values = state.listed('');
+    const backing = new Map<string, any>(Object.entries(values));
+    let releaseRevocation: () => void = () => {};
+    const lateRevocation = new Promise<void>((resolve) => { releaseRevocation = resolve; });
+    let holdRevocation = false;
+    const deleted: string[] = [];
+    const kv = {
+      get: async (key: string) => structuredClone(backing.get(key) ?? null),
+      set: async (key: string, value: any) => {
+        if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && value?.state === 'revoked'
+            && holdRevocation) {
+          holdRevocation = false;
+          await lateRevocation;
+        }
+        backing.set(key, structuredClone(value));
+      },
+      delete: async (key: string) => { deleted.push(key); backing.delete(key); },
+      list: async (prefix: string) => Object.fromEntries([...backing.entries()]
+        .filter(([key]) => key.startsWith(prefix))),
+    };
     const authority = createPreviewContributorAuthority({
-      storageDeadlineMs: 5,
+      kv, storageDeadlineMs: 5, now: () => 300, makeId: () => crypto.randomUUID(),
+    });
+    holdRevocation = true;
+    const disableTarget = { authority: { target: 'semantic:contributor/disable:options' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 100 };
+    expect(await authority.handle('semantic.contributor.clear', {}, disableTarget))
+      .toMatchObject({ ok: false, outcomeKnown: false });
+    const enableTarget = { authority: { target: 'semantic:contributor/enable:options' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 100 };
+    expect(await authority.handle('semantic.contributor.enable', {
+      expected: null, value: enabledRecord('re-enabled-consent'),
+    }, enableTarget))
+      .toMatchObject({ ok: true, outcomeKnown: true });
+    const acknowledged = await authority.arm();
+    releaseRevocation();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await authority.arm()).toEqual(acknowledged);
+    const currentKey = Object.entries(await kv.list(CONTRIBUTOR_STATE_PREFIX))
+      .sort((left, right) => right[1].revision - left[1].revision)[0][0];
+    expect(deleted).not.toContain(currentKey);
+  });
+
+  test('production enable timeout then re-enable ignores the late write', async () => {
+    const state = storage(null);
+    const sender = {};
+    const originalSet = state.kv.set;
+    let releaseLateWrite: () => void = () => {};
+    const lateWrite = new Promise<void>((resolve) => { releaseLateWrite = resolve; });
+    let holdFirstStateWrite = true;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && holdFirstStateWrite) {
+        holdFirstStateWrite = false;
+        await lateWrite;
+      }
+      await originalSet(key, value);
+    };
+    const owner = directRoutesFor(state, sender);
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true, status: { enabled: true } });
+    const acknowledged = await owner.arm();
+    releaseLateWrite();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await owner.arm()).toEqual(acknowledged);
+  });
+
+  test('production enable timeout survives restart, re-enable, and the late write', async () => {
+    const state = storage(null);
+    const sender = {};
+    const originalSet = state.kv.set;
+    let releaseLateWrite: () => void = () => {};
+    const lateWrite = new Promise<void>((resolve) => { releaseLateWrite = resolve; });
+    let holdFirstStateWrite = true;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && holdFirstStateWrite) {
+        holdFirstStateWrite = false;
+        await lateWrite;
+      }
+      await originalSet(key, value);
+    };
+    const beforeRestart = directRoutesFor(state, sender);
+    expect(await beforeRestart.routes['contributor/enable']({
+      type: 'contributor/enable',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+    const restarted = directRoutesFor(state, sender);
+    expect(await restarted.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true, status: { enabled: true } });
+    const acknowledged = await restarted.arm();
+    releaseLateWrite();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await restarted.arm()).toEqual(acknowledged);
+  });
+
+  test('production disable timeout then re-enable ignores the late revocation', async () => {
+    const state = storage(null);
+    const sender = {};
+    const owner = directRoutesFor(state, sender);
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true });
+    const originalSet = state.kv.set;
+    let releaseLateRevocation: () => void = () => {};
+    const lateRevocation = new Promise<void>((resolve) => { releaseLateRevocation = resolve; });
+    let holdRevocation = true;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && value?.state === 'revoked'
+          && holdRevocation) {
+        holdRevocation = false;
+        await lateRevocation;
+      }
+      await originalSet(key, value);
+    };
+    expect(await owner.routes['contributor/disable']({ type: 'contributor/disable' }, sender))
+      .toMatchObject({ ok: false, outcomeKnown: false });
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true, status: { enabled: true } });
+    const acknowledged = await owner.arm();
+    releaseLateRevocation();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await owner.arm()).toEqual(acknowledged);
+  });
+
+  test('production disable timeout survives restart, re-enable, and late cleanup', async () => {
+    const state = storage(null);
+    const sender = {};
+    const beforeRestart = directRoutesFor(state, sender);
+    expect(await beforeRestart.routes['contributor/enable']({
+      type: 'contributor/enable',
+    }, sender)).toMatchObject({ ok: true });
+    const originalSet = state.kv.set;
+    let releaseLateRevocation: () => void = () => {};
+    const lateRevocation = new Promise<void>((resolve) => { releaseLateRevocation = resolve; });
+    let holdRevocation = true;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_STATE_PREFIX) && value?.state === 'revoked'
+          && holdRevocation) {
+        holdRevocation = false;
+        await lateRevocation;
+      }
+      await originalSet(key, value);
+    };
+    expect(await beforeRestart.routes['contributor/disable']({
+      type: 'contributor/disable',
+    }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
+    const restarted = directRoutesFor(state, sender);
+    expect(await restarted.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true, status: { enabled: true } });
+    const acknowledged = await restarted.arm();
+    releaseLateRevocation();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await restarted.arm()).toEqual(acknowledged);
+  });
+
+  test('late snapshot cleanup never deletes a newer acknowledged generation', async () => {
+    const state = storage(null);
+    const sender = {};
+    const owner = directRoutesFor(state, sender);
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true });
+    const oldKey = Object.keys(state.listed(CONTRIBUTOR_STATE_PREFIX))[0];
+    const originalDelete = state.kv.delete;
+    let releaseLateDelete: () => void = () => {};
+    const lateDelete = new Promise<void>((resolve) => { releaseLateDelete = resolve; });
+    let holdOldDelete = true;
+    const deleted: string[] = [];
+    state.kv.delete = async (key: string) => {
+      if (key === oldKey && holdOldDelete) {
+        holdOldDelete = false;
+        await lateDelete;
+      }
+      deleted.push(key);
+      await originalDelete(key);
+    };
+    expect(await owner.routes['contributor/disable']({ type: 'contributor/disable' }, sender))
+      .toMatchObject({ ok: true, status: { enabled: false } });
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: true, status: { enabled: true } });
+    const acknowledged = await owner.arm();
+    const currentKey = Object.entries(state.listed(CONTRIBUTOR_STATE_PREFIX))
+      .sort((left, right) => right[1].revision - left[1].revision)[0][0];
+    releaseLateDelete();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deleted).not.toContain(currentKey);
+    expect(await owner.arm()).toEqual(acknowledged);
+  });
+
+  test('revocation recovers an oversized malformed journal without trusting its revision', async () => {
+    const state = storage(null);
+    for (let index = 0; index < 129; index += 1) {
+      await state.kv.set(`${CONTRIBUTOR_STATE_PREFIX}corrupt-${index}`, {
+        version: 2,
+        revision: index === 128 ? Number.MAX_SAFE_INTEGER : index + 1,
+        state: 'active',
+        record: { raw: 'not-a-contributor-record' },
+      });
+    }
+    const authority = createPreviewContributorAuthority({ kv: state.kv });
+    expect(await authority.handle('semantic.contributor.clear', {}, {
+      authority: { target: 'semantic:contributor/disable:options' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 1_000,
+    })).toMatchObject({ ok: true, outcomeKnown: true });
+    expect(await authority.arm()).toEqual({ enabled: false, generation: null });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const snapshots = state.listed(CONTRIBUTOR_STATE_PREFIX);
+    expect(Object.keys(snapshots)).toHaveLength(1);
+    expect(Object.values(snapshots)[0]).toMatchObject({ state: 'revoked', record: null });
+  });
+
+  test('revocation writes its durable marker before any recovery read or cleanup', async () => {
+    const state = storage(enabledRecord());
+    const operations: string[] = [];
+    const authority = createPreviewContributorAuthority({
       kv: {
-        get: async (key: string) => structuredClone(values.get(key) ?? null),
-        set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+        get: async (key: string) => { operations.push(`get:${key}`); return state.kv.get(key); },
+        set: async (key: string, value: any) => {
+          operations.push(`set:${key}`); await state.kv.set(key, value);
+        },
         delete: async (key: string) => {
-          if (key === CONTRIBUTOR_ACTIVE_CONSENT_KEY) await delayedDelete;
-          values.delete(key);
+          operations.push(`delete:${key}`); await state.kv.delete(key);
+        },
+        list: async (prefix: string) => {
+          operations.push(`list:${prefix}`); return state.kv.list(prefix);
         },
       },
     });
     expect(await authority.handle('semantic.contributor.clear', {}, {
       authority: { target: 'semantic:contributor/disable:options' },
-      signal: { aborted: false }, deadlineAt: Date.now() + 100,
-    })).toMatchObject({ ok: false, outcomeKnown: false });
+      signal: { aborted: false }, deadlineAt: Date.now() + 1_000,
+    })).toMatchObject({ ok: true, outcomeKnown: true });
+    expect(operations[0]).toStartWith(`set:${CONTRIBUTOR_STATE_PREFIX}`);
+  });
+
+  test('revocation repairs its marker above a durable revision after clock rollback', async () => {
+    const state = storage(null);
+    await state.kv.set(`${CONTRIBUTOR_STATE_PREFIX}future-active`, {
+      version: 2, revision: 5_000_000_000_000_000,
+      state: 'active', record: enabledRecord(),
+    });
+    const authority = createPreviewContributorAuthority({
+      kv: state.kv, now: () => 100,
+    });
+    expect(await authority.handle('semantic.contributor.clear', {}, {
+      authority: { target: 'semantic:contributor/disable:options' },
+      signal: { aborted: false }, deadlineAt: Date.now() + 1_000,
+    })).toMatchObject({ ok: true, outcomeKnown: true });
     expect(await authority.arm()).toEqual({ enabled: false, generation: null });
-    expect(await authority.appendPending(settlement('after-revoke-request')))
-      .toEqual({ ok: true, queued: false, reason: 'disabled' });
-    releaseDelete();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(await authority.arm()).toEqual({ enabled: false, generation: null });
+    const revisions = Object.values(state.listed(CONTRIBUTOR_STATE_PREFIX))
+      .map((snapshot: any) => snapshot.revision);
+    expect(Math.max(...revisions)).toBe(5_000_000_000_000_001);
   });
 
   test('terminal settlement awaits only the durable receipt when the host is hung', async () => {
@@ -309,15 +598,92 @@ describe('Preview Contributor Metrics private channel', () => {
       expect(result).toEqual({ ok: true, queued: true });
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(posted).toBe(2);
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
+      expect(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX)).toEqual({});
     } finally { live.restore(); }
+  });
+
+  test('a timed-out receipt append survives restart without losing or doubling settlement', async () => {
+    const state = storage(enabledRecord());
+    const sender = {};
+    const originalSet = state.kv.set;
+    let releaseLateReceipt: () => void = () => {};
+    const lateReceipt = new Promise<void>((resolve) => { releaseLateReceipt = resolve; });
+    let holdFirstReceipt = true;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_PENDING_RECEIPT_PREFIX) && holdFirstReceipt) {
+        holdFirstReceipt = false;
+        await lateReceipt;
+      }
+      await originalSet(key, value);
+    };
+    const beforeRestart = directRoutesFor(state, sender);
+    expect(await beforeRestart.recordWebSettlement(settlement('late-terminal')))
+      .toMatchObject({ ok: false, outcomeKnown: false });
+    const restarted = directRoutesFor(state, sender);
+    expect(await restarted.recordWebSettlement(settlement('late-terminal')))
+      .toEqual({ ok: true, queued: true });
+    releaseLateReceipt();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await restarted.drainPending()).toEqual({ ok: true, drained: 1 });
+    expect(Object.values(state.value().aggregate.rows)[0]).toMatchObject({ actorTurns: 1 });
+    expect(await restarted.pending()).toEqual([]);
+  });
+
+  test('a late failure write cannot resurrect a dropped poison receipt', async () => {
+    const state = storage(enabledRecord());
+    const authority = createPreviewContributorAuthority({
+      kv: state.kv, storageDeadlineMs: 5,
+    });
+    expect(await authority.appendPending(settlement('poison-race')))
+      .toEqual({ ok: true, queued: true });
+    const receipt = Object.values(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX))[0];
+    const originalSet = state.kv.set;
+    let releaseLateFailure: () => void = () => {};
+    const lateFailure = new Promise<void>((resolve) => { releaseLateFailure = resolve; });
+    let holdFirstFailure = true;
+    state.kv.set = async (key: string, value: any) => {
+      if (key.startsWith(CONTRIBUTOR_PENDING_RECEIPT_PREFIX) && value?.attempts === 1
+          && holdFirstFailure) {
+        holdFirstFailure = false;
+        await lateFailure;
+      }
+      await originalSet(key, value);
+    };
+    await expect(authority.notePendingFailure(receipt.operationToken))
+      .rejects.toThrow('contributor-storage-timeout');
+    expect(await authority.notePendingFailure(receipt.operationToken))
+      .toEqual({ found: true, dropped: false });
+    expect(await authority.notePendingFailure(receipt.operationToken))
+      .toEqual({ found: true, dropped: true });
+    releaseLateFailure();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(Object.keys(state.listed(CONTRIBUTOR_PENDING_DROP_PREFIX))).toHaveLength(1);
+    expect(await authority.pending()).toEqual([]);
+    expect(await authority.appendPending(settlement('healthy-after-poison')))
+      .toEqual({ ok: true, queued: true });
+    expect((await authority.pending()).map((item: any) => item.durationMs)).toEqual([42]);
+  });
+
+  test('pending receipts keep FIFO order when browser storage enumerates keys in reverse', async () => {
+    const state = storage(enabledRecord());
+    const authority = createPreviewContributorAuthority({ kv: state.kv, now: () => 100 });
+    expect(await authority.appendPending(settlement('fifo-first', { durationMs: 1 })))
+      .toMatchObject({ ok: true, queued: true });
+    expect(await authority.appendPending(settlement('fifo-second', { durationMs: 2 })))
+      .toMatchObject({ ok: true, queued: true });
+    const originalList = state.kv.list;
+    state.kv.list = async (prefix: string) => Object.fromEntries(
+      Object.entries(await originalList(prefix)).reverse(),
+    );
+    expect((await authority.pending()).map((item: any) => item.durationMs)).toEqual([1, 2]);
   });
 
   test('refuses a forged sender before opening a lease or reading storage', async () => {
     let reads = 0;
     const sender = {};
     const owner = createLiveRoutes({
-      kv: { get: async () => { reads += 1; }, set: async () => {}, delete: async () => {} },
+      kv: { get: async () => { reads += 1; }, set: async () => {}, delete: async () => {},
+        list: async () => { reads += 1; return {}; } },
       optionsUi: (candidate: any) => candidate === sender,
       sidepanelUi: () => false, homeUi: () => false,
       validateFeedback: async () => ({ ok: false }),
@@ -333,7 +699,8 @@ describe('Preview Contributor Metrics private channel', () => {
     let guarded = 0;
     let leased = 0;
     const owner = createLiveRoutes({
-      kv: { get: async () => null, set: async () => {}, delete: async () => {} },
+      kv: { get: async () => null, set: async () => {}, delete: async () => {},
+        list: async () => ({}) },
       optionsUi: () => false, sidepanelUi: () => false, homeUi: () => false,
       validateFeedback: async () => { guarded += 1; return { ok: true, messages: [] }; },
       offscreenUrl: 'chrome-extension://id/offscreen/offscreen.html',
@@ -345,7 +712,7 @@ describe('Preview Contributor Metrics private channel', () => {
     expect({ guarded, leased }).toEqual({ guarded: 0, leased: 0 });
   });
 
-  test('enables idempotently and commits revocation before cleanup', async () => {
+  test('explicit re-enable rotates consent and revocation commits before cleanup', async () => {
     const state = storage(null);
     const sender = {};
     const live = routesFor(state, sender);
@@ -355,24 +722,27 @@ describe('Preview Contributor Metrics private channel', () => {
       const generation = state.value().consent.generation;
       expect(await live.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
         .toMatchObject({ ok: true, status: { enabled: true } });
-      expect(state.value().consent.generation).toBe(generation);
+      expect(state.value().consent.generation).not.toBe(generation);
+      const activeGeneration = state.value().consent.generation;
       expect(await live.owner.recordWebSettlement(settlement('disable-pending', {
-        consentGeneration: generation,
+        consentGeneration: activeGeneration,
       }))).toEqual({ ok: true, queued: true });
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)?.receipts).toHaveLength(1);
+      expect(Object.keys(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX))).toHaveLength(1);
       expect(await live.routes['contributor/disable']({ type: 'contributor/disable' }, sender))
         .toMatchObject({ ok: true, status: { enabled: false, rowCount: 0 } });
       expect(state.value()).toBeNull();
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
+      expect(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX)).toEqual({});
     } finally { live.restore(); }
   });
 
   test('storage errors after a mutation request remain outcome-unknown', async () => {
     const authority = createPreviewContributorAuthority({
       kv: { get: async () => null, set: async () => { throw new Error('lost'); },
-        delete: async () => {} },
+        delete: async () => {}, list: async () => ({}) },
     });
-    expect(await authority.handle('semantic.contributor.enable', { expected: null }, {
+    expect(await authority.handle('semantic.contributor.enable', {
+      expected: null, value: enabledRecord('failed-consent'),
+    }, {
       authority: { target: 'semantic:contributor/enable:options' },
       signal: { aborted: false }, deadlineAt: Date.now() + 100,
     })).toMatchObject({ ok: false, outcomeKnown: false });
@@ -516,7 +886,7 @@ describe('Preview Contributor Metrics private channel', () => {
       expect(await live.owner.recordWebSettlement(settlement('raw-cohort', {
         providerCode: 999, modelFamilyCode: 999,
       }))).toMatchObject({ ok: false, code: 'contributor-pending-receipt-invalid' });
-      expect(state.read(CONTRIBUTOR_PENDING_RECEIPTS_KEY)).toBeNull();
+      expect(state.listed(CONTRIBUTOR_PENDING_RECEIPT_PREFIX)).toEqual({});
     } finally { live.restore(); }
   });
 
@@ -543,7 +913,9 @@ describe('Preview Contributor Metrics private channel', () => {
       port.postMessage({
         type: CONTRIBUTOR_CHANNEL_CALL, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
         channelId: offer.channelId, requestId: 'write-1',
-        operation: 'semantic.contributor.enable', payload: { expected: null },
+        operation: 'semantic.contributor.enable', payload: {
+          expected: null, value: enabledRecord('lost-channel-consent'),
+        },
       });
       port.onmessage = () => port.postMessage({
         type: CONTRIBUTOR_CHANNEL_RESULT, protocol: 999,
