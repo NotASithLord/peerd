@@ -31,19 +31,16 @@ export const KERNEL_PAGE_PROGRAM_ROUTE_NAMES = Object.freeze([
   'page-program/navigate', 'page-program/click', 'page-program/fill',
   'page-program/snapshot', 'page-program/read', 'page-program/read-state',
   'page-program/watch-changes', 'page-program/query-dom',
-  'page-program/view', 'page-program/fetch', 'page-program/read-document',
-  'page-program/read-result', 'page-program/site-client-read',
-  'page-program/site-client-write', 'page-program/site-capture',
-  'page-program/login',
+  'page-program/view', 'page-program/login',
 ]);
 
 export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze([
-  ...'pod/cancel-io pod/get-meta pod/git pod/web-fetch sw/web-fetch sw/web-fetch-abort export/artifact import/inspect import/apply apps/delete app/actor-chat app-code/observe app-code/act a2a/call actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
+  ...'pod/cancel-io pod/get-meta pod/git pod/web-fetch sw/web-fetch sw/web-fetch-abort export/artifact import/inspect import/apply apps/delete app/actor-chat app-code/observe app-code/act a2a/call actors/list actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
   ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
 ]);
 
 export const KERNEL_RELAY_ROUTE_NAMES = Object.freeze([
-  ...'a2a/call actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
+  ...'a2a/call actors/list actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
   ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
 ]);
 

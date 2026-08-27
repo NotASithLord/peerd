@@ -237,12 +237,6 @@ const PAGE_TOOL_ROUTES = Object.freeze({
   watch_changes: 'page-program/watch-changes',
   query_dom: 'page-program/query-dom',
   view: 'page-program/view',
-  fetch_url: 'page-program/fetch',
-  read_doc: 'page-program/read-document',
-  read_result: 'page-program/read-result',
-  site_client_read: 'page-program/site-client-read',
-  site_client_write: 'page-program/site-client-write',
-  site_capture: 'page-program/site-capture',
   login: 'page-program/login',
 });
 

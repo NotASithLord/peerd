@@ -16,7 +16,7 @@ import { confirmationSatisfies } from '../../../extension/peerd-runtime/lifecycl
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import { decideRecovery } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { fromOpenAiStream } from '../../../extension/peerd-provider/format/from-openai.js';
 
 const S = OPERATION_STATES;

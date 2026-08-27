@@ -34,6 +34,9 @@ describe('page program exact routes', () => {
       method: 'click',
       args: { route: 'page-program/navigate', tool: 'navigate' },
     })).toThrow(/target must be/);
+    expect(() => pageCallToRelay({
+      method: 'fetch', args: { url: 'https://example.com' },
+    })).toThrow(/no fixed authority route/);
   });
 });
 

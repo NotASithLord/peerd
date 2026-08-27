@@ -14,7 +14,7 @@
 export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
   /**
    * @param {string} code
-   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, signal?: AbortSignal, onExecutionDispatch?: () => void }} [opts]
+   * @param {{ timeoutMs?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, pageProgramSemanticToken?:string, workspaceSessionId?: string, signal?: AbortSignal, onExecutionDispatch?: () => void }} [opts]
    *   a2a: expose the `mesh` agent-to-agent client; actors: expose the `actors`
    *   delegation client (the script surface for chat or a granted spawned actor).
    *   caps: capability profile for the
@@ -29,7 +29,7 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
    *   worker can never name its own root).
    * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, usedApp?: boolean, actorDeliveryIds?: string[], usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<{ seq: number, method: string, to?: string, goal?: string, ok: boolean, ms: number, error?: string, settled?: boolean, actorFailed?: boolean, cancelled?: boolean }>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
    */
-  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch, workspaceSessionId, signal, onExecutionDispatch } = {}) => {
+  execHeadless: async (code, { timeoutMs, a2a, ownerSessionId, actors, ownerToolUseId, runId, caps, siteFetch, pageProgramSemanticToken, workspaceSessionId, signal, onExecutionDispatch } = {}) => {
     const wallMs = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs)
       ? Math.max(1, Math.floor(timeoutMs)) : 30_000;
     // Epoch time crosses the SW→offscreen realm boundary; performance.now()
@@ -111,6 +111,7 @@ export const makeOffscreenJsClient = ({ ensureOffscreen, sendMessage }) => ({
       ...(siteFetch ? { siteFetch, ownerSessionId } : {}),
       ...(caps ? { caps, ownerSessionId } : {}),
       ...(runId ? { runId } : {}),
+      ...(pageProgramSemanticToken ? { pageProgramSemanticToken } : {}),
       ...(workspaceSessionId ? { workspaceSessionId } : {}),
     };
     // This is the execution custody commit point. Mark it immediately before

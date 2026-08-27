@@ -21,6 +21,7 @@ import {
   createSiteClientStore,
   createSkillStore,
   decideNumericTabAuthority,
+  executePreparedToolCall,
   hasDurableSiteClientState,
   IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
   isAddressableBrowserTab,
@@ -51,9 +52,11 @@ import {
   makeWebActorRegistry,
   makeWebActorTabBindings,
   numericTabAuthorityRefusal,
+  prepareToolCall,
   resolveRuntimeCapabilities,
   retireStoppedRoamingWebActorDurably,
   retryClassForTool,
+  settleToolCall,
   SessionNotFoundError,
 } from '/peerd-runtime/kernel-turn-authority.js';
 import {
@@ -111,6 +114,7 @@ import {
 } from '/shared/web-actor-source-projection.js';
 import { providerEgressPolicy } from './provider-egress-manifest.js';
 import { createPageToolAuthority } from './page-tool-authority.js';
+import { PAGE_PROGRAM_SEMANTIC_TOOL_NAMES } from '/shared/page-program-authority.js';
 
 const originOf = (/** @type {string} */ value) => {
   try { return new URL(value).origin; }
@@ -129,11 +133,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     throw new TypeError('kernel-turn-live-config-invalid');
   }
   const {
-    ACTORS_ASK_DEFAULT_TIMEOUT_MS,
-    ACTORS_TRACE_ERROR_MAX_CHARS,
-    ACTORS_TRACE_TARGET_MAX_CHARS,
-    actorsCallToOp,
-    askOutcome,
     actorAllowedToolsFor,
     applyComposer,
     buildMintInjection,
@@ -142,7 +141,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     createSuggestionStore,
     describeLandingStop,
     digestCapture,
-    dispatchToolCall,
     DOC_TEXT_MAX_CHARS,
     DWEB_INBOUND_TOOL_NAMES,
     drainFetchTapInjected,
@@ -179,15 +177,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     parseSiteHandle,
     PERMISSION_MODES,
     pinActorCall,
-    prepareToolCall,
     prepareUserAttachmentsWithDocs,
     resolveManifestAllow,
     resolveSiteUrl,
     resolveWebActorSurface,
     restrictCtxCapabilities,
     safeWebActorSummaryOrigin,
-    settleToolCall,
-    shapeActorsResult,
     shapeMeshResult,
     skillRegistrySource,
     siteHandleFor,
@@ -1730,6 +1725,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       broadcastOp: post,
       isRelaySender: directActorHost?.isRelaySender ?? deps.isOffscreenSender,
       inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
+      pageProgramToolDescriptors: PAGE_PROGRAM_SEMANTIC_TOOL_NAMES
+        .flatMap((name) => toolDescriptorsByName.get(name) ?? []),
       spendRefusalFor: async (/** @type {string} */ actorSessionId) => {
         const spendLimit = deps.settingsStore.get().spendLimitUsd;
         const over = (/** @type {any} */ record) => record
@@ -2028,7 +2025,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
 
     const pageProgramRoute = (/** @type {{
      * toolName:string,method:string,tabMode:'adopt'|'owned'|'free',
-     * riskClass:'read'|'resource',invoke?:(authority:any)=>Promise<any>|any,
+     * riskClass:'read'|'resource',invoke:(input:{call:any,ctx:any,signal?:AbortSignal})=>Promise<any>|any,
      * }} */ {
       toolName, method, tabMode, riskClass, invoke,
     }) => async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
@@ -2087,24 +2084,16 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       };
       let result;
       try {
-        if (typeof invoke === 'function') {
-          // why: the route and handler are exact, while the established policy
-          // shell still owns per-operation gates, confirmation, hooks, audit,
-          // lifecycle receipts and child-navigation attribution. The custom
-          // executor avoids re-registering controller-owned implementations in
-          // the SW registry; post-hook arguments are the only arguments used.
-          result = await dispatchToolCall(call, ctx, {
-            execute: (prepared) => invoke(createPageToolAuthority({
-              call: { ...call, args: prepared.args },
-              ctx: prepared.execCtx,
-              signal: signal ?? undefined,
-            })),
-          });
-        } else {
-          // why: these fixed routes cover only still-legacy non-page domains.
-          // The request cannot choose a tool name, and each route disappears
-          // with its owning domain checkpoint.
-          result = await dispatchToolCall(call, ctx);
+        const descriptor = toolDescriptorsByName.get(toolName);
+        const prepared = /** @type {any} */ (await prepareToolCall(call, ctx, descriptor));
+        if (prepared?.prepared !== true) result = prepared;
+        else {
+          const execution = await executePreparedToolCall(prepared, (request) => invoke({
+            call: { ...call, args: request.args },
+            ctx: request.execCtx,
+            signal: signal ?? undefined,
+          }));
+          result = await settleToolCall(prepared, execution);
         }
       } catch (cause) {
         const replayable = riskClass === 'read';
@@ -2169,9 +2158,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     };
     const actorsRoutes = makeActorsRoutes({
       sessions: shared.sessions, uiPorts: shared.uiPorts, buildToolContext,
-      dispatchToolCall, actorMessaging, scriptRuns, actorsCallToOp,
-      shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
-      ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
+      actorMessaging, scriptRuns,
       resolveManifestAllow, isOffscreenSender: deps.isOffscreenSender,
     });
     const appActorChat = makeAppActorChatHandler({
@@ -2496,64 +2483,47 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       },
     };
     const relayRoutes = {
+      'actors/list': actorsRoutes['actors/list'],
       'actors/call': actorsRoutes['actors/call'],
       'page-program/navigate': pageProgramRoute({
         toolName: 'navigate', method: 'goto', tabMode: 'adopt', riskClass: 'resource',
-        invoke: (authority) => authority.navigateOwnedTab(),
+        invoke: (input) => createPageToolAuthority(input).navigateOwnedTab(),
       }),
       'page-program/click': pageProgramRoute({
         toolName: 'click', method: 'click', tabMode: 'owned', riskClass: 'resource',
-        invoke: (authority) => authority.clickOwnedTarget(),
+        invoke: (input) => createPageToolAuthority(input).clickOwnedTarget(),
       }),
       'page-program/fill': pageProgramRoute({
         toolName: 'type', method: 'fill', tabMode: 'owned', riskClass: 'resource',
-        invoke: (authority) => authority.fillOwnedTarget(),
+        invoke: (input) => createPageToolAuthority(input).fillOwnedTarget(),
       }),
       'page-program/snapshot': pageProgramRoute({
         toolName: 'snapshot', method: 'snapshot', tabMode: 'owned', riskClass: 'read',
-        invoke: (authority) => authority.captureOwnedAccessibilityTree(),
+        invoke: (input) => createPageToolAuthority(input).captureOwnedAccessibilityTree(),
       }),
       'page-program/read': pageProgramRoute({
         toolName: 'read_page', method: 'content', tabMode: 'owned', riskClass: 'read',
-        invoke: (authority) => authority.readOwnedPage(),
+        invoke: (input) => createPageToolAuthority(input).readOwnedPage(),
       }),
       'page-program/read-state': pageProgramRoute({
         toolName: 'read_state', method: 'readState', tabMode: 'owned', riskClass: 'read',
-        invoke: (authority) => authority.readOwnedFrameworkState(),
+        invoke: (input) => createPageToolAuthority(input).readOwnedFrameworkState(),
       }),
       'page-program/watch-changes': pageProgramRoute({
         toolName: 'watch_changes', method: 'watchChanges', tabMode: 'owned', riskClass: 'read',
-        invoke: (authority) => authority.drainOwnedDomChanges(),
+        invoke: (input) => createPageToolAuthority(input).drainOwnedDomChanges(),
       }),
       'page-program/query-dom': pageProgramRoute({
         toolName: 'query_dom', method: 'query', tabMode: 'owned', riskClass: 'read',
-        invoke: (authority) => authority.queryOwnedDom(),
+        invoke: (input) => createPageToolAuthority(input).queryOwnedDom(),
       }),
       'page-program/view': pageProgramRoute({
         toolName: 'view', method: 'view', tabMode: 'owned', riskClass: 'read',
-        invoke: (authority) => authority.captureOwnedTabPixels(),
+        invoke: (input) => createPageToolAuthority(input).captureOwnedTabPixels(),
       }),
       'page-program/login': pageProgramRoute({
         toolName: 'login', method: 'login', tabMode: 'owned', riskClass: 'resource',
-        invoke: (authority) => authority.performConfirmedOwnedLogin(),
-      }),
-      'page-program/fetch': pageProgramRoute({
-        toolName: 'fetch_url', method: 'fetch', tabMode: 'free', riskClass: 'read',
-      }),
-      'page-program/read-document': pageProgramRoute({
-        toolName: 'read_doc', method: 'readDocument', tabMode: 'free', riskClass: 'read',
-      }),
-      'page-program/read-result': pageProgramRoute({
-        toolName: 'read_result', method: 'readResult', tabMode: 'free', riskClass: 'read',
-      }),
-      'page-program/site-client-read': pageProgramRoute({
-        toolName: 'site_client_read', method: 'readSiteClient', tabMode: 'free', riskClass: 'read',
-      }),
-      'page-program/site-client-write': pageProgramRoute({
-        toolName: 'site_client_write', method: 'writeSiteClient', tabMode: 'free', riskClass: 'resource',
-      }),
-      'page-program/site-capture': pageProgramRoute({
-        toolName: 'site_capture', method: 'captureSite', tabMode: 'owned', riskClass: 'read',
+        invoke: (input) => createPageToolAuthority(input).performConfirmedOwnedLogin(),
       }),
       'site-fetch/call': async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
         if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'site_fetch_unauthorized_relay' };
@@ -2680,7 +2650,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       'a2a/call': a2aCall,
     };
     const relays = {
-      scriptRuns, validateGeneration, retireStale, dispatchToolCall,
+      scriptRuns, validateGeneration, retireStale,
       observeAppRuntime, actAppRuntime, appActorChat, engineTrackersHydrated, engineReady,
       relayRoutes, engineRoutes, eventOwners,
       dwebInbound: dwebAgentOwner.onMessage,
@@ -2884,7 +2854,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     markDwebEngaged: (/** @type {string} */ sessionId) => {
       if (sessionId) dwebEngagedSessions.add(sessionId);
     },
-    dispatchToolCall, prepareToolCall, settleToolCall,
+    prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     postChatNote: deps.postChatNote,

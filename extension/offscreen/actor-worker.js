@@ -63,6 +63,30 @@ const modelPending = new Map();
 const toolPending = new Map();
 const abort = new AbortController();
 let hasRun = false;
+/** @type {((call:any,options?:{pageProgramParentExecutionId?:string})=>Promise<any>)|null} */
+let executeOwnedTool = null;
+
+const pageProgramRequest = (/** @type {any} */ message) => {
+  if (message.type === 'page-program-fetch-request') {
+    return { response: 'page-program-fetch-response', tool: 'fetch_url' };
+  }
+  if (message.type === 'page-program-read-document-request') {
+    return { response: 'page-program-read-document-response', tool: 'read_doc' };
+  }
+  if (message.type === 'page-program-read-result-request') {
+    return { response: 'page-program-read-result-response', tool: 'read_result' };
+  }
+  if (message.type === 'page-program-site-client-read-request') {
+    return { response: 'page-program-site-client-read-response', tool: 'site_client_read' };
+  }
+  if (message.type === 'page-program-site-client-write-request') {
+    return { response: 'page-program-site-client-write-response', tool: 'site_client_write' };
+  }
+  if (message.type === 'page-program-site-capture-request') {
+    return { response: 'page-program-site-capture-response', tool: 'site_capture' };
+  }
+  return null;
+};
 
 self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
   const m = /** @type {any} */ (ev.data);
@@ -203,6 +227,23 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     toolPending.delete(m.rid);
     return;
   }
+  const nestedPageProgram = pageProgramRequest(m);
+  if (nestedPageProgram) {
+    const result = executeOwnedTool
+      ? await executeOwnedTool({
+          id: `${runId}:${String(m.rid ?? '')}`,
+          name: nestedPageProgram.tool,
+          args: m.args ?? {},
+        }, { pageProgramParentExecutionId: m.parentExecutionId })
+      : {
+          ok: false, error: 'page program semantic owner is not ready',
+          outcomeKnown: true,
+        };
+    self.postMessage({
+      type: nestedPageProgram.response, rid: m.rid, result,
+    });
+    return;
+  }
   if (m.type === 'abort') {
     abort.abort();
     // Unwind a worker BLOCKED awaiting the SW (model OR tool) so it doesn't park
@@ -313,7 +354,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       });
       throw error;
     };
-    const executeActorTool = async (/** @type {any} */ call) => {
+    const executeActorTool = async (
+      /** @type {any} */ call,
+      /** @type {{pageProgramParentExecutionId?:string}} */ options = {},
+    ) => {
       const authorityClass = controllerAuthorityClassForTool(call?.name);
       if (authorityClass === null) {
         return {
@@ -322,7 +366,12 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         };
       }
       const prepared = await actorToolRequest(
-        'actor-tool-prepare-request', { call, authorityClass },
+        'actor-tool-prepare-request', {
+          call, authorityClass,
+          ...(options.pageProgramParentExecutionId
+            ? { pageProgramParentExecutionId: options.pageProgramParentExecutionId }
+            : {}),
+        },
       );
       if (prepared?.ok !== true) {
         return {
@@ -800,6 +849,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
       };
     };
+    executeOwnedTool = executeActorTool;
     try {
       // Seed the actor's PRIOR history — a bound actor is stateful across turns.
       const sessions = makeInMemorySessions({

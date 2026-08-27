@@ -40,10 +40,8 @@ export { formatTodoBlock } from './todo/core.js';
 export { makePrewalkController } from './loop/prewalk-controller.js';
 export { makeToolsCommand } from './tools/manifest-command.js';
 export {
-  dispatchToolCall,
-  prepareToolCall,
-  settleToolCall,
-} from './tools/dispatcher.js';
+  executePreparedToolCall, prepareToolCall, settleToolCall,
+} from './tool-authority.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export { makeLifecycleBoot } from './lifecycle/boot.js';
 export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch-tracking.js';

@@ -25,6 +25,26 @@
 // worker bridge, the job-runner relay, the actors/call route) lives outside.
 
 import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
+import {
+  ACTORS_ADDRESS_MAX_CHARS,
+  ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  ACTORS_ASK_MAX_TIMEOUT_MS,
+  ACTORS_GOAL_MAX_CHARS,
+  ACTORS_RUN_MAX_OPS,
+  ACTORS_TRACE_ERROR_MAX_CHARS,
+  ACTORS_TRACE_TARGET_MAX_CHARS,
+  settleActorCodeCall,
+} from '../../shared/actor-code-authority.js';
+
+export {
+  ACTORS_ADDRESS_MAX_CHARS,
+  ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  ACTORS_ASK_MAX_TIMEOUT_MS,
+  ACTORS_GOAL_MAX_CHARS,
+  ACTORS_RUN_MAX_OPS,
+  ACTORS_TRACE_ERROR_MAX_CHARS,
+  ACTORS_TRACE_TARGET_MAX_CHARS,
+} from '../../shared/actor-code-authority.js';
 
 /** A failed actors op REJECTS like a thrown call — so `await actors.call(...)` throws. */
 export class ActorsApiError extends Error {
@@ -54,18 +74,11 @@ const actorAddress = (v, what) => {
 // actor turn fail as an ask timeout the script can handle, not a mid-run
 // worker termination — same reasoning as a2a-run's timer note). Every layer
 // DERIVES from the ask ceiling: bump it and the tower moves together.
-export const ACTORS_ASK_MAX_TIMEOUT_MS = 240_000;
-export const ACTORS_ASK_DEFAULT_TIMEOUT_MS = 120_000;
 // Worker-controlled strings cross two heaps and are mirrored for crash
 // recovery. Reject them at the shared translation edge before any trim/regex
 // work, then retain only smaller bounded trace projections in each host.
-export const ACTORS_ADDRESS_MAX_CHARS = 2_048;
-export const ACTORS_GOAL_MAX_CHARS = 32_768;
-export const ACTORS_TRACE_TARGET_MAX_CHARS = 256;
-export const ACTORS_TRACE_ERROR_MAX_CHARS = 4_096;
 // One run may compose many calls, but it is not an unbounded actor-message
 // pump. Shared by the SW admission meter and the offscreen trace ring.
-export const ACTORS_RUN_MAX_OPS = 50;
 // The worker-side bridge guard — sits ABOVE the ask cap so the SW's timeout
 // (a handleable rejection) always fires before the bridge gives up.
 export const ACTORS_BRIDGE_GUARD_MS = ACTORS_ASK_MAX_TIMEOUT_MS + 10_000;
@@ -182,12 +195,7 @@ export const shapeActorsResult = (method, opResult) => {
  * @returns {{ ok: true, reply: string | null, failed: boolean } | { ok: false, error: string }}
  */
 export const askOutcome = (r, { timedOut, aborted, timeoutMs, to }) => {
-  if (timedOut) return { ok: false, error: `actors.call: timed out after ${timeoutMs}ms awaiting '${to}'` };
-  if (aborted) return { ok: false, error: `actors.call: aborted (Stop) while awaiting '${to}'` };
-  if (r.ok) return { ok: true, reply: r.content ?? null, failed: false };
-  const err = String(r.error ?? 'ask failed');
-  if (err.startsWith('message_actor:')) return { ok: false, error: err };
-  return { ok: true, reply: err, failed: true };
+  return settleActorCodeCall(r, { timedOut, aborted, timeoutMs, to });
 };
 
 // ── the ops TRACE — the observability half of this surface ────────────────

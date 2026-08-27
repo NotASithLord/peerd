@@ -285,7 +285,7 @@ export {
   getToolDescriptor,
   listToolDescriptors,
 } from './tools/metadata-registry.js';
-export { dispatchToolCall } from './tools/dispatcher.js';
+export { dispatchToolCall } from './tools/local-tool-dispatcher.js';
 export { GATES } from './tools/gates.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export {

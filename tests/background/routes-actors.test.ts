@@ -6,10 +6,11 @@
 import { describe, test, expect } from 'bun:test';
 import { makeActorsRoutes } from '../../extension/background/routes/actors.js';
 import {
-  actorsCallToOp, shapeActorsResult, askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  actorsCallToOp, shapeActorsResult,
   ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS,
   ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
 } from '../../extension/peerd-runtime/actor/actors-api.js';
+import { shapeActorRoster } from '../../extension/peerd-runtime/tools/defs/actor-list.js';
 import { resolveManifestAllow } from '../../extension/peerd-runtime/tools/manifests.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 
@@ -47,14 +48,19 @@ const makeHarness = ({
   const broadcasts: any[] = [];
   const mirrored: any[] = [];
   const runController = new AbortController();
-  const route = makeActorsRoutes({
+  const routes = makeActorsRoutes({
     sessions: { get: getOwner ?? (async (id: string) => owner?.sessionId === id ? owner : null) },
     uiPorts: { broadcast: (event: any) => broadcasts.push(event) },
-    buildToolContext: buildToolContext ?? (async (args: any) => ({ builtFor: args })),
-    dispatchToolCall: async (call: any, ctx: any) => {
-      calls.push({ kind: 'dispatch', call, ctx });
-      return { ok: true, content: 'ROSTER', structured: { refs: [{ ref: 'vm-1', type: 'webvm' }] } };
-    },
+    buildToolContext: buildToolContext ?? (async (args: any) => {
+      const ctx = {
+        builtFor: args,
+        vmRegistry: { snapshot: async () => ({ vms: [{ id: 'vm-1', name: 'VM' }] }) },
+        vmTabTracker: { getTabId: () => 7 },
+        audit: async () => {},
+      };
+      calls.push({ kind: 'roster', ctx });
+      return ctx;
+    }),
     actorMessaging: {
       messageActor: async (req: any) => {
         calls.push({ kind: 'message', req });
@@ -73,19 +79,36 @@ const makeHarness = ({
         else mirrored.push(op);
       },
     },
-    actorsCallToOp,
-    shapeActorsResult,
-    askOutcome,
-    ACTORS_ASK_DEFAULT_TIMEOUT_MS,
-    ACTORS_TRACE_TARGET_MAX_CHARS,
-    ACTORS_TRACE_ERROR_MAX_CHARS,
     resolveManifestAllow,
     isOffscreenSender: (sender: unknown) => sender === OFFSCREEN,
-  })['actors/call'];
-  const callFrom = (sender: unknown, method: string, args: any = {}) => route({
-    method, args, ownerSessionId: owner?.sessionId ?? 'missing',
-    ownerToolUseId: 'tu-1', runId: 'run-1', seq: 1,
-  }, sender);
+  });
+  const callFrom = async (sender: unknown, method: string, args: any = {}) => {
+    let translated;
+    try { translated = actorsCallToOp({ method, args }); }
+    catch {
+      // Send malformed worker bytes through the SW wall to prove it repeats
+      // validation independently of the sealed host.
+      translated = method === 'list'
+        ? { op: 'list', args: {} }
+        : { op: 'call', args: {
+          to: args.address ?? args.to, goal: args.message ?? args.goal,
+          timeoutMs: args.timeoutMs, oneShot: args.oneShot,
+        } };
+    }
+    const response: any = await (routes as any)[translated.op === 'list' ? 'actors/list' : 'actors/call']({
+      args: translated.args, ownerSessionId: owner?.sessionId ?? 'missing',
+      ownerToolUseId: 'tu-1', runId: 'run-1', seq: 1,
+    }, sender);
+    if (response?.ok !== true) return response;
+    if (translated.op === 'list') {
+      const shaped = shapeActorRoster(response.roster);
+      return { ok: true, value: shapeActorsResult(method, {
+        ok: true, refs: shaped.structured.refs,
+      }) };
+    }
+    const { reply, failed, ...custody } = response;
+    return { ...custody, value: shapeActorsResult(method, { ok: true, reply, failed }) };
+  };
   const call = (method: string, args: any = {}) => callFrom(OFFSCREEN, method, args);
   return { call, callFrom, calls, broadcasts, mirrored, runController };
 };
@@ -270,18 +293,24 @@ describe('actors/call — per-operation authority', () => {
         grantedTools: ['script', 'message_actor', 'actor_list'],
       },
     });
-    expect(await allowed.call('list')).toEqual({ ok: true, value: { refs: [{ ref: 'vm-1', type: 'webvm' }] } });
-    expect(allowed.calls[0].call.name).toBe('actor_list');
-    expect(allowed.calls[0].ctx.abortSignal).toBe(allowed.runController.signal);
+    expect(await allowed.call('list')).toEqual({ ok: true, value: { refs: [{
+      ref: 'vm-1', type: 'webvm', name: 'VM', live: true, current: false, detail: '',
+    }] } });
+    expect(allowed.calls[0].kind).toBe('roster');
+    expect(allowed.calls[0].ctx.builtFor.abortSignal).toBe(allowed.runController.signal);
   });
 
   test('Stop during deferred roster context construction prevents dispatch', async () => {
     let finishContext: (ctx: any) => void = () => {};
+    let contextRequested = false;
     const h = makeHarness({
-      buildToolContext: () => new Promise((resolve) => { finishContext = resolve; }),
+      buildToolContext: () => new Promise((resolve) => {
+        contextRequested = true;
+        finishContext = resolve;
+      }),
     });
     const pending = h.call('list');
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 10 && !contextRequested; attempt += 1) await Promise.resolve();
     h.runController.abort();
     finishContext({ built: true });
     expect(await pending).toEqual({

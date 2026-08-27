@@ -23,6 +23,7 @@ const KERNEL_ROUTE_OVERRIDES = new Set([
   'audit/voice-fetch',
   'a2a/call',
   'actors/call',
+  'actors/list',
   'app/actor-chat',
   'app-code/observe',
   'app-code/act',

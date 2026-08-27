@@ -15,7 +15,7 @@
 //      events, so a user can see WHY they were asked
 
 import { describe, test, expect, afterEach } from 'bun:test';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
 
 const ISSUE = 'https://github.com/acme/widget/issues/7';

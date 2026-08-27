@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  dispatchToolCall,
   executePreparedToolCall,
   prepareToolCall,
   settleToolCall,
 } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import {
   clearTools,
   getTool,
@@ -60,6 +60,7 @@ describe('dispatcher phases', () => {
     const prepared: any = await prepareToolCall(
       { id: 'call-1', name: 'phase_tool', args: {} } as any,
       ctx,
+      getMetadataToolDescriptor('phase_tool'),
     );
     expect(prepared.prepared).toBe(true);
     expect(prepared.tool).not.toHaveProperty('execute');
@@ -96,6 +97,7 @@ describe('dispatcher phases', () => {
           return { ok: true };
         },
       }) as any,
+      getMetadataToolDescriptor('click'),
     );
     const execution = await executePreparedToolCall(prepared, async (request) => {
       events.push('execute');

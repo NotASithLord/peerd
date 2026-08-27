@@ -13,7 +13,6 @@
 // the same DI / functional-core / imperative-shell pattern we use
 // everywhere else.
 
-import { getTool, getToolDescriptor } from './registry.js';
 import { GATES } from './gates.js';
 import {
   AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE,
@@ -306,17 +305,16 @@ const liveTabUrl = async (ctx) => {
   }
 };
 
-/** @param {DispatchContext} ctx */
-const withToolMetadata = (ctx) => ({
+/** @param {DispatchContext} ctx @param {ToolDescriptor} tool */
+const withToolMetadata = (ctx, tool) => ({
   ...ctx,
   /** @param {string} name */
   getToolMeta: (name) => {
-    const descriptor = getToolDescriptor(name);
-    return descriptor && {
-      sideEffect: descriptor.sideEffect,
-      primitive: descriptor.primitive,
-      origins: descriptor.origins,
-    };
+    return name === tool.name ? {
+      sideEffect: tool.sideEffect,
+      primitive: tool.primitive,
+      origins: tool.origins,
+    } : undefined;
   },
 });
 
@@ -378,7 +376,7 @@ const withToolMetadata = (ctx) => ({
  * @returns {Promise<ToolResult | Record<string, any>>}
  */
 export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
-  const tool = descriptor?.name === call.name ? descriptor : getToolDescriptor(call.name);
+  const tool = descriptor?.name === call.name ? descriptor : null;
   if (!tool) {
     return {
       ok: false,
@@ -678,7 +676,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   // the egress allowlist via ctx augmentation so the default egress hook
   // can reason about a call's footprint without the dispatcher special-
   // casing it.
-  const hookCtx = withToolMetadata(ctx);
+  const hookCtx = withToolMetadata(ctx, tool);
   const pre = await runPreToolUse({ hooks, toolName: call.name, args, ctx: hookCtx });
   hookOutcomes.push(...pre.outcomes);
   if (!pre.allowed) {
@@ -910,22 +908,6 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
 };
 
 /** @param {Record<string, any>} prepared */
-const executeInline = (prepared) => {
-  const implementation = getTool(prepared.tool.name);
-  if (!implementation || getToolDescriptor(prepared.tool.name) !== prepared.tool) {
-    return {
-      ok: false,
-      error: `tool_implementation_unavailable:${prepared.tool.name}`,
-      code: 'tool-implementation-unavailable',
-      outcomeKnown: true,
-      outcomeKind: /** @type {const} */ ('pre-effect-failure'),
-      retryable: true,
-    };
-  }
-  return implementation.execute(prepared.args, prepared.execCtx);
-};
-
-/** @param {Record<string, any>} prepared */
 const withExecutionContext = (prepared) => {
   const { call, ctx } = prepared;
   const executeConfirm = /** @type {((prompt: Record<string, any>, signal?: AbortSignal) => Promise<import('/shared/tool-types.js').ConfirmAnswer>) | undefined} */ (
@@ -955,7 +937,17 @@ const withExecutionContext = (prepared) => {
  * @param {Record<string, any>} prepared
  * @param {(prepared:Record<string, any>)=>Promise<any>|any} [execute]
  */
-export const executePreparedToolCall = async (prepared, execute = executeInline) => {
+export const executePreparedToolCall = async (prepared, execute = undefined) => {
+  if (typeof execute !== 'function') return {
+    result: {
+      ok: false,
+      error: `tool_implementation_unavailable:${prepared.tool.name}`,
+      code: 'tool-implementation-unavailable',
+      outcomeKnown: true,
+      outcomeKind: /** @type {const} */ ('pre-effect-failure'),
+      retryable: true,
+    },
+  };
   if (prepared.preExecutionFailed) return { error: prepared.preExecutionError };
   if (prepared.preExecutionResult) return { result: prepared.preExecutionResult };
   try { return { result: await execute(withExecutionContext(prepared)) }; }
@@ -973,7 +965,7 @@ export const settleToolCall = async (prepared, execution) => {
     tracking, activityTabId, start, childPolicyEligible, childCapable,
     browserAsyncPolicyNotices,
   } = prepared;
-  const hookCtx = withToolMetadata(ctx);
+  const hookCtx = withToolMetadata(ctx, tool);
   const activity = tool.primitive === 'tab' ? ctx.onToolActivity : null;
   const consumeBrowserChildPolicyNotice = typeof ctx.consumeBrowserChildPolicyNotice === 'function'
     ? ctx.consumeBrowserChildPolicyNotice
@@ -1288,17 +1280,4 @@ export const settleToolCall = async (prepared, execution) => {
     }
     return failedResult;
   }
-};
-
-/**
- * @param {ToolCall} call
- * @param {DispatchContext} ctx
- * @param {{execute?:(prepared:Record<string, any>)=>Promise<any>|any}} [options]
- * @returns {Promise<ToolResult>}
- */
-export const dispatchToolCall = async (call, ctx, options = {}) => {
-  const prepared = /** @type {any} */ (await prepareToolCall(call, ctx));
-  if (prepared?.prepared !== true) return /** @type {ToolResult} */ (prepared);
-  const execution = await executePreparedToolCall(prepared, options.execute);
-  return settleToolCall(prepared, execution);
 };

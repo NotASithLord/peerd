@@ -26,6 +26,9 @@ import { bindEditingToolAuthority } from './editing-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
+import {
+  isPageProgramSemanticTool,
+} from '/shared/page-program-authority.js';
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -101,6 +104,8 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  *   the lane outright.
  * @param {readonly string[]} [deps.inboundDwebToolNames] positive inbound grant,
  *   supplied from the runtime capability manifest; omission fails closed.
+ * @param {readonly object[]} [deps.pageProgramToolDescriptors] authority-only
+ *   policy projections for the fixed page-code semantic helpers.
  * @param {number} [deps.maxModelRelaysPerRun]
  * @param {number} [deps.maxToolRelaysPerRun]
  * @param {number} [deps.maxLoopEventsPerRun]
@@ -116,6 +121,7 @@ export const makeOffscreenActorClient = ({
   spendRefusalFor = undefined,
   isRelaySender, isOffscreenSender,
   inboundDwebToolNames = [],
+  pageProgramToolDescriptors = [],
   maxModelRelaysPerRun = 100,
   maxToolRelaysPerRun = 128,
   maxLoopEventsPerRun = 256,
@@ -131,7 +137,7 @@ export const makeOffscreenActorClient = ({
     ? Math.floor(maxLoopEventsPerRun) : 256;
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> }>} Firefox relay grants:
+   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, pageProgramToolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> }>} Firefox relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: Firefox binds
@@ -217,6 +223,9 @@ export const makeOffscreenActorClient = ({
       modelActive: false, modelStreamId: null, contextRead: false,
       actorExecutions: new Map(),
       toolDescriptors: new Map((tools ?? []).map((tool) => [tool?.name, tool])),
+      pageProgramToolDescriptors: new Map(pageProgramToolDescriptors
+        .filter((tool) => isPageProgramSemanticTool(/** @type {any} */ (tool)?.name))
+        .map((tool) => [/** @type {any} */ (tool).name, tool])),
       ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
         ? { actorSurface: job.actorSurface }
         : {}),
@@ -307,7 +316,7 @@ export const makeOffscreenActorClient = ({
    * token. Every route treats a missing or retired grant as a hard refusal.
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> } | null}
+   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, pageProgramToolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> } | null}
    */
   const grantFor = (msg, sender, boundGrant = null) => {
     if (boundGrant) return boundGrant;
@@ -318,7 +327,11 @@ export const makeOffscreenActorClient = ({
   };
 
   /** Build the exact live actor context from SW-owned run and session custody. */
-  const contextForTool = async (/** @type {any} */ grant, /** @type {any} */ call) => {
+  const contextForTool = async (
+    /** @type {any} */ grant,
+    /** @type {any} */ call,
+    /** @type {{pageProgram?:boolean}} */ options = {},
+  ) => {
     const { actorSessionId } = grant;
     if (grant.inbound && (typeof call?.name !== 'string'
         || !grant.allowedTools?.has(call.name))) {
@@ -370,7 +383,9 @@ export const makeOffscreenActorClient = ({
       actorInstanceId: rec.instanceId, actorType: rec.actorType, actorBacking: rec.backing,
       lifecycleTurnId: grant.runId,
       lifecycleUserInitiated: !grant.inbound,
-      ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
+      ...(options.pageProgram === true
+        ? { actorSurface: 'tools' }
+        : grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
       ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
     });
     if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
@@ -463,12 +478,16 @@ export const makeOffscreenActorClient = ({
   const pageEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
+    /** @type {string[]} */ fields = [],
   ) => {
-    const entry = domainEntry(grant, msg, 'page', []);
+    const entry = domainEntry(grant, msg, 'page', fields);
     if (!entry) return null;
     bindPageToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
+      ...(typeof msg.pageProgramSemanticToken === 'string'
+        ? { pageProgramSemanticToken: msg.pageProgramSemanticToken }
+        : {}),
     });
     return entry;
   };
@@ -844,10 +863,20 @@ export const makeOffscreenActorClient = ({
       const grant = grantFor(msg, sender, boundGrant);
       const call = msg.call;
       const domain = msg.authorityClass;
-      if (!grant || !exactKeys(msg, ['call', 'authorityClass'])
+      const pageProgramParentExecutionId = msg.pageProgramParentExecutionId;
+      const nestedPageProgram = typeof pageProgramParentExecutionId === 'string'
+        && pageProgramParentExecutionId.length > 0;
+      const parent = nestedPageProgram
+        ? grant?.actorExecutions.get(pageProgramParentExecutionId) : null;
+      if (!grant || !exactKeys(
+        msg, ['call', 'authorityClass'], ['relayToken', 'pageProgramParentExecutionId'],
+      )
           || !controllerAuthorityClassAllowed(domain)
           || typeof prepareToolCall !== 'function'
-          || typeof settleToolCall !== 'function') {
+          || typeof settleToolCall !== 'function'
+          || (nestedPageProgram && (!parent || parent.open !== true
+            || parent.toolName !== 'page_code' || parent.authorityClass !== 'page'
+            || !isPageProgramSemanticTool(call?.name)))) {
         return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
       }
       if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
@@ -856,10 +885,18 @@ export const makeOffscreenActorClient = ({
         code: 'actor_tool_relay_limit', outcomeKnown: true, performed: false,
       };
       grant.toolRelays += 1;
-      const admittedContext = await contextForTool(grant, call);
+      const admittedContext = await contextForTool(grant, call, {
+        pageProgram: nestedPageProgram,
+      });
       if (admittedContext.ok !== true) return admittedContext;
+      const descriptor = nestedPageProgram
+        ? grant.pageProgramToolDescriptors.get(call?.name)
+        : grant.toolDescriptors.get(call?.name);
+      if (nestedPageProgram && !descriptor) {
+        return { ok: false, error: 'actor/tool-prepare: authority policy is unavailable' };
+      }
       const prepared = await prepareToolCall(
-        call, admittedContext.ctx, grant.toolDescriptors.get(call?.name),
+        call, admittedContext.ctx, descriptor,
       );
       if (prepared?.prepared !== true) return { ok: true, mode: 'result', result: prepared };
       const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[domain];
@@ -1840,8 +1877,14 @@ export const makeOffscreenActorClient = ({
         entry.domainState.authority.performConfirmedOwnedLogin());
     },
     'page/run-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
-      if (!entry) return { ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true };
+      const entry = pageEntry(
+        grantFor(msg, sender, boundGrant), msg, ['pageProgramSemanticToken'],
+      );
+      if (!entry || typeof msg.pageProgramSemanticToken !== 'string'
+          || msg.pageProgramSemanticToken.length < 8
+          || msg.pageProgramSemanticToken.length > 128) {
+        return { ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true };
+      }
       return runDomainEffect(entry, 'page/run-program', 'resource', () =>
         entry.domainState.authority.runOwnedPageProgram());
     },

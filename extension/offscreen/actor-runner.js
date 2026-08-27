@@ -10,6 +10,11 @@ import {
   AGENT_PROGRAM,
   describeExecution,
 } from '/shared/execution-protocol.js';
+import {
+  registerPageProgramSemanticOwner,
+  releasePageProgramSemanticOwner,
+  settlePageProgramSemanticResponse,
+} from './page-program-semantic-owner.js';
 
 const MAX_CONCURRENT = 4;
 let active = 0;
@@ -160,6 +165,8 @@ export const runActor = async (job, {
       let pendingToolRelays = 0;
       let pendingModelRelays = 0;
       let relayedLoopEvents = 0;
+      /** @type {string|null} */
+      let pageProgramSemanticToken = null;
       let relayedModelUnknown = false;
       /** @type {string | null} */
       let relayedModelFailure = null;
@@ -176,6 +183,10 @@ export const runActor = async (job, {
         clearTimeout(startupTimer);
         if (budgetTimer) clearTimeout(budgetTimer);
         if (relayDrainTimer) clearTimeout(relayDrainTimer);
+        if (pageProgramSemanticToken) {
+          releasePageProgramSemanticOwner(pageProgramSemanticToken);
+          pageProgramSemanticToken = null;
+        }
         try { w.terminate(); } catch { /* gone */ }
         try { delete globalThis[/** @type {keyof typeof globalThis} */ (canaryName)]; } catch { /* best effort */ }
         resolve(value);
@@ -319,6 +330,8 @@ export const runActor = async (job, {
       w.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         const m = /** @type {any} */ (ev.data);
         if (!m || typeof m !== 'object') return;
+        if (pageProgramSemanticToken
+            && settlePageProgramSemanticResponse(pageProgramSemanticToken, m)) return;
         if (m.type === 'ready') {
           if (readiness !== 'awaiting-ready' || m.protocol !== ACTOR_WORKER_PROTOCOL || !validActorWorkerRealm(m.realm)) {
             protocolFailure('actor worker returned an invalid readiness proof');
@@ -571,6 +584,9 @@ export const runActor = async (job, {
             sendToSW('actor/tool-prepare', {
               ...(relayToken ? { relayToken } : {}), call: m.call,
               authorityClass: m.authorityClass,
+              ...(m.pageProgramParentExecutionId
+                ? { pageProgramParentExecutionId: m.pageProgramParentExecutionId }
+                : {}),
             }), { countCall: true });
           return;
         }
@@ -1121,10 +1137,29 @@ export const runActor = async (job, {
           return;
         }
         if (m.type === 'page-run-program-request') {
-          await relayExactToolMessage(m, 'page-run-program-response', () =>
-            sendToSW('page/run-program', {
-              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
-            }), { observeResult: true });
+          if (pageProgramSemanticToken) {
+            w.postMessage({
+              type: 'page-run-program-response', rid: m.rid,
+              reply: {
+                ok: false, error: 'a page program is already active for this actor',
+                outcomeKnown: true,
+              },
+            });
+            return;
+          }
+          pageProgramSemanticToken = registerPageProgramSemanticOwner(w, m.executionId);
+          try {
+            await relayExactToolMessage(m, 'page-run-program-response', () =>
+              sendToSW('page/run-program', {
+                ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
+                pageProgramSemanticToken,
+              }), { observeResult: true });
+          } finally {
+            if (pageProgramSemanticToken) {
+              releasePageProgramSemanticOwner(pageProgramSemanticToken);
+              pageProgramSemanticToken = null;
+            }
+          }
           return;
         }
         if (m.type === 'page-capture-foreground-request') {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { siteClientWriteTool } from '../../../extension/peerd-runtime/tools/defs/site-client-write.js';
 import { clearTools, registerTool } from '../../../extension/peerd-runtime/tools/registry.js';
 import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';

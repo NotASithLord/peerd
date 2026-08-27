@@ -41,8 +41,17 @@ import {
   ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS,
   actorsCallToOp, buildCodeClientSource, canonicalCodeTraceLabel,
   CODE_RUN_MAX_TRACE_OPS, MAX_FILE_CONTENT_CHARS,
-  pageCallToRelay, shapePageCallOutcome,
+  pageCallToRelay, pageCallToToolCall, shapePageCallOutcome,
+  shapeActorRoster, shapeActorsResult,
 } from '/peerd-runtime/offscreen.js';
+import {
+  capturePageProgramSite,
+  fetchPageProgramResource,
+  readPageProgramDocument,
+  readPageProgramResult,
+  readPageProgramSiteClient,
+  writePageProgramSiteClient,
+} from './page-program-semantic-owner.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
 import {
   JAVASCRIPT_PROGRAM,
@@ -166,9 +175,7 @@ const RELAYING_MESSAGE_TYPES = Object.freeze(new Set([
   'page-program/navigate', 'page-program/click', 'page-program/fill',
   'page-program/snapshot', 'page-program/read', 'page-program/read-state',
   'page-program/watch-changes', 'page-program/query-dom',
-  'page-program/view', 'page-program/fetch', 'page-program/read-document',
-  'page-program/read-result', 'page-program/site-client-read',
-  'page-program/site-client-write', 'page-program/site-capture',
+  'page-program/view',
   'page-program/login', 'app-code/observe',
   'app-code/act',
   'a2a/call', 'site-fetch/call', 'script/model-call',
@@ -185,7 +192,7 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, pageProgramSemanticToken?:string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical
  *   script surface; the distributed cap is not a caller knob here — headless
  *   forces it off unconditionally); caps.page needs ownerSessionId — the actor
@@ -243,7 +250,7 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, pageProgramSemanticToken?:string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
  *   delegation client (the orchestrator's script surface); caps: capability
  *   profile (default DEFAULT_WORKER_CAPS; caps.page is the web actor's
@@ -256,7 +263,7 @@ export const runJob = async (job, deps) => {
  *   extractMarkdown is the LOCAL web-extract entry (same offscreen document),
  *   injected so the in-browser tests can stub it without the vendored parsers.
  */
-const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = '', caps, ownerSessionId, ownerToolUseId, runId, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {
+const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = '', caps, ownerSessionId, ownerToolUseId, runId, pageProgramSemanticToken, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {
   // One ABSOLUTE deadline spans resolution + execution. Phase-local timers
   // derive only the remaining budget; no phase may mint a fresh timeout and
   // quietly make the advertised wall-clock additive.
@@ -455,6 +462,28 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   };
   /** @param {string} bridge @param {unknown} method */
   const recordRefusedCodeOp = (bridge, method) => beginCodeOp(bridge, method)(false);
+  const pageSemanticOperation = (/** @type {{name:string,args:Record<string,unknown>}} */ call) => {
+    if (typeof pageProgramSemanticToken !== 'string' || !pageProgramSemanticToken) return null;
+    if (call.name === 'fetch_url') {
+      return () => fetchPageProgramResource(pageProgramSemanticToken, call.args);
+    }
+    if (call.name === 'read_doc') {
+      return () => readPageProgramDocument(pageProgramSemanticToken, call.args);
+    }
+    if (call.name === 'read_result') {
+      return () => readPageProgramResult(pageProgramSemanticToken, call.args);
+    }
+    if (call.name === 'site_client_read') {
+      return () => readPageProgramSiteClient(pageProgramSemanticToken, call.args);
+    }
+    if (call.name === 'site_client_write') {
+      return () => writePageProgramSiteClient(pageProgramSemanticToken, call.args);
+    }
+    if (call.name === 'site_capture') {
+      return () => capturePageProgramSite(pageProgramSemanticToken, call.args);
+    }
+    return null;
+  };
   // Remote module source rides the audited fetchRemote (shared decode in
   // module-resolver.js makeFetchRemote — see its header for the full story).
   const remoteModuleFetch = makeFetchRemote((req) =>
@@ -685,8 +714,8 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           try {
             const resp = await runCodeOp(
               'actors', m.method,
-              () => sendToSW('actors/call', {
-                method: m.method, args: translated.args,
+              () => sendToSW(translated.op === 'list' ? 'actors/list' : 'actors/call', {
+                args: translated.args,
                 ownerSessionId, ownerToolUseId, runId, seq,
               }),
               (response) => response?.ok === true && response?.value?.failed !== true,
@@ -697,13 +726,19 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
             entry.ms = Math.round(performance.now() - t0);
             entry.settled = true;
             if (resp?.ok) {
+              const value = translated.op === 'list'
+                ? shapeActorsResult(m.method, {
+                  ok: true,
+                  refs: shapeActorRoster(resp.roster).structured.refs,
+                })
+                : shapeActorsResult(m.method, resp);
               entry.ok = true;
               // Transport ok ≠ delegation ok: an ask whose actor turn FAILED
               // returns { failed:true } — record it so the trace can't render
               // a failed delegation as a clean 'ok' (the model-facing record
               // must agree with the user-facing live feed).
-              if (resp.value && resp.value.failed === true) entry.actorFailed = true;
-              worker.postMessage({ type: 'actors-response', rid: m.rid, result: resp.value });
+              if (value?.failed === true) entry.actorFailed = true;
+              worker.postMessage({ type: 'actors-response', rid: m.rid, result: value });
             } else {
               entry.error = String(resp?.error ?? 'actors call failed')
                 .slice(0, ACTORS_TRACE_ERROR_MAX_CHARS);
@@ -908,12 +943,15 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           usedPage = true;
           try {
-            const relay = pageCallToRelay({ method: m.method, args: m.args });
+            const toolCall = pageCallToToolCall({ method: m.method, args: m.args });
+            const semanticOperation = pageSemanticOperation(toolCall);
+            const relay = semanticOperation ? null
+              : pageCallToRelay({ method: m.method, args: m.args });
             const raw = await runCodeOp(
               'page', m.method,
-              () => sendToSW(relay.route, {
-                args: relay.args, ownerSessionId, runId,
-              }),
+              semanticOperation ?? (() => sendToSW(/** @type {any} */ (relay).route, {
+                args: /** @type {any} */ (relay).args, ownerSessionId, runId,
+              })),
               (response) => response?.ok === true,
             );
             const resp = /** @type {any} */ (

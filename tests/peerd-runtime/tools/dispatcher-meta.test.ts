@@ -3,7 +3,7 @@
 // classify and render them. They ride in meta (off the wire).
 
 import { describe, test, expect, afterEach } from 'bun:test';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
+import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
 import { messageActorTool } from '../../../extension/peerd-runtime/tools/defs/message-actor.js';
 import {
