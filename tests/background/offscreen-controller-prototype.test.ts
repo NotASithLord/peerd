@@ -1018,30 +1018,32 @@ describe('Chrome lazy controller private channel prototype', () => {
       supportedCaps: ['state.read'],
       loadController,
     });
-    const offer = (channelId: string) => {
+    const offer = (channelId: string, generation: number) => {
       const channel = new MessageChannel();
       const accepted = handler({
         isTrusted: true,
         source: { scriptURL: expectedWorkerUrl },
         data: {
           type: 'peerd/controller-channel', protocol: 2,
-          buildDigest: BUILD_DIGEST, kernelEpoch: 'epoch-live',
+          buildDigest: BUILD_DIGEST, kernelEpoch: KERNEL_IDENTITY.kernelEpoch,
           channelId, capabilities: ['state.read'],
+          kernelIdentity: KERNEL_IDENTITY,
+          lease: controllerLease(KERNEL_IDENTITY, generation),
         },
         ports: [channel.port2],
       } as unknown as MessageEvent);
       return { accepted, port: channel.port1 };
     };
 
-    const first = offer('channel-first');
+    const first = offer('channel-first', 1);
     expect(first.accepted).toBe(true);
     handler.release();
     expect(closed).toBe(1);
-    const second = offer('channel-second');
+    const second = offer('channel-second', 2);
     expect(second.accepted).toBe(true);
     handler.close();
     expect(closed).toBe(2);
-    expect(offer('channel-late').accepted).toBe(false);
+    expect(offer('channel-late', 3).accepted).toBe(false);
     first.port.close();
     second.port.close();
   });
@@ -1112,7 +1114,7 @@ describe('Chrome lazy controller private channel prototype', () => {
 
     for (let generation = 1; generation <= 256; generation += 1) {
       expect(offer(generation)).toBe(true);
-      handler.close();
+      handler.release();
     }
     expect(offer(1)).toBe(false);
     expect(offer(257, { ...controllerLease(KERNEL_IDENTITY, 257), hostEpoch: '' }))

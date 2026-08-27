@@ -683,6 +683,8 @@ export const makeControllerOfferHandler = ({
   // schema and identity binding.
   /** @type {Readonly<import('/shared/kernel-identity.js').KernelIdentity>|null} */
   let latestIdentity = null;
+  /** @type {Readonly<import('/shared/kernel-identity.js').KernelIdentity>|null} */
+  let closedIdentity = null;
   let retiredGeneration = 0;
   /** @type {{ epoch:string, kernelIdentity:unknown, leaseGeneration:number,
    *   close:()=>void } | null} */
@@ -714,7 +716,8 @@ export const makeControllerOfferHandler = ({
         || event.ports?.length !== 1) return false;
     if (latestIdentity) {
       const sameKernel = kernelIdentityMatches(latestIdentity, offeredIdentity);
-      if ((!sameKernel && !kernelIdentityIsSuccessor(latestIdentity, offeredIdentity))
+      if ((closedIdentity && kernelIdentityMatches(closedIdentity, offeredIdentity))
+          || (!sameKernel && !kernelIdentityIsSuccessor(latestIdentity, offeredIdentity))
           || (sameKernel && /** @type {NonNullable<typeof offeredLease>} */ (
             offeredLease
           ).generation <= retiredGeneration)) {
@@ -737,6 +740,7 @@ export const makeControllerOfferHandler = ({
     }
     if (!latestIdentity || !kernelIdentityMatches(latestIdentity, offeredIdentity)) {
       latestIdentity = offeredIdentity;
+      closedIdentity = null;
       retiredGeneration = 0;
     }
     active = { ...bindControllerChannel({
@@ -776,11 +780,13 @@ export const makeControllerOfferHandler = ({
   // sealed Worker rather than merely dropping the keepalive transport.
   handleOffer.close = () => {
     if (!active) {
+      closedIdentity = latestIdentity;
       loadController.close?.();
       return;
     }
     noteRetired(active);
     const prior = active;
+    closedIdentity = /** @type {any} */ (prior.kernelIdentity);
     active = null;
     prior.close();
   };
