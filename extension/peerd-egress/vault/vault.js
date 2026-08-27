@@ -783,7 +783,10 @@ export const createVault = (deps) => {
     await _adoptDK(newDK);
     unlockedAt = now();
     armAutoLock();
-    _persistDK(newDK);
+    // A successful initialize must already be restart-safe. The authority host
+    // may be replaced immediately after this call, so returning before the
+    // session mirror lands can turn a successful unlock into a silent lock.
+    await _persistDK(newDK);
     notify({ type: 'initialized' });
   };
 
@@ -823,7 +826,7 @@ export const createVault = (deps) => {
     await _adoptDK(newDK);
     unlockedAt = now();
     armAutoLock();
-    _persistDK(newDK);
+    await _persistDK(newDK);
     notify({ type: 'initialized' });
     notify({ type: 'prf_enrolled' });
   };
@@ -869,7 +872,7 @@ export const createVault = (deps) => {
     await _adoptDK(fresh);
     unlockedAt = now();
     armAutoLock();
-    _persistDK(fresh);
+    await _persistDK(fresh);
     notify({ type: 'unlocked' });
   };
 
@@ -1011,7 +1014,7 @@ export const createVault = (deps) => {
     await _adoptDK(fresh);
     unlockedAt = now();
     armAutoLock();
-    _persistDK(fresh);
+    await _persistDK(fresh);
     notify({ type: 'unlocked' });
   };
 

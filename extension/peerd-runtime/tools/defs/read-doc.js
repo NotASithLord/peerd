@@ -26,6 +26,13 @@ import { formatPdfBody, DEFAULT_MAX_CHARS as DEFAULT_PDF_MAX_CHARS } from '../..
 import { formatDocBody, formatDocHead, DEFAULT_MAX_CHARS as DEFAULT_DOC_MAX_CHARS } from '../../doc/format.js';
 import { toMarkdown } from '../../doc/markdown.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
+import { MAX_SPILL_TEXT_CHARS } from '../result-store-policy.js';
+
+const boundedPdfText = (/** @type {string} */ text) => {
+  if (text.length <= MAX_SPILL_TEXT_CHARS) return text;
+  const note = `\n[note] Stored PDF text capped at ${MAX_SPILL_TEXT_CHARS} characters.`;
+  return `${text.slice(0, MAX_SPILL_TEXT_CHARS - note.length)}${note}`;
+};
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readDocTool = composeTool("read_doc", {
@@ -67,25 +74,54 @@ export const readDocTool = composeTool("read_doc", {
     const result = extracted.result;
     if (typeof target !== 'string' || !target) return { ok: false, error: 'no_document_url' };
     if (result?.pdf) {
-      const maxChars = Number.isFinite(args?.maxChars) && args.maxChars > 0
-        ? Math.floor(args.maxChars) : DEFAULT_PDF_MAX_CHARS;
-      return {
-        ok: true,
-        content: wrapUntrusted({
-          origin: originOfUrl(target),
-          tool: 'read_doc',
-          body: formatPdfBody({
-            pages: result.pdf.pages,
-            engine: result.pdf.engine,
-            pageCount: result.pdf.pageCount,
-            info: result.pdf.info,
-            ocrUsed: result.pdf.ocrUsed,
-            scanned: result.pdf.scanned,
-            ocrAvailable: result.pdf.ocrAvailable,
-            maxChars,
+      const maxChars = Math.min(
+        Number.isFinite(args?.maxChars) && args.maxChars > 0
+          ? Math.floor(args.maxChars) : DEFAULT_PDF_MAX_CHARS,
+        MAX_SPILL_TEXT_CHARS,
+      );
+      const pdf = result.pdf;
+      if (!authority.spillResult) {
+        return {
+          ok: true,
+          content: wrapUntrusted({
+            origin: originOfUrl(target),
+            tool: 'read_doc',
+            body: formatPdfBody({ ...pdf, maxChars }),
           }),
-        }),
-      };
+        };
+      }
+      const text = boundedPdfText(formatPdfBody({
+        ...pdf, maxChars: Number.MAX_SAFE_INTEGER,
+      }));
+      const query = typeof args.query === 'string' ? args.query.trim() : '';
+      const ex = query ? excerptRelevant(text, query, maxChars) : null;
+      const win = windowText(text, maxChars);
+      const shown = ex ? ex.excerpt : win.window;
+      const truncated = ex ? ex.excerpted : win.windowed;
+      let footer = null;
+      if (truncated) {
+        try {
+          const cacheKey = await authority.spillResult({
+            url: target, format: 'pdf-text', text,
+            producer: 'read_doc', fenced: true, originLabel: originOfUrl(target),
+          });
+          if (cacheKey) {
+            footer = ex
+              ? excerptFooter({
+                key: cacheKey, total: ex.total, passagesShown: ex.passagesShown,
+                passagesTotal: ex.passagesTotal, query,
+              })
+              : pagingFooter({
+                key: cacheKey, total: win.total,
+                headChars: win.headChars, tailChars: win.tailChars,
+              });
+          }
+        } catch { /* the bounded window still returns if best-effort spill fails */ }
+      }
+      const fenced = wrapUntrusted({
+        origin: originOfUrl(target), tool: 'read_doc', body: shown,
+      });
+      return { ok: true, content: footer ? `${fenced}\n${footer}` : fenced };
     }
     if (!result?.doc) return { ok: false, error: 'doc_read_failed', content: 'empty conversion result' };
 

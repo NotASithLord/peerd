@@ -179,6 +179,12 @@ export const makeVaultAuthorityClient = ({
     }
     if (connecting) return connecting;
     connecting = (async () => {
+      // A successor host starts with a fresh sealed vault heap. If this client
+      // was unlocked before its lease/channel changed, restore the DK from the
+      // bounded session mirror before allowing the first caller onto the new
+      // connection. Otherwise a routine feature-host replacement silently
+      // turns a live unlocked session into a locked one.
+      const resumeSuccessor = cached.locked === false;
       const channelId = `vault-${newId()}`;
       const offer = {
         type: VAULT_AUTHORITY_OFFER,
@@ -315,14 +321,14 @@ export const makeVaultAuthorityClient = ({
       } finally {
         if (bootstrapTimer !== null) clearTimeout(bootstrapTimer);
       }
+      if (resumeSuccessor) await dispatch(connection, 'attemptResume', null);
       return connection;
     })().finally(() => { connecting = null; });
     return connecting;
   };
 
-  const call = (/** @type {string} */ method, /** @type {unknown} */ args = null) =>
-    withHost(async (lease) => {
-      const connection = await connect(lease);
+  const dispatch = (/** @type {NonNullable<typeof active>} */ connection,
+    /** @type {string} */ method, /** @type {unknown} */ args) => {
       const requestId = `call-${++sequence}-${newId()}`;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -351,7 +357,10 @@ export const makeVaultAuthorityClient = ({
           ));
         }
       });
-    }, { method });
+  };
+
+  const call = (/** @type {string} */ method, /** @type {unknown} */ args = null) =>
+    withHost(async (lease) => dispatch(await connect(lease), method, args), { method });
 
   const refreshStatus = async () => {
     cached = { ...cached, ...(await call('status')) };

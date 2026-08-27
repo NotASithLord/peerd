@@ -167,6 +167,34 @@ const record = (/** @type {unknown} */ value) => value !== null
   ? /** @type {Record<string,any>} */ (value) : null;
 const exactKeys = (/** @type {Record<string,any>} */ value, /** @type {string[]} */ keys) =>
   Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+const sessionManifest = (/** @type {unknown} */ value) => {
+  if (value === null) return true;
+  const manifest = record(value);
+  return !!manifest && nestedExactKeys(manifest, [], ['preset', 'allow'])
+    && Object.keys(manifest).length > 0
+    && (manifest.preset === undefined || string(manifest.preset, 128))
+    && (manifest.allow === undefined || Array.isArray(manifest.allow)
+      && manifest.allow.length <= 512
+      && manifest.allow.every((name) => string(name, 128)));
+};
+const sessionListCandidate = (/** @type {unknown} */ value) => {
+  const session = record(value);
+  return !!session && exactKeys(session, [
+    'kind', 'sessionId', 'title', 'createdAt', 'lastMessageAt', 'messageCount',
+    'archivedAt', 'provider', 'model', 'hasCustomSystemPrompt', 'toolManifest',
+  ])
+    && ['chat', 'actor', 'spawned'].includes(session.kind)
+    && string(session.sessionId, 512)
+    && nullableString(session.title, 64 * KIB)
+    && Number.isFinite(session.createdAt)
+    && Number.isFinite(session.lastMessageAt)
+    && Number.isSafeInteger(session.messageCount) && session.messageCount >= 0
+    && (session.archivedAt === undefined || Number.isFinite(session.archivedAt))
+    && typeof session.provider === 'string' && session.provider.length <= 128
+    && typeof session.model === 'string' && session.model.length <= 512
+    && typeof session.hasCustomSystemPrompt === 'boolean'
+    && sessionManifest(session.toolManifest);
+};
 const appId = (/** @type {Record<string,any>} */ input) =>
   typeof input.appId === 'string' && input.appId.length <= 256;
 const repositoryEffect = (/** @type {string} */ operation, /** @type {string[]} */ keys,
@@ -317,10 +345,7 @@ const listResult = effectResult((value) => {
   return !!result && exactKeys(result, ['status', 'candidates'])
     && Array.isArray(result.candidates)
     && (result.status === 'locked' ? result.candidates.length === 0
-      : result.status === 'ok' && result.candidates.every((candidate) => {
-        const session = record(candidate);
-        return !!session && string(session.sessionId, 512);
-      }));
+      : result.status === 'ok' && result.candidates.every(sessionListCandidate));
 });
 const sessionReadResult = effectResult(statusValue(
   ['locked', 'invalid', 'not-found', 'ok'], 'session',

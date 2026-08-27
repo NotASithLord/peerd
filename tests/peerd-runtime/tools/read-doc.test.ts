@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { readDocTool } from '../../../extension/peerd-runtime/tools/defs/read-doc.js';
+import { readResultTool } from '../../../extension/peerd-runtime/tools/defs/read-result.js';
 import { isPrivateOrLocalHost } from '../../../extension/shared/private-network.js';
+import { MAX_SPILL_TEXT_CHARS } from '../../../extension/peerd-runtime/tools/result-store-policy.js';
 
 const pdfResult = {
   format: 'pdf',
@@ -33,6 +35,7 @@ const docContext = (context: any): any => ({
       );
       return { ok: true, target, result };
     },
+    ...(context.spillResult ? { spillResult: context.spillResult } : {}),
   },
 });
 
@@ -77,6 +80,67 @@ describe('read_doc as the one public document reader', () => {
     expect(result.ok).toBe(true);
     expect(calls[0][0]).toEqual({ url });
     expect(result.content).toContain('tool="read_doc"');
+  });
+
+  test('queries the complete bounded PDF text and pages the same session-owned spill', async () => {
+    const middle = 'needle clause: renewal requires thirty days notice';
+    const longPdf = {
+      ...pdfResult,
+      pdf: {
+        ...pdfResult.pdf,
+        pages: [
+          { page: 1, text: 'opening '.repeat(3_000) },
+          { page: 2, text: `${'middle '.repeat(2_000)}${middle}${' middle'.repeat(2_000)}` },
+          { page: 3, text: 'closing '.repeat(3_000) },
+        ],
+        pageCount: 3,
+      },
+    };
+    let spilled: any = null;
+    const result = await readDocTool.execute({
+      url: 'https://docs.example/long.pdf', query: 'renewal thirty days', maxChars: 2_000,
+    }, docContext({
+      docOffscreenClient: { extract: async () => longPdf },
+      spillResult: async (record: any) => { spilled = { key: 'result:pdf-1', ...record }; return spilled.key; },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain(middle);
+    expect(result.content).toContain('read_result');
+    expect(spilled).toMatchObject({
+      key: 'result:pdf-1', producer: 'read_doc', format: 'pdf-text', fenced: true,
+      originLabel: 'https://docs.example', url: 'https://docs.example/long.pdf',
+    });
+    expect(spilled.text.length).toBeLessThanOrEqual(MAX_SPILL_TEXT_CHARS);
+    expect(spilled.text).toContain('[page 3]');
+
+    const page = await readResultTool.execute(
+      { key: spilled.key, offset: spilled.text.indexOf(middle), limit: middle.length },
+      { resourceAuthority: { readResult: async () => ({ ok: true, record: spilled }) } } as any,
+    );
+    expect(page.ok).toBe(true);
+    expect(page.content).toContain(middle);
+    expect(page.content).toContain('"format": "pdf-text"');
+  });
+
+  test('caps the stored PDF text at the shared spill limit', async () => {
+    let spilled: any = null;
+    const result = await readDocTool.execute({
+      url: 'https://docs.example/huge.pdf', maxChars: 1_000,
+    }, docContext({
+      docOffscreenClient: { extract: async () => ({
+        ...pdfResult,
+        pdf: {
+          ...pdfResult.pdf,
+          pages: [{ page: 1, text: 'x'.repeat(MAX_SPILL_TEXT_CHARS + 10_000) }],
+        },
+      }) },
+      spillResult: async (record: any) => { spilled = record; return 'result:pdf-cap'; },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(spilled.text.length).toBe(MAX_SPILL_TEXT_CHARS);
+    expect(spilled.text).toEndWith(`[note] Stored PDF text capped at ${MAX_SPILL_TEXT_CHARS} characters.`);
   });
 
   test('refuses private targets before the offscreen reader can fetch', async () => {
