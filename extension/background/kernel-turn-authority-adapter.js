@@ -1456,7 +1456,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
             headlessAvailable: !deps.firefox,
           }) : undefined);
       const contributorStartedAt = Date.now();
-      const contributorDecision = kind === 'web' && record.backing !== 'api'
+      const contributorDecision = kind === 'web' && record.backing === 'tab'
         ? Object.freeze({
           requested: requestedContributorSurface,
           resolved: actorSurface === 'code' ? 'code' : 'tools',
@@ -1502,8 +1502,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
             failure: terminal.failure,
             actions: projected.actions,
           });
-        } catch (cause) {
-          console.warn('[contributor] local settlement skipped', cause);
+        } catch {
+          // why: the failure may originate beside raw turn identifiers. The
+          // contribution path logs only its closed category, never the cause.
+          console.warn('[contributor] local settlement skipped');
         }
         return finalReply;
       };

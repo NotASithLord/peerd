@@ -4,7 +4,9 @@ import { withDeadline } from '../shared/cold-util.js';
 import { createPreviewContributorRoutes } from './kernel-contributor-owner.js';
 export {
   CONTRIBUTOR_ACTIVE_CONSENT_KEY, CONTRIBUTOR_PENDING_RECEIPTS_KEY,
-  CONTRIBUTOR_PENDING_MAX_RECEIPTS,
+  CONTRIBUTOR_PENDING_MAX_RECEIPTS, CONTRIBUTOR_PENDING_RECEIPT_PREFIX,
+  CONTRIBUTOR_PENDING_DROP_PREFIX,
+  CONTRIBUTOR_STATE_PREFIX,
   createPreviewContributorAuthority, createPreviewContributorRoutes,
 } from './kernel-contributor-owner.js';
 

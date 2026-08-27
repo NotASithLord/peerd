@@ -7,7 +7,7 @@ import {
 } from '../../extension/background/kernel-firefox-contributor-addon.js';
 
 describe('kernel Firefox lazy addon', () => {
-  test('disabled contributor arm performs one local read without loading semantics', async () => {
+  test('disabled contributor arm checks the journal and legacy marker without loading semantics', async () => {
     const loads: string[] = [];
     const contributorFactory = makeKernelFirefoxContributor({
       contributorOwner: async () => { loads.push('owner'); return {}; },
@@ -18,10 +18,38 @@ describe('kernel Firefox lazy addon', () => {
       kv: {
         get: async () => { reads += 1; return null; },
         set: async () => {}, delete: async () => {},
+        list: async () => { reads += 1; return {}; },
       },
     });
     expect(await contributor.arm()).toEqual({ enabled: false, generation: null });
-    expect({ reads, loads }).toEqual({ reads: 1, loads: [] });
+    expect({ reads, loads }).toEqual({ reads: 2, loads: [] });
+  });
+
+  test('a malformed Preview journal cannot arm the Firefox actor path', async () => {
+    const loads: string[] = [];
+    const contributor = makeKernelFirefoxContributor({
+      contributorOwner: async () => { loads.push('owner'); return {}; },
+      contributorSemantic: async () => { loads.push('semantic'); return {}; },
+    })({
+      kv: {
+        get: async () => null, set: async () => {}, delete: async () => {},
+        list: async () => ({
+          'contributor_metrics.state.v2.1-test': {
+            version: 2, revision: 1, state: 'active',
+            record: {
+              version: 1,
+              consent: {
+                enabled: true, schemaVersion: 1, disclosureVersion: 1,
+                generation: 'generation', unexpected: true,
+              },
+              aggregate: { version: 1 },
+            },
+          },
+        }),
+      },
+    });
+    expect(await contributor.arm()).toEqual({ enabled: false, generation: null });
+    expect(loads).toEqual([]);
   });
 
   test('refuses an untrusted contributor sender before storage or semantic demand', async () => {
@@ -37,6 +65,7 @@ describe('kernel Firefox lazy addon', () => {
       kv: {
         get: async () => { reads += 1; return null; },
         set: async () => {}, delete: async () => {},
+        list: async () => { reads += 1; return {}; },
       },
       optionsUi: (candidate: any) => candidate === optionsSender,
       sidepanelUi: (candidate: any) => candidate === sidepanelSender,

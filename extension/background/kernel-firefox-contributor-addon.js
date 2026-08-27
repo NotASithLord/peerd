@@ -7,7 +7,28 @@ import './kernel-firefox-addon.js';
 
 const CONTRIBUTOR_RECORD_KEY = 'contributor_metrics.aggregate.v1';
 const CONTRIBUTOR_ACTIVE_CONSENT_KEY = 'contributor_metrics.active.v1';
+const CONTRIBUTOR_STATE_PREFIX = 'contributor_metrics.state.v2.';
 const CONTRIBUTOR_STORAGE_DEADLINE_MS = 750;
+const CONTRIBUTOR_MAX_STATE_SNAPSHOTS = 128;
+const CONTRIBUTOR_MAX_REVISION = 8_000_000_000_000_000;
+const exactKeys = (/** @type {unknown} */ value, /** @type {string[]} */ keys) =>
+  !!value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+const armFromRecord = (/** @type {any} */ record,
+  /** @type {string|null} */ expectedGeneration = null) => {
+  const consent = record?.consent;
+  return Object.freeze(exactKeys(record, ['version', 'consent', 'aggregate'])
+      && record.version === 1
+      && exactKeys(consent, ['enabled', 'schemaVersion', 'disclosureVersion', 'generation'])
+      && consent.enabled === true && consent.schemaVersion === 1
+      && consent.disclosureVersion === 1 && typeof consent.generation === 'string'
+      && consent.generation.length > 0 && consent.generation.length <= 200
+      && (expectedGeneration === null || consent.generation === expectedGeneration)
+      && record.aggregate && typeof record.aggregate === 'object'
+      && !Array.isArray(record.aggregate)
+    ? { enabled: true, generation: consent.generation }
+    : { enabled: false, generation: null });
+};
 
 /** @template T @param {()=>Promise<T>} loader */
 const deferredModule = (loader) => {
@@ -22,7 +43,7 @@ const deferredModule = (loader) => {
 };
 
 const firefoxContributorArm = async (/** @type {any} */ kv) => {
-  const boundedGet = (/** @type {string} */ key) => new Promise((resolve, reject) => {
+  const bounded = (/** @type {()=>Promise<any>} */ operation) => new Promise((resolve, reject) => {
     let settled = false;
     const finish = (/** @type {any} */ callback, /** @type {any} */ value) => {
       if (settled) return;
@@ -31,24 +52,46 @@ const firefoxContributorArm = async (/** @type {any} */ kv) => {
     const timer = setTimeout(() => finish(
       reject, new Error('contributor-storage-timeout'),
     ), CONTRIBUTOR_STORAGE_DEADLINE_MS);
-    Promise.resolve().then(() => kv.get(key)).then(
+    Promise.resolve().then(operation).then(
       (value) => finish(resolve, value), (cause) => finish(reject, cause),
     );
   });
-  const active = /** @type {any} */ (await boundedGet(CONTRIBUTOR_ACTIVE_CONSENT_KEY));
+  const snapshots = /** @type {Record<string, any>} */ (
+    await bounded(() => kv.list(CONTRIBUTOR_STATE_PREFIX))
+  );
+  if (!snapshots || typeof snapshots !== 'object' || Array.isArray(snapshots)
+      || Object.keys(snapshots).length > CONTRIBUTOR_MAX_STATE_SNAPSHOTS) {
+    return Object.freeze({ enabled: false, generation: null });
+  }
+  /** @type {{key:string,value:any}|null} */ let latest = null;
+  for (const [key, value] of Object.entries(snapshots)) {
+    const valid = key.startsWith(CONTRIBUTOR_STATE_PREFIX)
+      && value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).sort().join('\0') === ['record', 'revision', 'state', 'version'].join('\0')
+      && value.version === 2 && Number.isSafeInteger(value.revision) && value.revision > 0
+      && value.revision <= CONTRIBUTOR_MAX_REVISION
+      && ['active', 'revoked'].includes(value.state)
+      && (value.state === 'revoked' ? value.record === null : !!value.record);
+    if (!valid) return Object.freeze({ enabled: false, generation: null });
+    if (!latest || value.revision > latest.value.revision
+        || value.revision === latest.value.revision && key > latest.key) latest = { key, value };
+  }
+  if (latest) {
+    if (latest.value.state !== 'active') {
+      return Object.freeze({ enabled: false, generation: null });
+    }
+    return armFromRecord(latest.value.record);
+  }
+  const active = /** @type {any} */ (
+    await bounded(() => kv.get(CONTRIBUTOR_ACTIVE_CONSENT_KEY))
+  );
   if (active?.version !== 1 || typeof active.generation !== 'string'
       || active.generation.length === 0 || active.generation.length > 200) {
     return Object.freeze({ enabled: false, generation: null });
   }
-  const record = await boundedGet(CONTRIBUTOR_RECORD_KEY);
-  const consent = record?.consent;
-  return Object.freeze(consent?.enabled === true && consent.schemaVersion === 1
-      && consent.disclosureVersion === 1 && typeof consent.generation === 'string'
-      && consent.generation.length > 0 && consent.generation.length <= 200
-      && consent.generation === active.generation
-      && record?.version === 1 && record.aggregate && typeof record.aggregate === 'object'
-    ? { enabled: true, generation: consent.generation }
-    : { enabled: false, generation: null });
+  return armFromRecord(
+    await bounded(() => kv.get(CONTRIBUTOR_RECORD_KEY)), active.generation,
+  );
 };
 
 /**

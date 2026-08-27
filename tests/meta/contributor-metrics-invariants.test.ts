@@ -22,6 +22,15 @@ const routes = readFileSync(join(
 const guard = readFileSync(join(
   EXTENSION_DIR, 'background/kernel-contributor-feedback-guard.js',
 ), 'utf8');
+const owner = readFileSync(join(
+  EXTENSION_DIR, 'background/kernel-contributor-owner.js',
+), 'utf8');
+const channel = readFileSync(join(
+  EXTENSION_DIR, 'shared/contributor-channel.js',
+), 'utf8');
+const authorityAdapter = readFileSync(join(
+  EXTENSION_DIR, 'background/kernel-turn-authority-adapter.js',
+), 'utf8');
 const options = readFileSync(join(EXTENSION_DIR, 'options/sections/contributor-metrics.js'), 'utf8');
 const messageList = readFileSync(join(EXTENSION_DIR, 'sidepanel/components/message-list.js'), 'utf8');
 
@@ -40,9 +49,22 @@ describe('Contributor Metrics source invariants', () => {
   });
 
   test('the local core/store/routes contain no network primitive or origin', () => {
-    const source = stripComments([metrics, store, feedback, routes, guard].join('\n'));
+    const source = stripComments([
+      metrics, store, feedback, routes, guard, owner, channel,
+    ].join('\n'));
     expect(source).not.toMatch(/\bfetch\s*\(|XMLHttpRequest|WebSocket|https?:\/\//);
     expect(source).not.toMatch(/collector|contributions\/v[0-9]/i);
+  });
+
+  test('the authority hashes identifiers before storage and never logs raw failure causes', () => {
+    expect(stripComments(owner)).not.toMatch(/console\./);
+    expect(owner.indexOf("opaqueContributorToken(\n      'operation'")).toBeLessThan(
+      owner.indexOf('await set(`${CONTRIBUTOR_PENDING_RECEIPT_PREFIX}'),
+    );
+    expect(authorityAdapter).toContain("console.warn('[contributor] local settlement skipped');");
+    expect(authorityAdapter).not.toContain(
+      "console.warn('[contributor] local settlement skipped', cause)",
+    );
   });
 
   test('every issue-345 contribution consumer remains local-only', () => {

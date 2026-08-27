@@ -222,9 +222,10 @@ describe('actor worker startup proof', () => {
     expect(JSON.stringify(result.contributor)).not.toContain('secret detail');
   });
 
-  test('never projects Contributor Metrics for API-Web or non-Web actors', async () => {
+  test('never projects Contributor Metrics for API-Web, unclassified Web, or non-Web actors', async () => {
     for (const actor of [
       { actorType: 'web', backing: 'api' },
+      { actorType: 'web', backing: undefined },
       { actorType: 'app', backing: 'tab' },
     ]) {
       const worker = new FakeWorker();
