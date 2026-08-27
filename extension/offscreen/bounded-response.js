@@ -23,10 +23,12 @@ export const readBoundedResponseBytes = async (response, limit) => {
     try { await response.body?.cancel?.(); } catch { /* best-effort */ }
     throw new ResponseTooLargeError(declared, limit);
   }
-  if (!response.body?.getReader) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length > limit) throw new ResponseTooLargeError(bytes.length, limit);
-    return bytes;
+  if (response.body === null) return new Uint8Array();
+  if (typeof response.body?.getReader !== 'function') {
+    // why: arrayBuffer() would materialize attacker-sized input before the
+    // post-read check. Real extension fetch Responses are stream-readable;
+    // an exotic/nonconforming response fails closed instead.
+    throw new TypeError('response body is not stream-readable');
   }
 
   const reader = response.body.getReader();

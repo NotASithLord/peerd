@@ -581,6 +581,7 @@ export const makeSemanticControllerClient = ({
   },
 }) => {
   if (typeof fetchFn !== 'function'
+      || typeof offscreenUrl !== 'string'
       || !Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0
       || !Number.isFinite(promptLoadTimeoutMs) || promptLoadTimeoutMs <= 0) {
     throw new TypeError('semantic controller asset reader is required');
@@ -593,6 +594,12 @@ export const makeSemanticControllerClient = ({
   }
   if (firefoxDirect && typeof withDirectLifetime !== 'function') {
     throw new TypeError('semantic controller direct lifetime is required');
+  }
+  const runtimeRoot = new URL(browser.runtime.getURL(''));
+  const controllerHostUrl = new URL(offscreenUrl, runtimeRoot);
+  if (controllerHostUrl.protocol !== runtimeRoot.protocol
+      || controllerHostUrl.host !== runtimeRoot.host) {
+    throw new TypeError('semantic controller host must belong to this extension');
   }
   const hasTurnAuthority = typeof authorizeTurnCall === 'function'
     && typeof handleTurnKernelCall === 'function';
@@ -628,10 +635,6 @@ export const makeSemanticControllerClient = ({
     ...(hasTurnAuthority ? ['turn.run'] : []),
     ...(hasFeatureAuthority ? [KERNEL_FEATURE_DISPATCH_CAPABILITY] : []),
   ]);
-  const expectedOffscreenUrl = (() => {
-    try { return new URL(offscreenUrl).href; }
-    catch { return browser.runtime.getURL(offscreenUrl); }
-  })();
   /** @type {Promise<any> | null} */
   let connecting = null;
   /** @type {any | null} */
@@ -727,7 +730,7 @@ export const makeSemanticControllerClient = ({
         ? handleControllerKernelCall : undefined,
       handshakeTimeoutMs: handshakeMs,
       findHost: async () => selectExactControllerHost(
-        await listWindowClients(), expectedOffscreenUrl,
+        await listWindowClients(), controllerHostUrl.href,
       ),
     });
     try {

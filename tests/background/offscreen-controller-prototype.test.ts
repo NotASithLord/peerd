@@ -1005,6 +1005,47 @@ describe('Chrome lazy controller private channel prototype', () => {
     handler.close();
   });
 
+  test('an exact feature release permits the live kernel epoch to reconnect', () => {
+    const expectedWorkerUrl = 'chrome-extension://id/background/kernel.js';
+    let closed = 0;
+    const loadController = Object.assign(
+      async () => ({ call: async () => ({ ok: true }) }),
+      { close: () => { closed += 1; } },
+    );
+    const handler = makeControllerOfferHandler({
+      expectedWorkerUrl,
+      expectedBuildDigest: BUILD_DIGEST,
+      supportedCaps: ['state.read'],
+      loadController,
+    });
+    const offer = (channelId: string) => {
+      const channel = new MessageChannel();
+      const accepted = handler({
+        isTrusted: true,
+        source: { scriptURL: expectedWorkerUrl },
+        data: {
+          type: 'peerd/controller-channel', protocol: 2,
+          buildDigest: BUILD_DIGEST, kernelEpoch: 'epoch-live',
+          channelId, capabilities: ['state.read'],
+        },
+        ports: [channel.port2],
+      } as unknown as MessageEvent);
+      return { accepted, port: channel.port1 };
+    };
+
+    const first = offer('channel-first');
+    expect(first.accepted).toBe(true);
+    handler.release();
+    expect(closed).toBe(1);
+    const second = offer('channel-second');
+    expect(second.accepted).toBe(true);
+    handler.close();
+    expect(closed).toBe(2);
+    expect(offer('channel-late').accepted).toBe(false);
+    first.port.close();
+    second.port.close();
+  });
+
   test('offer adoption rejects a new epoch minted under the old boot identity', () => {
     const expectedWorkerUrl = 'chrome-extension://id/background/kernel.js';
     const handler = makeControllerOfferHandler({

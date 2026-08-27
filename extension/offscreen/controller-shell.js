@@ -759,9 +759,21 @@ export const makeControllerOfferHandler = ({
     }), leaseGeneration: offeredLease.generation };
     return true;
   };
+  // Releasing an exact feature lease closes its channel and Worker, but the
+  // same live kernel epoch may acquire a later exact lease. The supervisor's
+  // lease check fences stale offers before they reach this handler.
+  handleOffer.release = () => {
+    if (!active) {
+      loadController.close?.();
+      return;
+    }
+    const prior = active;
+    noteRetired(prior);
+    active = null;
+    prior.close();
+  };
   // A feature-lease revocation must retire the exact controller epoch and its
-  // sealed Worker rather than merely dropping the keepalive transport. A late
-  // offer from that kernel generation then remains permanently fenced.
+  // sealed Worker rather than merely dropping the keepalive transport.
   handleOffer.close = () => {
     if (!active) {
       loadController.close?.();

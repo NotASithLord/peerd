@@ -436,6 +436,13 @@ export const makeControllerTurnBridge = ({
       finally { entry.release(); }
     }
   };
+  const closeProviderOwner = (/** @type {any} */ run) => {
+    // why: bridge shutdown and ordinary turn finalization can race. One exact
+    // owner-close promise makes provider cleanup idempotent across both paths.
+    run.providerClose ??= Promise.resolve().then(() =>
+      providerEgress?.closeOwner(run.providerOwner));
+    return run.providerClose;
+  };
   const recordModelEvent = (/** @type {any} */ run, /** @type {any} */ event) => {
     if (event?.type === 'tool-use-start'
         && typeof event.id === 'string' && typeof event.name === 'string') {
@@ -932,6 +939,9 @@ export const makeControllerTurnBridge = ({
           }
           if (prepared.mode === 'result') {
             release();
+            if (run.signal.aborted || runs.get(run.runId) !== run) {
+              return failed('controller turn stopped during tool preparation', true);
+            }
             return known({
               mode: 'result',
               resultJson: jsonWire(externalizeToolResult(run, prepared.result)),
@@ -982,6 +992,13 @@ export const makeControllerTurnBridge = ({
             domain: parsedRequest.authorityClass,
             domainCalls: new Set(), domainState: {},
           });
+          if (run.signal.aborted || runs.get(run.runId) !== run) {
+            // why: Stop may settle the outer controller call while a policy or
+            // confirmation hook is still preparing custody. Settle that late
+            // preparation immediately; it must never escape into an effect.
+            await cleanupPrepared(run, 'tool-execution-stopped-before-effect');
+            return failed('controller turn stopped during tool preparation', true);
+          }
           return known({ mode: 'execute', requestJson: jsonWire(request), deadlineAt });
         }
         case 'turn.goal.complete': {
@@ -2049,6 +2066,7 @@ export const makeControllerTurnBridge = ({
       maxOutputTokens: Number.isSafeInteger(ctx.maxOutputTokens)
         ? Math.max(1, Math.min(64_000, Number(ctx.maxOutputTokens))) : 64_000,
       preparedExecutions: new Map(),
+      providerClose: null,
       tools: [], toolNames: new Set(), toolDescriptors: new Map(),
       classifications: {}, system: null,
       nestedUnknown: false, abortFinalized: false,
@@ -2093,10 +2111,14 @@ export const makeControllerTurnBridge = ({
       localAbort.abort();
       ctx.signal?.removeEventListener?.('abort', onAbort);
       events.close();
-      await cleanupPrepared(run, 'tool-execution-controller-lost');
-      await providerEgress?.closeOwner(run.providerOwner);
-      runs.delete(runId);
-      run.opaque.clear();
+      try { await cleanupPrepared(run, 'tool-execution-controller-lost'); }
+      finally {
+        try { await closeProviderOwner(run); }
+        finally {
+          runs.delete(runId);
+          run.opaque.clear();
+        }
+      }
     }
   };
 
@@ -2108,7 +2130,10 @@ export const makeControllerTurnBridge = ({
       for (const run of runs.values()) {
         run.abort.abort();
         run.events.close();
-        void cleanupPrepared(run, 'tool-execution-kernel-closed');
+        void Promise.allSettled([
+          cleanupPrepared(run, 'tool-execution-kernel-closed'),
+          closeProviderOwner(run),
+        ]);
       }
       runs.clear();
       sessionGenerations.clear();

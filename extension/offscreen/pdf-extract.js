@@ -31,7 +31,7 @@ import {
   chooseEngine, looksScanned, createOcrStore,
   PdfParseError, MAX_SPILL_TEXT_CHARS,
 } from '/peerd-runtime/offscreen.js';
-import { extractBoundedPdfTextLayer } from './pdf-text-layer.js';
+import { boundedPdfInfo, extractBoundedPdfTextLayer } from './pdf-text-layer.js';
 
 // pdf.js is loaded LAZILY (dynamic import), not at module top level. The
 // offscreen document ALWAYS loads (voice + the SW keepalive port), but most
@@ -177,10 +177,7 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
       }
     }
     const meta = await pdf.getMetadata().catch(() => null);
-    const info = {
-      title: meta?.info?.Title || '',
-      author: meta?.info?.Author || '',
-    };
+    const info = boundedPdfInfo(meta);
     return { pages, pageCount, info, chars, textCapped };
   } finally {
     try { if (worker) await worker.terminate(); } catch { /* best-effort */ }

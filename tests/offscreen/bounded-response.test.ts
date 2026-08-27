@@ -40,4 +40,23 @@ describe('bounded offscreen response reader', () => {
     await expect(readBoundedResponseBytes(source, 10)).rejects.toMatchObject({ bytes: 100, limit: 10 });
     expect(source.cancelled()).toBe(true);
   });
+
+  test('never falls back to materializing a non-streaming body', async () => {
+    let materialized = false;
+    await expect(readBoundedResponseBytes({
+      headers: { get: () => null },
+      body: {},
+      arrayBuffer: async () => {
+        materialized = true;
+        return new ArrayBuffer(100);
+      },
+    }, 10)).rejects.toThrow('response body is not stream-readable');
+    expect(materialized).toBe(false);
+  });
+
+  test('accepts a platform response with no body as empty', async () => {
+    expect(await readBoundedResponseBytes({
+      headers: { get: () => null }, body: null,
+    }, 10)).toEqual(new Uint8Array());
+  });
 });

@@ -231,6 +231,113 @@ describe('controller turn finite tool protocol', () => {
     });
   });
 
+  test('Stop during delayed preparation settles custody without entering an effect', async () => {
+    const scriptDescriptor = authorityDescriptor('script');
+    const abort = new AbortController();
+    let signalPrepared = () => {};
+    let releasePreparation = () => {};
+    const preparationStarted = new Promise<void>((resolve) => { signalPrepared = resolve; });
+    const preparationRelease = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    const settlements: any[] = [];
+    let signalSettlement = () => {};
+    const settlementObserved = new Promise<void>((resolve) => { signalSettlement = resolve; });
+    let effects = 0;
+    const running = runHarness({
+      ctx: context({
+        signal: abort.signal,
+        tools: [scriptDescriptor], refreshTools: async () => [scriptDescriptor],
+        callModel: async function* () {
+          yield { type: 'tool-use-start', id: 'tool-script-stop', name: 'script' };
+          yield {
+            type: 'tool-use-delta', id: 'tool-script-stop',
+            partialJson: '{"code":"return 1"}',
+          };
+          yield { type: 'tool-use-stop', id: 'tool-script-stop' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+      bridgeHooks: {
+        toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
+        prepareToolCall: async (call: any) => {
+          signalPrepared();
+          await preparationRelease;
+          return {
+            mode: 'execute',
+            custody: {
+              ctx: {
+                session: { sessionId: 'session-tool-protocol' },
+                jsOffscreenClient: {
+                  execHeadless: async () => {
+                    effects += 1;
+                    return { durationMs: 1, value: 1 };
+                  },
+                },
+              },
+            },
+            args: call.args,
+            projection: { sessionId: 'session-tool-protocol', sessionKind: 'chat' },
+            manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
+          };
+        },
+        settleToolCall: async ({ result }: any) => {
+          settlements.push(result);
+          signalSettlement();
+          return result;
+        },
+      },
+    });
+    await preparationStarted;
+    abort.abort();
+    releasePreparation();
+    const stopped = await running;
+    await settlementObserved;
+
+    expect(effects).toBe(0);
+    expect(stopped.error).toMatchObject({
+      code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+    });
+    expect(settlements).toEqual([expect.objectContaining({
+      code: 'tool-execution-stopped-before-effect',
+      outcomeKnown: true,
+      effectEntered: false,
+      retryable: true,
+    })]);
+  });
+
+  test('turn completion waits for exact provider-owner cleanup', async () => {
+    const base = makeScriptedProviderAuthority(() => context().callModel) as any;
+    let signalCleanup = () => {};
+    let releaseCleanup = () => {};
+    let completed = false;
+    const cleanupStarted = new Promise<void>((resolve) => { signalCleanup = resolve; });
+    const cleanupRelease = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const running = runHarness({
+      ctx: context({
+        callModel: async function* () {
+          yield { type: 'text-delta', text: 'done' };
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        },
+      }),
+      bridgeHooks: {
+        providerEgress: {
+          ...base,
+          closeOwner: async () => {
+            signalCleanup();
+            await cleanupRelease;
+          },
+        },
+      },
+    }).then((result) => {
+      completed = true;
+      return result;
+    });
+    await cleanupStarted;
+    expect(completed).toBe(false);
+    releaseCleanup();
+    expect((await running).error).toBeNull();
+    expect(completed).toBe(true);
+  });
+
   test('executes actor_cancel through the exact actor authority operation', async () => {
     const actorCancelDescriptor = authorityDescriptor('actor_cancel');
     let legacy = 0;

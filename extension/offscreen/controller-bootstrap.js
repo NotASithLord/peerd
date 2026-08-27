@@ -35,7 +35,7 @@ export const acceptControllerOffer = (event) => {
   if (!handleOffer(event)) port?.close();
 };
 
-// The controller feature lease owns this lifecycle edge. Revocation closes the
-// private channel and sealed Worker and permanently retires the prior kernel
-// epoch before the offscreen document is allowed to go idle.
-export const retireControllerHost = () => handleOffer.close();
+// The exact feature lease owns this lifecycle edge. Revocation closes the
+// private channel and sealed Worker while allowing the same live kernel epoch
+// to acquire a later exact lease.
+export const releaseControllerHost = () => handleOffer.release();
