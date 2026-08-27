@@ -91,16 +91,25 @@ inputs and a 347,457-byte release-minified cold graph. These values are
 observations, not goals.
 
 Static typecheck, lint, checked-file coverage, dweb boundary, controller
-identity, ownership boundaries and focused security tests pass. The full Bun
-suite has only the two inherited failures: the session-support loss-accounting
-test and the typed-error minification harness that cannot import its temporary
-bundle. The in-browser suite previously passed 940 of 942 and reproduced its
-two inherited UI-copy assertions. The functional E2E harness previously
-refused `settings/update` with the inherited
-`kernel-demand-routes-load-failed` startup result. Re-run these browser lanes
-at the final cut; do not treat the documented debts as new regressions, and do
-not add new failures. The separate web target previously reproduced its
-inherited stale activity-overlay browser-touch ledger.
+identity, ownership boundaries and focused security tests pass. The final full
+Bun run passed 7,340 tests and reproduced five inherited failures on the
+pre-checkpoint baseline: session-support loss accounting, the temporary
+typed-error bundle import, the retired dispatcher seam in the packaged
+lifecycle-fault harness, and two stale turn-driver expectations.
+
+The final in-browser run passed 938 tests and reproduced the same four failures
+on the pre-checkpoint baseline: two actor job-runner custody expectations and
+two mode-selector UI-copy expectations. The functional E2E harness still
+refuses `settings/update` with the inherited
+`kernel-demand-routes-load-failed` startup result. The separate web target
+previously reproduced its inherited stale activity-overlay browser-touch
+ledger. These are recorded debt, not new regressions.
+
+The clean packaged Chrome cold lane passed. Fresh launch reached the worker
+target in 956.85 ms and actionable Home in 1,669.23 ms, including 712.38 ms
+from worker target to actionable UI. A confirmed worker stop returned to
+actionable Home in 115.05 ms. The accepted few-second envelope therefore holds
+without an artifact-size target.
 
 ## Fixed lifecycle residue
 
