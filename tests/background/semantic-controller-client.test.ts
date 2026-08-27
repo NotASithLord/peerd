@@ -46,7 +46,9 @@ const nextTestControllerLease = () => {
   });
 };
 const makeSemanticControllerClient = (
-  deps: Parameters<typeof makeSemanticControllerClientBase>[0],
+  deps: Omit<Parameters<typeof makeSemanticControllerClientBase>[0], 'kernelIdentity'> & {
+    kernelIdentity?: Parameters<typeof makeSemanticControllerClientBase>[0]['kernelIdentity'],
+  },
 ) => {
   let leaseUsers = 0;
   let sharedLease: ReturnType<typeof nextTestControllerLease> | null = null;

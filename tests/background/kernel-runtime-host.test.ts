@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   connectOffscreenController,
-  makeSemanticControllerClient,
+  makeSemanticControllerClient as makeSemanticControllerClientBase,
 } from '../../extension/background/offscreen-controller-client.js';
 import { connectDirectController } from '../../extension/background/direct-controller-client.js';
 import {
@@ -23,6 +23,22 @@ import {
 import { makeBoundedModuleLoader } from '../../extension/shared/bounded-module-load.js';
 import { createKernelRuntimeControl } from '../../extension/background/kernel-runtime-control.js';
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/controller-build.js';
+import {
+  TEST_CONTROLLER_KERNEL_IDENTITY,
+  testControllerLease,
+  withTestControllerLease,
+} from './controller-test-identity.ts';
+
+const makeSemanticControllerClient = (
+  deps: Omit<Parameters<typeof makeSemanticControllerClientBase>[0], 'kernelIdentity'> & {
+    kernelIdentity?: Parameters<typeof makeSemanticControllerClientBase>[0]['kernelIdentity'],
+  },
+) => makeSemanticControllerClientBase({
+  ...deps,
+  kernelIdentity: deps.kernelIdentity ?? TEST_CONTROLLER_KERNEL_IDENTITY,
+  ...(!deps.firefoxDirect && typeof deps.withControllerLease !== 'function'
+    ? { withControllerLease: withTestControllerLease } : {}),
+});
 
 const BUILD_DIGEST = 'a'.repeat(64);
 const AUTHORITY = Object.freeze({
@@ -882,6 +898,15 @@ describe('private runtime controller channel', () => {
 
   test('refuses a retired kernel generation', () => {
     const expectedWorkerUrl = 'chrome-extension://id/background/vault-kernel.js';
+    const kernelIdentity = Object.freeze({
+      ...TEST_CONTROLLER_KERNEL_IDENTITY,
+      buildId: `0.7.0:${BUILD_DIGEST}`,
+      kernelEpoch: 'runtime-kernel-generation',
+    });
+    const lease = Object.freeze({
+      ...testControllerLease(),
+      ...kernelIdentity,
+    });
     const handler = makeControllerOfferHandler({
       expectedWorkerUrl,
       expectedBuildDigest: BUILD_DIGEST,
@@ -898,6 +923,8 @@ describe('private runtime controller channel', () => {
         data: {
           type: 'peerd/controller-channel', protocol: 2,
           buildDigest: BUILD_DIGEST, kernelEpoch: 'runtime-kernel-generation',
+          kernelIdentity,
+          lease,
           channelId: crypto.randomUUID(), capabilities: ['runtime.dispatch'],
         },
         ports: [channel.port2],

@@ -24,6 +24,7 @@ import {
   KERNEL_EXECUTABLE_ROUTE_NAMES,
 } from '../../extension/shared/kernel-feature-route-inventory.js';
 import * as backgroundInventory from '../../extension/shared/kernel-feature-route-inventory.js';
+import { TEST_CONTROLLER_KERNEL_IDENTITY } from './controller-test-identity.ts';
 
 const BUILD_DIGEST = 'a'.repeat(64);
 const request = (overrides: Record<string, unknown> = {}) => Object.freeze({
@@ -501,6 +502,7 @@ describe('sealed kernel feature protocol', () => {
       browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
       ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
       firefoxDirect: true, dwebEnabled: false,
+      kernelIdentity: TEST_CONTROLLER_KERNEL_IDENTITY,
       authorizeFeatureCall: control.authorize,
       handleFeatureKernelCall: control.handleKernelCall,
       withDirectLifetime: (operation) => operation(),
