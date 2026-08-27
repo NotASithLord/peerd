@@ -190,7 +190,13 @@ export const createKernelVoiceCustody = ({
     const lease = await acquireChrome(STARTS_MEDIA.has(command.type));
     if (!lease) return { ok: true, inactive: true };
     try {
-      const clients = (await listWindowClients()).filter(
+      const clients = (await withDeadline(
+        listWindowClients,
+        timeoutMs,
+        () => new Error('voice-host-client-timeout'),
+        setTimeoutFn,
+        clearTimeoutFn,
+      )).filter(
         (/** @type {any} */ client) => client?.url === offscreenUrl,
       );
       if (clients.length !== 1) throw new Error('voice-host-unavailable');

@@ -46,6 +46,48 @@ describe('kernel dweb reseed owner', () => {
     expect(h.messages).toEqual([]);
   });
 
+  test('holds the App lifecycle lane through the exact host publication', async () => {
+    const events: string[] = [];
+    const h = owner({
+      withDwebReseedPublication: async (operation: any) => {
+        events.push('enter:dweb');
+        const result = await operation(() => true);
+        events.push('exit:dweb');
+        return result;
+      },
+      withAppLifecycle: async (id: string, operation: any) => {
+        events.push(`enter:${id}`);
+        const result = await operation();
+        events.push(`exit:${id}`);
+        return result;
+      },
+      sendMessage: async (message: any) => {
+        events.push(message.type);
+        return { ok: true };
+      },
+    });
+    await h.value.onHostGeneration({ hostEpoch: 'host-epoch-lane', meshGeneration: 1 });
+    expect(events).toEqual([
+      'enter:dweb', 'enter:app-1', 'dweb/base-host/share-app',
+      'exit:app-1', 'exit:dweb',
+    ]);
+  });
+
+  test('rechecks master state and vault lock after waiting for the App lane', async () => {
+    let locked = false;
+    const h = owner({
+      locked: () => locked,
+      withAppLifecycle: async (_id: string, operation: any) => {
+        locked = true;
+        return operation();
+      },
+    });
+    expect(await h.value.onHostGeneration({
+      hostEpoch: 'host-epoch-locked', meshGeneration: 1,
+    })).toEqual({ ok: true, seeded: 0 });
+    expect(h.messages).toEqual([]);
+  });
+
   test('publishes once per exact host generation and coalesces duplicate notices', async () => {
     const h = owner();
     expect(await h.value.onHostGeneration({

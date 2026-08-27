@@ -2,6 +2,8 @@
 // Firefox Preview cannot request an update poll. This exact owner reads the
 // signed-package feed and offers only the repository's versioned XPI.
 
+import { withDeadline } from '../shared/cold-util.js';
+
 export const FIREFOX_UPDATE_CUSTODY_KEY = 'kernel.firefoxUpdateCustody.v1';
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const VERSION = /^\d+(?:\.\d+)*$/;
@@ -73,10 +75,12 @@ const manifestFeed = (manifest) => {
 /** @param {any} deps */
 export const createKernelFirefoxUpdateCustody = ({
   runtime, session, fetchFn, ready, isEnabled, notify,
-  now = Date.now, log = () => {},
+  now = Date.now, log = () => {}, feedTimeoutMs = 15_000,
+  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout,
 }) => {
   if (![runtime?.getManifest, session?.get, session?.set, fetchFn, ready,
-    isEnabled, notify].every((value) => typeof value === 'function')) {
+    isEnabled, notify].every((value) => typeof value === 'function')
+      || !Number.isFinite(feedTimeoutMs) || feedTimeoutMs <= 0) {
     throw new TypeError('kernel-firefox-update-custody-config-invalid');
   }
   let tail = Promise.resolve();
@@ -122,11 +126,37 @@ export const createKernelFirefoxUpdateCustody = ({
       await postPending();
       return false;
     }
+    /** @type {any} */
     let response;
+    /** @type {any} */
+    let feed;
     try {
-      response = await fetchFn(source.url, {
-        cache: 'no-store', credentials: 'omit', redirect: 'error',
-      });
+      const controller = new AbortController();
+      response = await withDeadline(
+        () => fetchFn(source.url, {
+          cache: 'no-store', credentials: 'omit', redirect: 'error',
+          signal: controller.signal,
+        }),
+        feedTimeoutMs,
+        () => {
+          controller.abort('firefox-update-feed-timeout');
+          return new Error('firefox-update-feed-timeout');
+        },
+        setTimeoutFn,
+        clearTimeoutFn,
+      );
+      if (response?.ok) {
+        feed = await withDeadline(
+          () => response.json(),
+          feedTimeoutMs,
+          () => {
+            controller.abort('firefox-update-feed-timeout');
+            return new Error('firefox-update-feed-timeout');
+          },
+          setTimeoutFn,
+          clearTimeoutFn,
+        );
+      }
     } catch (cause) {
       log('[update] Firefox feed fetch failed', cause);
       return false;
@@ -135,9 +165,6 @@ export const createKernelFirefoxUpdateCustody = ({
       log('[update] Firefox feed response refused', response?.status);
       return false;
     }
-    let feed;
-    try { feed = await response.json(); }
-    catch (cause) { log('[update] Firefox feed malformed', cause); return false; }
     const candidate = selectFirefoxPreviewUpdate(feed, source.addonId);
     const pending = candidate
       && compareFirefoxUpdateVersions(candidate.version, manifest.version) > 0

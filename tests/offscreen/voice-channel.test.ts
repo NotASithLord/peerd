@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createServiceWorkerChannels } from '../../extension/offscreen/supervisor-channels.js';
 import { backgroundScriptUrl } from '../../extension/offscreen/sender-checks.js';
+import { acceptVoiceChannelOffer } from '../../extension/offscreen/voice-channel-host.js';
 import { parseVoiceCommand } from '../../extension/shared/voice-channel.js';
 
 const offer = {
@@ -41,5 +42,25 @@ describe('offscreen voice channel admission', () => {
     channels.onMessage(message(backgroundScriptUrl));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect({ accepted, closed }).toEqual({ accepted: 1, closed: 1 });
+  });
+
+  test('the production host returns a result over a real one-shot MessageChannel', async () => {
+    const { port1, port2 } = new MessageChannel();
+    const result = new Promise<any>((resolve, reject) => {
+      port1.onmessage = (event) => resolve(event.data);
+      port1.onmessageerror = reject;
+      port1.start();
+    });
+    expect(acceptVoiceChannelOffer({
+      data: offer,
+      isTrusted: true,
+      source: { scriptURL: backgroundScriptUrl },
+      ports: [port2],
+    } as unknown as MessageEvent, (lease) => lease.leaseId === 'lease-media-0001')).toBe(true);
+    await expect(result).resolves.toEqual({
+      type: 'voice/result', protocol: 1, requestId: offer.requestId,
+      result: { ok: true },
+    });
+    port1.close();
   });
 });
