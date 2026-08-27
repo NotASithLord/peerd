@@ -42,8 +42,6 @@ export const pageActionFor = (name, input = {}) => {
     }
     case 'type':
       return { verb: 'TYPE', target: selTarget(), description: `type "${clip(String(input.text ?? ''))}"` };
-    case 'page_keys':
-      return { verb: 'PRESS_KEY', target: 'page', description: `press ${clip(String(input.keys ?? ''))}` };
     default:
       // Everything else — snapshot/read_page/read_state/query_dom/watch_changes
       // (perception), message_actor/actor_list (orchestration), fetch_url (HTTP,

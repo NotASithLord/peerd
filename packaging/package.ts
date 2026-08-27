@@ -58,7 +58,6 @@ import {
   bundleChromeNativeKernel,
   isChromeNativeKernelEntry,
 } from './bundle-chrome-native-kernel.ts';
-import { COLD_START_TARGETS } from '../scripts/bench/cold-start-budgets.js';
 
 // Paths (relative to extension/) that never ship in ANY artifact.
 // why eval/ is NOT here: the home page's Lab (home/eval-section.js) imports
@@ -289,14 +288,11 @@ export const packageArtifact = async (
   if (minify) {
     const report = await minifyColdArtifactModules(staging, browser, channel);
     if (coldBudgetMode === 'enforce') {
-      assertColdArtifactBudgets(
-        report,
-        nativeChromeKernel ? COLD_START_TARGETS.chrome : undefined,
-      );
+      assertColdArtifactBudgets(report);
     }
     console.log(formatArtifactMinifyReport(report));
     if (coldBudgetMode === 'enforce' && nativeChromeKernel) {
-      console.log('cold graph budget: native Chrome target');
+      console.log('cold graph budget: package no-growth ratchet');
     }
     if (coldBudgetMode === 'measure-only') {
       console.log('cold graph budget: measure-only historical base (candidate ratchet not applied)');
@@ -318,12 +314,6 @@ export const packageArtifact = async (
 
   if (minify && nativeChromeKernel) {
     const bundled = await bundleChromeNativeKernel(staging, chromeBackgroundEntry);
-    const targetBytes = coldBudgetMode === 'enforce'
-      ? COLD_START_TARGETS.chrome.serviceWorker.graphBytes
-      : Number.MAX_SAFE_INTEGER;
-    if (bundled.bytes > targetBytes) {
-      throw new Error(`native Chrome bundle is ${bundled.bytes} bytes; target is ${targetBytes}`);
-    }
     console.log(`bundled native Chrome kernel ${bundled.bytes} bytes (${bundled.inputs.length} staged inputs)`);
   }
 

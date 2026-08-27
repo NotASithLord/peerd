@@ -1092,27 +1092,6 @@ export const runActor = async (job, {
             }));
           return;
         }
-        if (m.type === 'page-evaluate-main-request') {
-          await relayExactToolMessage(m, 'page-evaluate-main-response', () =>
-            sendToSW('page/evaluate-main', {
-              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'page-evaluate-debugger-request') {
-          await relayExactToolMessage(m, 'page-evaluate-debugger-response', () =>
-            sendToSW('page/evaluate-debugger', {
-              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'page-keys-availability-request') {
-          await relayExactToolMessage(m, 'page-keys-availability-response', () =>
-            sendToSW('page/keys-availability', {
-              ...(relayToken ? { relayToken } : {}), executionId: m.executionId,
-            }));
-          return;
-        }
         if (m.type === 'page-navigate-request') {
           await relayExactToolMessage(m, 'page-navigate-response', () =>
             sendToSW('page/navigate', {

@@ -54,7 +54,7 @@ describe('js_read_file self-paging', () => {
     expect(afterFence).toContain(`chars 0–${SPILL_PAGE_CHARS} of ${big.length}`);
     // the footer re-calls THIS tool at the next offset — not a separate reader
     expect(afterFence).toContain(`{"path":"big.json","offset":${SPILL_PAGE_CHARS}}`);
-    expect(afterFence).not.toContain('read_run_cache');
+    expect(afterFence).not.toContain('read_result');
   });
 
   test('offset pages the tail — a re-read continues instead of re-truncating', async () => {

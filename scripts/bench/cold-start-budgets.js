@@ -5,31 +5,31 @@
 export const COLD_START_LANES = Object.freeze({
   local: Object.freeze({
     enforcement: 'release-safety',
-    timeoutMs: 10_000, graphPolicy: 'target', requireTimingTargets: true,
+    timeoutMs: 10_000, graphPolicy: 'ratchet', requireTimingTargets: true,
     chrome: Object.freeze({ fresh: 1, wakes: 1 }),
     firefox: Object.freeze({ fresh: 1, wakes: 1, idleMs: 45_000 }),
   }),
   device: Object.freeze({
     enforcement: 'release-safety',
-    timeoutMs: 10_000, graphPolicy: 'target', requireTimingTargets: true,
+    timeoutMs: 10_000, graphPolicy: 'ratchet', requireTimingTargets: true,
     chrome: Object.freeze({ fresh: 15, wakes: 15 }),
     firefox: Object.freeze({ fresh: 15, wakes: 15, idleMs: 45_000 }),
   }),
   pr: Object.freeze({
     enforcement: 'release-safety',
-    timeoutMs: 10_000, graphPolicy: 'target', requireTimingTargets: true,
+    timeoutMs: 10_000, graphPolicy: 'ratchet', requireTimingTargets: true,
     chrome: Object.freeze({ fresh: 7, wakes: 7 }),
     firefox: Object.freeze({ fresh: 7, wakes: 5, idleMs: 45_000 }),
   }),
   main: Object.freeze({
     enforcement: 'release-safety',
-    timeoutMs: 10_000, graphPolicy: 'target', requireTimingTargets: true,
+    timeoutMs: 10_000, graphPolicy: 'ratchet', requireTimingTargets: true,
     chrome: Object.freeze({ fresh: 15, wakes: 15 }),
     firefox: Object.freeze({ fresh: 7, wakes: 7, idleMs: 45_000 }),
   }),
   release: Object.freeze({
     enforcement: 'release-safety',
-    timeoutMs: 10_000, graphPolicy: 'target', requireTimingTargets: true,
+    timeoutMs: 10_000, graphPolicy: 'ratchet', requireTimingTargets: true,
     chrome: Object.freeze({ fresh: 15, wakes: 15 }),
     firefox: Object.freeze({ fresh: 7, wakes: 7, idleMs: 45_000 }),
   }),
@@ -145,17 +145,6 @@ export const COLD_START_TARGET_CUTOVER = Object.freeze({
 });
 
 export const COLD_SOURCE_TARGETS = Object.freeze({
-  // Native ESM cluster seams are deliberate: the kernel statically owns only
-  // small authority adapters while sealed feature implementations remain
-  // fixed-literal lazy entries. A 76-module ceiling preserves that modular
-  // shape; the byte and 26 direct-edge ceilings still prevent a facade from
-  // smuggling a rich feature graph back into first wake. 450 KB -> 460 KB:
-  // the reviewed denylist-editor/DNR-custody and skills metadata-authority
-  // adapters (route migration; no feature implementation pulled cold).
-  // 76 -> 80 modules, 460 KB -> 500 KB: origin-credential custody with the
-  // full DPoP key lifecycle. Credential injection and nonextractable key
-  // custody are kernel-owned duties, not demand-loadable feature code.
-  kernel: Object.freeze({ modules: 80, graphBytes: 500_000, entryBytes: 40_000, directImports: 26 }),
   sidepanel: Object.freeze({ modules: 75, graphBytes: 650_000, entryBytes: 50_000 }),
   home: Object.freeze({ modules: 75, graphBytes: 650_000, entryBytes: 50_000 }),
   offscreen: Object.freeze({ modules: 25, graphBytes: 200_000, entryBytes: 40_000 }),
@@ -232,27 +221,12 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   home: Object.freeze({ modules: 11, graphBytes: 157_733, entryBytes: 575, directImports: 1 }),
 });
 
-// A cold authority wake is a UX boundary: shell, bootstrap, state, and the
-// actionable vault gate must each finish within three seconds on the pinned
-// local browser/toolchain. Byte ceilings support this outcome; they do not
-// justify a more complicated architecture when the timing gate already passes.
-export const COLD_START_TARGETS = Object.freeze({
-  chrome: Object.freeze({
-    // 200 KB remains the simplification goal, not a reason to add brittle
-    // indirection. The release guard permits the current straightforward ESM
-    // design only while it remains below 300 KB and meets the 3-second gate.
-    serviceWorker: Object.freeze({ modules: 80, graphBytes: 300_000, entryBytes: 30_000 }),
-    sidepanel: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
-    home: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
-    offscreen: Object.freeze({ modules: 25, graphBytes: 100_000, entryBytes: 25_000 }),
-    timing: Object.freeze({ usableMaxMs: 3_000 }),
-  }),
-  firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 80, graphBytes: 300_000, entryBytes: 30_000 }),
-    sidepanel: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
-    home: Object.freeze({ modules: 75, graphBytes: 300_000, entryBytes: 50_000 }),
-    timing: Object.freeze({ usableMaxMs: 3_000 }),
-  }),
+// Cold-start is an observed user-visible outcome, not a bundle-size contest.
+// The graph remains protected by achieved no-growth ratchets and dependency
+// boundary tests; only actionable readiness carries an absolute target.
+export const COLD_START_TIMING_TARGETS = Object.freeze({
+  chrome: Object.freeze({ usableMaxMs: 3_000 }),
+  firefox: Object.freeze({ usableMaxMs: 3_000 }),
 });
 
 export const COLD_GRAPH_RATCHETS = Object.freeze({

@@ -65,7 +65,7 @@ const exactGrants = (tools) => {
 const CAPABILITY_LABELS = /** @type {Readonly<Record<string, string>>} */ (Object.freeze({
   actor_create: 'spawn subactors', actor_list: 'list actors', message_actor: 'delegate',
   fetch_url: 'fetch URL', navigate: 'navigate', read_page: 'read page',
-  click: 'click page', type: 'type on page', page_keys: 'send page keys',
+  click: 'click page', type: 'type on page',
   page_code: 'run page code', site_client_run: 'use site client',
   script: 'run local code',
 }));

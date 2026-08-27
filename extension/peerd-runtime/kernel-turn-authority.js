@@ -60,7 +60,6 @@ export { classifyFailure } from './observability/failure-classify.js';
 export { resolveRuntimeCapabilities } from './runtime-capabilities.js';
 export { createSiteClientStore } from './site-clients/store.js';
 export { createSkillStore } from './skills/store.js';
-export { createToolboxStore } from './toolbox/store.js';
 export { isAddressableBrowserTab } from './tools/browser-automation-policy.js';
 export { isDenylistedTab } from './browser-authority/dom-helpers.js';
-export { createRunCacheStore } from './tools/run-cache.js';
+export { createResultStore } from './tools/result-store.js';

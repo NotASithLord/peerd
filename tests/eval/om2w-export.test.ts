@@ -13,7 +13,6 @@ describe('om2w-actions — peerd tool calls to Grammar A', () => {
     expect(pageActionFor('navigate', { url: 'https://x.com' })?.verb).toBe('NAVIGATE');
     expect(pageActionFor('click', { selector: '#buy' })?.verb).toBe('CLICK');
     expect(pageActionFor('type', { selector: '#q', text: 'shoes' })?.verb).toBe('TYPE');
-    expect(pageActionFor('page_keys', { keys: 'Enter' })?.verb).toBe('PRESS_KEY');
     expect(pageActionFor('open_tab', { url: 'https://x.com' })?.verb).toBe('NAVIGATE');
     // NOT page actions: perception, delegation, HTTP fetch, compute, code arm.
     for (const n of ['snapshot', 'read_page', 'read_state', 'query_dom', 'watch_changes',

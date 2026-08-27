@@ -61,7 +61,6 @@ export const createKernelSenderPolicy = (target) => {
     optionsUi, evalUi,
     voiceUi: (/** @type {any} */ sender) => sidepanelUi(sender) || optionsUi(sender),
     notebookUi,
-    toolboxUi: (/** @type {any} */ sender) => notebookUi(sender) || offscreenUi(sender),
     appUi, offscreenUi,
     sidepanelPortUi: (/** @type {any} */ sender) => isSidepanelPortSender(sender, {
       runtimeId, extensionOrigin, sidepanelUrl,

@@ -95,8 +95,7 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/composer/command-store.js',
       'peerd-runtime/site-clients/store.js',
       'peerd-runtime/skills/store.js',
-      'peerd-runtime/toolbox/store.js',
-      'peerd-runtime/tools/run-cache.js',
+      'peerd-runtime/tools/result-store.js',
     ]);
 
     expect([...modules].filter((module) =>
@@ -425,9 +424,6 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/tools/defs/read-state.js',
       'peerd-runtime/tools/defs/watch-changes.js',
       'peerd-runtime/tools/defs/query-dom.js',
-      'peerd-runtime/tools/defs/page-eval.js',
-      'peerd-runtime/tools/defs/page-exec.js',
-      'peerd-runtime/tools/defs/page-keys.js',
       'peerd-runtime/tools/defs/navigate.js',
       'peerd-runtime/tools/defs/type.js',
       'peerd-runtime/tools/defs/click.js',
@@ -450,14 +446,12 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
-  it('hosts introspection, skill, and wait semantics only in controller graphs', async () => {
+  it('hosts introspection and skill semantics only in controller graphs', async () => {
     const semanticModules = new Set([
       'peerd-runtime/controller-introspection-tools.js',
       'peerd-runtime/tools/defs/actor-list.js',
       'peerd-runtime/tools/defs/inspect.js',
       'peerd-runtime/skills/load-skill-tool.js',
-      'peerd-runtime/clock/tools.js',
-      'peerd-runtime/clock/wait-execute.js',
     ]);
     for (const entry of [
       'background/vault-kernel.js',
@@ -505,7 +499,6 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/tools/defs/dweb-peers.js',
       'peerd-runtime/tools/defs/dweb-block.js',
       'peerd-runtime/tools/defs/dweb-discovery.js',
-      'peerd-runtime/tools/defs/dweb-guide.js',
     ]);
     for (const entry of [
       'background/vault-kernel.js',

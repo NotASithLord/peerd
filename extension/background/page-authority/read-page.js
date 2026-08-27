@@ -61,13 +61,13 @@ export const readPageTool = definePageAuthorityHandler({
             // zero-width byte, so the second pass is what closes the entity
             // channel. Both run BEFORE any windowing or caching below, because
             // the paging footer reports character offsets into this string and
-            // webCache stores it for read_web_cache to page back later.
+            // resultStore keeps it for read_result to page back later.
             const ex = await webClient.extractMarkdown({ html: disarmMarkup(grabbed.html), url: grabbed.url || tab.url });
             const markdown = disarmMarkup(ex.markdown);
             if (ex.readerable && markdown.trim()) {
               const origin = originOfUrl(grabbed.url || tab.url);
-              const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
-                /** @type {any} */ (ctx).webCache);
+              const resultStore = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
+                /** @type {any} */ (ctx).resultStore);
               // Query-relevant excerpt when the caller named what it's after
               // (markdown is always prose here); else the head+tail window. Same
               // spill contract — full markdown stored + pageable either way.
@@ -78,15 +78,19 @@ export const readPageTool = definePageAuthorityHandler({
               const truncated = excerpt ? excerpt.excerpted : win.windowed;
               /** @type {string | null} */
               let footer = null;
-              if (truncated && webCache?.key && webCache?.put) {
-                const cacheKey = webCache.key();
+              if (truncated && resultStore?.key && resultStore?.put) {
+                const cacheKey = resultStore.key();
                 try {
-                  await webCache.put({ key: cacheKey, url: grabbed.url || tab.url, format: 'markdown', text: markdown });
+                  await resultStore.put({
+                    key: cacheKey, url: grabbed.url || tab.url, format: 'markdown', text: markdown,
+                    ownerSessionId: ctx.session?.sessionId ?? null,
+                    producer: 'read_page', fenced: true, originLabel: origin,
+                  });
                   footer = excerpt
                     ? excerptFooter({ key: cacheKey, total: excerpt.total, passagesShown: excerpt.passagesShown, passagesTotal: excerpt.passagesTotal, query })
                     : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
                 } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
-              } else if (truncated && !webCache) {
+              } else if (truncated && !resultStore) {
                 text = markdown.slice(0, CONTENT_BODY_CHARS);
               }
               const fenced = wrapUntrusted({

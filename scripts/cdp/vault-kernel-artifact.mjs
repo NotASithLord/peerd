@@ -18,7 +18,6 @@ import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { dwebEnabledForTarget } from '../../packaging/gen-channel-config.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import { writeControllerBuildIdentity } from '../../packaging/controller-build-identity.ts';
-import { COLD_START_TARGETS } from '../bench/cold-start-budgets.js';
 import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
 import {
   NATIVE_BACKGROUND_ENTRY,
@@ -41,23 +40,15 @@ export const vaultKernelManifest = (manifest, browser, channel = 'store') => ({
     : { service_worker: nativeEntry(browser, channel), type: 'module' },
 });
 
-export const assertVaultKernelReleaseTarget = ({
-  browser, modules, graphBytes, entryBytes, bundled = false,
+export const assertVaultKernelArtifactShape = ({
+  modules, graphBytes, entryBytes, bundled = false,
 }) => {
-  const target = COLD_START_TARGETS[browser]?.serviceWorker;
-  if (!target) throw new Error(`no native cold target for ${browser}`);
   for (const [name, value] of Object.entries({ modules, graphBytes, entryBytes })) {
     if (!Number.isInteger(value) || value <= 0) throw new Error(`invalid native ${name}: ${value}`);
-    if (!bundled && value > target[name]) {
-      throw new Error(`native ${browser} ${name} ${value} exceeds ${target[name]}`);
-    }
   }
   if (bundled) {
     if (modules !== 1 || entryBytes !== graphBytes) {
       throw new Error('native Chrome bundle must be exactly one static module');
-    }
-    if (graphBytes > target.graphBytes) {
-      throw new Error(`native ${browser} graphBytes ${graphBytes} exceeds ${target.graphBytes}`);
     }
   }
 };
@@ -130,8 +121,8 @@ export async function buildVaultKernelArtifact({
   const bytes = graph.reduce((total, path) => total + statSync(path).size, 0);
   const entryBytes = statSync(entry).size;
   if (releaseMinify) {
-    assertVaultKernelReleaseTarget({
-      browser, modules: graph.length, graphBytes: bytes, entryBytes,
+    assertVaultKernelArtifactShape({
+      modules: graph.length, graphBytes: bytes, entryBytes,
       bundled: browser === 'chrome',
     });
   }

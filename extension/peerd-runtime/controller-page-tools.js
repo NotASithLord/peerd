@@ -9,9 +9,6 @@ import { snapshotTool } from './tools/defs/snapshot.js';
 import { readStateTool } from './tools/defs/read-state.js';
 import { watchChangesTool } from './tools/defs/watch-changes.js';
 import { queryDomTool } from './tools/defs/query-dom.js';
-import { pageEvalTool } from './tools/defs/page-eval.js';
-import { pageExecTool } from './tools/defs/page-exec.js';
-import { pageKeysTool } from './tools/defs/page-keys.js';
 import { navigateTool } from './tools/defs/navigate.js';
 import { typeTool } from './tools/defs/type.js';
 import { clickTool } from './tools/defs/click.js';
@@ -22,8 +19,8 @@ import { viewTool } from './tools/web/view.js';
 
 export const CONTROLLER_PAGE_TOOL_NAMES = Object.freeze([
   'open_tab', 'read_page', 'snapshot', 'read_state', 'watch_changes',
-  'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type',
-  'click', 'login', 'page_code', 'capture', 'view',
+  'query_dom', 'navigate', 'type', 'click', 'login', 'page_code', 'capture',
+  'view',
 ]);
 
 const tools = Object.freeze({
@@ -33,9 +30,6 @@ const tools = Object.freeze({
   read_state: readStateTool,
   watch_changes: watchChangesTool,
   query_dom: queryDomTool,
-  page_eval: pageEvalTool,
-  page_exec: pageExecTool,
-  page_keys: pageKeysTool,
   navigate: navigateTool,
   type: typeTool,
   click: clickTool,

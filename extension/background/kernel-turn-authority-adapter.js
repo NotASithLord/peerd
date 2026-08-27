@@ -17,10 +17,9 @@ import {
   createCommandStore,
   createConversationRegistry,
   createRefRegistry,
-  createRunCacheStore,
+  createResultStore,
   createSiteClientStore,
   createSkillStore,
-  createToolboxStore,
   decideNumericTabAuthority,
   hasDurableSiteClientState,
   IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
@@ -167,7 +166,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     makeGoalRunner,
     makeScheduler,
     makeSpawnActor,
-    makeToolboxParseCheck,
     makeToolsCommand,
     makeTrimEnricher,
     manifestLabel,
@@ -279,14 +277,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     },
   });
   const siteClientStore = createSiteClientStore();
-  const toolboxStore = createToolboxStore();
-  const toolboxParseCheck = makeToolboxParseCheck({
-    buildModule: deps.buildToolboxModule ?? (async () => ({ code: '' })),
-    readSibling: async (name) => await toolboxStore.getBody(name) ?? '',
-    remoteModulesEnabled: deps.remoteModuleImportsEnabled === true,
-  });
   const domRefs = createRefRegistry();
-  const webCache = createRunCacheStore();
+  const resultStore = createResultStore();
   const persistEntries = (/** @type {string} */ key, /** @type {any} */ store) => () =>
     deps.sessionCache.sessionSet(key, store.entries()).catch(() => {});
   /** @type {Promise<void>} */
@@ -500,7 +492,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
     ensureOffscreen: deps.featureHost.ensureOffscreen,
     sendMessage: (message) => hostMessage(message, 'web-extract-demand'),
   });
-  const runCache = createRunCacheStore();
   /** @type {ReturnType<typeof createKernelDwebAgentOwner>|null} */
   let dwebAgentOwner = null;
   /** @type {Promise<ReturnType<typeof makeDwebShare>>|null} */
@@ -691,7 +682,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       jsOffscreenClient,
       docOffscreenClient,
       webOffscreenClient,
-      runCache,
+      resultStore,
       tabs: deps.browser.tabs,
       scripting: deps.browser.scripting,
       debuggerPool: advancedAutomationOn() ? debuggerPool : undefined,
@@ -723,7 +714,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       listApiIntegrations: () => live.listApiIntegrations(sessionId),
       safeFetch,
       webFetch,
-      webCache,
       settings: { ...deps.settingsStore.get() },
       settingsStore: deps.settingsStore,
       getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name),
@@ -734,8 +724,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       idb: deps.idb,
       skills: skillRegistry,
       siteClients: siteClientStore,
-      toolbox: toolboxStore,
-      toolboxParseCheck,
       dweb: dwebTransportOn() ? dwebSurface : null,
       ...(actorType === 'app' && options.actorInstanceId ? {
         appAgentCall: async (/** @type {'observe'|'act'} */ op,
@@ -2559,8 +2547,8 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwner) => {
       'page-program/read-document': pageProgramRoute({
         toolName: 'read_doc', method: 'readDocument', tabMode: 'free', riskClass: 'read',
       }),
-      'page-program/read-cache': pageProgramRoute({
-        toolName: 'read_web_cache', method: 'readCache', tabMode: 'free', riskClass: 'read',
+      'page-program/read-result': pageProgramRoute({
+        toolName: 'read_result', method: 'readResult', tabMode: 'free', riskClass: 'read',
       }),
       'page-program/site-client-read': pageProgramRoute({
         toolName: 'site_client_read', method: 'readSiteClient', tabMode: 'free', riskClass: 'read',

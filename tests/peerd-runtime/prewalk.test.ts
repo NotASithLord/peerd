@@ -73,7 +73,7 @@ describe('shouldPrewalkSwap — the gate', () => {
   });
 
   test('recon/bookkeeping writes are exempt by name', () => {
-    for (const name of ['open_tab', 'remember', 'wait_until', 'actor_cancel', 'todo_init', 'complete_goal']) {
+    for (const name of ['open_tab', 'remember', 'actor_cancel', 'todo_init', 'complete_goal']) {
       expect(PREWALK_EXEMPT_TOOLS.has(name)).toBe(true);
       expect(shouldPrewalkSwap({ ...base, toolName: name, sideEffect: 'write' })).toBe(false);
     }

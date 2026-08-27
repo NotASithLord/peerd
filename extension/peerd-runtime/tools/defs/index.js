@@ -11,8 +11,7 @@
 import { inspectTool }               from './inspect.js';
 import { readDocTool }               from './read-doc.js';
 import { fetchUrlTool }              from './fetch-url.js';
-import { readWebCacheTool }          from './read-web-cache.js';
-import { readRunCacheTool }          from './read-run-cache.js';
+import { readResultTool }            from './read-result.js';
 import { siteClientRunTool }         from './site-client-run.js';
 import { siteClientReadTool }        from './site-client-read.js';
 import { siteClientWriteTool }       from './site-client-write.js';
@@ -21,9 +20,6 @@ import { actorListTool }             from './actor-list.js';
 import { sandboxCreateTool }          from './sandbox-create.js';
 import { scriptTool }                  from './script.js';
 import { editFileTool }               from './edit-file.js';
-import { toolboxWriteTool }           from './toolbox-write.js';
-import { toolboxListTool }            from './toolbox-list.js';
-import { toolboxDeleteTool }          from './toolbox-delete.js';
 import { scheduleCreateTool }          from './schedule-create.js';
 import { scheduleListTool }            from './schedule-list.js';
 import { scheduleCancelTool }          from './schedule-cancel.js';
@@ -33,7 +29,6 @@ import { dwebInstallTool }             from './dweb-install.js';
 import { dwebPeersTool }               from './dweb-peers.js';
 import { dwebBlockTool }               from './dweb-block.js';
 import { dwebDiscoveryTool }           from './dweb-discovery.js';
-import { dwebGuideTool }               from './dweb-guide.js';
 import { a2aRunTool }                  from './a2a-run.js';
 
 export {
@@ -51,15 +46,11 @@ export {
   sandboxCreateTool,
   // engine (Notebook)
   scriptTool,
-  readRunCacheTool,
+  readResultTool,
   // engine (Pod)
   // engine (App)
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
-  // toolbox (design js-superpower/06 — durable agent-authored modules)
-  toolboxWriteTool,
-  toolboxListTool,
-  toolboxDeleteTool,
   // scheduling (background Routines — loop/scheduler.js)
   scheduleCreateTool,
   scheduleListTool,
@@ -71,7 +62,6 @@ export {
   dwebPeersTool,
   dwebBlockTool,
   dwebDiscoveryTool,
-  dwebGuideTool,
   a2aRunTool,
 };
 
@@ -95,9 +85,8 @@ export const BUILTIN_TOOLS = Object.freeze([
   // Registered + hidden from main (actor-only, like the DOM tools); allowed
   // for kind:'web' in ACTOR_TYPE_TOOLS.web and keyless by construction.
   fetchUrlTool,
-  // fetch_url's spill-and-page read side — same exposure (web actor only; the
-  // cache holds fetched page content).
-  readWebCacheTool,
+  // One session-owned pager for oversized web, document, page, and script results.
+  readResultTool,
   // site clients (DESIGN-19) — per-origin derived API clients. All web-actor-only
   // (hidden from main; allowed for kind:'web' in exposure.js). run executes the
   // stored client in the sealed worker under an origin-pinned fetch; read inspects
@@ -112,19 +101,10 @@ export const BUILTIN_TOOLS = Object.freeze([
   sandboxCreateTool,
   // engine (Notebook)
   scriptTool,
-  // script's value-spill read side — a MAIN-agent pager (script is a
-  // main-agent tool); ownership is session-stamped and fencing rides the
-  // record's stored flag (tools/defs/read-run-cache.js).
-  readRunCacheTool,
   // engine (Pod)
   // engine (App)
   // edit (SEARCH/REPLACE — primary write path)
   editFileTool,
-  // toolbox (design js-superpower/06 — durable agent-authored modules the
-  // script/notebook lanes import as peerd:toolbox/<name>; write confirm-gated)
-  toolboxWriteTool,
-  toolboxListTool,
-  toolboxDeleteTool,
   // goal mode (the Goal toggle — loop/goal-runner.js). Registered always but
   // exposure.js reveals them to the model ONLY while a goal run is active.
   // scheduling — background Routines (loop/scheduler.js). Main-agent tools; not
@@ -140,6 +120,5 @@ export const BUILTIN_TOOLS = Object.freeze([
   dwebPeersTool,
   dwebBlockTool,
   dwebDiscoveryTool,
-  dwebGuideTool,
   a2aRunTool,
 ]);

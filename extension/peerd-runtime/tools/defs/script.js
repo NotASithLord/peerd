@@ -23,8 +23,8 @@ import {
 import { JS_PITFALLS_NOTE, SCRIPT_BUILTINS_NOTE } from './code-style-note.js';
 import { oncePerSession } from './once-per-session.js';
 import { pushValueBlock, serializeValue } from './value-block.js';
-import { SPILL_PAGE_CHARS as RUN_CACHE_SLICE_CHARS } from '../web/spill.js';
-import { MAX_SPILL_TEXT_CHARS } from '../run-cache-policy.js';
+import { SPILL_PAGE_CHARS as RESULT_PAGE_CHARS } from '../web/spill.js';
+import { MAX_SPILL_TEXT_CHARS } from '../result-store-policy.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import {
   renderTraceLines, traceGoalLines, traceErrorDetails,
@@ -78,7 +78,7 @@ export const scriptTool = composeTool("script", {
     }
     // why: jsOffscreenClient/scriptRuns/messageActor ride the opaque ctx
     // contract (not on ToolContext); narrow to what this tool touches.
-    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string, ownerSessionId?: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string, capabilities?: { actors?: boolean, provider?: boolean, egress?: boolean }) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, runCache?: { put?: (record: object) => Promise<void> }, messageActor?: unknown, toolAllow?: Set<string> | null, inbound?: boolean, abortSignal?: AbortSignal, toolUseId?: string }} */ (
+    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<RunResult>, abortHeadless?: (runId: string, ownerSessionId?: string) => Promise<void> }, scriptRuns?: { mintRunId: (sid: string) => string, register: (runId: string, signal?: any, owner?: string, capabilities?: { actors?: boolean, provider?: boolean, egress?: boolean }) => void, abort: (runId: string) => void, release: (runId: string) => void, opsFor?: (runId: string) => Array<any> }, resultStore?: { key?: () => string, put?: (record: object) => Promise<void> }, messageActor?: unknown, toolAllow?: Set<string> | null, inbound?: boolean, abortSignal?: AbortSignal, toolUseId?: string }} */ (
       /** @type {unknown} */ (ctx));
     const jsOffscreenClient = c.jsOffscreenClient;
     if (!jsOffscreenClient || typeof jsOffscreenClient.execHeadless !== 'function') {
@@ -166,16 +166,13 @@ export const scriptTool = composeTool("script", {
     /** @type {(() => void) | undefined} */
     let onAbort;
     try {
-      /** @type {{ timeoutMs: number, toolbox: boolean, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, caps?: { provider?: boolean, subagent?: boolean }, signal?: AbortSignal }} */
-      // toolbox: the script lane resolves peerd:toolbox modules (design 06) —
-      // a trusted job param, not a worker choice; the other headless lanes
-      // (a2a/site-client/page_code) never set it.
+      /** @type {{ timeoutMs: number, actors?: boolean, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, workspaceSessionId?: string, caps?: { provider?: boolean, subagent?: boolean }, signal?: AbortSignal }} */
       // `script` is compute/orchestration, never a hidden second actor_create.
       // The default worker also supports embedded artifacts that call
       // peerd.runtime.runAgent, but here that would bypass the session manifest
       // and the caller's narrowed grant. Explicit actor_create remains the only
       // subtask authority; Notebook/App runtimes keep their separate profile.
-      const opts = { timeoutMs, toolbox: true, caps: { subagent: false }, signal: c.abortSignal };
+      const opts = { timeoutMs, caps: { subagent: false }, signal: c.abortSignal };
       // The durable workspace mount — the SESSION id rides as a TRUSTED job
       // param (invariant: the worker never names its own root; the SW-side tool
       // is the only place the owning session is resolved).
@@ -227,21 +224,22 @@ export const scriptTool = composeTool("script", {
       }
       // Value spill (run cache): when the serialized [VALUE] overflows its cap,
       // store the FULL text keyed by this run/tool-use, stamped with the owning
-      // session and the run's FENCE state — read_run_cache re-applies exactly
+      // session and the run's FENCE state — read_result re-applies exactly
       // that fencing when paging it back. Best-effort: a failed spill leaves
       // the truncation note alone (today's behavior).
       /** @type {{ key: string, total: number } | undefined} */
       let valueSpill;
       const sv = serializeValue(result.value);
-      if (sv?.truncated && c.runCache?.put && sid && (runId || c.toolUseId)) {
-        const key = `run:${runId ?? c.toolUseId}`;
+      if (sv?.truncated && c.resultStore?.key && c.resultStore?.put && sid) {
+        const key = c.resultStore.key();
         try {
-          await c.runCache.put({
+          const originLabel = runOriginLabel(result);
+          await c.resultStore.put({
             key, ownerSessionId: sid,
-            fenced: runIsFenced(result), originLabel: runOriginLabel(result),
+            producer: 'script', fenced: runIsFenced(result), originLabel,
             text: sv.text,
           });
-          // The store caps what it keeps (run-cache.js MAX_SPILL_TEXT_CHARS) —
+          // The store caps what it keeps (result-store.js MAX_SPILL_TEXT_CHARS) —
           // report the STORED length so the footer never advertises pages that
           // don't exist.
           valueSpill = { key, total: Math.min(sv.text.length, MAX_SPILL_TEXT_CHARS) };
@@ -338,7 +336,7 @@ export const runOriginLabel = (r) => {
 /**
  * Format a headless run result for the model. Shared with page_code (the web
  * actor's code-REPL tool, PR #119) — same worker substrate, same result shape.
- * `valueSpill` (script-only) names an already-stored run-cache record; its
+ * `valueSpill` (script-only) names an already-stored result record; its
  * footer is TOOL-AUTHORED (caller-computed values only) and rides OUTSIDE the
  * fence, like the web spill's paging note. `serializedValue` (script-only) is
  * the caller's precomputed serializeValue(r.value) — thread it so the spill
@@ -416,7 +414,7 @@ export const formatRunResult = (code, r, valueSpill, serializedValue) => {
   if (valueSpill) {
     lines.push([
       `[paging] The [VALUE] (${valueSpill.total} chars) is stored locally.`,
-      `Read more with read_run_cache { "key": "${valueSpill.key}", "offset": <char offset>, "limit": <chars, max ${RUN_CACHE_SLICE_CHARS}> } — but prefer re-running with a more compact return value.`,
+      `Read more with read_result { "key": "${valueSpill.key}", "offset": <char offset>, "limit": <chars, max ${RESULT_PAGE_CHARS}> } — but prefer re-running with a more compact return value.`,
     ].join('\n'));
   }
   return lines.join('\n');

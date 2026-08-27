@@ -1566,24 +1566,6 @@ export const makeControllerTurnBridge = ({
           return runDomainEffect(run, entry, operation, 'read', () =>
             entry.domainState.authority.queryOwnedDom());
         }
-        case 'turn.page.evaluate-main': {
-          const entry = pageExecutionEntry(run, value);
-          if (!entry) return failed('page evaluation authority mismatch', true);
-          return runDomainEffect(run, entry, operation, 'resource', () =>
-            entry.domainState.authority.evaluateOwnedPageMainWorld());
-        }
-        case 'turn.page.evaluate-debugger': {
-          const entry = pageExecutionEntry(run, value);
-          if (!entry) return failed('page debugger authority mismatch', true);
-          return runDomainEffect(run, entry, operation, 'resource', () =>
-            entry.domainState.authority.evaluateOwnedPageDebugger());
-        }
-        case 'turn.page.keys-availability': {
-          const entry = pageExecutionEntry(run, value);
-          if (!entry) return failed('page keys authority mismatch', true);
-          return runDomainEffect(run, entry, operation, 'read', () =>
-            entry.domainState.authority.readTrustedKeysAvailability());
-        }
         case 'turn.page.navigate': {
           const entry = pageExecutionEntry(run, value);
           if (!entry) return failed('page navigation authority mismatch', true);

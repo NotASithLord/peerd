@@ -1,7 +1,7 @@
 // @ts-check
 
 const DB_NAME = 'peerd';
-const DB_VERSION = 13;
+const DB_VERSION = 14;
 const OPEN_TIMEOUT_MS = 8_000;
 const TX_TIMEOUT_MS = 15_000;
 
@@ -60,8 +60,11 @@ export const openDB = () => {
       if (!db.objectStoreNames.contains('audit_meta')) {
         db.createObjectStore('audit_meta', { keyPath: 'key' });
       }
-      if (!db.objectStoreNames.contains('web_extract_cache')) {
-        db.createObjectStore('web_extract_cache', { keyPath: 'key' });
+      // why: oversized web, document, page, and script values now share the
+      // session-owned opaque result store. The legacy web cache is disposable
+      // spill data and must not survive as a second readable storage path.
+      if (db.objectStoreNames.contains('web_extract_cache')) {
+        db.deleteObjectStore('web_extract_cache');
       }
       if (!db.objectStoreNames.contains('vault')) {
         db.createObjectStore('vault', { keyPath: 'key' });

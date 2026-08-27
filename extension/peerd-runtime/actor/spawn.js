@@ -29,7 +29,7 @@ import { confirmActionsFromRecord } from '../permissions/policy.js';
 import { resolveManifestAllow } from '../tools/manifests.js';
 // The MAIN-AGENT tool surface: an actor is a CHILD of the main agent and must hold
 // no more than it could. mainAgentDescriptors drops MAIN_AGENT_HIDDEN_TOOLS (the
-// actor-only DOM/page/fetch tools — read_page, page_exec, click, navigate, fetch_url,
+// actor-only DOM/page/fetch tools — read_page, page_code, click, navigate, fetch_url,
 // …) so an actor cannot reach the user's foreground tab (DESIGN-17: web/DOM work
 // goes through the web actor via message_actor, never a raw grant); filterActorSurface
 // drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
@@ -139,10 +139,8 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   getSecret:          [],
   safeFetch:          [],
   webFetch:           ['vm_import', 'fetch_url'],
-  webCache:           ['fetch_url', 'read_web_cache', 'read_page'],
-  // The script value-spill store (tools/run-cache.js): script writes it,
-  // read_run_cache pages it back. Stripped from any child granted neither.
-  runCache:           ['script', 'read_run_cache'],
+  // One opaque spill store serves every supported producer and read_result.
+  resultStore:        ['fetch_url', 'read_doc', 'read_page', 'script', 'read_result'],
   // DESIGN-19 site clients — the two-tier store (run/read/write reach it) and the
   // capture closure (site_capture only). Stripped from any child/actor whose
   // toolset lacks them, like every other capability-by-need closure.
@@ -153,11 +151,6 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   authorizeSignInExcursion: ['login'],
   revokeSignInExcursion: ['login'],
   siteCapture:        ['site_capture'],
-  // design js-superpower/06 — the toolbox store + the write-time parse check.
-  // Stripped from any child/actor whose grants lack the toolbox tools, so a
-  // narrowed heap never holds the module store.
-  toolbox:            ['toolbox_write', 'toolbox_list', 'toolbox_delete'],
-  toolboxParseCheck:  ['toolbox_write'],
   memory:             ['read_memory', 'remember'],
   kv:                 ['inspect'],
   idb:                ['inspect'],
@@ -165,7 +158,7 @@ export const CAPABILITY_CONSUMERS = Object.freeze({
   // sandbox_create's app arm reads ctx.dweb to decide whether to build a
   // dwapp, so it keeps the dweb closure alongside the dweb_* tools.
   dweb:               ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers',
-    'dweb_block', 'dweb_discovery', 'dweb_guide', 'sandbox_create'],
+    'dweb_block', 'dweb_discovery', 'sandbox_create'],
   // DESIGN-17: the engine instance closures buildToolContext injects into EVERY
   // ctx — the SW-side clients + registries + tab trackers that the
   // vm_*/js_*/app_*/edit_file tools reach through. Listing them here strips them
@@ -468,7 +461,7 @@ export const makeSpawnActor = (deps) => {
     const parentAllow = resolveManifestAllow(parent?.toolManifest);
     // SECURITY (DESIGN-17): narrow from the MAIN-AGENT surface, not the full registry.
     // Without this, an actor could be granted the actor-only DOM/page tools (read_page,
-    // page_exec, click, navigate, fetch_url, …) — which NO gate refuses for an actor
+    // page_code, click, navigate, fetch_url, …) — which NO gate refuses for an actor
     // (exposure!=='main', not actor-mutating) — and drive/read the user's FOREGROUND tab,
     // authority the spawning agent itself lacks. Filtering the grantable universe here is
     // the fix: an actor holds ⊆ what the main agent holds, delegating web/DOM work to

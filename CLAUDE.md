@@ -349,10 +349,9 @@ gotchas to know going in:
   is wired into a tool context only when `advancedAutomationOn()` =
   `debuggerApiAvailable()` (namespace present) AND the
   `advancedAutomationEnabled` SETTING (default ON preview/dev, OFF store;
-  Settings → Advanced). Genuinely CDP-only (correctly NOT faked):
-  `page_exec`'s `Runtime.evaluate` with `allowUnsafeEvalBlockedByCSP:
-  true` on Trusted-Types pages (Gmail/Notion/Slack), and `page_keys`'
-  trusted (`isTrusted`) input. Pool lives in
+  Settings → Advanced). The pool supplies exact-tab screenshots,
+  accessibility snapshots, framework-state inspection, node actions, and
+  site-client network capture where CDP ships. Pool lives in
   `background/debugger-pool.js`.
 - Spawned actors — depth-bounded recursion, tool
   narrowing, output cap. Real implementation at

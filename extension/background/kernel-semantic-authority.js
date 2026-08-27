@@ -112,7 +112,7 @@ export const createKernelSemanticAuthority = ({
       if (!route || !String(context?.authority?.target ?? '').startsWith(`semantic:${route}:`)) {
         return { ok: false, code: 'semantic-kernel-operation-denied', outcomeKnown: true };
       }
-      if (vault.isLocked() && route !== 'app/get-meta' && !route.startsWith('toolbox/')) {
+      if (vault.isLocked() && route !== 'app/get-meta') {
         return { ok: false, error: 'vault-locked', outcomeKnown: true };
       }
       try {

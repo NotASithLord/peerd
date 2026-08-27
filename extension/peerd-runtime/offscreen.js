@@ -4,7 +4,6 @@
 // components and the privileged background agent-loop assembly.
 
 export { createModelStore } from './voice/model-store.js';
-export { makeToolboxParseCheck } from './toolbox/core.js';
 export {
   CODE_RUN_MAX_TRACE_OPS, buildCodeClientSource, canonicalCodeTraceLabel,
 } from './actor/capability-manifest.js';

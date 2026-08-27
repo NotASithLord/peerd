@@ -288,7 +288,7 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
   });
 
   test('SECURITY: an actor CANNOT be granted actor-only tools (foreground-tab escalation is closed)', async () => {
-    // DESIGN-17: read_page/page_exec/click/navigate/fetch_url are MAIN_AGENT_HIDDEN
+    // DESIGN-17: read_page/click/navigate/fetch_url are MAIN_AGENT_HIDDEN
     // (actor-only), and edit_file is actor-mutating. narrowTools filters from the
     // MAIN-AGENT surface, so requesting them yields a child that holds NONE of them —
     // it must delegate web/DOM work to the web actor via message_actor.
@@ -299,15 +299,15 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
       runChildOffscreen: async (job: any) => { offscreenJob = job; return { ok: true, started: true, finalText: 'ok', stopReason: 'end_turn', toolCalls: 0 }; },
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
       // a registry that DOES include the actor-only tools (the real listTools surface)
-      getToolDescriptors: () => ['read_page', 'page_exec', 'click', 'navigate', 'fetch_url', 'edit_file', 'script', 'read_memory']
+      getToolDescriptors: () => ['read_page', 'click', 'navigate', 'fetch_url', 'edit_file', 'script', 'read_memory']
         .map((name) => ({ name, description: name, schema: {} })),
     }) as any);
-    await spawn({ task: 'read the current page', tools: ['read_page', 'page_exec', 'edit_file', 'script'], parentSessionId: parent.sessionId });
+    await spawn({ task: 'read the current page', tools: ['read_page', 'edit_file', 'script'], parentSessionId: parent.sessionId });
     const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
     const granted = child.grantedTools ?? [];
     // the actor-only DOM/page + mutating tools were dropped; only the legit one survives
     expect(granted).toContain('script');
-    for (const forbidden of ['read_page', 'page_exec', 'click', 'navigate', 'fetch_url', 'edit_file']) {
+    for (const forbidden of ['read_page', 'click', 'navigate', 'fetch_url', 'edit_file']) {
       expect(granted).not.toContain(forbidden);
     }
     // and the worker is only advertised the surviving descriptor

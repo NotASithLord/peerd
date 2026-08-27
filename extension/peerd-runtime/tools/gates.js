@@ -231,7 +231,7 @@ export const actorTierGate = (tool, args, ctx) => {
 /**
  * Exposure — enforces the main-agent tool boundary at DISPATCH, not just
  * in the advertised descriptor list. The low-level DOM/page tools
- * (snapshot, click, type, page_exec, …) are hidden from the main agent and
+ * (snapshot, click, type, page_code, …) are hidden from the main agent and
  * belong to the web actor. mainAgentDescriptors() keeps them out of the
  * model's tool list, but that's advisory — a prompt-injected model can
  * still EMIT a hidden tool name. This gate makes the boundary real: a

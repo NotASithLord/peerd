@@ -9,7 +9,7 @@
 // carry the thesis; the tail catches conclusions/footers (and proves to the
 // model that content was elided in between).
 //
-// Pure functions, no IO — the fetch_url/read_web_cache tools own the store.
+// Pure functions, no IO — producers and read_result own the store boundary.
 
 // 75/25 head/tail split of the window budget.
 const HEAD_FRACTION = 0.75;
@@ -20,7 +20,7 @@ const HEAD_FRACTION = 0.75;
 export const SPILL_CACHE_MAX_ENTRIES = 40;
 
 // The ONE per-call paging slice size, shared by every offset/limit reader:
-// read_web_cache, read_run_cache, AND the self-paging file reads (js_read_file /
+// read_result AND the self-paging file reads (js_read_file /
 // app_read_file page the OPFS file itself). One constant so the advertised cap,
 // the enforced slice, and the loop's paged-result redact ceiling
 // (PAGED_MAX_CHARS below, imported by loop/redact.js) can never drift apart —
@@ -53,7 +53,7 @@ export const clampPageLimit = (rawLimit) =>
 
 /**
  * The tool-authored paging status line for an offset/limit page read — the
- * shape every offset-paging reader shares (read_web_cache / read_run_cache and
+ * shape every offset-paging reader shares (read_result and
  * the self-paging file reads). TRUSTED: it rides OUTSIDE the untrusted fence and
  * carries ONLY caller-computed positions, never the paged bytes. `nextArgs` is
  * the exact next call that continues from where this slice stopped.
@@ -102,7 +102,7 @@ export const windowText = (text, budget) => {
  */
 export const pagingFooter = ({ key, total, headChars, tailChars }) => [
   `[paging] The full text (${total} chars) is stored locally. You saw the first ${headChars} and last ${tailChars} chars.`,
-  `To read more call read_web_cache with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> } — e.g. offset ${headChars} continues where the head stopped.`,
+  `To read more call read_result with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> } — e.g. offset ${headChars} continues where the head stopped.`,
 ].join('\n');
 
 /**
@@ -127,7 +127,7 @@ export const pageSlice = (text, offset, limit) => {
  * given slice; escaping (JSON envelope, fence defang) can push a full slice past
  * the ceiling, so we shrink the limit and re-frame a bounded number of times
  * until it fits. Pure; no IO. The shared home for the offset/limit readers'
- * self-paging result shape (js/app_read_file, read_web_cache, read_run_cache).
+ * self-paging result shape (js/app_read_file and read_result).
  *
  * @param {{ text: string, offset: number, limit: number, frame: (page: ReturnType<typeof pageSlice>) => string }} p
  * @returns {{ ok: true, content: string, paged: true }}
@@ -315,5 +315,5 @@ export const excerptRelevant = (text, query, budget, opts = {}) => {
  */
 export const excerptFooter = ({ key, total, passagesShown, passagesTotal, query }) => [
   `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from ${total} chars stored locally — NOT a contiguous slice.`,
-  `To read the surrounding text or other sections call read_web_cache with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> }.`,
+  `To read the surrounding text or other sections call read_result with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> }.`,
 ].join('\n');

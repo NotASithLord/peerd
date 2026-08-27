@@ -123,15 +123,15 @@ export const readDocTool = composeTool("read_doc", {
     // where a silent truncation hurts most — the answer is as likely to be in
     // an appendix as in the intro, and unlike a web page there is no second
     // way to reach the tail. So the FULL markdown is stored locally and the
-    // model gets a window plus the read_web_cache call that pages the rest;
+    // model gets a window plus the read_result call that pages the rest;
     // with a query it gets the passages that MATCH instead of a blind
     // head+tail. Same idiom, same pager, same footer the actor already knows.
     const markdown = toMarkdown(result.doc);
     const head = formatDocHead({ doc: result.doc, source: target });
-    const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
-      /** @type {any} */ (ctx).webCache);
+    const resultStore = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
+      /** @type {any} */ (ctx).resultStore);
 
-    if (!webCache?.key || !webCache?.put) {
+    if (!resultStore?.key || !resultStore?.put) {
       // No spill capability → the plain capped render (which announces its cut).
       return {
         ok: true,
@@ -152,14 +152,15 @@ export const readDocTool = composeTool("read_doc", {
     /** @type {string | null} */
     let footer = null;
     if (truncated) {
-      const cacheKey = webCache.key();
+      const cacheKey = resultStore.key();
       try {
         // ownerSessionId stamps the OWNER — the spill store is one SW-level map
         // keyed by an opaque handle, so without it any actor holding a key could
         // page back a document a different actor fetched.
-        await webCache.put({
+        await resultStore.put({
           key: cacheKey, url: target, format: 'markdown', text: markdown,
           ownerSessionId: ctx.session?.sessionId ?? null,
+          producer: 'read_doc', fenced: true, originLabel: originOfUrl(target),
         });
         footer = ex
           ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })

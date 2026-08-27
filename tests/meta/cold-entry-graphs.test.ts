@@ -93,13 +93,8 @@ describe('cold entry graphs', () => {
     }
   });
 
-  test('the native authority kernel meets the final target without loading a controller for local routes', async () => {
+  test('the native authority kernel excludes controller and feature implementations', async () => {
     const measured = await nativeKernelStats();
-    const target = COLD_SOURCE_TARGETS.kernel;
-    expect(measured.modules).toBeLessThanOrEqual(target.modules);
-    expect(measured.graphBytes).toBeLessThanOrEqual(target.graphBytes);
-    expect(measured.entryBytes).toBeLessThanOrEqual(target.entryBytes);
-    expect(measured.directImports).toBeLessThanOrEqual(target.directImports);
     for (const forbidden of [
       'peerd-runtime/loop/agent-loop.js',
       'offscreen/controller-runtime.js',
@@ -122,10 +117,9 @@ describe('cold entry graphs', () => {
     ]) {
       expect(measured.modulesSet.has(forbidden), `native kernel imports ${forbidden}`).toBe(false);
     }
-    // Chrome retains only the operation facades. Firefox repository and
-    // storage-heartbeat implementations are first-demand branches in the
-    // shared entry and never enter Chrome's static graph.
-    expect(measured.modulesSet.has('background/repository-client.js')).toBe(true);
+    // Repository and Firefox storage-heartbeat implementations are exact
+    // first-demand branches and never enter Chrome's static graph.
+    expect(measured.modulesSet.has('background/repository-client.js')).toBe(false);
     expect(measured.modulesSet.has('background/firefox-storage-keepalive.js')).toBe(false);
     expect(measured.modulesSet.has('background/vault-authority-client.js')).toBe(true);
     expect(measured.modulesSet.has('shared/cold-util.js')).toBe(true);

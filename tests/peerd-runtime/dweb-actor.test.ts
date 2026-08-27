@@ -6,7 +6,7 @@ import { describe, test, expect } from 'bun:test';
 import { actorAllowedTools, actorDescriptors, isAllowedForActor } from '../../extension/peerd-runtime/tools/exposure.js';
 import { actorBlock } from '../../extension/peerd-runtime/loop/system-prompt.js';
 
-const DWEB_TOOLS = ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers', 'dweb_block', 'dweb_discovery', 'dweb_guide', 'a2a_run'];
+const DWEB_TOOLS = ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers', 'dweb_block', 'dweb_discovery', 'a2a_run'];
 
 describe('dweb actor — the positive allow-set', () => {
   test('exactly the dweb family + a2a_run, nothing else', () => {

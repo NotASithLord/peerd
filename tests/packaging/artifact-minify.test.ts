@@ -8,7 +8,6 @@ import {
   COLD_GRAPH_BUDGETS,
   minifyColdArtifactModules,
 } from '../../packaging/minify-artifact-js.ts';
-import { COLD_START_TARGETS } from '../../scripts/bench/cold-start-budgets.js';
 import {
   exportedNames,
   moduleImportSpecifiers,
@@ -258,7 +257,7 @@ describe('release artifact JavaScript minification', () => {
     expect(() => assertColdArtifactBudgets(report)).toThrow(/modules/);
   });
 
-  test('an exact native entry can use the final target without weakening legacy ratchets', () => {
+  test('an exact native entry uses the same package no-growth ratchet', () => {
     const report = {
       browser: 'chrome' as const,
       channel: 'store' as const,
@@ -271,13 +270,8 @@ describe('release artifact JavaScript minification', () => {
           entry: 'background/vault-kernel.js', entryBytes: 25_000,
           modules: 73, beforeBytes: 447_000, afterBytes: 287_000,
         },
-        offscreen: {
-          entry: 'offscreen/offscreen.js', entryBytes: 15_000,
-          modules: 12, beforeBytes: 84_000, afterBytes: 53_000,
-        },
       },
     };
-    expect(() => assertColdArtifactBudgets(report)).toThrow();
-    expect(() => assertColdArtifactBudgets(report, COLD_START_TARGETS.chrome)).not.toThrow();
+    expect(() => assertColdArtifactBudgets(report)).not.toThrow();
   });
 });

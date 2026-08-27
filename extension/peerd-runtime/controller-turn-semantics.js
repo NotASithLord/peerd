@@ -62,7 +62,6 @@ import {
   siteHandleFor,
 } from './actor/web-actor.js';
 import { describeLandingStop, landingStopCard, originPhrase } from './actor/origin-lock-report.js';
-import { makeToolboxParseCheck } from './toolbox/core.js';
 import { wrapUntrusted } from './tools/prompt-wrap.js';
 import { digestCapture } from './site-clients/digest.js';
 import { drainFetchTapInjected, installFetchTapInjected } from './dom/fetch-tap-injected.js';
@@ -110,7 +109,6 @@ export const createControllerTurnSemantics = () => Object.freeze({
   makeGoalRunner,
   makeScheduler,
   makeSpawnActor,
-  makeToolboxParseCheck,
   makeToolsCommand,
   makeTrimEnricher,
   manifestLabel,

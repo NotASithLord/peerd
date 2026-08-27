@@ -39,9 +39,6 @@ export {
   buildEntry,
   isRemoteSpecifier,
   makeFetchRemote,
-  // design js-superpower/06: the `peerd:toolbox/<name>` specifier family the
-  // resolver recognizes; hosts use it to spot toolbox entries in a module cache.
-  TOOLBOX_SPECIFIER_PREFIX,
 } from './module-resolver.js';
 export { linkSingleModuleWorker, linkSingleModuleWorkerDetailed } from './single-module-linker.js';
 

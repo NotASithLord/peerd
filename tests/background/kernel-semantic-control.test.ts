@@ -27,23 +27,17 @@ describe('kernel semantic control', () => {
 
   test('keeps locked and actor provenance refusals inside the kernel', async () => {
     let calls = 0;
-    const toolboxStore = {
-      getBody: async () => 'export const ok = true;', recordRuns: async () => {},
-    };
     const make = (locked: boolean, home: boolean) => createKernelSemanticControl({
       callSemantic: async () => { calls += 1; },
       isHomeSender: () => home,
       vault: { isLocked: () => locked },
       authority: { handle: () => ({ ok: true }) },
-      toolboxStore,
-      routes: ['actors/count', 'memory/export', 'toolbox/read'],
+      routes: ['actors/count', 'memory/export'],
     });
     expect(await make(false, false).routes['actors/count']({}, {}))
       .toEqual({ ok: false, error: 'actor-overview-unauthorized' });
     expect(await make(true, true).routes['memory/export']({}, {}))
       .toEqual({ ok: false, error: 'vault-locked' });
-    expect(await make(true, true).routes['toolbox/read']({ name: 'known' }, {}))
-      .toEqual({ ok: true, body: 'export const ok = true;' });
     expect(calls).toBe(0);
   });
 

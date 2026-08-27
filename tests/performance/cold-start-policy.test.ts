@@ -5,7 +5,6 @@ import {
   assessColdStartResult,
   COLD_START_LANES,
   COLD_START_PHASES,
-  COLD_START_TARGETS,
   COLD_START_TARGET_CUTOVER,
   PACKAGE_COLD_GRAPH_RATCHETS,
   NATIVE_FLOOR_CONTRACT,
@@ -32,14 +31,6 @@ const graphsFor = (
 ) => Object.fromEntries(
   Object.entries(PACKAGE_COLD_GRAPH_RATCHETS[channel][browser])
     .map(([name, value]) => [name, graph(value)]),
-);
-
-const targetGraphsFor = (browser: 'chrome' | 'firefox') => Object.fromEntries(
-  Object.entries(COLD_START_TARGETS[browser])
-    .filter(([name]) => name !== 'timing')
-    .map(([name, value]) => [name, graph(
-      value as { modules: number; graphBytes: number; entryBytes: number },
-    )]),
 );
 
 type RawSample = Record<string, string | number>;
@@ -213,12 +204,12 @@ const firefoxResult = ({
   };
 };
 
-const useTargetGraphs = <T extends {
+const useReviewedGraphs = <T extends {
   packagedGraphs: unknown;
   packagedGraphsByChannel: Record<string, unknown>;
 }>(browser: 'chrome' | 'firefox', result: T): T => {
   result.packagedGraphsByChannel = {
-    store: targetGraphsFor(browser), preview: targetGraphsFor(browser),
+    store: graphsFor('store', browser), preview: graphsFor('preview', browser),
   };
   result.packagedGraphs = result.packagedGraphsByChannel.store;
   return result;
@@ -276,8 +267,7 @@ const nativeResult = () => {
   });
   for (const channel of ['store', 'preview'] as const) {
     result.packagedGraphsByChannel[channel] = Object.fromEntries(
-      Object.entries(COLD_START_TARGETS.chrome)
-        .filter(([name]) => name !== 'timing')
+      Object.entries(PACKAGE_COLD_GRAPH_RATCHETS[channel].chrome)
         .map(([name, value]) => [name, graph(name === 'serviceWorker'
           ? { modules: 1, graphBytes: 200_000, entryBytes: 200_000 }
           : value as { modules: number; graphBytes: number; entryBytes: number })]),
@@ -327,7 +317,7 @@ const nativeResult = () => {
 
 const assessNative = (result: ReturnType<typeof nativeResult>) =>
   assessColdStartResult('chrome', result, {
-    lane: 'local', graphPolicy: 'target', requireTimingTargets: true,
+    lane: 'local', graphPolicy: 'integrity', requireTimingTargets: true,
   });
 
 describe('cold-start policy', () => {
@@ -470,7 +460,7 @@ describe('cold-start policy', () => {
       targetCutover: COLD_START_TARGET_CUTOVER,
       options: {
         browser: 'chrome', runtimeTarget: 'native-floor', runtimeSurface: 'home',
-        coldBudgetMode: 'native-target', graphPolicy: 'target', requireTimingTargets: true,
+        coldBudgetMode: 'native-target', graphPolicy: 'integrity', requireTimingTargets: true,
         chromeProcesses: 3, chromeWakes: 3,
       },
       results: { chrome: result },
@@ -500,76 +490,53 @@ describe('cold-start policy', () => {
     ]));
   });
 
-  test('enforces the final graph and real usable timing policy when explicitly selected', () => {
-    const result = chromeResult();
-    for (const channel of ['store', 'preview'] as const) {
-      result.packagedGraphsByChannel[channel] = Object.fromEntries(
-        Object.entries(COLD_START_TARGETS.chrome)
-          .filter(([name]) => name !== 'timing')
-          .map(([name, value]) => [name, graph(value as { modules: number; graphBytes: number; entryBytes: number })]),
-      );
-    }
-    result.packagedGraphs = result.packagedGraphsByChannel.store;
+  test('enforces graph integrity and real usable timing when explicitly selected', () => {
+    const result = useReviewedGraphs('chrome', chromeResult());
     expect(assessChrome(result, {
-      graphPolicy: 'target', requireTimingTargets: true,
+      graphPolicy: 'integrity', requireTimingTargets: true,
     })).toEqual({ ok: true, failures: [] });
     result.freshProfile.rawSamples.forEach((sample) => {
       sample.vaultGateReadyFromNavigationMs = 3_001;
     });
     result.freshProfile.vaultGateReadyFromNavigationMs = summarizeRaw(Array(7).fill(3_001));
     expect(assessChrome(result, {
-      graphPolicy: 'target', requireTimingTargets: true,
+      graphPolicy: 'integrity', requireTimingTargets: true,
     }).failures).toContain(
       'freshProfile.vaultGateReadyFromNavigationMs.max 3001ms exceeds 3000ms',
     );
   });
 
-  test('target policy accepts only a genuine one-module Chrome worker below 300KB', () => {
-    const result = chromeResult();
+  test('integrity policy validates a genuine one-module Chrome worker without a byte ceiling', () => {
+    const result = useReviewedGraphs('chrome', chromeResult());
     for (const channel of ['store', 'preview'] as const) {
-      result.packagedGraphsByChannel[channel] = Object.fromEntries(
-        Object.entries(COLD_START_TARGETS.chrome)
-          .filter(([name]) => name !== 'timing')
-          .map(([name, value]) => [name, graph(
-            name === 'serviceWorker'
-              ? { modules: 1, graphBytes: 299_999, entryBytes: 299_999 }
-              : value as { modules: number; graphBytes: number; entryBytes: number },
-          )]),
-      );
+      result.packagedGraphsByChannel[channel].serviceWorker = graph({
+        modules: 1, graphBytes: 1_300_000, entryBytes: 1_300_000,
+      });
     }
     result.packagedGraphs = result.packagedGraphsByChannel.store;
     expect(assessChrome(result, {
-      graphPolicy: 'target', requireTimingTargets: true,
+      graphPolicy: 'integrity', requireTimingTargets: true,
     })).toEqual({ ok: true, failures: [] });
 
-    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 299_998;
+    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 1_299_999;
     expect(assessChrome(result, {
-      graphPolicy: 'target', requireTimingTargets: true,
+      graphPolicy: 'integrity', requireTimingTargets: true,
     }).failures).toContain('preview.serviceWorker bundled entry does not equal its static graph');
 
-    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 300_001;
-    result.packagedGraphsByChannel.preview.serviceWorker.graphBytes = 300_001;
+    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 9_000_000;
+    result.packagedGraphsByChannel.preview.serviceWorker.graphBytes = 9_000_000;
     expect(assessChrome(result, {
-      graphPolicy: 'target', requireTimingTargets: true,
-    }).failures).toEqual(expect.arrayContaining([
-      'preview.serviceWorker.graphBytes 300001 exceeds 300000',
-      'preview.serviceWorker.entryBytes 300001 exceeds 300000',
-    ]));
+      graphPolicy: 'integrity', requireTimingTargets: true,
+    })).toEqual({ ok: true, failures: [] });
   });
 
-  test('a required lane defaults to the 300KB and three-second release gates', () => {
+  test('a required lane defaults to the package ratchet and three-second readiness gate', () => {
     const result = chromeResult();
+    result.packagedGraphsByChannel.store.serviceWorker.graphBytes += 1;
+    const ceiling = PACKAGE_COLD_GRAPH_RATCHETS.store.chrome.serviceWorker.graphBytes;
     expect(assessColdStartResult('chrome', result, { lane: 'pr' }).failures)
-      .toContain('store.serviceWorker.graphBytes 1680949 exceeds 300000');
-
-    for (const channel of ['store', 'preview'] as const) {
-      result.packagedGraphsByChannel[channel] = Object.fromEntries(
-        Object.entries(COLD_START_TARGETS.chrome)
-          .filter(([name]) => name !== 'timing')
-          .map(([name, value]) => [name, graph(value as { modules: number; graphBytes: number; entryBytes: number })]),
-      );
-    }
-    result.packagedGraphs = result.packagedGraphsByChannel.store;
+      .toContain(`store.serviceWorker.graphBytes ${ceiling + 1} exceeds ${ceiling}`);
+    result.packagedGraphsByChannel.store.serviceWorker.graphBytes = ceiling;
     result.forcedColdWake.rawSamples[0].vaultGateReadyFromWakeMs = 3_001;
     result.forcedColdWake.vaultGateReadyFromWakeMs = summarizeRaw([
       3_001, ...Array(COLD_START_LANES.pr.chrome.wakes - 1).fill(1_000),
@@ -588,7 +555,7 @@ describe('cold-start policy', () => {
       idleDiscardWake: { attempted: 0 },
     };
     expect(assessColdStartResult('firefox', partial, {
-      lane: 'local', graphPolicy: 'target', requireTimingTargets: true,
+      lane: 'local', graphPolicy: 'integrity', requireTimingTargets: true,
     }).failures).toContain(
       'freshProfile.vaultGateReadyFromInstallMs.max 3001ms exceeds 3000ms',
     );
@@ -619,18 +586,18 @@ describe('cold-start policy', () => {
     const now = Date.UTC(2026, 7, 25, 12);
     const profile = COLD_START_LANES.device;
     const candidate = {
-      chrome: useTargetGraphs('chrome', chromeResult({
+      chrome: useReviewedGraphs('chrome', chromeResult({
         lane: 'device', sourceCommitSha: '3'.repeat(40),
       })),
-      firefox: useTargetGraphs('firefox', firefoxResult({
+      firefox: useReviewedGraphs('firefox', firefoxResult({
         lane: 'device', sourceCommitSha: '3'.repeat(40),
       })),
     };
     const base = {
-      chrome: useTargetGraphs('chrome', chromeResult({
+      chrome: useReviewedGraphs('chrome', chromeResult({
         role: 'base', lane: 'device', sourceCommitSha: '4'.repeat(40),
       })),
-      firefox: useTargetGraphs('firefox', firefoxResult({
+      firefox: useReviewedGraphs('firefox', firefoxResult({
         role: 'base', lane: 'device', sourceCommitSha: '4'.repeat(40),
       })),
     };

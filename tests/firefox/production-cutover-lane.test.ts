@@ -192,7 +192,7 @@ describe('installed Firefox production cutover lane', () => {
       /event-page continuity/);
     rejects((report) => { report.observations.recycle.controllerCompletionCalls = 9; },
       /event-page continuity/);
-    rejects((report) => { report.observations.controllerTools.warm.tool = 'wait_until'; },
+    rejects((report) => { report.observations.controllerTools.warm.tool = 'not_now'; },
       /warm now controller receipt/);
     rejects((report) => { report.observations.modelWire[1].toolCallIdMatched = false; },
       /initial model tool-result proof/);
@@ -300,7 +300,7 @@ describe('installed Firefox production cutover lane', () => {
     expect(controllerNowReceiptFromState(reply, text, 2)).toEqual(nowReceipt(2, unixMs));
     const toolResult = reply.state.session.messages[2]?.toolResults?.[0];
     if (!toolResult) throw new Error('fixture tool result missing');
-    toolResult.meta.toolName = 'wait_until';
+    toolResult.meta.toolName = 'not_now';
     expect(controllerNowReceiptFromState(reply, text, 2)).toBeNull();
   });
 

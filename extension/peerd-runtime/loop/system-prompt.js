@@ -606,7 +606,7 @@ reply only from what the user has already made shareable.`,
 // from the capability manifest; this text only explains how those tools cooperate.
 const ACTOR_API_FRAMING = 'an API integration that owns ONE origin. Work directly against it with no tab or DOM, then report what you found.';
 const ACTOR_API_LORE = `fetch_url makes direct, denylist-gated, audited GET/POST requests.
-read_web_cache recalls fetched material; site_client_read/write persist an origin client and
+read_result pages oversized fetched material; site_client_read/write persist an origin client and
 site_client_run executes it. The code client exposed inside a site run is exactly:
 ${codeClientReference('site')}.
 Requests carry the user's session only for your OWN origin (same-origin); cross-origin calls are

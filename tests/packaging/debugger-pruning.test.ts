@@ -13,13 +13,13 @@ describe('package-time debugger graph pruning', () => {
     const pool = createDebuggerPool();
     expect(Object.keys(pool).sort()).toEqual([
       'attach', 'captureScreenshot', 'clickBackendNode', 'detach',
-      'discardNetworkCapture', 'dispatchKeys', 'evaluate', 'getAxTree',
+      'discardNetworkCapture', 'getAxTree',
       'isAttached', 'readFrameworkState', 'releaseNetworkCapture',
       'setValueBackendNode', 'startNetworkCapture', 'stopNetworkCapture',
     ].sort());
     expect(pool.isAttached()).toBe(false);
     expect(await pool.stopNetworkCapture()).toEqual([]);
-    await expect(pool.evaluate()).rejects.toThrow('debugger_unavailable');
+    await expect(pool.getAxTree()).rejects.toThrow('debugger_unavailable');
   });
 
   test('unavailable targets receive no debugger custody lifecycle events', () => {

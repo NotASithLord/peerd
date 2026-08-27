@@ -108,7 +108,6 @@ const extractionLoaders = Object.freeze({
   'web/extract': makeBoundedModuleLoader(() => import('./web-extract.js')
     .then((module) => /** @type {ExtractionHandler} */ (module.handleWebExtract))),
 });
-const loadToolboxParse = makeBoundedModuleLoader(() => import('./toolbox-parse.js'));
 browser.runtime.onMessage.addListener(/** @type {any} */ ((
   /** @type {any} */ msg,
   /** @type {any} */ sender,
@@ -126,26 +125,6 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
     ? undefined : handle(msg)).then(
     sendResponse, (cause) => sendResponse(errorResponse(cause)),
   );
-  return true;
-}));
-
-browser.runtime.onMessage.addListener(/** @type {any} */ ((
-  /** @type {any} */ msg,
-  /** @type {any} */ sender,
-  /** @type {(value:any)=>void} */ sendResponse,
-) => {
-  if (msg?.type !== 'toolbox/parse-check') return false;
-  if (!isServiceWorkerSender(sender)) {
-    sendResponse({ ok: false, error: 'unauthorized-command-sender' });
-    return false;
-  }
-  const claim = claimLease('dom-host', sendResponse);
-  if (!claim) return false;
-  loadToolboxParse()
-    .then(({ handleToolboxParseCheck }) => rejectStaleClaim(
-      'dom-host', claim, sendResponse,
-    ) ? undefined : handleToolboxParseCheck(msg))
-    .then(sendResponse, (cause) => sendResponse(errorResponse(cause)));
   return true;
 }));
 
@@ -380,9 +359,6 @@ const onJobMessage = (msg, sender, sendResponse) => {
       a2a: msg.a2a === true, actors: msg.actors === true,
       // DESIGN-19: the pinned origin for a site-client run (trusted job param, SW-set).
       siteFetch: typeof msg.siteFetch === 'string' ? msg.siteFetch : '',
-      // design 06: may this job resolve peerd:toolbox modules (script lane only;
-      // trusted job param — job-runner still refuses it for a2a/site-client runs).
-      toolbox: msg.toolbox === true,
       // caps + ownerSessionId ride from the SW's job/run message (trusted: the
       // sender gate above). The WORKER never supplies either — job-runner
       // attaches them from these params and ignores anything in the worker's

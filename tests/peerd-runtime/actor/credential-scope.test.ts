@@ -4,7 +4,7 @@
 // actor's session-credential scope, read live on every request by
 // withSessionScopedCredentials. So a page that redirects itself onto a
 // credentialed origin moves that scope with no tool call in between for the
-// async judge to see, and `fetch_url` / `read_web_cache` / `site_client_*` never
+// async judge to see, and `fetch_url` / `read_result` / `site_client_*` never
 // pass through resolveTargetTab at all.
 //
 // This getter is the answer, and its shape is the point: SYNCHRONOUS (so it can

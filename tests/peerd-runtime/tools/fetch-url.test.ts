@@ -226,18 +226,21 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     const stored: any[] = [];
     const { ctx } = recordingCtx({
       webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/big' }),
-      webCache: { key: () => 'wc-test-1', put: async (rec: any) => { stored.push(rec); } },
+      resultStore: { key: () => 'result:opaque-fetch', put: async (rec: any) => { stored.push(rec); } },
     });
     const r = await fetchUrlTool.execute({ url: 'https://site.example/big' }, ctx);
     if (!r.ok) throw new Error('expected ok');
     // The FULL text was spilled.
     expect(stored).toHaveLength(1);
-    expect(stored[0].key).toBe('wc-test-1');
+    expect(stored[0]).toMatchObject({
+      key: 'result:opaque-fetch', ownerSessionId: 't', producer: 'fetch_url',
+      fenced: true, originLabel: 'https://site.example',
+    });
     expect(stored[0].text.length).toBe(60_000);
     // The fenced body is the head+tail window with the elision marker.
     const afterFence = r.content!.split('</untrusted_web_content>')[1];
-    expect(afterFence).toContain('read_web_cache');
-    expect(afterFence).toContain('"key": "wc-test-1"');
+    expect(afterFence).toContain('read_result');
+    expect(afterFence).toContain('"key": "result:opaque-fetch"');
     // unwrap() anchors the close tag at $ — with a footer after the fence,
     // parse the fenced JSON by splitting at the tags instead.
     const body = JSON.parse(r.content!.split(/<untrusted_web_content [^>]*>\n/)[1].split('\n</untrusted_web_content>')[0]);
@@ -247,13 +250,13 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     expect(body.body.endsWith('T'.repeat(100))).toBe(true);
   });
 
-  test('no webCache capability → the pre-spill head-only slice, no footer', async () => {
+  test('no resultStore capability → the pre-spill head-only slice, no footer', async () => {
     const { ctx } = recordingCtx({
       webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/big' }),
     });
     const r = await fetchUrlTool.execute({ url: 'https://site.example/big' }, ctx);
     if (!r.ok) throw new Error('expected ok');
-    expect(r.content).not.toContain('read_web_cache');
+    expect(r.content).not.toContain('read_result');
     const body = unwrap(r.content!);
     expect(body.truncated).toBe(true);
     expect(body.body.length).toBe(16_000);
@@ -263,7 +266,7 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
   test('a small body is untouched: no spill, no footer, truncated:false', async () => {
     const stored: any[] = [];
     const { ctx } = recordingCtx({
-      webCache: { key: () => 'wc-x', put: async (rec: any) => { stored.push(rec); } },
+      resultStore: { key: () => 'result:opaque-small', put: async (rec: any) => { stored.push(rec); } },
     });
     const r = await fetchUrlTool.execute({ url: 'https://x.com/' }, ctx);
     if (!r.ok) throw new Error('expected ok');

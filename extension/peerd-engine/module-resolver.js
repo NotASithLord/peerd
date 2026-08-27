@@ -38,10 +38,6 @@ import {
   isRemoteModuleSpecifier,
   normalizeModuleSpecifier,
 } from './module-import-policy.js';
-import { TOOLBOX_SPECIFIER_PREFIX } from './module-specifiers.js';
-
-export { TOOLBOX_SPECIFIER_PREFIX } from './module-specifiers.js';
-
 /**
  * @typedef {{
  *   readFile: (path: string) => Promise<string>,
@@ -51,7 +47,6 @@ export { TOOLBOX_SPECIFIER_PREFIX } from './module-specifiers.js';
  *   validateRemoteSpecifiersOnly?: boolean,
  *   log?: (entry: { type: string, path: string, blobUrl?: string, error?: string, errorCode?: string }) => void,
  *   builtins?: Record<string, string>,
- *   readToolboxModule?: (name: string) => Promise<string>,
  * }} ResolverDeps
  *
  * `builtins` maps a bare specifier to a URL the worker can import natively —
@@ -65,18 +60,7 @@ export { TOOLBOX_SPECIFIER_PREFIX } from './module-specifiers.js';
  * value. Store and web packages set the first grant false. No-egress jobs omit
  * the second grant.
  *
- * `readToolboxModule` reads the body of a stored `peerd:toolbox/<name>` module
- * (design js-superpower/06). Deliberately OPTIONAL: the host injects it only on
- * the lanes allowed to resolve toolbox modules (script + notebook — the
- * own-compute lanes); its absence IS the lane refusal, so a job whose
- * capability profile promises "this code and nothing else" (a2a / site-client /
- * page_code) can never reach a stored module through the resolver.
  */
-
-// The toolbox specifier family. A matched module resolves via the injected
-// readToolboxModule and then transforms/blobs EXACTLY like a local OPFS module,
-// so a toolbox module may itself import peerd:std or other toolbox modules
-// (cycle detection below covers toolbox→toolbox loops too).
 
 /** @typedef {{ blobUrl: string, source: string }} ModuleEntry */
 
@@ -198,11 +182,8 @@ const fetchRemoteSource = async (specifier, deps, cache) => {
       `this run already fetched ${REMOTE_MODULES_MAX_PER_RUN} remote modules (the per-run cap) — vendor the dependency instead of widening the graph`);
   }
   remoteFetchCounts.set(cache, fetched + 1);
-  // toolbox_write validates the candidate graph before user confirmation but
-  // must not fetch third-party code merely to decide whether a specifier is
-  // legal. It still spends the graph-count budget so a write accepted here
-  // cannot deterministically fail the runtime cap. Runtime hosts never set
-  // this parse-only seam.
+  // Parse-only callers may validate a remote specifier graph without fetching
+  // third-party bytes. Runtime hosts never set this seam.
   if (deps.validateRemoteSpecifiersOnly === true) return 'export {};';
   if (typeof deps.fetchRemote !== 'function') throw new RemoteImportBlockedError(specifier);
   const url = pin ? pin[1] : normalizedSpecifier;
@@ -283,7 +264,6 @@ export const buildModule = async (path, deps, cache = new Map(), visited = new S
   }
   visited.add(path);
 
-  const isToolbox = path.startsWith(TOOLBOX_SPECIFIER_PREFIX);
   let source;
   if (isRemoteSpecifier(path)) {
     // Remote source rides the host's audited fetch and re-enters as a blob —
@@ -298,21 +278,11 @@ export const buildModule = async (path, deps, cache = new Map(), visited = new S
       throw e;  // named errors carry their own actionable message — don't rewrap
     }
   } else {
-    try {
-      if (isToolbox) {
-        // why the branch lives HERE (not in the callers): buildModule is the
-        // funnel entry and nested static imports share, so gating on the
-        // injected dep covers the whole supported graph.
-        if (!deps.readToolboxModule) throw new Error('toolbox modules are not available in this run');
-        source = await deps.readToolboxModule(path.slice(TOOLBOX_SPECIFIER_PREFIX.length));
-      } else {
-        source = await deps.readFile(path);
-      }
-    }
+    try { source = await deps.readFile(path); }
     catch (e) {
       const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
       deps.log?.({ type: 'resolve-failed', path, error: msg });
-      throw new Error(`cannot resolve '${isToolbox ? path : `./${path}`}': ${msg}`);
+      throw new Error(`cannot resolve './${path}': ${msg}`);
     }
   }
 
@@ -357,18 +327,6 @@ const rewriteModuleSource = async (code, fromPath, deps, cache, visited, parseOp
       staticReplacements.push({ match, replacement: JSON.stringify(deps.builtins[path]) });
     } else if (isRemoteSpecifier(path)) {
       // remote module → fetched host-side (audited), re-blobbed like a local file.
-      const sub = await buildModule(path, deps, cache, new Set(visited));
-      staticReplacements.push({ match, replacement: JSON.stringify(sub.blobUrl) });
-    } else if (path.startsWith(TOOLBOX_SPECIFIER_PREFIX)) {
-      // Remote code must not read locally stored toolbox modules. Resolution
-      // happens before the worker capability profile exists, so this edge is
-      // denied here at the graph boundary rather than relying on runtime caps.
-      if (isRemoteSpecifier(fromPath)) {
-        throw new RemoteImportBlockedError(path,
-          'remote modules cannot import local toolbox modules');
-      }
-      // toolbox module → resolved like a local file (recursion + cycle
-      // detection), keyed in the cache by its full specifier.
       const sub = await buildModule(path, deps, cache, new Set(visited));
       staticReplacements.push({ match, replacement: JSON.stringify(sub.blobUrl) });
     }
@@ -465,11 +423,6 @@ const extractTopLevelImports = async (code, entryPath, deps, cache, parseOptions
       replacement = JSON.stringify(deps.builtins[path]);
     } else if (isRemoteSpecifier(path)) {
       // remote module → fetched host-side (audited), imported as a blob.
-      const sub = await buildModule(path, deps, cache, new Set());
-      replacement = JSON.stringify(sub.blobUrl);
-    } else if (path.startsWith(TOOLBOX_SPECIFIER_PREFIX)) {
-      // toolbox module → resolved + blobbed like a local file (lane-gated by
-      // the readToolboxModule dep — buildModule refuses when it's absent).
       const sub = await buildModule(path, deps, cache, new Set());
       replacement = JSON.stringify(sub.blobUrl);
     }

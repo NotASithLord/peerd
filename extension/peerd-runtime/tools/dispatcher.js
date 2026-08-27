@@ -856,9 +856,9 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
     && tool.sideEffect !== 'read'
     && typeof activityTabId === 'number'
     && consumeBrowserChildPolicyNotice != null;
-  const childCapable = ['click', 'type', 'page_code', 'page_eval', 'page_exec', 'page_keys']
+  const childCapable = ['click', 'type', 'page_code']
     .includes(call.name);
-  const quarantineCapable = ['navigate', 'click', 'type', 'page_eval', 'page_exec', 'page_keys']
+  const quarantineCapable = ['navigate', 'click', 'type']
     .includes(call.name)
     && typeof activityTabId === 'number';
   /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */

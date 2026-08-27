@@ -7,18 +7,14 @@
 export const LEGACY_TOOL_ALLOWLIST = Object.freeze([
   'read_doc',
   'fetch_url',
-  'read_web_cache',
+  'read_result',
   'site_client_run',
   'site_client_read',
   'site_client_write',
   'site_capture',
   'sandbox_create',
   'script',
-  'read_run_cache',
   'edit_file',
-  'toolbox_write',
-  'toolbox_list',
-  'toolbox_delete',
   'a2a_run',
 ]);
 

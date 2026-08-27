@@ -33,7 +33,7 @@ Routing by responsibility (the live tool descriptors are authoritative):
      message the "web" actor; it fetches or drives a tab. See the actor group.)
 
   time (temporal grounding)
-    now / wait_until — current ISO timestamp; block until a time/duration
+    now — current ISO timestamp
 
   sandboxes (execution instances — each its own tab; you bootstrap, an ACTOR runs it)
     sandbox_create({kind})  : make a webvm (sandboxed Linux) | pod (sealed shell,
@@ -281,7 +281,7 @@ don't write.
 The <time> tag is per-turn: the current timestamp, plus how long since
 the user's previous message when the gap is notable. Weigh that gap
 only when it matters to the request. Exact arithmetic: now() twice and
-subtract; timed blocking: wait_until().
+subtract.
 
 ──── voice ───────────────────────────────────────────────────────────
 

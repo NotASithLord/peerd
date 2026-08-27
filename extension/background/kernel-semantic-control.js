@@ -2,18 +2,16 @@
 
 import { SEMANTIC_DISPATCH_PROTOCOL } from '../shared/semantic-dispatch-contract.js';
 import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../shared/semantic-host-route-manifest.js';
-import { makeToolboxRoutes } from './routes/toolbox.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../shared/bounded-module-load.js';
 
 const READS = new Set([
   'actors/count', 'actors/overview', 'contacts/list', 'memory/export',
-  'memory/suggestions', 'provider/status', 'skills/list', 'toolbox/read',
+  'memory/suggestions', 'provider/status', 'skills/list',
 ]);
 
 /** @param {any} deps */
 export const createKernelSemanticControl = ({
   callSemantic, isHomeSender, vault, authority,
-  toolboxStore = null,
   localRoutes = {},
   actorCount = () => ({ activeActors: 0 }),
   actorOverview = () => ({ roots: [] }),
@@ -21,8 +19,7 @@ export const createKernelSemanticControl = ({
   routes = null,
 }) => {
   const grants = new WeakMap();
-  const toolboxRoutes = toolboxStore ? makeToolboxRoutes({ toolboxStore }) : null;
-  const directRoutes = Object.freeze({ ...toolboxRoutes, ...localRoutes });
+  const directRoutes = Object.freeze({ ...localRoutes });
   const ownedRoutes = routes ?? [...new Set([
     ...SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.filter((row) =>
       !row.route.startsWith('contributor/')).map((row) => row.route),
@@ -55,13 +52,9 @@ export const createKernelSemanticControl = ({
         }
       };
       if (directRoutes[route]) {
-        if (!route.startsWith('toolbox/')) {
-          const unavailable = await wait();
-          if (unavailable) return unavailable;
-        }
-        if (vault.isLocked() && !route.startsWith('toolbox/')) {
-          return { ok: false, error: 'vault-locked' };
-        }
+        const unavailable = await wait();
+        if (unavailable) return unavailable;
+        if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
         return directRoutes[route](message, sender);
       }
       if (route.startsWith('actors/')) {
@@ -74,7 +67,7 @@ export const createKernelSemanticControl = ({
       }
       const unavailable = await wait();
       if (unavailable) return unavailable;
-      if (vault.isLocked() && !route.startsWith('toolbox/')) {
+      if (vault.isLocked()) {
         return { ok: false, error: 'vault-locked' };
       }
       return dispatch(route, message, 'first-party');

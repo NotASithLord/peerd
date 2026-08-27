@@ -25,7 +25,7 @@ describe('common execution protocol', () => {
       ownerSessionId: 'chat-1',
       workspaceSessionId: 'chat-1',
       actors: true,
-    }, 'code-run', { egress: false, opfs: true }, true);
+    }, 'code-run', { egress: false, opfs: true });
 
     for (const execution of [agent, code]) {
       expect(execution.protocol).toBe(EXECUTION_PROTOCOL);
@@ -44,7 +44,7 @@ describe('common execution protocol', () => {
       id: 'code-run',
       program: { kind: JAVASCRIPT_PROGRAM, source: 'return 6 * 7;' },
       state: { workspaceSessionId: 'chat-1' },
-      capabilities: ['opfs', 'actors', 'toolbox', 'workspace'],
+      capabilities: ['opfs', 'actors', 'workspace'],
       metadata: { ownerSessionId: 'chat-1' },
     });
   });
@@ -53,7 +53,7 @@ describe('common execution protocol', () => {
     const execution = describeCodeExecution({
       code: 'return fetch("https://example.com");',
       workspaceSessionId: 'chat-1',
-    }, 'no-egress', { egress: false, opfs: false }, false);
+    }, 'no-egress', { egress: false, opfs: false });
 
     expect(execution.capabilities).toEqual([]);
     expect(execution.state).toEqual({ workspaceSessionId: 'chat-1' });

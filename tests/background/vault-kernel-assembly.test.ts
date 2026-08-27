@@ -1,12 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import {
-  collectStaticModuleGraph,
-  staticImportSpecifiers,
-} from '../../packaging/static-module-graph.ts';
+import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
-import { COLD_SOURCE_TARGETS } from '../../scripts/bench/cold-start-budgets.js';
 import {
   createKernelPortRouter,
   KERNEL_PORT_NAMES,
@@ -276,10 +272,4 @@ test('native entry uses one identity and target-exact kernel custody', async () 
   expect(modules.some((module) => module.startsWith('offscreen/'))).toBe(false);
   expect(modules.some((module) => /controller-(?:worker|runtime|shell)/.test(module))).toBe(false);
 
-  const bytes = [...graph].reduce((total, file) => total + statSync(file).size, 0);
-  const directImports = (await staticImportSpecifiers(source, entry)).length;
-  expect(graph.size).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.kernel.modules);
-  expect(bytes).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.kernel.graphBytes);
-  expect(statSync(entry).size).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.kernel.entryBytes);
-  expect(directImports).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.kernel.directImports);
 });

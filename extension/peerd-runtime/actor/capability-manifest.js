@@ -51,7 +51,7 @@ export const CODE_CLIENT_MANIFESTS = Object.freeze({
     view: { op: 'view', signature: 'view()', effect: 'read', tool: 'view', canonical: true, worker: "() => pageCall('view', {})" },
     fetch: { op: 'fetch', signature: 'fetch(url, options?)', effect: 'read', tool: 'fetch_url', canonical: true, worker: "(url, options) => pageCall('fetch', { url, options })" },
     readDocument: { op: 'readDocument', signature: 'readDocument(url?, options?)', effect: 'read', tool: 'read_doc', canonical: true, worker: "(url, options) => pageCall('readDocument', { url, options })" },
-    readCache: { op: 'readCache', signature: 'readCache(key, options?)', effect: 'read', tool: 'read_web_cache', canonical: true, worker: "(key, options) => pageCall('readCache', { key, options })" },
+    readResult: { op: 'readResult', signature: 'readResult(key, options?)', effect: 'read', tool: 'read_result', canonical: true, worker: "(key, options) => pageCall('readResult', { key, options })" },
     readSiteClient: { op: 'readSiteClient', signature: 'readSiteClient(origin)', effect: 'read', tool: 'site_client_read', canonical: true, worker: "(origin) => pageCall('readSiteClient', { origin })" },
     writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})', effect: 'write', tool: 'site_client_write', canonical: true, worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
     captureSite: { op: 'captureSite', signature: 'captureSite("start"|"stop")', effect: 'read', tool: 'site_capture', canonical: true, worker: "(action) => pageCall('captureSite', { action })" },
@@ -128,7 +128,6 @@ const TRACE_METHODS = Object.freeze({
   page: Object.freeze(new Set(codeClientMethods('page', true))),
   app: Object.freeze(new Set(codeClientMethods('app', true))),
   provider: Object.freeze(new Set(['call'])),
-  toolbox: Object.freeze(new Set(['read'])),
   opfs: Object.freeze(new Set(['read', 'write', 'delete', 'list', 'compose-module'])),
   fetch: Object.freeze(new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])),
   'site-fetch': Object.freeze(new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])),
@@ -282,17 +281,17 @@ export const WEB_ACTOR_CODE_CLIENT_TOOL_NAMES = Object.freeze([
 ]);
 
 export const WEB_ACTOR_TOOL_NAMES = Object.freeze([
-  ...WEB_ACTOR_DOM_TOOL_NAMES, 'fetch_url', 'read_doc', 'read_web_cache',
+  ...WEB_ACTOR_DOM_TOOL_NAMES, 'fetch_url', 'read_doc', 'read_result',
   'site_client_run', 'site_client_read', 'site_client_write', 'site_capture', 'login',
 ]);
 
 export const WEB_API_TOOL_NAMES = Object.freeze([
-  'fetch_url', 'read_web_cache', 'site_client_run', 'site_client_read', 'site_client_write',
+  'fetch_url', 'read_result', 'site_client_run', 'site_client_read', 'site_client_write',
 ]);
 
 export const DWEB_ACTOR_TOOL_NAMES = Object.freeze([
   'dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers', 'dweb_block',
-  'dweb_discovery', 'dweb_guide', 'a2a_run',
+  'dweb_discovery', 'a2a_run',
 ]);
 
 // Remote peer bytes may wake the daemon actor, but that provenance must never

@@ -102,8 +102,6 @@ const KERNEL_ROUTE_OVERRIDES = new Set([
   'sidepanel/close',
   'site-client/delete',
   'site-client/list',
-  'toolbox/read',
-  'toolbox/record',
   'sw/web-fetch',
   'sw/web-fetch-abort',
   'site-fetch/call',

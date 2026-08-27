@@ -9,7 +9,7 @@ describe('controller-owned introspection semantics', () => {
   test('owns one finite catalog without a caller-selected operation', () => {
     expect(Object.isFrozen(CONTROLLER_INTROSPECTION_TOOL_NAMES)).toBe(true);
     expect(CONTROLLER_INTROSPECTION_TOOL_NAMES).toEqual([
-      'actor_list', 'inspect', 'wait_until', 'load_skill',
+      'actor_list', 'inspect', 'load_skill',
     ]);
     expect(controllerHostsIntrospectionTool('inspect')).toBe(true);
     expect(controllerHostsIntrospectionTool('storage.get')).toBe(false);

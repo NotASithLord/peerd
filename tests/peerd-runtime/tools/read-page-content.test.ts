@@ -15,6 +15,7 @@ const fencedBody = (content: string) =>
 // A ctx whose injected scripts return canned results: the content grabber
 // (detected by function name) gets HTML; the snapshot function gets a snapshot.
 const ctxWith = (over: any = {}) => ({
+  session: { sessionId: 't' },
   activeTab: { id: 7, url: 'https://site.example/article', origin: 'https://site.example' },
   tabs: { get: async (id: number) => ({ id, url: 'https://site.example/article' }) },
   scripting: {
@@ -58,15 +59,15 @@ describe('read_page mode:content', () => {
     const big = 'M'.repeat(40_000);
     const ctx = ctxWith({
       webOffscreenClient: { extractMarkdown: async () => ({ readerable: true, markdown: big, title: 'Big' }) },
-      webCache: { key: () => 'wc-rp-1', put: async (rec: any) => { stored.push(rec); } },
+      resultStore: { key: () => 'result:opaque-page', put: async (rec: any) => { stored.push(rec); } },
     });
     const r = await readPageTool.execute({ mode: 'content' }, ctx as any);
     if (!r.ok) throw new Error('expected ok');
     expect(stored).toHaveLength(1);
     expect(stored[0].text.length).toBe(40_000);
     const afterFence = r.content!.split('</untrusted_web_content>')[1];
-    expect(afterFence).toContain('read_web_cache');
-    expect(afterFence).toContain('"key": "wc-rp-1"');
+    expect(afterFence).toContain('read_result');
+    expect(afterFence).toContain('"key": "result:opaque-page"');
     expect(fencedBody(r.content!).truncated).toBe(true);
   });
 

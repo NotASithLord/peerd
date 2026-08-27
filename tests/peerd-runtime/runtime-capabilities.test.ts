@@ -12,7 +12,7 @@ import { readPageTool } from '../../extension/peerd-runtime/tools/defs/read-page
 import { getToolMetadata } from '../../extension/peerd-runtime/semantic.js';
 
 const names = [
-  'script', 'read_run_cache', 'page_code', 'app_code', 'site_client_run',
+  'script', 'read_result', 'page_code', 'app_code', 'site_client_run',
   'read_doc', 'dweb_discover', 'a2a_run', 'message_actor',
 ];
 const descriptors = names.map((name) => ({ name }));
@@ -35,7 +35,7 @@ describe('runtime host capabilities', () => {
     const capability = resolveRuntimeCapabilities({ offscreenDocument: false });
     const filtered = filterByRuntimeCapabilities(descriptors, capability);
     expect(filtered.map((tool) => tool.name)).toEqual([
-      'read_run_cache',
+      'read_result',
       'message_actor',
     ]);
     expect(runtimeCapabilityPromptBlock(capability)).toContain('visible Notebook actor');

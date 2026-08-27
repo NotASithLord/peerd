@@ -86,7 +86,7 @@ describe('restrictCtxCapabilities', () => {
     getSecret: () => 'KEY',
     safeFetch: () => {},
     webFetch: () => {},
-    webCache: { get: () => {}, put: () => {}, key: () => 'k' },
+    resultStore: { get: () => {}, put: () => {}, key: () => 'k' },
     siteClients: { get: () => {}, put: () => {}, remove: () => {} },
     canUseSiteClientOrigin: () => true,
     authorizeSiteClientOrigin: async () => true,
@@ -116,9 +116,9 @@ describe('restrictCtxCapabilities', () => {
   const CAP_KEYS = Object.keys(CAPABILITY_CONSUMERS);
 
   test("a DOM-only runner toolset strips EVERY capability — no path to secrets/egress/spawn", () => {
-    // read_page is deliberately EXCLUDED here: it consumes webCache (its
+    // read_page is deliberately EXCLUDED here: it consumes resultStore (its
     // mode:'content' spill pager), so it is not a no-capability DOM tool — the
-    // read_page→webCache grant is asserted on its own below. The rest of the
+    // read_page→resultStore grant is asserted on its own below. The rest of the
     // DOM toolset consumes nothing, so this set must strip every capability.
     const allowed = new Set(['snapshot', 'click', 'type', 'navigate', 'query_dom']);
     const out = restrictCtxCapabilities(fullCtx(), allowed);
@@ -138,10 +138,9 @@ describe('restrictCtxCapabilities', () => {
   test('a capability is KEPT when a granted tool consumes it', () => {
     expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['fetch_url']))).toBe(true);
     expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['vm_import']))).toBe(true);
-    // read_page mode:'content' pages its overflow through webCache — the grant
-    // that #189 added to CAPABILITY_CONSUMERS.webCache must survive narrowing.
-    expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_page']))).toBe(true);
-    expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_web_cache']))).toBe(true);
+    // read_page mode:'content' pages its overflow through resultStore.
+    expect('resultStore' in restrictCtxCapabilities(fullCtx(), new Set(['read_page']))).toBe(true);
+    expect('resultStore' in restrictCtxCapabilities(fullCtx(), new Set(['read_result']))).toBe(true);
     expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
     for (const tool of ['site_client_read', 'site_client_run', 'site_client_write']) {
       const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));

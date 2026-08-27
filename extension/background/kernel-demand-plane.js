@@ -263,7 +263,7 @@ export const createKernelDemandPlane = (deps) => {
       }),
     },
     beforeLoad: async (name) => {
-      if (name.startsWith('toolbox/') || OPTIONAL_CONTROLLER_ROUTES.has(name)) return null;
+      if (OPTIONAL_CONTROLLER_ROUTES.has(name)) return null;
       if (deps.firefox && ['actor/spawn', 'agent/send'].includes(name)
           && !deps.childGuard().ready()) {
         return {

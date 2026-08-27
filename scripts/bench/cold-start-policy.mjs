@@ -9,7 +9,7 @@ import {
   PREVIEW_KERNEL_SOURCE_CONTRACT,
   COLD_START_LANES,
   COLD_START_PHASES,
-  COLD_START_TARGETS,
+  COLD_START_TIMING_TARGETS,
   COLD_START_TARGET_CUTOVER,
   NATIVE_FLOOR_CONTRACT,
   COLD_GRAPH_RATCHETS,
@@ -25,7 +25,7 @@ export {
   PREVIEW_KERNEL_SOURCE_CONTRACT,
   COLD_START_LANES,
   COLD_START_PHASES,
-  COLD_START_TARGETS,
+  COLD_START_TIMING_TARGETS,
   COLD_START_TARGET_CUTOVER,
   NATIVE_FLOOR_CONTRACT,
   COLD_GRAPH_RATCHETS,
@@ -115,7 +115,7 @@ const validateNativeKernelSample = (failures, label, sample) => {
           )) {
         failures.push(`${label} kernel timing order is invalid`);
       }
-      const ceiling = COLD_START_TARGETS.chrome.timing.usableMaxMs;
+      const ceiling = COLD_START_TIMING_TARGETS.chrome.usableMaxMs;
       if (timing.replyFromWorkerTimeOriginMs > ceiling) {
         failures.push(`${label} replyFromWorkerTimeOriginMs ${timing.replyFromWorkerTimeOriginMs}ms exceeds ${ceiling}ms`);
       }
@@ -200,12 +200,9 @@ const graphFailures = (browser, result, policy) => {
   const failures = [];
   const channels = ['store', 'preview'];
   for (const channel of channels) {
-    const budgets = policy === 'target'
-      ? COLD_START_TARGETS[browser]
-      : policy === 'ratchet'
-        ? PACKAGE_COLD_GRAPH_RATCHETS[channel]?.[browser]
-        : null;
-    if (policy !== 'integrity' && !budgets) {
+    const reference = PACKAGE_COLD_GRAPH_RATCHETS[channel]?.[browser];
+    const budgets = policy === 'ratchet' ? reference : null;
+    if (!reference) {
       failures.push(`no ${policy} graph policy for ${channel}/${browser}`);
       continue;
     }
@@ -214,9 +211,7 @@ const graphFailures = (browser, result, policy) => {
       failures.push(`${channel} packaged graph set is missing`);
       continue;
     }
-    const expectedNames = policy === 'integrity'
-      ? Object.keys(COLD_START_TARGETS[browser]).filter((name) => name !== 'timing')
-      : Object.keys(budgets).filter((name) => name !== 'timing');
+    const expectedNames = Object.keys(reference);
     for (const name of expectedNames) {
       const ceiling = budgets?.[name];
       const graph = graphs[name];
@@ -230,7 +225,7 @@ const graphFailures = (browser, result, policy) => {
       }
       if (!validSha256(graph.graphSha256)) failures.push(`${label}.graphSha256 is missing`);
       if (!validSha256(graph.entrySha256)) failures.push(`${label}.entrySha256 is missing`);
-      const bundledChromeWorker = policy === 'target' && browser === 'chrome'
+      const bundledChromeWorker = browser === 'chrome'
         && name === 'serviceWorker' && graph.graphModules === 1;
       if (bundledChromeWorker && graph.entryBytes !== graph.graphBytes) {
         failures.push(`${label} bundled entry does not equal its static graph`);
@@ -417,7 +412,7 @@ const completenessFailures = (browser, result, lane) => {
 
 const timingFailures = (browser, result) => {
   const failures = [];
-  const budget = COLD_START_TARGETS[browser]?.timing;
+  const budget = COLD_START_TIMING_TARGETS[browser];
   if (!budget) return [`no timing policy for ${browser}`];
   for (const [groupName, phase] of Object.entries(COLD_START_PHASES[browser])) {
     const group = result?.[groupName];
@@ -435,7 +430,7 @@ export const assessColdStartResult = (browser, result, options = {}) => {
   const graphPolicy = options.graphPolicy ?? profile?.graphPolicy;
   const requireTimingTargets = options.requireTimingTargets ?? profile?.requireTimingTargets;
   if (!['chrome', 'firefox'].includes(browser)) throw new Error(`unsupported browser: ${browser}`);
-  if (!['ratchet', 'target'].includes(graphPolicy)) throw new Error(`unsupported graph policy: ${graphPolicy}`);
+  if (!['ratchet', 'integrity'].includes(graphPolicy)) throw new Error(`unsupported graph policy: ${graphPolicy}`);
   if (!COLD_START_LANES[lane]) throw new Error(`unsupported cold-start lane: ${lane}`);
   const failures = [
     ...graphFailures(browser, result, graphPolicy),

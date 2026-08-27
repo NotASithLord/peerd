@@ -4,7 +4,7 @@ import { authWaitGate } from '../../../extension/peerd-runtime/tools/gates.js';
 describe('auth wait parks the complete actor capability surface', () => {
   test('DOM, code, fetch, cache, site-client, delegation, and login all stop', () => {
     for (const name of [
-      'snapshot', 'page_code', 'fetch_url', 'read_web_cache',
+      'snapshot', 'page_code', 'fetch_url', 'read_result',
       'site_client_read', 'site_client_run', 'message_actor', 'login',
     ]) {
       expect(authWaitGate({ name } as any, {}, { authWaitingForUser: true } as any))

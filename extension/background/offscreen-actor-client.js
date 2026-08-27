@@ -1810,24 +1810,6 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'page/query-dom', 'read', () =>
         entry.domainState.authority.queryOwnedDom());
     },
-    'page/evaluate-main': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
-      if (!entry) return { ok: false, error: 'page/evaluate-main: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/evaluate-main', 'resource', () =>
-        entry.domainState.authority.evaluateOwnedPageMainWorld());
-    },
-    'page/evaluate-debugger': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
-      if (!entry) return { ok: false, error: 'page/evaluate-debugger: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/evaluate-debugger', 'resource', () =>
-        entry.domainState.authority.evaluateOwnedPageDebugger());
-    },
-    'page/keys-availability': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
-      if (!entry) return { ok: false, error: 'page/keys-availability: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/keys-availability', 'read', () =>
-        entry.domainState.authority.readTrustedKeysAvailability());
-    },
     'page/navigate': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
       if (!entry) return { ok: false, error: 'page/navigate: authority mismatch', outcomeKnown: true };

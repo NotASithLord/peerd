@@ -3,7 +3,6 @@
 import { createKernelSemanticAuthority } from './kernel-semantic-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
 import { createKernelSemanticControl } from './kernel-semantic-control.js';
-import { createKernelToolboxStore } from './kernel-toolbox-store.js';
 import { createKernelSkillsAuthority } from './kernel-skills-authority.js';
 import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { makeContactsRoutes } from './routes/contacts.js';
@@ -17,7 +16,7 @@ import { createKernelLocalControl } from './kernel-local-control.js';
 
 export const KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES = Object.freeze([
   'apps/list', 'contacts/list', 'memory/export',
-  'skills/list', 'skills/remove', 'skills/setEnabled', 'toolbox/read', 'toolbox/record',
+  'skills/list', 'skills/remove', 'skills/setEnabled',
 ]);
 
 /** @param {Record<string,any>} deps */
@@ -34,7 +33,6 @@ export const createKernelSemanticRuntime = (deps) => {
     audit: deps.auditLog.append,
     pushState: deps.pushState,
   });
-  const toolbox = createKernelToolboxStore({ idbFactory: deps.idbFactory });
   const memory = createKernelMemoryAuthority({
     idb: deps.idb, kv: deps.kv, auditLog: deps.auditLog,
   });
@@ -69,7 +67,7 @@ export const createKernelSemanticRuntime = (deps) => {
     'skills/setEnabled': skills.routes['skills/setEnabled'],
     'skills/remove': skills.routes['skills/remove'],
   };
-  const directNames = ['toolbox/read', 'toolbox/record', ...Object.keys(localRoutes)].sort();
+  const directNames = Object.keys(localRoutes).sort();
   if (directNames.join('\0') !== [...KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES].sort().join('\0')) {
     throw new TypeError('kernel-semantic-direct-routes-invalid');
   }
@@ -132,7 +130,6 @@ export const createKernelSemanticRuntime = (deps) => {
     isHomeSender: deps.isHomeSender,
     vault: deps.vault,
     authority,
-    toolboxStore: toolbox,
     localRoutes,
     actorCount: () => typeof deps.loadTurnRuntime === 'function'
       ? ensureTurnOwner().actorCount() : deps.actorCount(),

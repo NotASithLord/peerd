@@ -157,14 +157,6 @@ const PAGE_METHODS = {
     },
     shape: passthrough,
   },
-  keys: {
-    tool: 'page_keys',
-    toArgs: (a) => {
-      if (typeof a?.sequence !== 'string' || !a.sequence) throw new PageApiError('page.keys(sequence): sequence must be a non-empty string');
-      return { keys: a.sequence };
-    },
-    shape: passthrough,
-  },
   view: {
     tool: 'view',
     toArgs: () => ({}),
@@ -192,10 +184,10 @@ const PAGE_METHODS = {
     },
     shape: passthrough,
   },
-  readCache: {
-    tool: 'read_web_cache',
+  readResult: {
+    tool: 'read_result',
     toArgs: (a) => {
-      if (typeof a?.key !== 'string' || !a.key) throw new PageApiError('page.readCache(key): key must be a non-empty string');
+      if (typeof a?.key !== 'string' || !a.key) throw new PageApiError('page.readResult(key): key must be a non-empty string');
       return { ...plainOptions(a.options), key: a.key };
     },
     shape: passthrough,
@@ -247,7 +239,7 @@ const PAGE_TOOL_ROUTES = Object.freeze({
   view: 'page-program/view',
   fetch_url: 'page-program/fetch',
   read_doc: 'page-program/read-document',
-  read_web_cache: 'page-program/read-cache',
+  read_result: 'page-program/read-result',
   site_client_read: 'page-program/site-client-read',
   site_client_write: 'page-program/site-client-write',
   site_capture: 'page-program/site-capture',

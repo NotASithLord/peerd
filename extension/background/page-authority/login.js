@@ -22,7 +22,7 @@ import { definePageAuthorityHandler } from './handler.js';
 //      so the model cannot spoof the method/provider the confirm names.
 //   5. It is WEB-ACTOR-ONLY (exposure.js), and a passkey uses the TRUSTED CDP click
 //      (WebAuthn needs transient user activation); it does NOT fake a synthetic
-//      gesture when CDP is absent (page_keys' no-fake posture).
+//      gesture when CDP is absent (the no-fake trusted-input posture).
 
 import {
   classifyLoginAffordance,

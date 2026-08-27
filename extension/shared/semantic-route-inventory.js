@@ -924,7 +924,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
     "source": "extension/background/kernel-turn-authority-adapter.js"
   },
   {
-    "route": "page-program/read-cache",
+    "route": "page-program/read-result",
     "channels": ["store", "preview"],
     "source": "extension/background/kernel-turn-authority-adapter.js"
   },
@@ -1235,22 +1235,6 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "preview"
     ],
     "source": "extension/background/routes/engine.js"
-  },
-  {
-    "route": "toolbox/read",
-    "channels": [
-      "store",
-      "preview"
-    ],
-    "source": "extension/background/kernel-semantic-control.js"
-  },
-  {
-    "route": "toolbox/record",
-    "channels": [
-      "store",
-      "preview"
-    ],
-    "source": "extension/background/kernel-semantic-control.js"
   },
   {
     "route": "transfer/export",

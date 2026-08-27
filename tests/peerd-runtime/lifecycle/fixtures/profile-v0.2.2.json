@@ -75,7 +75,7 @@
       "spawnedTrusted": true,
       "grantedTools": [
         "snapshot", "read_page", "read_state", "query_dom",
-        "click", "type", "navigate", "page_keys", "fetch_url"
+        "click", "type", "navigate", "fetch_url"
       ],
       "permissionMode": "act",
       "messagesV2": true,

@@ -415,7 +415,7 @@ describe('inbound provenance — monotonic SW grant', () => {
     }));
     const names = [
       'dweb_discover', 'dweb_peers', 'dweb_block',
-      'dweb_discovery', 'dweb_guide', 'dweb_share', 'dweb_install', 'a2a_run',
+      'dweb_discovery', 'dweb_share', 'dweb_install', 'a2a_run',
       'message_actor', 'actor_create', 'script',
     ];
     await client.run({
