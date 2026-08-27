@@ -78,6 +78,26 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('admits every exact controller domain handler through the fixed channel ledger', () => {
+    const bridge = readFileSync(
+      join(EXTENSION_ROOT, 'background/controller-turn-bridge.js'), 'utf8',
+    );
+    const quota = readFileSync(
+      join(EXTENSION_ROOT, 'shared/controller-kernel-quota.js'), 'utf8',
+    );
+    const domainHandlers = [...bridge.matchAll(
+      /case '(turn\.(?:memory|todo|resource|site-client|execution|editing|introspection|schedule|dweb)\.[^']+)':/g,
+    )].map((match) => match[1]);
+    expect(domainHandlers.length).toBeGreaterThan(0);
+    for (const operation of domainHandlers) {
+      expect(quota, `${operation} is missing from the fixed authority ledger`)
+        .toContain(`'${operation}': { authorityClass:`);
+    }
+    for (const operation of [
+      'turn.model.open-local', 'turn.model.read-local', 'turn.model.cancel-local',
+    ]) expect(quota).toContain(`'${operation}':`);
+  });
+
   it('keeps the semantic owner free of authority and host dependencies', async () => {
     const modules = await modulesFor('peerd-runtime/controller-turn-semantics.js');
     const forbiddenPrefixes = [

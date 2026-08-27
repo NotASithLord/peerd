@@ -10,6 +10,7 @@
 import { describe, test, expect } from 'bun:test';
 import { formatRunResult, runIsFenced, runOriginLabel, scriptTool } from '../../../extension/peerd-runtime/tools/defs/script.js';
 import { makeEngineRoutes } from '../../../extension/background/routes/engine.js';
+import { executionToolContext } from '../../helpers/execution-tool.js';
 
 const run = (over: Record<string, unknown> = {}) => ({
   durationMs: 5, value: 'out', ...over,
@@ -125,7 +126,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       toolUseId: 'tu-42',
       ...over,
     };
-    return { ctx, seen };
+    return { ctx: executionToolContext(ctx), seen };
   };
 
   test('workspace:true passes workspaceSessionId = the session id', async () => {
@@ -215,7 +216,9 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       jsOffscreenClient: {
         // The thrown transport error does not repeat the target. Its identity
         // must survive from the bounded mirror itself, inside the fence only.
-        execHeadless: async () => { throw new Error(errorPayload); },
+        execHeadless: async () => {
+          throw Object.assign(new Error(errorPayload), { outcomeKnown: true });
+        },
       },
     });
     const result = await scriptTool.execute({
@@ -246,7 +249,9 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
         release: () => {}, opsFor: () => [],
       },
       jsOffscreenClient: {
-        execHeadless: async () => { throw new Error(errorPayload); },
+        execHeadless: async () => {
+          throw Object.assign(new Error(errorPayload), { outcomeKnown: true });
+        },
       },
     });
     const result = await scriptTool.execute({
@@ -312,7 +317,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
         },
       },
     };
-    await scriptTool.execute({ code: 'return await peerd.egress.fetch("https://example.com")' }, ctx as any);
+    await scriptTool.execute({ code: 'return await peerd.egress.fetch("https://example.com")' }, executionToolContext(ctx) as any);
     expect(jobOpts.ownerSessionId).toBe('chat-1');
     expect(relayResult).toMatchObject({ ok: true, status: 200 });
     expect(fetched).toBe(true);

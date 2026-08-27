@@ -58,6 +58,16 @@ export {
   executeControllerSiteClientTool,
 } from './controller-site-client-tools.js';
 export {
+  CONTROLLER_EXECUTION_TOOL_NAMES,
+  controllerHostsExecutionTool,
+  executeControllerExecutionTool,
+} from './controller-execution-tools.js';
+export {
+  CONTROLLER_EDITING_TOOL_NAMES,
+  controllerHostsEditingTool,
+  executeControllerEditingTool,
+} from './controller-editing-tools.js';
+export {
   CONTROLLER_INTROSPECTION_TOOL_NAMES,
   controllerHostsIntrospectionTool,
   executeControllerIntrospectionTool,

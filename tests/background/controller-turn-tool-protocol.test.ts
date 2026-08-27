@@ -668,28 +668,11 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
-  test('uses legacy dispatch only when kernel preparation declines hosting', async () => {
-    let legacy = 0;
-    const result = await runHarness({
-      ctx: context({
-        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
-      }),
-      bridgeHooks: {
-        prepareToolCall: async () => null,
-        settleToolCall: async () => ({ ok: true }),
-      },
-    });
-    expect(result.error).toBeNull();
-    expect(legacy).toBe(1);
-  });
-
-  test('never falls back to legacy dispatch for a controller-hosted tool', async () => {
-    let legacy = 0;
+  test('fails closed when exact controller preparation is unavailable', async () => {
     const nowDescriptor = authorityDescriptor('now');
     const result = await runHarness({
       ctx: context({
         tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
-        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
         callModel: async function* () {
           yield { type: 'tool-use-start', id: 'tool-now-1', name: 'now' };
           yield { type: 'tool-use-delta', id: 'tool-now-1', partialJson: '{}' };
@@ -708,17 +691,14 @@ describe('controller turn finite tool protocol', () => {
       ok: false, code: 'turn-kernel-call-failed',
       error: 'controller tool preparation unavailable',
     });
-    expect(legacy).toBe(0);
   });
 
-  test('the kernel rejects direct legacy dispatch of a controller-hosted tool', async () => {
+  test('the kernel has no generic tool-dispatch operation', async () => {
     let bypass: any = null;
-    let legacy = 0;
     const nowDescriptor = authorityDescriptor('now');
     const result = await runHarness({
       ctx: context({
         tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
-        toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
         callModel: async function* () {
           yield { type: 'tool-use-start', id: 'tool-now-bypass', name: 'now' };
           yield { type: 'tool-use-delta', id: 'tool-now-bypass', partialJson: '{}' };
@@ -735,11 +715,9 @@ describe('controller turn finite tool protocol', () => {
       },
     });
     expect(bypass).toMatchObject({
-      ok: false, code: 'turn-kernel-call-failed', outcomeKnown: true,
-      error: 'controller tool cannot use legacy dispatch',
+      ok: false, code: 'turn-kernel-operation-denied', outcomeKnown: true,
     });
     expect(result.error).toBeNull();
-    expect(legacy).toBe(0);
   });
 
   test('quota admits exact goal completion and rejects the deleted generic effect lane', () => {

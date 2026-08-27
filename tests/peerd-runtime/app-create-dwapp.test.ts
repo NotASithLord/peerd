@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { createAppSandbox } from '../../extension/peerd-runtime/tools/defs/app-create.js';
+import { executionToolContext } from '../helpers/execution-tool.js';
 
 // The bug this guards: a self-authored multiplayer app got NO dweb bridge because
 // app_create never set the dweb metadata SLOT (app-tab.js attachDwebBridge gates
@@ -7,7 +8,7 @@ import { createAppSandbox } from '../../extension/peerd-runtime/tools/defs/app-c
 // (app_create merged into sandbox_create; this exercises its app arm directly.)
 const makeCtx = (dwebOn: boolean) => {
   const calls: any[] = [];
-  const ctx = {
+  const raw = {
     dweb: dwebOn ? {} : null,
     session: { sessionId: 's1' },
     appClient: {
@@ -15,7 +16,7 @@ const makeCtx = (dwebOn: boolean) => {
       open: async () => {},
     },
   };
-  return { ctx, calls };
+  return { ctx: executionToolContext(raw), raw, calls };
 };
 
 describe('sandbox_create app arm — dwapp:true attaches the bridge-unlocking dweb slot', () => {
@@ -46,8 +47,8 @@ describe('sandbox_create app arm — dwapp:true attaches the bridge-unlocking dw
   });
 
   test('reports a durable App honestly when its isolated host cannot open', async () => {
-    const { ctx } = makeCtx(true);
-    ctx.appClient.open = async () => { throw new Error('Apps are not available in Firefox yet.'); };
+    const { ctx, raw } = makeCtx(true);
+    raw.appClient.open = async () => { throw new Error('Apps are not available in Firefox yet.'); };
     const result = await createAppSandbox({ name: 'todo', html: '<h1>todo</h1>' }, ctx as any);
     expect(result.ok).toBe(true);
     const summary = JSON.parse(String(result.content).split('\n\n')[0]);

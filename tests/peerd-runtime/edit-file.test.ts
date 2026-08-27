@@ -8,6 +8,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { editFileTool } from '../../extension/peerd-runtime/tools/defs/edit-file.js';
+import { createEditingToolAuthority } from '../../extension/background/editing-tool-authority.js';
 
 const WHOLE_FILE = '<<<<<<< SEARCH\n=======\nhello\n>>>>>>> REPLACE\n';
 
@@ -20,16 +21,22 @@ const baseCtx = (over: any = {}) => ({
   ...over,
 });
 
+const executeEdit = (args: any, ctx: any) => editFileTool.execute(args, {
+  editingAuthority: createEditingToolAuthority({
+    call: { name: 'edit_file', args }, ctx,
+  }),
+} as any);
+
 describe('edit_file — create-first hint (progressive disclosure consistency)', () => {
   test('app: no current app → create-first hint naming sandbox_create', async () => {
-    const r: any = await editFileTool.execute({ path: 'index.html', edits: WHOLE_FILE }, baseCtx() as any);
+    const r: any = await executeEdit({ path: 'index.html', edits: WHOLE_FILE }, baseCtx());
     expect(r.ok).toBe(false);
     expect(r.code).toBe('no_current_instance');
     expect(r.error).toContain("sandbox_create({kind:'app'})");
   });
 
   test('notebook: no current notebook → create-first hint naming sandbox_create', async () => {
-    const r: any = await editFileTool.execute({ path: 'x.js', edits: WHOLE_FILE, kind: 'notebook' }, baseCtx() as any);
+    const r: any = await executeEdit({ path: 'x.js', edits: WHOLE_FILE, kind: 'notebook' }, baseCtx());
     expect(r.ok).toBe(false);
     expect(r.code).toBe('no_current_instance');
     expect(r.error).toContain("sandbox_create({kind:'notebook'})");
@@ -37,19 +44,19 @@ describe('edit_file — create-first hint (progressive disclosure consistency)',
 
   test('proceeds normally when a current instance exists', async () => {
     const ctx = baseCtx({ appRegistry: { getDefaultForSession: async () => 'app-1' } });
-    const r: any = await editFileTool.execute({ path: 'index.html', edits: WHOLE_FILE }, ctx as any);
+    const r: any = await executeEdit({ path: 'index.html', edits: WHOLE_FILE }, ctx);
     expect(r.ok).toBe(true);
   });
 
   test('an explicit targetId skips the current-instance check', async () => {
-    const r: any = await editFileTool.execute({ path: 'index.html', edits: WHOLE_FILE, targetId: 'app-9' }, baseCtx() as any);
+    const r: any = await executeEdit({ path: 'index.html', edits: WHOLE_FILE, targetId: 'app-9' }, baseCtx());
     expect(r.ok).toBe(true);
   });
 
   test('no false negative when the registry is not wired (degrades to prior behavior)', async () => {
     // No appRegistry → the check is skipped; the write mock succeeds.
     const ctx = baseCtx({ appRegistry: undefined });
-    const r: any = await editFileTool.execute({ path: 'index.html', edits: WHOLE_FILE }, ctx as any);
+    const r: any = await executeEdit({ path: 'index.html', edits: WHOLE_FILE }, ctx);
     expect(r.ok).toBe(true);
   });
 });
@@ -66,7 +73,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
   test('anchored edit against a missing file → file_not_found (not search_not_found)', async () => {
     // readFile returns null → the file does not exist.
     const ctx = withInstance({ appClient: { readFile: async () => null, writeFile: async () => {} } });
-    const r: any = await editFileTool.execute({ path: 'nope.js', edits: ANCHORED }, ctx as any);
+    const r: any = await executeEdit({ path: 'nope.js', edits: ANCHORED }, ctx);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('file_not_found');
     expect(r.error).toContain('nope.js');
@@ -78,7 +85,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
       jsRegistry: { getDefaultForSession: async () => 'nb-1' },
       jsClient: { readFile: async () => null, writeFile: async () => {} },
     });
-    const r: any = await editFileTool.execute({ path: 'nope.js', edits: ANCHORED, kind: 'notebook' }, ctx as any);
+    const r: any = await executeEdit({ path: 'nope.js', edits: ANCHORED, kind: 'notebook' }, ctx);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('file_not_found');
     expect(r.error).toContain('js_read_file');
@@ -86,7 +93,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
 
   test('whole-file create against a missing file → success, path echoed', async () => {
     const ctx = withInstance({ appClient: { readFile: async () => null, writeFile: async () => {} } });
-    const r: any = await editFileTool.execute({ path: 'fresh.html', edits: WHOLE_FILE }, ctx as any);
+    const r: any = await executeEdit({ path: 'fresh.html', edits: WHOLE_FILE }, ctx);
     expect(r.ok).toBe(true);
     expect(JSON.parse(r.content).path).toBe('fresh.html');
   });
@@ -98,7 +105,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
         writeFile: async () => {},
       },
     });
-    const r: any = await editFileTool.execute({ path: 'index.html', edits: ANCHORED }, ctx as any);
+    const r: any = await executeEdit({ path: 'index.html', edits: ANCHORED }, ctx);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('read_failed');
     expect(r.error).toContain('OPFS unavailable');
@@ -112,7 +119,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
         writeFile: async () => {},
       },
     });
-    const r: any = await editFileTool.execute({ path: 'fresh.html', edits: WHOLE_FILE }, ctx as any);
+    const r: any = await executeEdit({ path: 'fresh.html', edits: WHOLE_FILE }, ctx);
     expect(r.ok).toBe(true);
   });
 
@@ -126,7 +133,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
       jsRegistry: { getDefaultForSession: async () => 'nb-1' },
       jsClient: { readFile: async () => { throw notFound; }, writeFile: async () => {} },
     });
-    const r: any = await editFileTool.execute({ path: 'fresh.js', edits: WHOLE_FILE, kind: 'notebook' }, ctx as any);
+    const r: any = await executeEdit({ path: 'fresh.js', edits: WHOLE_FILE, kind: 'notebook' }, ctx);
     expect(r.ok).toBe(true);
     expect(JSON.parse(r.content).path).toBe('fresh.js');
   });
@@ -137,7 +144,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
       jsRegistry: { getDefaultForSession: async () => 'nb-1' },
       jsClient: { readFile: async () => { throw notFound; }, writeFile: async () => {} },
     });
-    const r: any = await editFileTool.execute({ path: 'gone.js', edits: ANCHORED, kind: 'notebook' }, ctx as any);
+    const r: any = await executeEdit({ path: 'gone.js', edits: ANCHORED, kind: 'notebook' }, ctx);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('file_not_found');
     expect(r.error).toContain('js_read_file');
@@ -148,7 +155,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
     const ctx = withInstance({
       appClient: { readFile: async () => 'const x = 2;\n', writeFile: async () => {} },
     });
-    const r: any = await editFileTool.execute({ path: 'index.html', edits: ANCHORED }, ctx as any);
+    const r: any = await executeEdit({ path: 'index.html', edits: ANCHORED }, ctx);
     expect(r.ok).toBe(true);
     expect(JSON.parse(r.content).alreadyApplied).toBe(true);
   });
@@ -157,7 +164,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
     const ctx = withInstance({
       appClient: { readFile: async () => 'const x = 1;\nconst x = 1;\n', writeFile: async () => {} },
     });
-    const r: any = await editFileTool.execute({ path: 'index.html', edits: ANCHORED }, ctx as any);
+    const r: any = await executeEdit({ path: 'index.html', edits: ANCHORED }, ctx);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('search_ambiguous');
     expect(r.locations.map((l: any) => l.line)).toEqual([1, 2]);
@@ -168,7 +175,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
       appClient: { readFile: async () => 'function f() {\n    return 1;\n}\n', writeFile: async () => {} },
     });
     const edits = '<<<<<<< SEARCH\n\treturn 1;\n=======\n\treturn 2;\n>>>>>>> REPLACE\n';
-    const r: any = await editFileTool.execute({ path: 'index.html', edits }, ctx as any);
+    const r: any = await executeEdit({ path: 'index.html', edits }, ctx);
     expect(r.ok).toBe(false);
     expect(r.code).toBe('search_not_found');
     expect(r.whitespace).toBe(true);
@@ -179,7 +186,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
     const overLimit = '😀'.repeat(125_001);
     const edits = `<<<<<<< SEARCH\n=======\n${overLimit}\n>>>>>>> REPLACE\n`;
     const ctx = withInstance({ appClient: { readFile: async () => null, writeFile: async () => {} } });
-    const result: any = await editFileTool.execute({ path: 'fresh.txt', edits }, ctx as any);
+    const result: any = await executeEdit({ path: 'fresh.txt', edits }, ctx);
     expect(result.ok).toBe(false);
     // The App byte rail catches this even though the string has far fewer
     // UTF-16 code units.
@@ -196,7 +203,7 @@ describe('edit_file — 3a–3d robustness surface', () => {
       },
     });
     const edits = '<<<<<<< SEARCH\nconst protocol = 5;\n=======\nconst protocol = 6;\n>>>>>>> REPLACE\n';
-    const result: any = await editFileTool.execute({ path: 'bundle.js', edits }, ctx as any);
+    const result: any = await executeEdit({ path: 'bundle.js', edits }, ctx);
     expect(result.ok).toBe(true);
     expect(written.endsWith('const protocol = 6;\n')).toBe(true);
     expect(new TextEncoder().encode(written).byteLength).toBeGreaterThan(500_000);

@@ -14,6 +14,8 @@ import {
   controllerHostsPageTool,
   controllerHostsResourceTool,
   controllerHostsSiteClientTool,
+  controllerHostsExecutionTool,
+  controllerHostsEditingTool,
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
@@ -30,6 +32,8 @@ import {
   executeControllerPageTool,
   executeControllerResourceTool,
   executeControllerSiteClientTool,
+  executeControllerExecutionTool,
+  executeControllerEditingTool,
   executeControllerIntrospectionTool,
   executeControllerScheduleTool,
   executeControllerDwebTool,
@@ -39,7 +43,6 @@ import {
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { buildTemporalBlock, buildTemporalContext } from '/peerd-runtime/controller.js';
-import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import {
   callModel as callProviderModel,
   costOf,
@@ -335,27 +338,14 @@ const runControllerTurnWith = async (payload, options) => {
         const authorityClass = controllerAuthorityClassForTool(
           /** @type {any} */ (call)?.name,
         );
-        const legacyDispatch = async () => parseJson(await rpc('turn.tool.dispatch', {
-          callJson: JSON.stringify(call),
-        }), 'tool result');
-        if (authorityClass === null && !legacyToolAllowed(/** @type {any} */ (call)?.name)) {
+        if (authorityClass === null) {
           throw Object.assign(new Error('tool has no execution owner'), {
             code: 'tool-execution-owner-missing', outcomeKnown: true,
           });
         }
-        if (authorityClass === null) {
-          const result = await legacyDispatch();
-          if (result?.outcomeKnown === false) nestedUnknown = true;
-          return result;
-        }
         const prepared = await rpc('turn.tool.prepare', {
           callJson: JSON.stringify(call), authorityClass,
         });
-        if (prepared?.mode === 'legacy') {
-          throw Object.assign(new Error('controller tool preparation unavailable'), {
-            code: 'controller-tool-preparation-unavailable', outcomeKnown: true,
-          });
-        }
         if (prepared?.mode === 'result') {
           const result = parseJson(prepared.resultJson, 'tool result');
           if (result?.outcomeKnown === false) nestedUnknown = true;
@@ -775,6 +765,52 @@ const runControllerTurnWith = async (payload, options) => {
               effectEntered: true,
               value,
             };
+          } else if (controllerHostsExecutionTool(request.toolName)) {
+            const executionAuthority = Object.freeze({
+              createWebVm: (/** @type {any} */ plan) =>
+                rpc('turn.execution.create-webvm', { ...binding, plan }),
+              createNotebook: (/** @type {any} */ plan) =>
+                rpc('turn.execution.create-notebook', { ...binding, plan }),
+              createPod: (/** @type {any} */ plan) =>
+                rpc('turn.execution.create-pod', { ...binding, plan }),
+              createApp: (/** @type {any} */ plan) =>
+                rpc('turn.execution.create-app', { ...binding, plan }),
+              runHeadlessScript: (/** @type {any} */ scriptRequest) =>
+                rpc('turn.execution.run-script', { ...binding, ...scriptRequest }),
+              spillScriptValue: (/** @type {any} */ record) =>
+                rpc('turn.execution.spill-script', { ...binding, ...record }),
+            });
+            const value = await executeControllerExecutionTool(
+              request.toolName, request.args, executionAuthority, request.projection,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
+          } else if (controllerHostsEditingTool(request.toolName)) {
+            const editingAuthority = Object.freeze({
+              readEditTarget: (/** @type {any} */ target) =>
+                rpc('turn.editing.read-target', { ...binding, ...target }),
+              writeEditTarget: (/** @type {any} */ target) =>
+                rpc('turn.editing.write-target', { ...binding, ...target }),
+            });
+            const value = await executeControllerEditingTool(
+              request.toolName, request.args, editingAuthority,
+            );
+            execution = {
+              protocol: request.protocol,
+              executionId: request.executionId,
+              argsDigest: request.argsDigest,
+              ok: true,
+              outcomeKnown: true,
+              effectEntered: true,
+              value,
+            };
           } else if (controllerHostsIntrospectionTool(request.toolName)) {
             const introspectionAuthority = Object.freeze({
               readActorRoster: () => rpc('turn.introspection.actor-roster', binding),
@@ -836,6 +872,9 @@ const runControllerTurnWith = async (payload, options) => {
                 rpc('turn.dweb.set-peer-blocked', { ...binding, did, block, reason }),
               setDiscoveryEnabled: (/** @type {boolean} */ enabled) =>
                 rpc('turn.dweb.set-discovery-enabled', { ...binding, enabled }),
+              runMeshProgram: (/** @type {string} */ code,
+                /** @type {number} */ timeoutMs) =>
+                rpc('turn.dweb.run-mesh-program', { ...binding, code, timeoutMs }),
             });
             const value = await executeControllerDwebTool(
               request.toolName, request.args, request.projection,

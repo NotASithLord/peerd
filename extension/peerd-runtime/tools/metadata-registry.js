@@ -1,7 +1,7 @@
 // @ts-check
 
 // Controller-owned inert inventory. Execution registration is intentionally a
-// separate module so importing the legacy dispatcher cannot pull this growing
+// separate module so importing the authority policy shell cannot pull this growing
 // model-facing policy catalog into the service worker.
 import { listToolPolicies } from './metadata/policy.js';
 import {

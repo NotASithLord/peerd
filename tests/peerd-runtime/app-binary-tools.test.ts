@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createAppSandbox } from '../../extension/peerd-runtime/tools/defs/app-create.js';
 import { appWriteFileTool } from '../../extension/peerd-runtime/tools/defs/app-write-file.js';
+import { executionToolContext } from '../helpers/execution-tool.js';
 
 const writeContext = () => {
   const calls: any[] = [];
@@ -56,7 +57,7 @@ describe('sandbox_create App binary contract', () => {
     const calls: any[] = [];
     return {
       calls,
-      ctx: {
+      ctx: executionToolContext({
         session: { sessionId: `s-create-${Math.random()}` },
         appClient: {
           create: async (args: any) => {
@@ -65,7 +66,7 @@ describe('sandbox_create App binary contract', () => {
           },
           open: async () => {},
         },
-      },
+      }),
     };
   };
 
@@ -102,7 +103,7 @@ describe('sandbox_create App Git contract', () => {
       gitUrl: 'https://github.com/example/browser-app',
       gitRef: 'release',
       gitDepth: 900,
-    }, {
+    }, executionToolContext({
       session: { sessionId: 's-git-app' },
       abortSignal: controller.signal,
       confirm: async (prompt: any, signal: AbortSignal) => {
@@ -120,7 +121,7 @@ describe('sandbox_create App Git contract', () => {
         },
         open: async () => {},
       },
-    } as any);
+    }) as any);
 
     expect(result.ok).toBe(true);
     expect(confirmations[0].signal).toBe(controller.signal);

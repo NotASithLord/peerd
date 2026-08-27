@@ -2,15 +2,8 @@
 // background/offscreen-actor-client.js: the privileged-host client for EVERY isolated
 // agent loop (the heap split): ephemeral spawned reasoners (spawn.js) AND bound
 // actors (the actor turn). Provider semantics stay in the isolated Worker; this
-// client exposes exact inference open/read/cancel authority plus the existing
-// tool-dispatch and loop-event routes.
-//
-// The security-critical route is 'actor/tool-dispatch': the worker's loop asks to run
-// a tool; THIS builds the actor's instance-PINNED, gated tool context and dispatches
-// there — the pin, the gate, the engine clients, the tabs, and the audit are ALL
-// SW-side. It NEVER trusts the worker's call args (they may derive from injected
-// instance/page output): it re-pins the bound instance and runs the full gate,
-// with the same policy on every browser host.
+// client exposes exact inference and named domain-authority routes. The worker
+// receives no generic tool, browser, storage, credential, or fetch authority.
 //
 // Pure shell — every IO injected — so it is unit-testable without a browser.
 
@@ -18,7 +11,6 @@ import {
   CONTROLLER_AUTHORITY_MANIFEST,
   controllerAuthorityClassAllowed,
 } from '/shared/controller-authority-manifest.js';
-import { legacyToolAllowed } from '/shared/legacy-tool-allowlist.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
@@ -29,6 +21,8 @@ import { bindPersistenceToolAuthority } from './persistence-tool-authority.js';
 import { bindPageToolAuthority } from './page-tool-authority.js';
 import { bindResourceToolAuthority } from './resource-tool-authority.js';
 import { bindSiteClientToolAuthority } from './site-client-tool-authority.js';
+import { bindExecutionToolAuthority } from './execution-tool-authority.js';
+import { bindEditingToolAuthority } from './editing-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
@@ -72,7 +66,6 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * }} deps.providerEgress
  * @param {{ get: (id: string) => Promise<any> }} deps.sessions
  * @param {(opts: object) => Promise<object>} deps.buildToolContext
- * @param {(call: object, ctx: object) => Promise<any>} deps.dispatchToolCall
  * @param {(call: object, ctx: object, descriptor?:object) => Promise<any>} [deps.prepareToolCall]
  * @param {(prepared: object, execution: object) => Promise<any>} [deps.settleToolCall]
  * @param {(call: any, actorType: string|undefined, instanceId: string|undefined) => void} deps.pinActorCall
@@ -114,7 +107,7 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  */
 export const makeOffscreenActorClient = ({
   ensureHost, ensureOffscreen, sendMessage, runOnChannel, providerEgress,
-  sessions, buildToolContext, dispatchToolCall, prepareToolCall, settleToolCall,
+  sessions, buildToolContext, prepareToolCall, settleToolCall,
   pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR,
   now = Date.now,
   recordModelCall = () => {},
@@ -333,10 +326,10 @@ export const makeOffscreenActorClient = ({
     }
     const rec = await sessions.get(actorSessionId);
     if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-    if (!rec) return { ok: false, error: 'actor/tool-dispatch: unknown session' };
+    if (!rec) return { ok: false, error: 'actor/tool-prepare: unknown session' };
     if (rec.kind === 'spawned') {
       if (!restrictCtxCapabilities) {
-        return { ok: false, error: 'actor/tool-dispatch: actor offscreen not wired' };
+        return { ok: false, error: 'actor/tool-prepare: actor offscreen not wired' };
       }
       const persistedGrants = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
       const granted = grant.inbound
@@ -365,12 +358,12 @@ export const makeOffscreenActorClient = ({
       }, granted) };
     }
     if (rec.kind !== 'actor') {
-      return { ok: false, error: 'actor/tool-dispatch: not an actor or actor session' };
+      return { ok: false, error: 'actor/tool-prepare: not an actor or actor session' };
     }
     const activeTabId = rec.actorType === 'web' && rec.backing !== 'api' && ownedTabFor
       ? ownedTabFor(actorSessionId) : undefined;
     if (grant.inbound && !restrictCtxCapabilities) {
-      return { ok: false, error: 'actor/tool-dispatch: inbound capability filter not wired' };
+      return { ok: false, error: 'actor/tool-prepare: inbound capability filter not wired' };
     }
     const base = await buildToolContext({
       exposure: EXPOSURE_ACTOR, sessionId: actorSessionId, activeTabId,
@@ -502,6 +495,31 @@ export const makeOffscreenActorClient = ({
     bindSiteClientToolAuthority(entry.domainState, {
       call: entry.prepared.call, ctx: entry.prepared.ctx,
       signal: /** @type {any} */ (grant).relaySignal,
+    });
+    return entry;
+  };
+  const executionEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'execution', fields);
+    if (!entry) return null;
+    bindExecutionToolAuthority(entry.domainState, {
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
+      signal: /** @type {any} */ (grant).relaySignal,
+    });
+    return entry;
+  };
+  const editingEntry = (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string[]} */ fields,
+  ) => {
+    const entry = domainEntry(grant, msg, 'editing', fields);
+    if (!entry) return null;
+    bindEditingToolAuthority(entry.domainState, {
+      call: entry.prepared.call, ctx: entry.prepared.ctx,
     });
     return entry;
   };
@@ -818,53 +836,6 @@ export const makeOffscreenActorClient = ({
         permitsProvider: (/** @type {string} */ providerId) => providerId === grant.provider,
       });
     },
-    /** Frozen compatibility route. Controller-owned names are refused here. */
-    'actor/tool-dispatch': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
-    ) => {
-      let admitted = false;
-      try {
-        const grant = grantFor(msg, sender, boundGrant);
-        if (!grant) return { ok: false, error: 'actor/tool-dispatch: unauthorized relay' };
-        if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-        const call = msg.call;
-        if (grant.toolRelays >= toolRelayLimit) return {
-          ok: false, error: 'actor/tool-dispatch: relay budget exhausted',
-          code: 'actor_tool_relay_limit', outcomeKnown: true, performed: false,
-        };
-        grant.toolRelays += 1;
-        const admittedContext = await contextForTool(grant, call);
-        if (admittedContext.ok !== true) return admittedContext;
-        if (!legacyToolAllowed(call?.name)) {
-          return { ok: false, error: `actor/tool-dispatch: tool is not legacy-owned: ${call?.name}` };
-        }
-        admitted = true;
-        const result = await dispatchToolCall(call, admittedContext.ctx);
-        if (admittedContext.rec.kind === 'actor') {
-          try {
-            broadcastOp({
-              type: 'actor/op', sessionId: admittedContext.actorSessionId,
-              name: typeof call?.name === 'string' && /^[a-z0-9_-]{1,64}$/.test(call.name)
-                ? call.name : 'unknown',
-              ok: result?.ok !== false,
-            });
-          } catch { /* display-only */ }
-        }
-        return { ok: true, result };
-      } catch (e) {
-        const failure = /** @type {{ message?: string, code?: string, outcomeKnown?: boolean, performed?: boolean }} */ (e);
-        return {
-          ok: false, error: failure?.message ?? String(e),
-          ...(typeof failure?.code === 'string' ? { code: failure.code } : {}),
-          ...(admitted ? {
-            outcomeKnown: failure?.outcomeKnown === true,
-            ...(typeof failure?.performed === 'boolean' ? { performed: failure.performed } : {}),
-            ...(failure?.outcomeKnown === true ? {} : { retryable: false }),
-          } : {}),
-        };
-      }
-    },
     /** Admit one controller-owned tool without executing its semantics in the SW. */
     'actor/tool-prepare': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
@@ -875,7 +846,7 @@ export const makeOffscreenActorClient = ({
       const domain = msg.authorityClass;
       if (!grant || !exactKeys(msg, ['call', 'authorityClass'])
           || !controllerAuthorityClassAllowed(domain)
-          || legacyToolAllowed(call?.name) || typeof prepareToolCall !== 'function'
+          || typeof prepareToolCall !== 'function'
           || typeof settleToolCall !== 'function') {
         return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
       }
@@ -916,6 +887,9 @@ export const makeOffscreenActorClient = ({
       } : domain === 'resource' ? {
         sessionId: admittedContext.ctx.session?.sessionId,
         runtimeCapabilities: admittedContext.ctx.runtimeCapabilities,
+      } : domain === 'execution' ? {
+        sessionId: admittedContext.ctx.session?.sessionId,
+        sessionKind: admittedContext.ctx.session?.kind ?? 'spawned',
       } : call.name === 'load_skill' ? {
         sessionId: admittedContext.ctx.session?.sessionId,
         messageCount: admittedContext.ctx.session?.messageCount ?? 0,
@@ -1968,6 +1942,71 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'site-client/capture-stop', 'resource', () =>
         entry.domainState.authority.stopOwnedCapture());
     },
+    'execution/create-webvm': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      if (!entry) return { ok: false, error: 'execution/create-webvm: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'execution/create-webvm', 'commit', () =>
+        entry.domainState.authority.createWebVm(msg.plan));
+    },
+    'execution/create-notebook': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      if (!entry) return { ok: false, error: 'execution/create-notebook: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'execution/create-notebook', 'commit', () =>
+        entry.domainState.authority.createNotebook(msg.plan));
+    },
+    'execution/create-pod': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      if (!entry) return { ok: false, error: 'execution/create-pod: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'execution/create-pod', 'commit', () =>
+        entry.domainState.authority.createPod(msg.plan));
+    },
+    'execution/create-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      if (!entry) return { ok: false, error: 'execution/create-app: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'execution/create-app', 'commit', () =>
+        entry.domainState.authority.createApp(msg.plan));
+    },
+    'execution/run-script': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, [
+        'code', 'actors', 'provider', 'workspace', 'timeoutMs',
+      ]);
+      if (!entry) return { ok: false, error: 'execution/run-script: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'execution/run-script', 'resource', () =>
+        entry.domainState.authority.runHeadlessScript({
+          code: msg.code, actors: msg.actors, provider: msg.provider,
+          workspace: msg.workspace, timeoutMs: msg.timeoutMs,
+        }));
+    },
+    'execution/spill-script': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = executionEntry(
+        grantFor(msg, sender, boundGrant), msg, ['text', 'fenced', 'originLabel'],
+      );
+      if (!entry) return { ok: false, error: 'execution/spill-script: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'execution/spill-script', 'control', () =>
+        entry.domainState.authority.spillScriptValue({
+          text: msg.text, fenced: msg.fenced, originLabel: msg.originLabel,
+        }));
+    },
+    'editing/read-target': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = editingEntry(
+        grantFor(msg, sender, boundGrant), msg, ['kind', 'targetId', 'path'],
+      );
+      if (!entry) return { ok: false, error: 'editing/read-target: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'editing/read-target', 'read', () =>
+        entry.domainState.authority.readEditTarget({
+          kind: msg.kind, targetId: msg.targetId, path: msg.path,
+        }));
+    },
+    'editing/write-target': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = editingEntry(grantFor(msg, sender, boundGrant), msg, [
+        'kind', 'targetId', 'path', 'content',
+      ]);
+      if (!entry) return { ok: false, error: 'editing/write-target: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'editing/write-target', 'commit', () =>
+        entry.domainState.authority.writeEditTarget({
+          kind: msg.kind, targetId: msg.targetId, path: msg.path, content: msg.content,
+        }));
+    },
     'introspection/actor-roster': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/actor-roster: authority mismatch', outcomeKnown: true };
@@ -2070,6 +2109,14 @@ export const makeOffscreenActorClient = ({
       if (!entry) return { ok: false, error: 'dweb/set-discovery-enabled: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/set-discovery-enabled', 'commit', () =>
         entry.domainState.authority.setDiscoveryEnabled(msg.enabled));
+    },
+    'dweb/run-mesh-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
+      const entry = dwebEntry(
+        grantFor(msg, sender, boundGrant), msg, ['code', 'timeoutMs'],
+      );
+      if (!entry) return { ok: false, error: 'dweb/run-mesh-program: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'dweb/run-mesh-program', 'resource', () =>
+        entry.domainState.authority.runMeshProgram(msg.code, msg.timeoutMs));
     },
     'actor/tool-settle': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,

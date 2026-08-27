@@ -38,7 +38,7 @@ controller-only feature fixture proves a normal semantic addition contributes
 zero service-worker inputs and leaves normalized authority code byte-identical
 apart from generated controller identity literals.
 
-The current product-surface deletion checkpoint does all of the following:
+The retained product-surface and controller cut does all of the following:
 
 - deletes `page_eval`, `page_exec` and `page_keys`, including their controller
   definitions, exact authority routes, actor relays and debugger-only residue;
@@ -51,15 +51,19 @@ The current product-surface deletion checkpoint does all of the following:
 - keeps one producer-stamped provenance/fencing record, bounded pagination,
   opaque handles and fail-closed cross-session reads;
 - removes the old disposable web-cache object store during the normal schema
-  upgrade.
+  upgrade;
+- moves `sandbox_create`, `script`, `edit_file` and `a2a_run` into cohesive
+  controller semantic owners backed by exact execution, editing and mesh
+  authority operations;
+- deletes the frozen legacy allowlist, legacy implementations, generic
+  orchestrator/actor tool-dispatch routes and compatibility fallbacks.
 
-The public catalog contains 75 tools. Document/web/result and site-client
-semantics now run in the sealed controller through exact constrained-web,
-document-extraction, opaque-result, origin-owned store, confirmed mutation,
-pinned headless-run and document-capture operations. The temporary legacy set is the
-exact list in `extension/shared/legacy-tool-allowlist.js`:
-
-- `sandbox_create`, `script`, `edit_file`, `a2a_run`.
+The public catalog contains 75 tools, all with one controller semantic owner.
+Document/web/result, site-client, engine creation, headless execution,
+cross-kind editing and mesh-program semantics run in the sealed controller
+through exact constrained-web, document-extraction, opaque-result,
+origin-owned store, confirmed mutation, engine, editing and mesh operations.
+The legacy set is empty and its files no longer exist.
 
 The site-client subsystem is deliberately retained. It is Web-actor-only:
 
@@ -81,47 +85,36 @@ There is no substitute arbitrary byte target.
 ## Verification baseline
 
 The current Store-Chrome artifact packages and passes Store posture at
-1,258,793 bundled service-worker bytes, 415 staged inputs and a 347,603-byte
-release-minified cold graph. The preceding checkpoint was 1,258,927 bytes,
-419 inputs and the same cold-graph size. These values are observations, not
-goals.
+1,237,160 bundled service-worker bytes, 398 staged inputs and a 347,603-byte
+release-minified cold graph. The preceding retained checkpoint was 1,258,793
+bytes, 415 inputs and the same cold-graph size. These values are observations,
+not goals.
 
 Static typecheck, lint, checked-file coverage, dweb boundary, controller
 identity, ownership boundaries and focused security tests pass. The full Bun
-suite passes 7,411 of 7,413 tests. The two inherited failures are the
-session-support loss-accounting test and the typed-error minification harness
-that cannot import its temporary bundle. The in-browser suite passes 940 of
-942 and reproduces its two inherited UI-copy assertions. The functional E2E
-harness still refuses `settings/update` with the inherited
-`kernel-demand-routes-load-failed` startup result. Do not treat these debts as
-new regressions, and do not add new failures. The extension artifacts package;
-the separate web target reproduces its inherited stale activity-overlay browser
-touch ledger at the preceding checkpoint.
+suite has only the two inherited failures: the session-support loss-accounting
+test and the typed-error minification harness that cannot import its temporary
+bundle. The in-browser suite previously passed 940 of 942 and reproduced its
+two inherited UI-copy assertions. The functional E2E harness previously
+refused `settings/update` with the inherited
+`kernel-demand-routes-load-failed` startup result. Re-run these browser lanes
+at the final cut; do not treat the documented debts as new regressions, and do
+not add new failures. The separate web target previously reproduced its
+inherited stale activity-overlay browser-touch ledger.
 
 ## Remaining deletion sequence
 
-Continue with cohesive controller migrations. Every retained cut removes its
-legacy name/import in the same commit and keeps one execution path:
-
-1. Sandbox/headless semantics: `sandbox_create`, `script`. Authority retains
-   exact engine instance, job, cancellation, confirmation and settlement
-   operations.
-2. Cross-kind editing: `edit_file`. Authority retains exact repository and
-   engine file mutations, confirmation, audit and outcome custody.
-3. Mesh execution: `a2a_run`. Authority retains A2A grants, mesh identity,
-   confirmation, lifecycle and settlement.
-When the list reaches zero, physically delete
-`legacy-tool-allowlist.js`, `legacy-implementations.js`, `turn.tool.dispatch`,
-service-worker tool registration/execution and all strangler tests/docs. Do not
-leave a fallback.
-
-Then finish the residual semantic-root cut: relocate remaining composer and
-attachment shaping, Goal continuation, scheduler/memory orchestration and
-actor result shaping to their sealed owners. Delete
-`controller-turn-semantics.js`, `kernel-turn-live-factories.js` and any
-superseded aggregate/compatibility machinery once no authority caller needs
-them. Fixed session, vault, egress, browser/storage/engine, confirmation/audit,
-actor, alarm, replay and lifecycle custody stays in the service worker.
+The only remaining work is the residual semantic-root cut. Separate the
+authority lifecycle preparation/settlement shell from the semantic dispatcher,
+then remove the remaining `dispatchToolCall` uses in the authority driver,
+page-code relay and actor-code roster relay. Import fixed authority policy and
+adapters directly, relocate any remaining composer/attachment, Goal,
+scheduler/memory and actor-result semantics to their sealed owners, and delete
+`controller-turn-semantics.js`, `kernel-turn-live-factories.js` and superseded
+aggregate machinery when their last real caller disappears. Do not add a new
+dispatcher or duplicate path. Fixed session, vault, egress,
+browser/storage/engine, confirmation/audit, actor, alarm, replay and lifecycle
+custody stays in the service worker.
 
 ## Completion condition
 

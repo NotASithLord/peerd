@@ -568,13 +568,13 @@ describe('direct actor host', () => {
       clearTimeoutFn: (() => {}) as typeof clearTimeout,
       abort: (runId: string) => { aborted.push(runId); },
       run: async (_job: any, deps: any) => {
-        const relay = deps.sendToSW('actor/tool-dispatch', {});
+        const relay = deps.sendToSW('actor/tool-prepare', {});
         deps.onRelayDrain();
         return relay;
       },
     });
     host.bindRelayRoutes({
-      'actor/tool-dispatch': () => {
+      'actor/tool-prepare': () => {
         relayStarted();
         return new Promise(() => {});
       },
