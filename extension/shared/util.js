@@ -199,3 +199,34 @@ export const sha256Hex = async (text) => {
   for (let i = 0; i < view.length; i++) hex += view[i].toString(16).padStart(2, '0');
   return hex;
 };
+
+/**
+ * Promise sleep that respects an AbortSignal. Rejects with AbortError when the
+ * signal fires, so a user Stop during a wait unwinds immediately - the agent
+ * loop already treats AbortError as a clean stop.
+ *
+ * why it lives in shared/ rather than beside its first caller: three unrelated
+ * surfaces now need it (provider retry backoff, the adapters' rate-limit
+ * backoff, and per-origin action pacing), and `no-restricted-imports` forbids
+ * deep-importing peerd-provider/connect-timeout.js from outside that module.
+ * One implementation, importable from every context.
+ *
+ * @param {number} ms
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<void>}
+ */
+export const abortableSleep = (ms, signal) => new Promise((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(new DOMException('Aborted', 'AbortError'));
+    return;
+  }
+  const t = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+  const onAbort = () => {
+    clearTimeout(t);
+    reject(new DOMException('Aborted', 'AbortError'));
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+});

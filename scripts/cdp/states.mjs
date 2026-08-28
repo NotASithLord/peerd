@@ -2095,6 +2095,72 @@ export const STATES = [
     },
   },
 
+  // --- functional: a paced wait is visible, and Stop ends it -----------------
+  // #234 end to end through the real dispatcher: a seeded rule makes a browser
+  // action wait, the side panel explains why instead of looking hung, and Stop
+  // cancels the pending action rather than letting it fire late.
+  {
+    name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => (callIndex === 0
+      ? { sse: sseToolCall('open_tab', { url: 'https://paced.example/' }) }
+      : { sse: sseText('Nothing was opened.') }),
+    async run(ctx, rec) {
+      try {
+        await rpc(ctx.page, { type: 'paced/clear' });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        const seeded = await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://paced.example', status: 429, retryAfter: '4',
+        });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+        rec.check('a refusal with a stated wait becomes a rule',
+          Array.isArray(seeded?.origins) && seeded.origins.some((r) => r.origin === 'https://paced.example'),
+          JSON.stringify(seeded?.origins));
+
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Open the paced site.' });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+
+        const bar = await waitFor(() => evalIn(ctx.page, `(() => {
+          const row = document.querySelector('.pacing-bar');
+          if (!row) return null;
+          return {
+            text: row.textContent || '',
+            role: row.getAttribute('role'),
+            stop: !!Array.from(row.querySelectorAll('button')).find((b) => (b.textContent || '').trim() === 'Stop'),
+          };
+        })()`), { budgetMs: 20_000, pollMs: 100 });
+        rec.check('the wait is explained in the panel, not silent', !!bar, JSON.stringify(bar));
+        rec.check('it names the site that asked for the pause',
+          (bar?.text || '').includes('paced.example'), JSON.stringify(bar?.text));
+        rec.check('it is announced to assistive technology', bar?.role === 'status');
+        rec.check('the way out sits next to the explanation', bar?.stop === true);
+        await rec.shot('waiting');
+
+        const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+        rec.check('agent/stop accepted during a paced wait', !!stopped?.ok);
+        let out = {};
+        await waitFor(async () => { out = await probe(ctx); return !out.busy; }, { budgetMs: 20_000 });
+        rec.check('Stop returns the turn to idle instead of waiting the pause out', out.busy === false);
+
+        // The point of stopping during a wait: the action must never fire late.
+        // awaitPromise: an async IIFE otherwise serializes as the unresolved
+        // Promise, which is a truthy {} and would pass this check for free.
+        const opened = await evalIn(ctx.page, `(async () =>
+          (await chrome.tabs.query({}))
+            .map((t) => t.url || t.pendingUrl || '')
+            .filter((u) => u.includes('paced.example')))()`, true);
+        rec.check('the delayed action never fired after Stop',
+          Array.isArray(opened) && opened.length === 0, JSON.stringify(opened));
+        const gone = await waitFor(() => evalIn(ctx.page,
+          `!document.querySelector('.pacing-bar')`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('the wait notice clears when the turn ends', !!gone);
+        await rec.shot('final');
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        await rpc(ctx.page, { type: 'paced/clear' }).catch(() => {});
+      }
+    },
+  },
+
   // --- functional: a provider error surfaces + idles --------------------------
   {
     name: 'error', kind: 'functional', phase: 'post-unlock',
@@ -3504,6 +3570,58 @@ export const STATES = [
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-denylist', page);
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    // #234 Settings -> Paced sites. Seeded through the dev-mode observation
+    // seam, which feeds the same trusted status + Retry-After the egress choke
+    // point feeds, so the rendered rows are ones a real refusal would produce.
+    name: 'options-paced-sites', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let page;
+      try {
+        await rpc(ctx.page, { type: 'paced/clear' });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        // Two different shapes, so the row copy is exercised both ways: a site
+        // that stated a wait and was refused twice (a compounded interval), and
+        // one that only answered "unavailable" (peerd's own backoff).
+        await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://api.acme.test', status: 429, retryAfter: '1',
+        });
+        await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://api.acme.test', status: 429, retryAfter: '1',
+        });
+        // why the gap: the list is ordered by most recent refusal, and two seeds
+        // landing in the same millisecond fall back to the alphabetical tiebreak
+        // - so without it the two rows swap places between runs and the capture
+        // flaps.
+        await sleep(50);
+        await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://portal.globex.test', status: 503,
+        });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+        // why the page opens only after the stated pause has run out: a row
+        // renders "paused for another Ns" off the wall clock, and capturing one
+        // mid-countdown would make this state flap by a second on every run. The
+        // learned interval, which is what this capture is actually about, is
+        // stable. The countdown copy is covered by the in-browser test.
+        await sleep(6_000);
+
+        page = await openWidePage(ctx, 'options/options.html#!/paced-sites');
+        await waitFor(() => evalIn(page, `(() => {
+          const text = document.body.innerText;
+          return text.includes('api.acme.test')
+            && text.includes('portal.globex.test')
+            && text.includes('never tries to disguise itself')
+            && !text.includes('paused for another');
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        await rec.visualPage('options-paced-sites', page);
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        await rpc(ctx.page, { type: 'paced/clear' }).catch(() => {});
+        try { page?.close(); } catch { /* */ }
+      }
     },
   },
   {

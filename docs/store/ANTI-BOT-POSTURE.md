@@ -16,14 +16,27 @@ identity tricks.
 
 ## Adaptive pacing
 
-Issue #234 records the chosen design for per-origin action pacing. The unwired
-reducer and its tests do not affect a shipped package. No shipped package
-currently learns or enforces pacing rules.
+Per-origin action pacing is enforced. Issue #234 is the design record.
 
-The usable feature still needs trusted signal detection, service-worker
-persistence, one serialized lane per origin, complete write-path coverage,
-Stop and liveness checks, terminal handoff behavior, user settings, and browser
-tests.
+When a site answers an error status that states a wait, or refuses a request as
+too frequent, peerd records the pause against that exact canonical origin and
+honors it before acting there again. The recorded deadline is absolute, so it
+survives a browser restart. peerd also learns a slower steady cadence for browser
+write actions on that site. A wait longer than peerd will hold inside a turn ends
+the turn instead, with a fixed message naming the site.
+
+The rule is control-plane state. Only the egress choke point, holding a real HTTP
+response, can create or raise one. Page text, tool results, and model
+instructions cannot create, raise, lower, or clear one. A rule fades on its own
+after the site stops refusing, and a person can forget one from Settings ->
+Paced sites.
+
+What peerd can honestly learn from is narrower than it may sound, and the limit
+is a browser one: only requests peerd itself makes through its own network path
+expose a status code and a Retry-After header. A page navigation does not, so a
+challenge page that peerd only navigates to is not a pacing signal on any
+package. Requests a page makes for itself, including anything an action causes,
+are the page's own and are never metered.
 
 Other open product work includes visible challenge detection and user handoff,
 assist-only behavior on guarded sites, preference for official APIs, and clear

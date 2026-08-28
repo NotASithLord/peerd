@@ -22,6 +22,11 @@ import {
 import { listHooks } from './hooks/registry.js';
 import { runPreToolUse, runPostToolUse } from './hooks/runner.js';
 import { ugcWriteConfirm } from '../actor/ugc-registry.js';
+import { normalizeApiOrigin } from '../actor/web-actor.js';
+import {
+  PACED_CEILING_CODE, PACED_STATE_UNAVAILABLE_CODE,
+  pacedCeilingMessage, PACED_STATE_UNAVAILABLE_MESSAGE,
+} from '../pacing/pacing-messages.js';
 import { describeToolActivity, displayOrigin } from '../actor/activity-label.js';
 import {
   decideAction,
@@ -304,6 +309,16 @@ const liveTabUrl = async (ctx) => {
  *   consumeBrowserChildPolicyNotice?: (tabId: number) => Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
  *   waitForBrowserChildPolicyNotice?: (tabId: number, timeoutMs: number) => Promise<boolean>,
  *   hasPendingBrowserChildPolicy?: (tabId: number) => boolean,
+ *   pacing?: {
+ *     peek: (origin: string | null, opts: { isWrite: boolean }) =>
+ *       Promise<{ outcome: string, waitedMs: number, reason?: string, untilMs?: number }>
+ *       | { outcome: string, waitedMs: number, reason?: string, untilMs?: number },
+ *     engaged?: () => boolean,
+ *     reserve: (origin: string, opts: { isWrite: boolean, signal?: AbortSignal,
+ *       onWait?: (info: { origin: string, untilMs: number, waitMs: number, reason: string }) => void }) =>
+ *       Promise<{ outcome: string, waitedMs: number, reason?: string, untilMs?: number }>,
+ *   } | null,
+ *   onPacingWait?: (info: { origin: string, untilMs: number, waitMs: number, reason: string }) => void,
  * }} DispatchContext
  */
 
@@ -375,6 +390,169 @@ export const dispatchToolCall = async (call, ctx) => {
       }),
     };
   };
+  // ---- Adaptive per-origin pacing (#234) ---------------------------------
+  // A browser WRITE action is what pacing meters here: the network half is
+  // metered at the egress choke point instead (peerd-egress/fetch/web-fetch.js),
+  // because that is where a real Response - and therefore a status a page cannot
+  // forge - actually exists.
+  //
+  // The predicate is the same one browser child-policy notices already use, so
+  // a new tab-primitive write tool is covered the day it is registered rather
+  // than the day someone remembers to add it to a list.
+  const pacedBrowserAction = (tool.primitive === 'tab' || call.name === 'page_code')
+    && tool.sideEffect !== 'read'
+    // page_keys reaches the dispatcher and then refuses unconditionally (there
+    // is no honest trusted-input fallback), so metering it would spend a lane
+    // slot and a wait on an action that never happens.
+    && call.name !== 'page_keys';
+  // page_code's inner page.* calls relay back through this dispatcher and are
+  // each metered on their own. Charging the outer run as well would double-count
+  // one action, so the code surface takes the ceiling check without the wait.
+  const pacedWaitEligible = pacedBrowserAction && call.name !== 'page_code';
+
+  /**
+   * The origin a pacing decision keys on: the one this action is about to TOUCH.
+   *
+   * For an in-page action (click, type, page_exec, login) that is the live tab
+   * origin - deliberately re-read live rather than taken from ctx.activeTab,
+   * because the pinned record can be stale and a page that replaced its document
+   * would otherwise spend a different site's budget.
+   *
+   * For a NAVIGATION (open_tab, navigate) it is the DESTINATION. The tool
+   * declares it in origins(), and metering the page peerd is leaving would be
+   * metering the wrong site - it is also the only origin `open_tab` has, since
+   * the orchestrator holds that tool with no tab of its own.
+   *
+   * normalizeApiOrigin returning null means "no origin peerd can name and later
+   * compare against"; that is unpaceable, never folded into a looser key.
+   * @returns {Promise<string | null>}
+   */
+  const pacedOrigin = async () => {
+    if (!pacedBrowserAction || !ctx.pacing) return null;
+    // Resolving the live origin costs a tabs round-trip. On a profile no site
+    // has ever rate-limited there is nothing for it to decide, so skip it.
+    if (ctx.pacing.engaged && !ctx.pacing.engaged()) return null;
+    const live = normalizeApiOrigin(await liveTabUrl(ctx));
+    const declared = safeOrigins(tool, args, ctx)
+      .map((value) => normalizeApiOrigin(value))
+      .filter((value) => value && value !== live);
+    return declared[0] ?? live;
+  };
+
+  /**
+   * @param {string} origin @param {string} code @param {string} content @param {string} reason
+   * @returns {ToolResult}
+   */
+  const pacingRefusal = (origin, code, content, reason) => {
+    gateResults.push({ name: 'pacing', allowed: false, reason });
+    ctx.audit({
+      type: 'tool_blocked',
+      details: { tool: call.name, gate: 'pacing', reason, origin },
+    }).catch(() => {});
+    return {
+      ok: false,
+      error: code,
+      content,
+      // why endTurn: the ceiling is a STATE, not a soft error. Letting the model
+      // keep the turn would invite it to retry the same origin, or to delegate
+      // to a fresh actor and hit the identical refusal - burning the user's
+      // tokens to re-learn a fact peerd already recorded.
+      endTurn: true,
+      meta: /** @type {DispatchMeta} */ ({
+        toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        gates: gateResults, hooks: hookOutcomes, durationMs: 0,
+      }),
+    };
+  };
+
+  /**
+   * The ceiling check. Runs BEFORE the gates and before the async confirmation
+   * round-trip, so an action that cannot run never burns a human approval first.
+   * Read-only: it never sleeps and never stamps.
+   * @returns {Promise<ToolResult | null>}
+   */
+  const refusePacedCeiling = async () => {
+    if (!pacedBrowserAction || !ctx.pacing?.peek) return null;
+    const origin = await pacedOrigin();
+    const clearance = await ctx.pacing.peek(origin, { isWrite: true });
+    if (clearance.outcome === 'handoff') {
+      return pacingRefusal(
+        origin ?? '', PACED_CEILING_CODE, pacedCeilingMessage(origin ?? 'this site'),
+        clearance.reason ?? 'ceiling',
+      );
+    }
+    if (clearance.outcome === 'unavailable') {
+      return pacingRefusal(
+        origin ?? '', PACED_STATE_UNAVAILABLE_CODE, PACED_STATE_UNAVAILABLE_MESSAGE, 'state_unavailable',
+      );
+    }
+    return null;
+  };
+
+  /**
+   * The wait. Runs after every gate, the confirmation and the pre-tool-use
+   * hooks - so `args` are final - and BEFORE lifecycle tracking begins.
+   *
+   * why before beginTracking and not immediately before execute(): tracking
+   * writes a durable "dispatched" record so an eviction mid-effect reconciles as
+   * interrupted rather than silent. Sleeping after that would report a tool that
+   * never ran as an unknown outcome, and arm the repeat-after-unknown confirm on
+   * the next attempt. Sleeping before it leaves nothing to reconcile.
+   *
+   * The dispatcher's own landing re-check still runs after this, immediately
+   * before execute(), which is what covers a redirect that lands during the
+   * wait.
+   * @returns {Promise<ToolResult | null>}
+   */
+  const awaitPacingClearance = async () => {
+    if (!pacedWaitEligible || !ctx.pacing?.reserve) return null;
+    const origin = await pacedOrigin();
+    if (!origin) return null;
+    let clearance;
+    try {
+      clearance = await ctx.pacing.reserve(origin, {
+        isWrite: true,
+        signal: ctx.abortSignal,
+        onWait: ctx.onPacingWait,
+      });
+    } catch (e) {
+      // abortableSleep rejects with AbortError on Stop. Anything else here is
+      // the store failing, which for a write is the fail-closed case.
+      if (/** @type {{ name?: string }} */ (e)?.name === 'AbortError') {
+        return abortedResult('during_pacing_wait');
+      }
+      return pacingRefusal(
+        origin, PACED_STATE_UNAVAILABLE_CODE, PACED_STATE_UNAVAILABLE_MESSAGE, 'reserve_failed',
+      );
+    }
+    if (clearance.outcome === 'handoff') {
+      return pacingRefusal(origin, PACED_CEILING_CODE, pacedCeilingMessage(origin), clearance.reason ?? 'ceiling');
+    }
+    if (clearance.outcome === 'unavailable') {
+      return pacingRefusal(
+        origin, PACED_STATE_UNAVAILABLE_CODE, PACED_STATE_UNAVAILABLE_MESSAGE, 'state_unavailable',
+      );
+    }
+    if (clearance.waitedMs > 0) {
+      // Stop can land during the sleep; abortableSleep rejects on it, but a
+      // signal that fired between the timer and this line would otherwise slip
+      // through into an action the user already cancelled.
+      if (ctx.abortSignal?.aborted) return abortedResult('after_pacing_wait');
+      // The tab can navigate while peerd waits. A reservation is spent on ONE
+      // origin, and acting on a different one would apply this site's budget to
+      // a site that never granted it.
+      if (await pacedOrigin() !== origin) {
+        return pacingRefusal(origin, PACED_CEILING_CODE, pacedCeilingMessage(origin), 'origin_changed_during_wait');
+      }
+      gateResults.push({ name: 'pacing', allowed: true, reason: `waited ${Math.round(clearance.waitedMs)}ms` });
+      ctx.audit({
+        type: 'origin_paced',
+        details: { origin, durationMs: Math.round(clearance.waitedMs), reason: clearance.reason ?? 'interval' },
+      }).catch(() => {});
+    }
+    return null;
+  };
+
   /** @returns {Promise<ToolResult | null>} */
   const refuseInvalidLanding = async () => {
     if (!ctx.revalidateActorLanding) return null;
@@ -421,6 +599,8 @@ export const dispatchToolCall = async (call, ctx) => {
   // whole actor surface. Persistence failures end the turn fail-closed.
   const initialLandingRefusal = await refuseInvalidLanding();
   if (initialLandingRefusal) return initialLandingRefusal;
+  const ceilingRefusal = await refusePacedCeiling();
+  if (ceilingRefusal) return ceilingRefusal;
   for (const { name, fn } of GATES) {
     let result;
     try {
@@ -660,6 +840,9 @@ export const dispatchToolCall = async (call, ctx) => {
   // Adopt any args the pre-hooks rewrote. execute() + the audit see these.
   args = pre.args;
   if (ctx.abortSignal?.aborted) return abortedResult('after_pre_tool_hook');
+
+  const pacingRefusalResult = await awaitPacingClearance();
+  if (pacingRefusalResult) return pacingRefusalResult;
 
   // ---- Lifecycle tracking (the recovery contract) ------------------------
   // why HERE: every gate/confirm/hook has passed, so what follows is a real

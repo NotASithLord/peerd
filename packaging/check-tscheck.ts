@@ -174,8 +174,11 @@ import { computeCoverage } from './tscheck-coverage.ts';
 // 776 → 785: exact background/offscreen public surfaces plus the tested UI-port,
 // state-push, provider sub-call, session-cost, and origin-lock orchestration
 // extractions.
+// 799 -> 808: per-origin action pacing - the policy core, its fixed refusal
+// prose, the control-plane store, the settings routes and view, the wait bar,
+// and their tests.
 // The value below is a fresh scan of the merged tree, not an arithmetic guess.
-const COVERED_FLOOR = 799;
+const COVERED_FLOOR = 808;
 
 // The scan (walk + // @ts-check detection + the ES5-injected exemption set)
 // lives in tscheck-coverage.ts so the badge generator reports the same number.
