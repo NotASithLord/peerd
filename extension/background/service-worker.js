@@ -466,7 +466,7 @@ import { makeLocalModelState } from './local-model-state.js';
 import { makeProfileState } from './profile-state.js';
 import { makeOnboardingReconcile } from './onboarding-reconcile.js';
 import { makeModelCatalog } from './model-catalog.js';
-import { resolveComposerReadiness } from './provider-readiness.js';
+import { pickUsableProvider, resolveComposerReadiness, resolveDisplayProvider } from './provider-readiness.js';
 import { makeTabAffordances } from './tab-affordances.js';
 import { makeMintOnce } from './mint-once.js';
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
@@ -789,15 +789,22 @@ const ensureSettingsReady = () => {
  * descriptor { name, label, model, vaultSecretName } — enough for
  * session creation, the key-presence check, and the settings UI.
  */
-const resolveActiveProvider = () => {
-  const list = listProviders().filter((provider) =>
-    provider.name !== 'local-webgpu' || offscreenAvailable);
+const selectableProviders = () => listProviders().filter((provider) =>
+  provider.name !== 'local-webgpu' || offscreenAvailable);
+
+const resolveActiveProvider = (overrideName = '') => {
+  const list = selectableProviders();
   const fallback = list.find((p) => p.name === 'anthropic') ?? list[0];
-  const chosen = list.find((p) => p.name === settingsStore.get().providerName) ?? fallback;
+  const requested = overrideName || settingsStore.get().providerName;
+  const chosen = list.find((p) => p.name === requested) ?? fallback;
   return {
     name: chosen.name,
     label: chosen.label,
-    model: settingsStore.get().providerModel || chosen.defaultModel,
+    // why: an override means the stored providerName was empty or unregistered,
+    // so any stored providerModel belongs to a different adapter. Fall through
+    // to the picked provider's own default, exactly as ensureActiveProvider
+    // does when it persists a pick with providerModel: ''.
+    model: (overrideName ? '' : settingsStore.get().providerModel) || chosen.defaultModel,
     // why: the web actor's fast default for this provider (Haiku on
     // Anthropic). Surfaced so the settings UI can show it as the "blank =
     // this" placeholder and mintWebSession can resolve the web actor model.
@@ -821,36 +828,48 @@ const resolveActiveProvider = () => {
  */
 const ensureActiveProvider = async () => {
   await ensureSettingsReady();
-  const list = listProviders().filter((provider) =>
-    provider.name !== 'local-webgpu' || offscreenAvailable);
+  const list = selectableProviders();
   const name = settingsStore.get().providerName;
   if (name && list.some((p) => p.name === name)) return resolveActiveProvider();
-  for (const p of list) {
-    let usable = false;
-    if (p.keyless) {
-      // Keyless usability is REAL readiness, not mere presence: a live daemon
-      // (Ollama) must answer; the on-device model must be downloaded.
-      if (p.liveModels) {
-        const live = await liveProviderModels(p.name);
-        usable = Array.isArray(live) && live.length > 0;
-      }
-      else if (p.name === 'local-webgpu') usable = localModelState.available();
-      else usable = true;
-    } else {
-      try { usable = !!(await vault.getSecret(/** @type {string} */ (p.vaultSecretName))); }
-      catch { usable = false; }
-    }
-    if (usable) {
-      // Clear providerModel so the picked provider's own default model applies.
-      try { await settingsStore.update({ providerName: p.name, providerModel: '' }); }
-      catch { /* a settings write failure must not block chat creation */ }
-      return resolveActiveProvider();
-    }
+  const picked = await pickUsableProvider({
+    providers: list,
+    getSecret: (secret) => vault.getSecret(secret),
+    localModelAvailable: localModelState.available(),
+    // The binder can afford the live probe the render path must not repeat.
+    liveModelCount: async (provider) => {
+      const live = await liveProviderModels(provider);
+      return Array.isArray(live) ? live.length : null;
+    },
+  });
+  if (picked) {
+    // Clear providerModel so the picked provider's own default model applies.
+    try { await settingsStore.update({ providerName: picked, providerModel: '' }); }
+    catch { /* a settings write failure must not block chat creation */ }
   }
-  // Nothing usable — keep the existing fallback so the turn fails with a clear
-  // provider error (the UI gates sending before reaching here on a fresh chat).
-  return resolveActiveProvider();
+  // With no usable provider this keeps the existing fallback, so the turn fails
+  // with a clear provider error (the UI gates sending before reaching here on a
+  // fresh chat). Passing the pick through rather than re-reading settings also
+  // means a failed persist still binds the chat to the provider that works.
+  return resolveActiveProvider(picked ?? '');
 };
+
+/** Readiness-aware sibling of resolveActiveProvider for render paths (#384). */
+const resolveActiveProviderForDisplay = async () => resolveActiveProvider(
+  await resolveDisplayProvider({
+    providers: selectableProviders(),
+    chosenName: settingsStore.get().providerName,
+    getSecret: (secret) => vault.getSecret(secret),
+    localAvailable: () => localModelState.available(),
+    hydrateLocal: hydrateLocalModelAvailability,
+    // The projection reads the warm cache the binder's forced probe fills, and
+    // only pays for a probe when nothing has asked yet.
+    liveModelCount: async (provider) => {
+      const cached = liveProviderModelStatus(provider);
+      if (cached.known) return cached.count;
+      const live = await liveProviderModels(provider).catch(() => null);
+      return Array.isArray(live) ? live.length : null;
+    },
+  }));
 
 /**
  * Build the ordered failover candidate chain for a turn: the active
@@ -4471,7 +4490,7 @@ const buildStateSnapshot = async () => {
   // providers remains the Settings/default-for-NEW-chats projection. Composer
   // readiness is separate because an existing chat stays bound to the provider
   // recorded on its session even after the user changes that future default.
-  const activeProv = resolveActiveProvider();
+  const activeProv = await resolveActiveProviderForDisplay();
   const composerProvider = session?.provider ?? activeProv.name;
   const composerModel = session?.model ?? activeProv.model;
   if (activeProv.name === 'local-webgpu' || composerProvider === 'local-webgpu') {

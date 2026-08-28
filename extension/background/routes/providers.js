@@ -24,13 +24,26 @@ export const makeProviderRoutes = (deps) => {
     try { await ensureSettingsReady(); return true; }
     catch { return false; }
   };
+  // Shared by both activation paths below: a provider may adopt the active slot
+  // only when whatever holds it cannot actually serve a turn. An explicit,
+  // working selection is never overridden. An empty providerName - the shipped
+  // default - resolves to no descriptor, so a fresh install always adopts.
+  const activeProviderUsable = async () => {
+    const active = listProviders().find(
+      (/** @type {any} */ p) => p.name === settingsStore.get().providerName);
+    if (!active) return false;
+    if (active.keyless) return true;
+    if (!active.vaultSecretName) return false;
+    try { return !!(await vault.getSecret(active.vaultSecretName)); }
+    catch { return false; }
+  };
 
   return {
     // Validate a saved provider key with a minimal 1-token ping on the REAL
     // endpoint, so an onboarding tester learns the key works BEFORE sending a real
     // message (instead of hitting a 401 on the first turn). The adapter's
     // connect-timeout applies, so the test itself can't hang.
-    'provider/test': async ({ provider }) => {
+    'provider/test': async ({ provider, activate }) => {
       if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       const adapter = listProviders().find((/** @type {any} */ p) => p.name === provider);
       // Keyless local provider (Ollama): "does the daemon answer" is the
@@ -40,10 +53,23 @@ export const makeProviderRoutes = (deps) => {
         try {
           // ollamaHost (issue #104): test the daemon the user actually configured.
           const models = await liveProviderModels(provider, { force: true });
-          pushState();
-          if (!Array.isArray(models)) return { ok: false, error: 'unreachable' };
+          if (!Array.isArray(models)) { pushState(); return { ok: false, error: 'unreachable' }; }
           auditLog.append({ type: 'provider_validated', details: { provider } }).catch(() => {});
           const count = models?.length ?? 0;
+          // Adopt the daemon you just proved works, on the same terms the keyed
+          // path uses below - only when the current selection isn't usable, so
+          // an explicit pick is never overridden. why (issue #384): a keyless
+          // provider had no activation path at all, so a validated Ollama left
+          // providerName at its empty default and the composer stayed gated on
+          // an unkeyed Anthropic.
+          // activate:false is onboarding's opt-out, the same one setKey takes.
+          // That step probes every reachable daemon on mount, and its contract
+          // is that nothing becomes active until the user picks - so a survey
+          // ping must not decide for them.
+          if (activate !== false && count > 0 && !(await activeProviderUsable())) {
+            await settingsStore.update({ providerName: provider, providerModel: '' });
+          }
+          pushState();
           return count > 0
             ? { ok: true, reachable: true, models: count }
             : { ok: false, reachable: true, error: 'no-models', models: 0 };
@@ -179,18 +205,12 @@ export const makeProviderRoutes = (deps) => {
         // already-usable selection (an explicit keyless pick, or a provider that
         // already has a key). Clear providerModel so the new provider's default
         // model applies (mirrors the Settings provider <select>).
-        const activeName = settingsStore.get().providerName;
         // Onboarding verifies a candidate after vaulting it but before making
         // it active. Its explicit activate:false prevents this convenience
         // auto-switch from defeating that verify-before-switch contract.
-        if (activate !== false && provider !== activeName) {
-          const active = listProviders().find((/** @type {any} */ p) => p.name === activeName);
-          let activeUsable = !!active?.keyless;
-          if (!activeUsable && active?.vaultSecretName) {
-            try { activeUsable = !!(await vault.getSecret(active.vaultSecretName)); }
-            catch { activeUsable = false; }
-          }
-          if (!activeUsable) await settingsStore.update({ providerName: provider, providerModel: '' });
+        if (activate !== false && provider !== settingsStore.get().providerName
+          && !(await activeProviderUsable())) {
+          await settingsStore.update({ providerName: provider, providerModel: '' });
         }
         // Push fresh state so UI flips its "no key" affordance.
         pushState();
