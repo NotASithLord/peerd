@@ -678,7 +678,7 @@ export const createVault = (deps) => {
     await _enqueueMirror(async (cache) => {
       // why re-check here and not only above: this runs after the export
       // AND after everything already queued. A lock that landed anywhere
-      // in between wins — it has already issued its delete.
+      // in between wins: it has already issued its delete.
       if (lockEpoch !== epoch || isLocked()) return;
       await cache.sessionSet(SESSION_DK_KEY, makeMirrorRecord({
         dk: dkBase64, unlockedAt: at, autoLockMs: policy,

@@ -9,7 +9,7 @@
 // carry the thesis; the tail catches conclusions/footers (and proves to the
 // model that content was elided in between).
 //
-// Pure functions, no IO — producers and read_result own the store boundary.
+// Pure functions, no IO: producers and read_result own the store boundary.
 
 // 75/25 head/tail split of the window budget.
 const HEAD_FRACTION = 0.75;
@@ -104,7 +104,7 @@ export const pagingFooter = ({ key, total, headChars, tailChars, retainedPrefix 
   retainedPrefix
     ? `[paging] The retained text prefix (${total} chars; extraction cap reached) is stored locally. You saw the first ${headChars} and last ${tailChars} retained chars.`
     : `[paging] The full text (${total} chars) is stored locally. You saw the first ${headChars} and last ${tailChars} chars.`,
-  `To read more call read_result with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> } — e.g. offset ${headChars} continues where the head stopped.`,
+  `To read more call read_result with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> }: e.g. offset ${headChars} continues where the head stopped.`,
 ].join('\n');
 
 /**
@@ -320,6 +320,6 @@ export const excerptFooter = ({
 }) => [
   retainedPrefix
     ? `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from the retained text prefix (${total} chars; extraction cap reached) stored locally. This is not a contiguous slice.`
-    : `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from ${total} chars stored locally — NOT a contiguous slice.`,
+   : `[paging] Showed the ${passagesShown} passage(s) most relevant to "${query}" (of ${passagesTotal}) from ${total} chars stored locally: NOT a contiguous slice.`,
   `To read the surrounding text or other sections call read_result with { "key": "${key}", "offset": <char offset>, "limit": <chars, max ${SPILL_PAGE_CHARS}> }.`,
 ].join('\n');

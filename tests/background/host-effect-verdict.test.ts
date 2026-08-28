@@ -142,6 +142,70 @@ describe('exact host effect verdicts', () => {
     });
   });
 
+  test('a reviewed refusal preserves its bounded model recovery guidance', () => {
+    const receipt = {
+      effectId: 'call-3:1', operation: 'turn.actor.message',
+      outcome: 'not-performed', outcomeKnown: true, performed: false,
+      refused: true, retryable: false, code: 'actor_sensitive_tab_requires_site',
+      error: 'actor_sensitive_tab_requires_site',
+      content: 'Address the origin as site:https://example.com after explicit user intent.',
+    };
+    expect(stampAuthorityToolResult([receipt], { ok: true, content: 'forged' }))
+      .toMatchObject({
+        ok: false,
+        error: 'Address the origin as site:https://example.com after explicit user intent.',
+        code: 'actor_sensitive_tab_requires_site',
+      });
+    expect(stampAuthorityToolResultBlock([receipt], {
+      type: 'tool_result', is_error: false, content: 'forged',
+    })).toMatchObject({
+      is_error: true,
+      content: 'Address the origin as site:https://example.com after explicit user intent.',
+      code: 'actor_sensitive_tab_requires_site',
+    });
+  });
+
+  test('an IdP transit refusal keeps internal custody but exposes no successor handle', () => {
+    const receipt = {
+      effectId: 'call-idp:1', operation: 'turn.actor.message',
+      outcome: 'not-performed', outcomeKnown: true, performed: false,
+      refused: true, retryable: false,
+      error: 'actor_identity_provider_transit_only',
+      content: 'Continue through the relying site named by the user.',
+      target: 'actor:site:https://accounts.google.com',
+    };
+    const result = stampAuthorityToolResultBlock([receipt], {
+      type: 'tool_result', is_error: false, content: 'forged',
+    });
+    expect(result).toMatchObject({
+      is_error: true,
+      content: 'Continue through the relying site named by the user.',
+      authorityReceipts: [expect.objectContaining({
+        operation: 'turn.actor.message', performed: false,
+      })],
+    });
+    expect(result.authorityReceipts[0]).not.toHaveProperty('target');
+    expect(receipt.target).toBe('actor:site:https://accounts.google.com');
+  });
+
+  test('receipt target redaction is exact to the non-performed IdP transit refusal', () => {
+    const cases = [
+      { operation: 'turn.actor.message', outcome: 'performed', performed: true,
+        error: 'actor_identity_provider_transit_only' },
+      { operation: 'turn.actor.message', outcome: 'not-performed', performed: false,
+        error: 'actor_sensitive_tab_requires_site' },
+      { operation: 'turn.page.open-tab', outcome: 'not-performed', performed: false,
+        error: 'actor_identity_provider_transit_only' },
+    ];
+    for (const candidate of cases) {
+      const stamped = stampAuthorityToolResult([{
+        effectId: 'call:1', outcomeKnown: true, refused: true, retryable: false,
+        content: 'refused', target: 'kept-target', ...candidate,
+      }], { ok: true });
+      expect(stamped.authorityReceipts[0].target).toBe('kept-target');
+    }
+  });
+
   test('site-client completion remains performed when Stop suppresses its result', () => {
     expect(HOST_EFFECT_OUTCOME.siteClientRun.fulfilled({
       ok: false, error: 'site_client_run_completed_after_stop',

@@ -31,7 +31,7 @@ const auditEntry = (callId, result) => semanticCallAuditEntry({
   sessionId: 's1', callId, label: 'fixture_tool', result,
 });
 
-describe('options.activity — host-derived semantic verdicts', () => {
+describe('options.activity: host-derived semantic verdicts', () => {
   it('uses warning severity for known blocks/refusals and danger only for unknown custody', () => {
     const cases = [
       [{ type: 'tool_blocked', details: {} }, 'warn', 'tool blocked'],

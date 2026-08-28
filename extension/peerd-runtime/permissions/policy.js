@@ -89,7 +89,7 @@ export const ACTION_CLASSES = Object.freeze({
   // web session.
   WORKSPACE_WRITE: /** @type {const} */ ('workspace_write'),
   // Code execution: booting a VM or evaluating code in a sealed engine.
-  // Higher stakes than a file write — can
+  // Higher stakes than a file write: can
   // do anything within its runtime.
   SHELL: /** @type {const} */ ('shell'),
   // Acts on the user's LIVE web session or the outside world: DOM

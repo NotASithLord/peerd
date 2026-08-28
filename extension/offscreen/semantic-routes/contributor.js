@@ -177,8 +177,7 @@ export const dispatchContributorSemanticRoute = async (route, _message, options)
     };
     return { ok: true, status };
   }
-  const readOperation = route === 'contributor/status' ? 'semantic.contributor.read'
-    : `semantic.contributor.${route.slice('contributor/'.length)}-read`;
+  const readOperation = 'semantic.contributor.disable-read';
   /** @type {any} */ let expected = null;
   /** @type {any} */ let failure = null;
   const unwrap = (/** @type {any} */ result) => {

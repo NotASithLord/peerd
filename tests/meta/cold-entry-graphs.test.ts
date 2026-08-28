@@ -193,6 +193,8 @@ describe('cold entry graphs', () => {
       .toBeLessThanOrEqual(PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT.directImports);
     expect(measured.modulesSet.has('background/kernel-firefox-contributor-addon.js'))
       .toBe(true);
+    expect(measured.modulesSet.has('background/vault-kernel-firefox.js')).toBe(true);
+    expect(measured.modulesSet.has('background/kernel-firefox-runtime-modules.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/observability/contributor-metrics.js'))
       .toBe(false);
   });

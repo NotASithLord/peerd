@@ -169,7 +169,8 @@ export const createKernelProfileAuthority = ({ idb, sessions, now = Date.now }) 
 export const buildVaultKernelState = ({
   kernel, status, locked, unlockedAt, lockReason, autoLockMs,
   settings, session, providers, composer, profile = null,
-  generation = 1, actorHost = 'offscreen-document-worker',
+  generation = 1, actorHost = 'offscreen-document-worker', runtimeCapabilities = {},
+  actorProjection = null,
 }) => {
   if (!locked && !profile) throw new TypeError('kernel-profile-required');
   const state = {
@@ -186,8 +187,14 @@ export const buildVaultKernelState = ({
     session,
     providers,
     composer,
+    actors: actorProjection?.actors ?? {},
+    actorProjectionEpoch: actorProjection?.actorProjectionEpoch ?? null,
+    actorProjectionRevision: actorProjection?.actorProjectionRevision ?? 0,
+    spawned: actorProjection?.spawned ?? { byToolUse: {}, sessions: {} },
+    asyncTasks: actorProjection?.asyncTasks ?? {},
     ...(!locked ? { profile } : {}),
     capabilities: {
+      ...runtimeCapabilities,
       actorExecution: {
         status: 'temporarily_unavailable', host: actorHost,
         reason: 'controller-not-ready', retryable: true,

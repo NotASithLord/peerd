@@ -458,7 +458,8 @@ posture in which the rule means anything. Reads are exempt (reading is the point
 sending an actor there) and so is navigation (leaving is how it finishes). The zone is
 classified from the tab's live URL rather than a turn-start pin, because an in-page
 hop moves the page with no tool call to observe.
-Code: `peerd-runtime/actor/ugc-registry.js`, enforced in `tools/dispatcher.js`.
+Code: `peerd-runtime/actor/ugc-registry.js`, enforced in
+`background/page-tool-authority.js`.
 Red-team: scenario 09.
 
 <a id="inv-14"></a>

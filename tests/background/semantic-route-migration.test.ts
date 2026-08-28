@@ -105,8 +105,8 @@ describe('semantic control and host parity', () => {
     expect(starts).toBe(0);
   });
 
-  test('kernel projection strips actor transcripts before the keyless host', async () => {
-    let payload: any;
+  test('kernel projection strips actor transcripts without starting the keyless host', async () => {
+    let semanticCalls = 0;
     const { control } = harness({
       actorLiveProjection: {
         rootSessionIds: () => ['root'], activeActorCount: () => 1,
@@ -116,11 +116,12 @@ describe('semantic control and host parity', () => {
           spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
         }),
       },
-      callSemantic: async (value: any) => { payload = value; return { ok: true }; },
+      callSemantic: async () => { semanticCalls += 1; return { ok: true }; },
     });
-    await control.routes['actors/overview']({ type: 'actors/overview' }, HOME);
-    expect(JSON.stringify(payload)).not.toContain('private transcript');
-    expect(JSON.stringify(payload)).not.toContain('private input');
+    const result = await control.routes['actors/overview']({ type: 'actors/overview' }, HOME);
+    expect(JSON.stringify(result)).not.toContain('private transcript');
+    expect(JSON.stringify(result)).not.toContain('private input');
+    expect(semanticCalls).toBe(0);
   });
 
   test('contact writes run sealed while reads and storage effects remain kernel-bound', async () => {

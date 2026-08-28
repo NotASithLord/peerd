@@ -25,7 +25,7 @@ describe('page program sealed semantic translation', () => {
       .toThrow(/unknown page method/);
     expect(() => pageCallToToolCall({
       method: 'click',
-      args: { route: 'page-program/navigate', tool: 'navigate' },
+      args: { route: 'forged/authority-route', tool: 'navigate' },
     })).toThrow(/target must be/);
     expect(pageCallToToolCall({
       method: 'fetch', args: { url: 'https://example.com' },

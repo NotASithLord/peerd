@@ -18,11 +18,15 @@
 // screenshot to look at and a structured pass/fail with the "why".
 
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
+import {
+  GIT_FIXTURE_HOST, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_TLS_KEY,
+} from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
-  NETWORK_GUARD_CONTROLLER_PORT,
+  NETWORK_GUARD_CONTROLLER_PORT, SITE_CLIENT_FIXTURE_TLS_PORT,
 } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
@@ -127,7 +131,8 @@ let actorCodeDelegatesState = {
 // heap-split phase 4: an offscreen actor DELEGATING to its own web actor.
 let actorDelegatesState = { spawned: 0, childCalls: 0, webCalls: 0 };
 let actorFabricHierarchyState = {
-  spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
+  phase: 'hierarchy', fixtureUrl: '', targetOpened: false,
+  spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0, nestedResults: [],
 };
 let actorOverviewState = {
   alphaSpawned: 0, betaSpawned: 0,
@@ -237,6 +242,11 @@ let siteNumericTarget = null;
 let siteNumericAddressed = false;
 let siteNumericRefusalBody = '';
 let siteNumericActorCalls = 0;
+let siteClientVerticalOrigin = '';
+let siteClientVerticalUrl = '';
+let siteClientVertical = {
+  mainStage: 0, actorCalls: 0, mainRefusalBody: '', actorBodies: [], replyBody: '',
+};
 let lockActorTurn = 0;
 let lockDelegated = false;
 let lockReportBody = '';
@@ -403,7 +413,11 @@ export const STATES = [
               }),
             })),
           );
-          const tab = await chrome.tabs.getCurrent();
+          // A side panel is not itself a tab, so tabs.getCurrent() returns
+          // undefined. Bind the syntax probe to the active browser tab that
+          // owns this panel instead of fabricating an id.
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (!Number.isInteger(tab?.id)) throw new Error('active browser tab unavailable');
           const testIdOffset = 1000;
           const candidates = rules.buildPrivateNetworkBlockRules({
             tabIds: [tab.id],
@@ -1289,10 +1303,13 @@ export const STATES = [
           && replaced.imported?.dwebIdentity === 1 && storedDid === incoming.did,
         JSON.stringify({ replaced, storedDid, incomingDid: incoming.did }));
 
-      const restarted = await rpc(ctx.page, { type: 'dweb/base/start' });
-      rec.check('the peer host starts under the restored identity after lease release',
-        restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
-        JSON.stringify(restarted));
+      const homePage = await openWidePage(ctx, 'home/home.html');
+      try {
+        const restarted = await rpc(homePage, { type: 'dweb/base/start' });
+        rec.check('the peer host starts under the restored identity after lease release',
+          restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
+          JSON.stringify(restarted));
+      } finally { try { homePage.close(); } catch { /* */ } }
       await retirePrivateTransferPage(transferPage);
     },
   },
@@ -1857,6 +1874,11 @@ export const STATES = [
         rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
         await waitFor(() => numericTabAuthorityState.refusalBody.length > 0,
           { budgetMs: 60_000, pollMs: 100 });
+        // why: the final assistant response redraws the tool card. Inspecting
+        // while that turn is still streaming can click a node that is about to
+        // be replaced and falsely report a missing disclosure.
+        await waitFor(async () => !(await probe(ctx)).busy,
+          { budgetMs: 20_000, pollMs: 50 });
         rec.check('the ordinary page issued its cross-origin redirect',
           redirectRequests > 0, `redirect requests: ${redirectRequests}`);
         rec.check('the destination loaded authenticated content before addressing',
@@ -1973,6 +1995,8 @@ export const STATES = [
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       await waitFor(() => idpTransitState.siteRefusal && idpTransitState.bareRefusal,
         { budgetMs: 60_000, pollMs: 100 });
+      await waitFor(async () => !(await probe(ctx)).busy,
+        { budgetMs: 20_000, pollMs: 50 });
       const refusalBody = idpTransitState.bareRefusal;
       rec.check('site and bare-origin addressing returned the transit-only refusal',
         [idpTransitState.siteRefusal, idpTransitState.bareRefusal].every((result) =>
@@ -2151,6 +2175,229 @@ export const STATES = [
           JSON.stringify({ beforeNumeric, afterNumeric }));
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        server.close();
+      }
+    },
+  },
+
+  // --- functional: real tab-site-client custody + live confirmation ---------
+  // One production-shaped vertical: a forged main-agent call is refused, then
+  // a tab Web actor drives a real page, captures its traffic, waits on the real
+  // confirmation channel before persisting a client, reads it, and executes it
+  // in the sealed site-client worker against the same origin.
+  {
+    name: 'site-client-vertical', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>')) {
+        siteClientVertical.actorCalls += 1;
+        siteClientVertical.actorBodies.push(body);
+        const turn = siteClientVertical.actorCalls - 1;
+        siteClientVertical.actorResults[turn] = toolResultsIn(body).at(-1) ?? '';
+        const codeSurface = body.includes('tools: page_code');
+        if (turn === 0) return codeSurface
+          ? { sse: sseToolCall('page_code', {
+            code: `await page.goto(${JSON.stringify(siteClientVerticalUrl)}); return await page.content();`,
+          }) }
+          : { sse: sseToolCall('navigate', { url: siteClientVerticalUrl }) };
+        if (turn === 1) return codeSurface
+          ? { sse: sseToolCall('page_code', {
+            code: 'return await page.captureSite("start");',
+          }) }
+          : { sse: sseToolCall('site_capture', { action: 'start' }) };
+        if (turn === 2) return codeSurface
+          ? { sse: sseToolCall('page_code', {
+            code: 'await page.click("#refresh"); return await page.content();',
+          }) }
+          : { sse: sseToolCall('click', { selector: '#refresh' }) };
+        if (turn === 3) return codeSurface
+          ? { sse: sseToolCall('page_code', {
+            code: 'return await page.captureSite("stop");',
+          }) }
+          : { sse: sseToolCall('site_capture', { action: 'stop' }) };
+        if (turn === 4) {
+          const deriver = body.includes('deriver: capture-cdp') ? 'capture-cdp' : 'capture-tap';
+          const definition = {
+            summary: 'Read the live fixture status.',
+            endpoints: [{ method: 'GET', path: '/api/status', note: 'Current status' }],
+            auth: 'none', deriver,
+            body: 'return { status: async () => site.fetch("/api/status") };',
+          };
+          return codeSurface
+            ? { sse: sseToolCall('page_code', {
+              code: `return await page.writeSiteClient(${JSON.stringify(siteClientVerticalOrigin)}, ${JSON.stringify(definition)});`,
+            }) }
+            : { sse: sseToolCall('site_client_write', {
+              origin: siteClientVerticalOrigin, ...definition,
+            }) };
+        }
+        if (turn === 5) return codeSurface
+          ? { sse: sseToolCall('page_code', {
+            code: `return await page.readSiteClient(${JSON.stringify(siteClientVerticalOrigin)});`,
+          }) }
+          : { sse: sseToolCall('site_client_read', { origin: siteClientVerticalOrigin }) };
+        if (turn === 6) return { sse: sseToolCall('site_client_run', {
+          origin: siteClientVerticalOrigin,
+          code: 'const response = await client.status(); return { status: response.status, value: response.json?.value };',
+        }) };
+        return { sse: sseText('SITE-CLIENT-VERTICAL-DONE') };
+      }
+
+      if (siteClientVertical.mainStage === 0) {
+        siteClientVertical.mainStage = 1;
+        // Deliberately forge a hidden actor-only name. The real exposure gate
+        // must reject it before capture/browser authority is reached.
+        return { sse: sseToolCall('site_capture', { action: 'start' }) };
+      }
+      if (siteClientVertical.mainStage === 1) {
+        siteClientVertical.mainStage = 2;
+        return { sse: sseToolCall('message_actor', {
+          to: `site:${siteClientVerticalOrigin}`,
+          message: 'Capture the status request, save and inspect a client for it, then run the client.',
+        }) };
+      }
+      if (body.includes('you messaged has replied')
+          || body.includes('could not complete your request')) {
+        siteClientVertical.replyBody = body;
+        return { sse: sseText('The live site client completed.') };
+      }
+      return { sse: sseText('Delegated; awaiting the site-client result.') };
+    },
+    async run(ctx, rec) {
+      siteClientVertical = {
+        mainStage: 0, actorCalls: 0, actorBodies: [], actorResults: [],
+        replyBody: '', apiReads: 0,
+      };
+      const server = createHttpsServer({
+        cert: GIT_FIXTURE_TLS_CERT, key: GIT_FIXTURE_TLS_KEY,
+      }, (request, response) => {
+        if (request.url === '/api/status') {
+          siteClientVertical.apiReads += 1;
+          const requestOrigin = request.headers.origin;
+          const corsOrigin = typeof requestOrigin === 'string' && requestOrigin
+            ? requestOrigin : '*';
+          if (request.method === 'OPTIONS') {
+            response.writeHead(204, {
+              'access-control-allow-origin': corsOrigin,
+              'access-control-allow-credentials': 'true',
+              'access-control-allow-private-network': 'true',
+              'access-control-allow-methods': 'GET, OPTIONS',
+              'access-control-allow-headers': request.headers['access-control-request-headers'] ?? '*',
+              vary: 'Origin',
+            });
+            response.end();
+            return;
+          }
+          response.writeHead(200, {
+            'content-type': 'application/json',
+            'cache-control': 'no-store',
+            'access-control-allow-origin': corsOrigin,
+            'access-control-allow-credentials': 'true',
+            'access-control-allow-private-network': 'true',
+            vary: 'Origin',
+          });
+          response.end(JSON.stringify({ value: 'live-42' }));
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Site client fixture</title></head><body>
+<h1>Site client fixture</h1><button id="refresh" type="button">Refresh status</button>
+<output id="status">not loaded</output><script>
+document.querySelector('#refresh').addEventListener('click', async () => {
+  const response = await fetch('/api/status', { cache: 'no-store' });
+  document.querySelector('#status').textContent = (await response.json()).value;
+});
+</script></body></html>`);
+      });
+      await new Promise((resolve) => server.listen(
+        SITE_CLIENT_FIXTURE_TLS_PORT, '127.0.0.1', resolve,
+      ));
+      siteClientVerticalOrigin = `https://${GIT_FIXTURE_HOST}`;
+      siteClientVerticalUrl = `${siteClientVerticalOrigin}/`;
+      try {
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send',
+          text: 'Refuse a direct site capture, then delegate the site-client work to the exact site actor.',
+        });
+        rec.check('the single site-client turn was accepted', sent?.ok === true, JSON.stringify(sent));
+
+        const confirmation = await waitFor(() => evalIn(ctx.page, `(() => {
+          const modal = document.querySelector('.confirm-modal');
+          if (!modal || modal.querySelector('h3')?.textContent !== 'Confirm site client') return null;
+          return {
+            title: modal.querySelector('h3')?.textContent,
+            code: modal.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
+            endpoints: modal.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
+            buttons: [...modal.querySelectorAll('button')].map((button) => button.textContent.trim()),
+          };
+        })()`), { budgetMs: 90_000, pollMs: 100 });
+        rec.check('the page request occurs only after the refused call delegated to the actor',
+          siteClientVertical.apiReads >= 1,
+          JSON.stringify({ apiReads: siteClientVertical.apiReads }));
+        rec.check('the live confirmation names the stored executable and captured endpoint',
+          confirmation?.title === 'Confirm site client'
+            && confirmation?.code?.includes('/api/status')
+            && confirmation?.endpoints?.includes('GET /api/status')
+            && confirmation?.buttons?.includes('Save client'),
+          JSON.stringify(confirmation));
+
+        const callsAtConfirmation = siteClientVertical.actorCalls;
+        await sleep(500);
+        const stillBlocked = await evalIn(ctx.page,
+          `document.querySelector('.confirm-modal h3')?.textContent === 'Confirm site client'`);
+        rec.check('the actor is blocked on the real confirmation channel until the user answers',
+          stillBlocked === true && siteClientVertical.actorCalls === callsAtConfirmation,
+          JSON.stringify({ callsAtConfirmation, actorCalls: siteClientVertical.actorCalls }));
+
+        const answered = await evalIn(ctx.page, `(() => {
+          const button = [...document.querySelectorAll('.confirm-modal button')]
+            .find((candidate) => candidate.textContent.trim() === 'Save client');
+          button?.click();
+          return !!button;
+        })()`);
+        rec.check('the user approved through the rendered production modal', answered === true);
+
+        await waitFor(() => siteClientVertical.replyBody.length > 0,
+          { budgetMs: 90_000, pollMs: 100 });
+        const listed = await rpc(ctx.page, { type: 'session/list' });
+        const sessionId = listed?.sessions?.[0]?.sessionId;
+        const debug = sessionId
+          ? await rpc(ctx.page, { type: 'session/debugBundle', sessionId }) : null;
+        const failure = debug?.bundle?.failures?.find((entry) =>
+          entry?.scope === 'tool' && entry?.error === 'tool has no execution owner');
+        const refusalAudit = debug?.bundle?.audit?.find((entry) =>
+          entry?.type === 'tool_failed' && entry?.details?.tool === 'site_capture');
+        const firstActorEffect = debug?.bundle?.audit?.find((entry) =>
+          entry?.type === 'authority_effect' && entry?.sessionId !== sessionId);
+        rec.check('the forged main-agent site_capture was refused before browser effects',
+          typeof failure?.toolUseId === 'string'
+            && refusalAudit?.details?.callId === failure.toolUseId
+            && refusalAudit?.details?.performed === false
+            && refusalAudit?.details?.outcomeKnown === true
+            && refusalAudit?.when < firstActorEffect?.when,
+          JSON.stringify({ failure, refusalAudit, firstActorEffect }));
+        const actorEvidence = siteClientVertical.actorBodies.join('\n');
+        rec.check('capture observed the real page request and returned its redacted dossier',
+          actorEvidence.includes('/api/status')
+            && (actorEvidence.includes('deriver: capture-cdp')
+              || actorEvidence.includes('deriver: capture-tap')),
+          actorEvidence.slice(-1200));
+        rec.check('write settled, read returned the persisted client, and sealed run used it',
+          /create/i.test(siteClientVertical.actorResults[5] ?? '')
+            && (siteClientVertical.actorResults[6] ?? '')
+              .includes('return { status: async () => site.fetch')
+            && (siteClientVertical.actorResults[7] ?? '').includes('live-42')
+            && siteClientVertical.apiReads >= 2,
+          JSON.stringify({
+            apiReads: siteClientVertical.apiReads,
+            actorResults: siteClientVertical.actorResults.slice(4),
+          }));
+        rec.check('the tab Web actor completed and its fenced reply reached the orchestrator',
+          siteClientVertical.actorCalls >= 8
+            && siteClientVertical.replyBody.includes('SITE-CLIENT-VERTICAL-DONE')
+            && siteClientVertical.replyBody.includes('you messaged has replied'),
+          siteClientVertical.replyBody.slice(-900));
+      } finally {
         server.close();
       }
     },
@@ -4908,6 +5155,13 @@ export const STATES = [
     name: 'actor-fabric-hierarchy', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
+      if (actorFabricHierarchyState.phase === 'prepare') {
+        if (!actorFabricHierarchyState.targetOpened) {
+          actorFabricHierarchyState.targetOpened = true;
+          return { sse: sseToolCall('open_tab', { url: actorFabricHierarchyState.fixtureUrl }) };
+        }
+        return { sse: sseText('FABRIC-TARGET-READY') };
+      }
       if (body.includes('kind: bound; type: web')) {
         actorFabricHierarchyState.webCalls += 1;
         return { delayMs: 5_000, sse: sseText('NESTED-WEB-DONE') };
@@ -4918,6 +5172,7 @@ export const STATES = [
           if (actorFabricHierarchyState.nestedCalls === 1) {
             return { sse: sseToolCall('message_actor', { to: 'web', message: 'inspect the current price' }) };
           }
+          actorFabricHierarchyState.nestedResults = toolResultsIn(body);
           return { sse: sseText('NESTED-CHILD-DONE') };
         }
         actorFabricHierarchyState.siblingCalls += 1;
@@ -4938,9 +5193,42 @@ export const STATES = [
       return { sse: sseText('FABRIC-MAIN-IDLE') };
     },
     async run(ctx, rec) {
+      const server = createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end('<!doctype html><title>Actor fabric target</title><main>Widget price: 42</main>');
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const fixtureUrl = `http://orders.peerd.test:${/** @type {{port:number}} */ (server.address()).port}/actor-fabric`;
+      let fixtureTabId = null;
       actorFabricHierarchyState = {
-        spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0,
+        phase: 'prepare', fixtureUrl, targetOpened: false,
+        spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0, nestedResults: [],
       };
+      try {
+        // Generic `web` is intentionally unable to invent authority over an
+        // arbitrary tab. Establish a real public target through open_tab and
+        // the shipped Go control before exercising the nested delegation.
+        await rpc(ctx.page, { type: 'agent/send', text: 'FABRIC-PREP-TARGET open the comparison page' });
+        await waitFor(async () => {
+          const status = await probe(ctx);
+          const rendered = await evalIn(ctx.page, `document.body.textContent?.includes('FABRIC-TARGET-READY') === true`);
+          return !status.busy && rendered;
+        }, { budgetMs: 20_000, pollMs: 50 });
+        const fixtureTab = await waitFor(() => evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) =>
+          tabs.find((tab) => tab.url === ${JSON.stringify(fixtureUrl)}) ?? null)`, true),
+        { budgetMs: 10_000, pollMs: 50 });
+        if (!Number.isInteger(fixtureTab?.id)) throw new Error('actor-fabric-target-not-opened');
+        fixtureTabId = fixtureTab.id;
+        const goReady = await waitFor(() => evalIn(ctx.page,
+          `document.querySelectorAll('.agent-tab-notice-go').length > 0`),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (!goReady) throw new Error('actor-fabric-target-control-not-rendered');
+        await evalIn(ctx.page, `([...document.querySelectorAll('.agent-tab-notice-go')].at(-1)?.click(), true)`);
+        const activated = await waitFor(() => evalIn(ctx.page,
+          `chrome.tabs.get(${fixtureTabId}).then((tab) => tab.active === true)`, true),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (!activated) throw new Error('actor-fabric-target-not-activated');
+        actorFabricHierarchyState.phase = 'hierarchy';
       const sent = await rpc(ctx.page, {
         type: 'agent/send', text: 'compare price and warranty with isolated actors',
       });
@@ -4967,11 +5255,22 @@ export const STATES = [
           };
         })()`),
         { budgetMs: 20_000, pollMs: 50 });
+      const hierarchyDetail = hierarchy ?? {
+        counters: { ...actorFabricHierarchyState },
+        dom: await evalIn(ctx.page, `({
+          fabric: document.querySelector('.actor-fabric')?.textContent ?? '',
+          tools: [...document.querySelectorAll('.tool-call')].map((node) => node.textContent ?? ''),
+          replies: [...document.querySelectorAll('.message-actor-reply')].map((node) => node.textContent ?? ''),
+        })`),
+        audit: (await auditEntries(ctx, 80)).slice(-20).map((entry) => ({
+          type: entry.type, details: entry.details,
+        })),
+      };
       rec.check('the live fabric renders two sibling subactors and one nested bound actor',
         hierarchy?.nodes >= 4
           && hierarchy?.topSubactors >= 2
           && hierarchy?.nestedBound === true,
-        JSON.stringify(hierarchy));
+        JSON.stringify(hierarchyDetail));
       rec.check('the deep hierarchy fits 390px and stays height-bounded',
         hierarchy?.contentFits === true && hierarchy?.heightCapped === true,
         JSON.stringify(hierarchy));
@@ -5026,6 +5325,13 @@ export const STATES = [
           && finished?.text.includes('all actor work finished'),
         JSON.stringify(finished));
       await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
+      } finally {
+        if (Number.isInteger(fixtureTabId)) {
+          await evalIn(ctx.page, `chrome.tabs.remove(${fixtureTabId}).catch(() => {})`, true)
+            .catch(() => {});
+        }
+        server.close();
+      }
     },
   },
 
@@ -5145,9 +5451,17 @@ export const STATES = [
               && document.documentElement.scrollWidth <= innerWidth,
           };
         })()`), { budgetMs: 30_000, pollMs: 80 });
+        const renderedDetail = rendered ?? await evalIn(page, `(() => ({
+          text: document.querySelector('.actor-space')?.textContent ?? '',
+          error: document.querySelector('.actor-space-error')?.textContent ?? '',
+          loading: document.querySelector('.actor-space-loading')?.textContent ?? '',
+          rooms: document.querySelectorAll('.actor-space-room').length,
+          nodes: document.querySelectorAll('.actor-space-node').length,
+          hidden: document.hidden,
+        }))()`);
         rec.check('Actor Space renders two orchestrator rooms and both workers',
           rendered?.rooms === 2 && rendered?.nodes >= 6 && rendered?.subactors >= 4,
-          JSON.stringify(rendered));
+          JSON.stringify(renderedDetail));
         rec.check('rooms with isolated actors lead main-only orchestrators',
           rendered?.roots?.[0] === alphaRoot, JSON.stringify(rendered?.roots));
         rec.check('the rooms stay root-separated and use the brand orb on live contexts',

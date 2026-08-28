@@ -34,8 +34,11 @@ const apps = routeHandler(appRoutes, 'dispatchAppSemanticRoute');
 const contacts = routeHandler(contactRoutes, 'dispatchContactSemanticRoute');
 const providers = routeHandler(providerRoutes, 'dispatchProviderSemanticRoute');
 const memory = routeHandler(memoryRoutes, 'dispatchMemorySemanticRoute');
+const storeClassifications = SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.filter(
+  (row) => row.channels.includes('store'),
+);
 const runtime = createSemanticDispatchRuntime({
-  classifications: SEMANTIC_HOST_ROUTE_CLASSIFICATIONS,
+  classifications: storeClassifications,
   handlers: {
     'actors/overview': actor('actors/overview'),
     'actors/count': actor('actors/count'),

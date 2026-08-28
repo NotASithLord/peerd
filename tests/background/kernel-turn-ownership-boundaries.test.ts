@@ -11,6 +11,39 @@ const modulesFor = async (entry: string) => new Set(
     .map((file) => relative(EXTENSION_ROOT, file).replaceAll('\\', '/')),
 );
 
+const KERNEL_TURN_LIFECYCLE_EXPORTS = Object.freeze([
+  'DEFAULT_MAX_OUTPUT_TOKENS', 'DOC_TEXT_MAX_CHARS', 'GOAL_MAX_ITERATIONS',
+  'PERMISSION_MODES',
+  'buildMintInjection', 'confirmActionsFromRecord', 'createSkillRegistry',
+  'createSuggestionStore', 'describeLandingStop', 'digestCapture',
+  'drainFetchTapInjected', 'fenceApiActorSummary', 'fenceWebActorSummary',
+  'finalActorTurnReply', 'finalAssistantText', 'formatDocBody',
+  'installFetchTapInjected', 'landingStopCard', 'limitExceeded', 'makeAutoMemory',
+  'makeCheapCall', 'makeGoalRunner', 'makeScheduler', 'makeSpawnActor',
+  'makeTrimEnricher', 'meshCallToOp', 'normalizeApiOrigin',
+  'normalizeConfirmActions', 'normalizeMode', 'normalizeTally', 'originPhrase',
+  'parseSiteHandle', 'prepareUserAttachmentsWithDocs', 'resolveSiteUrl',
+  'safeWebActorSummaryOrigin', 'shapeMeshResult', 'siteHandleFor', 'wrapUntrusted',
+]);
+
+const KERNEL_TURN_LIFECYCLE_TARGETS = Object.freeze([
+  './actor/a2a-api.js', './actor/cheap-call.js', './actor/origin-lock-report.js',
+  './actor/spawn.js', './actor/web-actor.js', './cost/accumulator.js',
+  './doc/format.js', './dom/fetch-tap-injected.js', './loop/attachments.js',
+  './loop/goal-runner.js', './loop/scheduler.js', './loop/summary-enrichment.js',
+  './memory/auto-memory-orchestrator.js', './memory/suggestions.js',
+  './permissions/policy.js', './site-clients/core.js', './site-clients/digest.js',
+  './skills/registry.js', './tools/prompt-wrap.js',
+]);
+
+const exactReExports = (source: string) => [...source.matchAll(
+  /export\s*\{([\s\S]*?)\}\s*from\s*['"]([^'"]+)['"];/g,
+)].map((match) => ({
+  target: match[2],
+  names: match[1].split(',').map((name) => name.trim().split(/\s+as\s+/).at(-1))
+    .filter((name): name is string => Boolean(name)),
+}));
+
 describe('kernel turn ownership boundaries', () => {
   it('keeps the retired mutable tool protocol absent from production source', () => {
     for (const path of [
@@ -54,18 +87,14 @@ describe('kernel turn ownership boundaries', () => {
     expect(existsSync(join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-driver.js'))).toBe(false);
   });
 
-  it('links the fixed turn shell through the authority surface, not the semantic owner', async () => {
+  it('links the fixed turn shell through authority and deletes the semantic aggregate', async () => {
     const authorityModules = await modulesFor('background/kernel-turn-authority-adapter.js');
     expect(authorityModules.has('peerd-runtime/loop/turn-authority-driver.js')).toBe(true);
-
-    const semanticModules = await modulesFor('peerd-runtime/controller-turn-semantics.js');
-    expect(semanticModules.has('peerd-runtime/loop/turn-authority-driver.js')).toBe(false);
-    const semanticSource = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-runtime/controller-turn-semantics.js'), 'utf8',
-    );
-    expect(semanticSource).not.toContain('makeTurnAuthorityDriver');
-    expect(semanticSource).not.toContain('makeTurnCostTracker');
-    expect(semanticSource).not.toContain('detectInterruptedTurn');
+    expect(authorityModules.has('peerd-runtime/kernel-turn-lifecycle.js')).toBe(true);
+    expect(authorityModules.has('peerd-runtime/controller-turn-semantics.js')).toBe(false);
+    expect(existsSync(join(
+      EXTENSION_ROOT, 'peerd-runtime/controller-turn-semantics.js',
+    ))).toBe(false);
   });
 
   it('uses exact transfer custody leaves without a growing aggregate entry', async () => {
@@ -97,6 +126,25 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
+  it('wires the actor host through one exact dependency vocabulary', () => {
+    const client = readFileSync(
+      join(EXTENSION_ROOT, 'background/offscreen-actor-client.js'), 'utf8',
+    );
+    expect(client).toContain('ensureHost, sendMessage, runOnChannel, providerEgress');
+    expect(client).toContain('isRelaySender,');
+    expect(client).not.toContain('ensureOffscreen');
+    expect(client).not.toContain('isOffscreenSender');
+    expect(client).not.toContain('ensureHost ??');
+    expect(client).not.toContain('isRelaySender ??');
+
+    const adapter = readFileSync(
+      join(EXTENSION_ROOT, 'background/kernel-turn-authority-adapter.js'), 'utf8',
+    );
+    expect(adapter.match(/makeActorClient\(\{/g)).toHaveLength(1);
+    expect(adapter).toContain('ensureHost: async () => {');
+    expect(adapter).toContain('isRelaySender: deps.firefox');
+  });
+
   it('admits every exact controller domain handler through the fixed channel ledger', () => {
     const bridge = readFileSync(
       join(EXTENSION_ROOT, 'background/controller-turn-bridge.js'), 'utf8',
@@ -117,29 +165,24 @@ describe('kernel turn ownership boundaries', () => {
     ]) expect(quota).toContain(`'${operation}':`);
   });
 
-  it('keeps the semantic owner free of authority and host dependencies', async () => {
-    const modules = await modulesFor('peerd-runtime/controller-turn-semantics.js');
-    const forbiddenPrefixes = [
-      'background/',
-      'peerd-egress/vault/',
-      'peerd-egress/storage/',
-      'peerd-egress/credentials/',
-      'peerd-egress/dpop/',
-      'peerd-egress/fetch/origin-credentials.js',
-    ];
-    const forbiddenModules = new Set([
-      'shared/browser-api.js',
-      'peerd-provider/background.js',
-      'peerd-engine/background.js',
-      'peerd-runtime/composer/command-store.js',
-      'peerd-runtime/site-clients/store.js',
-      'peerd-runtime/skills/store.js',
-      'peerd-runtime/tools/result-store.js',
-    ]);
+  it('freezes the exact kernel turn lifecycle entry point', () => {
+    const lifecycle = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/kernel-turn-lifecycle.js'), 'utf8',
+    );
+    const exports = exactReExports(lifecycle);
+    expect(exports.flatMap(({ names }) => names).sort())
+      .toEqual([...KERNEL_TURN_LIFECYCLE_EXPORTS].sort());
+    expect(exports.map(({ target }) => target).sort())
+      .toEqual([...KERNEL_TURN_LIFECYCLE_TARGETS].sort());
+    expect([...lifecycle.matchAll(/\bexport\b/g)]).toHaveLength(exports.length);
+    expect(lifecycle).not.toContain('import(');
 
-    expect([...modules].filter((module) =>
-      forbiddenModules.has(module)
-        || forbiddenPrefixes.some((prefix) => module.startsWith(prefix)))).toEqual([]);
+    const adapter = readFileSync(
+      join(EXTENSION_ROOT, 'background/kernel-turn-authority-adapter.js'), 'utf8',
+    );
+    expect(adapter.split("from '/peerd-runtime/kernel-turn-lifecycle.js';"))
+      .toHaveLength(2);
+    expect(adapter).not.toContain('/peerd-runtime/controller-turn-semantics.js');
   });
 
   it('keeps the dynamically imported actor semantic roots outside host authority graphs', async () => {
@@ -166,30 +209,30 @@ describe('kernel turn ownership boundaries', () => {
     }
   });
 
-  it('keeps the authority adapter free of feature catalogs and semantic owners', async () => {
+  it('keeps the authority adapter transitively free of growing semantic runtimes', async () => {
     const modules = await modulesFor('background/kernel-turn-authority-adapter.js');
     const forbiddenPrefixes = [
       'peerd-provider/',
       'peerd-runtime/tools/defs/',
-      'peerd-runtime/tools/metadata/',
     ];
     const forbiddenModules = new Set([
-      'peerd-engine/app-manifest.js',
       'peerd-runtime/controller-turn-semantics.js',
-      'peerd-runtime/controller-actor-tools.js',
-      'peerd-runtime/controller-pod-tools.js',
-      'peerd-runtime/controller-repository-tools.js',
-      'peerd-runtime/controller-vm-tools.js',
-      'peerd-runtime/controller-notebook-tools.js',
-      'peerd-runtime/controller-app-tools.js',
-      'peerd-runtime/controller-tools.js',
-      'peerd-runtime/semantic.js',
-      'peerd-runtime/site-clients/digest.js',
+      'peerd-runtime/controller-contributor.js',
+      'peerd-runtime/controller-tool-ownership.js',
+      'peerd-runtime/controller-tool-projection.js',
+      'peerd-runtime/controller-turn.js',
+      'peerd-runtime/tools/hooks/registry.js',
+      'peerd-runtime/tools/metadata/authority.js',
+      'peerd-runtime/tools/metadata/catalog.js',
+      'peerd-runtime/tools/metadata/index.js',
+      'peerd-runtime/tools/metadata-registry.js',
+      'peerd-runtime/tools/registry.js',
     ]);
 
     expect([...modules].filter((module) =>
       forbiddenModules.has(module)
-        || forbiddenPrefixes.some((prefix) => module.startsWith(prefix)))).toEqual([]);
+        || forbiddenPrefixes.some((prefix) => module.startsWith(prefix))
+        || /^peerd-runtime\/controller-(?:.*-)?tools\.js$/.test(module))).toEqual([]);
   });
 
   it('keeps tool inventory and exposure projection in the sealed controller', async () => {
@@ -655,32 +698,22 @@ describe('kernel turn ownership boundaries', () => {
     ]) expect(existsSync(join(EXTENSION_ROOT, removed))).toBe(false);
   });
 
-  it('composes one synchronous owner path without a protocol or dynamic fallback', () => {
+  it('composes one direct authority adapter path without generic dispatch or fallback', async () => {
     const source = readFileSync(
       join(EXTENSION_ROOT, 'background/kernel-turn-live-factories.js'),
       'utf8',
     );
-    expect(source).toContain('createControllerTurnSemantics()');
-    expect(source).toContain('createKernelTurnAuthorityAdapter(deps,');
+    const imports = [...source.matchAll(/from\s+['"]([^'"]+)['"]/g)]
+      .map((match) => match[1]);
+    expect(imports).toEqual(['./kernel-turn-authority-adapter.js']);
+    expect(source.match(/createKernelTurnAuthorityAdapter\(deps\)/g)).toHaveLength(1);
+    expect(source).not.toContain('createControllerTurnSemantics');
+    expect(source).not.toContain('semanticOwners');
     expect(source).not.toContain('import(');
+    expect(source).not.toMatch(/\b(?:dispatch|fallback|legacy)\b/i);
     expect(source).not.toMatch(/\b(operation|action)\s*,\s*payload\b/);
-  });
-
-  it('keeps the fixed lifecycle residue in cohesive owners instead of a function bag', () => {
-    const semantics = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-runtime/controller-turn-semantics.js'),
-      'utf8',
-    );
-    const adapter = readFileSync(
-      join(EXTENSION_ROOT, 'background/kernel-turn-authority-adapter.js'),
-      'utf8',
-    );
-    for (const owner of ['actor', 'policy', 'site', 'turn']) {
-      expect(semantics).toContain(`${owner}: Object.freeze({`);
-      expect(adapter).toContain(`semanticOwners.${owner}`);
-    }
-    expect(semantics).not.toContain("from './actor/actors-api.js'");
-    expect(semantics).not.toContain('shapeActorsResult');
-    expect(adapter).not.toContain('semanticOwner;');
+    const modules = await modulesFor('background/kernel-turn-live-factories.js');
+    expect(modules.has('background/kernel-turn-authority-adapter.js')).toBe(true);
+    expect(modules.has('peerd-runtime/controller-turn-semantics.js')).toBe(false);
   });
 });

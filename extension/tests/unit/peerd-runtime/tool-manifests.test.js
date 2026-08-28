@@ -38,7 +38,7 @@ const id = (v) => /** @type {string} */ (v);
 const registered = listToolAuthorities();
 const registeredNames = new Set(registered.map((t) => t.name));
 
-describe('tool manifests — presets vs the real catalog', () => {
+describe('tool manifests: presets vs the real catalog', () => {
   it('every preset entry names a REGISTERED tool (rename-drift guard)', () => {
     for (const [presetName, preset] of Object.entries(TOOL_MANIFEST_PRESETS)) {
       const stranded = preset.allow.filter((n) => !registeredNames.has(n));

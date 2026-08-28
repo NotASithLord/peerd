@@ -22,6 +22,7 @@ import {
 } from '../../extension/shared/structured-clone-size.js';
 import { createController } from '../../extension/offscreen/controller-runtime.js';
 import { createControllerKernelQuota } from '../../extension/shared/controller-kernel-quota.js';
+import { shapeModelCall } from '../../extension/shared/model-context-snapshot.js';
 
 const SEALED_REALM = Object.fromEntries(CONTROLLER_REALM_FACT_KEYS.map((key) => [key, false]));
 const BUILD_DIGEST = 'a'.repeat(64);
@@ -733,6 +734,98 @@ describe('Chrome lazy controller private channel prototype', () => {
     expect(observed.signal?.aborted).toBe(true);
   });
 
+  test('a late reverse result from a settled turn cannot retire the live channel', async () => {
+    const within = <T>(pending: Promise<T>, label: string) => Promise.race([
+      pending,
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error(`${label} timed out`)), 500,
+      )),
+    ]);
+    let modelAdmitted!: () => void;
+    const admitted = new Promise<void>((resolve) => { modelAdmitted = resolve; });
+    let releaseModel!: () => void;
+    const modelResult = new Promise<any>((resolve) => {
+      releaseModel = () => resolve({ ok: true, outcomeKnown: true, value: { streamId: 'late' } });
+    });
+    let hostClosed = 0;
+    let workers = 0;
+    const firstWorkerPorts: MessagePort[] = [];
+    let enterSuccessor!: () => void;
+    const successorEntered = new Promise<void>((resolve) => { enterSuccessor = resolve; });
+    let releaseSuccessor!: () => void;
+    const successorGate = new Promise<void>((resolve) => { releaseSuccessor = resolve; });
+    const loader = makeSealedControllerLoader({
+      workerUrl: '/offscreen/controller-worker.js',
+      createWorker: () => {
+        workers += 1;
+        const generation = workers;
+        return {
+          postMessage: (_message: any, transfer: Transferable[]) => {
+            const port = transfer[0] as MessagePort;
+            if (generation === 1) firstWorkerPorts.push(port);
+            port.onmessage = async (event) => {
+              if (event.data.type !== 'controller-worker/call') return;
+              if (generation === 1) {
+                port.postMessage({
+                  type: 'controller-worker/kernel-call', requestId: event.data.requestId,
+                  rpcId: 'old-model-rpc', operation: 'turn.session.get',
+                  payload: { runId: 'old-turn', value: { sessionId: 'session:test' } },
+                });
+                return;
+              }
+              enterSuccessor();
+              await successorGate;
+              port.postMessage({
+                type: 'controller-worker/result', requestId: event.data.requestId,
+                result: { ok: true, generation, outcomeKnown: true },
+              });
+            };
+            port.start();
+            port.postMessage({
+              type: 'controller-worker/ready', realm: SEALED_REALM,
+              prototypeFetchBlocked: true, prototypeStorageBlocked: true,
+            });
+          },
+          terminate: () => {}, addEventListener: () => {},
+        } as unknown as Worker;
+      },
+    });
+    const controller = await connectController({
+      ensureOffscreen: async () => {}, capabilities: ['turn.run'],
+      createQuota: replaySafeQuota,
+      handleKernelCall: async () => {
+        modelAdmitted();
+        return modelResult;
+      },
+      findHost: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+          port: transfer[0] as MessagePort, channelId: offer.channelId,
+          buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+          hostEpoch: 'host-late-reverse-result', offeredCaps: offer.capabilities,
+          supportedCaps: ['turn.run'], onClose: () => { hostClosed += 1; },
+          createQuota: replaySafeQuota,
+          loadController: loader,
+        }),
+      }),
+    });
+
+    const first = controller.call('turn.run', { maxSteps: 1 });
+    await within(admitted, 'old reverse admission');
+    firstWorkerPorts[0]?.close();
+    expect(await within(first, 'old turn settlement'))
+      .toMatchObject({ outcomeKnown: false, retryable: false });
+    const successor = controller.call('turn.run', { maxSteps: 1 });
+    await within(successorEntered, 'successor Worker entry');
+    releaseModel();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hostClosed).toBe(0);
+    releaseSuccessor();
+    expect(await within(successor, 'successor settlement'))
+      .toMatchObject({ ok: true, outcomeKnown: true });
+    expect(workers).toBe(2);
+    controller.close();
+  });
+
   test('offscreen supervisor boots the sealed Worker lazily over a second private port', async () => {
     let workerCreated = 0;
     const loader = makeSealedControllerLoader({
@@ -839,6 +932,71 @@ describe('Chrome lazy controller private channel prototype', () => {
     expect(second).not.toBe(first);
     expect(await second.call('health.ping', {}, { signal: new AbortController().signal }))
       .toMatchObject({ ok: true, generation: 2 });
+    loader.close();
+  });
+
+  test('a clean Worker exit during an admitted call is unknown and never replayed', async () => {
+    let created = 0;
+    const workerPorts: MessagePort[] = [];
+    let entered!: () => void;
+    const admitted = new Promise<void>((resolve) => { entered = resolve; });
+    const loader = makeSealedControllerLoader({
+      workerUrl: '/offscreen/controller-worker.js',
+      createWorker: () => {
+        created += 1;
+        const generation = created;
+        return {
+          postMessage: (_message: any, transfer: Transferable[]) => {
+            const port = transfer[0] as MessagePort;
+            workerPorts.push(port);
+            port.onmessage = (event) => {
+              if (event.data.type !== 'controller-worker/call') return;
+              if (generation === 1) {
+                port.postMessage({
+                  type: 'controller-worker/kernel-call', requestId: event.data.requestId,
+                  rpcId: 'model-admission-1', operation: 'turn.model.open-inference',
+                  payload: { provider: 'ollama' },
+                });
+                return;
+              }
+              port.postMessage({
+                type: 'controller-worker/result', requestId: event.data.requestId,
+                result: { ok: true, generation, outcomeKnown: true },
+              });
+            };
+            port.start();
+            port.postMessage({
+              type: 'controller-worker/ready', realm: SEALED_REALM,
+              prototypeFetchBlocked: true, prototypeStorageBlocked: true,
+            });
+          },
+          terminate: () => {},
+          addEventListener: () => {},
+        } as unknown as Worker;
+      },
+    });
+    const first = await loader();
+    const pending = first.call('turn.run', { maxSteps: 1 }, {
+      signal: new AbortController().signal,
+      kernelCall: async (operation) => {
+        expect(operation).toBe('turn.model.open-inference');
+        entered();
+        return new Promise(() => {});
+      },
+    });
+    await admitted;
+    workerPorts[0]?.close();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, code: 'controller-worker-lost', outcomeKnown: false, retryable: false,
+    });
+    expect(created).toBe(1);
+
+    const second = await loader();
+    expect(second).not.toBe(first);
+    expect(await second.call('turn.run', { maxSteps: 1 }, {
+      signal: new AbortController().signal,
+    })).toMatchObject({ ok: true, generation: 2, outcomeKnown: true });
+    expect(created).toBe(2);
     loader.close();
   });
 
@@ -1092,6 +1250,106 @@ describe('Chrome lazy controller private channel prototype', () => {
     second.port.close();
   });
 
+  test('a fresh exact lease replaces a stale same-kernel binding and fences its late close', async () => {
+    const expectedWorkerUrl = 'chrome-extension://id/background/kernel.js';
+    const bindings: Array<{
+      channelId: string,
+      closed: boolean,
+      lose: () => void,
+    }> = [];
+    const bindChannel = ((options: any) => {
+      const binding = {
+        epoch: options.kernelEpoch,
+        kernelEpoch: options.kernelEpoch,
+        kernelIdentity: options.kernelIdentity,
+        hostEpoch: options.hostEpoch,
+        channelId: options.channelId,
+        buildDigest: options.buildDigest,
+        closed: false,
+        close: () => { binding.closed = true; },
+        // Simulate Chrome reporting the retired port loss only after its
+        // same-kernel successor is already live.
+        lose: () => options.onClose(),
+      };
+      bindings.push(binding);
+      options.port.postMessage({
+        protocol: CONTROLLER_CHANNEL_PROTOCOL,
+        channelId: options.channelId,
+        buildDigest: options.buildDigest,
+        kernelEpoch: options.kernelEpoch,
+        hostEpoch: options.hostEpoch,
+        sequence: 1,
+        type: 'controller/ready',
+        capabilities: options.offeredCaps,
+      });
+      return binding;
+    }) as typeof bindControllerChannel;
+    const handler = makeControllerOfferHandler({
+      expectedWorkerUrl,
+      expectedBuildDigest: BUILD_DIGEST,
+      supportedCaps: ['state.read'],
+      loadController: async () => ({ call: async () => ({ ok: true }) }),
+      bindChannel,
+      newId: ids('controller-realm-one', 'controller-realm-two', 'controller-realm-three'),
+    });
+    const offer = (generation: number, channelId: string) => {
+      const channel = new MessageChannel();
+      const messages: any[] = [];
+      channel.port1.onmessage = (event) => { messages.push(event.data); };
+      channel.port1.start();
+      const accepted = handler({
+        isTrusted: true,
+        source: { scriptURL: expectedWorkerUrl },
+        data: {
+          type: 'peerd/controller-channel', protocol: CONTROLLER_CHANNEL_PROTOCOL,
+          buildDigest: BUILD_DIGEST,
+          kernelEpoch: KERNEL_IDENTITY.kernelEpoch,
+          channelId,
+          capabilities: ['state.read'],
+          kernelIdentity: KERNEL_IDENTITY,
+          lease: controllerLease(KERNEL_IDENTITY, generation),
+        },
+        ports: [channel.port2],
+      } as unknown as MessageEvent);
+      return { accepted, channel, messages };
+    };
+    const ready = async (entry: ReturnType<typeof offer>) => {
+      for (let attempt = 0; attempt < 20 && entry.messages.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(entry.messages.map((message) => message.type)).toEqual(['controller/ready']);
+    };
+
+    const first = offer(1, 'stale-race-channel-one');
+    expect(first.accepted).toBe(true);
+    await ready(first);
+
+    const duplicate = offer(1, 'stale-race-channel-duplicate');
+    expect(duplicate.accepted).toBe(false);
+    expect(bindings).toHaveLength(1);
+
+    const second = offer(2, 'stale-race-channel-two');
+    expect(second.accepted).toBe(true);
+    await ready(second);
+    expect(bindings[0].closed).toBe(true);
+    expect(bindings[1].closed).toBe(false);
+
+    bindings[0].lose();
+    const third = offer(3, 'stale-race-channel-three');
+    expect(third.accepted).toBe(true);
+    await ready(third);
+    // If the old close cleared the successor by shared kernelEpoch, the third
+    // offer would not have retired this second binding.
+    expect(bindings[1].closed).toBe(true);
+    expect(bindings[2].closed).toBe(false);
+
+    handler.release();
+    first.channel.port1.close();
+    duplicate.channel.port1.close();
+    second.channel.port1.close();
+    third.channel.port1.close();
+  });
+
   test('offer adoption rejects a new epoch minted under the old boot identity', () => {
     const expectedWorkerUrl = 'chrome-extension://id/background/kernel.js';
     const handler = makeControllerOfferHandler({
@@ -1334,6 +1592,39 @@ describe('controller protocol pure validation', () => {
       outcomeKnown: true,
     };
     expect(controllerPayloadBytes(result)).toBeLessThan(4 * 1024 * 1024);
+  });
+
+  test('the advisory main-context edge is capped and loss is replay-safe', () => {
+    const quota = createControllerKernelQuota('turn.run', { maxSteps: 1 });
+    const observation = {
+      runId: 'context-observation',
+      value: {
+        label: 'main',
+        observation: shapeModelCall({
+          provider: 'anthropic', model: 'model', system: 's'.repeat(100_000),
+          messages: Array.from({ length: 100 }, () => ({
+            role: 'user', content: 'x'.repeat(10_000),
+          })),
+        }),
+      },
+    };
+    expect(quota.admit('turn.model.observe-context', observation).ok).toBe(true);
+    expect(quota.observe('turn.model.observe-context', observation, {
+      ok: true, value: null, outcomeKnown: true,
+    }).ok).toBe(true);
+    expect(quota.custody()).toEqual({ outcomeKnown: true, retryable: true });
+    expect(quota.pendingLoss('turn.model.observe-context', observation)).toEqual({
+      outcomeKnown: true, retryable: true,
+    });
+
+    const oversized = {
+      runId: 'oversized-observation',
+      value: { label: 'main', observation: { body: 'x'.repeat(128 * 1024) } },
+    };
+    expect(createControllerKernelQuota('turn.run', { maxSteps: 1 })
+      .admit('turn.model.observe-context', oversized)).toMatchObject({
+      ok: false, code: 'kernel-operation-payload-too-large', outcomeKnown: true,
+    });
   });
 
   test('more than 65,536 fragmented model chunks fit while the 8 MiB rail remains authoritative', () => {

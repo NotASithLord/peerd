@@ -8,7 +8,7 @@ import {
   SEMANTIC_ROUTE_CLASSIFICATION,
   SEMANTIC_ROUTE_CLASSIFICATIONS,
   SEMANTIC_ROUTE_CUTOVER,
-} from '../../extension/shared/semantic-route-classification.js';
+} from '../../packaging/semantic-route-classification.ts';
 import { SEMANTIC_ROUTE_INVENTORY } from '../../extension/shared/semantic-route-inventory.js';
 import { createSemanticDispatchRuntime } from '../../extension/offscreen/semantic-dispatch-runtime.js';
 import { createSemanticDemandQuota } from '../../extension/shared/semantic-demand-policy.js';
@@ -36,15 +36,15 @@ const DIRECT_KERNEL_ROUTES = [
 
 describe('semantic route inventory', () => {
   test('pins cardinality, channel variance, ownership, and the complete cutover', () => {
-    expect(SEMANTIC_ROUTE_INVENTORY).toHaveLength(167);
+    expect(SEMANTIC_ROUTE_INVENTORY).toHaveLength(157);
     expect(SEMANTIC_ROUTE_INVENTORY.filter((row) => row.channels.length === 1)
       .map((row) => row.route)).toEqual([
       'contributor/disable', 'contributor/enable',
       'contributor/feedback', 'contributor/status',
     ]);
-    expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(167);
+    expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(157);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'kernel'))
-      .toHaveLength(149);
+      .toHaveLength(139);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split'))
       .toHaveLength(18);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.state === 'migrated')
@@ -52,7 +52,7 @@ describe('semantic route inventory', () => {
         SEMANTIC_ROUTE_INVENTORY.map((row) => row.route),
       );
     expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
-      ready: true, expected: 167, classified: 167, missing: [], extra: [],
+      ready: true, expected: 157, classified: 157, missing: [], extra: [],
     });
     expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toEqual([]);
   });

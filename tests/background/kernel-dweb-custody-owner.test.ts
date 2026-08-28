@@ -174,10 +174,11 @@ describe('kernel dweb custody owner', () => {
     runtime.attachDwebCustody(live);
     live.onMessage.emit({ type: 'custody/ready', authorityId: 'authority:read-timeout' });
     const transfer = (await runtime.getDwebTransfer())!;
-    for (const [operation, pending] of [
-      ['export', transfer.exportRecord('passphrase')],
-      ['prepare', transfer.prepareRecord({}, 'passphrase')],
+    for (const [operation, run] of [
+      ['export', () => transfer.exportRecord('passphrase')],
+      ['prepare', () => transfer.prepareRecord({}, 'passphrase')],
     ] as const) {
+      const pending = run();
       await nextTask();
       const request = live.sent.find((message) => message.type === 'custody/request'
         && message.operation === operation);
@@ -741,6 +742,104 @@ describe('kernel dweb custody owner', () => {
     await expect((await runtime.getDwebLive())!.withIdentityMutation(async () => 'next'))
       .resolves.toBe('next');
     expect(stored as string | null).toBe(material);
+  });
+
+  test('a landed commit survives loss of its final host receipt', async () => {
+    const incoming = identityFixture(9);
+    let stored: string | null = null;
+    let retired = 0;
+    let successorRead: any = null;
+    let runtime: ReturnType<typeof owner>;
+    const successor = port();
+    runtime = owner({
+      timeoutMs: 5,
+      vault: {
+        isLocked: () => false,
+        getSecret: async (name: string) =>
+          name === 'distributed/identity/v1' ? stored : null,
+        setSecret: async (_name: string, value: string) => { stored = value; },
+      },
+      retireDwebHost: async () => {
+        retired += 1;
+        runtime.attachDwebCustody(successor);
+        successor.onMessage.emit({
+          type: 'custody/ready', authorityId: 'authority:replacement-host',
+        });
+        // The replacement dweb realm cannot start until it reads the committed
+        // identity. Before the regression fix this read sat behind the adoption
+        // lane while that same lane awaited host retirement: a hard deadlock.
+        successor.onMessage.emit({
+          type: 'custody/effect-request', requestId: 'base-start:identity-read',
+          operation: 'identity/read', args: {},
+        });
+        successorRead = await waitForPacket(successor, 'custody/effect-response');
+      },
+    });
+    const live = port();
+    runtime.attachDwebCustody(live);
+    live.onMessage.emit({ type: 'custody/ready', authorityId: 'authority:lost-final-receipt' });
+    const pending = (await runtime.getDwebTransfer())!.adoptRecord({}, 'passphrase', {
+      expectedExistingDid: null, expectedIncomingDid: incoming.did,
+    });
+    const status = await waitForPacket(live, 'custody/status');
+    live.onMessage.emit({
+      type: 'custody/status-response', requestId: status.requestId,
+      operationId: status.operationId, authorityId: 'authority:lost-final-receipt',
+      receipt: { state: 'missing' },
+    });
+    const request = await waitForPacket(live, 'custody/request');
+    live.onMessage.emit({
+      type: 'custody/effect-request', requestId: 'commit:lost-final-receipt',
+      parentOperationId: request.operationId, operation: 'identity/commit',
+      args: {
+        value: incoming.material, incomingDid: incoming.did, expectedExistingDid: null,
+      },
+    });
+    const effect = await waitForPacket(live, 'custody/effect-response');
+    expect(effect.result).toMatchObject({ ok: true, committed: true });
+    live.onMessage.emit({
+      type: 'custody/effect-request', requestId: 'committed-runtime:identity-read',
+      operation: 'identity/read', args: {},
+    });
+    for (let attempt = 0; attempt < 30
+      && !live.sent.some((message) => message.requestId === 'committed-runtime:identity-read');
+    attempt += 1) await nextTask();
+    expect(live.sent.find(
+      (message) => message.requestId === 'committed-runtime:identity-read',
+    )).toMatchObject({ result: { ok: true, value: incoming.material } });
+    await expect(pending).resolves.toMatchObject({
+      adopted: true, did: incoming.did, runtimeRecoveryPending: true,
+    });
+    expect(stored as string | null).toBe(incoming.material);
+    expect(retired).toBe(1);
+    expect(successorRead).toMatchObject({
+      requestId: 'base-start:identity-read',
+      result: { ok: true, value: incoming.material },
+    });
+
+    const exported = (await runtime.getDwebTransfer())!.exportRecord('passphrase');
+    const exportRequest = await waitForPacket(successor, 'custody/request');
+    successor.onMessage.emit({
+      type: 'custody/effect-request', requestId: 'export:identity-read',
+      parentOperationId: exportRequest.operationId,
+      operation: 'identity/read', args: {},
+    });
+    for (let attempt = 0; attempt < 30
+      && !successor.sent.some((message) => message.requestId === 'export:identity-read');
+    attempt += 1) await nextTask();
+    const exportRead = successor.sent.find(
+      (message) => message.requestId === 'export:identity-read',
+    );
+    expect(exportRead).toMatchObject({
+      requestId: 'export:identity-read',
+      result: { ok: true, value: incoming.material },
+    });
+    successor.onMessage.emit({
+      type: 'custody/response', requestId: exportRequest.requestId,
+      operationId: exportRequest.operationId, authorityId: 'authority:replacement-host',
+      ok: true, result: { identityRecord: { did: incoming.did } },
+    });
+    await expect(exported).resolves.toEqual({ identityRecord: { did: incoming.did } });
   });
 
   test('refuses disabled or malformed custody', async () => {

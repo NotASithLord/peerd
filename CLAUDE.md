@@ -295,10 +295,12 @@ exists today:
    runs the Notebook's sealed worker in the offscreen document with no tab
    (`offscreen/job-runner.js`) — the agent's own quick compute, same
    substrate as a Notebook, different host.
-5. **`peerd-runtime`** — agent loop, tool dispatcher, and the tool
-   inventory. Registered tools are assembled from `BUILTIN_TOOLS`, clock,
-   web tools, and service-worker wiring; do not pin the live counts in
-   prose. Exposure is decided in `tools/exposure.js`: the low-level
+5. **`peerd-runtime`** — agent loop, tool dispatcher, and the controller-owned
+   tool inventory. The sealed semantic catalog in `tools/metadata/catalog.js`
+   is the model-facing source of truth; `controller-tool-ownership.js` maps
+   that same inventory to finite authority families. The service worker sees
+   only compact projections and exact operations, never a tool registry.
+   Exposure is decided in `tools/exposure.js`: the low-level
    DOM/page tools are actor-only, never on the main agent — the
    orchestrator delegates plain-language goals to per-environment
    actors (web / webvm / notebook / app) via `message_actor`

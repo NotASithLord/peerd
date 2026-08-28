@@ -21,6 +21,9 @@ import {
 import {
   projectControllerToolSurface,
 } from '../../../extension/peerd-runtime/controller-tool-projection.js';
+import {
+  CONTROLLER_OWNED_TOOL_NAMES,
+} from '../../../extension/peerd-runtime/controller-tool-ownership.js';
 import { ORCHESTRATOR_OPERATION_GRANT } from '../../../extension/shared/controller-kernel-quota.js';
 import {
   APP_PROGRAM_EXACT_OPERATIONS,
@@ -29,39 +32,6 @@ import {
 import {
   CONTROLLER_LOCAL_TOOL_NAMES,
 } from '../../../extension/peerd-runtime/controller-local-tools.js';
-import { CONTROLLER_ACTOR_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-actor-tools.js';
-import { CONTROLLER_POD_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-pod-tools.js';
-import { CONTROLLER_REPOSITORY_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-repository-tools.js';
-import { CONTROLLER_VM_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-vm-tools.js';
-import { CONTROLLER_NOTEBOOK_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-notebook-tools.js';
-import { CONTROLLER_APP_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-app-tools.js';
-import { CONTROLLER_PERSISTENCE_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-persistence-tools.js';
-import { CONTROLLER_PAGE_TOOL_NAMES } from '../../../extension/peerd-runtime/controller-page-tools.js';
-
-const { BUILTIN_TOOLS } = await import(
-  '../../../extension/peerd-runtime/tools/defs/index.js'
-);
-const { WEB_TOOLS } = await import('../../../extension/peerd-runtime/tools/web/index.js');
-const { loadSkillTool } = await import(
-  '../../../extension/peerd-runtime/skills/load-skill-tool.js'
-);
-
-const ALL_TOOLS = [...BUILTIN_TOOLS, ...WEB_TOOLS, loadSkillTool];
-const EXECUTION_TOOL_NAMES = new Set(ALL_TOOLS.map((tool) => tool.name));
-const CONTROLLER_ONLY_TOOL_NAMES = new Set(
-  [
-    ...CONTROLLER_LOCAL_TOOL_NAMES,
-    ...CONTROLLER_ACTOR_TOOL_NAMES,
-    ...CONTROLLER_POD_TOOL_NAMES,
-    ...CONTROLLER_REPOSITORY_TOOL_NAMES,
-    ...CONTROLLER_VM_TOOL_NAMES,
-    ...CONTROLLER_NOTEBOOK_TOOL_NAMES,
-    ...CONTROLLER_APP_TOOL_NAMES,
-    ...CONTROLLER_PERSISTENCE_TOOL_NAMES,
-    ...CONTROLLER_PAGE_TOOL_NAMES,
-  ]
-    .filter((name) => !EXECUTION_TOOL_NAMES.has(name)),
-);
 const METADATA_KEYS = new Set([
   'name', 'primitive', 'description', 'schema', 'sideEffect',
   'dispatch', 'retryClass', 'dweb', 'originRule',
@@ -83,11 +53,9 @@ const sourceFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes:
     : entry.name.endsWith('.js') ? [join(dir, entry.name)] : []);
 
 describe('tool metadata authority', () => {
-  test('covers the exact controller catalog in production order', () => {
-    expect(TOOL_METADATA_ORDER.filter((name) => !CONTROLLER_ONLY_TOOL_NAMES.has(name)))
-      .toEqual(ALL_TOOLS.map((tool) => tool.name));
-    expect(new Set([...EXECUTION_TOOL_NAMES, ...CONTROLLER_ONLY_TOOL_NAMES]))
-      .toEqual(new Set(TOOL_METADATA_ORDER));
+  test('covers the exact controller-owned catalog', () => {
+    expect(new Set(CONTROLLER_OWNED_TOOL_NAMES)).toEqual(new Set(TOOL_METADATA_ORDER));
+    expect(new Set(CONTROLLER_OWNED_TOOL_NAMES).size).toBe(CONTROLLER_OWNED_TOOL_NAMES.length);
     expect(new Set(TOOL_METADATA_ORDER).size).toBe(TOOL_METADATA_ORDER.length);
     expect(listToolMetadata().map((metadata) => metadata.name)).toEqual([...TOOL_METADATA_ORDER]);
   });
@@ -107,9 +75,10 @@ describe('tool metadata authority', () => {
     }
   });
 
-  test('execution tools compose only compact authority policy and origins', () => {
-    for (const tool of ALL_TOOLS) {
-      const policy = getToolAuthority(tool.name);
+  test('controller tools compose only compact authority policy and origins', () => {
+    for (const name of CONTROLLER_OWNED_TOOL_NAMES) {
+      const tool = composeTool(name, { execute: async () => ({ ok: true }) });
+      const policy = getToolAuthority(name);
       const { originRule, ...descriptor } = policy;
       const actual = Object.fromEntries(Object.entries(tool).filter(
         ([key]) => key !== 'origins' && key !== 'execute',
@@ -132,15 +101,14 @@ describe('tool metadata authority', () => {
     const { hydrateToolDescriptors } = await import(
       '../../../extension/peerd-runtime/semantic.js'
     );
-    const projection = projectToolAuthority(toToolDescriptor(
-      getToolAuthority(ALL_TOOLS[0].name),
-    ));
+    const name = CONTROLLER_OWNED_TOOL_NAMES[0];
+    const projection = projectToolAuthority(toToolDescriptor(getToolAuthority(name)));
     expect(Object.keys(projection)).not.toContain('description');
     expect(Object.keys(projection)).not.toContain('schema');
     expect(hydrateToolDescriptors([projection])[0]).toMatchObject({
-      name: ALL_TOOLS[0].name,
-      description: getToolMetadata(ALL_TOOLS[0].name).description,
-      schema: getToolMetadata(ALL_TOOLS[0].name).schema,
+      name,
+      description: getToolMetadata(name).description,
+      schema: getToolMetadata(name).schema,
     });
     expect(() => hydrateToolDescriptors([{ ...projection, sideEffect: 'write' }]))
       .toThrow('tool authority mismatch');
@@ -266,6 +234,28 @@ describe('controller tool projection', () => {
     expect(isolationDisabled.operations).toEqual(['turn.introspection.actor-roster']);
   });
 
+  test('projects one exact spawned-child surface without actor-only or goal-only tools', () => {
+    const base = {
+      surface: 'spawn',
+      toolManifest: {
+        allow: ['schedule_list', 'actor_create', 'read_page', 'complete_goal'],
+      },
+      toolNames: ['schedule_list', 'actor_create', 'read_page', 'complete_goal'],
+      runtimeCapabilities: null,
+    };
+    const ordinary: any = projectControllerToolSurface({ ...base, allowRecursion: false });
+    expect(ordinary.ok).toBe(true);
+    expect(ordinary.tools.map((tool: any) => tool.name)).toEqual(['schedule_list']);
+    expect(ordinary.operations).toEqual(['turn.schedule.read-routines']);
+
+    const recursive: any = projectControllerToolSurface({ ...base, allowRecursion: true });
+    expect(new Set(recursive.tools.map((tool: any) => tool.name)))
+      .toEqual(new Set(['schedule_list', 'actor_create']));
+    expect(new Set(recursive.operations)).toEqual(new Set([
+      'turn.schedule.read-routines', 'turn.actor.spawn-sync', 'turn.actor.spawn-async',
+    ]));
+  });
+
   test('page-program projection and privileged parent admission share one exact operation set', () => {
     const surface: any = projectControllerToolSurface({ surface: 'page-program' });
     expect(surface.ok).toBe(true);
@@ -317,6 +307,6 @@ describe('tool metadata anti-drift', () => {
     // Actor definitions remain real controller-owned implementations and must
     // stay covered here even though the SW registry no longer imports them.
     expect(new Set([...composed, ...CONTROLLER_LOCAL_TOOL_NAMES]))
-      .toEqual(new Set(TOOL_METADATA_ORDER));
+      .toEqual(new Set(CONTROLLER_OWNED_TOOL_NAMES));
   });
 });

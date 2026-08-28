@@ -13,7 +13,7 @@
 //
 //   persona      — active: Plan/Act enforcement via decideAction. Plan
 //                  mode blocks every non-read action outright; Act mode
-//                  passes here and defers auto-vs-ask to the dispatcher.
+//                  records whether exact SW authority must ask.
 //   exposure     — active: enforces the main-agent tool boundary at
 //                  dispatch. ctx.exposure === 'main' is refused any
 //                  actor-only (main-hidden) tool even if the model emits its
@@ -21,11 +21,10 @@
 //                  the instance-mutating set is actor-only, and an actor
 //                  is positively scoped to its own kind + pinned to its own
 //                  instance.
-//   origin       — active (denylist)
-//   confirmation — active as a lineage placeholder: computes the policy's
-//                  PLANNED verdict; the dispatcher resolves the real
-//                  async confirm after the chain and overwrites it.
-//   egress       — no-op IN THE CHAIN. The real egress enforcement lives
+//   origin: active (denylist)
+//   confirmation: active as a lineage placeholder; computes the planned
+//                  verdict; exact SW authority owns the real async prompt.
+//   egress: no-op IN THE CHAIN. The real egress enforcement lives
 //                  in the default egress-allowlist pre-tool-use hook
 //                  (hooks/defaults/egress-allowlist.js) plus safeFetch at
 //                  the actual fetch boundary; this gate stays so the
@@ -103,9 +102,9 @@ export const authWaitGate = (_tool, _args, ctx) => ctx.authWaitingForUser === tr
  * SYNCHRONOUS half of the permission policy: PLAN mode blocks every
  * non-read action outright (allowed:false). The CONFIRMATION half (auto
  * vs ask, by the confirmActions toggle) can't run here because it needs
- * an async user round-trip — the
- * dispatcher does it after the gate chain, also via decideAction, so the
- * single policy function is the only place the rules live.
+ * an async user round-trip. Exact service-worker authority performs that
+ * prompt after binding the final arguments and target; this pure gate only
+ * projects the decision into semantic lineage.
  *
  * ctx.permission = { mode: 'plan'|'act', confirmActions: boolean }.
  * Missing/garbage → safe defaults (plan + confirm ON), so a legacy
@@ -121,8 +120,8 @@ const personaGate = (tool, _args, ctx) => {
   if (!verdict.allowed) {
     return { allowed: false, reason: verdict.reason };
   }
-  // Allowed here; whether it still needs confirmation is decided in the
-  // dispatcher's async step. Surface the mode + action class so the
+  // Allowed here; exact authority decides whether it still needs confirmation.
+  // Surface the mode + action class so the
   // lineage UI shows e.g. "act/auto · external".
   const modeLabel = mode === PERMISSION_MODES.ACT
     ? (confirmActions === false ? 'act/auto' : 'act/confirm')
@@ -167,8 +166,8 @@ export const actorTierGate = (tool, args, ctx) => {
   // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
   // refuses HERE, at the gate, not just at execute-time. PR #119: surface-aware —
   // a code-surface web actor's set is {snapshot, read_page, page_code}, so a
-  // discrete click/type/navigate FROM THE MODEL refuses here too (the fixed page-program
-  // route's inner dispatch builds a tools-surface ctx, which stays allowed).
+  // discrete click/type/navigate FROM THE MODEL refuses here too (the nested
+  // page-program execution builds a tools-surface ctx, which stays allowed).
   if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing, ctx.actorSurface)) {
     const scope = ctx.backing === 'api' ? 'API integration (no tab or DOM)' : `${ctx.actorType ?? 'unknown'}`;
     return { allowed: false, reason: `'${tool.name}' is not in this actor's (${scope}) toolset` };
@@ -229,7 +228,7 @@ export const actorTierGate = (tool, args, ctx) => {
 };
 
 /**
- * Exposure — enforces the main-agent semantic surface at DISPATCH, not just
+ * Exposure: enforces the main-agent semantic surface at DISPATCH, not just
  * in the advertised descriptor list. The low-level DOM/page tools
  * (snapshot, click, type, page_code, …) are hidden from the main agent and
  * belong to the web actor. mainAgentDescriptors() keeps them out of the
@@ -317,12 +316,10 @@ const originGate = (tool, args, ctx) => {
 };
 
 /**
- * Confirmation — a placeholder entry in the lineage. The actual confirm
- * decision (auto vs ask) is async, so the dispatcher resolves it AFTER
- * the gate chain and overwrites this entry's allowed/reason with the real
- * outcome (approved / rejected / auto-allowed). Here we just compute the
- * policy's PLANNED verdict from (mode, confirmActions, tool) so that even
- * before the round-trip the lineage shows whether a prompt is coming.
+ * Confirmation is a lineage placeholder. The semantic dispatcher records
+ * that exact service-worker authority will bind the final arguments and target,
+ * then decide and audit any prompt. Computing the planned verdict here keeps
+ * the gate pure; it never grants confirmation authority to the semantic heap.
  *
  * @param {Tool} tool @param {any} _args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'>}

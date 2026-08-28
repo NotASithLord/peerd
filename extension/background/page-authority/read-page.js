@@ -1,17 +1,17 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// read_page — read the DOM of the target tab.
+// read_page: read the DOM of the target tab.
 //
 // Returns a structured snapshot wrapped in <untrusted_web_content>:
 //   - title, url
 //   - visible text (computed-style-filtered, capped at ~8KB so a
 //     giant page doesn't blow the context window)
-//   - interactables: inputs, buttons, links — each with a CSS selector
+//   - interactables: inputs, buttons, links: each with a CSS selector
 //     the agent can pass back to click/type
 //
 // The injected function runs in the page's JS world. It cannot close
-// over any module-scope variable from this file — chrome.scripting
+// over any module-scope variable from this file: chrome.scripting
 // serializes the function body and runs it from scratch.
 
 import {
@@ -26,7 +26,7 @@ import {
   wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
-// Content mode shares fetch_url's body budget — one read costs like one fetch.
+// Content mode shares fetch_url's body budget: one read costs like one fetch.
 const CONTENT_BODY_CHARS = 16_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -40,12 +40,12 @@ export const readPageTool = definePageAuthorityHandler({
     // narrow it to the typed API surface for the executeScript call.
     const scripting = /** @type {typeof chrome.scripting} */ (ctx.scripting);
 
-    // mode:'content' — the RENDERED page's readable core as markdown. Grabs the
+    // mode:'content': the RENDERED page's readable core as markdown. Grabs the
     // live DOM's outerHTML (post-JS, unlike fetch_url which sees served bytes)
     // and routes it through the SAME offscreen Readability+Turndown extractor
     // and the SAME spill-and-page machinery fetch_url uses. FAIL-OPEN: a
     // non-readerable page, a missing extractor (Firefox), or an extraction
-    // error all fall through to the default snapshot below — content mode is
+    // error all fall through to the default snapshot below: content mode is
     // an optimization, never a gate on reading the page.
     if (args?.mode === 'content') {
       const webClient = /** @type {{ extractMarkdown?: (s: { html: string, url?: string }) => Promise<{ readerable: boolean, markdown?: string, title?: string | null }> } | undefined} */ (
@@ -56,8 +56,8 @@ export const readPageTool = definePageAuthorityHandler({
           if (grabbed?.html) {
             // CDR (dom/cdr.js) on the way in AND on the way out. In: the grabbed
             // DOM is page markup, so the MARKUP sweep (comments too) applies.
-            // Out: extraction PARSES that markup, decoding `&#8203;` — plain
-            // ASCII the first sweep correctly left alone — into a literal
+            // Out: extraction PARSES that markup, decoding `&#8203;`: plain
+            // ASCII the first sweep correctly left alone, into a literal
             // zero-width byte, so the second pass is what closes the entity
             // channel. Both run BEFORE any windowing or caching below, because
             // the paging footer reports character offsets into this string and
@@ -70,7 +70,7 @@ export const readPageTool = definePageAuthorityHandler({
                 /** @type {any} */ (ctx).resultStore);
               // Query-relevant excerpt when the caller named what it's after
               // (markdown is always prose here); else the head+tail window. Same
-              // spill contract — full markdown stored + pageable either way.
+              // spill contract: full markdown stored + pageable either way.
               const query = typeof args.query === 'string' ? args.query.trim() : '';
               const excerpt = query ? excerptRelevant(markdown, query, CONTENT_BODY_CHARS) : null;
               const win = windowText(markdown, CONTENT_BODY_CHARS);
@@ -89,7 +89,7 @@ export const readPageTool = definePageAuthorityHandler({
                   footer = excerpt
                     ? excerptFooter({ key: cacheKey, total: excerpt.total, passagesShown: excerpt.passagesShown, passagesTotal: excerpt.passagesTotal, query })
                     : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
-                } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
+                } catch { /* spill failed: the window/excerpt (with its elision markers) still ships */ }
               } else if (truncated && !resultStore) {
                 text = markdown.slice(0, CONTENT_BODY_CHARS);
               }
@@ -99,7 +99,7 @@ export const readPageTool = definePageAuthorityHandler({
                   mode: 'content', url: grabbed.url || tab.url,
                   ...(ex.title ? { title: ex.title } : {}),
                   format: 'markdown', truncated, body: text,
-                  // the RAW DOM was clipped at 2MB before extraction — the
+                  // the RAW DOM was clipped at 2MB before extraction: the
                   // readable core may be missing its tail (distinct from
                   // `truncated`, which only means the markdown was windowed).
                   ...(grabbed.htmlTruncated ? { htmlTruncated: true } : {}),
@@ -181,7 +181,7 @@ const formatPageBody = (snap) => {
 };
 
 // ───────────────────────────────────────────────────────────────────────
-// Injected functions — run in the page world. Self-contained.
+// Injected functions: run in the page world. Self-contained.
 // ───────────────────────────────────────────────────────────────────────
 // content mode's grabber: the rendered DOM, serialized. Capped so a pathological
 // page doesn't blow the executeScript result channel (the offscreen extractor
@@ -197,7 +197,7 @@ function readOuterHtmlInjected() {
   return {
     html: clipped ? raw.slice(0, MAX) : raw,
     // why: flag the clip so the caller never reports a complete read when the
-    // raw DOM's tail was dropped here — before the extractor ever saw it, so no
+    // raw DOM's tail was dropped here: before the extractor ever saw it, so no
     // downstream truncation signal would otherwise fire.
     htmlTruncated: clipped,
     url: location.href,
@@ -210,7 +210,7 @@ function readPageInjected() {
   // in the page's classic-script world; the calling module's strict
   // mode doesn't carry across. Opt in here.
   'use strict';
-  const TEXT_CAP = 4000;          // ≈1k tokens — keeps rate-limit pressure down
+  const TEXT_CAP = 4000;          // ≈1k tokens: keeps rate-limit pressure down
   const INTERACTABLE_CAP = 100;   // selectors are more useful per byte than raw text
   const SKIP_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'META', 'LINK', 'HEAD', 'SVG', 'IFRAME',
@@ -246,7 +246,7 @@ function readPageInjected() {
     if (aria) return aria.trim();
     if (el.id) {
       const lbl = document.querySelector(`label[for="${cssEscape(el.id)}"]`);
-      // why: erased cast — textContent is string|null; .trim() on null throws
+      // why: erased cast: textContent is string|null; .trim() on null throws
       // at runtime exactly as before, the cast only quiets the static check.
       if (lbl) return /** @type {string} */ (lbl.textContent).trim();
     }
@@ -266,7 +266,7 @@ function readPageInjected() {
     if (textLen >= TEXT_CAP && interactables.length >= INTERACTABLE_CAP) return;
     if (node.nodeType === Node.COMMENT_NODE) return;
     if (node.nodeType === Node.TEXT_NODE) {
-      // why: erased cast — a TEXT_NODE always has string textContent; the
+      // why: erased cast: a TEXT_NODE always has string textContent; the
       // nodeType guard above guarantees it, but TS types Node.textContent as
       // string|null.
       const t = /** @type {string} */ (node.textContent).replace(/\s+/g, ' ').trim();
@@ -289,7 +289,7 @@ function readPageInjected() {
           selector: selectorFor(el),
           label: labelOf(el),
           placeholder: el.getAttribute('placeholder') || '',
-          // why: erased cast — the tag check above already constrained el to a
+          // why: erased cast: the tag check above already constrained el to a
           // value-bearing form control; HTMLElement has no `value`.
           value: /** @type {HTMLInputElement} */ (el).value || '',
         });

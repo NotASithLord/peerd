@@ -30,7 +30,7 @@ export const GIT_FIXTURE_EXPECTED_REQUESTS = Object.freeze({
 
 // Static test-only leaf key. It authenticates no person or service; its sole
 // purpose is deterministic TLS identity for the loopback acceptance fixture.
-const TLS_CERT = `-----BEGIN CERTIFICATE-----
+export const GIT_FIXTURE_TLS_CERT = `-----BEGIN CERTIFICATE-----
 MIIDRjCCAi6gAwIBAgIUIZnyfY/MyVJ6XLkhBAQFQeffwdUwDQYJKoZIhvcNAQEL
 BQAwITEfMB0GA1UEAwwWZ2l0LWZpeHR1cmUucGVlcmQudGVzdDAeFw0yNjA4MjEw
 NzEyMDBaFw0zNjA4MTgwNzEyMDBaMCExHzAdBgNVBAMMFmdpdC1maXh0dXJlLnBl
@@ -50,7 +50,7 @@ dQAWtbhox7JMw/yLr0BHnN125U4PW/R4bhol/5rcw5aQyRVzSCEJYioM65HfFPXy
 6qreQNqnmf/aJLWOvfdydjizikjrCsA/zVNpjqJOY4kX9q5vVhxwKsrCrSzB0l79
 jUmHoCeRcFcDD4bUmqgbzOuuI55FnVI/BW4=
 -----END CERTIFICATE-----`;
-const TLS_KEY = `-----BEGIN PRIVATE KEY-----
+export const GIT_FIXTURE_TLS_KEY = `-----BEGIN PRIVATE KEY-----
 MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQCz/tZfwVj6GjDx
 85v6vxNFuHBzO8t2O4qWi9HQUZNLtggZ6kYByZT15fZOsgdsDIDaR2Om34WOArHN
 4Z1qwjrvzSdniNYqrazSQpdxchCtJClXF8fjiJCCMqYxtwiGK/nQVBlKoFVaW+ld
@@ -78,6 +78,11 @@ gT+kiH2OlFIWsOcFsdwaD28/i+hofPLlczTOb86BNwKBgQDdAYxyysrmAvQ+9NyP
 Hytbn4ly2n86hWFjWvExsVVZ2jrlj5Q7Ijd1ZZoYAj6UWa1QywTc0UNJ+KrVYq5b
 DeyWISpBmyLfSFO7lzUR0IO+pg==
 -----END PRIVATE KEY-----`;
+
+export const GIT_FIXTURE_SPKI_SHA256_BASE64 = createHash('sha256')
+  .update(new X509Certificate(GIT_FIXTURE_TLS_CERT)
+    .publicKey.export({ type: 'spki', format: 'der' }))
+  .digest('base64');
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const HEX_256 = /^[a-f0-9]{64}$/;
@@ -276,7 +281,9 @@ export const startGitSmartHttpFixture = async () => {
     await run('git', ['config', 'http.receivepack', 'true'], { cwd: repositoryPath });
     const gitVersion = (await run('git', ['--version'])).toString('utf8').trim();
 
-    httpsServer = createHttpsServer({ key: TLS_KEY, cert: TLS_CERT }, async (request, response) => {
+    httpsServer = createHttpsServer({
+      key: GIT_FIXTURE_TLS_KEY, cert: GIT_FIXTURE_TLS_CERT,
+    }, async (request, response) => {
       const chunks = [];
       let bytes = 0;
       request.on('data', (chunk) => {
@@ -367,11 +374,8 @@ export const startGitSmartHttpFixture = async () => {
     const proxyAddress = proxyServer.address();
     if (!proxyAddress || typeof proxyAddress === 'string') throw new Error('fixture proxy address unavailable');
 
-    const certificate = new X509Certificate(TLS_CERT);
+    const certificate = new X509Certificate(GIT_FIXTURE_TLS_CERT);
     const certificateSha256 = sha256(certificate.raw);
-    const spkiSha256Base64 = createHash('sha256')
-      .update(certificate.publicKey.export({ type: 'spki', format: 'der' }))
-      .digest('base64');
     const binding = buildGitFixtureBinding({
       gitVersion,
       certificateSha256,
@@ -388,7 +392,7 @@ export const startGitSmartHttpFixture = async () => {
       remote: GIT_FIXTURE_REMOTE,
       proxyServer: Object.freeze({
         url: `http://127.0.0.1:${proxyAddress.port}`,
-        certificateSpkiSha256: spkiSha256Base64,
+        certificateSpkiSha256: GIT_FIXTURE_SPKI_SHA256_BASE64,
       }),
       // Deliberately separate from every serializable evidence method.
       credential: () => credential,

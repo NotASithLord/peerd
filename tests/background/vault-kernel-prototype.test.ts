@@ -101,6 +101,11 @@ describe('minimal vault authority-kernel prototype', () => {
   });
 
   test('unlocked projection remains non-actionable until a controller commits', () => {
+    const runtimeCapabilities = {
+      version: 1,
+      pdfOcr: { status: 'available', host: 'offscreen-document' },
+      moonshineVoiceHost: { status: 'available', host: 'offscreen-document' },
+    };
     const state = buildVaultKernelState({
       kernel: KERNEL,
       status: { initialized: true, prfEnrolled: true, hasRecovery: false },
@@ -111,10 +116,12 @@ describe('minimal vault authority-kernel prototype', () => {
       composer: { provider: 'anthropic', model: 'claude-sonnet-4-6', keyless: false,
         credentialReady: false, localReady: true, canSend: false, reason: 'missing-key' },
       profile: { id: 'default', peerName: 'peerd', onboardingComplete: false },
+      runtimeCapabilities,
     });
     expect(state.vault.locked).toBe(false);
     expect(state.vault.unlockedAt).toBe(123);
     expect(state.composer).toMatchObject({ canSend: false, reason: 'missing-key' });
+    expect(state.capabilities).toMatchObject(runtimeCapabilities);
     expect(state.projection.semanticController).toBe('required');
   });
 
@@ -144,8 +151,10 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(source).toContain('attachKernelFrontDoor');
     expect(source).toContain('createKernelPortRouter');
     expect(source).not.toContain('createKernelLocalRoutes');
-    expect(source).toContain("import('./kernel-demand-plane.js')");
-    expect(source).toContain("import('./kernel-production-runtime.js')");
+    expect(source).not.toContain("import('./kernel-demand-plane.js')");
+    expect(source).not.toContain("import('./kernel-production-runtime.js')");
+    expect(source).toContain('runtimeModules.demandPlane()');
+    expect(source).toContain('runtimeModules.productionRuntime');
     expect(source).not.toContain("import('./kernel-provider-key-route.js')");
     expect(source).not.toContain("import('./kernel-credential-routes.js')");
     expect(source).not.toContain('createKernelAppFileReader');
@@ -185,7 +194,7 @@ describe('minimal vault authority-kernel prototype', () => {
       join(EXTENSION_DIR, 'background/vault-kernel.js'),
     )].map((path) => path.slice(EXTENSION_DIR.length + 1));
     expect(graph).not.toContain('peerd-runtime/tools/prompt-wrap.js');
-    expect(graph).toContain('background/context-snapshots.js');
+    expect(graph).toContain('shared/model-context-snapshot.js');
     expect(graph).not.toContain('background/routes/contacts.js');
     expect(graph).not.toContain('peerd-runtime/contacts/aggregate.js');
     expect(graph).not.toContain('peerd-runtime/contacts/store.js');

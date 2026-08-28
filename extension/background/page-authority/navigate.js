@@ -1,7 +1,7 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// navigate — change the URL of the target tab and wait for load.
+// navigate: change the URL of the target tab and wait for load.
 //
 // V1 semantics:
 //   - Default target is the active tab; pass tabId for a specific one.
@@ -23,10 +23,12 @@ import {
   resetToVerifiedBlank,
   resolveTargetTab,
   sensitiveSiteBrowserTargetVerdict,
+  unverifiedBrowserTargetVerdict,
   updateAndObserveCommittedNavigation,
 } from '/peerd-runtime/browser-authority.js';
 
 const NAV_TIMEOUT_MS = 30_000;
+const DOCUMENT_READY_WAIT_MS = 2_000;
 
 /**
  * A browser tab as surfaced by browser.tabs.get.
@@ -66,7 +68,7 @@ export const navigateTool = definePageAuthorityHandler({
 
     const c = /** @type {any} */ (ctx);
     let tab = await resolveTargetTab(args, ctx, { allowRestrictedSource: true });
-    // DESIGN-17 lazy tab adoption: the web ACTOR (kind:'web') may own 0 tabs — a
+    // DESIGN-17 lazy tab adoption: the web ACTOR (kind:'web') may own 0 tabs: a
     // pure-fetch task never rendered. navigate IS the render decision made concrete:
     // when it owns no tab, open + adopt one now (SW-side ctx.adoptWebTab). Only the web
     // kind gets adoptWebTab; every other no-tab path still fails closed.
@@ -77,11 +79,11 @@ export const navigateTool = definePageAuthorityHandler({
     // local ref (adoptedPin === the shared object) to re-stamp the landed origin below.
     /** @type {{ id: number, windowId?: number, url: string, origin: string } | null} */
     let adoptedPin = null;
-    // issue 251 — ADOPT ONLY FROM THE GENUINE 0-TAB STATE. resolveTargetTab
+    // issue 251: ADOPT ONLY FROM THE GENUINE 0-TAB STATE. resolveTargetTab
     // returns null for two very different reasons: "this actor owns no tab yet"
     // and "the origin lock (or the denylist) REFUSED the tab it owns". Adopting
     // on the second turns a refusal into a brand-new tab the actor may drive
-    // anywhere — and because adoption re-pins ctx.activeTab, which IS the
+    // anywhere, and because adoption re-pins ctx.activeTab, which IS the
     // session-credential scope, every 'end' verdict would buy another
     // credentialed tab. `c.activeTab?.id` is the discriminator: an actor in the
     // real 0-tab state has no pin at all.
@@ -153,10 +155,10 @@ export const navigateTool = definePageAuthorityHandler({
     // sees the live origin, not the turn-start one (matters most for a freshly-adopted
     // web-actor tab, which started blank). adoptedPin IS the shared object (set via
     // repinActiveTab); for an already-owned tab, ctx.activeTab is the same object the
-    // shallow copy shares — both mutate in place. resolveTargetTab's in-execute denylist
+    // shallow copy shares: both mutate in place. resolveTargetTab's in-execute denylist
     // re-check is still the second wall on the landing.
     //
-    // issue 251 — THE PIN TRACKS REALITY, ALWAYS. A draft of this PR froze it at
+    // issue 251: THE PIN TRACKS REALITY, ALWAYS. A draft of this PR froze it at
     // the actor's owned origin on an off-origin landing, reasoning that the
     // re-stamp is what launders an open redirect. That was wrong twice over, and
     // an adversarial review caught it:
@@ -166,7 +168,7 @@ export const navigateTool = definePageAuthorityHandler({
     //      and peerd-egress reads that getter LIVE on every fetch to decide
     //      `credentials:'include'`. Freezing it at the owned origin leaves a
     //      hijacked actor sitting on the attacker's page still holding
-    //      CREDENTIALED reach into the origin it left — strictly worse than the
+    //      CREDENTIALED reach into the origin it left: strictly worse than the
     //      laundering it was meant to stop.
     //   2. It is also what the confirm prompt, the origin gate, and the audit
     //      log report. A frozen pin tells the user "on github.com" while the
@@ -176,7 +178,7 @@ export const navigateTool = definePageAuthorityHandler({
     // The origin LOCK does not need this and never did: what an actor OWNS is
     // separate state (actor/origin-lock.js), and decideLanding compares the live
     // tab URL against that, never against the pin. Reality here, ownership
-    // there, and the two are allowed to disagree — the disagreement is exactly
+    // there, and the two are allowed to disagree: the disagreement is exactly
     // what the lock detects on the next tool call.
     if (pin && pin.id === tabId && finalTab?.url) {
       pin.url = finalTab.url;
@@ -277,14 +279,14 @@ export const navigateTool = definePageAuthorityHandler({
         outcomeKind: 'host-lost',
       };
     }
-    // issue 251 — JUDGE THE LANDING WE JUST CAUSED. resolveTargetTab judged the
+    // issue 251: JUDGE THE LANDING WE JUST CAUSED. resolveTargetTab judged the
     // tab's PRE-navigation URL; this is the only place in the tree that sees a
     // landing at the moment it is created, and it is exactly case (2) of the
-    // landing rule's own enumeration — "that navigation 302s somewhere else, no
+    // landing rule's own enumeration: "that navigation 302s somewhere else, no
     // tool call for the hop". Without this the lock is structurally ONE TOOL
     // CALL LATE: the actor lands on a credentialed origin, the pin (and with it
     // the session-credential scope) follows, and the refusal only fires if the
-    // actor happens to make another DOM tool call — which it need not, because
+    // actor happens to make another DOM tool call, which it need not, because
     // fetch_url and the site_client_* tools never pass through resolveTargetTab.
     //
     // Ordering: AFTER the re-stamp, so the pin tells the truth in the audit and
@@ -305,7 +307,36 @@ export const navigateTool = definePageAuthorityHandler({
         return { ok: false, error: `origin_lock: ${verdict.reason ?? 'this task was stopped'}` };
       }
     }
-    // A freshly-adopted web-actor tab is a peerd-opened web page, same as open_tab —
+    // tabs.onUpdated(status:'complete') can precede the renderer becoming an
+    // injectable, browser-identified document. Do not tell page programs that
+    // goto completed until the exact-document fence their next operation needs
+    // can actually be minted.
+    const readyDeadline = Date.now() + Math.min(
+      navigationTimeoutMs, DOCUMENT_READY_WAIT_MS,
+    );
+    let verifiedTab = null;
+    do {
+      try {
+        verifiedTab = await resolveTargetTab({ tabId }, ctx);
+      } catch (cause) {
+        if (/** @type {{code?:unknown}} */ (cause)?.code !== 'browser_target_unverified') {
+          throw cause;
+        }
+      }
+      if (verifiedTab?.peerdDocumentId
+          && Number.isFinite(verifiedTab.peerdDocumentTimeOrigin)) break;
+      verifiedTab = null;
+      if (Date.now() < readyDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } while (Date.now() < readyDeadline);
+    if (!verifiedTab) {
+      return browserTargetRefusalResult(unverifiedBrowserTargetVerdict(), {
+        effectCompleted: true,
+      });
+    }
+    finalTab = verifiedTab;
+    // A freshly-adopted web-actor tab is a peerd-opened web page, same as open_tab :
     // give it the agent-tab card (the landed URL as its label, not a blank "a tab") and
     // schedule the "pull peerd in" orientation hint, matching the open_tab path.
     if (adoptedPin && finalTab?.url) {

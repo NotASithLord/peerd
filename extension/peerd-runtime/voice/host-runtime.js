@@ -134,7 +134,7 @@ export const createVoiceHostRuntime = ({
         if (!operationCurrent(owner, current) || transcriber !== active) return;
         pushError({
           name: 'VoiceNoSpeechError',
-          message: 'Heard nothing — mic released. Click the mic to try again.',
+          message: 'Heard nothing: mic released. Click the mic to try again.',
           targetId: ownerTargetId,
         });
       });

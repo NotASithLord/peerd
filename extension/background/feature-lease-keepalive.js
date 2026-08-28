@@ -17,6 +17,8 @@ const safeHeartbeatId = (/** @type {unknown} */ value) => typeof value === 'stri
  * @param {any} deps.port
  * @param {{snapshot:()=>any,handleHostLoss:(hostEpoch:string)=>Promise<any>}} deps.featureLeases
  * @param {import('../shared/kernel-identity.js').KernelIdentity} deps.identity
+ * @param {(hostEpoch:string)=>void} [deps.onAuthenticated]
+ * @param {(hostEpoch:string)=>Promise<void>|void} [deps.onLost]
  * @param {(recovery:any)=>Promise<void>|void} [deps.onRecovered]
  * @param {(cause:unknown)=>void} [deps.onError]
  */
@@ -24,6 +26,8 @@ export const attachFeatureLeaseKeepalive = ({
   port,
   featureLeases,
   identity,
+  onAuthenticated = () => {},
+  onLost = () => {},
   onRecovered = () => {},
   onError = () => {},
 }) => {
@@ -63,6 +67,7 @@ export const attachFeatureLeaseKeepalive = ({
     });
     if (!current) return;
     authenticatedHostEpoch = message.hostEpoch;
+    onAuthenticated(message.hostEpoch);
     try {
       port.postMessage({
         type: 'feature-lease/heartbeat-ack',
@@ -79,6 +84,11 @@ export const attachFeatureLeaseKeepalive = ({
     const lostHostEpoch = authenticatedHostEpoch;
     authenticatedHostEpoch = null;
     if (!lostHostEpoch) return;
+    // why: MessagePort `close` is not a reliable renderer-loss signal in
+    // Chrome. The authenticated keepalive is, so retire in-flight clients
+    // immediately instead of leaving a committed turn pending until timeout.
+    try { void Promise.resolve(onLost(lostHostEpoch)).catch(onError); }
+    catch (cause) { onError(cause); }
     void featureLeases.handleHostLoss(lostHostEpoch)
       .then(onRecovered)
       .catch(onError);

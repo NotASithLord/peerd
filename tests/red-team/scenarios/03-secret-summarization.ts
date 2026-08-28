@@ -16,9 +16,11 @@
 import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
-import { restrictCtxCapabilities } from '../../../extension/peerd-runtime/actor/spawn.js';
-import { makeActorSummaryFence } from '../../../extension/peerd-runtime/actor/actor-worker-core.js';
+import {
+  makeActorSummaryFence, makeInMemorySessions, runActorLoop,
+} from '../../../extension/peerd-runtime/actor/actor-worker-core.js';
 import { createActorModelEgress } from '../../../extension/offscreen/actor-model-egress.js';
+import { ActorCredentialBoundaryError } from '../../../extension/peerd-runtime/errors.js';
 import { wrapUntrusted, neutralizeFence } from '../../../extension/peerd-runtime/tools/prompt-wrap.js';
 import { makeTurnAuthorityDriver } from '../../../extension/peerd-runtime/loop/turn-authority-driver.js';
 import { appSearchTool } from '../../../extension/peerd-runtime/tools/defs/app-search.js';
@@ -153,19 +155,37 @@ export const scenario: Scenario = {
         : leaked('bound actor tries to enter the privileged background loop', proof.evidence));
     }
 
-    // 2) Restricted tool context: no live provider capability survives any grant.
-    for (const grant of [['read_memory'], ['read_page', 'click', 'type'], ['script', 'read_memory', 'write_memory']]) {
-      const ctx: Record<string, unknown> = {
-        getSecret: async () => 'sk-ant-SECRET', safeFetch: async () => new Response(''),
-        spawnActor: async () => {}, memory: { get: () => {} },
-      };
-      const before = JSON.stringify(Object.keys(ctx));
-      const out = restrictCtxCapabilities(ctx, new Set(grant));
-      const stripped = !('getSecret' in out) && !('safeFetch' in out);
-      const notMutated = JSON.stringify(Object.keys(ctx)) === before;
-      probes.push(stripped && notMutated
-        ? blocked(`actor granted [${grant.join(', ')}] tries to read a secret`, 'getSecret & safeFetch stripped from the narrowed ctx; input untouched')
-        : leaked(`actor granted [${grant.join(', ')}] tries to read a secret`, `getSecret in out=${'getSecret' in out} safeFetch in out=${'safeFetch' in out}`));
+    // 2) The real isolated-worker core constructs the loop context from relays;
+    // privileged closures are not stripped after construction because they
+    // never cross the heap boundary in the first place.
+    {
+      const sessions = makeInMemorySessions({ sessionId: 'isolated-probe' });
+      let keys: string[] = [];
+      let secretDenied = false;
+      let providerNetworkDenied = false;
+      async function* runUserTurn(ctx: any) {
+        keys = Object.keys(ctx);
+        try { await ctx.getSecret(); }
+        catch (cause) { secretDenied = cause instanceof ActorCredentialBoundaryError; }
+        try { await ctx.safeFetch('https://provider.invalid'); }
+        catch (cause) { providerNetworkDenied = cause instanceof ActorCredentialBoundaryError; }
+        await ctx.sessions.appendMessage(ctx.sessionId, { role: 'assistant', content: 'done' });
+        yield { type: 'stop', stopReason: 'end_turn' };
+      }
+      await runActorLoop({
+        runUserTurn, sessions,
+        callModel: async function* () { yield { type: 'message-stop' }; },
+        toolDispatch: async () => ({ ok: true }),
+        getSystemPrompt: () => 'system',
+        tools: [{ name: 'read_memory', description: '', schema: {} }],
+      }, { sessionId: 'isolated-probe', userText: 'probe' });
+      const forbiddenLiveAuthorities = ['webFetch', 'memory', 'actorAuthority'];
+      const held = forbiddenLiveAuthorities.every((name) => !keys.includes(name))
+        && secretDenied && providerNetworkDenied
+        && keys.includes('callModel') && keys.includes('toolDispatch');
+      probes.push(held
+        ? blocked('actor tries to reach privileged closures from its reasoning heap', 'the real worker core exposed exact relays plus loud credential-boundary stubs')
+        : leaked('actor tries to reach privileged closures from its reasoning heap', `worker ctx keys=${keys.join(',')}`));
     }
 
     // 3) Isolated model authority: the adapter can send only its native body and
@@ -257,6 +277,6 @@ export const scenario: Scenario = {
           `ok=${String(result?.ok)} realCloses=${realCloses}`));
     }
 
-    return summarize(probes, ['makeTurnAuthorityDriver (background actor refusal)', 'restrictCtxCapabilities (tool-context narrowing)', 'createActorModelEgress (exact isolated inference projection)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)', 'app_search whole-result fence']);
+    return summarize(probes, ['makeTurnAuthorityDriver (background actor refusal)', 'runActorLoop (isolated relay-only heap)', 'createActorModelEgress (exact isolated inference projection)', 'makeActorSummaryFence + wrapUntrusted (untrusted-data fence)', 'neutralizeFence (structural break-out defense)', 'app_search whole-result fence']);
   },
 };

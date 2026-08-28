@@ -8,7 +8,7 @@ export const DEFAULT_HOOK_MANIFEST = Object.freeze([
     order: 10,
     match: '*',
     description: 'Blocks network tools whose target origin is off the provider '
-      + 'allowlist — the always-on egress floor. Built-in code, registered at '
+      + 'allowlist: the always-on egress floor. Built-in code, registered at '
       + 'boot; cannot be disabled or removed.',
   }),
   Object.freeze({
@@ -17,7 +17,7 @@ export const DEFAULT_HOOK_MANIFEST = Object.freeze([
     enabled: true,
     order: 20,
     match: '*',
-    description: 'Blocks a page-driving tool — or a web helper\'s own fetch — from '
+    description: 'Blocks a page-driving tool or a web helper\'s own fetch from '
       + 'sending an off-origin URL that carries a high-entropy encoded payload in its '
       + 'userinfo, host, or path, or a fetch header/body carrying that shape. Does NOT scan the '
       + 'query string, where legitimate login tokens live. Best-effort tripwire, not a '

@@ -52,7 +52,7 @@ describe('target-specific native background entry', () => {
   test('adds contributor custody only to Preview/dev Firefox', () => {
     const source = readFileSync(join(EXTENSION, PREVIEW_FIREFOX_BACKGROUND_ENTRY), 'utf8');
     expect(source.indexOf("import './kernel-firefox-contributor-addon.js'"))
-      .toBeLessThan(source.indexOf("import './vault-kernel.js'"));
+      .toBeLessThan(source.indexOf("import './vault-kernel-firefox.js'"));
     const storeSource = readFileSync(join(EXTENSION, FIREFOX_BACKGROUND_ENTRY), 'utf8');
     expect(storeSource).not.toContain('contributor');
   });

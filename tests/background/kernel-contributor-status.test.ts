@@ -91,7 +91,16 @@ const routesFor = (state: ReturnType<typeof storage>, sender: any, postMessage?:
   };
   const prior = (globalThis as any).clients;
   (globalThis as any).clients = { matchAll: async () => [target] };
-  const owner = createLiveRoutes({
+  let owner: any;
+  const callSemanticRoute = (route: string, message: any) =>
+    dispatchContributorSemanticRoute(route, message, {
+      kernelCall: (operation: string, payload: unknown) =>
+        owner.handleKernelCall(operation, payload, {
+          authority: { target: `semantic:${route}:options` },
+          signal: { aborted: false }, deadlineAt: Date.now() + 5_000,
+        }),
+    });
+  owner = createLiveRoutes({
     kv: state.kv, optionsUi: (candidate: any) => candidate === sender,
     sidepanelUi: (candidate: any) => candidate === feedback.sidepanel,
     homeUi: (candidate: any) => candidate === feedback.home,
@@ -99,6 +108,7 @@ const routesFor = (state: ReturnType<typeof storage>, sender: any, postMessage?:
     offscreenUrl,
     featureHost: { runtime: { runWithLease: async (_scope: string, operation: any) =>
       operation(lease) } },
+    callSemanticRoute,
     scheduleDrain: feedback.scheduleDrain,
     channelDeadlineMs: feedback.channelDeadlineMs,
     storageDeadlineMs: feedback.storageDeadlineMs,
@@ -108,18 +118,30 @@ const routesFor = (state: ReturnType<typeof storage>, sender: any, postMessage?:
 };
 
 const directRoutesFor = (state: ReturnType<typeof storage>, sender: any,
-    storageDeadlineMs = 5) => createPreviewContributorRoutes({
-  kv: state.kv,
-  optionsUi: (candidate: any) => candidate === sender,
-  sidepanelUi: () => false,
-  homeUi: () => false,
-  validateFeedback: async () => ({ ok: false }),
-  offscreenUrl: null,
-  featureHost: null,
-  dispatchSemanticRoute: dispatchContributorSemanticRoute,
-  scheduleDrain: () => {},
-  storageDeadlineMs,
-});
+    storageDeadlineMs = 5) => {
+  let owner: any;
+  owner = createPreviewContributorRoutes({
+    kv: state.kv,
+    optionsUi: (candidate: any) => candidate === sender,
+    sidepanelUi: () => false,
+    homeUi: () => false,
+    validateFeedback: async () => ({ ok: false }),
+    offscreenUrl: null,
+    featureHost: null,
+    dispatchSemanticRoute: dispatchContributorSemanticRoute,
+    callSemanticRoute: (route: string, message: any) =>
+      dispatchContributorSemanticRoute(route, message, {
+        kernelCall: (operation: string, payload: unknown) =>
+          owner.handleKernelCall(operation, payload, {
+            authority: { target: `semantic:${route}:options` },
+            signal: { aborted: false }, deadlineAt: Date.now() + 5_000,
+          }),
+      }),
+    scheduleDrain: () => {},
+    storageDeadlineMs,
+  });
+  return owner;
+};
 
 describe('Preview Contributor Metrics private channel', () => {
   test('target addon is update plus one fixed contributor capability', () => {
@@ -980,14 +1002,29 @@ describe('Preview Contributor Metrics private channel', () => {
   test('Firefox preview uses the same contributor route and settlement owner', async () => {
     const state = storage(null);
     const sender = {};
-    const owner = makeKernelFirefoxContributor()({
+    let owner: any;
+    let sealedCalls = 0;
+    owner = makeKernelFirefoxContributor()({
       kv: state.kv, optionsUi: (candidate: any) => candidate === sender,
       sidepanelUi: () => false, homeUi: () => false,
       validateFeedback: async () => ({ ok: false }), scheduleDrain: () => {},
+      callSemanticRoute: async (route: string, message: any) => {
+        sealedCalls += 1;
+        const surface = route === 'contributor/feedback' ? 'chat'
+          : route === 'contributor/settlement' ? 'runtime' : 'options';
+        return dispatchContributorSemanticRoute(route, message, {
+          kernelCall: (operation: string, payload: unknown) =>
+            owner.handleKernelCall(operation, payload, {
+              authority: { target: `semantic:${route}:${surface}` },
+              signal: { aborted: false }, deadlineAt: Date.now() + 5_000,
+            }),
+        });
+      },
     });
     expect(await owner.arm()).toEqual({ enabled: false, generation: null });
     expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
       .toMatchObject({ ok: true, status: { enabled: true } });
+    expect(sealedCalls).toBe(1);
     const generation = state.value().consent.generation;
     expect(await owner.recordWebSettlement(settlement('firefox-delivery', {
       consentGeneration: generation, browser: 'firefox',
@@ -1035,12 +1072,14 @@ describe('Preview Contributor Metrics private channel', () => {
     } finally { live.restore(); }
   });
 
-  test('bounds the private channel offer and has no semantic arm route', () => {
+  test('the private channel admits only runtime settlement and feedback', () => {
     const base = {
       type: CONTRIBUTOR_CHANNEL_OFFER, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
       channelId: 'channel-1', lease: {}, message: {},
     };
-    expect(parseContributorOffer({ ...base, route: 'contributor/arm' })).toBeNull();
+    for (const route of [
+      'contributor/status', 'contributor/enable', 'contributor/disable', 'contributor/arm',
+    ]) expect(parseContributorOffer({ ...base, route })).toBeNull();
     expect(parseContributorOffer({
       ...base, route: 'contributor/feedback', message: { value: 'x'.repeat(600_000) },
     })).toBeNull();
@@ -1049,29 +1088,31 @@ describe('Preview Contributor Metrics private channel', () => {
     })).toBeNull();
   });
 
-  test('loss after the exact write request cannot be replayed as known-safe', async () => {
+  test('sealed-controller loss after the exact write stays outcome-unknown', async () => {
     const state = storage(null);
     const sender = {};
-    const live = routesFor(state, sender, (offer: any, ports: MessagePort[]) => {
-      const port = ports[0];
-      port.start();
-      port.postMessage({
-        type: CONTRIBUTOR_CHANNEL_CALL, protocol: CONTRIBUTOR_CHANNEL_PROTOCOL,
-        channelId: offer.channelId, requestId: 'write-1',
-        operation: 'semantic.contributor.enable', payload: {
-          expected: null, value: enabledRecord('lost-channel-consent'),
-        },
-      });
-      port.onmessage = () => port.postMessage({
-        type: CONTRIBUTOR_CHANNEL_RESULT, protocol: 999,
-        channelId: offer.channelId, result: { ok: true },
-      });
+    let owner: any;
+    owner = createPreviewContributorRoutes({
+      kv: state.kv, optionsUi: (candidate: any) => candidate === sender,
+      sidepanelUi: () => false, homeUi: () => false,
+      validateFeedback: async () => ({ ok: false }), scheduleDrain: () => {},
+      offscreenUrl: null, featureHost: null,
+      callSemanticRoute: (route: string, message: any) =>
+        dispatchContributorSemanticRoute(route, message, {
+          kernelCall: async (operation: string, payload: unknown) => {
+            const result = await owner.handleKernelCall(operation, payload, {
+              authority: { target: `semantic:${route}:options` },
+              signal: { aborted: false }, deadlineAt: Date.now() + 5_000,
+            });
+            return operation === 'semantic.contributor.enable'
+              ? { ok: false, code: 'controller-channel-lost', outcomeKnown: false }
+              : result;
+          },
+        }),
     });
-    try {
-      expect(await live.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
-        .toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
-      expect(state.value()).toMatchObject({ consent: { enabled: true } });
-    } finally { live.restore(); }
+    expect(await owner.routes['contributor/enable']({ type: 'contributor/enable' }, sender))
+      .toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
+    expect(state.value()).toMatchObject({ consent: { enabled: true } });
   });
 
   test('the production actor and vault owners wire the same preview-only capability', () => {

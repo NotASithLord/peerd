@@ -1,5 +1,5 @@
 // @ts-check
-// offscreen/actor-worker-runtime.js — the ONE runtime that runs any non-orchestrator agent
+// offscreen/actor-worker-runtime.js: the ONE runtime that runs any non-orchestrator agent
 // loop in its own heap (the heap split): an ephemeral reasoning actor (tools:[],
 // so the tool-relay below never fires) OR a bound actor (VM / Notebook / App / web,
 // tool-bearing). Imperative shell over actor-worker-core. Provider semantics run
@@ -25,6 +25,7 @@ import {
   controllerHostsDwebTool,
   controllerHostsTool,
   controllerOperationsForSpawnedTools,
+  controllerToolNamesForSpawnedTools,
   decideAction,
   dispatchToolCall,
   executeControllerLocalTool,
@@ -62,6 +63,79 @@ import { createActorModelEgress } from './actor-model-egress.js';
 import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
 import { nestedActorProgramCallId } from '/shared/actor-channel-protocol.js';
 import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
+
+const boundedText = (/** @type {unknown} */ value, /** @type {number} */ cap) =>
+  typeof value === 'string' ? value.slice(0, cap) : undefined;
+
+const boundedRecovery = (/** @type {unknown} */ value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = /** @type {Record<string,any>} */ (value);
+  const category = boundedText(source.category, 128);
+  const state = boundedText(source.state, 64);
+  if (!category || !state
+      || !['failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state)) return null;
+  const retryRequires = Array.isArray(source.retryRequires)
+    ? source.retryRequires.slice(0, 16)
+      .flatMap((entry) => typeof entry === 'string' ? [entry.slice(0, 128)] : [])
+    : [];
+  return Object.freeze({
+    category, state,
+    autoRetry: source.autoRetry === true,
+    retryRequires: Object.freeze(retryRequires),
+    verificationRequired: source.verificationRequired === true,
+    keepIdempotencyKey: source.keepIdempotencyKey === true,
+    reason: boundedText(source.reason, 2_048) ?? '',
+  });
+};
+
+const boundedAuthorityReceipt = (/** @type {unknown} */ value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = /** @type {Record<string,any>} */ (value);
+  const effectId = boundedText(source.effectId, 512);
+  const operation = boundedText(source.operation, 256);
+  const outcome = boundedText(source.outcome, 64);
+  if (!effectId || !operation || !outcome) return null;
+  return Object.freeze({
+    effectId, operation, outcome,
+    outcomeKnown: source.outcomeKnown === true,
+    performed: source.performed === true,
+    retryable: source.retryable === true,
+    ...(source.refused === true ? { refused: true } : {}),
+    ...(boundedText(source.target, 2_048) ? { target: boundedText(source.target, 2_048) } : {}),
+    ...(boundedText(source.code, 256) ? { code: boundedText(source.code, 256) } : {}),
+    ...(boundedText(source.error, 2_048) ? { error: boundedText(source.error, 2_048) } : {}),
+    ...(boundedText(source.ugcZone, 128) ? { ugcZone: boundedText(source.ugcZone, 128) } : {}),
+  });
+};
+
+const authorityFailureMetadata = (/** @type {unknown} */ value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const source = /** @type {Record<string,any>} */ (value);
+  const recovery = boundedRecovery(source.recovery);
+  const authorityReceipt = boundedAuthorityReceipt(source.authorityReceipt);
+  const actorDeliveryIds = Array.isArray(source.actorDeliveryIds)
+    ? [...new Set(source.actorDeliveryIds.slice(0, 32)
+      .flatMap((entry) => typeof entry === 'string' ? [entry.slice(0, 256)] : []))]
+    : [];
+  return {
+    ...(recovery ? { recovery } : {}),
+    ...(authorityReceipt ? { authorityReceipt } : {}),
+    ...(boundedText(source.actorCorrelationId, 256)
+      ? { actorCorrelationId: boundedText(source.actorCorrelationId, 256) } : {}),
+    ...(boundedText(source.actorDeliveryId, 256)
+      ? { actorDeliveryId: boundedText(source.actorDeliveryId, 256) } : {}),
+    ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
+    ...(typeof source.actorTerminal === 'boolean'
+      ? { actorTerminal: source.actorTerminal } : {}),
+    ...(typeof source.actorOutcomeKnown === 'boolean'
+      ? { actorOutcomeKnown: source.actorOutcomeKnown } : {}),
+    ...(typeof source.actorPerformed === 'boolean'
+      ? { actorPerformed: source.actorPerformed } : {}),
+    ...(typeof source.actorAborted === 'boolean'
+      ? { actorAborted: source.actorAborted } : {}),
+    ...(source.aborted === true ? { aborted: true } : {}),
+  };
+};
 
 const recoveredPrototypeCapabilityBlocked = async (
   /** @type {any} */ target, /** @type {string} */ name, /** @type {unknown} */ argument,
@@ -389,6 +463,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       controllerOperationsForSpawnedTools(
         visibleToolNames, request.tools, request.allowRecursion === true,
       );
+    const childToolNamesFor = (/** @type {any} */ request) =>
+      controllerToolNamesForSpawnedTools(
+        visibleToolNames, request.tools, request.allowRecursion === true,
+      );
     const semanticPolicy = m.semanticPolicy && typeof m.semanticPolicy === 'object'
       ? m.semanticPolicy : {};
     const semanticHooks = semanticHooksFor(semanticPolicy.userHookRecords);
@@ -479,6 +557,8 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       toolPending.set(rid, resolve);
       self.postMessage({ type, rid, runId, ...payload });
     });
+    /** @type {Record<string,unknown>} */
+    let terminalAuthorityFailure = {};
     const authorityValue = async (/** @type {Promise<any>} */ pending) => {
       const reply = await pending;
       if (reply?.ok === true && reply.value?.authorityReceipt
@@ -490,13 +570,18 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         code: reply?.code ?? 'actor-authority-failed',
         outcomeKnown: reply?.outcomeKnown === true,
         retryable: reply?.retryable,
+        ...authorityFailureMetadata(reply),
       });
+      if (reply?.outcomeKnown !== true) {
+        terminalAuthorityFailure = authorityFailureMetadata(reply);
+      }
       throw error;
     };
     const executeActorTool = async (
       /** @type {any} */ call,
       /** @type {{programParentExecutionId?:string,semanticPrepared?:boolean,effectCounter?:{count:number}}} */ options = {},
     ) => {
+      if (options.semanticPrepared !== true) terminalAuthorityFailure = {};
       if (!controllerHostsTool(call?.name) || typeof call?.id !== 'string') {
         return {
           ok: false, error: 'actor tool has no controller semantic owner', outcomeKnown: true,
@@ -540,7 +625,6 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             messageCount: 0, trimCovered: 0,
           },
           abortSignal: abort.signal,
-          authorityOwnsLifecycle: true,
           runtimeCapabilities: m.runtimeCapabilities,
           audit: async () => {},
         }, {
@@ -560,6 +644,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           ok: false, error: settled?.error ?? 'actor call completion failed',
           outcomeKnown: settled?.outcomeKnown === true,
           ...(settled?.outcomeKnown === true ? {} : { retryable: false }),
+          ...authorityFailureMetadata(settled),
           meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
         };
       }
@@ -596,6 +681,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           'actor-spawn-sync-request', {
             ...effectBinding(), task: request.task,
             allowRecursion: request.allowRecursion === true,
+            grantedToolNames: childToolNamesFor(request),
             grantedOperations: childOperationsFor(request),
             ...(request.tools === undefined ? {} : { tools: request.tools }),
             ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
@@ -606,6 +692,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           'actor-spawn-async-request', {
             ...effectBinding(), task: request.task,
             allowRecursion: request.allowRecursion === true,
+            grantedToolNames: childToolNamesFor(request),
             grantedOperations: childOperationsFor(request),
             ...(request.tools === undefined ? {} : { tools: request.tools }),
             ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
@@ -1063,6 +1150,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         result = {
           ok: false,
           ...failure,
+          ...authorityFailureMetadata(cause),
           code: failure.code ?? 'controller-tool-execution-failed',
         };
       }
@@ -1070,7 +1158,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     };
     executeOwnedTool = executeActorTool;
     try {
-      // Seed the actor's PRIOR history — a bound actor is stateful across turns.
+      // Seed the actor's PRIOR history: a bound actor is stateful across turns.
       const sessions = makeInMemorySessions({
         sessionId: metadata.sessionId,
         provider: program.provider,
@@ -1156,7 +1244,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       // relay rejects, the loop stops with an empty reply), but whether that counts as
       // a cancellation vs a raced-but-completed turn is decided at the SW client, which
       // sees BOTH the authoritative Stop signal AND whether any reply came back
-      // (signal.aborted && !finalText). A stamp here — ignorant of finalText — would
+      // (signal.aborted && !finalText). A stamp here, ignorant of finalText, would
       // mislabel a turn that produced a real reply just before Stop as 'cancelled'.
       const projectedResult = projectResult === null
         ? result : projectResult(result, program, metadata);
@@ -1170,7 +1258,15 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         },
       });
     } catch (e) {
-      self.postMessage({ type: 'error', runId, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+      const detail = /** @type {{message?:string,code?:unknown,outcomeKnown?:unknown,retryable?:unknown}} */ (e);
+      self.postMessage({
+        type: 'error', runId, error: detail?.message ?? String(e),
+        ...(boundedText(detail?.code, 256) ? { code: boundedText(detail.code, 256) } : {}),
+        outcomeKnown: detail?.outcomeKnown === true,
+        ...(typeof detail?.retryable === 'boolean' ? { retryable: detail.retryable } : {}),
+        ...(detail?.outcomeKnown === false ? terminalAuthorityFailure : {}),
+        ...authorityFailureMetadata(e),
+      });
     }
   }
 });

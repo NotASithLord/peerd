@@ -1,12 +1,12 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// click — click an element matching a CSS selector on the target tab.
+// click: click an element matching a CSS selector on the target tab.
 //
 // V1 implementation uses chrome.scripting.executeScript to dispatch a
 // full pointer + mouse + click event sequence in the page world.
 // Sites that check event.isTrusted (LinkedIn, Facebook, and other
-// apps that ignore synthetic events) refuse dispatched clicks — those
+// apps that ignore synthetic events) refuse dispatched clicks: those
 // need chrome.debugger (V1.1), whose CDP-issued events pages receive
 // as trusted user input.
 //
@@ -19,7 +19,7 @@ import { definePageAuthorityHandler } from './handler.js';
 //     rendering and ensures the element is in the layout viewport,
 //     which sites use to gate "real" interactions.
 //   - `nth` lets the agent target the Nth match without crafting a
-//     :nth-of-type selector — common when query_dom returns several
+//     :nth-of-type selector: common when query_dom returns several
 //     candidates with the same aria-label.
 //   - On no-match, we return up to 3 nearby candidates (siblings,
 //     ancestors with role=button) as breadcrumbs so the agent can
@@ -58,11 +58,11 @@ export const clickTool = definePageAuthorityHandler({
     };
 
     // why: domRefs/debuggerPool are SW-injected onto ctx but absent from the
-    // ToolContext typedef; scripting is typed opaquely — narrow all three.
+    // ToolContext typedef; scripting is typed opaquely: narrow all three.
     const { domRefs, debuggerPool } = /** @type {DomCtxExtras} */ (ctx);
     const scripting = /** @type {typeof chrome.scripting} */ (ctx.scripting);
 
-    // why: hoisted above the ref branch — the cardinality guard applies to
+    // why: hoisted above the ref branch: the cardinality guard applies to
     // BOTH resolution channels the injected body serves (selector match count,
     // walk-ref 0/1), not just selector calls (issue #36).
     const expectedCount = Number.isInteger(args?.expectedCount) && args.expectedCount > 0
@@ -78,12 +78,12 @@ export const clickTool = definePageAuthorityHandler({
     if (typeof args?.ref === 'string' && args.ref.trim()) {
       const ref = args.ref.trim();
       const entry = domRefs?.resolve?.(tab.id, ref);
-      if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first`, outcomeKind: 'pre-effect-failure' };
+      if (!entry) return { ok: false, error: `stale_ref: ${ref}: re-run snapshot on this tab first`, outcomeKind: 'pre-effect-failure' };
 
       if (entry.backendDOMNodeId != null && typeof debuggerPool?.clickBackendNode === 'function') {
         // Cardinality guard on the CDP channel too (#36 consistency): a resolved
         // backendDOMNodeId ref IS exactly one node, so any expectedCount other
-        // than 1 is a mismatch — same shape the walk-ref/selector paths return,
+        // than 1 is a mismatch: same shape the walk-ref/selector paths return,
         // so the guard the schema promises holds identically across channels.
         if (expectedCount != null && expectedCount !== 1) {
           return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
@@ -154,7 +154,7 @@ export const clickTool = definePageAuthorityHandler({
             // resolved walk ref is always exactly 1 (issue #36).
             matchedCount: scriptResult.matchedCount,
             // Honest about the channel: a scripting click is synthetic
-            // (isTrusted=false) — sites that gate on trusted input may
+            // (isTrusted=false): sites that gate on trusted input may
             // ignore it, and there is no fallback channel here.
             via: 'dom-walk',
           }, null, 2),
@@ -163,7 +163,7 @@ export const clickTool = definePageAuthorityHandler({
 
       // A CDP-sourced ref but the pool is gone (advanced automation was
       // turned off since the snapshot). A fresh snapshot will hand out
-      // walk refs that CAN be clicked here — steer the model there.
+      // walk refs that CAN be clicked here: steer the model there.
       return {
         ok: false,
         error: 'debugger_unavailable: this ref came from a CDP snapshot but advanced automation is now '
@@ -222,7 +222,7 @@ export const clickTool = definePageAuthorityHandler({
  * @param {string | null} [allowedCrossOriginFormOrigin]
  */
 // why: exported for the Bun tests to exercise the REAL body's walk-ref
-// cardinality guard (mocked scriptResults would hide an omission — #103
+// cardinality guard (mocked scriptResults would hide an omission: #103
 // review lesson). Same precedent as domWalkInjected; `export` is not part
 // of Function.prototype.toString, so executeScript serialization is
 // unchanged.
@@ -235,13 +235,13 @@ export function clickInjected(selector, nth, walkId, expectedCount, allowedCross
     // DOM-walk ref resolution: the walk (walk-injected.js) registered
     // walkId → element in this same isolated world. Element gone or
     // detached → the snapshot is stale, same contract as a CDP ref.
-    // why: __peerdWalkEls is set on the page world by walk-injected.js — not
+    // why: __peerdWalkEls is set on the page world by walk-injected.js: not
     // a standard global, so reach it through an erased cast.
     const reg = /** @type {{ __peerdWalkEls?: Map<number, HTMLElement> }} */ (globalThis).__peerdWalkEls;
     el = reg && typeof reg.get === 'function' ? (reg.get(walkId) ?? null) : null;
     // why: a walkId names exactly one registered element, so the real match
     // cardinality is 0 (stale/unregistered) or 1 (found). Enforce the guard
-    // against that count — same code + fields as the selector path — instead
+    // against that count, using the same code + fields as the selector path instead
     // of silently ignoring expectedCount on ref calls (issue #36). Checked
     // BEFORE the stale return so the 0 case reports the mismatch the caller
     // asked to be told about, with the re-snapshot hint kept in the text.
@@ -249,18 +249,18 @@ export function clickInjected(selector, nth, walkId, expectedCount, allowedCross
     if (expectedCount != null && matchedCount !== expectedCount) {
       return {
         ok: false,
-        error: `matched_count_mismatch: walk ref matched ${matchedCount} element(s), expected ${expectedCount}${matchedCount === 0 ? ' — element no longer in the page; re-run snapshot on this tab first' : ''}`,
+        error: `matched_count_mismatch: walk ref matched ${matchedCount} element(s), expected ${expectedCount}${matchedCount === 0 ? ': element no longer in the page; re-run snapshot on this tab first': ''}`,
         matchedCount,
         expectedCount,
       };
     }
     if (!el || !el.isConnected) {
-      return { ok: false, error: 'stale_ref: element no longer in the page — re-run snapshot on this tab first' };
+      return { ok: false, error: 'stale_ref: element no longer in the page: re-run snapshot on this tab first' };
     }
   } else {
     /** @type {NodeListOf<HTMLElement>} */
     let nodes;
-    // why: erased cast — this branch is reached only when walkId is null, so a
+    // why: erased cast: this branch is reached only when walkId is null, so a
     // selector is always present; the schema/guards upstream ensure a string.
     try { nodes = document.querySelectorAll(/** @type {string} */ (selector)); }
     catch (e) { return { ok: false, error: `invalid_selector: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` }; }

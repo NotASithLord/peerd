@@ -57,7 +57,10 @@ export const isSidepanelSender = (sender, { runtimeId, extensionOrigin, sidepane
   if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
   if (typeof sidepanelUrl !== 'string' || sidepanelUrl.length === 0) return false;
   if (sender && typeof sender === 'object' && 'tab' in sender) return false;
-  return sender?.url === sidepanelUrl;
+  const url = /** @type {string} */ (sender?.url);
+  const hashAt = url.indexOf('#');
+  const documentUrl = hashAt === -1 ? url : url.slice(0, hashAt);
+  return !documentUrl.includes('?') && documentUrl === sidepanelUrl;
 };
 
 /** @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender

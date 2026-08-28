@@ -54,6 +54,7 @@ describe('identity-provider transit sign-in flow', () => {
       scripting: { executeScript },
       denylist: [],
       confirm: async () => 'yes_once',
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: true }),
       audit: async () => {},
       authorizeSignInOrigin,
       authorizeSignInExcursion,

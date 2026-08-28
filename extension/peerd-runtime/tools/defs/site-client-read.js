@@ -29,7 +29,7 @@ export const siteClientReadTool = composeTool("site_client_read", {
     const header = stalenessHeader(record.meta);
     const endpoints = record.meta.endpoints?.length
       ? record.meta.endpoints.map((/** @type {{method:string,path:string,note?:string}} */ e) =>
-        `  ${e.method} ${e.path}${e.note ? ` — ${e.note}` : ''}`).join('\n')
+        `  ${e.method} ${e.path}${e.note ? `: ${e.note}`: ''}`).join('\n')
       : '  (none recorded)';
     const fenced = wrapUntrusted({
       origin: `site-client(${origin})`,

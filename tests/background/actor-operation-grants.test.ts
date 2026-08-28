@@ -120,8 +120,8 @@ describe('actor exact-operation ceiling', () => {
 
   test('every admitted exact operation has a real actor relay handler', () => {
     const routes = makeOffscreenActorClient({
-      ensureOffscreen: async () => {},
-      isOffscreenSender: () => true,
+      ensureHost: async () => {},
+      isRelaySender: () => true,
       sendMessage: async () => ({ ok: true }),
       sessions: { get: async () => null },
       buildToolContext: async () => ({}),

@@ -257,6 +257,14 @@ describe('transfer/export', () => {
     expect(res.ok).toBe(true);
   });
 
+  test('Store exports remain available when no dweb identity owner exists', async () => {
+    const { deps } = baseDeps({ dwebTransfer: null, CHANNEL: 'store' });
+    const res = await makeSettingsRoutes(deps)['transfer/export'](authorized({
+      passphrase: 'long-enough-for-backup',
+    }));
+    expect(res).toMatchObject({ ok: true, identityIncluded: false, identityDid: null });
+  });
+
   test('custody secrets are never decrypted and the portable identity is reported', async () => {
     const identityRecord = { did: 'did:key:zPortable' };
     const decrypted: string[] = [];

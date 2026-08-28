@@ -262,17 +262,19 @@ describe('release artifact JavaScript minification', () => {
   });
 
   test('an exact native entry uses the same package no-growth ratchet', () => {
+    const budget = COLD_GRAPH_BUDGETS.store.chrome.serviceWorker;
     const report = {
       browser: 'chrome' as const,
       channel: 'store' as const,
-      transformedModules: 73,
+      transformedModules: budget.modules,
       preservedModules: 0,
-      beforeBytes: 500_000,
-      afterBytes: 340_000,
+      beforeBytes: budget.graphBytes + 1,
+      afterBytes: budget.graphBytes,
       graphs: {
         serviceWorker: {
-          entry: 'background/vault-kernel.js', entryBytes: 25_000,
-          modules: 73, beforeBytes: 447_000, afterBytes: 287_000,
+          entry: 'background/vault-kernel-chrome.js', entryBytes: budget.entryBytes,
+          modules: budget.modules,
+          beforeBytes: budget.graphBytes + 1, afterBytes: budget.graphBytes,
         },
       },
     };

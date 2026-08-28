@@ -25,7 +25,7 @@
 //      "a parent reacting to a child result is not trusted to delegate" decision.
 //      So the RESULT edge needs no handling here: the inbound wall already covers it.
 //   2. the capability strip — message_actor's ctx closure survives only for a ctx
-//      whose toolset grants message_actor (spawn.js CAPABILITY_CONSUMERS). A
+//      whose exact persisted operation grant includes actor messaging. A
 //      tools:[] fan-out child still can't delegate. Unchanged.
 //
 // THE HOLE THIS CLOSES (why lineage alone is not enough). An INBOUND turn on the

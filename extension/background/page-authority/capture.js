@@ -1,7 +1,7 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// capture — screenshot of the active tab.
+// capture: screenshot of the active tab.
 //
 // chrome.tabs.captureVisibleTab requires either the activeTab grant
 // (which we have at session start) or <all_urls> host permission.
@@ -11,7 +11,7 @@ import { definePageAuthorityHandler } from './handler.js';
 // The result is a base64 data URL. We return it inline; downstream
 // rendering (in the side panel chat view) detects the data URL and
 // renders the image. For agent consumption, the model can include
-// the image in a follow-up vision request — V1 doesn't push it
+// the image in a follow-up vision request: V1 doesn't push it
 // directly into context because most provider adapters don't support
 // inline base64 images at the schema layer yet.
 

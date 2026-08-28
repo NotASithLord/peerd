@@ -105,6 +105,28 @@ describe('actor overview route', () => {
     expect(JSON.stringify(result)).not.toContain('vault_export_all_secrets');
   });
 
+  test('live turn activity wins before the durable user message append completes', async () => {
+    let durableReads = 0;
+    const { deps } = makeDeps({
+      turnSlots: {
+        isBusy: () => true,
+        busySessionIds: () => ['root-a'],
+        activityFor: () => 'Prepare the beta launch sequence',
+      },
+      sessions: {
+        getMetadata: async () => ({ sessionId: 'root-a', title: 'Beta launch' }),
+        getLatestNonSyntheticUserMessage: async () => {
+          durableReads++;
+          return { role: 'user', content: 'stale prior request' };
+        },
+      },
+    });
+    const result = await makeActorOverviewRoutes(deps)['actors/overview']({}, HOME_SENDER);
+
+    expect(result.roots[0].activity).toBe('Coordinating: Prepare the beta launch sequence');
+    expect(durableReads).toBe(0);
+  });
+
   test('does not load inactive root transcripts', async () => {
     const { deps, reads } = makeDeps({
       actorLiveProjection: { rootSessionIds: () => [], snapshot: emptyTopology },

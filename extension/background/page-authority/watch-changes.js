@@ -1,15 +1,15 @@
 import { definePageAuthorityHandler } from './handler.js';
 
-// watch_changes — start/poll a persistent DOM-mutation watcher on a tab.
+// watch_changes: start/poll a persistent DOM-mutation watcher on a tab.
 //
 // The per-action `result` (in click/type) captures a ~400ms window around
 // ONE action. This is the continuous variant: a MutationObserver that
 // lives in the page and accumulates a rolling delta log, so the agent can
-// catch ASYNC changes that land AFTER the action window — slow results,
-// websocket / live updates, notifications, lazy loads — that a snapshot or
+// catch ASYNC changes that land AFTER the action window: slow results,
+// websocket / live updates, notifications, lazy loads: that a snapshot or
 // the per-action result would miss. (DOM nav Phase 2 streaming.)
 //
-// Injected via chrome.scripting (ISOLATED world — MutationObserver sees the
+// Injected via chrome.scripting (ISOLATED world: MutationObserver sees the
 // shared DOM) so it carries NO debugger banner during continuous watching.
 // Opt-in per tab and time-scoped (resets on navigation), per the perf
 // constraint: never a firehose on a tab the agent isn't watching.
@@ -37,7 +37,7 @@ export const watchChangesTool = definePageAuthorityHandler({
     }
     if (!res) return { ok: false, error: 'watch_returned_nothing' };
     const body = res.started
-      ? 'watching started — baseline set. Call watch_changes again to see what changed since now.'
+      ? 'watching started: baseline set. Call watch_changes again to see what changed since now.'
       : `changes since last look: ${summarizeMutations(res.changes) ?? 'no DOM change detected'}`;
     return {
       ok: true,

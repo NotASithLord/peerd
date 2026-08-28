@@ -283,11 +283,19 @@ describe('makeSpawnActor — the parent manifest caps and follows the child', ()
           newMessages: [{ role: 'assistant', content: 'done' }],
         };
       },
-      getToolDescriptors: () => [
-        { name: 'a', description: 'A', schema: {} },
-        { name: 'b', description: 'B', schema: {} },
-        { name: 'c', description: 'C', schema: {} },
-      ],
+      projectChildSurface: async (input: any) => ({
+        tools: narrowTools([
+          { name: 'a', description: 'A', schema: {} },
+          { name: 'b', description: 'B', schema: {} },
+          { name: 'c', description: 'C', schema: {} },
+        ], {
+          tools: input.toolNames,
+          allowRecursion: input.allowRecursion,
+          allow: Array.isArray(input.toolManifest?.allow)
+            ? new Set(input.toolManifest.allow) : null,
+        }),
+        operations: [],
+      }),
     };
     return { deps, seenTools };
   };

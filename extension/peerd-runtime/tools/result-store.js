@@ -1,5 +1,5 @@
 // @ts-check
-// tools/result-store.js — one opaque spill store for oversized tool results.
+// tools/result-store.js: one opaque spill store for oversized tool results.
 //
 // `fetch_url`, `read_doc`, `read_page`, and `script` write the same bounded
 // record shape. `read_result` is the only read side. Every record carries its
@@ -8,7 +8,7 @@
 //
 // Functional-core discipline (site-clients/store.js is the template): IO
 // (indexedDB) is INJECTED so this is Bun-testable with fake-indexeddb, never
-// imported here. Its own DB — spilled results are best-effort cache bytes,
+// imported here. Its own DB: spilled results are best-effort cache bytes,
 // safe to clear, never mixed into a durable store.
 
 import { SPILL_CACHE_MAX_ENTRIES } from './web/spill.js';
@@ -22,7 +22,7 @@ const DB_VERSION = 2;
 const STORE = 'entries';
 const CREATED_AT_INDEX = 'createdAt';
 
-// LRU cap — one window onto recent oversized values, not an archive. Eviction
+// LRU cap: one window onto recent oversized values, not an archive. Eviction
 // is by createdAt because opaque keys are deliberately unordered.
 const MAX_ENTRIES = SPILL_CACHE_MAX_ENTRIES;
 
@@ -33,7 +33,7 @@ const MAX_ENTRIES = SPILL_CACHE_MAX_ENTRIES;
 /**
  * @typedef {Object} ResultSpillRecord
  * @property {string} key             opaque local handle
- * @property {string} ownerSessionId  the session whose tool spilled — read refuses others
+ * @property {string} ownerSessionId  the session whose tool spilled: read refuses others
  * @property {'fetch_url'|'read_doc'|'read_page'|'script'} producer
  * @property {boolean} fenced         whether the stored bytes re-enter untrusted
  * @property {string} originLabel     source origin / fence label
@@ -50,7 +50,7 @@ const MAX_ENTRIES = SPILL_CACHE_MAX_ENTRIES;
  * @param {Object} [deps]
  * @param {IDBFactory} [deps.idbFactory]  defaults to globalThis.indexedDB
  * @param {() => number} [deps.now]        injected clock (deterministic tests)
- * @param {string} [deps.dbName]           override — tests use a unique name per case
+ * @param {string} [deps.dbName]           override: tests use a unique name per case
  */
 export const createResultStore = (deps = {}) => {
   const idbFactory = deps.idbFactory ?? globalThis.indexedDB;
@@ -82,7 +82,7 @@ export const createResultStore = (deps = {}) => {
         resolve(db);
       };
       // Clear the cached promise so a TRANSIENT open failure doesn't disable
-      // the spill until the SW restarts — the next call retries.
+      // the spill until the SW restarts: the next call retries.
       req.onerror = () => { openPromise = null; reject(req.error ?? new Error('open failed')); };
     });
     return openPromise;
@@ -116,7 +116,7 @@ export const createResultStore = (deps = {}) => {
   // Evict the oldest entries beyond the cap WITHOUT materializing bodies (the
   // web cache's getAllKeys/delUpTo posture, over an index because run keys are
   // not chronological): count, then walk the createdAt index with a KEY cursor
-  // deleting until the overflow is gone — record text never enters memory.
+  // deleting until the overflow is gone: record text never enters memory.
   const evictOverflow = () => tx('readwrite', async (t) => {
     const store = t.objectStore(STORE);
     let excess = (await reqP(store.count())) - MAX_ENTRIES;
@@ -141,7 +141,7 @@ export const createResultStore = (deps = {}) => {
     /**
      * Store one spilled value (stamped createdAt, text capped at
      * MAX_SPILL_TEXT_CHARS), then evict the oldest entries beyond the cap in
-     * a SEPARATE best-effort transaction — a failed eviction never fails the
+     * a SEPARATE best-effort transaction: a failed eviction never fails the
      * put (a shared transaction would abort both).
      * @param {Omit<ResultSpillRecord, 'createdAt'> & { createdAt?: number }} record
      * @returns {Promise<void>}

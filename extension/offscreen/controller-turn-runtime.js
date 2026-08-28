@@ -22,6 +22,7 @@ import {
   controllerAuthorityClassForTool,
   controllerHostsTool,
   controllerOperationsForSpawnedTools,
+  controllerToolNamesForSpawnedTools,
   decideAction,
   dispatchToolCall,
   executeControllerActorTool,
@@ -60,6 +61,10 @@ import {
   shouldFailover,
 } from '/peerd-provider/controller.js';
 import { createControllerModelEgress } from './model-egress-client.js';
+import {
+  mainModelContextLabel,
+  shapeModelCall,
+} from '/shared/model-context-snapshot.js';
 import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
@@ -195,6 +200,10 @@ const runControllerTurnWith = async (payload, options) => {
     controllerOperationsForSpawnedTools(
       descriptorsByName.keys(), request.tools, request.allowRecursion === true,
     );
+  const childToolNamesFor = (/** @type {any} */ request) =>
+    controllerToolNamesForSpawnedTools(
+      descriptorsByName.keys(), request.tools, request.allowRecursion === true,
+    );
   const semanticPolicy = isRecord(ctx.semanticPolicy) ? ctx.semanticPolicy : {};
   const semanticHooks = semanticHooksFor(semanticPolicy.userHookRecords);
   const effectSequences = new Map();
@@ -217,6 +226,14 @@ const runControllerTurnWith = async (payload, options) => {
       );
       return isRecord(reply?.authorityReceipt) ? reply.authorityValue : reply;
     } catch (cause) { throw cause; }
+  };
+  const observeContext = async (/** @type {unknown} */ value) => {
+    try {
+      const reply = await turnValue(
+        kernelCall, 'turn.model.observe-context', { runId, value }, () => {},
+      );
+      return isRecord(reply?.authorityReceipt) ? reply.authorityValue : reply;
+    } catch { return null; }
   };
   /** @type {Set<Promise<unknown>>} */
   const advisory = new Set();
@@ -263,6 +280,21 @@ const runControllerTurnWith = async (payload, options) => {
       const candidate = chain[index];
       let streamedContent = false;
       try {
+        // why: support capture is advisory. Shape before crossing the kernel
+        // boundary, then ignore recorder loss so diagnostics can never become
+        // an inference dependency.
+        try {
+          trackAdvisory(observeContext({
+            label: mainModelContextLabel({
+              provider: requestedProvider, model: requestedModel,
+            }, candidate),
+            observation: shapeModelCall({
+              ...modelRequest,
+              provider: candidate.provider,
+              model: candidate.model,
+            }),
+          })).catch(() => {});
+        } catch { /* shaping is best-effort too */ }
         for await (const event of callProviderModel(/** @type {any} */ ({
           ...modelRequest,
           provider: candidate.provider,
@@ -377,7 +409,6 @@ const runControllerTurnWith = async (payload, options) => {
           hooks: semanticHooks,
           session,
           abortSignal: options.signal,
-          authorityOwnsLifecycle: true,
           runtimeCapabilities: ctx.runtimeCapabilities,
           audit: async () => {},
         }, {
@@ -430,6 +461,7 @@ const runControllerTurnWith = async (payload, options) => {
                 ...binding(),
                 task: actorRequest.task,
                 allowRecursion: actorRequest.allowRecursion === true,
+                grantedToolNames: childToolNamesFor(actorRequest),
                 grantedOperations: childOperationsFor(actorRequest),
                 ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
                 ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
@@ -439,6 +471,7 @@ const runControllerTurnWith = async (payload, options) => {
                 ...binding(),
                 task: actorRequest.task,
                 allowRecursion: actorRequest.allowRecursion === true,
+                grantedToolNames: childToolNamesFor(actorRequest),
                 grantedOperations: childOperationsFor(actorRequest),
                 ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
                 ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
@@ -887,7 +920,10 @@ const runControllerTurnWith = async (payload, options) => {
       }
     }
     if (advisory.size > 0) await Promise.allSettled([...advisory]);
-    await rpc('turn.finalize', {});
+    // why: abort finalization is already the terminal host transition. Sending
+    // a second finalization request would turn a clean Stop into a false
+    // turn-run-finalized failure after the transcript was safely settled.
+    if (!abortFinalized) await rpc('turn.finalize', {});
     if (nestedUnknown) throw new Error('a dispatched kernel operation has an unknown outcome');
     if (options.signal.aborted && !abortFinalized) {
       throw Object.assign(new Error('controller turn aborted before finalization'), {
@@ -896,6 +932,7 @@ const runControllerTurnWith = async (payload, options) => {
     }
     return { ok: true, outcomeKnown: true };
   } catch (cause) {
+    if (advisory.size > 0) await Promise.allSettled([...advisory]);
     const detail = /** @type {{code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
     const modelFailure = providerFailureCode(cause);
     return {

@@ -78,7 +78,8 @@ import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private
 import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import { createKernelRecoveryCustody } from './kernel-recovery-custody.js';
 import { createKernelVoiceCustody } from './kernel-voice-custody.js';
-import { createContextSnapshots } from './context-snapshots.js';
+import { createContextSnapshots } from '../shared/model-context-snapshot.js';
+import { resolveRuntimeCapabilities } from '../shared/runtime-capability-hosts.js';
 import { createScriptRunRegistry } from './script-runs.js';
 import {
   createVaultKernelAssemblyReport,
@@ -167,6 +168,11 @@ const vmTabUrl = browser.runtime.getURL('engine-tabs/vm-tab/index.html');
 const podTabUrl = browser.runtime.getURL('engine-tabs/pod-tab/index.html');
 const offscreenPath = 'offscreen/offscreen.html';
 const offscreenUrl = browser.runtime.getURL(offscreenPath);
+const listActorHostClients = () => {
+  const clientsApi = /** @type {any} */ (globalThis).clients;
+  return clientsApi?.matchAll
+    ? clientsApi.matchAll({ type: 'window', includeUncontrolled: true }) : Promise.resolve([]);
+};
 const appTabUrl = browser.runtime.getURL('engine-tabs/app-tab/index.html');
 const packagedFetch = (/** @type {string|URL|Request} */ input,
   /** @type {RequestInit|undefined} */ init = undefined) => globalThis.fetch(input, init);
@@ -224,6 +230,7 @@ const generation = makeKernelGenerationLifecycle({
 });
 /** @type {ReturnType<typeof featureHost.attachFirefoxActorLifetime>|null} */
 let firefoxActorLifetime = null;
+let retireControllerOnHostLoss = () => {};
 const featureHost = createKernelFeatureHost({
   browser,
   identity: kernelIdentity,
@@ -243,6 +250,9 @@ const featureHost = createKernelFeatureHost({
     firefoxActorLifetime?.fail(error);
     console.error('[kernel] feature host recovery failed', error);
   },
+  // why: Chrome does not reliably emit MessagePort close when its offscreen
+  // renderer dies. The authenticated feature-host Port is the lifetime oracle.
+  onHostLost: () => retireControllerOnHostLoss(),
   loadFirefoxLifetime: kernelFirefox
     ? () => Promise.resolve(makeFirefoxGuard.firefoxLifetime) : undefined,
 });
@@ -255,8 +265,6 @@ const controllerGateway = createKernelControllerGateway({
     firefoxDirect: kernelFirefox,
     dwebEnabled: DWEB_ENABLED,
     kernelIdentity,
-    retireHost: (/** @type {string} */ reason) =>
-      featureHost.runtime.retireActiveHost(reason),
     withControllerLease: (/** @type {()=>any} */ operation) =>
       featureHost.runtime.runWithLease('controller', operation, {
         reason: 'controller-demand',
@@ -278,6 +286,7 @@ const controllerGateway = createKernelControllerGateway({
     fetchFn: packagedFetch,
   },
 });
+retireControllerOnHostLoss = controllerGateway.retire;
 const vault = featureHost.vault;
 const kernelSessions = createKernelSessionReader(idb);
 const kernelProfile = createKernelProfileAuthority({ idb, sessions: kernelSessions });
@@ -399,9 +408,36 @@ const providerProjection = createKernelProviderProjection({
     (await loadDemandPlane()).projectProviderState(snapshot),
   pushState: () => pushState(),
 });
+const runtimeCapabilities = resolveRuntimeCapabilities({
+  offscreenDocument: !kernelFirefox,
+  moonshineVoiceDocument: true,
+  dwebPackaged: DWEB_ENABLED,
+});
+const pendingProviderView = (/** @type {Record<string,any>} */ settings,
+  /** @type {any} */ session) => {
+  const provider = typeof session?.provider === 'string'
+    ? session.provider : String(settings.providerName ?? '');
+  const model = typeof session?.model === 'string'
+    ? session.model : String(settings.providerModel ?? '');
+  return Object.freeze({
+    providers: Object.freeze({
+      current: String(settings.providerName ?? ''),
+      model: String(settings.providerModel ?? ''),
+      hasKey: false,
+    }),
+    composer: Object.freeze({
+      provider, model, keyless: false, credentialReady: false,
+      localReady: false, canSend: false, reason: 'controller-not-ready',
+    }),
+  });
+};
 let stateProjectionGeneration = 0;
 const stateSnapshot = async () => {
   const projectionGeneration = ++stateProjectionGeneration;
+  // why: a cold state read can wait on storage and semantic provider shaping
+  // longer than a short actor turn. Freeze topology before the first await,
+  // then select only the authority-proven current root below.
+  const capturedActorProjections = controllerRelays()?.actorSnapshots?.() ?? {};
   await kernelReady;
   const current = await generation.reconcile();
   if (!current.ok) throw new Error(current.error);
@@ -412,6 +448,7 @@ const stateSnapshot = async () => {
       locked: true, unlockedAt: 0, lockReason: null,
     }
     : await vault.status();
+  providerProjection.observeLocked(authority.locked);
   if (authority.initialized || indexed?.initialized !== false) {
     await vaultPosture.write(authority);
   }
@@ -446,9 +483,14 @@ const stateSnapshot = async () => {
       onboardingComplete: durableProfile.onboardingComplete,
     };
   }
+  const actorProjection = !authority.locked && typeof session.sessionId === 'string'
+    ? capturedActorProjections[session.sessionId]
+      ?? controllerRelays()?.actorSnapshot?.(session.sessionId) ?? null
+    : null;
   const providerView = authority.locked
     ? LOCKED_PROVIDER_AUTHORITY_VIEW
-    : await providerProjection.view(currentSession, false);
+    : await providerProjection.peek(currentSession, false)
+      ?? pendingProviderView(settings, currentSession);
   return buildVaultKernelState({
     kernel: generation.identity,
     status: {
@@ -467,6 +509,8 @@ const stateSnapshot = async () => {
     profile,
     generation: projectionGeneration,
     actorHost: kernelFirefox ? 'background-page-worker' : 'offscreen-document-worker',
+    runtimeCapabilities,
+    actorProjection,
   });
 };
 
@@ -593,6 +637,10 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     getFirefoxLifetime: () => firefoxActorLifetime,
     featureHost,
     offscreenUrl,
+    // why: Chrome's isolated actor channel transfers a MessagePort to the
+    // exact offscreen WindowClient. Keep that client enumeration in the SW
+    // authority shell; the sealed actor receives neither the list nor a proxy.
+    listActorHostClients,
     appTabUrl, notebookTabUrl, vmTabUrl, podTabUrl, optionsUrl,
     isAppSender: appUi,
     isHomeSender: homeUi,
@@ -623,6 +671,10 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     channel: CHANNEL,
     kernelIdentity,
     controllerGateway,
+    contributorAuthority: (/** @type {string} */ operation,
+      /** @type {unknown} */ payload, /** @type {any} */ context) =>
+      targetContributor?.handleKernelCall?.(operation, payload, context)
+        ?? { ok: false, code: 'semantic-kernel-operation-denied', outcomeKnown: true },
     fetchFn: packagedFetch,
     ensureDwebFeature,
     getDwebLive: () => dwebCustodyOwner?.getDwebLive() ?? null,
@@ -748,6 +800,7 @@ const startupPopupNetworkGuard = makeStartupPopupNetworkGuard(
     ruleDigests: PRIVATE_NETWORK_RULE_DIGESTS,
   },
 );
+/** @type {any} */ let childGuard = INERT_CHILD_REQUEST_GUARD;
 const networkOwner = createKernelBrowserNetworkOwner({
   firefox: kernelFirefox, browser, dnr: serializedBrowserDnr, sessionCache,
   denylist: denylistPolicy, kernelIdentity, appTabUrl,
@@ -761,6 +814,8 @@ const networkOwner = createKernelBrowserNetworkOwner({
   settleOutcome: browserChildOutcomes.settle,
   releaseOutcome: browserChildOutcomes.release,
   audit: (/** @type {any} */ entry) => { void auditLog.append(entry).catch(() => {}); },
+  guardFirefoxChildRequest: (/** @type {any} */ event) =>
+    childGuard.onNavigationTarget(event),
   releaseChild: (/** @type {number} */ tabId) => childGuard.release(tabId),
   onError: (/** @type {unknown} */ error) => {
     console.error('[kernel] browser network authority failed', error);
@@ -774,7 +829,7 @@ const {
   releaseBrowserNetworkGuardLease,
   updateBrowserNetworkGuardOrigin,
 } = networkOwner;
-const childGuard = makeFirefoxGuard?.({
+childGuard = makeFirefoxGuard?.({
   isDrivenSource: (/** @type {number} */ tabId) =>
     networkOwner.relays()?.isDrivenSource?.(tabId) ?? false,
   isSourceReady: () => networkOwner.sourceProjectionReady?.() === true,
@@ -845,6 +900,8 @@ if (kernelFirefox) {
 }
 targetContributor = (targetAddon || makeFirefoxGuard)?.contributor?.({
   kv, optionsUi, sidepanelUi, homeUi, offscreenUrl, featureHost,
+  callSemanticRoute: async (/** @type {string} */ route, /** @type {any} */ message) =>
+    (await loadDemandPlane()).dispatchContributor(route, message),
   validateFeedback: async (/** @type {any} */ message) =>
     (await loadDemandPlane()).validateContributorFeedback(message),
 }) ?? null;
@@ -1028,9 +1085,10 @@ const uiPortOwner = createKernelUiPortOwner({
     const states = replay();
     return Array.isArray(states) ? states : [];
   },
-  onUiConnect: async (/** @type {any} */ port) => {
+  onUiConnect: async (/** @type {any} */ port, /** @type {Promise<unknown>} */ hydrated) => {
+    const replay = controllerRelays()?.onUiConnect?.(port, hydrated);
     await kernelUpdateCustody?.onUiConnect();
-    await controllerRelays()?.onUiConnect?.(port);
+    await replay;
   },
   onQuiet: async () => {
     await kernelUpdateCustody?.onQuiet();

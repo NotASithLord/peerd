@@ -367,7 +367,7 @@ describe('controller turn finite tool protocol', () => {
     for await (const event of bridge.runUserTurn(withOperationSurface(ctx))) events.push(event);
     const result = events.find((event) => event.type === 'tool-result')?.result;
     expect(result).toMatchObject({
-      ok: false, error: 'declined',
+      ok: false, error: 'User declined to arm the routine.',
       authorityPerformed: false, retryable: false,
     });
     expect(scheduled).toBe(0);
@@ -2078,6 +2078,291 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  const runScheduleLifecycle = async ({
+    lifecycle, scheduleRemove, audits = [], signal,
+  }: {
+    lifecycle: any;
+    scheduleRemove: () => Promise<any> | any;
+    audits?: any[];
+    signal?: AbortSignal;
+  }) => {
+    const scheduleDescriptor = authorityDescriptor('schedule_cancel');
+    let round = 0;
+    const ctx = context({
+      ...(signal ? { signal } : {}),
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+      semanticPolicy: { permission: { mode: 'act', confirmActions: false } },
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+      lifecycle: {
+        requiresIntentConfirmation: async () => false,
+        ...lifecycle,
+      },
+      scheduleRemove,
+      callModel: async function* () {
+        round += 1;
+        if (round > 1) {
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+          return;
+        }
+        yield { type: 'tool-use-start', id: 'lifecycle-schedule', name: 'schedule_cancel' };
+        yield {
+          type: 'tool-use-delta', id: 'lifecycle-schedule',
+          partialJson: '{"id":"routine-lifecycle"}',
+        };
+        yield { type: 'tool-use-stop', id: 'lifecycle-schedule' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const run = await runHarness({ ctx });
+    const live = run.events.find((event: any) =>
+      event.type === 'tool-result' && event.toolUseId === 'lifecycle-schedule')?.result;
+    const stored = ctx.sessions.snapshot().messages
+      .flatMap((message: any) => message.toolResults ?? [])
+      .find((block: any) => block.tool_use_id === 'lifecycle-schedule');
+    return { ...run, live, stored, audits };
+  };
+
+  test('a lifecycle unknown rewrite replaces caller certainty but not its physical receipt', async () => {
+    const audits: any[] = [];
+    const settled: any[] = [];
+    const recovery = {
+      category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+      retryRequires: ['external-verification', 'user-instruction'],
+      verificationRequired: true, keepIdempotencyKey: false,
+      reason: 'host reply was lost',
+    };
+    const result = await runScheduleLifecycle({
+      audits,
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'operation-unknown' } }),
+        settleTracking: async (_handle: any, outcome: any) => {
+          settled.push(outcome);
+          return { error: 'outcome_unknown: verify the routine before retrying', recovery };
+        },
+      },
+      scheduleRemove: async () => { throw Object.assign(new Error('private transport token'), {
+        outcomeKnown: false, outcomeKind: 'host-lost', performed: true,
+      }); },
+    });
+
+    expect(settled).toEqual([expect.objectContaining({
+      ok: false, aborted: false, outcomeKind: 'host-lost',
+    })]);
+    for (const value of [result.live, result.stored]) {
+      expect(value).toMatchObject({
+        outcomeKnown: false, retryable: false, recovery,
+        authorityPerformed: true,
+        authorityReceipts: [expect.objectContaining({
+          operation: 'turn.schedule.cancel-routine', outcome: 'unknown',
+          outcomeKnown: false, performed: true,
+        })],
+      });
+      expect(value.error ?? value.content).toContain('outcome_unknown');
+      expect(JSON.stringify(value)).not.toContain('private transport token');
+    }
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_effect_failed',
+      details: expect.objectContaining({
+        outcome: 'unknown', performed: true, outcomeKnown: false,
+        recoveryCategory: 'verify_before_retry', recoveryState: 'outcome_unknown',
+      }),
+    }));
+  });
+
+  test('a lifecycle cancellation rewrite receives host abort proof and stays safe to retry manually', async () => {
+    const settled: any[] = [];
+    const recovery = {
+      category: 'safe_to_retry', state: 'cancelled', autoRetry: false,
+      retryRequires: ['user-instruction'], verificationRequired: false,
+      keepIdempotencyKey: false, reason: 'effect positively did not occur',
+    };
+    const result = await runScheduleLifecycle({
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'operation-cancelled' } }),
+        settleTracking: async (_handle: any, outcome: any) => {
+          settled.push(outcome);
+          return { error: 'cancelled: routine removal stopped before dispatch', recovery };
+        },
+      },
+      scheduleRemove: async () => { throw Object.assign(new Error('stopped'), {
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+        aborted: true, retryable: false,
+      }); },
+    });
+
+    expect(settled).toEqual([expect.objectContaining({
+      ok: false, aborted: true, outcomeKind: 'pre-effect-failure',
+    })]);
+    expect(result.live).toMatchObject({
+      ok: false, error: 'cancelled: routine removal stopped before dispatch',
+      outcomeKnown: true, retryable: false, recovery,
+      authorityPerformed: false,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      })],
+    });
+  });
+
+  test('an outer lifecycle unknown overrides stale actor certainty and cancellation custody', async () => {
+    const actorDescriptor = authorityDescriptor('message_actor');
+    const recovery = {
+      category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+      retryRequires: ['external-verification'], verificationRequired: true,
+      keepIdempotencyKey: false, reason: 'actor delivery settlement was lost',
+    };
+    let round = 0;
+    const ctx = context({
+      tools: [actorDescriptor], refreshTools: async () => [actorDescriptor],
+      semanticPolicy: { permission: { mode: 'act', confirmActions: false } },
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+      lifecycle: {
+        requiresIntentConfirmation: async () => false,
+        beginTracking: async () => ({ handle: { operationId: 'actor-delivery' } }),
+        settleTracking: async () => ({
+          error: 'outcome_unknown: verify actor delivery before retrying', recovery,
+        }),
+      },
+      actorAuthority: {
+        deliverMessage: async () => ({
+          ok: false, error: 'clean inner policy stop',
+          actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+          actorTerminal: true, actorOutcomeKnown: true,
+          actorPerformed: false, actorAborted: true,
+        }),
+      },
+      callModel: async function* () {
+        round += 1;
+        if (round > 1) {
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+          return;
+        }
+        yield { type: 'tool-use-start', id: 'actor-lifecycle', name: 'message_actor' };
+        yield {
+          type: 'tool-use-delta', id: 'actor-lifecycle',
+          partialJson: '{"to":"web","message":"read it","await":true}',
+        };
+        yield { type: 'tool-use-stop', id: 'actor-lifecycle' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const result = await runHarness({ ctx });
+    const live: any = result.events.find((event: any) =>
+      event.type === 'tool-result' && event.toolUseId === 'actor-lifecycle')?.result;
+    const stored: any = ctx.sessions.snapshot().messages
+      .flatMap((message: any) => message.toolResults ?? [])
+      .find((block: any) => block.tool_use_id === 'actor-lifecycle');
+
+    for (const value of [live, stored]) expect(value).toMatchObject({
+      outcomeKnown: false, retryable: false, recovery,
+      actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+      actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+    });
+  });
+
+  test.each([
+    ['returned refusal', async () => ({ refuse: {
+      error: 'failed: lifecycle storage unavailable',
+      recovery: {
+        category: 'security_degradation', state: 'failed', autoRetry: false,
+        retryRequires: ['lifecycle-storage'], verificationRequired: false,
+        keepIdempotencyKey: false, reason: 'storage unavailable',
+      },
+    } })],
+    ['unexpected rejection', async () => { throw new Error('private lifecycle database error'); }],
+  ] as const)('lifecycle begin %s fails closed before the authority leaf', async (_label, beginTracking) => {
+    let removals = 0;
+    const audits: any[] = [];
+    const result = await runScheduleLifecycle({
+      audits,
+      lifecycle: { beginTracking, settleTracking: async () => null },
+      scheduleRemove: async () => { removals += 1; return true; },
+    });
+
+    expect(removals).toBe(0);
+    expect(result.live).toMatchObject({
+      ok: false, outcomeKnown: true, retryable: false,
+      recovery: expect.objectContaining({
+        category: 'security_degradation', state: 'failed', autoRetry: false,
+      }),
+      authorityPerformed: false,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      })],
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_lifecycle_refused',
+      details: expect.objectContaining({
+        recoveryCategory: 'security_degradation', recoveryState: 'failed',
+        outcomeKnown: true, performed: false,
+      }),
+    }));
+    if (_label === 'unexpected rejection') {
+      expect(JSON.stringify(result.live)).not.toContain('private lifecycle database error');
+      expect(audits).toContainEqual(expect.objectContaining({
+        type: 'authority_lifecycle_begin_failed',
+        details: expect.objectContaining({
+          outcomeKnown: true, performed: false,
+          diagnostic: 'private lifecycle database error',
+        }),
+      }));
+    }
+  });
+
+  test.each([
+    ['success', async (): Promise<boolean> => true, {
+      ok: true, outcomeKnown: true, authorityPerformed: true,
+      receipt: { outcome: 'performed', outcomeKnown: true, performed: true },
+    }],
+    ['pre-effect refusal', async (): Promise<boolean> => { throw Object.assign(new Error('known refusal'), {
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    }); }, {
+      ok: false, outcomeKnown: true, authorityPerformed: false,
+      receipt: { outcome: 'not-performed', outcomeKnown: true, performed: false },
+    }],
+    ['host loss', async (): Promise<boolean> => { throw Object.assign(new Error('lost host'), {
+      outcomeKnown: false, outcomeKind: 'host-lost', performed: true,
+    }); }, {
+      ok: false, outcomeKnown: false, authorityPerformed: true,
+      receipt: { outcome: 'unknown', outcomeKnown: false, performed: true },
+    }],
+  ] as const)('an unexpected settle rejection preserves physical %s evidence', async (
+    _label, scheduleRemove, expected,
+  ) => {
+    const audits: any[] = [];
+    const result = await runScheduleLifecycle({
+      audits,
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'settle-reject' } }),
+        settleTracking: async () => { throw new Error('private settle persistence error'); },
+      },
+      scheduleRemove,
+    });
+
+    expect(result.live).toMatchObject({
+      ok: expected.ok, outcomeKnown: expected.outcomeKnown,
+      authorityPerformed: expected.authorityPerformed,
+      authorityReceipts: [expect.objectContaining(expected.receipt)],
+    });
+    expect(result.live).not.toHaveProperty('recovery');
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_lifecycle_settlement_failed',
+      details: expect.objectContaining({
+        ...expected.receipt,
+        diagnostic: 'private settle persistence error',
+      }),
+    }));
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: expected.ok ? 'authority_effect' : 'authority_effect_failed',
+      details: expect.objectContaining({
+        ...expected.receipt,
+      }),
+    }));
+  });
+
   test('the main semantic owner refuses actor-only fetch_url before authority', async () => {
     const fetchDescriptor = authorityDescriptor('fetch_url');
     let legacy = 0;
@@ -2228,7 +2513,7 @@ describe('controller turn finite tool protocol', () => {
     });
     expect(declined.scheduleCalls).toBe(0);
     expect(declined.finalResult).toMatchObject({
-      ok: false, error: 'declined', authorityPerformed: false,
+      ok: false, error: 'User declined to arm the routine.', authorityPerformed: false,
       outcomeKnown: true, retryable: false,
     });
     expect(declined.audits).toContainEqual(expect.objectContaining({

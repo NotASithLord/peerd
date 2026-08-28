@@ -22,6 +22,8 @@ const makeHarness = () => {
   const onDisconnect = event();
   const posted: any[] = [];
   const recovered: string[] = [];
+  const authenticated: string[] = [];
+  const lost: string[] = [];
   const errors: unknown[] = [];
   const snapshot = {
     ...IDENTITY,
@@ -41,6 +43,8 @@ const makeHarness = () => {
         return { hostEpoch, results: [] };
       },
     },
+    onAuthenticated: (hostEpoch) => { authenticated.push(hostEpoch); },
+    onLost: (hostEpoch) => { lost.push(hostEpoch); },
     onError: (cause) => errors.push(cause),
   });
   const heartbeat = (over: Record<string, any> = {}) => ({
@@ -58,7 +62,9 @@ const makeHarness = () => {
     }],
     ...over,
   });
-  return { onMessage, onDisconnect, posted, recovered, errors, heartbeat };
+  return {
+    onMessage, onDisconnect, posted, recovered, authenticated, lost, errors, heartbeat,
+  };
 };
 
 describe('thin-kernel feature lease keepalive', () => {
@@ -71,8 +77,10 @@ describe('thin-kernel feature lease keepalive', () => {
       hostEpoch: 'host-feature-keepalive',
       heartbeatId: 'heartbeat-feature-keepalive',
     }]);
+    expect(harness.authenticated).toEqual(['host-feature-keepalive']);
     harness.onDisconnect.emit();
     harness.onDisconnect.emit();
+    expect(harness.lost).toEqual(['host-feature-keepalive']);
     await Promise.resolve();
     await Promise.resolve();
     expect(harness.recovered).toEqual(['host-feature-keepalive']);
@@ -93,6 +101,8 @@ describe('thin-kernel feature lease keepalive', () => {
       await Promise.resolve();
       expect(harness.posted).toEqual([]);
       expect(harness.recovered).toEqual([]);
+      expect(harness.authenticated).toEqual([]);
+      expect(harness.lost).toEqual([]);
     }
   });
 });

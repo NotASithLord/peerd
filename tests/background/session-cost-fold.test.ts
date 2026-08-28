@@ -1,20 +1,28 @@
 import { describe, expect, test } from 'bun:test';
-import { makeSessionCostFolder } from '../../extension/background/service-worker-control-plane.js';
+import {
+  makeSessionCostFolder,
+} from '../../extension/background/kernel-turn-authority-adapter.js';
+
+const normalize = (value: any) => ({
+  inputTokens: Number(value?.inputTokens ?? 0),
+  outputTokens: Number(value?.outputTokens ?? 0),
+  cacheReadTokens: Number(value?.cacheReadTokens ?? 0),
+  cacheWriteTokens: Number(value?.cacheWriteTokens ?? 0),
+  cost: Number(value?.cost ?? 0),
+});
 
 describe('session cost fold', () => {
   test('serializes concurrent read-modify-writes for one session', async () => {
-    let persisted = { inputTokens: 0, outputTokens: 0, cost: 0 };
+    let persisted: any = { inputTokens: 0, outputTokens: 0, cost: 0 };
     const fold = makeSessionCostFolder({
       sessions: {
         get: async () => ({ cost: { ...persisted } }),
-        setCost: async (_id, next) => { await Promise.resolve(); persisted = next; },
+        update: async (_id, patch) => {
+          await Promise.resolve();
+          persisted = patch.cost;
+        },
       },
-      normalizeTally: (value) => value,
-      addUsage: (current, usage, cost) => ({
-        inputTokens: current.inputTokens + usage.inputTokens,
-        outputTokens: current.outputTokens + usage.outputTokens,
-        cost: current.cost + cost,
-      }),
+      normalize,
     });
 
     await Promise.all([
@@ -22,21 +30,24 @@ describe('session cost fold', () => {
       fold('chat', { inputTokens: 5, outputTokens: 7 }, 0.2),
     ]);
 
-    expect(persisted).toEqual({ inputTokens: 7, outputTokens: 10, cost: 0.30000000000000004 });
+    expect(persisted).toEqual({
+      inputTokens: 7, outputTokens: 10,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+      cost: 0.30000000000000004,
+    });
   });
 
-  test('contains a persistence failure and permits a later fold', async () => {
+  test('a persistence failure does not poison a later fold', async () => {
     let attempts = 0;
     const fold = makeSessionCostFolder({
       sessions: {
         get: async () => ({ cost: 0 }),
-        setCost: async () => { if (++attempts === 1) throw new Error('quota'); },
+        update: async () => { if (++attempts === 1) throw new Error('quota'); },
       },
-      normalizeTally: (value) => value,
-      addUsage: () => 1,
+      normalize,
     });
 
-    await expect(fold('chat', {}, 0)).resolves.toBeUndefined();
+    await expect(fold('chat', {}, 0)).rejects.toThrow('quota');
     await expect(fold('chat', {}, 0)).resolves.toBeUndefined();
     expect(attempts).toBe(2);
   });

@@ -146,6 +146,10 @@ const makeCtx = (over: Record<string, any> = {}) => {
   const origin = over.origin ?? 'https://acct.example.com';
   const ctx: any = {
     session: { sessionId: 's1' },
+    permission: { mode: 'act', confirmActions: over.settings?.confirmActions !== false },
+    readAuthorityPermission: async () => ({
+      mode: 'act', confirmActions: over.settings?.confirmActions !== false,
+    }),
     activeTab: over.activeTab ?? { id: 1, url: `${origin}/login`, origin },
     tabs: { get: async (id: number) => ({ id, url: `${origin}/login` }) },
     denylist: [],

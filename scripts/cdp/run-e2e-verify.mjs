@@ -165,8 +165,13 @@ async function main() {
 
   const states = STATES.filter(selected);
   const preUnlock = states.filter((s) => s.phase === 'pre-unlock');
+  const postUnlockPriority = (state) => state.name === 'first-turn'
+    ? -1
+    : state.name === 'browser-network-floor' ? 1 : 0;
+  // why: `first-turn` is only meaningful before any reset or prior post-unlock
+  // state; the network-floor probe remains last because it mutates live rules.
   const postUnlock = states.filter((s) => s.phase === 'post-unlock').sort((a, b) =>
-    Number(a.name === 'browser-network-floor') - Number(b.name === 'browser-network-floor'));
+    postUnlockPriority(a) - postUnlockPriority(b));
   const results = [];
   const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR });
   try {

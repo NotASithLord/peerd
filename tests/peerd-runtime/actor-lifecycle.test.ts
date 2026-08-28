@@ -81,7 +81,11 @@ const spawnDeps = (store: any, loop: any, extra: any = {}) => ({
   buildToolContext: async ({ sessionId }: any) => ({ session: { sessionId }, audit: async () => {} }),
   dispatchToolCall: async () => ({ ok: true, content: 'tool ran' }),
   renderSystemPrompt: async ({ taskOverride }: any) => `sys task=${taskOverride}`,
-  getToolDescriptors: () => [{ name: 'a', description: 'A', schema: {} }],
+  projectChildSurface: async ({ toolNames, allowRecursion }: any) => ({
+    tools: toolNames?.includes('a') === false || allowRecursion === false && toolNames?.includes('actor_create')
+      ? [] : [{ name: 'a', description: 'A', schema: {} }],
+    operations: [],
+  }),
   now: (() => { let t = 1000; return () => (t += 25); })(),
   // Lifecycle tests exercise the dedicated-worker contract through a portable
   // fake host. The loop still receives the child's abort signal, but no test
@@ -299,8 +303,10 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
       runChildOffscreen: async (job: any) => { offscreenJob = job; return { ok: true, started: true, finalText: 'ok', stopReason: 'end_turn', toolCalls: 0 }; },
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
       // a registry that DOES include the actor-only tools (the real listTools surface)
-      getToolDescriptors: () => ['read_page', 'click', 'navigate', 'fetch_url', 'edit_file', 'script', 'read_memory']
-        .map((name) => ({ name, description: name, schema: {} })),
+      projectChildSurface: async () => ({
+        tools: [{ name: 'script', description: 'script', schema: {} }],
+        operations: [],
+      }),
     }) as any);
     await spawn({ task: 'read the current page', tools: ['read_page', 'edit_file', 'script'], parentSessionId: parent.sessionId });
     // the actor-only DOM/page + mutating tools were dropped; only the legit one survives

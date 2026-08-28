@@ -395,34 +395,50 @@ class KernelIdentityTransferError extends Error {
 const makeIdentityLane = () => {
   /** @type {any[]} */ const queue = [];
   let active = false;
-  let recoveryPending = false;
+  let recoveryDepth = 0;
+  const recoveryPending = () => recoveryDepth > 0;
   const recoveryError = () =>
     new KernelIdentityTransferError('identity-recovery-pending', false);
   const pump = () => {
-    if (active || recoveryPending || queue.length === 0) return;
+    if (active || recoveryPending() || queue.length === 0) return;
     const entry = queue.shift();
     active = true;
-    Promise.resolve().then(entry.operation).then(entry.resolve, entry.reject).finally(() => {
+    Promise.resolve().then(entry.operation).then((value) => {
       active = false;
+      entry.resolve(value);
+      pump();
+    }, (cause) => {
+      active = false;
+      entry.reject(cause);
       pump();
     });
   };
   const withMutation = (/** @type {()=>Promise<any>} */ operation) => {
-    if (recoveryPending) return Promise.reject(recoveryError());
+    if (recoveryPending()) return Promise.reject(recoveryError());
     return new Promise((resolve, reject) => {
       queue.push({ operation, resolve, reject });
       pump();
     });
   };
   const beginRecovery = () => {
-    if (recoveryPending) return;
-    recoveryPending = true;
-    for (const entry of queue.splice(0)) entry.reject(recoveryError());
+    recoveryDepth += 1;
+    if (recoveryDepth === 1) {
+      for (const entry of queue.splice(0)) entry.reject(recoveryError());
+    }
   };
   const endRecovery = () => {
-    recoveryPending = false;
+    recoveryDepth = Math.max(0, recoveryDepth - 1);
+    if (!recoveryPending()) pump();
   };
-  return Object.freeze({ withMutation, beginRecovery, endRecovery });
+  const withRead = (/** @type {()=>Promise<any>} */ operation) =>
+    // why: physical-host replacement must keep writes fenced while the new
+    // dweb realm reads the already-reconciled durable identity to start. The
+    // retiring mutation has released `active`; no later mutation is admitted
+    // until recovery ends.
+    recoveryPending() && !active
+      ? Promise.resolve().then(operation)
+      : withMutation(operation);
+  return Object.freeze({ withMutation, withRead, beginRecovery, endRecovery });
 };
 
 const TRANSFER_EFFECTS = Object.freeze({
@@ -578,18 +594,32 @@ export const createKernelDwebCustodyOwner = ({
       return;
     }
     const run = () => /** @type {any} */ (effects).handle(message.operation, message.args ?? {});
-    const operation = grant || message.operation === 'self/read'
+    const committedAdoptionRead = !hasParent && message.operation === 'identity/read'
+      && activeGrant?.port === port && activeGrant.commitSettled === true;
+    const operation = grant || message.operation === 'self/read' || committedAdoptionRead
       ? Promise.resolve().then(run)
-      : lane.withMutation(run);
+      : message.operation === 'identity/read'
+        ? lane.withRead(run)
+        : lane.withMutation(run);
     if (grant) {
       grant.pendingEffects.add(operation);
       grant.effectCalls.set(message.requestId, { key, promise: operation });
       void operation.finally(() => { grant.pendingEffects.delete(operation); }).catch(() => {});
     }
     void operation.then(
-      (result) => respond(port, {
-        type: 'custody/effect-response', requestId: message.requestId, ok: true, result,
-      }),
+      (result) => {
+        if (grant && message.operation === 'identity/commit'
+            && result?.ok === true && result.committed === true) {
+          // why: the stopped dweb realm resumes inside this same adoption and
+          // immediately rereads the permanent identity. Mark only the exact
+          // acknowledged commit so that read need not wait behind its own
+          // outer mutation lane.
+          grant.commitSettled = true;
+        }
+        respond(port, {
+          type: 'custody/effect-response', requestId: message.requestId, ok: true, result,
+        });
+      },
       () => respond(port, {
         type: 'custody/effect-response', requestId: message.requestId,
         ok: false, error: 'identity-effect-failed', outcomeKnown: false,
@@ -636,15 +666,16 @@ export const createKernelDwebCustodyOwner = ({
         }
         if (message.ok) entry.resolve(message.result);
         else {
-          const error = new KernelIdentityTransferError(
-            typeof message.error === 'string' ? message.error : 'dweb-custody-host-failed',
-            outcomeKnown,
+          const error = /** @type {KernelIdentityTransferError & {retireHost?:boolean}} */ (
+            new KernelIdentityTransferError(
+              typeof message.error === 'string' ? message.error : 'dweb-custody-host-failed',
+              outcomeKnown,
+            )
           );
           if (message.error === 'identity-custody-operation-timeout'
               && message.phase === 'inspection') {
-            void Promise.resolve().then(retireDwebHost).then(
-              () => entry.reject(error), () => entry.reject(error),
-            );
+            error.retireHost = true;
+            entry.reject(error);
           } else entry.reject(error);
         }
         return;
@@ -723,14 +754,13 @@ export const createKernelDwebCustodyOwner = ({
         calls.delete(requestId);
         const outcomeKnown = beforeIdentityWrite({ port, operation, operationId });
         disconnect(port);
-        const error = new KernelIdentityTransferError(
-          'dweb-custody-operation-timeout', outcomeKnown,
+        const error = /** @type {KernelIdentityTransferError & {retireHost?:boolean}} */ (
+          new KernelIdentityTransferError(
+            'dweb-custody-operation-timeout', outcomeKnown,
+          )
         );
-        if (outcomeKnown) {
-          void Promise.resolve().then(retireDwebHost).then(
-            () => reject(error), () => reject(error),
-          );
-        } else reject(error);
+        error.retireHost = outcomeKnown;
+        reject(error);
       }, timeoutMs);
       calls.set(requestId, { port, operation, operationId, resolve, reject, timer });
       try {
@@ -788,13 +818,21 @@ export const createKernelDwebCustodyOwner = ({
   };
 
   const enqueueTransfer = (/** @type {any} */ port,
-    /** @type {'export'|'prepare'|'adopt'} */ operation, /** @type {any} */ args) =>
+    /** @type {'export'|'prepare'|'adopt'} */ operation, /** @type {any} */ args,
+    /** @type {{freshHost?:boolean}} */ context = {}) =>
     new Promise((resolve, reject) => {
       let visibleSettled = false;
+      /** @type {{kind:'result',value:any}|{kind:'retry'}|{kind:'error',value:any}|null} */
+      let retirementPlan = null;
       const settle = (/** @type {boolean} */ ok, /** @type {any} */ value) => {
         if (visibleSettled) return;
         visibleSettled = true;
         if (ok) resolve(value); else reject(value);
+      };
+      const deferRetirement = (/** @type {Exclude<typeof retirementPlan, null>} */ plan) => {
+        if (retirementPlan) throw new Error('dweb-custody-retirement-already-planned');
+        retirementPlan = plan;
+        lane.beginRecovery();
       };
       const job = lane.withMutation(async () => {
         let operationId = `operation:${newId()}`;
@@ -803,33 +841,26 @@ export const createKernelDwebCustodyOwner = ({
             if (!approvedAdoption(args)) {
               throw new KernelIdentityTransferError('dweb-custody-approval-required');
             }
-            let statusResult;
-            try {
-              statusResult = await status(port, operation, args);
-            } catch {
-              const identity = await reconcileAdoption(args);
-              try { await retireDwebHost(); }
-              catch (retireCause) {
+            /** @type {any} */
+            let statusResult = { receipt: { state: 'missing' } };
+            if (!context.freshHost) {
+              try {
+                statusResult = await status(port, operation, args);
+              } catch {
+                const identity = await reconcileAdoption(args);
                 if (identity === 'incoming') {
-                  settle(true, recoveredAdoption(args));
+                  deferRetirement({ kind: 'result', value: recoveredAdoption(args) });
                   return;
                 }
                 if (identity === 'changed') {
-                  throw new KernelIdentityTransferError('identity-changed');
+                  deferRetirement({
+                    kind: 'error', value: new KernelIdentityTransferError('identity-changed'),
+                  });
+                  return;
                 }
-                throw new KernelIdentityTransferError(
-                  'dweb-custody-host-retirement-failed', true, retireCause,
-                );
-              }
-              if (identity === 'incoming') {
-                settle(true, recoveredAdoption(args));
+                deferRetirement({ kind: 'retry' });
                 return;
               }
-              if (identity === 'changed') {
-                throw new KernelIdentityTransferError('identity-changed');
-              }
-              port = await waitForPort();
-              statusResult = { receipt: { state: 'missing' } };
             }
             const receipt = statusResult?.receipt;
             if (receipt?.state === 'succeeded' && safeDwebId(receipt.operationId)) {
@@ -846,8 +877,8 @@ export const createKernelDwebCustodyOwner = ({
               if (outcomeKnown || !safeDwebId(receipt.operationId)) {
                 if (receipt.error === 'identity-custody-operation-timeout'
                     && receipt.phase === 'inspection' && safeDwebId(receipt.operationId)) {
-                  await retireDwebHost();
-                  port = await waitForPort();
+                  deferRetirement({ kind: 'retry' });
+                  return;
                 } else {
                   throw new KernelIdentityTransferError(
                     receipt.error ?? 'dweb-custody-host-failed', outcomeKnown,
@@ -860,14 +891,15 @@ export const createKernelDwebCustodyOwner = ({
                     await recover(port, receipt.operationId, operation, args);
                     respond(port, { type: 'custody/ack', operationId: receipt.operationId });
                   } catch {
-                    try { await retireDwebHost(); } catch { /* durable identity is authoritative */ }
+                    deferRetirement({ kind: 'result', value: recoveredAdoption(args) });
+                    return;
                   }
                   settle(true, recoveredAdoption(args));
                   return;
                 }
                 if (receipt.phase === 'suspending') {
-                  await retireDwebHost();
-                  port = await waitForPort();
+                  deferRetirement({ kind: 'retry' });
+                  return;
                 } else if (receipt.phase === 'commit-dispatched'
                     || receipt.phase === 'recovering') {
                   await recover(port, receipt.operationId, operation, args);
@@ -888,14 +920,28 @@ export const createKernelDwebCustodyOwner = ({
           }
           const grant = {
             port, operation, operationId, args, commitStarted: false,
-            pendingEffects: new Set(), effectCalls: new Map(),
+            commitSettled: false, pendingEffects: new Set(), effectCalls: new Map(),
           };
           activeGrant = grant;
           try {
             const result = await request(port, operation, operationId, args);
             settle(true, result);
           } catch (cause) {
-            settle(false, cause);
+            if (/** @type {{retireHost?:boolean}} */ (cause)?.retireHost === true) {
+              deferRetirement({ kind: 'error', value: cause });
+            } else if (operation === 'adopt'
+                && /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false) {
+              const identity = await reconcileAdoption(args);
+              if (identity === 'incoming') {
+                // why: the durable DID is stronger evidence than a lost host
+                // receipt. Retire the uncertain runtime, but do not turn a
+                // proven commit back into a user-visible failure if teardown
+                // itself loses its acknowledgement.
+                deferRetirement({ kind: 'result', value: recoveredAdoption(args) });
+              } else if (identity === 'changed') {
+                settle(false, new KernelIdentityTransferError('identity-changed'));
+              } else settle(false, cause);
+            } else settle(false, cause);
           } finally {
             if (grant.pendingEffects.size > 0) {
               lane.beginRecovery();
@@ -910,7 +956,35 @@ export const createKernelDwebCustodyOwner = ({
           settle(false, cause);
         }
       });
-      void job.catch((cause) => { settle(false, cause); });
+      void job.then(async () => {
+        const plan = retirementPlan;
+        if (!plan) return;
+        let retirementError = null;
+        try { await retireDwebHost(); }
+        catch (cause) { retirementError = cause; }
+        finally { lane.endRecovery(); }
+        if (plan.kind === 'result') {
+          // why: reconciliation already proved the durable incoming DID. A
+          // failed physical restart remains explicit in this result and can
+          // be retried, but it cannot turn a landed single commit into failure.
+          settle(true, plan.value);
+          return;
+        }
+        if (plan.kind === 'error') {
+          settle(false, plan.value);
+          return;
+        }
+        if (retirementError) {
+          settle(false, new KernelIdentityTransferError(
+            'dweb-custody-host-retirement-failed', true, retirementError,
+          ));
+          return;
+        }
+        try {
+          const next = enqueueTransfer(await waitForPort(), operation, args, { freshHost: true });
+          void next.then((value) => settle(true, value), (cause) => settle(false, cause));
+        } catch (cause) { settle(false, cause); }
+      }, (cause) => { settle(false, cause); });
     });
 
   const call = async (/** @type {'export'|'prepare'|'adopt'} */ operation,

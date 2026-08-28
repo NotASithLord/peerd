@@ -13,6 +13,7 @@ import { makeVaultAuthorityClient } from './vault-authority-client.js';
  * @param {boolean} [deps.vaultUnlocked]
  * @param {()=>boolean} [deps.dwebEnabled]
  * @param {string} [deps.offscreenPath]
+ * @param {(hostEpoch:string)=>Promise<void>|void} [deps.onHostLost]
  * @param {(recovery:any)=>Promise<void>|void} [deps.onRecovered]
  * @param {(error:unknown)=>void} [deps.onError]
  * @param {typeof createProductionFeatureLeaseRuntime} [deps.createRuntime]
@@ -29,6 +30,7 @@ export const createKernelFeatureHost = ({
   vaultUnlocked = false,
   dwebEnabled = () => false,
   offscreenPath = 'offscreen/offscreen.html',
+  onHostLost = () => {},
   onRecovered = () => {},
   onError = () => {},
   createRuntime = createProductionFeatureLeaseRuntime,
@@ -84,10 +86,23 @@ export const createKernelFeatureHost = ({
     vaultUnlocked,
   });
 
+  /** @type {string|null} */
+  let authenticatedHostEpoch = null;
   const handleKeepalive = (/** @type {any} */ port) => attachKeepalive({
     port,
     featureLeases: runtime,
     identity: canonicalIdentity,
+    onAuthenticated: (/** @type {string} */ hostEpoch) => {
+      authenticatedHostEpoch = hostEpoch;
+    },
+    onLost: (/** @type {string} */ hostEpoch) => {
+      // why: Chrome may deliver an old Port's disconnect after its successor
+      // has authenticated. Only the current lifetime oracle may retire the
+      // controller; lease recovery below is independently epoch-fenced.
+      if (authenticatedHostEpoch !== hostEpoch) return;
+      authenticatedHostEpoch = null;
+      return onHostLost(hostEpoch);
+    },
     onRecovered,
     onError,
   });

@@ -26,6 +26,8 @@ const loadActorRunner = () => import('/offscreen/actor-runner.js');
  * @param {number} [deps.relayDrainTimeoutMs]
  * @param {() => void|Promise<void>} [deps.startKeepAlive]
  * @param {() => void|Promise<void>} [deps.stopKeepAlive]
+ * @param {(error:Error) => void|Promise<void>} [deps.onKeepAliveLost]
+ * @param {number} [deps.healthTransitionTimeoutMs]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
  */
@@ -38,6 +40,8 @@ export const makeDirectActorHost = ({
   relayDrainTimeoutMs = 5_000,
   startKeepAlive = () => {},
   stopKeepAlive = () => {},
+  onKeepAliveLost = () => {},
+  healthTransitionTimeoutMs = 1_000,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
 }) => {
@@ -62,7 +66,7 @@ export const makeDirectActorHost = ({
   let keepAliveReady = null;
   /** @type {Error|null} */
   let keepAliveLoss = null;
-  /** @type {Map<symbol, { runId: string|null, started:boolean, stopped:boolean, armDrain:()=>void, settle:(value:any)=>void }>} */
+  /** @type {Map<symbol, { runId: string|null, started:boolean, stopped:boolean, lossReady:Promise<void>|null, armDrain:()=>void, settle:(value:any)=>void }>} */
   const activeRunLosses = new Map();
   const pendingAborts = new Set();
 
@@ -112,12 +116,31 @@ export const makeDirectActorHost = ({
   /** @param {Record<string, (payload: any, sender?: unknown) => any>} routes */
   const bindRelayRoutes = (routes) => { relayRoutes = routes; };
   const isRelaySender = (/** @type {unknown} */ sender) => sender === relaySender;
+  /** @param {Error} error @returns {Promise<void>} */
+  const completeHealthTransition = (error) => new Promise((resolve) => {
+    let finished = false;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    let timer = null;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeoutFn(timer);
+      resolve();
+    };
+    timer = setTimeoutFn(finish, Math.max(1, healthTransitionTimeoutMs));
+    void Promise.resolve().then(() => onKeepAliveLost(error)).catch(() => {}).then(finish);
+  });
   const failKeepAlive = (/** @type {unknown} */ reason) => {
     const error = reason instanceof Error ? reason : new Error(String(reason));
     if (keepAliveLoss) return;
     keepAliveLoss = error;
+    // why: actor isolation health is host authority, not a later semantic
+    // result code. Every lost-run result waits for this bounded transition so
+    // a successor demand cannot race ahead of the durable refusal.
+    const lossReady = completeHealthTransition(error);
     for (const active of activeRunLosses.values()) {
       active.stopped = true;
+      active.lossReady = lossReady;
       if (active.started && active.runId) abortActor(active.runId);
       active.settle({
         ok: false,
@@ -188,7 +211,7 @@ export const makeDirectActorHost = ({
       /** @type {(value:any)=>void} */
       let settle = () => {};
       const active = {
-        runId, started: false, stopped: false,
+        runId, started: false, stopped: false, lossReady: null,
         armDrain: () => {},
         settle: (/** @type {any} */ value) => settle(value),
       };
@@ -260,7 +283,9 @@ export const makeDirectActorHost = ({
         }
       })();
       try {
-        return await Promise.race([actorRun, stopped]);
+        const result = await Promise.race([actorRun, stopped]);
+        await active.lossReady;
+        return result;
       } finally {
         if (relayDrainTimer) clearTimeoutFn(relayDrainTimer);
         activeRunLosses.delete(runKey);

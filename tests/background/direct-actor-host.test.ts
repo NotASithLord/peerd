@@ -741,12 +741,14 @@ describe('direct actor host', () => {
 
   test('aborts and reports an unknown outcome if the event-page lease is lost', async () => {
     const aborted: string[] = [];
+    const healthLosses: string[] = [];
     const host = makeDirectActorHost({
       workerUrl: 'worker.js',
       run: () => new Promise(() => {}),
       abort: (runId: string) => { aborted.push(runId); },
       startKeepAlive: () => {},
       stopKeepAlive: () => {},
+      onKeepAliveLost: (error) => { healthLosses.push(error.message); },
     });
     host.bindRelayRoutes({});
 
@@ -764,6 +766,59 @@ describe('direct actor host', () => {
       outcomeKnown: false,
     });
     expect(aborted).toEqual(['run-lost']);
+    expect(healthLosses).toEqual(['session heartbeat stopped']);
+  });
+
+  test('holds lost-run settlement until the durable health transition completes', async () => {
+    let releaseHealth = () => {};
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      run: () => new Promise(() => {}),
+      abort: () => {},
+      startKeepAlive: () => {},
+      stopKeepAlive: () => {},
+      onKeepAliveLost: () => new Promise<void>((resolve) => { releaseHealth = resolve; }),
+      healthTransitionTimeoutMs: 1_000,
+    });
+    host.bindRelayRoutes({});
+
+    let settled = false;
+    const result = host.sendMessage({
+      type: 'actor/run', job: { runId: 'run-held', actorSessionId: 'actor-held' },
+    }).then((value) => { settled = true; return value; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    host.failKeepAlive(new Error('session heartbeat stopped'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(settled).toBe(false);
+    releaseHealth();
+    await expect(result).resolves.toMatchObject({
+      code: 'actor_host_keepalive_lost', outcomeKnown: false,
+    });
+  });
+
+  test('bounds a health transition that never settles', async () => {
+    const host = makeDirectActorHost({
+      workerUrl: 'worker.js',
+      run: () => new Promise(() => {}),
+      abort: () => {},
+      startKeepAlive: () => {},
+      stopKeepAlive: () => {},
+      onKeepAliveLost: () => new Promise<void>(() => {}),
+      healthTransitionTimeoutMs: 5,
+    });
+    host.bindRelayRoutes({});
+
+    const result = host.sendMessage({
+      type: 'actor/run', job: { runId: 'run-bounded', actorSessionId: 'actor-bounded' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    host.failKeepAlive(new Error('session heartbeat stopped'));
+
+    await expect(Promise.race([
+      result,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('health transition hung')), 100)),
+    ])).resolves.toMatchObject({ code: 'actor_host_keepalive_lost', outcomeKnown: false });
   });
 
   test('settles unknown without waiting for a stuck heartbeat write or cleanup', async () => {

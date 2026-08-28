@@ -150,4 +150,38 @@ describe('exact execution creation rollback', () => {
       });
     }
   });
+
+  test('delegating script binds its live operation feed to the exact model call', async () => {
+    let options: any = null;
+    const authority = createExecutionToolAuthority({
+      binding: {
+        operation: 'turn.execution.run-script',
+        args: { code: "return actors.call('web', 'read')" },
+      },
+      ctx: {
+        session: { sessionId: 'chat-1', kind: 'chat' },
+        toolUseId: 'script-call-1',
+        messageActor: async () => ({}),
+        operationGrant: new Set(['turn.actor.message']),
+        jsOffscreenClient: {
+          execHeadless: async (_code: string, value: any) => {
+            options = value;
+            return { durationMs: 1, value: 'done', usedActors: true };
+          },
+        },
+        scriptRuns: {
+          mintRunId: () => 'run-1', register: () => {}, release: () => {}, opsFor: () => [],
+        },
+      },
+    });
+    const result = await authority.runHeadlessScript({
+      code: "return actors.call('web', 'read')",
+      actors: true, provider: false, workspace: false, timeoutMs: null,
+    });
+    expect(result.ok).toBe(true);
+    expect(options).toMatchObject({
+      runId: 'run-1', ownerSessionId: 'chat-1', ownerToolUseId: 'script-call-1', actors: true,
+      timeoutMs: 270_000,
+    });
+  });
 });

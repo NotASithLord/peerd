@@ -4,20 +4,25 @@ import { dwebDiscoverTool } from '../../extension/peerd-runtime/tools/defs/dweb-
 import { dwebInstallTool } from '../../extension/peerd-runtime/tools/defs/dweb-install.js';
 import { createDwebToolAuthority } from '../../extension/background/dweb-tool-authority.js';
 
-// A mock ctx with a spyable dweb service + confirm. confirmActions default ON
-// (so the dispatcher's gate owns the confirm and the tool does NOT double it).
+// A mock ctx with a spyable dweb service and exact authority confirmation.
+// Publication prepares and digests the bundle before the user sees the prompt.
 const mkCtx = (over: any = {}) => {
   const calls: any = { share: [], discover: 0, install: [], confirm: [] };
+  const dweb = {
+    prepareShare: async (appId: string) => ({
+      ok: true, appId, name: 'Pong', entryFile: 'index.html',
+      fileCount: 2, totalBytes: 128, digest: 'a'.repeat(64),
+    }),
+    share: async (id: string) => { calls.share.push(id); return { ok: true, uri: 'peerd://did:key:zA/abc', hash: 'abc' }; },
+    discover: async () => { calls.discover += 1; return { ok: true, apps: [{ name: 'Pong', dwapp_id: 'h1', slug: 'pong', seq: 7, uri: 'peerd://did/h1', publisher: 'did:key:zB' }] }; },
+    install: async (a: any) => { calls.install.push(a); return { ok: true, app: { id: 'app9', name: a.name ?? 'Pong' } }; },
+  };
   const ctx: any = {
     permission: { mode: 'act', confirmActions: true },
     session: { sessionId: 's1' },
     confirm: async (p: any) => { calls.confirm.push(p); return over.confirmAnswer ?? 'yes_once'; },
-    dweb: {
-      share: async (id: string) => { calls.share.push(id); return { ok: true, uri: 'peerd://did:key:zA/abc', hash: 'abc' }; },
-      discover: async () => { calls.discover += 1; return { ok: true, apps: [{ name: 'Pong', dwapp_id: 'h1', slug: 'pong', seq: 7, uri: 'peerd://did/h1', publisher: 'did:key:zB' }] }; },
-      install: async (a: any) => { calls.install.push(a); return { ok: true, app: { id: 'app9', name: a.name ?? 'Pong' } }; },
-    },
     ...over,
+    dweb: over.dweb === null ? null : { ...dweb, ...(over.dweb ?? {}) },
   };
   return { ctx, calls };
 };

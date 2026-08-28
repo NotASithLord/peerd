@@ -67,7 +67,7 @@ export const scenario: Scenario = {
   title: 'Retargeting durable site-client code across actor origins (issue #274)',
   adversary: 'malicious page content steering a bound web actor',
   asset: 'stored executable client definitions and their origin-scoped integrity',
-  claim: 'A web actor cannot read, execute, overwrite, delete, or relay through another origin\'s stored client. The dispatch gate and final tool boundary fail before foreign effects; worker relays recheck durable/live custody; canonical own-origin use remains available; and roaming actors are limited to their exact ordinary live tab.',
+  claim: 'At the policy and final tool boundaries, a web actor cannot read, execute, overwrite, or delete another origin\'s stored client. The pure worker-relay policy also refuses lost custody; the production actor-to-authority vertical is covered separately. Canonical own-origin use remains available, and roaming actors are limited to their exact ordinary live tab.',
   threatModelRef: 'INV-18',
   tier: 'unit',
   async run() {

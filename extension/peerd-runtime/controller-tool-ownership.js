@@ -206,7 +206,7 @@ export const controllerOperationsForTools = (/** @type {Iterable<string>} */ nam
   Object.freeze([...new Set([...names].flatMap((name) =>
     CONTROLLER_OPERATION_GRANTS[name] ?? []))]);
 
-export const controllerOperationsForSpawnedTools = (
+export const controllerToolNamesForSpawnedTools = (
   /** @type {Iterable<string>} */ visibleNames,
   /** @type {unknown} */ requestedNames,
   /** @type {boolean} */ allowRecursion,
@@ -216,7 +216,15 @@ export const controllerOperationsForSpawnedTools = (
   )), false).filter((tool) => allowRecursion || tool.name !== 'actor_create');
   const requested = Array.isArray(requestedNames)
     ? new Set(requestedNames.filter((name) => typeof name === 'string')) : null;
-  return controllerOperationsForTools(spawnable
+  return Object.freeze(spawnable
     .filter((tool) => !requested || requested.has(tool.name))
     .map((tool) => tool.name));
 };
+
+export const controllerOperationsForSpawnedTools = (
+  /** @type {Iterable<string>} */ visibleNames,
+  /** @type {unknown} */ requestedNames,
+  /** @type {boolean} */ allowRecursion,
+) => controllerOperationsForTools(controllerToolNamesForSpawnedTools(
+  visibleNames, requestedNames, allowRecursion,
+));

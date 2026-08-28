@@ -263,7 +263,7 @@ export const ChatView = {
         state.session?.customSystemPrompt ? m('span.session-sys-badge', {
           title: `Session instructions active:\n${state.session.customSystemPrompt}\n\n"/system" shows them - "/system clear" removes them.`,
         }, '/system') : null,
-        // /tools presence chip — a narrowed manifest silently changes which
+        // /tools presence chip: a narrowed manifest silently changes which
         // tools the model is offered, so it gets the same visibility contract
         // as /system: a monochrome chip where the model surface is active.
         state.session?.toolManifest ? m('span.session-sys-badge', {

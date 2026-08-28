@@ -330,7 +330,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // Tier 0 login — web-actor-only, refused for every other kind.
     expect(isAllowedForActorType('login', 'web')).toBe(true);
     expect(isAllowedForActorType('login', 'app')).toBe(false);
-    // read_result pages any supported oversized result — same tier as the producer.
+    // read_result pages any supported oversized result: same tier as the producer.
     expect(isAllowedForActorType('read_result', 'web')).toBe(true);
     expect(isAllowedForActorType('read_result', 'app')).toBe(false);
   });
@@ -491,8 +491,8 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     // closed at exposureGate), and present ONLY in the code-surface web actor's
     // positive set. (The spawn_subagent path is walled separately: the
     // capability strip drops jsOffscreenClient for any non-code-surface ctx,
-    // and the fixed SW page-program routes refuse a non-web-actor owner — the slice-3
-    // security tests.)
+    // and nested page-program execution refuses a non-web-actor owner: the
+    // slice-3 security tests.)
     expect(isHiddenFromMain('page_code')).toBe(true);
     const r = eg({ name: 'page_code' }, {}, { exposure: 'main' });
     expect(r?.allowed).toBe(false);

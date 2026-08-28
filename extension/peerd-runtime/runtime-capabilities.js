@@ -2,6 +2,18 @@
 // Runtime capabilities give one browser-neutral description of facilities the
 // privileged host can actually provide.
 
+import {
+  RUNTIME_CAPABILITY_VERSION,
+  resolveRuntimeCapabilities,
+  runtimeCapabilityAvailable,
+} from '/shared/runtime-capability-hosts.js';
+
+export {
+  RUNTIME_CAPABILITY_VERSION,
+  resolveRuntimeCapabilities,
+  runtimeCapabilityAvailable,
+};
+
 /** @typedef {'available'|'unsupported'|'temporarily_unavailable'} RuntimeCapabilityStatus */
 /**
  * @typedef {object} RuntimeCapability
@@ -11,8 +23,6 @@
  * @property {boolean} retryable
  * @property {string|null} alternativeCode
  */
-
-export const RUNTIME_CAPABILITY_VERSION = 1;
 
 export class RuntimeCapabilityUnavailableError extends Error {
   /** @param {string} facility @param {string} alternative */
@@ -34,59 +44,6 @@ export const requireRuntimeCapability = (capability, facility) => {
   );
 };
 
-/** @param {string} host */
-const available = (host) => Object.freeze({
-  status: /** @type {const} */ ('available'),
-  host,
-  reasonCode: null,
-  retryable: false,
-  alternativeCode: null,
-});
-
-/** @param {string} alternativeCode */
-const unsupported = (alternativeCode) => Object.freeze({
-  status: /** @type {const} */ ('unsupported'),
-  host: null,
-  reasonCode: 'host_unsupported',
-  retryable: false,
-  alternativeCode,
-});
-
-/**
- * Resolve facilities from host facts. Consumers must ask about the product
- * facility, never infer support from a browser name or a stored preference.
- *
- * @param {{ offscreenDocument: boolean, dwebPackaged?: boolean, moonshineVoiceDocument?: boolean }} hosts
- */
-export const resolveRuntimeCapabilities = ({
-  offscreenDocument, dwebPackaged = false, moonshineVoiceDocument = offscreenDocument,
-}) => {
-  const offscreen = offscreenDocument === true;
-  const voiceDocument = moonshineVoiceDocument === true;
-  return Object.freeze({
-    version: RUNTIME_CAPABILITY_VERSION,
-    sealedJobs: offscreen
-      ? available('offscreen-worker')
-      : unsupported('use_visible_notebook'),
-    documentReader: offscreen
-      ? available('offscreen-document')
-      : unsupported('attach_pdf_or_plain_text'),
-    readableHtml: Object.freeze({ mode: offscreen ? 'markdown' : 'snapshot_or_raw' }),
-    moonshineVoiceHost: voiceDocument
-      ? available(offscreen ? 'offscreen-document' : 'background-page')
-      : unsupported('type_in_composer'),
-    pdfOcr: offscreen
-      ? available('offscreen-document')
-      : unsupported('use_page_images_or_searchable_pdf'),
-    localWebGpuHost: offscreen
-      ? available('offscreen-document')
-      : unsupported('use_ollama'),
-    dwebMesh: offscreen && dwebPackaged
-      ? available('offscreen-document')
-      : unsupported('use_local_apps'),
-  });
-};
-
 /** @typedef {'sealedJobs'|'documentReader'|'dwebMesh'} ToolRuntimeFacility */
 /** @type {Readonly<Record<string, ToolRuntimeFacility>>} */
 const TOOL_CAPABILITIES = Object.freeze({
@@ -97,10 +54,6 @@ const TOOL_CAPABILITIES = Object.freeze({
   a2a_run: 'dwebMesh',
   read_doc: 'documentReader',
 });
-
-/** @param {unknown} capability */
-export const runtimeCapabilityAvailable = (capability) =>
-  /** @type {{ status?: unknown }} */ (capability)?.status === 'available';
 
 /**
  * @param {string} toolName

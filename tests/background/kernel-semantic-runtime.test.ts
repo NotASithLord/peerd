@@ -6,6 +6,8 @@ import {
 } from '../../extension/background/kernel-semantic-runtime.js';
 import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
 import { createKernelControllerGateway } from '../../extension/background/kernel-controller-gateway.js';
+import { createPreviewContributorRoutes } from '../../extension/background/kernel-contributor-owner.js';
+import { dispatchSemanticRoute } from '../../extension/offscreen/semantic-route-host.js';
 
 await useFakeIndexedDB();
 
@@ -114,6 +116,80 @@ describe('kernel semantic runtime', () => {
     }
     expect(state.controllerCalls()).toBe(2);
     expect(state.controllerCreates()).toBe(1);
+  });
+
+  test('Options consent crosses the sealed controller into only the exact journal authority', async () => {
+    const values = new Map<string, any>();
+    const kv = {
+      get: async (key: string) => structuredClone(values.get(key) ?? null),
+      set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+      delete: async (key: string) => { values.delete(key); },
+      list: async (prefix: string) => Object.fromEntries([...values.entries()]
+        .filter(([key]) => key.startsWith(prefix))),
+    };
+    const optionsSender = {};
+    let runtime: any;
+    let controllerCalls = 0;
+    const contributor = createPreviewContributorRoutes({
+      kv,
+      optionsUi: (sender: unknown) => sender === optionsSender,
+      sidepanelUi: () => false,
+      homeUi: () => false,
+      validateFeedback: async () => ({ ok: false }),
+      callSemanticRoute: (route: string, message: any) =>
+        runtime.dispatchContributor(route, message),
+      offscreenUrl: null,
+      featureHost: null,
+      scheduleDrain: () => {},
+    });
+    const controllerGateway = gateway((deps: any) => controller({
+      callSemantic: async (payload: any) => {
+        controllerCalls += 1;
+        const authority = deps.authorizeSemanticCall(payload);
+        return dispatchSemanticRoute(payload, {
+          signal: new AbortController().signal,
+          authority,
+          deadlineAt: Date.now() + 5_000,
+          kernelCall: (operation: string, value: unknown) =>
+            deps.handleSemanticKernelCall(operation, value, {
+              authority, signal: { aborted: false }, deadlineAt: Date.now() + 5_000,
+            }),
+        }).then((result: any) => result?.semanticResult ?? result);
+      },
+    }));
+    runtime = createKernelSemanticRuntime({
+      controllerGateway,
+      contributorAuthority: contributor.handleKernelCall,
+      idbFactory: indexedDB,
+      idb: {
+        get: async () => undefined, getAll: async () => [], put: async () => {},
+        del: async () => {}, transact: async () => ({ ok: true }),
+      },
+      kv,
+      auditLog: { list: async () => [], append: async () => {} },
+      vault: { isLocked: () => false, getSecret: async () => null },
+      ready: Promise.resolve(), canWrite: () => {}, pushState: () => {},
+      isHomeSender: () => true, actorCount: () => ({}), actorOverview: () => ({}),
+      appCatalog: { list: async () => [], get: async () => null },
+      appFiles: null, isAppSender: () => false,
+    });
+
+    expect(contributor.routes['contributor/enable'](
+      { type: 'contributor/enable' }, {},
+    )).toEqual({
+      ok: false, code: 'contributor-channel-admission-denied', outcomeKnown: true,
+    });
+    expect(controllerCalls).toBe(0);
+    await expect(contributor.routes['contributor/enable'](
+      { type: 'contributor/enable' }, optionsSender,
+    )).resolves.toMatchObject({ ok: true, status: { enabled: true } });
+    expect(controllerCalls).toBe(1);
+    const snapshots = [...values.entries()].filter(([key]) =>
+      key.startsWith('contributor_metrics.state.v2.'));
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0][1]).toMatchObject({
+      committed: true, state: 'active', record: { consent: { enabled: true } },
+    });
   });
 
   test('App metadata sender custody and file reads stay local to an exact host projection', async () => {

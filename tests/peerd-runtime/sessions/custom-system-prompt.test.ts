@@ -127,7 +127,7 @@ describe('renderSystemPrompt — <session_instructions> augmentation', () => {
   });
 });
 
-describe('renderSystemPrompt — controller-owned turn guidance', () => {
+describe('renderSystemPrompt: controller-owned turn guidance', () => {
   const TEMPLATE = 'BASE-PROMPT {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}';
 
   test('renders planning, actor-host, and runtime-capability corrections', async () => {
@@ -230,7 +230,7 @@ describe('actor spawn — customSystemPrompt is NOT inherited', () => {
         ok: true, started: true, finalText: 'child done',
         newMessages: [{ role: 'assistant', content: 'child done', id: 'a1', when: 2 }],
       }),
-      getToolDescriptors: () => [],
+      projectChildSurface: async () => ({ tools: [], operations: [] }),
     });
 
     const out = await spawn({ task: 'summarize X', parentSessionId: parent.sessionId, parentDepth: 0 });

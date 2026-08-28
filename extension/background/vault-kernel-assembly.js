@@ -5,8 +5,8 @@ import {
 import { parseKernelIdentity } from '../shared/kernel-identity.js';
 
 export const SEMANTIC_CUTOVER_SUMMARY = Object.freeze({
-  schema: 2, total: 167, kernel: 149, split: 18, migrated: 167,
-  unmigrated: 0, executable: 167, unavailable: 0, ready: true,
+  schema: 2, total: 157, kernel: 139, split: 18, migrated: 157,
+  unmigrated: 0, executable: 157, unavailable: 0, ready: true,
 });
 
 const EVENT_OWNERS = Object.freeze({

@@ -49,6 +49,16 @@ const validInput = (/** @type {Record<string,any>} */ input) => {
       && Array.isArray(input.toolNames) && input.toolNames.length <= 256
       && input.toolNames.every((name) => typeof name === 'string' && name.length <= 128);
   }
+  if (input.surface === 'spawn') {
+    return exactKeys(input, [
+      'surface', 'toolManifest', 'toolNames', 'allowRecursion',
+      'actorIsolation', 'runtimeCapabilities',
+    ])
+      && typeof input.allowRecursion === 'boolean'
+      && (input.toolNames === undefined || (Array.isArray(input.toolNames)
+        && input.toolNames.length <= 256
+        && input.toolNames.every((name) => typeof name === 'string' && name.length <= 128)));
+  }
   if (input.surface === 'main') {
     return exactKeys(input, [
       'surface', 'toolManifest', 'dwebEnabled', 'dwebEngaged', 'goalActive',
@@ -102,6 +112,24 @@ export const projectControllerToolSurface = (value) => {
     projected = descriptors.filter((tool) => names.has(tool.name));
     if (projected.length !== names.size) {
       return { ok: false, code: 'turn-tool-selection-unknown', outcomeKnown: true };
+    }
+  } else if (input.surface === 'spawn') {
+    // why: spawned-agent tool semantics belong to the sealed controller. The
+    // authority host receives descriptors plus exact operations, then applies
+    // the independently admitted run and lineage ceilings before persisting.
+    projected = filterByRuntimeCapabilities(filterDescriptorsByManifest(
+      filterByGoalActive(filterActorSurface(mainAgentDescriptors(descriptors)), false),
+      resolveManifestAllow(input.toolManifest),
+    ), input.runtimeCapabilities);
+    if (record(input.actorIsolation)) {
+      projected = filterByActorIsolation(projected, /** @type {any} */ (input.actorIsolation));
+    }
+    if (Array.isArray(input.toolNames)) {
+      const names = new Set(input.toolNames);
+      projected = projected.filter((tool) => names.has(tool.name));
+    }
+    if (input.allowRecursion !== true) {
+      projected = projected.filter((tool) => tool.name !== 'actor_create');
     }
   } else if (input.surface === 'actor') {
     const actorType = typeof input.actorType === 'string' ? input.actorType : '';

@@ -1,4 +1,4 @@
-// Debugger pool — owns chrome.debugger attach/detach lifecycle for exact
+// Debugger pool: owns chrome.debugger attach/detach lifecycle for exact
 // document-bound accessibility, action, screenshot, state, and capture effects.
 //
 // Why a pool instead of attach-per-call:

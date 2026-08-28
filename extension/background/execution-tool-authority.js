@@ -20,7 +20,7 @@ const expectedTimeout = (
   /** @type {any} */ args, /** @type {boolean} */ actors,
   /** @type {boolean} */ provider,
 ) => {
-  const value = Number(args?.timeoutMs);
+  const value = typeof args?.timeoutMs === 'number' ? args.timeoutMs : Number.NaN;
   const fallback = actors || provider ? 270_000 : 30_000;
   const ceiling = actors || provider ? 300_000 : 120_000;
   return Math.min(ceiling, Math.max(1000, Number.isFinite(value) ? value : fallback));

@@ -1083,7 +1083,7 @@ export async function* runUserTurn(ctx) {
     // EXISTING permission classification doing double duty as the scheduler:
     //   - READ class → safe (reads share no mutable state, and decideAction
     //     never confirms a read, so no modal can race another).
-    //   - confirm:true → NEVER safe — a turn must
+    //   - confirm:true → NEVER safe: a turn must
     //     not stack two confirmation modals (serialize confirms).
     //   - every write stays strictly serial in emitted order.
     // Missing classification fails closed to serial dispatch. Both sealed

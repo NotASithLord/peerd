@@ -108,6 +108,7 @@ const makeContext = ({
   sessions: makeSessions(),
   session: { sessionId: 'session-backpressure', kind: 'chat' },
   tools: [descriptor],
+  allowedOperations: ['turn.resource.read-result'],
   refreshTools: async () => [descriptor],
   classifyToolCall: () => ({ actionClass: 'read', confirm: false }),
   audit: async () => {},

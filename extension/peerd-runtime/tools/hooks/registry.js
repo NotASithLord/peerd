@@ -8,7 +8,7 @@
 //      flagship: the network-origin check is implemented AS a default
 //      pre-tool-use hook (see ./defaults/egress-allowlist.js), proving
 //      the model is load-bearing and not a toy.
-//   2. USER (config) hooks — authored by the user as declarative markdown in
+//   2. USER (config) hooks: authored by the user as declarative markdown in
 //      the peerd workspace at `.peerd/hooks/`. peerd has no real
 //      filesystem, so "`.peerd/hooks/`" is a logical path; the bytes
 //      live in chrome.storage.local under HOOKS_STORAGE_KEY. The store

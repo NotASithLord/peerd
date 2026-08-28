@@ -356,6 +356,8 @@ describe('site-client custody walls', () => {
       deriver: 'probe', body: 'return { changed: true };',
     }, {
       session: { sessionId: 'bound-a' },
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
       authorizeSiteClientOrigin: async () => { checks += 1; return allowed; },
       siteClients: {
         get: async () => null,
@@ -441,6 +443,8 @@ describe('site-client custody walls', () => {
     const operations: string[] = [];
     const ctx: any = {
       session: { sessionId: 'bound-a' },
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
       canUseSiteClientOrigin: (origin: string) => origin === 'https://a.test',
       authorizeSiteClientOrigin: async (origin: string) => origin === 'https://a.test',
       confirm: async () => { operations.push('confirm'); return 'yes_once'; },

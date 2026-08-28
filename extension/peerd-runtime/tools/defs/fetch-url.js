@@ -7,7 +7,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // A direct, denylist-gated, audited HTTP call with NO tab and NO rendering. It rides
 // ctx.webFetch — scheme + SSRF/private-network + denylist + redirect-block + audit,
 // the SAME chain call_api uses — and the capability strip (spawn.js
-// restrictCtxCapabilities) leaves the web ctx NO getSecret / NO safeFetch (keyless).
+// isolated actor relay leaves the web ctx NO getSecret / NO safeFetch (keyless).
 //
 // SESSION is decided AT THE BOUNDARY, not here: ctx.webFetch is session-scoped
 // (peerd-egress withSessionScopedCredentials) so the user's cookies ride ONLY on a
@@ -197,7 +197,7 @@ export const fetchUrlTool = composeTool("fetch_url", {
       }
       // Spill-and-page for an oversized body (Hermes-style): the FULL text is
       // stored locally and the model sees a head+tail WINDOW plus the exact
-      // read_result paging call — instead of the old silent head-only slice
+      // read_result paging call instead of the old silent head-only slice
       // that lost the tail without saying so. Falls back to the old slice when
       // the spill capability is absent (a ctx without resultStore).
       // When the caller named a query AND the body is prose (not JSON — BM25 is

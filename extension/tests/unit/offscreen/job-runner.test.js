@@ -1221,7 +1221,7 @@ describe('headless remote module imports (audited resolver path)', () => {
     expect(attempts.actors).toContain('not defined');
     expect(calls.filter((call) => call.type === 'sw/web-fetch').length).toBe(1);
     expect(calls.some((call) => [
-      'actor/spawn', 'actors/call', 'script/model-call', 'page-program/snapshot',
+      'actor/spawn', 'actors/call', 'script/model-call',
       'app-code/observe', 'app-code/act',
       'dweb/distributed/info', 'site-fetch/call', 'a2a/call',
     ].includes(call.type))).toBe(false);

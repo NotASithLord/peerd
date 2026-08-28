@@ -1,6 +1,6 @@
 // The shared repeat-injection dedup guard (schema-diet 6b). oncePerSession is
 // the flat "disclose a note once per session" gate the create-result notes and
-// large one-shot tool bodies; shouldInjectBody is the trim-AWARE variant load_skill uses —
+// large one-shot tool bodies; shouldInjectBody is the trim-AWARE variant load_skill uses :
 // it re-injects a scrolled-out body once the rolling-summary watermark passes
 // the prior load. Pure logic, module-scope registries — reset between cases.
 

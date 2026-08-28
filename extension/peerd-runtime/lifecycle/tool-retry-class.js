@@ -3,9 +3,9 @@
 // side-effecting tool has a retry classification" — realized as ONE pure
 // function over a tool DESCRIPTOR.
 //
-// why a descriptor and not the tool objects themselves: importing
-// BUILTIN_TOOLS here would drag every def's chrome.* / engine-client import
-// graph into a module that must stay pure, IO-free and browser-free
+// why a descriptor and not executable tool objects: importing implementations
+// here would drag their chrome.* / engine-client graph into a module that must
+// stay pure, IO-free and browser-free
 // (functional core, imperative shell). The classifier reads only
 // { name, sideEffect, primitive, retryClass } — the shape every tool already
 // declares in /shared/tool-types.js — so the dispatcher can classify a

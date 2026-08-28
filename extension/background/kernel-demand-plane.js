@@ -221,8 +221,6 @@ export const createKernelDemandPlane = (deps) => {
       handleRichKernelCall: richEffects.handle,
       providerEgress,
       ensureOffscreen: deps.featureHost.ensureOffscreen,
-      retireHost: (/** @type {string} */ reason) =>
-        deps.featureHost.runtime.retireActiveHost(reason),
       loadTurnRuntime: async (/** @type {any} */ seams) =>
         (await loadRichOwner(seams)).turnRuntime,
       withProductionRun: deps.controllerGateway.withRun,
@@ -408,6 +406,8 @@ export const createKernelDemandPlane = (deps) => {
   }
   return Object.freeze({
     routes,
+    dispatchContributor: async (/** @type {string} */ route, /** @type {any} */ message) =>
+      (await loadControllerOwner()).dispatchContributor(route, message),
     projectProviderState: async (/** @type {Record<string,any>} */ snapshot) =>
       (await loadControllerOwner()).routes['models/state-projection'](snapshot),
     controllerRelays,

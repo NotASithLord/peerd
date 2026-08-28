@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { relative, join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
@@ -13,7 +14,7 @@ import {
 import {
   SEMANTIC_ROUTE_CLASSIFICATIONS,
   SEMANTIC_ROUTE_CUTOVER,
-} from '../../extension/shared/semantic-route-classification.js';
+} from '../../packaging/semantic-route-classification.ts';
 import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
 import { SEMANTIC_CUTOVER_SUMMARY } from '../../extension/background/vault-kernel-assembly.js';
 
@@ -40,6 +41,19 @@ describe('digest-bound lazy semantic route clusters', () => {
       row.state === 'migrated' && row.placement !== 'kernel');
     expect(JSON.parse(JSON.stringify(SEMANTIC_HOST_ROUTE_CLASSIFICATIONS)))
       .toEqual(expected);
+  });
+
+  test('the Store host projects out Preview-only semantic routes', () => {
+    const storeRows = SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.filter(
+      (row) => row.channels.includes('store'),
+    );
+    expect(storeRows.some((row) => row.route.startsWith('contributor/'))).toBe(false);
+    expect(storeRows.some((row) => row.route === 'apps/open')).toBe(true);
+    const template = readFileSync(
+      join(process.cwd(), 'packaging/templates/semantic-route-host.store.js'), 'utf8',
+    );
+    expect(template).toContain("row.channels.includes('store')");
+    expect(template).toContain('classifications: storeClassifications');
   });
 
   test('cold summary is an exact projection of the full route ledger', () => {

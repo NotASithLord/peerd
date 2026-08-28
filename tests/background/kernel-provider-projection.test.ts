@@ -19,8 +19,8 @@ const makeProjection = (overrides: Record<string, any> = {}) => {
       },
     },
     browser: { storage: { local: { get: async () => overrides.local ?? {} } } },
-    projectSemantic: async (snapshot: any) =>
-      controllerLocalRoutes['models/state-projection'](snapshot),
+    projectSemantic: overrides.projectSemantic ?? (async (snapshot: any) =>
+      controllerLocalRoutes['models/state-projection'](snapshot)),
     localModels: overrides.localModels ?? true,
     pushState: () => { pushes.push('state'); },
   });
@@ -30,6 +30,11 @@ const makeProjection = (overrides: Record<string, any> = {}) => {
     reads,
     setSettings: (next: Record<string, any>) => { settings = next; },
   };
+};
+
+const flush = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
 };
 
 describe('cold kernel provider/composer projection', () => {
@@ -125,5 +130,183 @@ describe('cold kernel provider/composer projection', () => {
       },
     });
     expect(lane.reads).toEqual([]);
+  });
+
+  test('coalesces identical first-paint projections during unlock', async () => {
+    let projectCalls = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        await held;
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    const first = lane.projection.view();
+    const second = lane.projection.view();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(projectCalls).toBe(1);
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      await first, await first,
+    ]);
+  });
+
+  test('cold reads share one async refresh and reuse only its exact settled view', async () => {
+    let projectCalls = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        await held;
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    lane.projection.observeLocked(false);
+    expect(await lane.projection.peek({ provider: 'anthropic', model: 'one' })).toBeNull();
+    expect(await lane.projection.peek({ provider: 'anthropic', model: 'one' })).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(1);
+    release();
+    await flush();
+    expect(lane.pushes).toEqual(['state']);
+    expect(await lane.projection.peek({ provider: 'anthropic', model: 'one' })).toMatchObject({
+      composer: { provider: 'anthropic', model: 'one' },
+    });
+    expect(projectCalls).toBe(1);
+  });
+
+  test('locked reads never start semantic refresh and stale unlock work never publishes', async () => {
+    let projectCalls = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        await held;
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    expect(await lane.projection.peek(null, true)).toBeNull();
+    expect(await lane.projection.peek()).toBeNull();
+    expect(projectCalls).toBe(0);
+
+    lane.projection.observeLocked(false);
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(1);
+    lane.projection.observeLocked(true);
+    release();
+    await flush();
+    expect(lane.pushes).toEqual([]);
+    expect(await lane.projection.peek(null, true)).toBeNull();
+    expect(projectCalls).toBe(1);
+  });
+
+  test('lock and unlock while the same snapshot is in flight starts fresh authority work', async () => {
+    const releases: Array<() => void> = [];
+    let projectCalls = 0;
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        await new Promise<void>((resolve) => { releases.push(resolve); });
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    lane.projection.observeLocked(false);
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(1);
+
+    lane.projection.observeLocked(true);
+    lane.projection.observeLocked(false);
+    expect(await lane.projection.peek()).toBeNull();
+    releases[0]();
+    await flush();
+    expect(projectCalls).toBe(2);
+    expect(lane.pushes).toEqual([]);
+    releases[1]();
+    await flush();
+    expect(lane.pushes).toEqual(['state']);
+    expect(await lane.projection.peek()).toMatchObject({
+      providers: { current: 'anthropic' },
+    });
+  });
+
+  test('config changes reject stale completion and refresh the new exact snapshot', async () => {
+    const releases: Array<() => void> = [];
+    let projectCalls = 0;
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        await new Promise<void>((resolve) => { releases.push(resolve); });
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    lane.projection.observeLocked(false);
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    lane.setSettings({
+      providerName: 'openrouter', providerModel: 'new/model',
+      ollamaHost: 'http://localhost:11434',
+    });
+    lane.projection.bumpRevision();
+    releases[0]();
+    await flush();
+    expect(lane.pushes).toEqual([]);
+
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(2);
+    releases[1]();
+    await flush();
+    expect(lane.pushes).toEqual(['state']);
+    expect(await lane.projection.peek()).toMatchObject({
+      providers: { current: 'openrouter', model: 'new/model' },
+    });
+  });
+
+  test('failed async refresh is not cached and retries on the next state read', async () => {
+    let projectCalls = 0;
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        if (projectCalls === 1) throw new Error('controller-lost');
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    lane.projection.observeLocked(false);
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(1);
+    expect(lane.pushes).toEqual([]);
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(2);
+    expect(lane.pushes).toEqual(['state']);
+    expect(await lane.projection.peek()).toMatchObject({
+      providers: { current: 'anthropic' },
+    });
+  });
+
+  test('settled projection cache stays bounded and does not reuse another session snapshot', async () => {
+    let projectCalls = 0;
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    lane.projection.observeLocked(false);
+    for (let index = 0; index < 9; index += 1) {
+      await lane.projection.view({ provider: 'anthropic', model: `model-${index}` });
+    }
+    expect(projectCalls).toBe(9);
+    await lane.projection.view({ provider: 'anthropic', model: 'model-0' });
+    expect(projectCalls).toBe(10);
+    await lane.projection.view({ provider: 'anthropic', model: 'model-8' });
+    expect(projectCalls).toBe(10);
   });
 });

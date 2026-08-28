@@ -1,11 +1,11 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// open_tab — open a new browser tab, optionally pre-loaded with a URL.
+// open_tab: open a new browser tab, optionally pre-loaded with a URL.
 //
 // This is mutate_external in spirit (it changes user-visible browser
 // state), so it's gated: Plan refuses it (clicks/new tabs aren't pure
-// reads — pure URL loads via navigate/open_tab are the lone Plan
+// reads: pure URL loads via navigate/open_tab are the lone Plan
 // exception, see docs/DECISIONS.md #16), and Act can route it through a
 // confirmation prompt per the denylist + confirmActions policy.
 
@@ -44,7 +44,7 @@ export const openTabTool = definePageAuthorityHandler({
   execute: async (args, ctx) => {
     // why background, always: a tab peerd opens no longer steals the user away
     // (DESIGN-12, owner 2026-06-18). It opens quietly and ctx.announceTab drops a
-    // "go there" card in the chat — the user's click focuses it AND opens the side
+    // "go there" card in the chat: the user's click focuses it AND opens the side
     // panel (the click is the only gesture Chrome lets us open the panel in).
     // Co-locate with the tab the agent is working in: a new tab opens in the
     // active tab's window, not a random last-focused one. No-op for normal use

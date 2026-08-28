@@ -10,6 +10,7 @@ import { RUNTIME_DISPATCH_CAPABILITY } from '/shared/kernel-runtime-policy.js';
 import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
 } from '/shared/kernel-feature-policy.js';
+import { TURN_COMPOSE_CAPABILITY } from '/shared/controller-turn-phase-policy.js';
 import {
   makeControllerOfferHandler,
   makeSealedControllerLoader,
@@ -22,8 +23,8 @@ const handleOffer = makeControllerOfferHandler({
   expectedWorkerUrl: backgroundModuleUrl(browser),
   expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
   supportedCaps: [
-    'prompt.render', 'turn.tools.project', RUNTIME_DISPATCH_CAPABILITY,
-    'semantic.dispatch', 'turn.run',
+    'prompt.render', 'turn.tools.project', 'turn.tools.command',
+    TURN_COMPOSE_CAPABILITY, RUNTIME_DISPATCH_CAPABILITY, 'semantic.dispatch', 'turn.run',
     KERNEL_FEATURE_DISPATCH_CAPABILITY,
   ],
   loadController,

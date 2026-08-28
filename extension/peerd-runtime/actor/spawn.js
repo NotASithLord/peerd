@@ -20,23 +20,11 @@
 // module unit-testable in Bun without resolving the extension's `/`-rooted
 // import graph.
 
-// Deep imports of PURE policy modules (not module barrels) so this file
-// stays importable under the bun test runner — same pattern as
-// tools/gates.js. confirmActionsFromRecord normalizes legacy permission
-// records; resolveManifestAllow resolves the parent session's tool
-// manifest into the allow-set the narrowing intersects.
+// This fixed lifecycle owner stays in the authority graph. Tool inventory,
+// exposure, manifest interpretation, descriptors, and name→operation mapping
+// live behind the sealed controller's exact spawn projection.
 import { confirmActionsFromRecord } from '../permissions/policy.js';
-import { resolveManifestAllow } from '../tools/manifests.js';
-// The MAIN-AGENT tool surface: an actor is a CHILD of the main agent and must hold
-// no more than it could. mainAgentDescriptors drops MAIN_AGENT_HIDDEN_TOOLS (the
-// actor-only DOM/page/fetch tools — read_page, page_code, click, navigate, fetch_url,
-// …) so an actor cannot reach the user's foreground tab (DESIGN-17: web/DOM work
-// goes through the web actor via message_actor, never a raw grant); filterActorSurface
-// drops the actor-only instance tier (vm_*/js_*/app_*/edit_file — writes AND the
-// fenced reads, already gate-refused for a non-actor). Both are pure.
-import { mainAgentDescriptors, filterActorSurface, filterByGoalActive } from '../tools/exposure.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../../shared/bounded-module-load.js';
-import { projectToolAuthority } from '../tools/metadata/descriptor.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
 
@@ -111,116 +99,6 @@ export const narrowTools = (available, { tools, allowRecursion = false, allow = 
   return subset;
 };
 
-// ── capability-by-need stripping for narrowed child contexts ──────────────
-//
-// why: childCtx carries the FULL set of capability CLOSURES buildToolContext
-// hands every context — getSecret (→ the unlocked vault DK), safeFetch/webFetch
-// (egress), the spawn closures (escalation), memory, kv/idb, dweb (signs as the
-// user). Tool NARROWING only limits which tools the model may NAME; it does NOT
-// remove those closures from the heap object the child shares with the service
-// worker. So a confused-deputy bug in a granted tool (e.g. a DOM tool fed
-// crafted args) would have the vault one property access away in a SHARED heap.
-// We close it BY CONSTRUCTION: strip every capability closure that NONE of the
-// child's granted tools consume, so a narrowed child's context literally has no
-// path to secrets/egress/spawn. The child loop runs in its own Worker heap where
-// it never receives these closures. This restriction is the privileged ctx build
-// the tool-dispatch route reuses for each relayed call.
-//
-// The lists below are the COMPLETE set of ctx.<cap> readers among tools
-// (grep `ctx.<cap>` over tools/**). getSecret/safeFetch have NO tool reader —
-// the provider key and the provider-allowlisted fetch are the agent LOOP's,
-// injected via spawn deps, never read off childCtx — so they are always stripped
-// from a child. A capability with no granted consumer is removed; everything
-// else (denylist, allowlist, activeTab, debuggerPool, scripting, domRefs, tabs,
-// confirm, audit, …) is untouched. Keep a list in sync if a new tool reads a
-// capability off ctx — fail-safe is conservative here: an UNLISTED reader whose
-// tool is granted would lose its closure (a loud throw, not a silent bypass).
-export const CAPABILITY_CONSUMERS = Object.freeze({
-  getSecret:          [],
-  safeFetch:          [],
-  webFetch:           ['vm_import', 'fetch_url'],
-  // One opaque spill store serves every supported producer and read_result.
-  resultStore:        ['fetch_url', 'read_doc', 'read_page', 'script', 'read_result'],
-  // DESIGN-19 site clients — the two-tier store (run/read/write reach it) and the
-  // capture closure (site_capture only). Stripped from any child/actor whose
-  // toolset lacks them, like every other capability-by-need closure.
-  siteClients:        ['site_client_run', 'site_client_read', 'site_client_write'],
-  canUseSiteClientOrigin: ['site_client_run', 'site_client_read', 'site_client_write'],
-  authorizeSiteClientOrigin: ['site_client_run', 'site_client_read', 'site_client_write'],
-  authorizeSignInOrigin: ['login'],
-  authorizeSignInExcursion: ['login'],
-  revokeSignInExcursion: ['login'],
-  siteCapture:        ['site_capture'],
-  memory:             ['read_memory', 'remember'],
-  kv:                 ['inspect'],
-  idb:                ['inspect'],
-  actorAuthority:  ['actor_create', 'actor_tasks', 'actor_cancel', 'message_actor'],
-  // sandbox_create's app arm reads ctx.dweb to decide whether to build a
-  // dwapp, so it keeps the dweb closure alongside the dweb_* tools.
-  dweb:               ['dweb_share', 'dweb_discover', 'dweb_install', 'dweb_peers',
-    'dweb_block', 'dweb_discovery', 'sandbox_create'],
-  // DESIGN-17: the engine instance closures buildToolContext injects into EVERY
-  // ctx — the SW-side clients + registries + tab trackers that the
-  // vm_*/js_*/app_*/edit_file tools reach through. Listing them here strips them
-  // from any narrowed child whose granted tools don't read them — the keyless tool
-  // ctx the actor relies on, and the confused-deputy close for plain spawned.
-  // The reader lists are EXHAUSTIVE (an omitted reader silently loses its closure
-  // and the tool returns `*_not_available`, never a crash — covered by tests).
-  // NOTE: edit_file reaches appRegistry/jsRegistry via a COMPUTED property
-  // (edit-file.js: ctx[kind==='app'?'appRegistry':'jsRegistry']), so it must be
-  // listed in BOTH despite not matching a `.appRegistry` grep.
-  // actor_list reads the registries + tab trackers of ALL four engine kinds
-  // (plus tabs + listApiIntegrations, which are ungated/always present) to build
-  // the unified catalog — so it appears in every engine registry+tracker list.
-  vm:                 ['vm_boot', 'vm_write_file', 'vm_import'],
-  vmRegistry:         ['sandbox_create', 'vm_delete', 'vm_boot', 'actor_list'],
-  vmTabTracker:       ['sandbox_create', 'vm_delete', 'actor_list'],
-  jsClient:           ['js_notebook', 'js_write_file', 'js_read_file', 'edit_file'],
-  jsRegistry:         ['js_notebook', 'sandbox_create', 'js_delete', 'edit_file', 'actor_list'],
-  jsTabTracker:       ['sandbox_create', 'js_delete', 'actor_list', 'repo_version'],
-  podClient:          ['pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write'],
-  podRegistry:        ['sandbox_create', 'pod_destroy', 'actor_list'],
-  podTabTracker:      ['sandbox_create', 'pod_destroy', 'actor_list', 'repo_version', 'repo_remote'],
-  jsOffscreenClient:  ['script', 'a2a_run', 'page_code', 'app_code', 'site_client_run'],
-  appClient:          ['sandbox_create', 'app_open', 'app_update', 'app_write_file',
-    'app_read_file', 'app_list_files', 'app_delete_file', 'app_delete', 'app_search', 'edit_file'],
-  appAgentCall:       ['app_observe', 'app_act'],
-  repositories:       ['sandbox_create', 'js_delete', 'pod_destroy', 'repo_history', 'repo_version', 'repo_remote'],
-  appRegistry:        ['app_delete', 'edit_file', 'actor_list'],
-  appTabTracker:      ['actor_list', 'repo_version'],
-  appQuiescence:      ['repo_version', 'repo_remote'],
-  messageActor:    ['script'],
-  // The sealed-code run registry (Stop + relay custody). Script's actor client
-  // additionally requires messageActor, so code delegation still composes off
-  // exactly the same grant as direct message_actor.
-  // Every sealed code lane now mints the same owner-bound live-run lease. Keep
-  // the registry exactly when one of those tools survived the grant; omitting a
-  // lane fails loudly as `*_registry_unavailable`, never as an ungated relay.
-  scriptRuns:      ['script', 'a2a_run', 'page_code', 'app_code', 'site_client_run'],
-  // DESIGN-17: the web actor's lazy tab-open hook (SW-injected for kind:'web' only).
-  // navigate reads it to open/adopt the actor's tab when it owns none; kept for the
-  // web actor (which has navigate), stripped from any kind whose toolset lacks it.
-  adoptWebTab:        ['navigate'],
-});
-
-/**
- * Return a COPY of a child tool-context with every capability closure no granted
- * tool needs removed. Pure — never mutates the input (so the parent ctx the
- * closures are shared from is untouched). `allowedNames` is the child's granted
- * tool-name Set (post tool-narrowing + manifest intersection).
- *
- * @param {Record<string, unknown>} ctx
- * @param {Set<string>} allowedNames
- * @returns {Record<string, unknown>}
- */
-export const restrictCtxCapabilities = (ctx, allowedNames) => {
-  const out = { ...ctx };
-  for (const [cap, consumers] of Object.entries(CAPABILITY_CONSUMERS)) {
-    if (!consumers.some((name) => allowedNames.has(name))) delete out[cap];
-  }
-  return out;
-};
-
 /**
  * Pull the actor's "result" — the final assistant text — out of a
  * completed session. The last assistant message with text content is
@@ -272,9 +150,10 @@ export const finalActorTurnReply = (session) => {
  * @param {Object} deps
  * @param {ReturnType<typeof import('../sessions/store.js').createSessionStore>} deps.sessions
  * @param {(entry: object) => Promise<unknown>} deps.appendAudit
- * @param {() => Array<{ name:string, primitive?:any, sideEffect?:any,
- *   dispatch?:any, retryClass?:any, dweb?:any }>} deps.getToolDescriptors
- *   Returns the full available tool descriptor set (parent's tools).
+ * @param {(input:{surface:'spawn',toolManifest:unknown,toolNames?:string[],
+ *   allowRecursion:boolean}) => Promise<{tools:ReadonlyArray<Record<string,unknown>>,
+ *   operations:ReadonlyArray<string>}>} deps.projectChildSurface
+ *   Exact sealed-controller projection for one spawned child's model surface.
  * @param {() => number} [deps.now]
  * @param {{ claim: (sessionId: string) => { controller: AbortController, release: () => void }, stop: (sessionId: string) => boolean }} [deps.turnSlots]
  *   The per-session turn-slot system (loop/turn-slots.js). PR #134 phase 1: a
@@ -297,7 +176,7 @@ export const finalActorTurnReply = (session) => {
  */
 export const makeSpawnActor = (deps) => {
   const {
-    sessions, appendAudit, getToolDescriptors,
+    sessions, appendAudit, projectChildSurface,
     now = Date.now,
     turnSlots = {
       claim: () => ({ controller: new AbortController(), release: () => {} }),
@@ -362,6 +241,7 @@ export const makeSpawnActor = (deps) => {
    * @param {Object} req
    * @param {string} req.task                      the spawning prompt
    * @param {string[]} [req.tools]                 explicit tool-name subset
+   * @param {string[]} [req.grantedToolNames]      sealed semantic name projection
    * @param {string[]} [req.grantedOperations]     sealed semantic operation projection
    * @param {string} [req.model]                   override the inherited model
    * @param {number} [req.maxSteps]                step cap (default 20)
@@ -387,6 +267,7 @@ export const makeSpawnActor = (deps) => {
     const {
       task,
       tools,
+      grantedToolNames: projectedToolNames,
       grantedOperations: projectedOperations,
       model,
       maxSteps = DEFAULT_MAX_STEPS,
@@ -453,42 +334,72 @@ export const makeSpawnActor = (deps) => {
     const parentConfirmActions = confirmActionsFromRecord(parent);
 
     // ---- Guardrail 2: tool narrowing (computed BEFORE create) ------------
-    // The parent session's tool manifest caps the child's set whatever the
-    // caller asked for — intersection, never escalation (fail-closed: a
-    // manifest naming none of the requested tools yields a tool-less child).
-    // Hoisted above create (heap-split phase 4) so the granted set can be
-    // PERSISTED on the child record: when a tool-bearing child runs in its own
-    // offscreen heap, the SW rebuilds the child's restricted tool context from
-    // this persisted set at dispatch time and NEVER trusts the worker's call.
-    const parentAllow = resolveManifestAllow(parent?.toolManifest);
-    // SECURITY (DESIGN-17): narrow from the MAIN-AGENT surface, not the full registry.
-    // Without this, an actor could be granted the actor-only DOM/page tools (read_page,
-    // page_code, click, navigate, fetch_url, …) — which NO gate refuses for an actor
-    // (exposure!=='main', not actor-mutating) — and drive/read the user's FOREGROUND tab,
-    // authority the spawning agent itself lacks. Filtering the grantable universe here is
-    // the fix: an actor holds ⊆ what the main agent holds, delegating web/DOM work to
-    // the web actor via message_actor like the main agent does.
-    const surface = filterByGoalActive(
-      filterActorSurface(mainAgentDescriptors(getToolDescriptors())), false,
-    );
-    const requestedSubset = narrowTools(surface, { tools, allowRecursion, allow: parentAllow });
-    // why: descriptor narrowing is semantic behavior in the sealed owner.
-    // This host uses only the independently projected exact-operation ceiling
-    // for authority; it never reconstructs authority from persisted names.
-    const subset = requestedSubset;
-    const visibleNames = new Set(subset.map((t) => t.name));
-    const subsetDescriptors = subset.map(projectToolAuthority);
+    // Inventory, exposure, manifest interpretation, recursion stripping, and
+    // descriptor shaping are sealed-controller semantics. The SW receives one
+    // exact spawn projection, then independently intersects its operation set
+    // with the admitted run, parent, and lineage ceilings below.
+    if (typeof projectChildSurface !== 'function') {
+      throw new TypeError('actor spawn projection unavailable');
+    }
+    const hasValidRunToolCeiling = Array.isArray(projectedToolNames)
+      && projectedToolNames.length <= 256
+      && projectedToolNames.every((name) => typeof name === 'string' && name.length <= 128);
+    const hasValidRunOperationCeiling = Array.isArray(projectedOperations)
+      && projectedOperations.length <= 256
+      && projectedOperations.every((operation) => typeof operation === 'string');
+    const requestedNames = Array.isArray(tools) ? new Set(tools) : null;
+    const exactToolNames = hasValidRunToolCeiling
+      ? [...new Set(/** @type {string[]} */ (projectedToolNames))] : null;
+    if (exactToolNames && requestedNames
+        && exactToolNames.some((name) => !requestedNames.has(name))) {
+      throw new TypeError('actor spawn projection mismatch');
+    }
+    const childSurface = await projectChildSurface({
+      surface: 'spawn',
+      toolManifest: parent?.toolManifest ?? null,
+      ...(exactToolNames ? { toolNames: exactToolNames }
+        : Array.isArray(tools) ? { toolNames: tools } : {}),
+      allowRecursion,
+    });
+    if (!childSurface || !Array.isArray(childSurface.tools)
+        || !Array.isArray(childSurface.operations)
+        || childSurface.tools.some((tool) => !tool || typeof tool.name !== 'string')
+        || childSurface.operations.some((operation) => typeof operation !== 'string')) {
+      throw new TypeError('actor spawn projection invalid');
+    }
+    if (childSurface.operations.length > 0
+        && (!hasValidRunToolCeiling || !hasValidRunOperationCeiling)) {
+      throw new TypeError('actor spawn run ceiling unavailable');
+    }
+    const childToolNames = childSurface.tools.map((tool) => tool.name);
+    const childOperations = [...new Set(childSurface.operations)];
+    if (exactToolNames && hasValidRunOperationCeiling) {
+      const exactNameSet = new Set(exactToolNames);
+      const exactOperationSet = new Set(/** @type {string[]} */ (projectedOperations));
+      if (childToolNames.length !== exactNameSet.size
+          || childToolNames.some((name) => !exactNameSet.has(name))
+          || childOperations.length !== exactOperationSet.size
+          || childOperations.some((operation) => !exactOperationSet.has(operation))) {
+        throw new TypeError('actor spawn projection mismatch');
+      }
+    }
+    // why: projection is requested only for the already-admitted exact names,
+    // then cross-checked against their run-bound operations. The persisted
+    // grant therefore cannot contain authority belonging to a discarded tool.
+    const subsetDescriptors = Object.freeze(childSurface.tools);
+    const visibleNames = new Set(subsetDescriptors.map((tool) => tool.name));
     const parentGrantedOperations = parent?.kind === 'spawned'
       ? new Set(Array.isArray(parent.grantedOperations) ? parent.grantedOperations : []) : null;
     // why: name→operation projection belongs to the sealed semantic owner.
     // This authority shell persists only the bounded projection and narrows it
     // again by the parent/lineage operation ceiling below.
-    const candidateOperations = Array.isArray(projectedOperations)
-      ? [...new Set(projectedOperations.filter((operation) => typeof operation === 'string'))]
-      : [];
+    const runOperationCeiling = hasValidRunOperationCeiling
+      ? new Set(/** @type {string[]} */ (projectedOperations)) : null;
+    const candidateOperations = childOperations;
     const lineageMayDelegate = parent?.kind !== 'spawned' || parent.spawnedTrusted === true;
     const grantedOperations = candidateOperations.filter((operation) =>
-      (!parentGrantedOperations || parentGrantedOperations.has(operation))
+      (!runOperationCeiling || runOperationCeiling.has(operation))
+      && (!parentGrantedOperations || parentGrantedOperations.has(operation))
       && (lineageMayDelegate
         || !['turn.actor.spawn-sync', 'turn.actor.spawn-async', 'turn.actor.message']
           .includes(operation)));
@@ -511,7 +422,7 @@ export const makeSpawnActor = (deps) => {
       ...(parent?.permissionMode !== undefined ? { permissionMode: parent.permissionMode } : {}),
       ...(parentConfirmActions !== undefined ? { confirmActions: parentConfirmActions } : {}),
       // why: the tool MANIFEST inherits (unlike customSystemPrompt, which
-      // deliberately does not — see below). Copying it into the child record
+      // deliberately does not: see below). Copying it into the child record
       // keeps the advertised/model-call surface narrowed across descendants;
       // exact operation authority is persisted separately below and is
       // independently intersected by the host.

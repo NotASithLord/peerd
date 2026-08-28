@@ -8,14 +8,14 @@
 // authored by an attacker, but the origin's cookies belong to the user. So the
 // prompt-injection payload arrives WITH the authority to act on it.
 //
-// This module is the deterministic CLASSIFIER plus the one PURE PREDICATE built
-// on it. Classification is a static lookup, never a channel probe — same input,
-// same answer, offline, forever.
+// This module is the deterministic CLASSIFIER. Classification is a static
+// lookup, never a channel probe: same input, same answer, offline, forever.
 //
-// THE ENFORCEMENT (ugcWriteConfirm below, wired in tools/dispatcher.js): a
-// non-read BROWSER-SESSION action on a page classified `ugc` always asks the
-// user, even when confirmations are toggled OFF. It puts a human on the exact
-// keystroke an injected comment would want to drive.
+// THE ENFORCEMENT: the exact service-worker page authority classifies the live
+// document immediately before every click or fill and always asks the user on
+// `ugc`, even when confirmations are toggled OFF. It puts a human on the exact
+// keystroke an injected comment would want to drive. The semantic controller
+// makes no confirmation decision and carries no parallel policy fallback.
 //
 // why a forced CONFIRM and not a hard read-only downscale (the shape first
 // sketched here): "reply to this GitHub issue" and "update the Jira ticket" are
@@ -185,46 +185,6 @@ export const classifyUrl = (url) => {
     }
   }
   return { zone: 'standard' };
-};
-
-// Browser-session tools that MOVE somewhere rather than act on the page in
-// front of them. why exempt: the risk this predicate addresses is an injected
-// page driving the actor's AUTHENTICATED WRITE surface — the click, the
-// keystroke, the script that posts as the user. Going somewhere else is not
-// that, it is how the actor finishes reading and leaves; confirming it would
-// nag on ordinary link-following and train the prompt away, which costs more
-// than it buys. The navigation vectors have their own layers: the denylist
-// (origin gate) for where, and the egress tripwire
-// (tools/hooks/defaults/egress-tripwire.js) for a URL carrying scraped bytes.
-const NAVIGATION_TOOLS = new Set(['navigate', 'open_tab', 'close_tab']);
-
-/**
- * Does this tool call need the forced UGC confirmation?
- *
- * Takes PRIMITIVES, not a ctx — the caller reads the four values off the live
- * tool context, so this stays a pure function that can be exhaustively tested
- * without a dispatcher. Returns the matched `ruleId` (so the caller can say WHY
- * it is asking) or null for "no opinion".
- *
- * The rule, in one line: a non-read `tab` action, that is not just navigation,
- * on a page classified `ugc`. The zone is decided from the URL of the page the
- * call ACTS ON — not the destination — because the authority being borrowed is
- * that page's session.
- *
- * @param {object} call
- * @param {string} call.toolName            The tool's registered name.
- * @param {string} [call.primitive]         tool.primitive.
- * @param {string} [call.sideEffect]        tool.sideEffect ('read' | 'write' | 'mutate_external').
- * @param {string} [call.url]               URL of the tab the call acts on (ctx.activeTab.url).
- * @returns {string | null}                 The matched UGC ruleId, or null.
- */
-export const ugcWriteConfirm = ({ toolName, primitive, sideEffect, url }) => {
-  if (primitive !== 'tab' || sideEffect === 'read') return null;
-  if (NAVIGATION_TOOLS.has(toolName)) return null;
-  // why the `?? ''` rather than an early return: classifyUrl already fails open
-  // on garbage, so one path handles "no tab yet", "about:blank", and a real URL.
-  const { zone, ruleId } = classifyUrl(url ?? '');
-  return zone === 'ugc' ? (ruleId ?? 'ugc') : null;
 };
 
 /**

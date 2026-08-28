@@ -106,6 +106,36 @@ describe('local model generation authority', () => {
     expect(authority.activeStreams()).toBe(0);
   });
 
+  test('owner retirement rejects an open still waiting for host readiness', async () => {
+    let offered!: () => void;
+    const offerSeen = new Promise<void>((resolve) => { offered = resolve; });
+    const hostPorts: MessagePort[] = [];
+    const authority = makeAuthority((_offer, port) => {
+      hostPorts.push(port);
+      offered();
+    });
+    const owner = {};
+    const opened = authority.open(request, owner, undefined);
+    await offerSeen;
+
+    await authority.closeOwner(owner);
+    await expect(opened).rejects.toMatchObject({
+      code: 'local-model-generation-aborted', outcomeKnown: true,
+    });
+    expect(authority.activeStreams()).toBe(0);
+
+    hostPorts[0]?.postMessage({
+      type: LOCAL_MODEL_CHANNEL_RESULT,
+      protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+      channelId: 'late-readiness-cannot-reopen',
+      ok: true,
+      started: true,
+      outcomeKnown: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authority.activeStreams()).toBe(0);
+  });
+
   test('preserves a known host failure and refuses an invalid host topology', async () => {
     const authority = makeAuthority((offer, port) => {
       port.postMessage({

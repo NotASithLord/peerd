@@ -7,7 +7,12 @@
 export { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 export { makeCheapCall } from './actor/cheap-call.js';
 export { describeLandingStop, landingStopCard, originPhrase } from './actor/origin-lock-report.js';
-export { finalActorTurnReply, finalAssistantText, makeSpawnActor } from './actor/spawn.js';
+export {
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  finalActorTurnReply,
+  finalAssistantText,
+  makeSpawnActor,
+} from './actor/spawn.js';
 export {
   fenceApiActorSummary,
   fenceWebActorSummary,

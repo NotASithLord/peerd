@@ -6,6 +6,7 @@ import {
 import {
   HOST_EFFECT_OUTCOME,
   safeHostEffectFailure,
+  safeHostPolicyAttribution,
   stampAuthorityToolResultBlock,
 } from '../../extension/background/host-effect-verdict.js';
 
@@ -40,6 +41,7 @@ describe('exact page authority', () => {
       ctx,
       actionCalls: () => actionCalls,
       move: (nextHref: string) => { href = nextHref; documentId = 'document-2'; },
+      route: (nextHref: string) => { href = nextHref; },
     };
   };
 
@@ -128,6 +130,106 @@ describe('exact page authority', () => {
       authorityReceipts: [{ ugcZone: 'github-issues-pulls' }],
     });
     expect({ prompts, actions: page.actionCalls() }).toEqual({ prompts: 1, actions: 0 });
+  });
+
+  test('missing UGC confirmation authority fails closed before quarantine or page effect', async () => {
+    let quarantines = 0;
+    const page = pageContext({
+      href: 'https://github.com/openai/example/issues/42',
+      armBrowserChildQuarantine: async () => {
+        quarantines += 1;
+        return { ok: true };
+      },
+    });
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+      ctx: page.ctx,
+    });
+
+    await expect(authority.clickOwnedTarget()).resolves.toEqual({
+      ok: false,
+      code: 'confirmation_unavailable',
+      error: 'confirmation unavailable',
+      outcomeKind: 'pre-effect-failure',
+      retryable: false,
+      authorityPolicy: { ugcZone: 'github-issues-pulls' },
+    });
+    expect({ quarantines, actions: page.actionCalls() }).toEqual({
+      quarantines: 0, actions: 0,
+    });
+  });
+
+  test('throwing UGC confirmation authority is a declined pre-effect refusal', async () => {
+    let quarantines = 0;
+    const page = pageContext({
+      href: 'https://www.reddit.com/r/example/comments/abc/thread/',
+      confirm: async () => { throw new Error('confirmation transport details'); },
+      armBrowserChildQuarantine: async () => {
+        quarantines += 1;
+        return { ok: true };
+      },
+    });
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.fill', args: {
+        selector: '#reply', text: 'hello', tabId: 7,
+      } },
+      ctx: page.ctx,
+    });
+
+    await expect(authority.fillOwnedTarget()).resolves.toEqual({
+      ok: false,
+      code: 'declined',
+      error: 'declined',
+      outcomeKind: 'pre-effect-failure',
+      retryable: false,
+      authorityPolicy: { ugcZone: 'reddit-comments' },
+    });
+    expect({ quarantines, actions: page.actionCalls() }).toEqual({
+      quarantines: 0, actions: 0,
+    });
+  });
+
+  test('rejected UGC confirmation exposes only exact receipt and audit policy attribution', async () => {
+    const page = pageContext({
+      href: 'https://github.com/openai/example/issues/42',
+      confirm: async () => 'no',
+    });
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+      ctx: page.ctx,
+    });
+    const result = await authority.clickOwnedTarget();
+    const policy = safeHostPolicyAttribution(result) as Readonly<{ ugcZone?: string }>;
+    expect(policy).toEqual({ ugcZone: 'github-issues-pulls' });
+    expect(Object.keys(policy)).toEqual(['ugcZone']);
+
+    const receipt = {
+      effectId: 'call-1:1', operation: 'turn.page.click', outcome: 'not-performed',
+      outcomeKnown: true, performed: false, refused: true, retryable: false,
+      code: 'declined', error: 'declined', ...policy,
+    };
+    expect(stampAuthorityToolResultBlock(
+      [receipt],
+      { type: 'tool_result', is_error: true, content: 'declined' },
+    )).toMatchObject({
+      is_error: true, code: 'declined', outcomeKnown: true, retryable: false,
+      authorityPolicy: { ugcZone: 'github-issues-pulls' },
+      authorityReceipts: [{
+        operation: 'turn.page.click', outcome: 'not-performed', performed: false,
+        refused: true, ugcZone: 'github-issues-pulls',
+      }],
+    });
+    expect({
+      operation: receipt.operation, outcome: receipt.outcome,
+      outcomeKnown: receipt.outcomeKnown, performed: receipt.performed,
+      refused: receipt.refused, retryable: receipt.retryable, code: receipt.code,
+      ...policy,
+    }).toEqual({
+      operation: 'turn.page.click', outcome: 'not-performed',
+      outcomeKnown: true, performed: false, refused: true, retryable: false,
+      code: 'declined', ugcZone: 'github-issues-pulls',
+    });
+    expect(page.actionCalls()).toBe(0);
   });
 
   test('does not prompt an ordinary page action when confirmations are off', async () => {
@@ -228,6 +330,35 @@ describe('exact page authority', () => {
       ok: false, error: 'page action was stopped', outcomeKind: 'pre-effect-failure',
     });
     expect(actions).toBe(0);
+  });
+
+  test('a failed live target probe refuses before quarantine or physical effect', async () => {
+    let quarantines = 0;
+    let actions = 0;
+    const page = pageContext({
+      armBrowserChildQuarantine: async () => {
+        quarantines += 1;
+        return { ok: true };
+      },
+    });
+    page.ctx.scripting.executeScript = async (request: any) => {
+      if (!request.target.documentIds) throw new Error('renderer probe failed');
+      if (request.args) actions += 1;
+      return [];
+    };
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+      ctx: page.ctx,
+    });
+
+    await expect(authority.clickOwnedTarget()).rejects.toMatchObject({
+      code: 'browser_target_unverified',
+      outcomeKind: 'pre-effect-failure',
+      structured: {
+        reason: 'unverified_target', stage: 'committed_origin', outcome: 'not_run',
+      },
+    });
+    expect({ quarantines, actions }).toEqual({ quarantines: 0, actions: 0 });
   });
 
   test('Stop while child quarantine arms prevents the physical fill', async () => {
@@ -333,6 +464,34 @@ describe('exact page authority', () => {
     });
     await expect(authority.fillOwnedTarget()).resolves.toMatchObject({
       ok: false, code: 'page_target_changed', outcomeKind: 'pre-effect-failure',
+    });
+    expect({ prompts, actions: page.actionCalls() }).toEqual({ prompts: 1, actions: 0 });
+  });
+
+  test('refuses a same-document SPA route hop while UGC confirmation is open', async () => {
+    let prompts = 0;
+    const page = pageContext({
+      href: 'https://github.com/openai/example/issues/42',
+      confirm: async () => {
+        prompts += 1;
+        page.route('https://github.com/settings/profile');
+        return 'yes_once';
+      },
+    });
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.fill', args: {
+        selector: '#comment', text: 'hello', tabId: 7,
+      } },
+      ctx: page.ctx,
+    });
+
+    await expect(authority.fillOwnedTarget()).resolves.toEqual({
+      ok: false,
+      code: 'page_target_changed',
+      error: 'page target changed while confirmation was open',
+      outcomeKind: 'pre-effect-failure',
+      retryable: false,
+      authorityPolicy: { ugcZone: 'github-issues-pulls' },
     });
     expect({ prompts, actions: page.actionCalls() }).toEqual({ prompts: 1, actions: 0 });
   });

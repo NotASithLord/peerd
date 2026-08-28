@@ -29,16 +29,17 @@ describe('Firefox diagnostic artifact source seams', () => {
   });
 
   test('injects the lifetime probe into readable and release-minified source', () => {
-    for (const source of [
-      `coldEvent('storage.session.onChanged', browser.storage.session.onChanged)
-        .addListener((/** @type {any} */ changes) => {
-          firefoxActorControl.onChanged(changes);
-        });`,
-      'H("storage.session.onChanged",i.storage.session.onChanged).addListener((e)=>{Zo.onChanged(e)})',
-    ]) {
-      const output = injectFirefoxLifetimeProbe(source);
+    const source = readFileSync(join(import.meta.dir,
+      '../../extension/background/kernel-feature-host.js'), 'utf8');
+    const transpiler = new Bun.Transpiler({
+      loader: 'js', target: 'browser', minifyWhitespace: true,
+      deadCodeElimination: false, inline: false, treeShaking: false,
+      trimUnusedImports: false,
+    });
+    for (const candidate of [source, transpiler.transformSync(source)]) {
+      const output = injectFirefoxLifetimeProbe(candidate);
       expect(output).toContain('peerdFirefoxLifetimeProbe?.record(');
-      expect(output).toMatch(/\.onChanged\s*\(/);
+      expect(output).toMatch(/\?\.onChanged\s*\(/);
     }
   });
 
@@ -62,8 +63,10 @@ describe('Firefox diagnostic artifact source seams', () => {
   test('fails closed when a semantic anchor is absent or duplicated', () => {
     expect(() => injectFirefoxLifetimeProbe('export const x = 1;')).toThrow(/matched 0 locations/);
     expect(() => injectFirefoxLifetimeProbe(
-      `H("storage.session.onChanged",i.storage.session.onChanged).addListener((e)=>{A.onChanged(e)});
-       H("storage.session.onChanged",i.storage.session.onChanged).addListener((e)=>{B.onChanged(e)});`,
+      `const first = registry?.event?.("storage.session.onChanged", storage.onChanged);
+       first.addListener((changes) => { A?.onChanged(changes); });
+       const second = registry?.event?.("storage.session.onChanged", storage.onChanged);
+       second.addListener((changes) => { B?.onChanged(changes); });`,
     )).toThrow(/matched 2 locations/);
   });
 });

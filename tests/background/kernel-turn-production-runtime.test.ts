@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnProductionRuntime } from '../../extension/background/kernel-turn-production-runtime.js';
 import { createKernelTurnCustody } from '../../extension/background/kernel-turn-custody.js';
-import { KERNEL_PAGE_PROGRAM_ROUTE_NAMES } from '../../extension/shared/kernel-feature-route-inventory.js';
 
 const sendCustody = () => ({
   validOperationId: () => false, operationWindowValid: () => false,
@@ -57,6 +56,11 @@ describe('kernel turn production runtime', () => {
               scriptRuns: { ownerFor: () => null },
               validateGeneration: async () => true,
               retireStale: async () => {},
+              actorSnapshot: () => ({
+                actorProjectionEpoch: 'test-actor-epoch', actorProjectionRevision: 0,
+                actors: {}, spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
+              }),
+              actorSnapshots: () => ({}),
               appActorChat: async () => ({ ok: true }),
               broadcastAgentTab: () => {}, onUiConnect: () => {},
               showWebTabHint: () => {}, isDrivenSource: () => false,
@@ -69,7 +73,6 @@ describe('kernel turn production runtime', () => {
               },
               relayRoutes: Object.fromEntries([
                 'a2a/call', 'actors/list', 'actors/call', 'site-fetch/call',
-                ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
               ].map((name) => [name, async () => ({ ok: true })])),
             },
           };

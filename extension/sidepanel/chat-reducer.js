@@ -693,11 +693,12 @@ export const reduceChat = (state, msg) => {
     case 'turn/spawned-start': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // why these casts: an actor-start message always carries a string
       // sessionId (and parentToolUseId when present) by contract — the
       // permissive ReducerMsg types them optional, so name the invariant.
       const sid = /** @type {string} */ (msg.sessionId);
-      return { ...state, spawned: { ...state.spawned,
+      return stampActorProjectionRevision({ ...state, spawned: { ...state.spawned,
         byToolUse: msg.parentToolUseId
           ? { ...state.spawned.byToolUse, [msg.parentToolUseId]: sid }
           : state.spawned.byToolUse,
@@ -712,12 +713,15 @@ export const reduceChat = (state, msg) => {
             visibleTools: Array.isArray(msg.visibleTools) ? msg.visibleTools : undefined,
             running: true,
             messages: state.spawned.sessions[sid]?.messages ?? [],
-          } } } };
+          } } } }, msg);
     }
     case 'turn/spawned-state':
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
-      return putSpawnedSession(state, { ...msg.session, running: true });
+      if (actorEventIsStale(state, msg)) return state;
+      return stampActorProjectionRevision(
+        putSpawnedSession(state, { ...msg.session, running: true }), msg,
+      );
     case 'turn/spawned-delta':
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
@@ -736,9 +740,12 @@ export const reduceChat = (state, msg) => {
     case 'turn/spawned-done': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       const sid = /** @type {string} */ (msg.sessionId);
       const session = state.spawned.sessions[sid];
-      return session ? putSpawnedSession(state, { ...session, running: false }) : state;
+      return session ? stampActorProjectionRevision(
+        putSpawnedSession(state, { ...session, running: false }), msg,
+      ) : stampActorProjectionRevision(state, msg);
     }
     case 'turn/spawned-tool-use':
     case 'turn/spawned-tool-result':
@@ -869,8 +876,9 @@ export const reduceChat = (state, msg) => {
       if (state.session.sessionId
         && msg.parentSessionId !== state.session.sessionId
         && !state.spawned.sessions[/** @type {string} */ (msg.parentSessionId)]) return state;
-      return { ...state, asyncTasks: { ...state.asyncTasks,
-        [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
+      if (actorEventIsStale(state, msg)) return state;
+      return stampActorProjectionRevision({ ...state, asyncTasks: { ...state.asyncTasks,
+        [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } }, msg);
     case 'state': {
       const incomingProjection = msg.state?.projection;
       if (incomingProjection !== undefined) {
@@ -940,10 +948,10 @@ export const reduceChat = (state, msg) => {
                 : state.actors,
               snapshotMessages,
             ),
-            spawned: msg.state?.spawned && !actorEpochMismatch
+            spawned: msg.state?.spawned && !staleActorSnapshot
               ? reconcileSpawned(state.spawned, msg.state.spawned)
               : state.spawned,
-            asyncTasks: msg.state?.asyncTasks && !actorEpochMismatch
+            asyncTasks: msg.state?.asyncTasks && !staleActorSnapshot
               ? msg.state.asyncTasks : state.asyncTasks,
           };
       const notices = sessionChanged

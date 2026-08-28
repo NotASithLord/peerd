@@ -153,10 +153,12 @@ describe('thin-kernel demand-only feature host', () => {
       reconcile: async () => [], lock: async () => [],
     };
     let attached: any;
+    const hostLosses: string[] = [];
     const host = createKernelFeatureHost({
       browser,
       identity,
       createRuntime: (() => runtime) as any,
+      onHostLost: (hostEpoch) => { hostLosses.push(hostEpoch); },
       attachKeepalive: ((deps: any) => { attached = deps; }) as any,
     });
     const port = { name: 'feature-lease-keepalive' };
@@ -164,6 +166,36 @@ describe('thin-kernel demand-only feature host', () => {
     expect(attached.port).toBe(port);
     expect(attached.featureLeases).toBe(runtime);
     expect(attached.identity).toEqual(identity);
+    attached.onAuthenticated('lost-host-epoch');
+    attached.onLost('lost-host-epoch');
+    expect(hostLosses).toEqual(['lost-host-epoch']);
+  });
+
+  test('a stale keepalive disconnect cannot retire the authenticated successor', () => {
+    const { browser } = makeBrowser();
+    const runtime = {
+      ready: Promise.resolve(), disable: async () => {}, unlock: () => {},
+      reconcile: async () => [], lock: async () => [],
+    };
+    const attached: any[] = [];
+    const hostLosses: string[] = [];
+    const host = createKernelFeatureHost({
+      browser,
+      identity,
+      createRuntime: (() => runtime) as any,
+      onHostLost: (hostEpoch) => { hostLosses.push(hostEpoch); },
+      attachKeepalive: ((deps: any) => { attached.push(deps); }) as any,
+    });
+
+    host.handleKeepalive({ name: 'host-a' } as any);
+    host.handleKeepalive({ name: 'host-b' } as any);
+    attached[0].onAuthenticated('host-aaaaaaaa');
+    attached[1].onAuthenticated('host-bbbbbbbb');
+
+    attached[0].onLost('host-aaaaaaaa');
+    expect(hostLosses).toEqual([]);
+    attached[1].onLost('host-bbbbbbbb');
+    expect(hostLosses).toEqual(['host-bbbbbbbb']);
   });
 
   test('captures one Firefox event synchronously but loads heartbeat code only on demand', async () => {

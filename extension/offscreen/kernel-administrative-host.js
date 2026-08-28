@@ -138,7 +138,7 @@ const runMemoryInit = async (/** @type {any} */ message, /** @type {any} */ cont
     { workspace, body, checklist: checklist.length ? checklist : deriveChecklist(probe) },
   ));
   if (result?.rejected) {
-    await note(context, '/init cancelled — nothing was saved.');
+    await note(context, '/init cancelled: nothing was saved.');
     return result;
   }
   if (result?.ok !== true) {

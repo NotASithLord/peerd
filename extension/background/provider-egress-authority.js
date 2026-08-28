@@ -119,13 +119,30 @@ export const createProviderEgressAuthority = ({
    * abort:AbortController,bytes:number,maxBytes:number,chunkBytes:number,
    * pending:Uint8Array|null,unlink:()=>void}>} */
   const streams = new Map();
-  const closeStream = async (/** @type {string} */ streamId) => {
+  /** @type {Map<object, Set<{owner:object,abort:AbortController,unlink:()=>void}>>} */
+  const pendingByOwner = new Map();
+  /** @type {WeakSet<object>} */
+  const retiredOwners = new WeakSet();
+  const cancelReader = (/** @type {ReadableStreamDefaultReader<Uint8Array>|null|undefined} */ reader,
+    /** @type {unknown} */ reason = undefined) => {
+    try { void Promise.resolve(reader?.cancel(reason)).catch(() => {}); }
+    catch { /* already detached */ }
+  };
+  const cancelResponse = (/** @type {Response|undefined} */ response,
+    /** @type {unknown} */ reason = undefined) => {
+    try { void Promise.resolve(response?.body?.cancel(reason)).catch(() => {}); }
+    catch { /* already locked or detached */ }
+  };
+  const closeStream = (/** @type {string} */ streamId) => {
     const entry = streams.get(streamId);
     if (!entry) return;
     streams.delete(streamId);
     entry.unlink();
     entry.abort.abort();
-    try { await entry.reader?.cancel(); } catch {}
+    // why: authority retirement is the map/abort transition above. A broken
+    // transport must not keep owner cleanup (and therefore turn settlement)
+    // pending forever while its reader ignores cancellation.
+    cancelReader(entry.reader, 'model-egress-owner-retired');
   };
   const urlFor = (/** @type {any} */ policy, /** @type {'inference'|'inventory'|'context'} */ kind,
     /** @type {string} */ providerId, /** @type {string|null} */ modelId = null) => {
@@ -149,6 +166,34 @@ export const createProviderEgressAuthority = ({
     else source.addEventListener('abort', abort, { once: true });
     return () => source.removeEventListener('abort', abort);
   };
+  const beginOwnerOperation = (/** @type {object} */ owner,
+    /** @type {AbortSignal|undefined} */ signal) => {
+    if (retiredOwners.has(owner) || signal?.aborted) return null;
+    const abort = new AbortController();
+    const unlink = linkSignal(signal, abort);
+    if (retiredOwners.has(owner)) {
+      abort.abort('model-egress-owner-retired');
+      unlink();
+      return null;
+    }
+    const operation = { owner, abort, unlink };
+    const pending = pendingByOwner.get(owner) ?? new Set();
+    pending.add(operation);
+    pendingByOwner.set(owner, pending);
+    return operation;
+  };
+  const releaseOwnerOperation = (/** @type {NonNullable<ReturnType<typeof beginOwnerOperation>>} */ operation,
+    /** @type {boolean} */ unlink = true) => {
+    const pending = pendingByOwner.get(operation.owner);
+    pending?.delete(operation);
+    if (pending?.size === 0) pendingByOwner.delete(operation.owner);
+    if (unlink) operation.unlink();
+  };
+  const ownerOperationLive = (/** @type {NonNullable<ReturnType<typeof beginOwnerOperation>>} */ operation) =>
+    !operation.abort.signal.aborted && !retiredOwners.has(operation.owner);
+  const ownerOperationFailure = (/** @type {NonNullable<ReturnType<typeof beginOwnerOperation>>} */ operation) =>
+    knownFailure(operation.abort.signal.reason === 'model-egress-connect-timeout'
+      ? 'model-egress-connect-timeout' : 'model-egress-aborted');
 
   /**
    * @param {unknown} input
@@ -179,13 +224,24 @@ export const createProviderEgressAuthority = ({
     }
     const url = urlFor(policy, 'inference', providerId);
     if (!url) return knownFailure('model-egress-provider-unavailable');
+    const operation = beginOwnerOperation(grant.owner, grant.signal);
+    if (!operation) return knownFailure('model-egress-aborted');
     let credential = null;
     try { credential = await credentialFor(policy); }
-    catch { return knownFailure('model-egress-credential-unavailable'); }
+    catch {
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-credential-unavailable');
+    }
+    if (!ownerOperationLive(operation)) {
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-aborted');
+    }
     const headers = providerEgressHeaders(policy, credential);
-    if (!headers) return knownFailure('model-egress-credential-missing');
-    const abort = new AbortController();
-    const unlink = linkSignal(grant.signal, abort);
+    if (!headers) {
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-credential-missing');
+    }
+    const { abort, unlink } = operation;
     let response;
     const connectTimer = setTimeout(() => abort.abort('model-egress-connect-timeout'), policy.connectMs);
     try {
@@ -194,19 +250,32 @@ export const createProviderEgressAuthority = ({
       });
     } catch {
       clearTimeout(connectTimer);
-      unlink();
+      releaseOwnerOperation(operation);
       return abort.signal.aborted
-        ? knownFailure(grant.signal?.aborted
-          ? 'model-egress-aborted' : 'model-egress-connect-timeout')
+        ? knownFailure(abort.signal.reason === 'model-egress-connect-timeout'
+          ? 'model-egress-connect-timeout' : 'model-egress-aborted')
         : unknownFailure('model-egress-connect-failed');
     }
     clearTimeout(connectTimer);
+    if (!ownerOperationLive(operation)) {
+      cancelResponse(response, 'model-egress-owner-retired');
+      releaseOwnerOperation(operation);
+      return ownerOperationFailure(operation);
+    }
     const streamId = newId();
+    if (streams.has(streamId)) {
+      abort.abort('model-egress-stream-collision');
+      cancelResponse(response, 'model-egress-stream-collision');
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-stream-collision');
+    }
     streams.set(streamId, {
       owner: grant.owner, reader: response.body?.getReader() ?? null,
       abort, bytes: 0, maxBytes: policy.responseBytes, chunkBytes: policy.chunkBytes,
       pending: null, unlink,
     });
+    // The stream map now owns abort/unlink; owner cleanup can see it atomically.
+    releaseOwnerOperation(operation, false);
     return {
       ok: true, outcomeKnown: true,
       value: { streamId, ...responseProjection(response), hasBody: !!response.body },
@@ -222,11 +291,11 @@ export const createProviderEgressAuthority = ({
       return knownFailure('model-egress-stream-invalid');
     }
     if (grant.signal?.aborted) {
-      await closeStream(streamId);
+      closeStream(streamId);
       return knownFailure('model-egress-aborted');
     }
     if (!entry.reader) {
-      await closeStream(streamId);
+      closeStream(streamId);
       return { ok: true, outcomeKnown: true, value: { done: true } };
     }
     try {
@@ -237,14 +306,18 @@ export const createProviderEgressAuthority = ({
         return { ok: true, outcomeKnown: true, value: { done: false, chunk } };
       }
       const next = await entry.reader.read();
+      if (streams.get(streamId) !== entry || entry.abort.signal.aborted
+          || grant.signal?.aborted) {
+        return knownFailure('model-egress-aborted');
+      }
       if (next.done) {
-        await closeStream(streamId);
+        closeStream(streamId);
         return { ok: true, outcomeKnown: true, value: { done: true } };
       }
       const received = next.value;
       entry.bytes += received.byteLength;
       if (entry.bytes > entry.maxBytes) {
-        await closeStream(streamId);
+        closeStream(streamId);
         return knownFailure('model-egress-response-limit-exceeded');
       }
       const chunk = received.slice(0, entry.chunkBytes);
@@ -252,8 +325,10 @@ export const createProviderEgressAuthority = ({
         ? received.slice(entry.chunkBytes) : null;
       return { ok: true, outcomeKnown: true, value: { done: false, chunk } };
     } catch {
-      await closeStream(streamId);
-      return grant.signal?.aborted ? knownFailure('model-egress-aborted')
+      const aborted = streams.get(streamId) !== entry || entry.abort.signal.aborted
+        || grant.signal?.aborted;
+      closeStream(streamId);
+      return aborted ? knownFailure('model-egress-aborted')
         : unknownFailure('model-egress-stream-failed');
     }
   };
@@ -266,7 +341,7 @@ export const createProviderEgressAuthority = ({
     if (!exactKeys(value, ['streamId']) || !entry || entry.owner !== grant?.owner) {
       return knownFailure('model-egress-stream-invalid');
     }
-    await closeStream(streamId);
+    closeStream(streamId);
     return { ok: true, outcomeKnown: true, value: null };
   };
 
@@ -289,6 +364,9 @@ export const createProviderEgressAuthority = ({
         || bodyBytes(value) > providerEgressPolicy(providerId).requestBytes) {
       return knownFailure('local-model-egress-request-invalid');
     }
+    if (retiredOwners.has(grant.owner) || grant.signal?.aborted) {
+      return knownFailure('local-model-generation-aborted');
+    }
     try {
       const streamId = await localModelAuthority.open({
         messages: value.messages,
@@ -297,6 +375,10 @@ export const createProviderEgressAuthority = ({
         model: modelId,
         maxTokens: requestedOutput,
       }, grant.owner, grant.signal);
+      if (retiredOwners.has(grant.owner) || grant.signal?.aborted) {
+        void Promise.resolve(localModelAuthority.cancel(streamId, grant.owner)).catch(() => {});
+        return knownFailure('local-model-generation-aborted');
+      }
       return { ok: true, outcomeKnown: true, value: { streamId } };
     } catch (cause) {
       return knownFailure(
@@ -360,21 +442,39 @@ export const createProviderEgressAuthority = ({
     }
     const url = urlFor(policy, kind, providerId, modelId);
     if (!url) return { ok: true, outcomeKnown: true, value: null };
+    const operation = beginOwnerOperation(grant.owner, grant.signal);
+    if (!operation) return knownFailure('model-egress-aborted');
     let credential = null;
     try { credential = await credentialFor(policy); }
-    catch { return knownFailure('model-egress-credential-unavailable'); }
+    catch {
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-credential-unavailable');
+    }
+    if (!ownerOperationLive(operation)) {
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-aborted');
+    }
     const headers = providerEgressHeaders(policy, credential);
-    if (!headers && policy.credential) return knownFailure('model-egress-credential-missing');
+    if (!headers && policy.credential) {
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-credential-missing');
+    }
     const requestHeaders = headers ?? {};
     const init = kind === 'context' && providerId === 'ollama'
       ? { method: 'POST', headers: requestHeaders,
-        body: JSON.stringify({ model: modelId }), signal: grant.signal }
-      : { method: 'GET', headers: requestHeaders, signal: grant.signal };
+        body: JSON.stringify({ model: modelId }), signal: operation.abort.signal }
+      : { method: 'GET', headers: requestHeaders, signal: operation.abort.signal };
     let response;
     try { response = await safeFetch(url, init); }
     catch {
-      return grant.signal?.aborted ? knownFailure('model-egress-aborted')
-        : unknownFailure('model-egress-probe-failed');
+      const aborted = !ownerOperationLive(operation);
+      releaseOwnerOperation(operation);
+      return aborted ? knownFailure('model-egress-aborted') : unknownFailure('model-egress-probe-failed');
+    }
+    if (!ownerOperationLive(operation)) {
+      cancelResponse(response, 'model-egress-owner-retired');
+      releaseOwnerOperation(operation);
+      return knownFailure('model-egress-aborted');
     }
     const limit = Math.min(policy.responseBytes, 4 * 1024 * 1024);
     const reader = response.body?.getReader();
@@ -383,18 +483,30 @@ export const createProviderEgressAuthority = ({
     try {
       while (reader) {
         const next = await reader.read();
+        if (!ownerOperationLive(operation)) {
+          cancelReader(reader, 'model-egress-owner-retired');
+          releaseOwnerOperation(operation);
+          return knownFailure('model-egress-aborted');
+        }
         if (next.done) break;
         size += next.value.byteLength;
         if (size > limit) {
-          await reader.cancel('model-egress-probe-response-too-large').catch(() => {});
+          cancelReader(reader, 'model-egress-probe-response-too-large');
+          releaseOwnerOperation(operation);
           return knownFailure('model-egress-probe-response-too-large');
         }
         chunks.push(next.value);
       }
-    } catch { return unknownFailure('model-egress-probe-read-failed'); }
+    } catch {
+      const aborted = !ownerOperationLive(operation);
+      releaseOwnerOperation(operation);
+      return aborted ? knownFailure('model-egress-aborted')
+        : unknownFailure('model-egress-probe-read-failed');
+    }
     const bytes = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    releaseOwnerOperation(operation);
     return {
       ok: true, outcomeKnown: true,
       value: { ...responseProjection(response), body: bytes },
@@ -415,10 +527,16 @@ export const createProviderEgressAuthority = ({
       /** @type {{owner:object,signal?:AbortSignal,permitsProvider:(providerId:string)=>boolean}} */ grant) =>
       readBoundedProbe('context', input, grant),
     closeOwner: async (/** @type {object} */ owner) => {
-      await Promise.all([...streams.entries()]
-        .filter(([, entry]) => entry.owner === owner)
-        .map(([streamId]) => closeStream(streamId))
-        .concat(localModelAuthority ? [localModelAuthority.closeOwner(owner)] : []));
+      retiredOwners.add(owner);
+      for (const operation of pendingByOwner.get(owner) ?? []) {
+        operation.abort.abort('model-egress-owner-retired');
+        operation.unlink();
+      }
+      pendingByOwner.delete(owner);
+      for (const [streamId, entry] of streams) {
+        if (entry.owner === owner) closeStream(streamId);
+      }
+      if (localModelAuthority) await localModelAuthority.closeOwner(owner);
     },
     activeStreams: () => streams.size + (localModelAuthority?.activeStreams?.() ?? 0),
   });

@@ -46,9 +46,9 @@ const recordingCtx = (over: any = {}) => {
     },
   };
   if (typeof over.confirm === 'function') {
-    resourceAuthority.confirmWebWrite = (url: string, method: string) => over.confirm({
-      tool: 'web:write', kind: 'web_write', origins: [new URL(url).origin],
-      summary: `Allow a ${method} request to ${new URL(url).host}? This can send data out of the browser.`,
+    resourceAuthority.confirmWebWrite = (request: { url: string, method: string }) => over.confirm({
+      tool: 'web:write', kind: 'web_write', origins: [new URL(request.url).origin],
+      summary: `Allow a ${request.method} request to ${new URL(request.url).host}? This can send data out of the browser.`,
       sessionId: 't',
     });
   }

@@ -200,7 +200,11 @@ export const createKernelUiPortOwner = ({
           }).catch(() => {});
         }
       });
-      void Promise.resolve(pushState()).catch(() => {});
+      // why: the authoritative snapshot establishes which session this fresh
+      // surface is viewing. Replaying live actor rows before that snapshot lets
+      // the reducer accept them, then discard them as belonging to the former
+      // null session when the snapshot arrives.
+      const hydrated = Promise.resolve(pushState()).catch(() => {});
       broadcastSurfaces();
       broadcastAgentTab();
       const goals = activeGoalStates();
@@ -208,7 +212,10 @@ export const createKernelUiPortOwner = ({
       for (const event of goals) {
         try { port.postMessage(event); } catch { break; }
       }
-      void Promise.resolve(onUiConnect(port)).catch(() => {});
+      // why: rich owners must snapshot live topology immediately, before a
+      // state read queued behind active semantic work can observe it settled.
+      // They receive the hydration barrier and publish only after it resolves.
+      void Promise.resolve(onUiConnect(port, hydrated)).catch(() => {});
     },
   });
 };
