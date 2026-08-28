@@ -4,6 +4,7 @@ import { makeOffscreenActorChannelClient } from '../../extension/background/offs
 import { bindActorChannel } from '../../extension/offscreen/actor-channel-host.js';
 import { DWEB_INBOUND_TOOL_NAMES } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 import { nestedActorProgramCallId } from '../../extension/shared/actor-channel-protocol.js';
+import { createReadOnlyOperationGrant } from '../../extension/background/controller-turn-authority-scope.js';
 
 const OFFSCREEN = { id: 'ext', url: 'chrome-extension://ext/offscreen/offscreen.html' };
 const ENGINE_TAB = { id: 'ext', url: 'chrome-extension://ext/engine-tabs/vm-tab/vm-tab.html' };
@@ -94,6 +95,77 @@ const clientWithRelay = (over: Record<string, any> = {}) => {
 };
 
 describe('isolated actor run custody', () => {
+  test('keeps the actor operation grant live while exposing no mutation surface', () => {
+    const membership = new Set(['turn.execution.run-script']);
+    const grant = createReadOnlyOperationGrant(membership);
+    expect(grant instanceof Set).toBe(true);
+    expect(grant.has('turn.execution.run-script')).toBe(true);
+    expect((grant as any).add).toBeUndefined();
+    expect((grant as any).delete).toBeUndefined();
+    expect((grant as any).clear).toBeUndefined();
+    expect(() => Set.prototype.add.call(grant, 'turn.actor.message')).toThrow();
+    expect(membership.has('turn.actor.message')).toBe(false);
+    membership.delete('turn.execution.run-script');
+    expect(grant.has('turn.execution.run-script')).toBe(false);
+  });
+
+  test('cannot widen actor authority by mutating the projected job after admission', async () => {
+    const spawned = {
+      kind: 'spawned', sessionId: 'actor-grant-child', parentSessionId: 'chat-root',
+      spawnedTrusted: true,
+      grantedOperations: ['turn.execution.run-script', 'turn.actor.message'],
+    };
+    const executionOptions: any[] = [];
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async (id: string) => id === spawned.sessionId
+        ? structuredClone(spawned)
+        : id === 'chat-root' ? { kind: 'chat', sessionId: 'chat-root' } : null },
+      buildToolContext: async () => ({
+        session: { sessionId: spawned.sessionId, kind: 'spawned', depth: 1 },
+        messageActor: async () => ({ ok: true }),
+        jsOffscreenClient: {
+          execHeadless: async (_code: string, options: any) => {
+            executionOptions.push(options);
+            return { value: null, durationMs: 1, error: null };
+          },
+        },
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        job.allowedOperations.push('turn.actor.message');
+        const callId = 'actor-grant-script';
+        const effect = await relay('execution/run-script', {
+          operation: 'turn.execution.run-script', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          code: 'return actors;', actors: true, provider: false,
+          workspace: false, timeoutMs: null,
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'done' },
+        });
+        return { effect, completion, newMessages: durableMessages(callId) };
+      },
+    }));
+    const allowedOperations = ['turn.execution.run-script'];
+    const result: any = await client.run({
+      actorSessionId: spawned.sessionId, message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', tools: [{ name: 'script' }],
+      allowedOperations,
+    } as any);
+    expect(result.effect).toMatchObject({ ok: true });
+    expect(allowedOperations).toContain('turn.actor.message');
+    expect(executionOptions[0]?.actors).toBeUndefined();
+    expect(executionOptions[0]?.caps).toEqual({ subagent: false });
+  });
+
   test.each([
     'api.example.test',
     'https://api.example.test/path',

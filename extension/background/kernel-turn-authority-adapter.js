@@ -57,6 +57,45 @@ import {
   SessionNotFoundError,
 } from '/peerd-runtime/kernel-turn-authority.js';
 import {
+  buildMintInjection,
+  confirmActionsFromRecord,
+  createSkillRegistry,
+  createSuggestionStore,
+  describeLandingStop,
+  digestCapture,
+  DOC_TEXT_MAX_CHARS,
+  drainFetchTapInjected,
+  fenceApiActorSummary,
+  fenceWebActorSummary,
+  finalActorTurnReply,
+  finalAssistantText,
+  formatDocBody,
+  GOAL_MAX_ITERATIONS,
+  installFetchTapInjected,
+  landingStopCard,
+  limitExceeded,
+  makeAutoMemory,
+  makeCheapCall,
+  makeGoalRunner,
+  makeScheduler,
+  makeSpawnActor,
+  makeTrimEnricher,
+  meshCallToOp,
+  normalizeApiOrigin,
+  normalizeConfirmActions,
+  normalizeMode,
+  normalizeTally,
+  originPhrase,
+  parseSiteHandle,
+  PERMISSION_MODES,
+  prepareUserAttachmentsWithDocs,
+  resolveSiteUrl,
+  safeWebActorSummaryOrigin,
+  shapeMeshResult,
+  siteHandleFor,
+  wrapUntrusted,
+} from '/peerd-runtime/kernel-turn-lifecycle.js';
+import {
   HARDCODED_ALLOWLIST,
   makeAgentSendCustody,
   makeSafeFetch,
@@ -114,6 +153,18 @@ import {
 } from '/shared/web-actor-source-projection.js';
 import { providerEgressPolicy } from './provider-egress-manifest.js';
 import { finalWebRequestConfirmation } from '/shared/web-request-confirmation.js';
+import { parseAppManifest } from '/peerd-engine/authority.js';
+import { createControllerTurnComposeControl } from './controller-turn-compose-control.js';
+import {
+  composerReferenceAuditEntry,
+  createComposerReferenceAuthority,
+} from './composer-reference-authority.js';
+import { normalizeComposerCommands } from './composer-command-authority.js';
+import { parseComposerCommandName } from '../shared/composer-parser.js';
+import {
+  composerReferenceRequestKey,
+  composerReferenceRequests,
+} from '../shared/composer-reference-policy.js';
 
 // why: silently replacing an unreadable enabled pre-hook policy with an empty
 // list fails open. The sealed semantic realm compiles this sentinel into a
@@ -129,69 +180,14 @@ const originOf = (/** @type {string} */ value) => {
   catch { return ''; }
 };
 
-/**
- * @param {Record<string,any>} deps
- * @param {ReturnType<import('/peerd-runtime/controller-turn-semantics.js').createControllerTurnSemantics>} semanticOwners
- */
-export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
+/** @param {Record<string,any>} deps */
+export const createKernelTurnAuthorityAdapter = (deps) => {
   if (!deps?.engine || !deps.browser || !deps.vault || !deps.settingsStore
       || !deps.seams || !deps.confirmation || !deps.denylist
       || !deps.scriptRuns || !deps.contextSnapshots
       || !deps.providerEgress || typeof deps.resolveProviderSelection !== 'function') {
     throw new TypeError('kernel-turn-live-config-invalid');
   }
-  const {
-    describeLandingStop,
-    fenceApiActorSummary,
-    fenceWebActorSummary,
-    finalActorTurnReply,
-    finalAssistantText,
-    landingStopCard,
-    makeSpawnActor,
-    meshCallToOp,
-    normalizeApiOrigin,
-    originPhrase,
-    parseSiteHandle,
-    safeWebActorSummaryOrigin,
-    shapeMeshResult,
-    siteHandleFor,
-    wrapUntrusted,
-  } = semanticOwners.actor;
-  const {
-    PERMISSION_MODES,
-    confirmActionsFromRecord,
-    limitExceeded,
-    normalizeConfirmActions,
-    normalizeMode,
-    normalizeTally,
-  } = semanticOwners.policy;
-  const {
-    buildMintInjection,
-    digestCapture,
-    drainFetchTapInjected,
-    installFetchTapInjected,
-    parseAppManifest,
-    resolveSiteUrl,
-  } = semanticOwners.site;
-  const {
-    DOC_TEXT_MAX_CHARS,
-    GOAL_MAX_ITERATIONS,
-    applyComposer,
-    createSkillRegistry,
-    createSuggestionStore,
-    formatDocBody,
-    localStoreSource,
-    makeAutoMemory,
-    makeCheapCall,
-    makeGoalRunner,
-    makeInitOrchestrator,
-    makeScheduler,
-    makeToolsCommand,
-    makeTrimEnricher,
-    mergeSources,
-    prepareUserAttachmentsWithDocs,
-    skillRegistrySource,
-  } = semanticOwners.turn;
   const projectToolSurface = async (/** @type {Record<string,unknown>} */ input) => {
     const projected = await deps.seams.projectTurnTools(input);
     if (!projected || !Array.isArray(projected.tools)
@@ -229,9 +225,76 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     audit: deps.auditLog.append,
   });
   const commandStore = createCommandStore({ kv: deps.kv });
-  const commandSources = mergeSources([
-    localStoreSource(commandStore), skillRegistrySource(skillRegistry),
-  ]);
+  const listComposerCommands = async () => {
+    const [local, skills] = await Promise.all([
+      commandStore.list(),
+      typeof skillRegistry.listCommands === 'function'
+        ? skillRegistry.listCommands() : Promise.resolve([]),
+    ]);
+    return normalizeComposerCommands(local, skills);
+  };
+  const composerReferences = createComposerReferenceAuthority();
+  const composeControl = createControllerTurnComposeControl({
+    call: (/** @type {string} */ capability, /** @type {unknown} */ payload,
+      /** @type {any} */ options) => capability === 'turn.compose'
+      ? deps.seams.composeTurn(payload, options)
+      : Promise.resolve({ ok: false, code: 'controller-capability-denied', outcomeKnown: true }),
+    prepareContext: async (/** @type {Record<string,any>} */ input) => {
+      if (input.ctx?.signal?.aborted) {
+        throw input.ctx.signal.reason instanceof Error
+          ? input.ctx.signal.reason : new DOMException('composer stopped', 'AbortError');
+      }
+      // why: plain messages and file/tab-only references have no command
+      // authority need. Avoiding the store read narrows both latency and the
+      // failure surface before model admission.
+      const commands = parseComposerCommandName(input.text)
+        ? await listComposerCommands() : Object.freeze([]);
+      if (input.ctx?.signal?.aborted) {
+        throw input.ctx.signal.reason instanceof Error
+          ? input.ctx.signal.reason : new DOMException('composer stopped', 'AbortError');
+      }
+      const requests = composerReferenceRequests(input.text, commands);
+      const referenceContext = await composerReferences.pinContext(input.ctx, requests);
+      const allowedReferenceTemplate = new Map();
+      for (const request of requests) {
+        const key = composerReferenceRequestKey(request.operation, request.payload);
+        allowedReferenceTemplate.set(key, (allowedReferenceTemplate.get(key) ?? 0) + 1);
+      }
+      return {
+        referenceContext,
+        commands: Object.freeze(commands),
+        allowedReferenceTemplate,
+        allowedReferences: new Map(allowedReferenceTemplate),
+      };
+    },
+    handleEffect: async (/** @type {string} */ operation, /** @type {any} */ payload,
+      /** @type {any} */ context) => {
+      if (operation === 'turn.compose.list-commands') {
+        return { ok: true, outcomeKnown: true, value: context.composeContext.commands };
+      }
+      if (operation === 'turn.compose.capture-tab' || operation === 'turn.compose.read-file') {
+        let result;
+        if (context.referenceAllowed !== true) {
+          result = { ok: false, outcomeKnown: true, error: 'composer_reference_not_authorized' };
+        } else if (operation === 'turn.compose.capture-tab') {
+          result = await composerReferences.captureTab(
+            payload.tabId, context.composeContext.referenceContext,
+          );
+        } else {
+          result = await composerReferences.readFile(
+            payload.path, context.composeContext.referenceContext,
+          );
+        }
+        await deps.auditLog.append(composerReferenceAuditEntry({
+          operation, payload,
+          context: context.composeContext.referenceContext,
+          result, allowed: context.referenceAllowed === true,
+        }));
+        return result;
+      }
+      return { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+    },
+  });
   const safeFetch = makeSafeFetch({
     getAllowlist: () => [...HARDCODED_ALLOWLIST, ...userEndpoints],
     audit: deps.auditLog.append,
@@ -590,18 +653,24 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     if (!denylistReady?.ok) throw new Error('sensitive-origin policy unavailable');
     await lifecycleArmed;
     await deps.syncDenylistNetwork?.();
-    const sessionId = options.sessionId
-      ?? await deps.sessionCache.sessionGet('currentSessionId');
-    const session = sessionId ? await shared.sessions.get(sessionId) : null;
+    const sessionSpecified = Object.hasOwn(options, 'sessionId');
+    const requestedSessionId = sessionSpecified
+      ? options.sessionId : await deps.sessionCache.sessionGet('currentSessionId');
+    const session = requestedSessionId
+      ? await shared.sessions.get(requestedSessionId) : null;
+    // why: an explicit receipt binding, including null or a deleted chat, is
+    // authoritative. Never turn it into the currently selected chat later.
+    const sessionId = session?.sessionId ?? null;
     const permission = await resolvePermission(session);
     /** @type {any} */
     let activeTab;
-    if (options.activeTabId != null) {
+    const activeTabSpecified = Object.hasOwn(options, 'activeTabId');
+    if (activeTabSpecified && typeof options.activeTabId === 'number') {
       const tab = await deps.browser.tabs.get(options.activeTabId).catch(() => null);
       if (tab) activeTab = {
         id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
       };
-    } else if (options.exposure !== ACTOR_EXPOSURE) {
+    } else if (!activeTabSpecified && options.exposure !== ACTOR_EXPOSURE) {
       const [tab] = await deps.browser.tabs.query({ active: true, currentWindow: true });
       if (tab) activeTab = {
         id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
@@ -636,6 +705,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       synthetic: options.synthetic === true,
       inbound: options.synthetic === true && options.trusted !== true,
       lifecycle: lifecycleTracker,
+      ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
       lifecycleOwnerSessionId: sessionId,
       ...(typeof options.lifecycleTurnId === 'string'
         ? { lifecycleTurnId: options.lifecycleTurnId } : {}),
@@ -896,8 +966,11 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     }
     return normalized;
   };
-  const ensureCurrentSession = async () => {
-    let sessionId = await deps.sessionCache.sessionGet('currentSessionId');
+  const ensureCurrentSession = async (
+    /** @type {{exactFresh?:boolean}} */ options = {},
+  ) => {
+    let sessionId = options.exactFresh === true
+      ? null : await deps.sessionCache.sessionGet('currentSessionId');
     if (sessionId) return sessionId;
     const active = await ensureActiveProvider();
     const permission = await resolvePermission(null);
@@ -909,42 +982,106 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     await deps.sessionCache.sessionSet('currentSessionId', sessionId);
     return sessionId;
   };
-  const handleSystemCommand = async (/** @type {string} */ raw) => {
+  const handleSystemCommand = async (/** @type {string} */ raw,
+    /** @type {string|null} */ boundSessionId = null) => {
     if (deps.vault.isLocked()) throw new VaultLockedError();
     const argument = raw.trim();
-    let sessionId = await deps.sessionCache.sessionGet('currentSessionId');
+    const sessionId = typeof boundSessionId === 'string' && boundSessionId
+      ? boundSessionId : null;
+    const postBoundNote = (/** @type {string} */ text) =>
+      deps.postChatNote(text, null, sessionId);
+    const current = sessionId ? await live.shared.sessions.get(sessionId) : null;
     if (!argument) {
-      const current = sessionId ? await live.shared.sessions.get(sessionId) : null;
-      deps.postChatNote(current?.customSystemPrompt
+      postBoundNote(current?.customSystemPrompt
         ? `Session instructions active (${current.customSystemPrompt.length} chars): ${current.customSystemPrompt}`
         : 'No session instructions set. "/system <text>" sets them for this chat; "/system clear" removes them.');
       return;
     }
     if (/^clear$/i.test(argument)) {
-      if (!sessionId) return;
+      if (!current) return;
       await live.shared.sessions.setCustomSystemPrompt(sessionId, null);
       await deps.auditLog.append({ type: 'session_instructions_cleared', sessionId });
       await deps.pushState();
       return;
     }
-    sessionId = await ensureCurrentSession();
+    if (!current) {
+      postBoundNote('No active chat — send a message before setting session instructions.');
+      return { session: null };
+    }
     await live.shared.sessions.setCustomSystemPrompt(sessionId, argument);
     await deps.auditLog.append({
       type: 'session_instructions_set', sessionId, details: { chars: argument.length },
     });
     await deps.pushState();
   };
-  const handleToolsCommand = makeToolsCommand({
-    sessions: {
-      get: (/** @type {string} */ sessionId) => live.shared.sessions.get(sessionId),
-      setToolManifest: (/** @type {string} */ sessionId, /** @type {any} */ manifest) =>
-        live.shared.sessions.setToolManifest(sessionId, manifest),
-    },
-    getCurrentSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
-    ensureSession: ensureCurrentSession,
-    postNote: deps.postChatNote,
-    audit: deps.auditLog.append,
-  });
+  const handleToolsCommand = async (/** @type {string} */ argument,
+    /** @type {string|null} */ boundSessionId = null) => {
+    const sessionId = typeof boundSessionId === 'string' && boundSessionId
+      ? boundSessionId : null;
+    const postBoundNote = (/** @type {string} */ text) =>
+      deps.postChatNote(text, null, sessionId);
+    const currentSession = sessionId
+      ? await live.shared.sessions.get(sessionId) : null;
+    const planned = await deps.seams.planToolsCommand({
+      argument, currentManifest: currentSession?.toolManifest ?? null,
+    });
+    const plan = planned && typeof planned === 'object' && !Array.isArray(planned)
+      ? /** @type {Record<string,any>} */ (planned) : null;
+    const validNote = typeof plan?.note === 'string' && plan.note.length <= 16 * 1024;
+    if (!plan || !validNote || !['note', 'clear', 'set'].includes(plan.action)) {
+      throw Object.assign(new Error('tools command plan invalid'), {
+        code: 'turn-tools-command-invalid', outcomeKnown: true, retryable: true,
+      });
+    }
+    if (plan.action === 'note') {
+      if (Object.keys(plan).some((key) => !['action', 'note'].includes(key))) {
+        throw Object.assign(new Error('tools command plan invalid'), {
+          code: 'turn-tools-command-invalid', outcomeKnown: true, retryable: true,
+        });
+      }
+      postBoundNote(plan.note);
+      return { session: null };
+    }
+    if (plan.action === 'clear') {
+      if (plan.auditType !== 'tool_manifest_cleared'
+          || Object.keys(plan).some((key) => !['action', 'note', 'auditType'].includes(key))) {
+        throw Object.assign(new Error('tools command plan invalid'), {
+          code: 'turn-tools-command-invalid', outcomeKnown: true, retryable: true,
+        });
+      }
+      if (!currentSession) {
+        postBoundNote('No active chat — new chats already start with the default tool surface.');
+        return { session: null };
+      }
+      const session = await live.shared.sessions.setToolManifest(sessionId, null);
+      await deps.auditLog.append({ type: plan.auditType, sessionId });
+      postBoundNote(plan.note);
+      return { session };
+    }
+    if (plan.auditType !== 'tool_manifest_set'
+        || typeof plan.preset !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(plan.preset)
+        || !plan.manifest || plan.manifest.preset !== plan.preset
+        || Object.keys(plan.manifest).length !== 1
+        || Object.keys(plan).some((key) => ![
+          'action', 'note', 'auditType', 'preset', 'manifest',
+        ].includes(key))) {
+      throw Object.assign(new Error('tools command plan invalid'), {
+        code: 'turn-tools-command-invalid', outcomeKnown: true, retryable: true,
+      });
+    }
+    if (!currentSession) {
+      postBoundNote('No active chat — send a message before setting a tool preset.');
+      return { session: null };
+    }
+    const session = await live.shared.sessions.setToolManifest(sessionId, {
+      preset: plan.preset,
+    });
+    await deps.auditLog.append({
+      type: plan.auditType, sessionId, details: { preset: plan.preset },
+    });
+    postBoundNote(plan.note);
+    return { session };
+  };
 
   const registryEntries = () => [
     ['vm', 'webvm', engine.vmRegistry, engine.vmTabTracker],
@@ -2249,12 +2386,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         return { sessionId: created.sessionId };
       },
     });
-    const init = makeInitOrchestrator({
-      tabs: deps.browser.tabs, scripting: deps.browser.scripting,
-      listApps: () => engine.appRegistry.list(), memory: shared.memory,
-      confirm: deps.confirmation.confirm, postChatNote: deps.postChatNote,
-      getDenylist: () => deps.denylist.patterns(),
-    });
     const adoptWebTab = async (/** @type {string} */ sessionId,
       /** @type {AbortSignal|undefined} */ signal = undefined) => {
       if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
@@ -2297,7 +2428,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     });
     Object.assign(live, {
       actorMessaging, spawnActor, scheduler, trimEnricher,
-      autoMemory, init, adoptWebTab, liveLandingFor, originLockFor,
+      autoMemory, adoptWebTab, liveLandingFor, originLockFor,
       actorRecoveryGate, actorLifecycle: spawnActorCore,
     });
 
@@ -3076,7 +3207,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       vault: deps.vault, auditLog: deps.auditLog, sessions: shared.sessions,
       sessionCache: deps.sessionCache, turnSlots: shared.turnSlots,
       makeAgentSendCustody, pushState: deps.pushState, buildToolContext,
-      applyComposer, commandSources, prepareUserAttachmentsWithDocs,
+      applyComposer: (/** @type {{text:string,ctx:Record<string,any>}} */ input,
+        /** @type {any} */ options = undefined) => composeControl.compose(input, options),
+      prepareUserAttachmentsWithDocs,
       convertDocAttachment: docOffscreenClient
         ? async (/** @type {any} */ attachment) => {
           if (!attachment?.data) throw new Error('the file was empty');
@@ -3089,7 +3222,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
             doc, maxChars: DOC_TEXT_MAX_CHARS, source: attachment.name,
           });
         } : null,
-      runInit: () => live.init.runInit(), handleSystemCommand, handleToolsCommand,
+      runInit: (/** @type {any} */ message = {}, /** @type {any} */ options = undefined) =>
+        deps.runMemoryInit(message, options),
+      handleSystemCommand, handleToolsCommand,
       postChatNote: deps.postChatNote, spawnActor: live.spawnActor,
       browser: deps.browser, ensureSession: ensureCurrentSession,
       actorRecoveryReady: () => live.actorRecoveryGate.ready(),
@@ -3178,5 +3313,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
   return Object.freeze({
     buildToolContext, makeActorRuntime, makeDriverDeps, makeRouteDeps, makeDriver,
     makeGoals: makeGoalRunner, goalMaxIterations: GOAL_MAX_ITERATIONS,
+    composeAuthority: Object.freeze({
+      authorize: composeControl.authorize,
+      handleKernelCall: composeControl.handleKernelCall,
+    }),
   });
 };

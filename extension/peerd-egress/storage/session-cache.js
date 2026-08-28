@@ -59,7 +59,13 @@ export const makeAgentSendCustody = (/** @type {any} */ cache, now = Date.now) =
         data: typeof item?.data === 'string' ? await digest(item.data) : null,
         text: typeof item?.text === 'string' ? await digest(item.text) : null,
       }))),
-    activeTabId: input.activeTabId ?? null, goal: input.goal === true,
+    // Presence is user intent: omitted means "pin foreground at admission";
+    // explicit null means "no browser target". The resolved foreground id is
+    // deliberately not fingerprinted, so a settled replay remains stable.
+    activeTab: input.activeTabSpecified === true
+      ? { specified: true, id: input.activeTabId ?? null }
+      : { specified: false },
+    goal: input.goal === true,
     sessionId: input.sessionId,
   }));
   const validReceipt = (/** @type {string} */ id, /** @type {any} */ receipt) => {

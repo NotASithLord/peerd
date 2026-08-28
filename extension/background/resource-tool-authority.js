@@ -1,13 +1,13 @@
 // @ts-check
 
 import {
+  inspectTabToolCall,
   isDenylistedTab,
   originOfUrl,
   resolveTargetTab,
 } from '/peerd-runtime/browser-authority.js';
 import { isPrivateOrLocalHost } from '/shared/private-network.js';
 import { ALLOWED_METHODS, needsWebWriteConfirm } from '/peerd-engine/authority.js';
-import { inspectTabToolCall } from '/peerd-runtime/background.js';
 import { finalWebRequestConfirmation } from '/shared/web-request-confirmation.js';
 import { normalizeApiOrigin } from '/shared/api-origin.js';
 

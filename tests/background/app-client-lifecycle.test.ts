@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { createAppClient } from '../../extension/background/app-client.js';
+import {
+  AppDefaultMissingError,
+  createAppClient,
+} from '../../extension/background/app-client.js';
 import { makeWriteGuard, StoreReadOnlyError } from '../../extension/peerd-runtime/lifecycle/write-guard.js';
 
 const blockedAppGuard = (reason: string) => {
@@ -9,6 +12,22 @@ const blockedAppGuard = (reason: string) => {
 };
 
 describe('App OPFS lifecycle posture', () => {
+  test('missing session default has a stable typed pre-read refusal', async () => {
+    const client = createAppClient({
+      registry: {
+        getDefaultForSession: async () => null,
+      } as any,
+      tracker: {} as any,
+    });
+
+    const failure = await client.readFile({ sessionId: 'session-a', path: 'notes.md' })
+      .then(() => null, (cause) => cause);
+    expect(failure).toBeInstanceOf(AppDefaultMissingError);
+    expect(failure).toMatchObject({
+      name: 'AppDefaultMissingError', code: 'app_default_missing',
+    });
+  });
+
   for (const reason of ['newer schema', 'malformed schema stamp']) {
     test(`${reason} refuses App bytes before opening OPFS`, async () => {
       let deletedMetadata = false;

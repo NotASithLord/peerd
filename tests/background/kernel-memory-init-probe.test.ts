@@ -41,4 +41,56 @@ describe('kernel memory init probe', () => {
       warning: '/init skipped browser page details because the document probe did not finish.',
     });
   });
+
+  test('distinguishes omitted foreground, explicit no-tab, and one exact tab', async () => {
+    const queried = { active: 0, exact: [] as number[] };
+    const tab = { id: 7, url: 'https://example.test/work' };
+    const probe = createKernelMemoryInitProbe({
+      tabs: {
+        query: async () => { queried.active += 1; return [tab]; },
+        get: async (id: number) => { queried.exact.push(id); return id === 7 ? tab : null; },
+      },
+      scripting: { executeScript: async () => [{ result: { title: 'Work' } }] },
+      resolveTab: async (candidate: any) => candidate?.id === 7
+        ? { ...tab, peerdDocumentId: 'document:7' } : null,
+    });
+    await expect(probe.probeTab({ activeTabSpecified: true, activeTabId: null }))
+      .resolves.toEqual({ tab: null });
+    expect(queried).toEqual({ active: 0, exact: [] });
+    await expect(probe.probeTab({ activeTabSpecified: true, activeTabId: 7 }))
+      .resolves.toMatchObject({ tab: { url: tab.url, title: 'Work' } });
+    expect(queried).toEqual({ active: 0, exact: [7] });
+    await expect(probe.probeTab()).resolves.toMatchObject({ tab: { url: tab.url } });
+    expect(queried.active).toBe(1);
+  });
+
+  test('a missing exact tab and a replaced document refuse without foreground fallback', async () => {
+    let queries = 0;
+    let resolutions = 0;
+    const tab = { id: 7, url: 'https://example.test/work' };
+    const missing = createKernelMemoryInitProbe({
+      tabs: {
+        query: async () => { queries += 1; return [tab]; },
+        get: async () => { throw new Error('closed'); },
+      },
+      scripting: { executeScript: async () => [] },
+      resolveTab: async () => null,
+    });
+    await expect(missing.probeTab({ activeTabSpecified: true, activeTabId: 7 }))
+      .resolves.toMatchObject({ tab: null, warning: expect.stringContaining('bound tab') });
+    expect(queries).toBe(0);
+
+    const replaced = createKernelMemoryInitProbe({
+      tabs: { query: async () => [], get: async () => tab },
+      scripting: { executeScript: async () => [{ result: { title: 'Old' } }] },
+      resolveTab: async () => {
+        resolutions += 1;
+        return resolutions === 1
+          ? { ...tab, peerdDocumentId: 'document:old' }
+          : { ...tab, peerdDocumentId: 'document:new' };
+      },
+    });
+    await expect(replaced.probeTab({ activeTabSpecified: true, activeTabId: 7 }))
+      .resolves.toMatchObject({ tab: null, warning: expect.stringContaining('changed') });
+  });
 });

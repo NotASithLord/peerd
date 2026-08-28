@@ -90,3 +90,4 @@ export {
   controllerOperationsForTools,
   controllerOperationsForSpawnedTools,
 } from './controller-tool-ownership.js';
+export { planToolsCommand } from './tools/manifest-command.js';

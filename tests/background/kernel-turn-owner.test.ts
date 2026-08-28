@@ -73,7 +73,11 @@ const makeControllerFactory = (calls: Record<string, any>, turnFailure: any = nu
         });
       },
       renderSystemPrompt: async () => 'PINNED-SYSTEM',
-      projectTurnTools: async () => [],
+      projectTurnTools: async () => ({ tools: [], operations: [] }),
+      planToolsCommand: async () => ({ action: 'note', note: 'planned' }),
+      composeTurn: async ({ text }: any) => ({
+        text, command: null, commandFound: false, refs: [],
+      }),
       withRun: async (operation: () => Promise<void>) => {
         calls.withRuns += 1;
         await operation();
@@ -88,7 +92,9 @@ const makeRuntime = (seams: any, calls: Record<string, any>, sessionCache = make
     try {
       for await (const event of seams.runUserTurn({
         sessionId: args.sessionId ?? 'root', userText: args.userText,
-        sessions, tools: [], refreshTools: async () => [],
+        sessions, tools: [], allowedOperations: [], refreshTools: async () => ({
+          tools: [], operations: [],
+        }),
         classifyToolCall: () => null, toolDispatch: async () => ({ ok: true }),
         getSystemPrompt: () => seams.renderSystemPrompt({ actorType: 'orchestrator' }),
         appendAudit: async () => {}, enrichTrimSummary: () => {},

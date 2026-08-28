@@ -82,7 +82,10 @@ const connectHarness = async () => {
     bridge,
     runUserTurn: (context: any) => {
       modelCall = context.callModel;
-      return bridge.runUserTurn(context);
+      return bridge.runUserTurn({
+        ...context,
+        loadAuthorityContext: async () => context,
+      });
     },
     close: () => {
       client.close();

@@ -29,7 +29,9 @@ export const createKernelTurnProductionRuntime = async (deps) => {
     requiredFunction(deps.factories, key);
   }
   if (!Number.isSafeInteger(deps.factories.goalMaxIterations)
-      || deps.factories.goalMaxIterations < 1) {
+      || deps.factories.goalMaxIterations < 1
+      || typeof deps.factories.composeAuthority?.authorize !== 'function'
+      || typeof deps.factories.composeAuthority?.handleKernelCall !== 'function') {
     throw new TypeError('kernel-turn-production-goalMaxIterations-invalid');
   }
   /** @type {any} */
@@ -84,7 +86,7 @@ export const createKernelTurnProductionRuntime = async (deps) => {
   }
   const releaseCustody = deps.custody.bindActorRuntime(actorRuntime);
   try {
-    runtime = createKernelTurnRuntime({
+    const turnRuntime = createKernelTurnRuntime({
       seams: deps.seams,
       turnDriverDeps: { ...driverDeps, ...shared },
       turnRouteDeps: { ...routeDeps.turn, ...shared },
@@ -102,6 +104,10 @@ export const createKernelTurnProductionRuntime = async (deps) => {
         await actorRuntime.close?.();
         await deps.onClose?.();
       },
+    });
+    runtime = Object.freeze({
+      ...turnRuntime,
+      composeAuthority: deps.factories.composeAuthority,
     });
   } catch (cause) {
     await releaseCustody();

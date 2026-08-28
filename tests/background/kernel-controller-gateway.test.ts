@@ -14,6 +14,7 @@ const makeState = () => {
   let featureGrant: any = null;
   let promptCalls = 0;
   let retired = 0;
+  let composeOptions: any = null;
   const calls: any[] = [];
   const gateway = createKernelControllerGateway({
     controller: { fixed: true },
@@ -36,6 +37,13 @@ const makeState = () => {
         },
         renderSystemPrompt: async () => { promptCalls += 1; return 'prompt'; },
         projectTurnTools: async () => [],
+        planToolsCommand: async () => ({ action: 'note', note: 'planned' }),
+        composeTurn: async ({ text }: any, options: any) => {
+          composeOptions = options;
+          return ({
+          text, command: null, commandFound: false, refs: [],
+          });
+        },
         withRun: async (operation: () => Promise<any>) => operation(),
         retire: () => { retired += 1; },
         close: () => { closed += 1; },
@@ -46,6 +54,7 @@ const makeState = () => {
     gateway, calls, releaseHeld, releaseFeature, startedFeature,
     featureGrant: () => featureGrant, promptCalls: () => promptCalls,
     creates: () => creates, closed: () => closed, retired: () => retired, deps: () => deps,
+    composeOptions: () => composeOptions,
   };
 };
 
@@ -153,6 +162,15 @@ describe('kernel controller gateway', () => {
       code: 'kernel-turn-owner-unavailable', outcomeKnown: true,
     });
     expect(ran).toBe(false);
+  });
+
+  test('forwards the exact compose cancellation signal to the controller client', async () => {
+    const state = makeState();
+    const binding = state.gateway.bindCompose(owner('compose'));
+    const abort = new AbortController();
+    await expect(binding.composeTurn({ text: 'hello' }, { signal: abort.signal }))
+      .resolves.toMatchObject({ text: 'hello' });
+    expect(state.composeOptions()?.signal).toBe(abort.signal);
   });
 
   test('drains an in-flight binding before release and refuses a conflicting replacement', async () => {

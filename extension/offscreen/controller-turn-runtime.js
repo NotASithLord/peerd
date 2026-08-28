@@ -41,6 +41,7 @@ import {
   executeControllerScheduleTool,
   executeControllerDwebTool,
   projectControllerToolSurface,
+  planToolsCommand,
   reasoningForTurn,
   runUserTurn,
   semanticHooksFor,
@@ -916,6 +917,21 @@ const runControllerTurnWith = async (payload, options) => {
  */
 export const createControllerTurnRuntime = () => Object.freeze({
   projectTools: (/** @type {unknown} */ payload) => projectControllerToolSurface(payload),
+  planToolsCommand: (/** @type {unknown} */ payload) => {
+    if (!isRecord(payload)) {
+      return { ok: false, code: 'turn-tools-command-invalid', outcomeKnown: true };
+    }
+    const input = /** @type {Record<string,any>} */ (payload);
+    if (!Object.keys(input).every((key) => ['argument', 'currentManifest'].includes(key))
+        || typeof input.argument !== 'string' || input.argument.length > 4096) {
+      return { ok: false, code: 'turn-tools-command-invalid', outcomeKnown: true };
+    }
+    return {
+      ok: true,
+      plan: planToolsCommand(input.argument, input.currentManifest),
+      outcomeKnown: true,
+    };
+  },
   runControllerTurn: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
     runControllerTurnWith(payload, options),
 });

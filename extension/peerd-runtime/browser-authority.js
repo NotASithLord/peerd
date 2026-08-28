@@ -32,6 +32,7 @@ export { classifyLoginAffordance, loginTargetReader } from './tools/login-afford
 export { isKnownIdp } from './actor/idp-registry.js';
 export { classifyUrl as classifyUgcUrl } from './actor/ugc-registry.js';
 export { describeToolActivity, displayOrigin } from './actor/activity-label.js';
+export { inspectTabToolCall } from './tools/egress-heuristics.js';
 export {
   normalizeBrowserChildPolicyNotices,
   withAsyncBrowserChildPolicyNotices,

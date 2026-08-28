@@ -34,9 +34,14 @@ export const createKernelMemoryInitProbe = ({
   const step = (/** @type {Promise<any>} */ operation) => timed(
     operation, timeoutMs, setTimeoutFn, clearTimeoutFn,
   );
-  const probeTab = async () => {
+  const probeTab = async (/** @type {{activeTabSpecified?:boolean,activeTabId?:number|null}} */ binding = {}) => {
     try {
-      const [tab] = await step(Promise.resolve(tabs.query({ active: true, currentWindow: true })));
+      if (binding.activeTabSpecified === true && binding.activeTabId === null) {
+        return { tab: null };
+      }
+      const tab = binding.activeTabSpecified === true
+        ? await step(Promise.resolve(tabs.get(binding.activeTabId)))
+        : (await step(Promise.resolve(tabs.query({ active: true, currentWindow: true }))))[0];
       if (!tab?.id || !tab.url) return { tab: null };
       if (!/^https?:/.test(tab.url)) {
         return { tab: null, warning: '/init skipped the browser page because this URL type cannot be verified.' };
@@ -60,6 +65,11 @@ export const createKernelMemoryInitProbe = ({
         })));
         const result = response?.result;
         if (!result) return { tab: tabResult };
+        const stillLive = await step(Promise.resolve(resolveTab({ id: target.id })));
+        const stillDocumentId = stillLive?.peerdDocumentId ?? stillLive?.documentId;
+        if (stillLive?.url !== target.url || stillDocumentId !== documentId) {
+          return { tab: null, warning: '/init skipped the browser page because its current document changed.' };
+        }
         return { tab: {
           ...tabResult,
           title: typeof result.title === 'string' ? disarmText(result.title) : undefined,
@@ -73,7 +83,12 @@ export const createKernelMemoryInitProbe = ({
         return { tab: tabResult, warning: '/init skipped browser page details because the document probe did not finish.' };
       }
     } catch {
-      return { tab: null, warning: '/init skipped the browser page because the active-tab probe did not finish.' };
+      return {
+        tab: null,
+        warning: binding.activeTabSpecified === true
+          ? '/init skipped the browser page because the bound tab was unavailable.'
+          : '/init skipped the browser page because the active-tab probe did not finish.',
+      };
     }
   };
   return Object.freeze({ probeTab });

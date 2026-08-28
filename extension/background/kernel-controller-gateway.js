@@ -20,15 +20,15 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
   if (typeof loadController !== 'function' || !controller || typeof controller !== 'object') {
     throw new TypeError('kernel-controller-gateway-config-invalid');
   }
-  /** @type {Record<'semantic'|'turn'|'runtime',any|null>} */
-  const slots = { semantic: null, turn: null, runtime: null };
+  /** @type {Record<'semantic'|'turn'|'compose'|'runtime',any|null>} */
+  const slots = { semantic: null, turn: null, compose: null, runtime: null };
   /** @type {Map<string,any>} */
   const features = new Map();
   /** @type {Map<unknown,{binding:any,users:number}>} */
   const featureCalls = new Map();
   let closed = false;
 
-  const bindSlot = (/** @type {'semantic'|'turn'|'runtime'} */ family,
+  const bindSlot = (/** @type {'semantic'|'turn'|'compose'|'runtime'} */ family,
     /** @type {any} */ owner) => {
     if (closed || slots[family]) throw new Error(`kernel-${family}-owner-conflict`);
     if (typeof owner?.authorize !== 'function' || typeof owner?.handle !== 'function') {
@@ -66,16 +66,16 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
         if (binding.cluster) {
           if (features.get(binding.cluster) === binding) features.delete(binding.cluster);
         } else {
-          for (const slot of ['semantic', 'turn', 'runtime']) {
-            if (slots[/** @type {'semantic'|'turn'|'runtime'} */ (slot)] === binding) {
-              slots[/** @type {'semantic'|'turn'|'runtime'} */ (slot)] = null;
+          for (const slot of ['semantic', 'turn', 'compose', 'runtime']) {
+            if (slots[/** @type {'semantic'|'turn'|'compose'|'runtime'} */ (slot)] === binding) {
+              slots[/** @type {'semantic'|'turn'|'compose'|'runtime'} */ (slot)] = null;
             }
           }
         }
       }
     }
   };
-  const activeOwner = (/** @type {'semantic'|'turn'|'runtime'} */ family) =>
+  const activeOwner = (/** @type {'semantic'|'turn'|'compose'|'runtime'} */ family) =>
     slots[family]?.owner ?? null;
   const featureOwner = (/** @type {any} */ context) => {
     const target = context?.authority?.target;
@@ -128,6 +128,12 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
       /** @type {unknown} */ payload, /** @type {any} */ context) =>
       activeOwner('turn')?.handle(operation, payload, context)
         ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
+    authorizeComposeCall: (/** @type {unknown} */ payload) =>
+      activeOwner('compose')?.authorize(payload) ?? null,
+    handleComposeKernelCall: (/** @type {string} */ operation,
+      /** @type {unknown} */ payload, /** @type {any} */ context) =>
+      activeOwner('compose')?.handle(operation, payload, context)
+        ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
     authorizeRuntimeCall: (/** @type {unknown} */ payload) =>
       activeOwner('runtime')?.authorize(payload) ?? null,
     handleRuntimeKernelCall: (/** @type {string} */ operation,
@@ -157,7 +163,8 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
         }
         const candidate = makeController(clientDeps);
         if (['callSemantic', 'callTurn', 'callRuntime', 'callFeature',
-          'renderSystemPrompt', 'projectTurnTools', 'withRun', 'close']
+          'renderSystemPrompt', 'projectTurnTools', 'planToolsCommand', 'composeTurn',
+          'withRun', 'close']
           .some((name) => typeof candidate?.[name] !== 'function')) {
           try { candidate?.close?.(); } catch {}
           throw new TypeError('kernel-controller-client-invalid');
@@ -242,10 +249,23 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
       projectTurnTools: (/** @type {Record<string,unknown>} */ context) => useTurn(
         () => clientCall('projectTurnTools', context),
       ),
+      planToolsCommand: (/** @type {Record<string,unknown>} */ context) => useTurn(
+        () => clientCall('planToolsCommand', context),
+      ),
       withRun: (/** @type {()=>Promise<any>} */ operation) => useTurn(
         () => clientCall('withRun', operation),
       ),
       release: () => release(binding, () => slots.turn, () => { slots.turn = null; }),
+    });
+  };
+  const bindCompose = (/** @type {any} */ owner) => {
+    const binding = bindSlot('compose', owner);
+    return Object.freeze({
+      composeTurn: (/** @type {{text:string}} */ payload,
+        /** @type {any} */ options = {}) => use(
+        binding, 'compose', () => clientCall('composeTurn', payload, options),
+      ),
+      release: () => release(binding, () => slots.compose, () => { slots.compose = null; }),
     });
   };
   const bindRuntime = (/** @type {any} */ owner) => {
@@ -269,7 +289,7 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
     });
   };
   return Object.freeze({
-    bindSemantic, bindTurn, bindRuntime, bindFeature,
+    bindSemantic, bindTurn, bindCompose, bindRuntime, bindFeature,
     withRun: (/** @type {()=>Promise<any>} */ operation) => clientCall('withRun', operation),
     retire: () => {
       retirement += 1;
@@ -282,6 +302,7 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
       client = null;
       slots.semantic = null;
       slots.turn = null;
+      slots.compose = null;
       slots.runtime = null;
       features.clear();
       featureCalls.clear();

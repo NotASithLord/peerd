@@ -25,13 +25,55 @@ import {
 const USAGE = '"/tools list" shows presets; "/tools <preset>" narrows this chat\'s toolset; "/tools full" restores everything.';
 
 /**
+ * Pure command planner used by the sealed controller. The authority host
+ * applies only the returned finite session mutation and audit event.
+ * @param {unknown} rawArg
+ * @param {unknown} currentManifest
+ */
+export const planToolsCommand = (rawArg, currentManifest) => {
+  const arg = typeof rawArg === 'string' ? rawArg.trim() : '';
+  if (!arg) {
+    const allow = resolveManifestAllow(currentManifest);
+    return Object.freeze({
+      action: 'note',
+      note: allow
+        ? `Tool manifest active for this chat: ${manifestLabel(currentManifest)} (${allow.size} tools exposed). ${USAGE}`
+        : `No tool manifest set — the default tool surface is exposed. ${USAGE}`,
+    });
+  }
+  if (/^list$/i.test(arg)) {
+    return Object.freeze({ action: 'note', note: `Tool manifest presets:\n${describePresets()}` });
+  }
+  if (/^(full|clear)$/i.test(arg)) {
+    return Object.freeze({
+      action: 'clear',
+      note: 'Tool manifest cleared — the default tool surface is exposed again.',
+      auditType: 'tool_manifest_cleared',
+    });
+  }
+  const name = arg.toLowerCase();
+  const preset = /** @type {Record<string, { description: string, allow: readonly string[] }>} */ (TOOL_MANIFEST_PRESETS)[name];
+  if (!preset) {
+    return Object.freeze({
+      action: 'note',
+      note: `Unknown tool preset '${arg}'.\n${describePresets()}`,
+    });
+  }
+  return Object.freeze({
+    action: 'set', manifest: Object.freeze({ preset: name }),
+    note: `Tool manifest set for this chat: ${name} — ${preset.description} (${preset.allow.length} tools). "/tools full" restores the default surface.`,
+    auditType: 'tool_manifest_set', preset: name,
+  });
+};
+
+/**
  * One line per preset for the /tools list note. Pure.
  * @returns {string}
  */
 export const describePresets = () => {
   const lines = Object.entries(TOOL_MANIFEST_PRESETS).map(([name, p]) =>
     `/tools ${name} — ${p.description} (${p.allow.length} tools)`);
-  lines.push('/tools full — every registered tool (the default)');
+  lines.push('/tools full — the default tool surface');
   return lines.join('\n');
 };
 

@@ -53,6 +53,32 @@ const connectController = (deps: Omit<Parameters<typeof connectOffscreenControll
   });
 };
 
+const composeShellResult = async (
+  suffix: string,
+  call: (_capability: string, _payload: unknown, options: any) => Promise<any>,
+) => {
+  const controller = await connectController({
+    ensureOffscreen: async () => {}, capabilities: ['turn.compose'],
+    handleKernelCall: async () => ({
+      ok: false, error: 'read-result-lost', outcomeKnown: false, retryable: false,
+    }),
+    findHost: async () => ({
+      postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+        port: transfer[0] as MessagePort, channelId: offer.channelId,
+        buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+        hostEpoch: `host-epoch-compose-${suffix}`,
+        offeredCaps: offer.capabilities, supportedCaps: ['turn.compose'],
+        loadController: async () => ({ call }),
+      }),
+    }),
+  });
+  try {
+    return await controller.call(
+      'turn.compose', { text: 'inspect @file:notes.md' }, { timeoutMs: 1_000 },
+    );
+  } finally { controller.close(); }
+};
+
 const ids = (...values: string[]) => {
   const queue = [...values];
   return () => queue.shift() ?? crypto.randomUUID();
@@ -483,6 +509,24 @@ describe('Chrome lazy controller private channel prototype', () => {
       ok: false, outcomeKnown: true,
     });
     controller.close();
+  });
+
+  test('compose invalid outer results stay unknown', async () => {
+    await expect(composeShellResult('invalid', async () => ({ ok: true })))
+      .resolves.toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
+  });
+
+  test('compose AbortError stays unknown', async () => {
+    const aborted = new Error('stopped');
+    aborted.name = 'AbortError';
+    await expect(composeShellResult('abort', async () => { throw aborted; }))
+      .resolves.toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
+  });
+
+  test('compose reverse-effect unknown stays unknown', async () => {
+    await expect(composeShellResult('effect', async (_capability, _payload, options) =>
+      options.kernelCall?.('turn.compose.read-file', { path: 'notes.md' })))
+      .resolves.toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
   });
 
   test('reverse kernel RPC is parent-bound and unknown custody cannot be laundered', async () => {

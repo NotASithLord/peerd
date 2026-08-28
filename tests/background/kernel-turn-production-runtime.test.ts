@@ -41,6 +41,7 @@ describe('kernel turn production runtime', () => {
       seams: {
         runUserTurn: async () => {}, renderSystemPrompt: async () => '',
         projectTurnTools: async () => [],
+        planToolsCommand: async () => ({ action: 'note', note: 'planned' }),
         withRun: async (operation: () => Promise<void>) => operation(),
       },
       browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts, custody,
@@ -85,6 +86,12 @@ describe('kernel turn production runtime', () => {
           start: async () => ({ ok: true }), stop: async () => {}, resume: async () => {},
           activeStates: () => [],
         }),
+        composeAuthority: {
+          authorize: () => null,
+          handleKernelCall: () => ({
+            ok: false, code: 'kernel-operation-denied', outcomeKnown: true,
+          }),
+        },
         goalMaxIterations: 12,
         makeRouteDeps: (shared: any) => {
           seen.push(shared);

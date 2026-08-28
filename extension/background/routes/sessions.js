@@ -23,6 +23,16 @@ export const makeSessionRoutes = (deps) => {
     postChatNote('Actor recovery is still being recorded. Wait a moment, then send again.');
     return false;
   };
+  const awaitWithSignal = (/** @type {Promise<any>} */ operation,
+    /** @type {AbortSignal|undefined} */ signal) => {
+    if (!signal) return operation;
+    if (signal.aborted) return Promise.reject(new DOMException('stopped', 'AbortError'));
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(new DOMException('stopped', 'AbortError'));
+      signal.addEventListener('abort', aborted, { once: true });
+      operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', aborted));
+    });
+  };
 
   const {
     validOperationId, operationWindowValid, sendFingerprint, unknownSend,
@@ -83,9 +93,14 @@ export const makeSessionRoutes = (deps) => {
       /** @type {any} */ message = {}, /** @type {any} */ admission = undefined,
     ) => {
       const {
-        text, attachments, activeTabId = null, goal = false, operationId = null,
-        checkOnly = false,
+        text, attachments, goal = false, operationId = null, checkOnly = false,
       } = message;
+      const activeTabSpecified = Object.hasOwn(message, 'activeTabId');
+      const requestedActiveTabId = activeTabSpecified ? message.activeTabId : undefined;
+      if (activeTabSpecified && !(requestedActiveTabId === null
+          || Number.isSafeInteger(requestedActiveTabId) && requestedActiveTabId > 0)) {
+        return { ok: false, error: 'agent-send-active-tab-invalid', outcomeKnown: true };
+      }
       const sessionSpecified = Object.hasOwn(message, 'sessionId');
       const requestedSessionId = sessionSpecified ? message.sessionId : null;
       if (sessionSpecified && !(requestedSessionId === null
@@ -128,9 +143,18 @@ export const makeSessionRoutes = (deps) => {
         }
         if (!sessionSpecified) boundSessionId = currentSessionId ?? null;
       }
+      // why: omission is not explicit null. Preserve it until context
+      // preparation, which pins the foreground once immediately before the
+      // sealed composer starts; explicit null stays no-tab and an explicit id
+      // is never replaced by a later foreground target.
+      const activeTabBinding = activeTabSpecified
+        ? { activeTabId: requestedActiveTabId } : {};
       const binding = operationId ? {
         fingerprint: await sendFingerprint({
-          text, attachments, activeTabId, goal, sessionId: boundSessionId,
+          text, attachments,
+          activeTabSpecified,
+          activeTabId: requestedActiveTabId,
+          goal, sessionId: boundSessionId,
         }),
         sessionId: boundSessionId,
       } : { fingerprint: '', sessionId: null };
@@ -167,13 +191,50 @@ export const makeSessionRoutes = (deps) => {
       // check it BEFORE composer expansion so the slash command short-
       // circuits the turn entirely (it drafts AGENTS.md, no model call).
       if (trimmed === '/init' || trimmed.startsWith('/init ')) {
-        try { await runInit(); }
+        let initSessionId = boundSessionId;
+        if (initSessionId === null) {
+          if (typeof ensureSession !== 'function') {
+            return { ok: false, error: 'init-session-unavailable', outcomeKnown: true };
+          }
+          initSessionId = await ensureSession({ exactFresh: true });
+          if (!admitted()) return stopped();
+        }
+        let result;
+        try {
+          result = await runInit({
+            sessionId: initSessionId,
+            ...activeTabBinding,
+          }, { signal: admission?.signal });
+        }
         catch (e) {
+          if (!admitted()) return stopped();
           console.error('[sw] /init threw', e);
           postChatNote(`/init failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
           return {
             ok: false, error: 'init-outcome-unknown', outcomeKnown: false,
             outcomeKind: 'unknown', retryable: false,
+          };
+        }
+        if (!admitted()) return stopped();
+        if (!result || typeof result !== 'object') {
+          return {
+            ok: false, error: 'init-outcome-unknown', code: 'init-outcome-unknown',
+            outcomeKnown: false, outcomeKind: 'unknown', retryable: false,
+            handled: 'init',
+          };
+        }
+        if (result.ok !== true) {
+          const cancelled = result.rejected === true || result.cancelled === true;
+          const known = cancelled || result.outcomeKnown !== false;
+          const code = cancelled ? 'init-cancelled'
+            : typeof result.code === 'string' ? result.code
+              : typeof result.error === 'string' ? result.error : 'init-failed';
+          return {
+            ok: false, error: code, code,
+            outcomeKnown: known,
+            outcomeKind: cancelled ? 'cancelled' : known ? 'known-failure' : 'unknown',
+            retryable: cancelled || !known ? false : result.retryable !== false,
+            handled: 'init',
           };
         }
         return { ok: true, handled: 'init' };
@@ -234,17 +295,21 @@ export const makeSessionRoutes = (deps) => {
       // and apply the denylist origin gate. Build a tool context for them.
       let userText = trimmed;
       try {
-        const ctx = await buildToolContext();
-        const applied = await applyComposer({ text: userText, commandSources, ctx });
+        // why: the receipt accepted one chat and one browser target. Composer
+        // IO must use those exact bindings even if the user switches either
+        // surface while the sealed composer is loading.
+        const ctx = await buildToolContext({
+          sessionId: boundSessionId,
+          ...activeTabBinding,
+          signal: admission?.signal,
+        });
+        const applied = await applyComposer(
+          { text: userText, commandSources, ctx },
+          { signal: admission?.signal },
+        );
         userText = applied.text;
-        // Audit any @-references the user inlined — provenance for the
-        // lethal-trifecta surface. Failures are noted, not fatal.
-        for (const r of applied.refs) {
-          auditLog.append({
-            type: 'composer_reference',
-            details: { raw: r.raw, ok: r.ok, error: r.error ?? null },
-          }).catch(() => {});
-        }
+        // Reference authority emits the audit from the actual host read. The
+        // controller's refs report is UX metadata and is not trusted as proof.
         if (applied.command) {
           auditLog.append({
             type: 'composer_command',
@@ -252,8 +317,17 @@ export const makeSessionRoutes = (deps) => {
           }).catch(() => {});
         }
       } catch (e) {
-        console.error('[sw] applyComposer failed; sending raw text', e);
-        userText = trimmed;
+        if (!admitted()) return stopped();
+        console.error('[sw] applyComposer failed before model dispatch', e);
+        return {
+          ok: false,
+          error: 'turn-compose-unavailable',
+          code: typeof /** @type {{code?:unknown}} */ (e)?.code === 'string'
+            ? /** @type {{code:string}} */ (e).code : 'turn-compose-unavailable',
+          outcomeKnown: true,
+          phase: 'pre-dispatch',
+          retryable: true,
+        };
       }
       // File attachments — validate through the pure core, FAIL CLOSED:
       // an invalid batch rejects the whole send with the typed error's
@@ -269,12 +343,14 @@ export const makeSessionRoutes = (deps) => {
           // uses), so by the time the pure inlining step runs they are
           // ordinary text. Validate-then-convert-then-inline is sequenced
           // inside prepareUserAttachmentsWithDocs.
-          const prepared = await prepareUserAttachmentsWithDocs({
+          const prepared = await awaitWithSignal(prepareUserAttachmentsWithDocs({
             text: userText, attachments, convert: convertDocAttachment,
-          });
+            signal: admission?.signal,
+          }), admission?.signal);
           userText = prepared.text;
           turnAttachments = prepared.attachments;
         } catch (e) {
+          if (!admitted()) return stopped();
           return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
         }
       }
@@ -285,7 +361,7 @@ export const makeSessionRoutes = (deps) => {
       // port for streaming events. Returning immediately keeps the
       // message-channel cycle short.
       const settlement = runAgentTurn({
-        userText, attachments: turnAttachments, activeTabId,
+        userText, attachments: turnAttachments, ...activeTabBinding,
         ...(boundSessionId ? { sessionId: boundSessionId } : {}),
       });
       if (!operationId) {

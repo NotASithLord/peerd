@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
+import {
+  createReadOnlyOperationGrant,
+  projectControllerTurnAuthorityClass,
+  snapshotControllerTurnAuthorityBinding,
+} from '../../extension/background/controller-turn-authority-scope.js';
+import { bindPageToolAuthority } from '../../extension/background/page-tool-authority.js';
+import { bindResourceToolAuthority } from '../../extension/background/resource-tool-authority.js';
+import { bindSiteClientToolAuthority } from '../../extension/background/site-client-tool-authority.js';
 import { createAuthorityEffectScheduler } from '../../extension/background/authority-effect-scheduler.js';
 import {
   createControllerTurnRuntime,
@@ -62,7 +70,7 @@ const makeSessions = () => {
 const context = (over: Record<string, unknown> = {}) => {
   const sessions = makeSessions();
   let round = 0;
-  return {
+  const value = {
     sessionId: 'session-tool-protocol', userText: 'run protocol fixture', sessions,
     session: { sessionId: 'session-tool-protocol', kind: 'chat' },
     tools: [descriptor], refreshTools: async () => [descriptor],
@@ -94,6 +102,8 @@ const context = (over: Record<string, unknown> = {}) => {
     },
     ...over,
   } as any;
+  value.loadAuthorityContext ??= async () => value;
+  return value;
 };
 
 const runHarness = async ({
@@ -111,9 +121,11 @@ const runHarness = async ({
   ctx = withOperationSurface(ctx);
   let bridge!: ReturnType<typeof makeControllerTurnBridge>;
   let sequence = 0;
+  const controllerInputs: any[] = [];
   const runtime = createControllerTurnRuntime();
   const getClient = async () => ({
     call: async (capability: string, payload: any, options: any) => {
+      controllerInputs.push(JSON.parse(payload.ctxJson));
       const authority = bridge.authorize(payload);
       return runtime.runControllerTurn(payload, {
         signal: options.signal,
@@ -142,18 +154,23 @@ const runHarness = async ({
     for await (const event of bridge.runUserTurn(withOperationSurface(ctx))) events.push(event);
   } catch (cause) { error = cause; }
   if (!leaveOpen) bridge.close();
-  return { bridge, events, error };
+  return { bridge, events, error, controllerInputs };
 };
 
 describe('controller turn finite tool protocol', () => {
   test('executes now entirely in the semantic realm without tool lifecycle RPC', async () => {
     let legacy = 0;
     const audits: any[] = [];
+    let authorityLoads = 0;
     const nowDescriptor = authorityDescriptor('now');
     const kernelOperations: string[] = [];
     const result = await runHarness({
       ctx: context({
         appendAudit: async (entry: any) => { audits.push(entry); },
+        loadAuthorityContext: async () => {
+          authorityLoads += 1;
+          throw new Error('semantic-only tool requested host authority');
+        },
         tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
         toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
         callModel: async function* () {
@@ -169,6 +186,7 @@ describe('controller turn finite tool protocol', () => {
       },
     });
     expect(result.error).toBeNull();
+    expect(authorityLoads).toBe(0);
     expect(legacy).toBe(0);
     const toolResult: any = result.events.find((event: any) => event.type === 'tool-result');
     expect(toolResult.result.ok).toBe(true);
@@ -1419,8 +1437,8 @@ describe('controller turn finite tool protocol', () => {
     let legacy = 0;
     let cancelled = '';
     let round = 0;
-    const result = await runHarness({
-      ctx: context({
+    let authorityLoads = 0;
+    const privateAuthority = context({
         tools: [actorCancelDescriptor], refreshTools: async () => [actorCancelDescriptor],
         toolDispatch: async () => { legacy += 1; return { ok: true, content: 'legacy' }; },
         actorAuthority: {
@@ -1443,15 +1461,398 @@ describe('controller turn finite tool protocol', () => {
           yield { type: 'tool-use-stop', id: 'tool-actor-cancel-1' };
           yield { type: 'message-stop', stopReason: 'tool_use' };
         },
-      }),
+      });
+    const result = await runHarness({
+      ctx: {
+        ...privateAuthority,
+        actorAuthority: undefined,
+        loadAuthorityContext: async () => {
+          authorityLoads += 1;
+          return privateAuthority;
+        },
+      },
     });
     expect(result.error).toBeNull();
     expect(cancelled).toBe('task-9');
+    expect(authorityLoads).toBe(1);
     expect(legacy).toBe(0);
     expect(result.events).toContainEqual(expect.objectContaining({
       type: 'tool-result',
       result: expect.objectContaining({ ok: true, content: 'cancelled task-9' }),
     }));
+  });
+
+  test('one frozen actor scope cannot replace semantic state or change binding mid-turn', async () => {
+    const actorCancelDescriptor = authorityDescriptor('actor_cancel');
+    const cancelled: string[] = [];
+    let authorityLoads = 0;
+    let poisonReads = 0;
+    let round = 0;
+    const semanticContext = context({
+      tools: [actorCancelDescriptor], refreshTools: async () => [actorCancelDescriptor],
+      callModel: async function* () {
+        round += 1;
+        if (round > 1) {
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+          return;
+        }
+        for (const [id, taskId] of [['actor-bound-1', 'task-1'], ['actor-bound-2', 'task-2']]) {
+          yield { type: 'tool-use-start', id, name: 'actor_cancel' };
+          yield { type: 'tool-use-delta', id, partialJson: JSON.stringify({ taskId }) };
+          yield { type: 'tool-use-stop', id };
+        }
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const hostBinding: any = {
+      ...semanticContext,
+      sessions: {
+        get: async () => { poisonReads += 1; throw new Error('authority replaced transcript'); },
+      },
+      getSystemPrompt: async () => {
+        poisonReads += 1;
+        throw new Error('authority replaced prompt');
+      },
+      actorAuthority: {
+        cancelTask: async (taskId: string) => {
+          cancelled.push(taskId);
+          hostBinding.actorAuthority = {
+            cancelTask: async () => {
+              poisonReads += 1;
+              return { ok: false, content: 'replacement authority ran' };
+            },
+          };
+          return { ok: true, content: `cancelled ${taskId}` };
+        },
+      },
+    };
+    const result = await runHarness({
+      ctx: {
+        ...semanticContext,
+        actorAuthority: undefined,
+        loadAuthorityContext: async () => {
+          authorityLoads += 1;
+          return hostBinding;
+        },
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(authorityLoads).toBe(1);
+    expect(cancelled).toEqual(['task-1', 'task-2']);
+    expect(poisonReads).toBe(0);
+    expect(result.controllerInputs[0]).not.toHaveProperty('actorAuthority');
+    expect(result.controllerInputs[0]).not.toHaveProperty('loadAuthorityContext');
+    expect(result.controllerInputs[0]).not.toHaveProperty('toolDispatch');
+  });
+
+  test('Stop while an exact authority binding loads reaches no authority leaf', async () => {
+    const actorCancelDescriptor = authorityDescriptor('actor_cancel');
+    const stop = new AbortController();
+    let authorityLoads = 0;
+    let leafCalls = 0;
+    let releaseLoad = () => {};
+    let reportLoadStarted = () => {};
+    const loadStarted = new Promise<void>((resolve) => { reportLoadStarted = resolve; });
+    const loadReleased = new Promise<void>((resolve) => { releaseLoad = resolve; });
+    const semanticContext = context({
+      signal: stop.signal,
+      tools: [actorCancelDescriptor], refreshTools: async () => [actorCancelDescriptor],
+      callModel: async function* () {
+        yield { type: 'tool-use-start', id: 'actor-stop-load', name: 'actor_cancel' };
+        yield {
+          type: 'tool-use-delta', id: 'actor-stop-load', partialJson: '{"taskId":"task-stop"}',
+        };
+        yield { type: 'tool-use-stop', id: 'actor-stop-load' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const pending = runHarness({
+      ctx: {
+        ...semanticContext,
+        actorAuthority: undefined,
+        loadAuthorityContext: async () => {
+          authorityLoads += 1;
+          reportLoadStarted();
+          await loadReleased;
+          return {
+            ...semanticContext,
+            actorAuthority: {
+              cancelTask: async () => {
+                leafCalls += 1;
+                return { ok: true, content: 'cancelled' };
+              },
+            },
+          };
+        },
+      },
+    });
+    await loadStarted;
+    stop.abort();
+    releaseLoad();
+    const result = await pending;
+    expect(authorityLoads).toBe(1);
+    expect(leafCalls).toBe(0);
+    expect(result.events).not.toContainEqual(expect.objectContaining({
+      type: 'tool-result', result: expect.objectContaining({ ok: true }),
+    }));
+  });
+
+  test('class projections carry complete browser custody through real binders', async () => {
+    const signal = new AbortController().signal;
+    const calls = {
+      tab: 0, script: 0, guard: 0, landing: 0, note: 0,
+      quarantine: 0, ref: 0, click: 0, document: 0, capture: 0,
+    };
+    const tab = {
+      id: 7, windowId: 1, url: 'https://example.test/',
+      peerdDocumentId: 'document-7', peerdDocumentTimeOrigin: 1,
+    };
+    const host = {
+      session: { sessionId: 'session-tool-protocol', kind: 'actor' },
+      actorType: 'web', actorInstanceId: 'https://example.test', backing: 'tab',
+      activeTab: { id: 7, url: tab.url, origin: 'https://example.test' },
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+      lifecycle: {}, denylist: [],
+      tabs: {
+        get: async () => { calls.tab += 1; return { ...tab }; },
+        query: async () => [{ ...tab }],
+      },
+      scripting: {
+        executeScript: async ({ func }: any) => {
+          calls.script += 1;
+          if (func?.name === 'liveDocumentLocationInjected') return [{
+            documentId: 'document-7',
+            result: {
+              origin: 'https://example.test', href: tab.url, timeOrigin: 1,
+            },
+          }];
+          if (func?.name === 'hasPasswordFieldInjected') return [{
+            documentId: 'document-7', result: false,
+          }];
+          throw new Error(`unexpected injected body: ${func?.name}`);
+        },
+      },
+      ensureBrowserNetworkGuard: async () => { calls.guard += 1; return { ok: true }; },
+      updateBrowserNetworkGuardOrigin: async () => ({ ok: true }),
+      acquireBrowserNetworkGuardLease: async () => ({ ok: true, lease: {} }),
+      releaseBrowserNetworkGuardLease: async () => {},
+      judgeLanding: async () => { calls.landing += 1; return { action: 'continue' }; },
+      noteTab: () => { calls.note += 1; },
+      hintPullIn: () => {},
+      adoptWebTab: async () => ({ id: 7 }),
+      repinActiveTab: () => {},
+      noteLearnedOrigin: () => {},
+      authorizeSignInOrigin: async () => true,
+      authorizeSignInExcursion: async () => true,
+      revokeSignInExcursion: async () => true,
+      audit: async () => {},
+      armBrowserChildQuarantine: async () => {
+        calls.quarantine += 1;
+        return { ok: true };
+      },
+      domRefs: {
+        resolve: () => {
+          calls.ref += 1;
+          return { backendDOMNodeId: 9, role: 'button', name: 'Continue' };
+        },
+      },
+      debuggerPool: {
+        clickBackendNode: async () => {
+          calls.click += 1;
+          return { ok: true, tag: 'button', text: 'Continue', mutations: [] };
+        },
+      },
+      docOffscreenClient: {
+        extract: async () => {
+          calls.document += 1;
+          return { text: 'document text' };
+        },
+      },
+      siteCapture: {
+        start: async () => { calls.capture += 1; return { tap: 'tap-1' }; },
+        stop: async () => ({ requests: [] }),
+      },
+      siteClients: { get: async () => null },
+      poisonAuthority: () => { throw new Error('cross-class authority leaked'); },
+    } as any;
+    const binding = snapshotControllerTurnAuthorityBinding(host, {
+      sessionId: 'session-tool-protocol', operationGrant: new Set(), abortSignal: signal,
+    });
+
+    const pageScope = projectControllerTurnAuthorityClass(binding, 'page');
+    expect(pageScope).not.toHaveProperty('siteClients');
+    expect(pageScope).not.toHaveProperty('docOffscreenClient');
+    expect(pageScope).not.toHaveProperty('poisonAuthority');
+    for (const key of [
+      'tabs', 'scripting', 'debuggerPool', 'domRefs', 'noteTab', 'hintPullIn',
+      'adoptWebTab', 'judgeLanding', 'authorizeSignInOrigin',
+      'authorizeSignInExcursion', 'revokeSignInExcursion',
+      'ensureBrowserNetworkGuard', 'updateBrowserNetworkGuardOrigin',
+      'acquireBrowserNetworkGuardLease', 'releaseBrowserNetworkGuardLease',
+    ]) expect(pageScope?.[key]).toBe(host[key]);
+    const page = bindPageToolAuthority({}, {
+      operation: 'turn.page.click', args: { tabId: 7, ref: 'ref-1' },
+      ctx: pageScope, signal,
+    });
+    expect(await page.clickOwnedTarget()).toMatchObject({ ok: true });
+
+    const resourceScope = projectControllerTurnAuthorityClass(binding, 'resource');
+    expect(resourceScope).not.toHaveProperty('siteCapture');
+    expect(resourceScope?.tabs).toBe(host.tabs);
+    const resource = bindResourceToolAuthority({}, {
+      operation: 'turn.resource.extract-document',
+      args: { url: null, format: 'text', engine: 'pdf' },
+      ctx: resourceScope, signal,
+    });
+    expect(await resource.extractDocument({
+      url: null, format: 'text', engine: 'pdf',
+    })).toMatchObject({ ok: true, target: tab.url });
+
+    const siteScope = projectControllerTurnAuthorityClass(binding, 'siteclient');
+    expect(siteScope).not.toHaveProperty('docOffscreenClient');
+    expect(siteScope?.tabs).toBe(host.tabs);
+    const site = bindSiteClientToolAuthority({}, {
+      operation: 'turn.site-client.capture-start', args: {}, ctx: siteScope, signal,
+    });
+    expect(await site.startOwnedCapture()).toMatchObject({
+      ok: true, origin: 'https://example.test', tap: 'tap-1',
+    });
+    expect(calls.script > 0).toBe(true);
+    expect(calls.guard > 0).toBe(true);
+    expect(calls.landing > 0).toBe(true);
+    expect(calls.note > 0).toBe(true);
+    expect(calls.tab > 0).toBe(true);
+    expect({
+      quarantine: calls.quarantine, ref: calls.ref, click: calls.click,
+      document: calls.document, capture: calls.capture,
+    }).toEqual({ quarantine: 1, ref: 1, click: 1, document: 1, capture: 1 });
+  });
+
+  test('projected inbound page authority refuses login before browser or sign-in authority', async () => {
+    const signal = new AbortController().signal;
+    const calls = { scripting: 0, confirm: 0, authorizeSignIn: 0 };
+    const tab = {
+      id: 7, url: 'https://example.test/login', peerdDocumentId: 'document-7',
+      peerdDocumentTimeOrigin: 1,
+    };
+    const host = {
+      session: { sessionId: 'session-tool-protocol', kind: 'actor' },
+      actorType: 'web', backing: 'tab', inbound: true,
+      activeTab: { id: 7, url: tab.url, origin: 'https://example.test' },
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+      denylist: [],
+      tabs: { get: async () => ({ ...tab }) },
+      scripting: {
+        executeScript: async ({ func }: any) => {
+          calls.scripting += 1;
+          if (func?.name === 'liveDocumentLocationInjected') return [{
+            documentId: 'document-7',
+            result: {
+              origin: 'https://example.test', href: tab.url, timeOrigin: 1,
+            },
+          }];
+          if (func?.name === 'hasPasswordFieldInjected') return [{
+            documentId: 'document-7', result: { has: false, capped: false },
+          }];
+          throw new Error(`unexpected injected body: ${func?.name}`);
+        },
+      },
+      ensureBrowserNetworkGuard: async () => ({ ok: true }),
+      judgeLanding: async () => ({ action: 'continue' }),
+      confirm: async () => { calls.confirm += 1; return 'yes_once'; },
+      authorizeSignInOrigin: async () => { calls.authorizeSignIn += 1; return true; },
+      authorizeSignInExcursion: async () => true,
+      revokeSignInExcursion: async () => true,
+    } as any;
+    const binding = snapshotControllerTurnAuthorityBinding(host, {
+      sessionId: 'session-tool-protocol',
+      operationGrant: new Set(['turn.page.login']),
+      abortSignal: signal,
+    });
+    const scope = projectControllerTurnAuthorityClass(binding, 'page');
+    const page = bindPageToolAuthority({}, {
+      operation: 'turn.page.login', args: { selector: '#sign-in' }, ctx: scope, signal,
+    });
+
+    await expect(page.performConfirmedOwnedLogin()).resolves.toMatchObject({
+      ok: false, error: 'login_refused_inbound', performed: false,
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+    expect(calls).toEqual({ scripting: 0, confirm: 0, authorizeSignIn: 0 });
+  });
+
+  test('projected Web site-client authority never borrows a foreground tab for capture', async () => {
+    const signal = new AbortController().signal;
+    const calls = { foregroundQueries: 0, starts: 0, stops: 0 };
+    const host = {
+      session: { sessionId: 'session-tool-protocol', kind: 'actor' },
+      actorType: 'web', activeTab: null,
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+      denylist: [],
+      tabs: {
+        query: async () => {
+          calls.foregroundQueries += 1;
+          return [{ id: 99, url: 'https://foreground.example/' }];
+        },
+      },
+      scripting: {
+        executeScript: async ({ func }: any) => {
+          if (func?.name === 'liveDocumentLocationInjected') return [{
+            documentId: 'foreground-document',
+            result: {
+              origin: 'https://foreground.example',
+              href: 'https://foreground.example/', timeOrigin: 1,
+            },
+          }];
+          if (func?.name === 'hasPasswordFieldInjected') return [{
+            documentId: 'foreground-document', result: { has: false, capped: false },
+          }];
+          throw new Error(`unexpected injected body: ${func?.name}`);
+        },
+      },
+      siteCapture: {
+        start: async () => { calls.starts += 1; return { tap: 'tap-99' }; },
+        stop: async () => { calls.stops += 1; return { entries: [] }; },
+      },
+    } as any;
+    const binding = snapshotControllerTurnAuthorityBinding(host, {
+      sessionId: 'session-tool-protocol',
+      operationGrant: new Set([
+        'turn.site-client.capture-start', 'turn.site-client.capture-stop',
+      ]),
+      abortSignal: signal,
+    });
+    const scope = projectControllerTurnAuthorityClass(binding, 'siteclient');
+
+    for (const action of ['start', 'stop'] as const) {
+      const site = bindSiteClientToolAuthority({}, {
+        operation: `turn.site-client.capture-${action}`, args: {}, ctx: scope, signal,
+      });
+      const result = action === 'start'
+        ? await site.startOwnedCapture() : await site.stopOwnedCapture();
+      expect(result).toMatchObject({
+        ok: false,
+        error: expect.stringContaining('owned tab has no web origin'),
+      });
+    }
+    expect(calls).toEqual({ foregroundQueries: 0, starts: 0, stops: 0 });
+  });
+
+  test('the exposed operation grant has live membership and no mutation surface', () => {
+    const membership = new Set(['turn.execution.run-script']);
+    const grant = createReadOnlyOperationGrant(membership);
+    expect(grant instanceof Set).toBe(true);
+    expect(grant.has('turn.execution.run-script')).toBe(true);
+    expect((grant as any).add).toBeUndefined();
+    expect((grant as any).delete).toBeUndefined();
+    expect((grant as any).clear).toBeUndefined();
+    expect(() => Set.prototype.add.call(grant, 'turn.actor.message')).toThrow();
+    expect(membership.has('turn.actor.message')).toBe(false);
+    membership.delete('turn.execution.run-script');
+    expect(grant.has('turn.execution.run-script')).toBe(false);
   });
 
   test('the main semantic owner refuses actor-only pod_write before authority', async () => {
@@ -1962,6 +2363,40 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('a forged semantic effect envelope cannot load host authority', async () => {
+    const scheduleDescriptor = authorityDescriptor('schedule_cancel');
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    let authorityLoads = 0;
+    let effectResult: any;
+    const getClient = async () => ({
+      call: async (capability: string, payload: any, options: any) => {
+        const authority = bridge.authorize(payload);
+        const invoke = (operation: string, value: any) => bridge.handleKernelCall(
+          operation, { runId: payload.runId, value }, {
+            capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+          },
+        );
+        effectResult = await invoke('turn.schedule.cancel-routine', {
+          callId: 'not-issued-by-model', effectId: 'not-issued-by-model:1',
+          effectSequence: 1, turnGeneration: payload.turnGeneration, id: 'routine-1',
+        });
+        return invoke('turn.finalize', {});
+      },
+    });
+    bridge = makeControllerTurnBridge({ getClient });
+    const ctx = withOperationSurface(context({
+      tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+      loadAuthorityContext: async () => {
+        authorityLoads += 1;
+        throw new Error('forged effect loaded authority');
+      },
+    }));
+    for await (const _event of bridge.runUserTurn(ctx)) { /* drain */ }
+    expect(effectResult).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(authorityLoads).toBe(0);
+    await bridge.close();
+  });
+
   test('rejects an unknown exact operation in the initial projection before startup', async () => {
     let clientStarts = 0;
     const bridge = makeControllerTurnBridge({
@@ -1990,10 +2425,15 @@ describe('controller turn finite tool protocol', () => {
     let effectResult: any;
     let freshToolsJson: string | null = null;
     let removals = 0;
+    let authorityLoads = 0;
     const ctx = withOperationSurface(context({
       tools: [nowDescriptor],
       refreshTools: async () => [scheduleDescriptor],
       scheduleRemove: async () => { removals += 1; return true; },
+      loadAuthorityContext: async () => {
+        authorityLoads += 1;
+        throw new Error('a projected-disallowed operation loaded authority');
+      },
     }));
     let generation = 0;
     const getClient = async () => ({
@@ -2031,6 +2471,7 @@ describe('controller turn finite tool protocol', () => {
     expect(JSON.parse(refreshResult.value.toolsJson)).toEqual([]);
     expect(effectResult).toMatchObject({ ok: false, outcomeKnown: true });
     expect(removals).toBe(0);
+    expect(authorityLoads).toBe(0);
     for await (const _event of bridge.runUserTurn(withOperationSurface(context({
       tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
     })))) { /* drain */ }
