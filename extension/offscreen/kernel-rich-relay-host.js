@@ -4,7 +4,7 @@ import { callModel } from '/peerd-provider/controller.js';
 import {
   foldProviderEvents,
   validateProviderCallArgs,
-} from '/peerd-runtime/background.js';
+} from '/peerd-runtime/controller-model.js';
 import {
   parseRuntimeRichAdmitProjection,
   parseRuntimeRichOpenInferenceValue,

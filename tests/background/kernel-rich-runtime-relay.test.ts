@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 
 import { createKernelRichEffectAuthority } from '../../extension/background/kernel-rich-effect-authority.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 import { dispatchKernelRichRelay } from '../../extension/offscreen/kernel-rich-relay-host.js';
+import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 
 const encoder = new TextEncoder();
 const streamBytes = encoder.encode([
@@ -22,12 +24,34 @@ const admitProjection = {
 };
 
 describe('sealed rich relay host', () => {
+  test('links only the narrow pure runtime surface', async () => {
+    const extensionRoot = join(import.meta.dir, '../../extension');
+    const graph = new Set([...await collectStaticModuleGraph(
+      extensionRoot,
+      join(extensionRoot, 'offscreen/kernel-rich-relay-host.js'),
+    )].map((file) => relative(extensionRoot, file).replaceAll('\\', '/')));
+    expect(graph.has('peerd-runtime/controller-model.js')).toBe(true);
+    expect(graph.has('peerd-runtime/actor/provider-call-api.js')).toBe(true);
+    for (const module of [
+      'peerd-runtime/background.js',
+      'peerd-runtime/tools/registry.js',
+      'peerd-runtime/tools/metadata-registry.js',
+      'peerd-runtime/controller-turn-semantics.js',
+      'peerd-runtime/semantic.js',
+    ]) expect(graph.has(module), `rich relay imports ${module}`).toBe(false);
+    expect([...graph].filter((module) =>
+      module.startsWith('peerd-runtime/tools/defs/')
+        || module.startsWith('peerd-runtime/tools/metadata/'))).toEqual([]);
+  });
+
   test('keeps provider semantics controller-side and privileged transport worker-side', async () => {
     const [relay, authority] = await Promise.all([
       readFile(new URL('../../extension/offscreen/kernel-rich-relay-host.js', import.meta.url), 'utf8'),
       readFile(new URL('../../extension/background/kernel-rich-effect-authority.js', import.meta.url), 'utf8'),
     ]);
     expect(relay).toContain("from '/peerd-provider/controller.js'");
+    expect(relay).toContain("from '/peerd-runtime/controller-model.js'");
+    expect(relay).not.toContain("from '/peerd-runtime/background.js'");
     for (const forbidden of [
       '/peerd-provider/kernel.js', '/peerd-provider/background.js',
       'getSecret', 'safeFetch', 'rich.model.call',

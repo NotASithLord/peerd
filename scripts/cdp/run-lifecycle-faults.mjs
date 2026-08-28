@@ -26,6 +26,7 @@ const PASSPHRASE = 'peerd-physical-lifecycle-passphrase';
 const STABILITY_WINDOW_MS = 1_500;
 const SOURCE_TARGET = 'source';
 const STORE_TARGET = 'store';
+const STORE_BACKGROUND_ENTRY = 'background/vault-kernel-chrome.js';
 
 const withDeadline = async (promise, budgetMs, label) => {
   let timeout;
@@ -186,9 +187,11 @@ ${anchor}`, 'source exact script effect');
 };
 
 export const injectLifecycleFaultJob = (input) => {
-  const anchor = 'const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = \'\', caps, ownerSessionId, ownerToolUseId, runId, pageProgramSemanticToken, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {';
-  return replaceExact(input, anchor, `${anchor}
-  if (code === ${JSON.stringify(FAULT_CODE)}) {
+  // Keep the fixture independent of the job parameter inventory. Its proof
+  // needs only the production names already in this scope; adding another
+  // bounded capability must not silently disable the lifecycle lane.
+  const anchor = '  // One ABSOLUTE deadline spans resolution + execution.';
+  return replaceExact(input, anchor, `  if (code === ${JSON.stringify(FAULT_CODE)}) {
     const recorded = await sendToSW('lifecycle-fault/dispatch', {
       reached: true, runId, ownerSessionId,
     });
@@ -198,20 +201,24 @@ export const injectLifecycleFaultJob = (input) => {
     // The physical lane kills Chrome only after the real offscreen job host
     // accepts custody. Ignore cancellation to model loss during execution.
     await new Promise(() => {});
-  }`, 'source exact offscreen job effect');
+  }
+${anchor}`, 'source exact offscreen job effect');
 };
 
 export const assertLifecycleFaultExecutionSeam = ({ tracking, controller, bridge, authority }) => {
   const canaries = [
     [tracking, 'await operationLog.markDispatched(operationId);'],
-    [controller, "rpc('turn.tool.prepare', {"],
-    [controller, "rpc('turn.execution.run-script', { ...binding, ...scriptRequest })"],
-    [controller, "rpc('turn.tool.settle', {"],
+    [controller, "rpc('turn.execution.run-script', { ...binding(), ...scriptRequest })"],
+    [controller, "await rpc('turn.finalize', {});"],
     [bridge, "case 'turn.execution.run-script':"],
+    [bridge, "case 'turn.session.append':"],
+    [bridge, 'run.persistedSemanticCalls.add(result.tool_use_id);'],
+    [bridge, "case 'turn.finalize':"],
+    [bridge, '!run.persistedSemanticCalls.has(receipt.callId)'],
     [authority, 'const result = await client.execHeadless(code, opts);'],
   ];
   if (canaries.some(([source, canary]) => source.split(canary).length !== 2)) {
-    throw new Error('source lifecycle controller execution seam changed');
+    throw new Error('source lifecycle exact-effect/finalization seam changed');
   }
 };
 
@@ -283,18 +290,21 @@ const makePackagedFaultExtension = async () => {
   const staging = join(artifactRoot, 'staging', 'store-chrome');
   const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));
   const backgroundEntry = manifest.background?.service_worker;
-  if (backgroundEntry !== 'background/vault-kernel.js') {
+  if (backgroundEntry !== STORE_BACKGROUND_ENTRY) {
     throw new Error(`packaged lifecycle target changed: ${backgroundEntry ?? '(missing)'}`);
   }
   const stagedSources = [
     readFileSync(join(staging, backgroundEntry), 'utf8'),
     readFileSync(join(staging, 'background/execution-tool-authority.js'), 'utf8'),
+    readFileSync(join(staging, 'background/controller-turn-bridge.js'), 'utf8'),
     readFileSync(join(staging, 'offscreen/controller-turn-runtime.js'), 'utf8'),
     readFileSync(join(staging, 'offscreen/job-runner.js'), 'utf8'),
+    readFileSync(join(staging, 'peerd-runtime/lifecycle/dispatch-tracking.js'), 'utf8'),
   ].join('\n');
   for (const canary of [
     REACHED_KEY, BOOT_ERROR_KEY, 'lifecycle-fault/dispatch',
     'turn.execution.run-script', FAULT_CODE, 'lifecycle fault execution target changed',
+    'turn.finalize', 'persistedSemanticCalls', 'markDispatched',
   ]) {
     if (!stagedSources.includes(canary)) {
       throw new Error(`packaged lifecycle probe was removed before launch: ${canary}`);
@@ -459,11 +469,13 @@ const main = async (target = SOURCE_TARGET) => {
         reachedKey, operationKey, bootErrorKey,
       ]);
       if (stored[bootErrorKey]) return { failure: stored[bootErrorKey] };
-      const entry = Object.entries(stored[operationKey] ?? {}).find(([id, record]) =>
-        id.endsWith(':' + cid) && record?.toolName === 'script');
+      const entries = Object.entries(stored[operationKey] ?? {}).filter(([, record]) =>
+        record?.toolName === 'turn.execution.run-script');
+      const entry = entries.length === 1 ? entries[0] : null;
       const record = entry?.[1];
       return stored[reachedKey]?.[0]?.phase === 'offscreen.runJob'
         && record?.state === 'awaiting_remote' && record?.dispatched === true
+        && entry?.[0]?.includes(':' + cid + ':')
         ? { operationId: entry[0], sessionId: record.sessionId } : null;
     }, {
       reachedKey: REACHED_KEY, operationKey: OPERATION_KEY,
@@ -480,7 +492,7 @@ const main = async (target = SOURCE_TARGET) => {
       throw new Error(`real controller Class E effect did not cross the offscreen job host; state: ${JSON.stringify(faultState)}; controller diagnostics: ${JSON.stringify(modelWire.diagnostics)}; model requests: ${JSON.stringify(modelWire.requests)}`);
     }
     const { operationId, sessionId } = inFlight;
-    assert(true, 'model-issued Class E tool crossed controller prepare and exact effect authority');
+    assert(true, 'model-issued Class E tool crossed exact run-script authority with durable dispatch custody');
     await modelWire.detach().catch(() => {});
 
     stage = 'physical browser termination';
