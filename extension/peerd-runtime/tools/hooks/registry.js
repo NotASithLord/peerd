@@ -26,6 +26,7 @@
 // is hidden in opaque state.
 
 import { isDefaultHookId } from '../../../shared/default-hook-manifest.js';
+import { projectSemanticHookManifest } from '../../../shared/semantic-hook-manifest.js';
 import { compileUserHook } from './compile.js';
 
 /** @typedef {import('./runner.js').Hook} Hook */
@@ -172,6 +173,7 @@ export const saveUserHook = async ({ kv }, record) => {
   const existing = (await kv.get(HOOKS_STORAGE_KEY)) ?? [];
   const next = Array.isArray(existing) ? existing.filter((r) => r.id !== record.id) : [];
   next.push(record);
+  projectSemanticHookManifest(next);
   await kv.set(HOOKS_STORAGE_KEY, next);
   userHooks.set(compiled.id, compiled);
   return compiled;

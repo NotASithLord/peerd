@@ -149,6 +149,20 @@ describe('kernel transfer routes', () => {
       code: 'transfer-import-refused', outcomeKnown: true,
     });
 
+    const limited = makeKernelTransferRoutes(transferDeps(authorization, {
+      applyImport: async () => {
+        const cause: any = new Error('hook limit exceeded before import');
+        cause.code = 'hook-records-limit';
+        throw cause;
+      },
+    }));
+    expect(await limited['transfer/import']({
+      privateTransferAuthorization: authorization, payload: {},
+    })).toEqual({
+      ok: false, error: 'hook limit exceeded before import',
+      code: 'hook-records-limit', outcomeKnown: true,
+    });
+
     let guards = 0;
     const partial = makeKernelTransferRoutes(transferDeps(authorization, {
       canWrite: () => {

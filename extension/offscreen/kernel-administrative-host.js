@@ -106,7 +106,12 @@ const mutateHook = (/** @type {string} */ route) => async (
     activateUserHook(next);
     return { ok: true };
   } catch (cause) {
-    if (cause instanceof AdministrativeEffectError) throw cause;
+    if (cause instanceof AdministrativeEffectError) {
+      if (cause.code === 'administrative-hooks-limit' && cause.outcomeKnown) {
+        return { ok: false, code: cause.code, error: cause.message, outcomeKnown: true };
+      }
+      throw cause;
+    }
     return { ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause) };
   }
 });

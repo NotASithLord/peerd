@@ -56,6 +56,7 @@ export const makeKernelTransferRoutes = (deps) => {
           ),
         };
         const kv = {
+          get: live.kv.get.bind(live.kv),
           set: trackKernelEffect(live.kv.set.bind(live.kv), state, canWrite, known),
         };
         const vault = {

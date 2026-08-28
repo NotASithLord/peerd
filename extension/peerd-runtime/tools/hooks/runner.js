@@ -1,14 +1,13 @@
 // @ts-check
 // Hook runner — the functional core of the lifecycle-hook system (§10).
 //
-// A *hook* is a small policy function that observes (and, for
-// pre-tool-use, can BLOCK or MODIFY) a tool call as it flows through the
+// A *hook* is a small policy function that observes or BLOCKS a tool call as it
+// flows through the
 // dispatcher. Two events ship in V1 — the two load-bearing ones:
 //
 //   pre-tool-use   runs AFTER the first synchronous gate pass and BEFORE
 //                  confirmation or authority admission. A pre-hook may deny
-//                  the call or rewrite its args; mandatory policy floors run
-//                  again over the snapshotted replacement.
+//                  the call; arguments remain the model's admitted proposal.
 //   post-tool-use  runs AFTER tool.execute() returns. Observe-only —
 //                  it sees the result but cannot change it (V1).
 //
@@ -17,8 +16,8 @@
 // phase belongs there. But the runner itself imports no IO — the
 // registry and the per-hook fns are *injected* via ctx.hooks. That's
 // the same functional-core / imperative-shell split the gates use, and
-// it's what makes the four required behaviours (block / modify /
-// observe / fail-closed) unit-testable without a browser.
+// it's what makes block / observe / fail-closed behavior unit-testable without
+// a browser.
 //
 // User hooks are semantic/model guardrails, so they fail closed within that
 // runtime: a pre-hook that throws, returns garbage, or times out blocks the
@@ -34,16 +33,15 @@
  * @typedef {Object} HookInvocation   what every hook fn receives
  * @property {string} event           'pre-tool-use' | 'post-tool-use'
  * @property {string} toolName
- * @property {Record<string, any>} args   the (possibly already-rewritten) call args
+ * @property {Record<string, any>} args   the proposed call args
  * @property {ToolResult} [result]    present only for post-tool-use
  * @property {ToolContext} ctx        frozen data-only policy projection
  */
 
 /**
  * @typedef {Object} HookDecision     what a pre-tool-use hook may return
- * @property {'allow' | 'block' | 'modify'} [action]   default 'allow'
+ * @property {'allow' | 'block'} [action]   default 'allow'
  * @property {string} [reason]        human-readable; surfaces in audit + UI lineage
- * @property {Record<string, any>} [args]   replacement args when action==='modify'
  *
  * post-tool-use hooks return nothing meaningful (observe-only in V1);
  * any return value is ignored except that a THROW still fails closed.
@@ -70,7 +68,7 @@
 /**
  * @typedef {Object} HookOutcome      one record per hook that ran, for lineage
  * @property {string} id
- * @property {'allow' | 'block' | 'modify' | 'observe'} action
+ * @property {'allow' | 'block' | 'observe'} action
  * @property {string} reason
  */
 
@@ -93,9 +91,7 @@ export const hookMatches = (pattern, name) => {
 /**
  * Order the hooks registered for one event: enabled only, sorted by
  * `order` then by id for determinism. Pure — given the same registry it
- * always yields the same sequence, which matters because pre-hooks can
- * mutate args and a non-deterministic order would make modify chains
- * unreproducible.
+ * always yields the same sequence, which keeps lineage reproducible.
  *
  * @param {Hook[]} hooks
  * @param {string} event
@@ -113,7 +109,7 @@ export const selectHooks = (hooks, event, toolName) =>
  * allow — fail closed on garbage, not just on throws.
  *
  * @param {Hook} hook @param {HookDecision | void} decision
- * @returns {{ action: 'allow'|'block', reason: string } | { action: 'modify', reason: string, args: Record<string, any> }}
+ * @returns {{ action: 'allow'|'block', reason: string }}
  */
 const normalizeDecision = (hook, decision) => {
   // No return value === implicit allow. This is the common case for a
@@ -125,15 +121,6 @@ const normalizeDecision = (hook, decision) => {
   const action = decision.action ?? 'allow';
   if (action === 'allow') return { action: 'allow', reason: decision.reason ?? `${hook.id}: allow` };
   if (action === 'block') return { action: 'block', reason: decision.reason ?? `${hook.id}: blocked` };
-  if (action === 'modify') {
-    // A modify must carry a replacement args object; otherwise it's a
-    // malformed hook and we fail closed rather than execute with the
-    // original (possibly dangerous) args it claimed it wanted to change.
-    if (!decision.args || typeof decision.args !== 'object') {
-      return { action: 'block', reason: `${hook.id}: modify without replacement args — failing closed` };
-    }
-    return { action: 'modify', reason: decision.reason ?? `${hook.id}: modified args`, args: decision.args };
-  }
   // Unknown action verb — fail closed.
   return { action: 'block', reason: `${hook.id}: unknown action '${action}' — failing closed` };
 };
@@ -141,9 +128,8 @@ const normalizeDecision = (hook, decision) => {
 /**
  * Run the pre-tool-use phase.
  *
- * Walks the matching pre-hooks in order. Each hook sees the args as
- * left by the previous hook (modify chains compose). The FIRST hook to
- * block wins and short-circuits the rest — there's no point running
+ * Walks the matching pre-hooks in order. The FIRST hook to block wins and
+ * short-circuits the rest — there's no point running
  * softer policy after a hard veto. A hook that throws (or its decision
  * is malformed) blocks too.
  *
@@ -163,35 +149,29 @@ export const runPreToolUse = async ({ hooks, toolName, args, ctx, invoke }) => {
   const selected = selectHooks(hooks, 'pre-tool-use', toolName);
   /** @type {HookOutcome[]} */
   const outcomes = [];
-  let current = args;
   const call = invoke ?? ((fn) => fn());
 
   for (const hook of selected) {
     let decision;
     try {
-      decision = await call(() => hook.run({ event: 'pre-tool-use', toolName, args: current, ctx }));
+      decision = await call(() => hook.run({ event: 'pre-tool-use', toolName, args, ctx }));
     } catch (e) {
       // why: a throwing pre-hook is the canonical fail-closed case. If
       // an exfiltration guard crashes we must NOT run the tool — that's
       // exactly when an attacker would want it to "fail open".
       const reason = `${hook.id}: threw (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}) — failing closed`;
       outcomes.push({ id: hook.id, action: 'block', reason });
-      return { allowed: false, args: current, reason, outcomes };
+      return { allowed: false, args, reason, outcomes };
     }
     const norm = normalizeDecision(hook, decision);
     if (norm.action === 'block') {
       outcomes.push({ id: hook.id, action: 'block', reason: norm.reason });
-      return { allowed: false, args: current, reason: norm.reason, outcomes };
-    }
-    if (norm.action === 'modify') {
-      current = norm.args;
-      outcomes.push({ id: hook.id, action: 'modify', reason: norm.reason });
-      continue;
+      return { allowed: false, args, reason: norm.reason, outcomes };
     }
     outcomes.push({ id: hook.id, action: 'allow', reason: norm.reason });
   }
 
-  return { allowed: true, args: current, reason: 'pre-hooks passed', outcomes };
+  return { allowed: true, args, reason: 'pre-hooks passed', outcomes };
 };
 
 /**

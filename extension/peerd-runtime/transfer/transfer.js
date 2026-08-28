@@ -55,6 +55,11 @@ import {
   deriveBackupPassphraseBytes,
 } from '/shared/backup-passphrase.js';
 import { isCustodySecretName, portableSecretEntries } from './secret-policy.js';
+import {
+  assertUserHookRecordsBounded,
+  HookRecordsLimitError,
+  USER_HOOK_RECORDS_MAX_COUNT,
+} from '/shared/semantic-hook-manifest.js';
 export { isCustodySecretName } from './secret-policy.js';
 
 export const EXPORT_VERSION = 2;
@@ -129,7 +134,6 @@ const MAX_SECRET_VALUE_LENGTH = 1024 * 1024;
 const MAX_SETTINGS_KEYS = 512;
 const MAX_PROVIDER_ENDPOINTS = 64;
 const MAX_MEMORY_DOCS = 10_000;
-const MAX_HOOKS = 256;
 const MAX_SKILLS = 512;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
@@ -390,7 +394,8 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
     || (typeof payload.memory === 'object' && Array.isArray(payload.memory.docs)
       && payload.memory.docs.length <= MAX_MEMORY_DOCS
       && payload.memory.docs.every((/** @type {any} */ doc) => doc && typeof doc === 'object'));
-  const hooksValid = Array.isArray(payload.hooks) && payload.hooks.length <= MAX_HOOKS
+  const hooksValid = Array.isArray(payload.hooks)
+    && payload.hooks.length <= USER_HOOK_RECORDS_MAX_COUNT
     && payload.hooks.every((/** @type {any} */ hook) => portableHookDisposition(hook) !== 'invalid');
   const skillsValid = Array.isArray(payload.skills) && payload.skills.length <= MAX_SKILLS
     && payload.skills.every((/** @type {any} */ skill) => skill && typeof skill === 'object');
@@ -400,6 +405,13 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   if (!settingsValid || !endpointsValid || !memoryValid || !hooksValid || !skillsValid
       || !dwebValid || !secretsValid) {
     return { ok: false, error: 'invalid-export-sections' };
+  }
+  try { assertUserHookRecordsBounded(payload.hooks); }
+  catch (cause) {
+    if (cause instanceof HookRecordsLimitError) {
+      return { ok: false, error: cause.message, code: cause.code };
+    }
+    throw cause;
   }
   const settings = (payload.settings && typeof payload.settings === 'object') ? payload.settings : {};
   const known = new Set(knownSettingKeys);
@@ -511,6 +523,7 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
  * @param {(name: string, value: string) => Promise<void>} args.io.setSecret
  * @param {(payload: any) => Promise<{written: number, skipped: number}>} args.io.importMemory
  * @param {(record: any) => Promise<any>} args.io.saveHook
+ * @param {(records: any[]) => Promise<void>} [args.io.prepareHookImport]
  * @param {(record: any, passphrase: string, options?: { replaceExisting?: boolean, prepareOnly?: boolean, expectedExistingDid?: string | null, expectedExistingRevision?: string, expectedIncomingDid?: string }) => Promise<{ adopted: boolean, did?: string | null, reason?: string, existingDid?: string | null, incomingDid?: string | null, existingUnreadable?: boolean, existingRevision?: string, runtimeRecoveryPending?: boolean }>} [args.io.adoptDwebIdentity]
  *        preview-channel identity adoption (absent on store builds / when
  *        the receiving build cannot host an identity)
@@ -538,6 +551,13 @@ export const applyImport = async ({
     settings: 0, secrets: 0, providerEndpoints: 0,
     memoryWritten: 0, hooks: 0, dwebIdentity: 0,
   };
+
+  // Validate the complete merge against the receiving store before any import
+  // mutation. This keeps a clear hook-limit refusal from becoming a partial
+  // settings/memory import when the local store is already populated.
+  await io.prepareHookImport?.((payload.hooks ?? []).map((/** @type {any} */ record) => ({
+    ...record, enabled: false,
+  })));
 
   /** @type {'not-present'|'restored'|'replaced'|'already-present'|'kept-local'|'unsupported'} */
   let identityOutcome = 'not-present';

@@ -642,7 +642,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/hooks.js"
+    "source": "extension/offscreen/kernel-administrative-host.js"
   },
   {
     "route": "hooks/remove",
@@ -650,7 +650,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/hooks.js"
+    "source": "extension/offscreen/kernel-administrative-host.js"
   },
   {
     "route": "hooks/save",
@@ -658,7 +658,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/hooks.js"
+    "source": "extension/offscreen/kernel-administrative-host.js"
   },
   {
     "route": "hooks/toggle",
@@ -666,7 +666,7 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
       "store",
       "preview"
     ],
-    "source": "extension/background/routes/hooks.js"
+    "source": "extension/offscreen/kernel-administrative-host.js"
   },
   {
     "route": "import/apply",

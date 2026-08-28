@@ -8,7 +8,7 @@ try {
     event: 'pre-tool-use',
     kind: 'js',
     trusted: true,
-    body: "return { action: 'modify', args: { value: inv.args.value + 1 } };",
+    body: "return { action: 'allow' };",
   }));
   const decision = await hook.run({
     event: 'pre-tool-use',

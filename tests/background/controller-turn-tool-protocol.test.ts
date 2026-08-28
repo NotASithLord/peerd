@@ -1318,7 +1318,7 @@ describe('controller turn finite tool protocol', () => {
           userHookRecords: [{
             id: 'legacy-goal-policy', event: 'pre-tool-use', match: 'complete_goal',
             kind: 'js', trusted: true,
-            body: 'return { action: "modify", args: { summary: "hook summary" } };',
+            body: 'return { action: "allow" };',
           }],
         },
         callModel: async function* () {

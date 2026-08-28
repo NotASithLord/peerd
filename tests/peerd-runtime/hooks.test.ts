@@ -2,7 +2,7 @@
 //
 // Coverage required by the feature brief:
 //   1. a pre-hook BLOCKS a call
-//   2. a pre-hook MODIFIES args
+//   2. unsupported decisions fail closed
 //   3. a post-hook OBSERVES the result
 //   4. a hook that THROWS fails closed (blocks)
 //
@@ -13,8 +13,7 @@
 // transitive `/peerd-egress/index.js` absolute import (which Bun can't
 // resolve — that path needs the browser, like the rest of the in-browser
 // suite). A "dispatcher-shaped" describe block at the bottom runs a
-// faithful mini-dispatcher over the runner to prove the block/modify/
-// observe wiring end-to-end.
+// faithful mini-dispatcher over the runner to prove block/observe wiring.
 
 import { describe, test, expect, beforeEach } from 'bun:test';
 import {
@@ -67,25 +66,15 @@ describe('runPreToolUse', () => {
     expect(out.outcomes[0]).toMatchObject({ id: 'blocker', action: 'block' });
   });
 
-  test('(2) a pre-hook MODIFIES args, and modify chains compose', async () => {
-    const hooks = [
-      {
-        id: 'add-flag', event: 'pre-tool-use' as const, order: 10,
-        run: (inv: any) => ({ action: 'modify' as const, args: { ...inv.args, flagged: true } }),
-      },
-      {
-        id: 'see-flag', event: 'pre-tool-use' as const, order: 20,
-        // second hook must observe the FIRST hook's rewrite
-        run: (inv: any) => {
-          expect(inv.args.flagged).toBe(true);
-          return { action: 'modify' as const, args: { ...inv.args, seen: true } };
-        },
-      },
-    ];
+  test('an obsolete modify decision FAILS CLOSED', async () => {
+    const hooks = [{
+      id: 'obsolete-modify', event: 'pre-tool-use' as const,
+      run: () => ({ action: 'modify' as any, args: { flagged: true } }),
+    }];
     const out = await runPreToolUse({ hooks, toolName: 'type', args: { text: 'hi' }, ctx });
-    expect(out.allowed).toBe(true);
-    expect(out.args).toEqual({ text: 'hi', flagged: true, seen: true });
-    expect(out.outcomes.map((o) => o.action)).toEqual(['modify', 'modify']);
+    expect(out.allowed).toBe(false);
+    expect(out.reason).toContain("unknown action 'modify'");
+    expect(out.args).toEqual({ text: 'hi' });
   });
 
   test('(4) a throwing pre-hook FAILS CLOSED (blocks)', async () => {
@@ -96,16 +85,6 @@ describe('runPreToolUse', () => {
     const out = await runPreToolUse({ hooks, toolName: 'navigate', args: {}, ctx });
     expect(out.allowed).toBe(false);
     expect(out.reason).toContain('kaboom');
-    expect(out.reason).toContain('failing closed');
-  });
-
-  test('a malformed decision (modify without args) FAILS CLOSED', async () => {
-    const hooks = [{
-      id: 'bad-modify', event: 'pre-tool-use' as const,
-      run: () => ({ action: 'modify' as const }), // no replacement args
-    }];
-    const out = await runPreToolUse({ hooks, toolName: 'click', args: {}, ctx });
-    expect(out.allowed).toBe(false);
     expect(out.reason).toContain('failing closed');
   });
 
@@ -416,16 +395,15 @@ describe('dispatcher-shaped: pre → execute → post', () => {
     expect(executed).toBe(false);
   });
 
-  test('modify reaches execute with rewritten args; post observes', async () => {
+  test('post observes the unchanged admitted args and result', async () => {
     let receivedArgs: any = null;
     let observedOk: any = null;
     const tool = { name: 'type', execute: async (a: any) => { receivedArgs = a; return { ok: true, content: 'typed' }; } };
-    const hooks = [
-      { id: 'stamp', event: 'pre-tool-use', run: (inv: any) => ({ action: 'modify', args: { ...inv.args, stamped: true } }) },
-      { id: 'watch', event: 'post-tool-use', run: (inv: any) => { observedOk = inv.result.ok; } },
-    ];
+    const hooks = [{
+      id: 'watch', event: 'post-tool-use', run: (inv: any) => { observedOk = inv.result.ok; },
+    }];
     const out = await miniDispatch(hooks, tool, { text: 'hi' });
-    expect(receivedArgs).toEqual({ text: 'hi', stamped: true });
+    expect(receivedArgs).toEqual({ text: 'hi' });
     expect(observedOk).toBe(true);
     expect(out.ranExecute).toBe(true);
   });
