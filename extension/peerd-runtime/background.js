@@ -75,6 +75,7 @@ export { installFromLocal, installFromGit, installFromManifest, SkillInstallErro
 export { loadSkillTool } from './skills/load-skill-tool.js';
 export { normalizeVariant, normalizeEngine } from './voice/settings.js';
 export { wrapUntrusted } from './tools/prompt-wrap.js';
+export { inspectTabToolCall } from './tools/egress-heuristics.js';
 export { makeAsyncActors } from './actor/async-actors.js';
 export { makeActorMessaging } from './actor/actor-messaging.js';
 export { buildAncestry } from './actor/delegation-lineage.js';

@@ -23,7 +23,7 @@ import {
   withBrowserChildPolicyNotices,
 } from '/peerd-runtime/browser-authority.js';
 import { controllerOperationAllowedInPermissionMode } from '/shared/controller-kernel-quota.js';
-import { inspectTabToolCall } from '/peerd-runtime/tools/egress-heuristics.js';
+import { inspectTabToolCall } from '/peerd-runtime/background.js';
 
 const PAGE_PROGRAM_CAPS = Object.freeze({
   page: true, egress: false, subagent: false, opfs: false,

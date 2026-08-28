@@ -81,8 +81,8 @@ const safeUrl = (/** @type {unknown} */ value) => {
     const url = new URL(String(value));
     const queryNames = [...new Set([...url.searchParams.keys()])].slice(0, 8)
       .map((name) => clean(name, 32));
-    return `${url.origin}${clean(url.pathname, 240)}`
-      + (url.search ? ` (query fields: ${queryNames.join(', ') || 'unnamed'})` : '');
+    return `${url.origin}${clean(url.pathname, 240)}${url.search
+      ? ` (query fields: ${queryNames.join(', ') || 'unnamed'})` : ''}`;
   } catch { return clean(value, 240); }
 };
 
