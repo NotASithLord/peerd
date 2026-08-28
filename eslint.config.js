@@ -42,8 +42,11 @@ import globals from 'globals';
 // re-list every rule EXCEPT the eval one (a flat-config override REPLACES the
 // whole rule, so the patterns it keeps must be spelled out).
 const CROSS_MODULE_IMPORT = {
-  // any `peerd-<name>/<deeper>` path that isn't a declared public entry point
-  regex: '(^|/)peerd-[a-z]+/(?!index\\.js$|background\\.js$|offscreen\\.js$).+',
+  // any `peerd-<name>/<deeper>` path that isn't a declared public entry point.
+  // why the hyphen is in the class: `peerd-voice-host` is a real module and
+  // `[a-z]+` silently stopped matching at its first hyphen, leaving it outside
+  // the boundary this rule exists to enforce.
+  regex: '(^|/)peerd-[a-z-]+/(?!index\\.js$|background\\.js$|offscreen\\.js$).+',
   message: 'Cross-module imports must go through a declared /peerd-<name> public entry point.',
 };
 // The dweb module is stricter: NOTHING outside it may import it — not even its
