@@ -13,6 +13,7 @@ import { createSkillRegistry } from '/peerd-runtime/skills/registry.js';
 import { createSkillStore } from '/peerd-runtime/skills/store.js';
 import { isCustodySecretName } from '/peerd-runtime/transfer/secret-policy.js';
 import { normalizeEngine, normalizeVariant } from '/peerd-runtime/voice/settings.js';
+import { assertUserHookRecordsBounded } from '/shared/semantic-hook-manifest.js';
 
 /** @param {Record<string,any>} deps */
 export const createKernelTransferLive = async (deps) => {
@@ -27,15 +28,34 @@ export const createKernelTransferLive = async (deps) => {
       ? structuredClone(records.filter((record) => portableHookDisposition(record) !== 'invalid'))
       : [];
   };
+  const mergedHookRecords = async (/** @type {any[]} */ incoming) => {
+    const existing = await deps.kv.get('hooks.user.v1');
+    const byId = new Map((Array.isArray(existing) ? existing : [])
+      .map((record) => [record?.id, record]));
+    for (const record of incoming) {
+      if (portableHookDisposition(record) === 'invalid') {
+        throw new TypeError('imported-hook-record-invalid');
+      }
+      byId.set(record.id, structuredClone({ ...record, enabled: false }));
+    }
+    const records = [...byId.values()];
+    assertUserHookRecordsBounded(records);
+    return records;
+  };
+  const prepareHookImport = async (/** @type {any[]} */ records) => {
+    await mergedHookRecords(records);
+  };
   const saveUserHook = async (/** @type {{kv:{get:Function,set:Function}}} */ io,
     /** @type {any} */ record) => {
+    const existing = await io.kv.get('hooks.user.v1');
+    const byId = new Map((Array.isArray(existing) ? existing : [])
+      .map((candidate) => [candidate?.id, candidate]));
     if (portableHookDisposition(record) === 'invalid') {
       throw new TypeError('imported-hook-record-invalid');
     }
-    const existing = await io.kv.get('hooks.user.v1');
-    const records = Array.isArray(existing)
-      ? existing.filter((candidate) => candidate?.id !== record.id) : [];
-    records.push(structuredClone({ ...record, enabled: false }));
+    byId.set(record.id, structuredClone({ ...record, enabled: false }));
+    const records = [...byId.values()];
+    assertUserHookRecordsBounded(records);
     await io.kv.set('hooks.user.v1', records);
     return record;
   };
@@ -55,6 +75,7 @@ export const createKernelTransferLive = async (deps) => {
     buildExport,
     CHANNEL: deps.channel,
     exportHooks,
+    prepareHookImport,
     skillRegistry,
     dwebTransfer: await deps.getDwebTransfer(),
     EXPORT_PASSPHRASE_MIN_LENGTH,

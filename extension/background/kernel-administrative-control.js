@@ -3,6 +3,10 @@
 import { makeSerialLane } from '../shared/cold-util.js';
 import { parseHookDocument } from '../shared/hook-document.js';
 import {
+  HookRecordsLimitError,
+  projectSemanticHookManifest,
+} from '../shared/semantic-hook-manifest.js';
+import {
   KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
   validAdministrativeHookRecord,
@@ -103,6 +107,7 @@ export const createKernelAdministrativeControl = (deps) => {
       if (!validAdministrativeHookRecord(record)) throw new TypeError('hook-source-invalid');
       const next = records.filter((candidate) => candidate?.id !== record.id);
       next.push(record);
+      projectSemanticHookManifest(next);
       await writeHooks(next);
       deps.auditLog.append({ type: 'hook_added', details: {
         id: record.id, event: record.event, kind: record.kind,
@@ -118,6 +123,9 @@ export const createKernelAdministrativeControl = (deps) => {
     if (index < 0) return { ok: false, error: 'not-found' };
     const next = [...records];
     next[index] = { ...next[index], enabled: payload.enabled };
+    // Recovery mutations stay possible if an older build already stored an
+    // oversized policy. Only enabling can increase live semantic work.
+    if (payload.enabled) projectSemanticHookManifest(next);
     await writeHooks(next);
     deps.auditLog.append({
       type: payload.enabled ? 'hook_enabled' : 'hook_disabled', details: { id: payload.id },
@@ -174,6 +182,9 @@ export const createKernelAdministrativeControl = (deps) => {
       }
       try { return success(await mutateHooks(operation, payload)); }
       catch (cause) {
+        if (cause instanceof HookRecordsLimitError) {
+          return failure('administrative-hooks-limit', true, cause);
+        }
         try { deps.canWrite('hooks'); }
         catch (refusal) { return failure('administrative-write-refused', true, refusal); }
         return failure('administrative-hooks-write-unknown', false, cause);

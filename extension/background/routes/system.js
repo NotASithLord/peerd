@@ -18,7 +18,7 @@ export const makeSystemRoutes = (deps) => {
   const {
     vault, auditLog, pushState, kv, memory,
     closeSidePanel, loadUserEndpoints,
-    inspectImport, applyImport, settingsStore, saveUserHook,
+    inspectImport, applyImport, settingsStore, saveUserHook, prepareHookImport,
     CHANNEL, DEFAULT_SETTINGS, ExportPassphraseError, dwebTransfer,
     onSettingsChanging, onSettingsChanged, privateTransferAuthorization,
     retryActorIsolation, normalizeImportedSettings, onProviderConfigChanged,
@@ -101,6 +101,7 @@ export const makeSystemRoutes = (deps) => {
             },
             setSecret: (/** @type {string} */ name, /** @type {string} */ value) => vault.setSecret(name, value),
             importMemory: (/** @type {any} */ p) => memory.importAll(p),
+            prepareHookImport,
             saveHook: (/** @type {any} */ record) => saveUserHook({ kv }, record),
             // Preview-channel identity adoption (applyImport gates on
             // channel; the helper itself refuses when the build has no dweb).
@@ -128,6 +129,12 @@ export const makeSystemRoutes = (deps) => {
         return result;
       } catch (e) {
         if (e instanceof ExportPassphraseError) return { ok: false, error: 'wrong-passphrase' };
+        if ((/** @type {{code?:string}} */ (e))?.code === 'hook-records-limit') {
+          return {
+            ok: false, code: 'hook-records-limit', outcomeKnown: true,
+            error: /** @type {{message?:string}} */ (e)?.message ?? 'hook limit exceeded',
+          };
+        }
         if ((/** @type {{ name?: string, code?: string }} */ (e))?.name === 'IdentityTransferError') {
           if ((/** @type {{ outcomeKnown?: boolean }} */ (e)).outcomeKnown === false) throw e;
           return { ok: false, error: `dweb-identity-${(/** @type {{ code?: string }} */ (e)).code ?? 'transfer-failed'}` };

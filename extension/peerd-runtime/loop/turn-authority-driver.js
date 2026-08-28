@@ -21,6 +21,7 @@ import { classifyBrowserAutomationTarget } from '../tools/browser-automation-pol
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import { makeTurnCostTracker } from '../cost/turn-tracker.js';
 import { detectInterruptedTurn } from './resume-detect.js';
+import { projectSemanticHookManifest } from '../../shared/semantic-hook-manifest.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
 // why: an enabled pre-hook is a user policy veto. If durable hook state cannot
@@ -309,7 +310,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   const manifestSession = await sessions.get(sessionId);
   const turnPermission = await resolvePermission(manifestSession);
   const userHookRecords = await Promise.resolve(getUserHookRecords())
-    .then((records) => Array.isArray(records) ? records : HOOK_RECORDS_UNAVAILABLE)
+    .then(projectSemanticHookManifest)
     .catch(() => HOOK_RECORDS_UNAVAILABLE);
 
   const toolContextArgs = {

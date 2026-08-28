@@ -68,6 +68,7 @@ import {
   VaultLockedError,
   withSessionScopedCredentials,
 } from '/peerd-egress/background.js';
+import { projectSemanticHookManifest } from '/shared/semantic-hook-manifest.js';
 import {
   needsWebWriteConfirm,
   WEB_WRITE_CONFIRM_KEY,
@@ -1747,8 +1748,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         }
       } : undefined;
       const userHookRecords = await deps.kv.get('hooks.user.v1')
-        .then((/** @type {any} */ records) =>
-          Array.isArray(records) ? records : HOOK_RECORDS_UNAVAILABLE)
+        .then(projectSemanticHookManifest)
         .catch(() => HOOK_RECORDS_UNAVAILABLE);
       const tabOrigin = kind === 'web' && record.backing !== 'api' && actorTabId != null
         ? safeWebActorSummaryOrigin(
@@ -2120,8 +2120,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       runChildOffscreen: async (/** @type {any} */ job, /** @type {any} */ options) => {
         const childRecord = await shared.sessions.get(job.sessionId);
         const userHookRecords = await deps.kv.get('hooks.user.v1')
-          .then((/** @type {any} */ records) =>
-            Array.isArray(records) ? records : HOOK_RECORDS_UNAVAILABLE)
+          .then(projectSemanticHookManifest)
           .catch(() => HOOK_RECORDS_UNAVAILABLE);
         const toolSurface = await projectToolSurface({
           surface: 'selection',

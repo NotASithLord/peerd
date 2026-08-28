@@ -39,10 +39,7 @@ import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
 import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
 import { resolveDeclaredToolOrigins } from '../tool-origin-policy.js';
-import { checkEgressAllowlist } from './hooks/defaults/egress-allowlist.js';
-import { checkEgressTripwire } from './hooks/defaults/egress-tripwire.js';
 import { DEFAULT_HOOKS } from './hooks/defaults/index.js';
-import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 
 /** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} ToolDescriptor */
 
@@ -242,8 +239,6 @@ const withToolMetadata = (ctx, tool) => ({
   },
 });
 
-const HOOK_ARGS_MAX_BYTES = 20 * 1024 * 1024;
-
 /** @param {unknown} value */
 const freezePlainSnapshot = (value) => {
   if (!value || typeof value !== 'object' || ArrayBuffer.isView(value)
@@ -252,21 +247,6 @@ const freezePlainSnapshot = (value) => {
     freezePlainSnapshot(child);
   }
   return Object.freeze(value);
-};
-
-/**
- * User hooks may return getters, proxies, or retain their replacement object
- * and mutate it after approval. Admit only the bounded structured-clone subset,
- * copy it once, then freeze the exact bytes used by every final gate and RPC.
- * @param {unknown} value
- */
-const snapshotHookArgs = (value) => {
-  const bytes = structuredClonePayloadBytes(value, { maxDepth: 16, maxNodes: 10_000 });
-  if (!Number.isFinite(bytes) || bytes > HOOK_ARGS_MAX_BYTES) {
-    throw new TypeError('hook arguments are not a bounded structured-clone payload');
-  }
-  const cloned = structuredClone(value);
-  return /** @type {Record<string,any>} */ (freezePlainSnapshot(cloned));
 };
 
 /**
@@ -375,11 +355,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
     };
   }
 
-  // why: `let`, not `const` — a pre-tool-use hook may MODIFY the args
-  // before execute() runs (see the hook phase below). After that point
-  // `args` is the rewritten set; the gates above still see the original
-  // (gates are about authorization, not arg transformation).
-  let args = call.args ?? {};
+  const args = call.args ?? {};
 
   // why: the live hook population + a per-call lineage accumulator. Hook
   // outcomes ride along in meta next to gate results so the same legible
@@ -491,14 +467,12 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   }
 
   // ---- Pre-tool-use hooks ------------------------------------------------
-  // Hooks transform the semantic request before any user prompt or durable
-  // lifecycle claim is minted. The authority host therefore confirms and
-  // tracks exactly the bytes that can reach an effect, never the model's stale
-  // pre-hook proposal.
+  // Hooks may veto the semantic request before any user prompt or durable
+  // lifecycle claim is minted. They never rewrite the admitted arguments.
   const hookCtx = withToolMetadata(ctx, tool);
   // Code-owned policy hooks are an immutable floor. They run outside the user
   // population, so an order=0 hook cannot run first or mutate their registry /
-  // metadata context. The same checks run again below on final transformed args.
+  // metadata context.
   const mandatoryPre = await runPreToolUse({
     hooks: /** @type {any} */ (DEFAULT_HOOKS),
     toolName: call.name, args, ctx: hookCtx,
@@ -544,74 +518,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
       }),
     };
   }
-  try { args = snapshotHookArgs(pre.args); }
-  catch (cause) {
-    const reason = /** @type {{message?:string}} */ (cause)?.message
-      ?? 'hook arguments could not be snapshotted';
-    hookOutcomes.push({ id: 'hook-args-snapshot', action: 'block', reason });
-    return {
-      ok: false,
-      error: `hook_blocked:final-args:${reason}`,
-      meta: /** @type {DispatchMeta} */ ({
-        toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
-        gates: gateResults, hooks: hookOutcomes, durationMs: 0,
-      }),
-    };
-  }
   if (ctx.abortSignal?.aborted) return abortedResult('after_pre_tool_hook');
-
-  // User hooks may rewrite the target after the ordinary gate/default-hook
-  // pass. Re-run the non-modifying mandatory floors on those frozen final
-  // bytes so an allowed URL cannot be rewritten into a denylisted or
-  // exfiltration-shaped target. These checks are not hook invocations and do
-  // not duplicate hook lineage; defaults and user hooks still each execute
-  // exactly once.
-  for (const { name, fn } of GATES) {
-    let result;
-    try { result = fn(tool, args, ctx); }
-    catch (cause) {
-      result = {
-        allowed: false,
-        reason: `final gate threw: ${/** @type {{message?:string}} */ (cause)?.message ?? String(cause)}`,
-      };
-    }
-    if (!result.allowed) {
-      const reason = `post-hook ${result.reason}`;
-      ctx.audit({
-        type: 'tool_blocked',
-        details: { tool: call.name, gate: `final-${name}`, reason },
-      }).catch(() => {});
-      return {
-        ok: false,
-        error: `gate_blocked:final-${name}:${result.reason}`,
-        meta: /** @type {DispatchMeta} */ ({
-          toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
-          gates: [...gateResults, { name: `final-${name}`, ...result }],
-          hooks: hookOutcomes, durationMs: 0,
-        }),
-      };
-    }
-  }
-  for (const [name, check] of /** @type {const} */ ([
-    ['egress-allowlist', checkEgressAllowlist],
-    ['egress-tripwire', checkEgressTripwire],
-  ])) {
-    const decision = check({ event: 'pre-tool-use', toolName: call.name, args, ctx: hookCtx });
-    if (decision?.action === 'block') {
-      ctx.audit({
-        type: 'tool_blocked',
-        details: { tool: call.name, gate: `final-${name}`, reason: decision.reason },
-      }).catch(() => {});
-      return {
-        ok: false,
-        error: `hook_blocked:final-${name}:${decision.reason}`,
-        meta: /** @type {DispatchMeta} */ ({
-          toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
-          gates: gateResults, hooks: hookOutcomes, durationMs: 0,
-        }),
-      };
-    }
-  }
 
   // ---- Async confirmation (driven by the Plan/Act permission policy) -----
   // The six sync gates above can't await a user round-trip, so the

@@ -5,7 +5,6 @@ import { createKernelAdministrativeControl } from '../../extension/background/ke
 import { createKernelSkillPersistence } from '../../extension/background/kernel-skill-persistence.js';
 import { createKernelFeatureControl } from '../../extension/background/kernel-feature-control.js';
 import { makeSemanticControllerClient } from '../../extension/background/offscreen-controller-client.js';
-import { makeKernelSkillInstallRoutes } from '../../extension/background/kernel-administrative-routes.js';
 import { parseSkillMd } from '../../extension/peerd-runtime/skills/parse.js';
 import { parseHookMarkdown } from '../../extension/peerd-runtime/tools/hooks/compile.js';
 import { scopeId } from '../../extension/peerd-runtime/memory/memory.js';
@@ -17,6 +16,7 @@ import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
   kernelFeatureAuthorityFor,
 } from '../../extension/shared/kernel-feature-policy.js';
+import { USER_HOOK_RECORDS_MAX_COUNT } from '../../extension/shared/semantic-hook-manifest.js';
 import { useFakeIndexedDB } from '../setup.ts';
 import { TEST_CONTROLLER_KERNEL_IDENTITY } from './controller-test-identity.ts';
 
@@ -114,7 +114,7 @@ const makeHarness = (overrides: Record<string, any> = {}) => {
 };
 
 describe('sealed administrative root cutover', () => {
-  test('matches the existing hook and skill route results through granular effects', async () => {
+  test('preserves hook and skill results through granular effects', async () => {
     const { control, audits, effects } = makeHarness();
     const id = `cutover-${crypto.randomUUID()}`;
     expect(await control.routes['hooks/list']()).toMatchObject({ ok: true });
@@ -132,23 +132,13 @@ describe('sealed administrative root cutover', () => {
       'administrative.hooks.remove',
     ]));
 
-    class SkillExistsError extends Error {}
-    class SkillParseError extends Error {}
-    class SkillInstallError extends Error {}
-    const legacy = makeKernelSkillInstallRoutes({
-      skillRegistry: { install: async (text: string) => ({ name: parseSkillMd(text).name }) },
-      canWrite: () => {}, pushState: () => {}, REMOTE_SKILL_INSTALL: false,
-      installFromLocal: ({ registry }: any, { text }: any) => registry.install(text),
-      installFromGit: async () => {}, installFromManifest: async () => {},
-      SkillExistsError, SkillParseError, SkillInstallError,
-    });
     expect(await control.routes['skills/installGit']({ url: 'https://example.test' }))
-      .toEqual(await legacy['skills/installGit']({ url: 'https://example.test' }));
+      .toEqual({ ok: false, error: 'remote-install-disabled' });
     const skill = [
       '---', 'name: skill-one', 'description: One skill', '---', '', '# One', 'Body.',
     ].join('\n');
     expect(await control.routes['skills/installLocal']({ text: skill }))
-      .toMatchObject(await legacy['skills/installLocal']({ text: skill }));
+      .toMatchObject({ ok: true, skill: { name: 'skill-one' } });
   });
 
   test('keeps write refusals known and storage loss after dispatch unknown', async () => {
@@ -164,6 +154,37 @@ describe('sealed administrative root cutover', () => {
     expect(await lost.control.routes['hooks/save']({ markdown: hookMarkdown(lostId) }))
       .toMatchObject({ ok: false, outcomeKnown: false,
         code: 'administrative-hooks-write-unknown' });
+  });
+
+  test('refuses a hook beyond the durable count before storage write', async () => {
+    const harness = makeHarness();
+    harness.stored.set('hooks.user.v1', Array.from(
+      { length: USER_HOOK_RECORDS_MAX_COUNT },
+      (_, index) => ({
+        id: `existing-${index}`, event: 'pre-tool-use', enabled: false,
+        kind: 'declarative', doc: '',
+        rule: { matchArg: 'text', contains: `literal-${index}` },
+      }),
+    ));
+    expect(await harness.control.routes['hooks/save']({
+      markdown: hookMarkdown('one-too-many'),
+    })).toMatchObject({
+      ok: false, code: 'administrative-hooks-limit', outcomeKnown: true,
+      error: expect.stringContaining('hook limit exceeded'),
+    });
+    expect((await harness.stored.get('hooks.user.v1')).length)
+      .toBe(USER_HOOK_RECORDS_MAX_COUNT);
+
+    const oversized = await harness.stored.get('hooks.user.v1');
+    oversized.push({
+      id: 'historical-overflow', event: 'pre-tool-use', enabled: false,
+      kind: 'declarative', doc: '', rule: { matchArg: 'text', contains: 'old' },
+    });
+    harness.stored.set('hooks.user.v1', oversized);
+    expect(await harness.control.routes['hooks/remove']({ id: 'historical-overflow' }))
+      .toEqual({ ok: true });
+    expect((await harness.stored.get('hooks.user.v1')).length)
+      .toBe(USER_HOOK_RECORDS_MAX_COUNT);
   });
 
   test('preserves accepted-then-note memory init while the sealed lease finishes', async () => {
