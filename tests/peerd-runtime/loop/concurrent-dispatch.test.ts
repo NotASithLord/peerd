@@ -9,7 +9,7 @@
 //   - any call whose verdict says confirm:true is NEVER raced (serialized
 //     confirms — stacked modals are a UX failure);
 //   - writes are barriers: a read emitted after a write waits for it;
-//   - without a classifier, only actor_create keeps its parallel path.
+//   - without a classifier, dispatch fails closed to serial execution.
 
 import { describe, test, expect } from 'bun:test';
 import { runUserTurn } from '../../../extension/peerd-runtime/loop/agent-loop.js';
@@ -288,7 +288,7 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     ]);
   });
 
-  test('confirm-gated calls are NEVER raced — even actor_create serializes its confirms', async () => {
+  test('confirm-gated calls are NEVER raced', async () => {
     const store = makeStore();
     store.seed('s1');
     const calls = [{ id: 't_1', name: 'actor_create' }, { id: 't_2', name: 'actor_create' }];
@@ -309,45 +309,41 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     expect(log).toEqual(['start:t_1', 'end:t_1', 'start:t_2', 'end:t_2']);
   });
 
-  test('no classifier injected: actor_create keeps its parallel path, other tools stay serial', async () => {
+  test('no classifier injected: every tool stays serial', async () => {
     const store = makeStore();
     store.seed('s1');
-    // Two spawns → concurrent (the pre-existing behavior).
+    // A tool name cannot grant itself concurrency without semantic policy.
     const spawnCalls = [{ id: 't_1', name: 'actor_create' }, { id: 't_2', name: 'actor_create' }];
-    const started: string[] = [];
+    const log: string[] = [];
     const ctx = baseCtx(store, {
       callModel: makeToolModel(spawnCalls),
       tools: [{ name: 'actor_create', description: '', schema: {} }],
       toolDispatch: async (call: any) => {
-        started.push(call.id);
-        if (call.id === 't_1') {
-          await Promise.race([
-            (async () => { while (started.length < 2) await sleep(5); })(),
-            sleep(1500).then(() => { throw new Error('serialized: second spawn never started'); }),
-          ]);
-        }
+        log.push(`start:${call.id}`);
+        await sleep(5);
+        log.push(`end:${call.id}`);
         return { ok: true, content: 'r', meta: {} };
       },
     });
     await drain(runUserTurn(ctx));
-    expect(started).toEqual(['t_1', 't_2']);
+    expect(log).toEqual(['start:t_1', 'end:t_1', 'start:t_2', 'end:t_2']);
 
-    // Two unknown tools → serial (no classifier, not in CONCURRENT_TOOLS).
+    // Unknown names are equally serial.
     const store2 = makeStore();
     store2.seed('s1');
-    const log: string[] = [];
+    const unknownLog: string[] = [];
     const ctx2 = baseCtx(store2, {
       callModel: makeToolModel([{ id: 'u_1', name: 'a' }, { id: 'u_2', name: 'b' }]),
       tools: [{ name: 'a', description: '', schema: {} }, { name: 'b', description: '', schema: {} }],
       toolDispatch: async (call: any) => {
-        log.push(`start:${call.name}`);
+        unknownLog.push(`start:${call.name}`);
         await sleep(5);
-        log.push(`end:${call.name}`);
+        unknownLog.push(`end:${call.name}`);
         return { ok: true, content: 'r', meta: {} };
       },
     });
     await drain(runUserTurn(ctx2));
-    expect(log).toEqual(['start:a', 'end:a', 'start:b', 'end:b']);
+    expect(unknownLog).toEqual(['start:a', 'end:a', 'start:b', 'end:b']);
   });
 
   test('Stop after a known ToolResult halts later waves and conservatively persists custody', async () => {

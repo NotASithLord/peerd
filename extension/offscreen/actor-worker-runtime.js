@@ -25,6 +25,7 @@ import {
   controllerHostsDwebTool,
   controllerHostsTool,
   controllerOperationsForSpawnedTools,
+  decideAction,
   dispatchToolCall,
   executeControllerLocalTool,
   executeControllerActorTool,
@@ -61,17 +62,6 @@ import { createActorModelEgress } from './actor-model-egress.js';
 import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
 import { nestedActorProgramCallId } from '/shared/actor-channel-protocol.js';
 import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
-
-let seq = 0;
-let runId = '';
-/** @type {Map<string, (v: any) => void>} rid → pending model-authority resolver */
-const modelPending = new Map();
-/** @type {Map<string, (v: any) => void>} rid → pending tool-dispatch resolver */
-const toolPending = new Map();
-const abort = new AbortController();
-let hasRun = false;
-/** @type {((call:any,options?:{programParentExecutionId?:string})=>Promise<any>)|null} */
-let executeOwnedTool = null;
 
 const recoveredPrototypeCapabilityBlocked = async (
   /** @type {any} */ target, /** @type {string} */ name, /** @type {unknown} */ argument,
@@ -162,6 +152,16 @@ export const startActorWorker = (
   /** @type {(()=>Record<string, boolean>)|null} */
   realmProbe = null,
 ) => {
+let seq = 0;
+let runId = '';
+/** @type {Map<string, (v: any) => void>} rid → pending model-authority resolver */
+const modelPending = new Map();
+/** @type {Map<string, (v: any) => void>} rid → pending tool-dispatch resolver */
+const toolPending = new Map();
+const abort = new AbortController();
+let hasRun = false;
+/** @type {((call:any,options?:{programParentExecutionId?:string})=>Promise<any>)|null} */
+let executeOwnedTool = null;
 self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
   const m = /** @type {any} */ (ev.data);
   if (!m || typeof m !== 'object') return;
@@ -1122,6 +1122,18 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       const result = await runActorLoop(
         {
           runUserTurn, sessions, callModel, toolDispatch,
+          // Scheduling is semantic, not authority. Classify the exact hydrated
+          // descriptor the actor was shown under the immutable permission
+          // projection pinned for this run, matching the main controller.
+          classifyToolCall: (/** @type {string} */ name) => {
+            const descriptor = descriptorsByName.get(name);
+            if (!descriptor || !visibleToolNames.has(name)) return null;
+            return decideAction({
+              mode: semanticPolicy.permission?.mode,
+              confirmActions: semanticPolicy.permission?.confirmActions,
+              tool: descriptor,
+            });
+          },
           getSystemPrompt: () => program.systemPrompt,
           appendAudit: async () => {},
           onEvent: (/** @type {object} */ event) => self.postMessage({ type: 'loop-event', runId, event }),
