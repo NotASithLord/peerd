@@ -130,7 +130,6 @@ describe('cold entry graphs', () => {
     expect(measured.modulesSet.has('background/vault-authority-client.js')).toBe(true);
     expect(measured.modulesSet.has('shared/cold-util.js')).toBe(true);
     expect(measured.modulesSet.has('shared/util.js')).toBe(true);
-    expect(measured.modulesSet.has('background/routes/toolbox.js')).toBe(false);
     expect(measured.modulesSet.has('background/kernel-semantic-demand.js')).toBe(false);
     expect(measured.modulesSet.has('background/semantic-demand-client.js')).toBe(false);
     // Contacts and semantic-demand policy remain finite storage/route custody,
@@ -325,7 +324,6 @@ describe('cold entry graphs', () => {
       'offscreen/job-runner.js',
       'offscreen/artifact-host.js',
       'offscreen/artifact-worker.js',
-      'offscreen/toolbox-parse.js',
       'offscreen/local-model.js',
       'offscreen/pdf-extract.js',
       'offscreen/doc-extract.js',

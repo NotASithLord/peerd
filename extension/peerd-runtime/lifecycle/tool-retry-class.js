@@ -9,7 +9,7 @@
 // (functional core, imperative shell). The classifier reads only
 // { name, sideEffect, primitive, retryClass } — the shape every tool already
 // declares in /shared/tool-types.js — so the dispatcher can classify a
-// registered tool and a Bun test can classify the entire live inventory
+// controller tool and a Bun test can classify the entire live inventory
 // without a browser.
 //
 // The decision order, and why it is that order:

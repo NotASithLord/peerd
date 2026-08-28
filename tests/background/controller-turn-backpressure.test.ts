@@ -3,7 +3,7 @@ import { makeControllerTurnBridge } from '../../extension/background/controller-
 import { connectDirectController } from '../../extension/background/direct-controller-client.js';
 import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
-import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
+import { getToolAuthority } from '../../extension/peerd-runtime/tools/metadata/authority.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
@@ -36,7 +36,7 @@ const makeSessions = () => {
 
 // why: the final architecture has no generic dispatcher. Exercise saturation
 // through a real controller-owned tool and its exact execution authority.
-const descriptor = projectToolAuthority(toToolDescriptor(getToolPolicy('read_result')));
+const descriptor = projectToolAuthority(toToolDescriptor(getToolAuthority('read_result')));
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 5_000, detail = () => '') => {
   const deadline = Date.now() + timeoutMs;

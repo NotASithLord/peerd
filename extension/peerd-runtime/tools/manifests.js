@@ -26,8 +26,8 @@
 /** @typedef {{ preset?: string, allow?: string[] }} ToolManifest */
 
 // Named presets — DATA, deliberately literal so editing a preset is a
-// one-line diff. Names must match registered tool names exactly; the
-// in-browser suite checks every entry against the real registry, and the
+// one-line diff. Names must match controller tool names exactly; the
+// in-browser suite checks every entry against the real catalog, and the
 // bun suite checks the runner-internals invariant below, so drift fails CI.
 //
 // INVARIANT (web actor): a preset that grants message_actor must also

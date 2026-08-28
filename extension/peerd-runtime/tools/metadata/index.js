@@ -1,17 +1,17 @@
 // @ts-check
 
-// Authority-side tool composition. Model-facing prose and schemas live in
-// /peerd-runtime/semantic.js so registering executable handlers in the SW does
-// not import the full catalog.
+// Controller-side tool composition derives compact authority policy from the
+// same rich catalog as its semantic descriptors. The service worker receives
+// only bounded projections across the sealed channel.
 
-import { getToolPolicy } from './policy.js';
+import { getToolAuthority } from './authority.js';
 import { resolveToolOrigins } from '../../tool-origin-policy.js';
 
 export { resolveToolOrigins };
 
 /** @param {string} name @param {{execute?:(args:any,ctx:any)=>Promise<any>}} implementation */
 export const composeTool = (name, implementation) => {
-  const policy = getToolPolicy(name);
+  const policy = getToolAuthority(name);
   if (!policy || typeof implementation?.execute !== 'function') {
     throw new TypeError(`tool composition invalid: ${name}`);
   }

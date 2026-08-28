@@ -1,14 +1,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { siteClientWriteTool } from '../../../extension/peerd-runtime/tools/defs/site-client-write.js';
-import { clearTools, registerTool } from '../../../extension/peerd-runtime/tools/registry.js';
+import { createExplicitToolFixture } from './explicit-tool-fixture';
 import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
 import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
 import { createSiteClientToolAuthority } from '../../../extension/background/site-client-tool-authority.js';
 
-afterEach(() => clearTools());
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
+
+afterEach(fixture.clear);
 
 const call = {
   id: 'write-a',
@@ -75,7 +78,7 @@ const trackedLifecycle = () => {
 
 describe('site-client dispatch confirmation ordering', () => {
   test('live-custody refusal happens before any generic or dossier prompt', async () => {
-    registerTool(siteClientWriteTool);
+    setFixtureTool(siteClientWriteTool);
     let prompts = 0;
     let storeEffects = 0;
     const result = await dispatchToolCall(call as any, context({
@@ -95,7 +98,7 @@ describe('site-client dispatch confirmation ordering', () => {
   });
 
   test('an owned write receives exactly the detailed tool confirmation', async () => {
-    registerTool(siteClientWriteTool);
+    setFixtureTool(siteClientWriteTool);
     const prompts: any[] = [];
     let puts = 0;
     const result = await dispatchToolCall(call as any, context({
@@ -118,7 +121,7 @@ describe('site-client dispatch confirmation ordering', () => {
   });
 
   test('a declined dossier settles failed and does not create unknown-intent friction', async () => {
-    registerTool(siteClientWriteTool);
+    setFixtureTool(siteClientWriteTool);
     const { tracker, log } = trackedLifecycle();
     const prompts: any[] = [];
     let puts = 0;
@@ -182,7 +185,7 @@ describe('site-client dispatch confirmation ordering', () => {
       };
     }],
   ])('Stop %s is proven pre-effect and settles failed', async (_label, arrange) => {
-    registerTool(siteClientWriteTool);
+    setFixtureTool(siteClientWriteTool);
     const { tracker, log } = trackedLifecycle();
     const controller = new AbortController();
     const arranged = arrange(controller);

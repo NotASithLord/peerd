@@ -10,11 +10,28 @@
 import { describe, it, expect } from '../../framework.js';
 import {
   makeLifecycleBoot, makeDispatchTracker, retryClassForTool,
-  registerTool, clearTools, dispatchToolCall,
   OPERATION_STATES, groupResourceLossNotices,
 } from '/peerd-runtime/index.js';
+import { dispatchToolCall as dispatchExplicitToolCall } from '/peerd-runtime/tools/local-tool-dispatcher.js';
+import { toToolDescriptor } from '/peerd-runtime/tools/metadata/descriptor.js';
 
 const S = OPERATION_STATES;
+
+/** @type {import('/shared/tool-types.js').Tool | null} */
+let fixtureTool = null;
+/** @param {import('/shared/tool-types.js').Tool} tool */
+const setFixtureTool = (tool) => { fixtureTool = tool; };
+const clearFixtureTool = () => { fixtureTool = null; };
+/** @param {import('/shared/tool-types.js').ToolCall} call @param {any} ctx */
+const dispatchToolCall = (call, ctx) => {
+  const implementation = fixtureTool?.name === call.name ? fixtureTool : null;
+  return dispatchExplicitToolCall(call, ctx, {
+    descriptor: implementation ? toToolDescriptor(implementation) : undefined,
+    execute: (prepared) => implementation
+      ? implementation.execute(prepared.args, prepared.execCtx)
+      : ({ ok: false, error: 'tool implementation unavailable', outcomeKnown: true }),
+  });
+};
 
 // REAL browser storage. As an extension page this is chrome.storage.local
 // (the SW's actual kv backing); under the CDP harness the runner serves
@@ -173,10 +190,10 @@ describe('lifecycle recovery over real chrome.storage', () => {
 
   it('the wired dispatcher refuses a cross-generation Class E replay end-to-end', async () => {
     await cleanup();
-    clearTools();
+    clearFixtureTool();
     try {
       let executions = 0;
-      registerTool(/** @type {any} */ ({
+      setFixtureTool(/** @type {any} */ ({
         name: 'test_submit', description: 'x', schema: {},
         primitive: 'web', sideEffect: 'mutate_external',
         origins: () => [],
@@ -217,7 +234,7 @@ describe('lifecycle recovery over real chrome.storage', () => {
       expect(replay.ok).toBe(false);
       expect(String(/** @type {any} */ (replay).error).startsWith('outcome_unknown:')).toBe(true);
     } finally {
-      clearTools();
+      clearFixtureTool();
       await cleanup();
     }
   });

@@ -29,7 +29,6 @@ describe('digest-bound lazy semantic route clusters', () => {
     expect(modules.has('background/routes/actor-overview.js')).toBe(false);
     expect(modules.has('background/routes/contacts.js')).toBe(false);
     expect(modules.has('peerd-provider/background.js')).toBe(false);
-    expect(modules.has('background/routes/toolbox.js')).toBe(false);
     expect([...modules].some((file) => file.startsWith('offscreen/semantic-routes/')))
       .toBe(false);
     expect(modules.has('shared/semantic-route-inventory.generated.js')).toBe(false);

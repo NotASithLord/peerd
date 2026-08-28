@@ -6,15 +6,6 @@ import { filterByRuntimeCapabilities } from './runtime-capabilities.js';
 import { TOOL_METADATA_ORDER, TOOL_METADATA_RECORDS } from './tools/metadata/catalog.js';
 import { resolveToolOrigins } from './tool-origin-policy.js';
 
-/** @template T @param {T} value @returns {T} */
-const deepFreeze = (value) => {
-  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
-};
-
-deepFreeze(TOOL_METADATA_RECORDS);
-
 export { TOOL_METADATA_ORDER, resolveToolOrigins };
 
 /** @param {string} name */

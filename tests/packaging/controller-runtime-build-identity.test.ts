@@ -86,13 +86,13 @@ describe('controller runtime build identity', () => {
       ));
     const projection = join(candidate, 'peerd-runtime/controller-tool-projection.js');
     writeFileSync(projection, readFileSync(projection, 'utf8')
-      .replace("import { listToolPolicies } from './tools/metadata/policy.js';", [
-        "import { listToolPolicies } from './tools/metadata/policy.js';",
+      .replace("import { listToolAuthorities } from './tools/metadata/authority.js';", [
+        "import { listToolAuthorities } from './tools/metadata/authority.js';",
         "import { CONTROLLER_FEATURE_TOOL_POLICY } from './controller-feature-fixture.js';",
       ].join('\n'))
       .replace(
-        'const descriptors = Object.freeze(listToolPolicies().map(toToolDescriptor));',
-        'const descriptors = Object.freeze([...listToolPolicies(), CONTROLLER_FEATURE_TOOL_POLICY].map(toToolDescriptor));',
+        'const descriptors = Object.freeze(listToolAuthorities().map(toToolDescriptor));',
+        'const descriptors = Object.freeze([...listToolAuthorities(), CONTROLLER_FEATURE_TOOL_POLICY].map(toToolDescriptor));',
       ));
 
     const baselineDigest = await writeControllerBuildIdentity(baseline);

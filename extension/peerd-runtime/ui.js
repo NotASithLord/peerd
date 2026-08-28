@@ -1,6 +1,6 @@
 // @ts-check
 // Cold-safe UI surface. Keep this exact: sidepanel/Home must not inherit the
-// agent loop, tool registry, repository engine, or background semantics through
+// agent loop, tool catalog, repository engine, or background semantics through
 // the universal barrel before the vault gate is actionable.
 
 export { classifyBrowserAutomationTarget } from './tools/browser-automation-policy.js';

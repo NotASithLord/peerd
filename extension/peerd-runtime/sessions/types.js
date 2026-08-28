@@ -108,7 +108,7 @@
  * @property {'code'} [actorSurface]            manifest-defined App actors use the code-first surface
  *
  * Per-session tool exposure manifest (the /tools composer command;
- * tools/manifests.js). Absent = every registered tool stays exposed —
+ * tools/manifests.js). Absent = every available tool stays exposed —
  * today's behavior. When present, the main turn's descriptor list and
  * the semantic exposure gate both intersect with it (fail-closed), and
  * spawned actors INHERIT it so descendants keep the same model-surface

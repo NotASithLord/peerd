@@ -1136,7 +1136,6 @@ describe('Chrome lazy controller private channel prototype', () => {
       'turn.model.cancel-inference', 'turn.model.cancel-local',
       'turn.abort.finalize', 'turn.finalize',
     ]) expect(source).toContain(`'${operation}'`);
-    expect(source).not.toContain("'turn.tool.settle'");
   });
 });
 
@@ -1282,9 +1281,6 @@ describe('controller protocol pure validation', () => {
     };
     expect(quota.admit('turn.session.set-trim', trim).ok).toBe(true);
 
-    expect(quota.admit('turn.tool.dispatch', { runId: 'deleted' })).toEqual({
-      ok: false, code: 'kernel-operation-denied', outcomeKnown: true,
-    });
     const result = {
       ok: true,
       value: JSON.stringify({

@@ -4,7 +4,7 @@
 // authority host receives only the structured-clone-safe policy fields needed
 // to admit a model-issued call; prose, schemas and catalog construction never
 // enter its module graph.
-import { listToolPolicies } from './tools/metadata/policy.js';
+import { listToolAuthorities } from './tools/metadata/authority.js';
 import { projectToolAuthority, toToolDescriptor } from './tools/metadata/descriptor.js';
 import {
   actorDescriptors,
@@ -30,7 +30,7 @@ import {
   PAGE_PROGRAM_SEMANTIC_TOOL_NAMES,
 } from '../shared/page-program-authority.js';
 
-const descriptors = Object.freeze(listToolPolicies().map(toToolDescriptor));
+const descriptors = Object.freeze(listToolAuthorities().map(toToolDescriptor));
 
 /** @param {unknown} value */
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)

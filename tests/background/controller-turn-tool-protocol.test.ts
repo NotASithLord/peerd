@@ -1,23 +1,18 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
 import { createAuthorityEffectScheduler } from '../../extension/background/authority-effect-scheduler.js';
 import {
   createControllerTurnRuntime,
 } from '../../extension/offscreen/controller-turn-runtime.js';
-import {
-  clearTools,
-  registerTool,
-} from '../../extension/peerd-runtime/tools/registry.js';
-import { registerMetadataInventory } from '../../extension/peerd-runtime/tools/metadata-registry.js';
 import { toToolDescriptor, projectToolAuthority } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
-import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
+import { getToolAuthority } from '../../extension/peerd-runtime/tools/metadata/authority.js';
 import { controllerOperationsForTools } from '../../extension/peerd-runtime/controller-tool-ownership.js';
 import { ORCHESTRATOR_OPERATION_GRANT } from '../../extension/shared/controller-kernel-quota.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const PROTOCOL_FIXTURE_TOOL = 'a2a_run';
 const authorityDescriptor = (name: string) => projectToolAuthority(
-  toToolDescriptor(getToolPolicy(name)),
+  toToolDescriptor(getToolAuthority(name)),
 );
 const descriptor = authorityDescriptor(PROTOCOL_FIXTURE_TOOL);
 const orchestratorOperations = new Set(ORCHESTRATOR_OPERATION_GRANT);
@@ -150,14 +145,8 @@ const runHarness = async ({
   return { bridge, events, error };
 };
 
-afterEach(() => {
-  clearTools();
-  registerMetadataInventory([]);
-});
-
 describe('controller turn finite tool protocol', () => {
   test('executes now entirely in the semantic realm without tool lifecycle RPC', async () => {
-    registerMetadataInventory();
     let legacy = 0;
     const audits: any[] = [];
     const nowDescriptor = authorityDescriptor('now');
@@ -181,8 +170,6 @@ describe('controller turn finite tool protocol', () => {
     });
     expect(result.error).toBeNull();
     expect(legacy).toBe(0);
-    expect(kernelOperations).not.toContain('turn.tool.prepare');
-    expect(kernelOperations).not.toContain('turn.tool.settle');
     const toolResult: any = result.events.find((event: any) => event.type === 'tool-result');
     expect(toolResult.result.ok).toBe(true);
     expect(typeof toolResult.result.content).toBe('string');
@@ -200,7 +187,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('executes complete_goal through the exact goal authority operation', async () => {
-    registerMetadataInventory();
     const summaries: string[] = [];
     const goalDescriptor = authorityDescriptor('complete_goal');
     let round = 0;
@@ -233,8 +219,6 @@ describe('controller turn finite tool protocol', () => {
     expect(result.error).toBeNull();
     expect(summaries).toEqual(['done']);
     expect(kernelOperations.filter((operation) => operation === 'turn.goal.complete')).toHaveLength(1);
-    expect(kernelOperations).not.toContain('turn.tool.prepare');
-    expect(kernelOperations).not.toContain('turn.tool.settle');
     const toolResult: any = result.events.find((event: any) => event.type === 'tool-result');
     expect(toolResult.result).toMatchObject({
       ok: true, content: 'Goal run ended. Summary: done',
@@ -242,7 +226,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('the host permits goal completion as Plan-safe internal bookkeeping', async () => {
-    registerMetadataInventory();
     let completed = 0;
     const goalDescriptor = authorityDescriptor('complete_goal');
     const result = await runHarness({
@@ -272,7 +255,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('the host re-reads a newly enabled Act confirmation before mutation', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let prompts = 0;
     let removals = 0;
@@ -304,7 +286,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('a declined self-confirmation overrides forged main semantic success', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_create');
     let scheduled = 0;
     const ctx = context({
@@ -375,7 +356,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('normal finalization cannot omit an accepted claim without a host receipt', async () => {
-    registerMetadataInventory();
     const rememberDescriptor = authorityDescriptor('remember');
     const ctx = context({
       tools: [rememberDescriptor], refreshTools: async () => [rememberDescriptor],
@@ -419,7 +399,6 @@ describe('controller turn finite tool protocol', () => {
 
   for (const change of ['plan', 'confirm'] as const) {
     test(`a queued main effect rechecks live ${change} policy at the physical edge`, async () => {
-      registerMetadataInventory();
       const scheduleDescriptor = authorityDescriptor('schedule_cancel');
       const authorityScheduler = createAuthorityEffectScheduler();
       let mode = 'act';
@@ -492,7 +471,6 @@ describe('controller turn finite tool protocol', () => {
   }
 
   test('the main tool-result boundary closes and drains its exact effect', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let releaseRemoval!: () => void;
@@ -569,7 +547,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('an accepted exact claim enters the call drain before its target digest resolves', async () => {
-    registerMetadataInventory();
     const rememberDescriptor = authorityDescriptor('remember');
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let releaseDigest!: () => void;
@@ -653,7 +630,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('Stop during exact target hashing prevents the accepted claim from entering its host', async () => {
-    registerMetadataInventory();
     const rememberDescriptor = authorityDescriptor('remember');
     const controller = new AbortController();
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
@@ -720,7 +696,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('session append cannot persist a tool result before its exact effect drains', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let releaseRemoval!: () => void;
@@ -787,7 +762,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('main finalization never reports known success with an irreversible effect active', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let releaseRemoval!: () => void;
@@ -849,7 +823,6 @@ describe('controller turn finite tool protocol', () => {
   ] as const)('outer controller success %s is refused while host custody is active', async (
     _label, attemptFinalize,
   ) => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let releaseRemoval!: () => void;
@@ -913,7 +886,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('successful host finalization rejects every later controller call', async () => {
-    registerMetadataInventory();
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     const sessions = makeSessions();
     let appends = 0;
@@ -975,7 +947,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('host finalization drains every earlier admitted kernel call', async () => {
-    registerMetadataInventory();
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     const sessions = makeSessions();
     let releaseHosts!: () => void;
@@ -1069,7 +1040,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('abort finalization derives unknown custody from a delayed performed effect', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let releaseRemoval!: () => void;
@@ -1142,7 +1112,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('Stop settles an abort-ignoring exact host operation unknown', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     const controller = new AbortController();
     let hostStarted!: () => void;
@@ -1185,7 +1154,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('main finalization rejects a performed effect whose result was never persisted', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     let finalization: any;
@@ -1229,7 +1197,6 @@ describe('controller turn finite tool protocol', () => {
   });
 
   test('schedule creation rechecks Plan mode after its confirmation wait', async () => {
-    registerMetadataInventory();
     const scheduleDescriptor = authorityDescriptor('schedule_create');
     let mode = 'act';
     let additions = 0;
