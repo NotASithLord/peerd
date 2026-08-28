@@ -1,7 +1,7 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// read_state — read the React/Vue component state behind an element.
+// read_state: read the React/Vue component state behind an element.
 //
 // For framework apps the rendered DOM is a lossy projection of the real
 // state. This reads the source: the owning component's props + state from
@@ -10,7 +10,7 @@ import { definePageAuthorityHandler } from './handler.js';
 //   - CDP: resolve a snapshot {ref} → node → Runtime.callFunctionOn (the
 //     debugger-pool path). Used when the CDP pool is wired.
 //   - chrome.scripting world:'MAIN' on a CSS {selector} (framework-state.js
-//     readFrameworkStateInjected). Works WITHOUT CDP — Firefox, the store
+//     readFrameworkStateInjected). Works WITHOUT CDP: Firefox, the store
 //     Chrome package, or advanced automation off. The DOM-walk's walkId map
 //     lives in the ISOLATED world (invisible from MAIN), so a walk {ref}
 //     can't be bridged there; a {selector} can. Hence: on the no-CDP
@@ -44,10 +44,10 @@ export const readStateTool = definePageAuthorityHandler({
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
 
     // why: domRefs + debuggerPool are SW-injected onto ctx but absent from the
-    // ToolContext typedef — narrow them through an erased cast.
+    // ToolContext typedef: narrow them through an erased cast.
     const { domRefs, debuggerPool } = /** @type {DomCtxExtras} */ (ctx);
 
-    // Selector path: read via chrome.scripting world:'MAIN'. No CDP needed —
+    // Selector path: read via chrome.scripting world:'MAIN'. No CDP needed :
     // querySelector resolves the node in the page's own JS context where the
     // React fiber / Vue internals live. resolveTargetTab already enforced the
     // denylist, so this can't run on a sensitive tab.
@@ -58,24 +58,24 @@ export const readStateTool = definePageAuthorityHandler({
       return { ok: false, error: 'ref_or_selector_required' };
     }
     const entry = domRefs?.resolve?.(tab.id, args.ref.trim());
-    if (!entry) return { ok: false, error: `stale_ref: ${args.ref} — re-run snapshot on this tab first` };
+    if (!entry) return { ok: false, error: `stale_ref: ${args.ref}: re-run snapshot on this tab first` };
     if (entry.backendDOMNodeId == null) {
       // A DOM-walk pseudo-snapshot ref (no CDP): walkId→element lives in the
       // ISOLATED world, unreachable from the MAIN world the fiber read needs.
-      // Can't bridge a walk ref — but a CSS {selector} CAN be read in MAIN.
+      // Can't bridge a walk ref, but a CSS {selector} CAN be read in MAIN.
       if (entry.walkId != null) {
         return {
           ok: false,
           error: 'read_state_needs_selector: this ref came from a DOM-walk snapshot (no CDP), which '
             + 'can\'t be resolved in the page\'s JS context. Pass a CSS {selector} for the element '
-            + '(from read_page / query_dom) — read_state reads the framework state there directly.',
+            + '(from read_page / query_dom): read_state reads the framework state there directly.',
         };
       }
       return { ok: false, error: `ref_has_no_node: ${args.ref}` };
     }
     if (typeof debuggerPool?.readFrameworkState !== 'function') {
       // A CDP-sourced ref but the pool is gone (advanced automation turned off
-      // since the snapshot). The selector path still works — steer there.
+      // since the snapshot). The selector path still works: steer there.
       return {
         ok: false,
         error: 'read_state_needs_selector: advanced automation is off, so this CDP ref can\'t be '
@@ -119,14 +119,14 @@ const readViaScripting = async (tab, selector, ctx) => {
     return { ok: false, error: 'read_state_unavailable: no scripting API in this context' };
   }
   // why: the injected reader returns dynamic page state (framework props/state
-  // are arbitrary JSON) plus an optional error tag — restate that contract.
+  // are arbitrary JSON) plus an optional error tag: restate that contract.
   /** @type {{ error?: string, [k: string]: any } | undefined} */
   let result;
   try {
     const results = await scripting.executeScript({
       target: scriptingTarget(tab),
       // MAIN world: the React fiber / Vue internals are properties the page's
-      // own JS set on the element — invisible from the isolated content world.
+      // own JS set on the element: invisible from the isolated content world.
       world: 'MAIN',
       func: readFrameworkStateInjected,
       args: [selector],
@@ -138,7 +138,7 @@ const readViaScripting = async (tab, selector, ctx) => {
   }
   if (!result) return { ok: false, error: 'read_state_returned_nothing' };
   if (typeof result.error === 'string' && result.error.indexOf('no_match') === 0) {
-    return { ok: false, error: `no_match: ${selector} — no element matched; check the selector with query_dom.` };
+    return { ok: false, error: `no_match: ${selector}: no element matched; check the selector with query_dom.` };
   }
   if (typeof result.error === 'string' && result.error.indexOf('bad_selector') === 0) {
     return { ok: false, error: `invalid_selector: ${selector}` };

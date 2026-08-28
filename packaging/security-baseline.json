@@ -12,7 +12,7 @@
         }
       },
       "background": {
-        "service_worker": "background/vault-kernel.js",
+        "service_worker": "background/vault-kernel-chrome.js",
         "type": "module"
       },
       "commands": {
@@ -492,16 +492,14 @@
     }
   },
   "dynamicCodeSites": {
-    "peerd-runtime/tools/defs/js-notebook.js": 1,
-    "peerd-runtime/tools/defs/page-eval.js": 1,
-    "peerd-runtime/tools/hooks/compile.js": 1
+    "background/notebook-tool-authority.js": 1
   },
   "messageHostSites": {
     "engine-tabs/app-tab/app-tab.js": 3,
     "engine-tabs/notebook-tab/notebook-tab.js": 1,
     "engine-tabs/pod-tab/pod-tab.js": 1,
     "engine-tabs/vm-tab/vm-tab.js": 1,
-    "offscreen/offscreen.js": 8,
+    "offscreen/offscreen.js": 6,
     "shared/peer-notifications.js": 1,
     "shared/pull-in-peerd.js": 1
   }

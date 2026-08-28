@@ -270,10 +270,12 @@ exists today:
    runs the Notebook's sealed worker in the offscreen document with no tab
    (`offscreen/job-runner.js`) — the agent's own quick compute, same
    substrate as a Notebook, different host.
-5. **`peerd-runtime`** — agent loop, tool dispatcher, and the tool
-   inventory. Registered tools are assembled from `BUILTIN_TOOLS`, clock,
-   web tools, and service-worker wiring; do not pin the live counts in
-   prose. Exposure is decided in `tools/exposure.js`: the low-level
+5. **`peerd-runtime`** — agent loop, tool dispatcher, and the controller-owned
+   tool inventory. The sealed semantic catalog in `tools/metadata/catalog.js`
+   is the model-facing source of truth; `controller-tool-ownership.js` maps
+   that same inventory to finite authority families. The service worker sees
+   only compact projections and exact operations, never a tool registry.
+   Exposure is decided in `tools/exposure.js`: the low-level
    DOM/page tools are actor-only, never on the main agent — the
    orchestrator delegates plain-language goals to per-environment
    actors (web / webvm / notebook / app) via `message_actor`
@@ -285,8 +287,9 @@ exists today:
    are invisible where `DWEB_ENABLED` is false. Plus sessions, clock
    (temporal grounding), actor orchestrator, voice (Moonshine WASM
    + Web Speech fallback).
-6. **Wire it together** in `background/service-worker.js` — message
-   routing, dependency injection, lifecycle wiring. The SW is wiring
+6. **Wire it together** in `background/vault-kernel.js`, with the
+   target-specific `vault-kernel-*` entries selecting browser/channel custody.
+   The kernel owns message routing, dependency injection, and lifecycle wiring. The SW is wiring
    plus per-route message handlers (one per RPC the side panel /
    offscreen doc / tab pages dispatch in); the logic lives in
    modules. If a new handler needs more than a few lines of glue,
@@ -441,8 +444,8 @@ gotchas to know going in:
   `actor/a2a-api.js` (the page-api.js twin: `meshCallToOp`/
   `shapeMeshResult`, a `MESH_METHODS` table); the ask/reply CORRELATION —
   tag a request DM, await the matching reply bound to the target did, time
-  out — is `actor/a2a-dispatch.js`; the SW singleton + consent live in
-  `background/service-worker.js` (`a2aCallRoute`). We RHYME with A2A's data
+  out — is `actor/a2a-dispatch.js`; the SW singleton + consent live behind the
+  exact authority in `background/dweb-tool-authority.js`. We RHYME with A2A's data
   model (`peerd-distributed/agent-card.js` — Agent Card, message shape) for
   future interop, but REJECT its HTTP+SSE transport: the mesh is the
   transport, did:key the address, the fenced inbound wake the stream. Signing

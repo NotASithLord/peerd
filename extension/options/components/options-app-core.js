@@ -1,9 +1,9 @@
 // @ts-check
-// Options shell — grouped sidebar nav + the active section page.
+// Options shell: grouped sidebar nav + the active section page.
 //
 // A pure projection of attrs { state, send, section }: the router in
 // options.js resolves the hash to a section id and passes it in. Nav
-// entries are plain `#!/…` anchors, NOT m.route.set calls — Mithril's
+// entries are plain `#!/…` anchors, NOT m.route.set calls: Mithril's
 // hash router picks the change up via hashchange, and the component
 // never needs an active router. That is also what lets component tests
 // mount this shell directly (the same constraint that forced logs-view
@@ -84,14 +84,14 @@ const NAV = [
 
 const SECTION_TITLES = Object.fromEntries(NAV.flatMap((g) => g.items));
 
-// Five-block wordmark — same construction as the panel TopBar's. It plays the
+// Five-block wordmark: same construction as the panel TopBar's. It plays the
 // type→colorize render-in every time this tab becomes visible: the first open
 // AND each time you switch back to it (the "swapback" that mirrors the panel
 // hiding its mark while options is foregrounded).
 //
 // Why a visibilitychange listener + reflow rather than Mithril state/redraw: a
 // plain tab switch doesn't reload this page, and a hidden (background) tab is
-// throttled — rAF is paused, so a redraw-driven replay never fires while
+// throttled: rAF is paused, so a redraw-driven replay never fires while
 // hidden and the away→back transition is missed. So we restart the CSS
 // animation directly: toggle the class off, force a reflow, toggle it back on.
 // The intro CSS lives in the panel's styles.css, which this page links first.
@@ -117,7 +117,7 @@ const Wordmark = () => {
     oncreate: (/** @type {{ dom: HTMLElement }} */ v) => { el = v.dom; document.addEventListener('visibilitychange', replay); },
     onremove: () => document.removeEventListener('visibilitychange', replay),
     view: () => m('.wordmark.wordmark--intro', {
-      'aria-label': 'peerd — back to home', role: 'link', tabindex: '0',
+      'aria-label': 'peerd: back to home', role: 'link', tabindex: '0',
       title: 'Back to peerd home', style: 'cursor: pointer',
       onclick: () => openHome(),
       onkeydown: (/** @type {KeyboardEvent} */ e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHome(); } },
@@ -147,7 +147,7 @@ const gate = (heading, copy) => m('.options-gate', m('.options-gate-card', [
 const OptionsApp = {
   /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   oninit(vnode) {
-    // Pending auto-memory suggestions count — feeds the badge on the
+    // Pending auto-memory suggestions count: feeds the badge on the
     // Memory nav entry (the discoverability affordance that used to be
     // the Context view's Memory-tab badge). Fed by the same
     // memory/suggestions route the Memory page itself uses.
@@ -194,7 +194,7 @@ const OptionsApp = {
     const ui = vnode.state;
 
     // Gate ladder. The page is reachable from chrome://extensions before
-    // any vault exists, and unlock is a panel-only ceremony — this page
+    // any vault exists, and unlock is a panel-only ceremony: this page
     // never renders unlock UI, it points at the panel and re-reads state
     // on focus. ("the peerd panel", not "side panel": Firefox renders a
     // sidebar, and the phrase covers both.)
@@ -215,12 +215,12 @@ const OptionsApp = {
     if (!state.vault?.initialized) {
       return gate('Set up peerd first',
         'There’s no vault yet. Open the peerd panel from the extension '
-        + 'icon to set up peerd — this page picks the new state up when '
+        + 'icon to set up peerd: this page picks the new state up when '
         + 'you return.');
     }
     if (state.vault.locked) {
       return gate('Vault locked',
-        'Unlock peerd in the peerd panel, then come back — this page '
+        'Unlock peerd in the peerd panel, then come back: this page '
         + 'refreshes when it regains focus.');
     }
 
@@ -247,7 +247,7 @@ const OptionsApp = {
       m('nav.options-nav', { 'aria-label': 'Settings sections' }, [
         m(Wordmark),
         CHANNEL === 'preview'
-          ? m('span.channel-badge.channel-badge--in', { title: 'peerd preview — dweb preview package' }, 'preview')
+          ? m('span.channel-badge.channel-badge--in', { title: 'peerd preview: dweb preview package' }, 'preview')
           : null,
         NAV.flatMap((group) => [
           m('.options-nav-group', group.label),
@@ -270,7 +270,7 @@ const OptionsApp = {
       case 'behavior':  return m(BehaviorSection, { state, send });
       case 'voice':     return m(VoiceSection, { state, send });
       // Self-fetching management surfaces, reused verbatim from the
-      // panel's component set — they consume only {send} (+ state).
+      // panel's component set: they consume only {send} (+ state).
       case 'skills':    return m(SkillsView, { state, send });
       case 'hooks':     return m(HooksView, { send });
       case 'memory':    return m(MemoryView, {
@@ -285,7 +285,7 @@ const OptionsApp = {
         ? m(ContributorMetricsSection, { send }) : null;
       case 'vault':     return m(VaultSection, { state, send });
       // Git credentials are folded UNDER API integrations (both are host/origin-bound
-      // vault secrets) — ApiIntegrationsSection renders the GitCredentialsSection as a
+      // vault secrets): ApiIntegrationsSection renders the GitCredentialsSection as a
       // subsection, so there is no standalone git-credentials route/nav entry.
       case 'api-integrations': return m(ApiIntegrationsSection, { send });
       case 'denylist':  return m(DenylistView, { send });

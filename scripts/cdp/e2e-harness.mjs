@@ -30,6 +30,9 @@ import { tmpdir } from 'node:os';
 import { resolve, join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareToBaseline, UPDATE_BASELINES } from './visual.mjs';
+import {
+  GIT_FIXTURE_HOST, GIT_FIXTURE_SPKI_SHA256_BASE64,
+} from '../acceptance/git-smart-http-fixture.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..', '..');
@@ -37,6 +40,7 @@ const EXT = resolve(ROOT, 'extension');
 
 export const PASSPHRASE = 'correct-horse-battery-staple';
 export const NETWORK_GUARD_CONTROLLER_PORT = 18_763;
+export const SITE_CLIENT_FIXTURE_TLS_PORT = 18_764;
 export const READY_BUDGET_MS = 30_000; // extension load + SW boot + page mount
 const VAULT_READY_BUDGET_MS = 120_000; // production Argon2 under loaded CI/browser hosts
 export const POLL_MS = 250;
@@ -559,7 +563,14 @@ export async function launchPeerd({
     // Browser-policy fixtures need public-looking names while their local HTTP
     // servers stay deterministic and offline. Reserved .test names preserve the
     // documented DNS-resolution residual without weakening localhost coverage.
-    '--host-resolver-rules=MAP orders.peerd.test 127.0.0.1, MAP acme.peerd.test 127.0.0.1, MAP acct.peerd.test 127.0.0.1, MAP guard.peerd.test 127.0.0.1, MAP chase.com 127.0.0.1',
+    `--host-resolver-rules=${[
+      'MAP orders.peerd.test 127.0.0.1',
+      'MAP acme.peerd.test 127.0.0.1',
+      'MAP acct.peerd.test 127.0.0.1',
+      'MAP guard.peerd.test 127.0.0.1',
+      'MAP chase.com 127.0.0.1',
+      `MAP ${GIT_FIXTURE_HOST}:443 127.0.0.1:${SITE_CLIENT_FIXTURE_TLS_PORT}`,
+    ].join(', ')}`,
     // Product-boundary security tests must not pass because Chrome's separate
     // Local Network Access feature stopped the request first.
     `--disable-features=${[
@@ -573,9 +584,12 @@ export async function launchPeerd({
     `--unsafely-treat-insecure-origin-as-secure=http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT},http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}`,
     '--disable-gpu', '--no-sandbox',
     '--enable-unsafe-extension-debugging',
+    `--ignore-certificate-errors-spki-list=${[
+      GIT_FIXTURE_SPKI_SHA256_BASE64,
+      acceptanceProxy?.certificateSpkiSha256,
+    ].filter(Boolean).join(',')}`,
     ...(acceptanceProxy ? [
       `--proxy-server=${acceptanceProxy.url}`,
-      `--ignore-certificate-errors-spki-list=${acceptanceProxy.certificateSpkiSha256}`,
     ] : []),
     ...DETERMINISM_FLAGS,
     `--user-data-dir=${profile}`,
@@ -786,7 +800,7 @@ export async function launchPeerd({
         return targetInfos.find(
           (entry) => entry.targetId !== created.id && entry.url === panelUrl,
         ) ?? null;
-      }, { budgetMs: Math.min(2_000, READY_BUDGET_MS), pollMs: 25 });
+      }, { budgetMs: Math.min(10_000, READY_BUDGET_MS), pollMs: 25 });
       if (target) break;
     }
     if (!target) {

@@ -199,6 +199,7 @@ export const createKernelBrowserNetworkOwner = (deps) => {
   /** @type {any} */ let authority = null;
   /** @type {Promise<any>|null} */ let authorityLoading = null;
   /** @type {Map<number,symbol>} */ const childGenerations = new Map();
+  /** @type {Map<number,symbol>} */ const firefoxRequestFences = new Map();
   /** @type {Promise<boolean|null>|null} */ let coldQuarantineReading = null;
   let sourceProjectionReady = false;
   /** @type {Promise<void>|null} */ let sourceProjectionLoading = null;
@@ -363,11 +364,12 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     /** @type {any[]} */ args,
     /** @type {()=>Promise<boolean>|boolean} */ prove,
     /** @type {(cause:unknown,contained:boolean)=>Promise<boolean>|boolean} */ guardedFailure,
-    /** @type {()=>boolean} */ alreadyContained = () => false,
+    /** @type {()=>Promise<boolean>|boolean} */ alreadyContained = () => false,
     /** @type {()=>Promise<boolean>|boolean} */ noProof = () => false,
   ) => {
     return bounded(Promise.resolve(prove()),
-      `kernel-browser-network-${name}-startup-timeout`).then((proven) => proven
+      `kernel-browser-network-${name}-startup-timeout`).then(async (proven) => proven
+        || await alreadyContained()).then((proven) => proven
       ? call(name, args).then(() => true, (cause) => guardedFailure(cause, true))
       : noProof());
   };
@@ -587,7 +589,15 @@ export const createKernelBrowserNetworkOwner = (deps) => {
       : restoreSources().then((ready) => ready || (sourceProjectionLoading
         ? sourceProjectionLoading.then(() => true, () => false) : false)),
     ensureSourceProjection,
-    flowToken: (/** @type {number} */ tabId) => childGeneration(tabId),
+    flowToken(/** @type {number} */ tabId) {
+      const generation = childGeneration(tabId);
+      // why: this method is called only by the synchronous tab-custody owner,
+      // immediately before Firefox's exact request guard observes the child.
+      // The token carries that local proof across Firefox's duplicate tab and
+      // navigation events without trusting browser-serialized event fields.
+      if (deps.firefox === true) firefoxRequestFences.set(tabId, generation);
+      return generation;
+    },
     onCreated(/** @type {any} */ tab) {
       observeAppTab(tab);
       if (typeof tab?.id !== 'number' || typeof tab?.openerTabId !== 'number') {
@@ -604,6 +614,13 @@ export const createKernelBrowserNetworkOwner = (deps) => {
       const generation = childGeneration(tab.id, tab.flowToken);
       deps.beginOutcome?.(tab.openerTabId, tab.id, generation);
       const event = { ...tab, flowToken: generation };
+      if (deps.firefox === true && firefoxRequestFences.get(tab.id) !== generation
+          && typeof deps.guardFirefoxChildRequest === 'function') {
+        deps.guardFirefoxChildRequest({
+          tabId: tab.id, sourceTabId: tab.openerTabId, flowToken: generation,
+        });
+        firefoxRequestFences.set(tab.id, generation);
+      }
       return provenCall('onCreated', [event], async () => {
         const contained = await (deps.startupGuard?.adopt(
           tab.openerTabId, tab.id, generation) ?? false);
@@ -611,7 +628,8 @@ export const createKernelBrowserNetworkOwner = (deps) => {
         return contained;
       },
       (cause, contained) => handleGuardedFailure(event, cause, generation, contained),
-      () => deps.startupGuard?.isGuarded?.(tab.id, generation) === true,
+      () => firefoxRequestFences.get(tab.id) === generation
+        || deps.startupGuard?.isGuarded?.(tab.id, generation) === true,
       () => handleAbsentProof(event, generation, 'onCreated', [event]))
         .catch((cause) => handleUncontainedFailure(event, cause, generation))
         .finally(() => { deps.settleOutcome?.(tab.openerTabId, tab.id, generation); });
@@ -631,7 +649,8 @@ export const createKernelBrowserNetworkOwner = (deps) => {
         return contained;
       },
       (cause, contained) => handleGuardedFailure(event, cause, generation, contained),
-      () => deps.startupGuard?.isGuarded?.(details.tabId, generation) === true,
+      () => firefoxRequestFences.get(details.tabId) === generation
+        || deps.startupGuard?.isGuarded?.(details.tabId, generation) === true,
       () => handleAbsentProof(event, generation, 'onNavigationTarget', [event]))
         .catch((cause) => handleUncontainedFailure(event, cause, generation))
         .finally(() => {
@@ -647,8 +666,13 @@ export const createKernelBrowserNetworkOwner = (deps) => {
     },
     onRemoved(/** @type {number} */ tabId) {
       appTabs.delete(tabId);
+      // why: the controller relay can already be retired when Firefox delivers
+      // the close event. Remove dead source evidence in the kernel before the
+      // network authority resyncs, or DNR custody can retain a closed tab.
+      restoredSources?.delete(tabId);
       const generation = childGenerations.get(tabId);
       childGenerations.delete(tabId);
+      firefoxRequestFences.delete(tabId);
       const released = deps.startupGuard?.release(tabId, generation) ?? Promise.resolve();
       deps.releaseOutcome?.(tabId);
       return Promise.resolve(released).then(() => authority
@@ -723,8 +747,18 @@ export const createKernelTabCustody = (deps) => {
     const handled = await network(name, args);
     return Promise.all([handled, liveResult]);
   };
+  const fenceFirefoxChild = (/** @type {any} */ details) => {
+    const flowToken = deps.network?.flowToken?.(details.tabId);
+    const ingress = flowToken ? { ...details, flowToken } : details;
+    deps.child.onNavigationTarget(ingress);
+    return ingress;
+  };
   return Object.freeze({
-    onCreated: (/** @type {any} */ tab) => event('onCreated', [tab]),
+    onCreated: (/** @type {any} */ tab) => {
+      const ingress = deps.firefox === true && typeof tab?.openerTabId === 'number'
+        ? fenceFirefoxChild({ ...tab, sourceTabId: tab.openerTabId }) : tab;
+      return event('onCreated', [ingress]);
+    },
     onUpdated: (/** @type {number} */ tabId, /** @type {any} */ changeInfo,
       /** @type {any} */ tab) => event('onUpdated', [tabId, changeInfo, tab]),
     onRemoved: (/** @type {number} */ tabId, /** @type {any} */ removeInfo) => {
@@ -733,9 +767,7 @@ export const createKernelTabCustody = (deps) => {
     },
     onActivated: (/** @type {any} */ activeInfo) => live('onActivated', [activeInfo]),
     onNavigationTarget: (/** @type {any} */ details) => {
-      const flowToken = deps.network?.flowToken?.(details?.tabId);
-      const ingress = flowToken ? { ...details, flowToken } : details;
-      deps.child.onNavigationTarget(ingress);
+      const ingress = fenceFirefoxChild(details);
       const custody = event('onNavigationTarget', [ingress]);
       void custody.then(() => deps.child.resolveNavigationTarget(ingress), () => {});
       return custody;

@@ -129,7 +129,7 @@ export const scriptTool = composeTool("script", {
       }
       // Value spill (run cache): when the serialized [VALUE] overflows its cap,
       // store the FULL text keyed by this run/tool-use, stamped with the owning
-      // session and the run's FENCE state — read_result re-applies exactly
+      // session and the run's FENCE state: read_result re-applies exactly
       // that fencing when paging it back. Best-effort: a failed spill leaves
       // the truncation note alone (today's behavior).
       /** @type {{ key: string, total: number } | undefined} */
@@ -141,7 +141,7 @@ export const scriptTool = composeTool("script", {
           const key = await authority.spillScriptValue({
             fenced: runIsFenced(result), originLabel, text: sv.text,
           });
-          // The store caps what it keeps (result-store.js MAX_SPILL_TEXT_CHARS) —
+          // The store caps what it keeps (result-store.js MAX_SPILL_TEXT_CHARS) :
           // report the STORED length so the footer never advertises pages that
           // don't exist.
           valueSpill = { key, total: Math.min(sv.text.length, MAX_SPILL_TEXT_CHARS) };
@@ -273,7 +273,7 @@ export const formatRunResult = (code, r, valueSpill, serializedValue) => {
   if (valueSpill) {
     lines.push([
       `[paging] The [VALUE] (${valueSpill.total} chars) is stored locally.`,
-      `Read more with read_result { "key": "${valueSpill.key}", "offset": <char offset>, "limit": <chars, max ${RESULT_PAGE_CHARS}> } — but prefer re-running with a more compact return value.`,
+      `Read more with read_result { "key": "${valueSpill.key}", "offset": <char offset>, "limit": <chars, max ${RESULT_PAGE_CHARS}> }; but prefer re-running with a more compact return value.`,
     ].join('\n'));
   }
   return lines.join('\n');

@@ -41,19 +41,33 @@ describe('kernel semantic control', () => {
     expect(calls).toBe(0);
   });
 
-  test('injects actor state without accepting it from the message', async () => {
-    let sent: any;
+  test('returns actor authority state directly without accepting it from the message', async () => {
+    let semanticCalls = 0;
     const control = createKernelSemanticControl({
-      callSemantic: async (payload: any) => { sent = payload; return { ok: true }; },
+      callSemantic: async () => { semanticCalls += 1; return { ok: true }; },
       isHomeSender: () => true,
       vault: { isLocked: () => false },
       authority: { handle: () => ({ ok: true }) },
       actorCount: () => ({ activeActors: 4 }),
       routes: ['actors/count'],
     });
-    await control.routes['actors/count']({ kernelContext: { activeActors: 99 } }, {});
-    expect(sent.message.kernelContext).toEqual({ activeActors: 4 });
-    expect(control.authorize(sent)).toMatchObject({ replayClass: 'A' });
+    expect(await control.routes['actors/count']({ kernelContext: { activeActors: 99 } }, {}))
+      .toEqual({ ok: true, activeActors: 4 });
+    expect(semanticCalls).toBe(0);
+  });
+
+  test('preserves an authority projection failure instead of wrapping it as success', async () => {
+    const control = createKernelSemanticControl({
+      callSemantic: async () => { throw new Error('unused'); },
+      isHomeSender: () => true,
+      vault: { isLocked: () => false },
+      authority: { handle: () => ({ ok: true }) },
+      actorOverview: () => ({ ok: false, code: 'kernel-turn-runtime-load-timeout' }),
+      routes: ['actors/overview'],
+    });
+    expect(await control.routes['actors/overview']({}, {})).toEqual({
+      ok: false, code: 'kernel-turn-runtime-load-timeout',
+    });
   });
 
   test('keeps large local authority reads outside the controller channel', async () => {

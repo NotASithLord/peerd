@@ -413,6 +413,22 @@ describe('production semantic controller slice', () => {
       supportedCaps: ['prompt.render', 'turn.run'],
       loadController,
     });
+    let leaseUsers = 0;
+    let sharedLease: ReturnType<typeof nextTestControllerLease> | null = null;
+    const withControllerLease = async <T>(
+      operation: (lease?: unknown) => Promise<T>,
+    ): Promise<T> => {
+      sharedLease ??= nextTestControllerLease();
+      leaseUsers += 1;
+      try { return await operation(sharedLease); }
+      finally {
+        leaseUsers -= 1;
+        if (leaseUsers === 0) {
+          sharedLease = null;
+          offerHandler.release();
+        }
+      }
+    };
     const semantic = makeSemanticControllerClient({
       browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
       ensureOffscreen: async () => {},
@@ -424,7 +440,7 @@ describe('production semantic controller slice', () => {
         origin: null, target: 'orchestrator-turn', replayClass: 'E',
       }),
       handleTurnKernelCall: async () => ({ ok: true }),
-      withControllerLease: (operation) => operation(nextTestControllerLease()),
+      withControllerLease,
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
       listWindowClients: async () => [{
         url: offscreenUrl,
@@ -450,6 +466,90 @@ describe('production semantic controller slice', () => {
     expect({ offers, loads, closes }).toEqual({ offers: 1, loads: 1, closes: 1 });
   });
 
+  test('an externally held exact lease keeps one client across local semantic gaps', async () => {
+    const workerUrl = 'chrome-extension://test/background/service-worker.js';
+    const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
+    let offers = 0;
+    let loads = 0;
+    let closes = 0;
+    let loaded: Promise<any> | null = null;
+    const loadController = Object.assign(
+      () => {
+        loaded ??= Promise.resolve(createController({ handlers: {
+          'prompt.render': async () => ({ ok: true, prompt: 'held prompt', outcomeKnown: true }),
+        } })).then((controller) => {
+          loads += 1;
+          return controller;
+        });
+        return loaded;
+      },
+      { close: () => { closes += 1; loaded = null; } },
+    );
+    const offerHandler = makeControllerOfferHandler({
+      expectedWorkerUrl: workerUrl,
+      expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
+      supportedCaps: ['prompt.render'],
+      loadController,
+    });
+    let leaseUsers = 0;
+    let sharedLease: ReturnType<typeof nextTestControllerLease> | null = null;
+    const withControllerLease = async <T>(
+      operation: (lease?: unknown) => Promise<T>,
+    ): Promise<T> => {
+      sharedLease ??= nextTestControllerLease();
+      leaseUsers += 1;
+      try { return await operation(sharedLease); }
+      finally {
+        leaseUsers -= 1;
+        if (leaseUsers === 0) {
+          sharedLease = null;
+          offerHandler.release();
+        }
+      }
+    };
+    let releaseExternal = () => {};
+    let noteExternalStarted = () => {};
+    const externalStarted = new Promise<void>((resolve) => { noteExternalStarted = resolve; });
+    const externalGate = new Promise<void>((resolve) => { releaseExternal = resolve; });
+    const externalHold = withControllerLease(async () => {
+      noteExternalStarted();
+      await externalGate;
+    });
+    await externalStarted;
+
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: false, dwebEnabled: false, withControllerLease,
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (data: unknown, transfer: Transferable[]) => {
+          offers += 1;
+          offerHandler({
+            isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+          } as unknown as MessageEvent);
+        },
+      }],
+    });
+
+    await expect(semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
+      .resolves.toBe('held prompt');
+    await expect(semantic.renderSystemPrompt({ actorType: 'web' }))
+      .resolves.toBe('held prompt');
+    expect({ offers, loads, closes }).toEqual({ offers: 1, loads: 1, closes: 0 });
+
+    releaseExternal();
+    await externalHold;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closes).toBe(1);
+    await expect(semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
+      .resolves.toBe('held prompt');
+    expect({ offers, loads }).toEqual({ offers: 2, loads: 2 });
+    semantic.close();
+    offerHandler.close();
+  });
+
   test('a semantic startup retry releases its lease user before the next call', async () => {
     const workerUrl = 'chrome-extension://test/background/service-worker.js';
     const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
@@ -470,7 +570,9 @@ describe('production semantic controller slice', () => {
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
       listWindowClients: async () => {
         discoveries += 1;
-        if (discoveries <= 2) return [];
+        // One failed discovery consumes the first exact lease. The outer
+        // retry must reacquire a fresh lease before the next discovery.
+        if (discoveries === 1) return [];
         return [{
           url: offscreenUrl,
           postMessage: (data: unknown, transfer: Transferable[]) => {
@@ -620,7 +722,7 @@ describe('production semantic controller slice', () => {
       fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
       listWindowClients: async () => {
         discoveries += 1;
-        if (discoveries <= 2) return [];
+        if (discoveries === 1) return [];
         return [{
           url: offscreenUrl,
           postMessage: (data: unknown, transfer: Transferable[]) => {
@@ -635,9 +737,61 @@ describe('production semantic controller slice', () => {
     await expect(semantic.callFeature({
       cluster: 'support', route: 'session/list', dispatchId: 'feature-read-1', message: {},
     })).resolves.toMatchObject({ ok: true, value: { rows: [] } });
-    expect({ discoveries, leases, calls }).toEqual({ discoveries: 3, leases: 2, calls: 1 });
+    expect({ discoveries, leases, calls }).toEqual({ discoveries: 2, leases: 2, calls: 1 });
     semantic.close();
     offerHandler.close();
+  });
+
+  test('tool projection preserves an exact known host refusal without replay', async () => {
+    let calls = 0;
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      connectDirectController: async () => ({
+        call: async (capability: string) => {
+          expect(capability).toBe('turn.tools.project');
+          calls += 1;
+          return { ok: false, code: 'projection-policy-refused', outcomeKnown: true };
+        },
+        close() {},
+      } as any),
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+
+    await expect(semantic.projectTurnTools({ surface: 'actor', actorType: 'web' }))
+      .rejects.toMatchObject({
+        message: 'projection-policy-refused',
+        code: 'projection-policy-refused', outcomeKnown: true,
+      });
+    expect(calls).toBe(1);
+    semantic.close();
+  });
+
+  test('tool projection forwards an already-aborted turn without opening a call', async () => {
+    let calls = 0;
+    const controller = new AbortController();
+    controller.abort();
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      connectDirectController: async () => ({
+        call: async () => {
+          calls += 1;
+          return { ok: true, tools: [], operations: [] };
+        },
+        close() {},
+      } as any),
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    await expect(semantic.projectTurnTools(
+      { surface: 'actor' }, { signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(0);
+    semantic.close();
   });
 
   test('Firefox carries all session support routes through the sealed controller', async () => {
@@ -793,16 +947,18 @@ describe('production semantic controller slice', () => {
     expect({ starts, stops }).toEqual({ starts: 2, stops: 2 });
   });
 
-  test('a failed lazy controller realm is retired before the visible startup failure returns', async () => {
-    const retirements: string[] = [];
+  test('a failed lazy controller realm settles only its exact feature leases', async () => {
+    let leaseSettlements = 0;
     const semantic = makeSemanticControllerClient({
       browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
       ensureOffscreen: async () => {},
       offscreenUrl: 'offscreen/offscreen.html',
       firefoxDirect: false,
       dwebEnabled: false,
-      withControllerLease: (operation) => operation(nextTestControllerLease()),
-      retireHost: async (reason) => { retirements.push(reason); },
+      withControllerLease: async (operation) => {
+        try { return await operation(nextTestControllerLease()); }
+        finally { leaseSettlements += 1; }
+      },
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
       listWindowClients: async () => [{
         url: 'chrome-extension://test/offscreen/offscreen.html',
@@ -827,10 +983,7 @@ describe('production semantic controller slice', () => {
         code: 'controller-prompt-startup-failed',
         outcomeKnown: true, phase: 'startup', retryable: true,
       });
-    expect(retirements).toEqual([
-      'controller-host-startup-failed',
-      'controller-host-startup-failed',
-    ]);
+    expect(leaseSettlements).toBe(2);
   });
 
   test('a module-load timeout retires the Chrome and Firefox controller generation', async () => {
@@ -1068,16 +1221,12 @@ describe('production semantic controller slice', () => {
     client.close();
   });
 
-  test('Chrome waits for exact host retirement before opening a successor generation', async () => {
+  test('Chrome retries a failed controller lease on the same physical host', async () => {
     const workerUrl = 'chrome-extension://test/background/vault-kernel.js';
     const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
     let connections = 0;
-    let retirements = 0;
-    let releaseRetirement = () => {};
-    let retirementStarted = () => {};
-    const retiring = new Promise<void>((resolve) => { releaseRetirement = resolve; });
-    const started = new Promise<void>((resolve) => { retirementStarted = resolve; });
-    let retired = false;
+    let leaseSettlements = 0;
+    let firstLeaseId = '';
     const offerHandler = makeControllerOfferHandler({
       expectedWorkerUrl: workerUrl,
       expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
@@ -1097,17 +1246,32 @@ describe('production semantic controller slice', () => {
         origin: null, target: 'semantic:provider/status:first-party', replayClass: 'A',
       }),
       handleSemanticKernelCall: async () => ({ ok: true }),
-      retireHost: async () => {
-        retirements += 1;
-        retirementStarted();
-        await retiring;
-        retired = true;
+      withControllerLease: async (operation) => {
+        const lease = nextTestControllerLease();
+        firstLeaseId ||= lease.leaseId;
+        try { return await operation(lease); }
+        finally { leaseSettlements += 1; }
       },
       listWindowClients: async () => [{
         url: offscreenUrl,
-        postMessage: (data: unknown, transfer: Transferable[]) => {
+        postMessage: (data: any, transfer: Transferable[]) => {
           connections += 1;
-          if (retired) offerHandler({
+          if (data.lease.leaseId === firstLeaseId) {
+            const port = transfer[0] as MessagePort;
+            port.postMessage({
+              protocol: data.protocol,
+              channelId: data.channelId,
+              buildDigest: data.buildDigest,
+              kernelEpoch: data.kernelEpoch,
+              hostEpoch: null,
+              sequence: 1,
+              type: 'controller/unavailable',
+              code: 'controller-host-load-failed',
+            });
+            port.close();
+            return;
+          }
+          offerHandler({
             isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
           } as unknown as MessageEvent);
         },
@@ -1115,18 +1279,8 @@ describe('production semantic controller slice', () => {
       fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
     });
     const payload = { protocol: 1, route: 'provider/status', message: {} };
-    const first = client.callSemantic(payload);
-    await started;
-    const second = client.callSemantic(payload);
-    await Promise.resolve();
-    expect({ connections, retirements }).toEqual({ connections: 1, retirements: 1 });
-    releaseRetirement();
-    await expect(Promise.all([first, second])).resolves.toEqual([
-      { ok: true, generation: 2 }, { ok: true, generation: 2 },
-    ]);
-    // The concurrent caller owns generation 2; the original replay-safe call
-    // retries after that bounded lease settles and therefore opens generation 3.
-    expect(connections).toBe(3);
+    await expect(client.callSemantic(payload)).resolves.toEqual({ ok: true, generation: 2 });
+    expect({ connections, leaseSettlements }).toEqual({ connections: 2, leaseSettlements: 2 });
     client.close();
     offerHandler.close();
   });

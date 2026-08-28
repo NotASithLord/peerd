@@ -14,7 +14,7 @@ const makePort = (name = 'sidepanel') => {
 };
 
 describe('kernel UI Port owner', () => {
-  test('synchronously takes custody and replays every non-snapshot live projection', async () => {
+  test('takes custody and replays every non-snapshot live projection after hydration', async () => {
     const uiPorts = makeUiPorts();
     const calls: string[] = [];
     const port = makePort();
@@ -31,6 +31,8 @@ describe('kernel UI Port owner', () => {
     });
     expect(owner.attach(port)).toBeUndefined();
     expect(uiPorts.hasNamed('sidepanel')).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
     expect(calls).toEqual(['state', 'surfaces', 'agent-tab', 'update']);
     expect(calls.filter((call) => call === 'state')).toHaveLength(1);
     expect(port.messages).toEqual([
@@ -83,12 +85,14 @@ describe('kernel UI Port owner', () => {
     expect(hints).toEqual([]);
   });
 
-  test('takes custody without waiting for state or live-runtime hydration', async () => {
+  test('captures live state immediately but publishes it only after snapshot hydration', async () => {
     const uiPorts = makeUiPorts();
     let settleState = () => {};
     let settleRuntime = () => {};
     const state = new Promise<void>((resolve) => { settleState = resolve; });
     const runtime = new Promise<void>((resolve) => { settleRuntime = resolve; });
+    let runtimeStarted = false;
+    let runtimePublished = false;
     const port = makePort();
     const owner = createKernelUiPortOwner({
       uiPorts,
@@ -96,13 +100,23 @@ describe('kernel UI Port owner', () => {
       broadcastSurfaces: () => {},
       broadcastAgentTab: () => {},
       activeGoalStates: () => [{ type: 'goal/state', sessionId: 'live' }],
-      onUiConnect: () => runtime,
+      onUiConnect: async (_port: any, hydrated: Promise<unknown>) => {
+        runtimeStarted = true;
+        await hydrated;
+        runtimePublished = true;
+        return runtime;
+      },
     });
 
     expect(owner.attach(port)).toBeUndefined();
     expect(uiPorts.hasNamed('sidepanel')).toBe(true);
     expect(port.messages).toEqual([{ type: 'goal/state', sessionId: 'live' }]);
+    expect(runtimeStarted).toBe(true);
+    expect(runtimePublished).toBe(false);
     settleState();
+    await state;
+    await Promise.resolve();
+    expect(runtimePublished).toBe(true);
     settleRuntime();
     await Promise.all([state, runtime]);
   });

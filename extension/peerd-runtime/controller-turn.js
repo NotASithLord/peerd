@@ -89,5 +89,6 @@ export {
   controllerHostsTool,
   controllerOperationsForTools,
   controllerOperationsForSpawnedTools,
+  controllerToolNamesForSpawnedTools,
 } from './controller-tool-ownership.js';
 export { planToolsCommand } from './tools/manifest-command.js';

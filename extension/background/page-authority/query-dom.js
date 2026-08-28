@@ -1,7 +1,7 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// query_dom — selector-based DOM probe.
+// query_dom: selector-based DOM probe.
 //
 // read_page is comprehensive but expensive: it walks the body, returns
 // a text snapshot, and caps interactables at 100. On a heavy SPA
@@ -10,7 +10,7 @@ import { definePageAuthorityHandler } from './handler.js';
 // for "Mark as read" never makes the cut.
 //
 // query_dom solves that: take a CSS selector, return up to N matches
-// with the bits that matter for picking ONE — label, visibility,
+// with the bits that matter for picking ONE: label, visibility,
 // bbox, common attributes. Cheap to call (sub-KB results), surgical,
 // and lets the agent iterate selectors against reality without paying
 // for a full body scrape.
@@ -129,7 +129,7 @@ const formatBody = (snap, selector, includeHidden) => {
 };
 
 // ───────────────────────────────────────────────────────────────────────
-// Injected function — runs in the page world. Self-contained, strict.
+// Injected function: runs in the page world. Self-contained, strict.
 // ───────────────────────────────────────────────────────────────────────
 /**
  * @param {string} selector
@@ -211,7 +211,7 @@ function queryDomInjected(selector, limit, includeHidden) {
       type: (el.tagName === 'INPUT' || el.tagName === 'BUTTON') ? (el.getAttribute('type') || '') : '',
       name: el.getAttribute('name') || '',
       testid: el.getAttribute('data-testid') || '',
-      // why: erased cast — the tagName guard already constrained el to a
+      // why: erased cast: the tagName guard already constrained el to a
       // value-bearing control; HTMLElement has no `value`.
       value: (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? (/** @type {HTMLInputElement} */ (el).value || '').slice(0, 80) : '',
       bbox: formatBbox(rect),

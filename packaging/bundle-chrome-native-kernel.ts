@@ -17,14 +17,17 @@ export const CHROME_NATIVE_KERNEL_ENTRIES = Object.freeze([
 
 export const NATIVE_CHROME_BUNDLE_RATCHETS = Object.freeze({
   'background/vault-kernel-chrome.js': Object.freeze({
-    bytes: 1_220_360,
-    inputs: 396,
-    inputSha256: 'c51755505453e1384498f571772bc006dd27253881da630c9f1de7b2035e84bf',
+    // Exact controller/actor lifecycle settlement, isolation admission and
+    // stale-generation recovery remain fixed authority work. Tool semantics
+    // remain outside this closure. Exact achieved bytes, no headroom.
+    bytes: 1_330_688,
+    inputs: 405,
+    inputSha256: 'dca3599f9d85831d377b1d0660386ded50dcc59b35599fd7534e6acf89205949',
   }),
   'background/vault-kernel-preview.js': Object.freeze({
-    bytes: 1_284_116,
-    inputs: 401,
-    inputSha256: 'f0cd5828da10deb3b3fb925a5c605ed56d81e430a917e5b4509c68593bd19059',
+    bytes: 1_411_335,
+    inputs: 411,
+    inputSha256: 'ec980822145adf06bb9d4fe427e966bcc6fbd79a36fa611ec7aa6a96c9fa5dec',
   }),
 });
 

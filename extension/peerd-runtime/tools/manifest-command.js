@@ -38,7 +38,7 @@ export const planToolsCommand = (rawArg, currentManifest) => {
       action: 'note',
       note: allow
         ? `Tool manifest active for this chat: ${manifestLabel(currentManifest)} (${allow.size} tools exposed). ${USAGE}`
-        : `No tool manifest set — the default tool surface is exposed. ${USAGE}`,
+       : `No tool manifest set: the default tool surface is exposed. ${USAGE}`,
     });
   }
   if (/^list$/i.test(arg)) {
@@ -47,7 +47,7 @@ export const planToolsCommand = (rawArg, currentManifest) => {
   if (/^(full|clear)$/i.test(arg)) {
     return Object.freeze({
       action: 'clear',
-      note: 'Tool manifest cleared — the default tool surface is exposed again.',
+      note: 'Tool manifest cleared: the default tool surface is exposed again.',
       auditType: 'tool_manifest_cleared',
     });
   }
@@ -61,7 +61,7 @@ export const planToolsCommand = (rawArg, currentManifest) => {
   }
   return Object.freeze({
     action: 'set', manifest: Object.freeze({ preset: name }),
-    note: `Tool manifest set for this chat: ${name} — ${preset.description} (${preset.allow.length} tools). "/tools full" restores the default surface.`,
+    note: `Tool manifest set for this chat: ${name}: ${preset.description} (${preset.allow.length} tools). "/tools full" restores the default surface.`,
     auditType: 'tool_manifest_set', preset: name,
   });
 };
@@ -73,7 +73,7 @@ export const planToolsCommand = (rawArg, currentManifest) => {
 export const describePresets = () => {
   const lines = Object.entries(TOOL_MANIFEST_PRESETS).map(([name, p]) =>
     `/tools ${name} — ${p.description} (${p.allow.length} tools)`);
-  lines.push('/tools full — the default tool surface');
+  lines.push('/tools full: the default tool surface');
   return lines.join('\n');
 };
 

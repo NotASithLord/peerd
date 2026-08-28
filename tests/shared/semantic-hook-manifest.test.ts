@@ -37,6 +37,7 @@ describe('semantic hook manifest', () => {
       '../../extension/background/kernel-turn-authority-adapter.js'), 'utf8');
     expect(mainSource).toContain('.then(projectSemanticHookManifest)');
     expect(actorSource.match(/\.then\(projectSemanticHookManifest\)/g)).toHaveLength(2);
+    expect(actorSource).toContain("(await deps.kv.get('hooks.user.v1')) ?? []");
   });
 
   test('disabled prose and executable bodies never enter the semantic realm', () => {

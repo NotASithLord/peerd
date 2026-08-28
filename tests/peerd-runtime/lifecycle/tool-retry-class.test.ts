@@ -1,6 +1,6 @@
 // Tool → retry class: the derivation rules, and §16.1's inventory obligation
 // ("every side-effecting tool has a retry classification") asserted against the
-// REAL authority inventory rather than a hand-copied one — so a new tool
+// REAL authority inventory rather than a hand-copied one, so a new tool
 // that lands without a considered class fails here, not in production recovery.
 
 import { describe, test, expect } from 'bun:test';
@@ -107,7 +107,7 @@ describe('garbage in, Class E out', () => {
   });
 });
 
-describe('§16.1 — the whole controller inventory is classified', () => {
+describe('§16.1: the whole controller inventory is classified', () => {
   test('the inventory actually loaded', () => {
     expect(ALL_TOOLS.length).toBeGreaterThan(50);
     expect(byName.size).toBe(ALL_TOOLS.length);
@@ -135,7 +135,7 @@ describe('§16.1 — the whole controller inventory is classified', () => {
     for (const tool of destructive) expect(retryClassForTool(tool)).toBe('E');
   });
 
-  test('the override table has no dead entries — every name is a controller tool', () => {
+  test('the override table has no dead entries: every name is a controller tool', () => {
     const dead = Object.keys(RETRY_CLASS_OVERRIDES).filter((name) => !byName.has(name));
     expect(dead).toEqual([]);
   });

@@ -67,7 +67,9 @@ import {
 import { normalizeToolManifest } from '/peerd-runtime/tools/manifests.js';
 import { compileUserHook } from '/peerd-runtime/tools/hooks/compile.js';
 import { orderAlwaysLoaded, assembleAlwaysLoaded } from '/peerd-runtime/memory/memory.js';
-import { inspectImport, EXPORT_FORMAT } from '/peerd-runtime/transfer/transfer.js';
+import {
+  inspectImport, portableHookDisposition, EXPORT_FORMAT,
+} from '/peerd-runtime/transfer/transfer.js';
 import { runMigration, guardStore } from '/peerd-runtime/lifecycle/store-version.js';
 import { checkStores, storeEntry, STORE_REGISTRY } from '/peerd-runtime/lifecycle/store-registry.js';
 import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
@@ -321,17 +323,13 @@ describe('tool manifests — culled tool names are kept, not scrubbed', () => {
 // ── 4. old hook + memory records ──────────────────────────────────────────
 
 describe.each(FIXTURES)('$name — hooks and memory docs', ({ data }) => {
-  test('declarative hooks compile while legacy executable records fail closed', () => {
+  test('retired regex and executable hooks remain records but never compile', () => {
     for (const record of data.hooks) {
-      if (record.kind === 'js') {
-        expect(() => compileUserHook(record as any)).toThrow(/executable JS hooks are not supported/);
-        continue;
-      }
-      const compiled = compileUserHook(record as any);
-      expect(compiled.id).toBe(record.id);
-      expect(compiled.enabled).toBe(record.enabled !== false);
-      expect(compiled._record).toEqual(record as any);
-      expect((compiled._record as Rec).unknownHookFieldFromANewerBuild).toBe('keep-me');
+      expect(portableHookDisposition(record)).toBe(
+        record.kind === 'js' ? 'legacy-js' : 'legacy-regex',
+      );
+      expect(() => compileUserHook(record as any)).toThrow();
+      expect(record.unknownHookFieldFromANewerBuild).toBe('keep-me');
     }
   });
 
@@ -351,7 +349,11 @@ describe.each(FIXTURES)('$name — hooks and memory docs', ({ data }) => {
 
 const KNOWN_SETTING_KEYS = Object.keys(CHANNEL_DEFAULTS);
 
-describe.each(FIXTURES)('$name — the export envelope this release wrote', ({ data }) => {
+// why: these nested envelope samples preserved only hook labels, not the
+// bounded records required by today's untrusted-import gate. They are useful
+// malformed fixtures, but cannot prove settings, durability, or dweb summaries;
+// production-shaped payloads own those contracts in transfer.test.ts.
+describe.each(FIXTURES)('$name: the historical export envelope', ({ data }) => {
   const envelope = () => data.exportEnvelope;
 
   test('the historical format/version remains intact', () => {
@@ -359,82 +361,20 @@ describe.each(FIXTURES)('$name — the export envelope this release wrote', ({ d
     expect(envelope().version).toBe(1);
   });
 
-  test('inspectImport accepts it and the summary is sane', () => {
+  test('incomplete hook snapshots fail closed before any import summary', () => {
+    expect(envelope().hooks.length).toBeGreaterThan(0);
+    expect(envelope().hooks.every((hook: Rec) => portableHookDisposition(hook) === 'invalid'))
+      .toBe(true);
     const result = inspectImport({
       payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
     });
-    expect(result.ok).toBe(true);
-    // narrow inspectImport's union for TS — expect() does not (same idiom as
-    // tests/peerd-runtime/transfer/transfer.test.ts).
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    const { summary } = result;
-    expect(summary.exportedAt).toBe(envelope().exportedAt);
-    expect(summary.sourceChannel).toBe(envelope().channel);
-    expect(summary.memoryDocs).toBe(envelope().memory.docs.length);
-    expect(summary.hooks).toBe(envelope().hooks.length);
-    expect(summary.skills).toHaveLength(envelope().skills.length);
-    for (const notice of summary.notices) expect(typeof notice).toBe('string');
+    expect(result).toEqual({ ok: false, error: 'invalid-export-sections' });
   });
 
-  test('every settings key is ACCOUNTED FOR — kept or declared dropped, never silently gone', () => {
-    const result = inspectImport({
-      payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    const accounted = [...result.summary.settingsKeys, ...result.summary.settingsDropped].sort();
-    expect(accounted).toEqual(Object.keys(envelope().settings).sort());
-    // A drop is only legitimate if the user is TOLD about it.
-    if (result.summary.settingsDropped.length > 0) {
-      expect(result.summary.notices.some((n) => n.includes('not recognized by this build'))).toBe(true);
-      for (const key of result.summary.settingsDropped) {
-        expect(result.summary.notices.join(' ')).toContain(key);
-      }
-    }
-  });
-
-  test('§12 durability labels are absent, which means "unlabelled" — not "nothing was omitted"', () => {
-    // The durability block landed in 70f6e42 (2026-08-05); none of these files
-    // carry it. Absent must read as empty defaults with NO omission notice.
-    expect(envelope().durability).toBeUndefined();
-    const result = inspectImport({
-      payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    expect(result.summary.durabilityTiers).toEqual({});
-    expect(result.summary.omittedDeviceBound).toEqual([]);
-    expect(result.summary.notices.some((n) => n.includes('Device-bound state'))).toBe(false);
-  });
-
-  test('the authority-redirecting sections are named loudly (R6)', () => {
-    const result = inspectImport({
-      payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    const expectedUrls = (envelope().providerEndpoints?.endpoints ?? []).map((e: Rec) => e.url);
-    if (envelope().settings?.ollamaHost) expectedUrls.push(new URL(envelope().settings.ollamaHost).origin);
-    expect(result.summary.endpointUrls).toEqual(expectedUrls);
-    expect(result.summary.hookIds).toEqual(envelope().hooks.map((h: Rec) => h.id));
-  });
-});
-
-describe('the v0.2.2 preview export landing on a store build', () => {
-  const envelope = FIXTURES[1]!.data.exportEnvelope;
-
-  test('the dweb section is dropped WITH the §10 notice, never silently', () => {
-    const result = inspectImport({
-      payload: envelope, channel: 'store', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    expect(result.summary.dwebPresent).toBe(true);
-    expect(result.summary.dwebDropped).toBe(true);
-    expect(result.summary.notices).toContain(
-      'Dweb state in this export is not supported in the store package and was skipped.');
-  });
-
-  test('inspectImport does not mutate the payload it inspects', () => {
-    const before = JSON.stringify(envelope);
-    inspectImport({ payload: envelope, channel: 'store', knownSettingKeys: KNOWN_SETTING_KEYS });
-    expect(JSON.stringify(envelope)).toBe(before);
+  test('failed inspection does not mutate the historical payload', () => {
+    const before = JSON.stringify(envelope());
+    inspectImport({ payload: envelope(), channel: 'store', knownSettingKeys: KNOWN_SETTING_KEYS });
+    expect(JSON.stringify(envelope())).toBe(before);
   });
 });
 
@@ -634,16 +574,15 @@ describe.each(FIXTURES)('$name — byte-anchored no-loss sweep', ({ data, text }
 // The fixtures above all stop at 0.2.8, and each is a SINGLE release's
 // output. Two gaps follow from that, and these two files close them:
 //
-//   fixtures/profile-v0.4.0.json   the CURRENT release (86aaa0a, 0.4.0 —
-//     package.json). Everything above tests "can today's build read an OLD
-//     profile"; nothing tested "can today's build read ITS OWN". It carries
-//     the modern field set (todos / prewalk / toolManifest /
+//   fixtures/profile-v0.4.0.json   a historical 0.4.0 record-shape sample
+//     (86aaa0a). It extends the older samples through todos / prewalk /
+//     toolManifest /
 //     originState / backing / grantedTools / spawnedTrusted), settings whose
 //     values are deliberately NON-default (§11 Option A: a stored value wins
 //     over CHANNEL_DEFAULTS, so an all-defaults fixture proves nothing), and
-//     the first export envelope carrying the §12 `durability` block
-//     (70f6e42) — the tier labels + the device-bound surfaces an export
-//     structurally cannot carry.
+//     a deliberately malformed later export-envelope sample carrying the §12
+//     `durability` block. Its incomplete hook entries exercise fail-closed
+//     import handling; they are not claimed as production buildExport output.
 //
 //   fixtures/profile-maximal-historical.json   a COMPOSITE torture profile,
 //     labelled as one in its own `_provenance` (it is NOT a release
@@ -658,12 +597,11 @@ describe.each(FIXTURES)('$name — byte-anchored no-loss sweep', ({ data, text }
 //
 // Both plant `unknown*FromANewerBuild` / `future*` fields throughout.
 
-import { omittedDeviceBoundStores } from '/peerd-runtime/lifecycle/store-registry.js';
 import { HOOKS_STORAGE_KEY } from '/peerd-runtime/tools/hooks/registry.js';
 
-const CURRENT_FIXTURE = { name: 'profile-v0.4.0', ...readFixture('profile-v0.4.0') };
+const V040_FIXTURE = { name: 'profile-v0.4.0', ...readFixture('profile-v0.4.0') };
 const MAXIMAL_FIXTURE = { name: 'profile-maximal-historical', ...readFixture('profile-maximal-historical') };
-const NEW_FIXTURES = [CURRENT_FIXTURE, MAXIMAL_FIXTURE];
+const LATE_FIXTURES = [V040_FIXTURE, MAXIMAL_FIXTURE];
 
 /** The messages a record is EXPECTED to assemble to, whichever storage shape it is in. */
 const expectedMessages = (fixture: Fixture, record: Rec): Rec[] => (Array.isArray(record.messages)
@@ -673,7 +611,7 @@ const expectedMessages = (fixture: Fixture, record: Rec): Rec[] => (Array.isArra
 
 // ── 9a. both new profiles round-trip through today's store with no loss ────
 
-describe.each(NEW_FIXTURES)('$name — store round-trip is lossless', ({ data }) => {
+describe.each(LATE_FIXTURES)('$name: store round-trip is lossless', ({ data }) => {
   test('every record loads, in its own shape, without throwing', async () => {
     const { store } = openStore(data);
     const listed = await store.list();
@@ -821,8 +759,8 @@ describe('profile-maximal-historical — mixed-era lazy v1 → v2 migration', ()
 
 // ── 9c. permissions over the NON-DEFAULT settings + the mixed-era tiers ────
 
-describe('the new fixtures — permission normalization over non-default values', () => {
-  const current = CURRENT_FIXTURE.data;
+describe('the later fixtures: permission normalization over non-default values', () => {
+  const current = V040_FIXTURE.data;
   const maximal = MAXIMAL_FIXTURE.data;
 
   test('the settings really are non-default — otherwise this proves nothing (§11 Option A)', () => {
@@ -887,9 +825,9 @@ describe('the new fixtures — permission normalization over non-default values'
   });
 });
 
-// ── 9d. the export envelopes: the §12 durability block finally has a fixture ─
+// ── 9d. later malformed export-envelope snapshots ────────────────────────
 
-describe.each(NEW_FIXTURES)('$name — inspectImport over the export envelope', ({ data }) => {
+describe.each(LATE_FIXTURES)('$name: inspectImport over the export envelope', ({ data }) => {
   const envelope = () => data.exportEnvelope;
 
   test('the historical format/version remains intact', () => {
@@ -897,62 +835,14 @@ describe.each(NEW_FIXTURES)('$name — inspectImport over the export envelope', 
     expect(envelope().version).toBe(1);
   });
 
-  test('inspectImport accepts it and the summary is sane', () => {
+  test('incomplete hook snapshots fail closed before any import summary', () => {
+    expect(envelope().hooks.length).toBeGreaterThan(0);
+    expect(envelope().hooks.every((hook: Rec) => portableHookDisposition(hook) === 'invalid'))
+      .toBe(true);
     const result = inspectImport({
       payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
     });
-    expect(result.ok).toBe(true);
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    const { summary } = result;
-    expect(summary.exportedAt).toBe(envelope().exportedAt);
-    expect(summary.sourceChannel).toBe(envelope().channel);
-    expect(summary.memoryDocs).toBe(envelope().memory.docs.length);
-    expect(summary.hooks).toBe(envelope().hooks.length);
-    expect(summary.skills).toHaveLength(envelope().skills.length);
-    expect(summary.hasSecrets).toBe(true); // both carry an encrypted secrets box
-  });
-
-  test('every settings key is ACCOUNTED FOR — kept or declared dropped, never silently gone', () => {
-    const result = inspectImport({
-      payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    const accounted = [...result.summary.settingsKeys, ...result.summary.settingsDropped].sort();
-    expect(accounted).toEqual(Object.keys(envelope().settings).sort());
-    expect(result.summary.settingsDropped.length).toBeGreaterThan(0); // both plant an unknown key
-    expect(result.summary.notices.some((n) => n.includes('not recognized by this build'))).toBe(true);
-  });
-
-  test('§12 durability labels SURFACE — tiers per section, and the omitted device-bound surfaces', () => {
-    const durability = envelope().durability as Rec;
-    expect(durability).toBeDefined();
-    const result = inspectImport({
-      payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    expect(result.summary.durabilityTiers).toEqual(durability.tiers);
-    expect(Object.keys(result.summary.durabilityTiers).length).toBeGreaterThan(0);
-    expect(result.summary.omittedDeviceBound).toEqual(durability.omittedDeviceBound);
-    // Every name the file omits is a REAL device-bound surface in today's
-    // registry — including the dpop-keys handle store, which can only ever
-    // appear in a fixture as an omission (rung 2 cannot be exported).
-    expect(result.summary.omittedDeviceBound).toContain('dpop-keys');
-    for (const name of result.summary.omittedDeviceBound) {
-      expect(omittedDeviceBoundStores()).toContain(name);
-    }
-    // A silent omission is the failure mode; the notice is the fix.
-    expect(result.summary.notices.some((n) => n.includes('Device-bound state'))).toBe(true);
-  });
-
-  test('the authority-redirecting sections are named loudly (R6)', () => {
-    const result = inspectImport({
-      payload: envelope(), channel: 'preview', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    const expectedUrls = (envelope().providerEndpoints?.endpoints ?? []).map((e: Rec) => e.url);
-    if (envelope().settings?.ollamaHost) expectedUrls.push(new URL(envelope().settings.ollamaHost).origin);
-    expect(result.summary.endpointUrls).toEqual(expectedUrls);
-    expect(result.summary.hookIds).toEqual(envelope().hooks.map((h: Rec) => h.id));
+    expect(result).toEqual({ ok: false, error: 'invalid-export-sections' });
   });
 
   test('inspectImport does not mutate the payload it inspects', () => {
@@ -962,39 +852,17 @@ describe.each(NEW_FIXTURES)('$name — inspectImport over the export envelope', 
   });
 });
 
-describe('the maximal envelope landing on a store build', () => {
-  const envelope = MAXIMAL_FIXTURE.data.exportEnvelope;
-
-  test('the dweb section drops WITH the §10 notice, and the durability labels still surface', () => {
-    const result = inspectImport({
-      payload: envelope, channel: 'store', knownSettingKeys: KNOWN_SETTING_KEYS,
-    });
-    if (!result.summary) throw new Error(`expected ok result: ${result.error}`);
-    expect(result.summary.dwebPresent).toBe(true);
-    expect(result.summary.dwebDropped).toBe(true);
-    expect(result.summary.notices).toContain(
-      'Dweb state in this export is not supported in the store package and was skipped.');
-    // Two independent disclosures, both required — one must not mask the other.
-    expect(result.summary.omittedDeviceBound).toContain('dpop-keys');
-    expect(result.summary.notices.some((n) => n.includes('Device-bound state'))).toBe(true);
-  });
-});
-
 // ── 9e. hooks + memory carried by the new profiles ────────────────────────
 
-describe.each(NEW_FIXTURES)('$name — hooks and memory docs', ({ data }) => {
-  test('declarative hooks compile while legacy executable records fail closed', () => {
+describe.each(LATE_FIXTURES)('$name: hooks and memory docs', ({ data }) => {
+  test('retired regex and executable hooks remain records but never compile', () => {
     expect(data.hooks.length).toBeGreaterThan(0);
     for (const record of data.hooks) {
-      if (record.kind === 'js') {
-        expect(() => compileUserHook(record as any)).toThrow(/executable JS hooks are not supported/);
-        continue;
-      }
-      const compiled = compileUserHook(record as any);
-      expect(compiled.id).toBe(record.id);
-      expect(compiled.enabled).toBe(record.enabled !== false);
-      expect(compiled._record).toEqual(record as any);
-      expect((compiled._record as Rec).unknownHookFieldFromANewerBuild).toBe('keep-me');
+      expect(portableHookDisposition(record)).toBe(
+        record.kind === 'js' ? 'legacy-js' : 'legacy-regex',
+      );
+      expect(() => compileUserHook(record as any)).toThrow();
+      expect(record.unknownHookFieldFromANewerBuild).toBe('keep-me');
     }
   });
 
@@ -1070,8 +938,8 @@ describe('profile-maximal-historical — checkStores over a partially stamped ma
     }
   });
 
-  test('the CURRENT release\'s profile is still UNSTAMPED — the registry postdates 0.4.0', async () => {
-    expect(CURRENT_FIXTURE.data.storeVersions).toBeNull();
+  test('the historical 0.4.0 profile is UNSTAMPED because the registry landed later', async () => {
+    expect(V040_FIXTURE.data.storeVersions).toBeNull();
     const check = await checkStores({ read: async () => undefined });
     expect(check.ok).toBe(true);
     for (const entry of check.stores) {
@@ -1083,7 +951,7 @@ describe('profile-maximal-historical — checkStores over a partially stamped ma
 
 // ── 9g. runMigration over each new profile ────────────────────────────────
 
-describe.each(NEW_FIXTURES)('$name — runMigration identity chain', ({ data, text }) => {
+describe.each(LATE_FIXTURES)('$name: runMigration identity chain', ({ data, text }) => {
   test('a no-op step chain preserves the profile byte-for-byte', () => {
     const result = runMigration({
       store: 'sessions',

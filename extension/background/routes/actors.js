@@ -119,7 +119,7 @@ export const makeActorsRoutes = (deps) => {
             toolUseId: msg.ownerToolUseId ?? null, seq: msg.seq ?? 0,
             method: 'call', phase, ...extra,
           });
-        } catch { /* panel closed — the result trace remains authoritative */ }
+        } catch { /* panel closed: the result trace remains authoritative */ }
       };
 
       try {

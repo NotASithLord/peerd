@@ -445,12 +445,20 @@ jobs:
         run: |
           bun run test:e2e:lifecycle
           bun run test:e2e:lifecycle:store
+      - name: Exercise the controller host-loss boundary
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        # Physically retire the offscreen semantic host during an admitted
+        # turn, then prove unknown-outcome settlement and clean recovery.
+        run: bun run test:e2e:controller-faults
       - name: Upload MV3 lifecycle diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: chrome-lifecycle-diagnostics
-          path: artifacts/chrome-lifecycle/
+          path: |
+            artifacts/chrome-lifecycle/
+            artifacts/e2e/controller-fault-evidence*.json
 
   # The VISUAL lane: render the side panel, compare against the committed
   # baselines, go red when the UI moved. NOT in required checks until it has a

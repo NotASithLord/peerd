@@ -27,7 +27,6 @@ export const CONTRIBUTOR_ACTION_KINDS = Object.freeze(['page_code', 'page_action
 export const CONTRIBUTOR_FEEDBACK = Object.freeze(['worked', 'didnt_work']);
 export const CONTRIBUTOR_CLASSIFICATION_CODE_MAX = 255;
 const ROUTES = new Set([
-  'contributor/status', 'contributor/enable', 'contributor/disable',
   'contributor/settlement', 'contributor/feedback',
 ]);
 

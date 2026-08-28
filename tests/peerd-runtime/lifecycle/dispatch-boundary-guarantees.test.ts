@@ -1,10 +1,8 @@
-// Boundary-guarantee proofs — each test is named for the contract guarantee
-// it defends, and each of the reviewer's mutation probes would fail exactly
-// one of them. All run at the REAL dispatcher boundary (dispatchToolCall +
-// an execution spy), not against the tracker in isolation.
+// Durable authority-tracker and operation-log boundary guarantees. The
+// semantic dispatcher deliberately has no direct lifecycle mode.
 
-import { describe, test, expect, beforeEach } from 'bun:test';
-import { makeDispatchTracker, makeFailClosedTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
+import { describe, test, expect } from 'bun:test';
+import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
 import {
   createOperationLog, OPERATION_LOG_MAX_TERMINAL, OPERATION_LOG_MAX_UNKNOWN,
   OPERATION_LOG_KEY, TOMBSTONES_KEY, TOMBSTONES_MAX, UNKNOWN_INTENT_OVERFLOW_KEY,
@@ -15,13 +13,9 @@ import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/ope
 import { confirmationSatisfies } from '../../../extension/peerd-runtime/lifecycle/confirmation.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import { decideRecovery } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
-import { createExplicitToolFixture } from '../tools/explicit-tool-fixture';
 import { fromOpenAiStream } from '../../../extension/peerd-provider/format/from-openai.js';
 
 const S = OPERATION_STATES;
-const fixture = createExplicitToolFixture();
-const dispatchToolCall = fixture.dispatch;
-const setFixtureTool = fixture.set;
 
 const makeStorage = () => {
   const map = new Map<string, unknown>();
@@ -38,267 +32,8 @@ const makeLog = (storage = makeStorage()) => ({
   log: createOperationLog({ storage, now: () => 1 }),
 });
 
-const spyTool = (name: string, sideEffect: string, retryClass?: string) => {
-  const calls = { count: 0 };
-  setFixtureTool({
-    name, description: 'x', schema: {}, primitive: 'web', sideEffect,
-    ...(retryClass ? { retryClass } : {}),
-    origins: () => ['https://example.com'],
-    execute: async () => { calls.count += 1; return { ok: true, content: 'done' }; },
-  } as any);
-  return calls;
-};
-
-const baseCtx = (lifecycle: unknown, extra: Record<string, unknown> = {}) => ({
-  audit: async () => {},
-  session: { sessionId: 'sess-1' },
-  permission: { mode: 'act', confirmActions: false },
-  hooks: [],
-  lifecycle,
-  ...extra,
-});
-
-const RESOURCE_TOOL_NAMES = [
-  'sandbox_create', 'vm_boot', 'actor_create',
-] as const;
-
-const resourceCall = (name: typeof RESOURCE_TOOL_NAMES[number]) => ({
-  id: `tu-${name}`,
-  name,
-  args: name === 'vm_boot' ? { vm: 'vm-1' } : {},
-});
-
-const resourceCtx = (name: typeof RESOURCE_TOOL_NAMES[number], lifecycle: unknown) =>
-  name === 'vm_boot'
-    ? baseCtx(lifecycle, {
-      exposure: 'actor', actorType: 'webvm', actorInstanceId: 'vm-1',
-    })
-    : baseCtx(lifecycle);
-
-beforeEach(fixture.clear);
-
-describe('GUARANTEE 2 + fail-closed: Class D/E/F never execute when tracking cannot start', () => {
-  test('operationLog.begin throws + Class E → refusal at the dispatcher, execute() never entered', async () => {
-    const tracker = makeDispatchTracker({
-      operationLog: createOperationLog({
-        storage: { get: async () => { throw new Error('storage dead'); },
-          set: async () => { throw new Error('storage dead'); } },
-      }),
-      generationId: () => 'gen-1-x',
-      retryClassFor: retryClassForTool,
-    });
-    const calls = spyTool('submit_form', 'mutate_external'); // → Class E by taxonomy
-    const result = await dispatchToolCall(
-      { id: 'tu-1', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
-    expect(calls.count).toBe(0);
-    expect(result.ok).toBe(false);
-    expect((result as { error: string }).error).toContain('NOT executed');
-  });
-
-  test('boot failed (fail-closed tracker) → Class D and E refused, execute() never entered; A/B/C still run', async () => {
-    const tracker = makeFailClosedTracker({
-      reason: 'lifecycle boot failed', retryClassFor: retryClassForTool,
-    });
-    const e = spyTool('submit_form', 'mutate_external');
-    const d = spyTool('dweb_share', 'mutate_external');       // named D override
-    const b = spyTool('fetch_url_like', 'read', 'B');
-    const a = spyTool('read_page', 'read');
-
-    for (const [name, calls, shouldRun] of [
-      ['submit_form', e, false], ['dweb_share', d, false],
-      ['fetch_url_like', b, true], ['read_page', a, true],
-    ] as const) {
-      const result = await dispatchToolCall(
-        { id: `tu-${name}`, name, args: {} }, baseCtx(tracker) as any);
-      expect(calls.count).toBe(shouldRun ? 1 : 0);
-      if (!shouldRun) expect(result.ok).toBe(false);
-    }
-  });
-
-  test('boot failed: every Class F override is refused and never executes', async () => {
-    const tracker = makeFailClosedTracker({
-      reason: 'lifecycle boot failed', retryClassFor: retryClassForTool,
-    });
-    for (const name of RESOURCE_TOOL_NAMES) {
-      const calls = spyTool(name, 'write');
-      const result = await dispatchToolCall(
-        resourceCall(name), resourceCtx(name, tracker) as any);
-      expect(calls.count, name).toBe(0);
-      expect(result.ok, name).toBe(false);
-      expect((result as { error: string }).error, name).toContain('NOT executed');
-    }
-  });
-
-  test('operation-log failure before the first durable write refuses every Class F override', async () => {
-    for (const name of RESOURCE_TOOL_NAMES) {
-      const tracker = makeDispatchTracker({
-        operationLog: createOperationLog({
-          storage: {
-            get: async () => undefined,
-            set: async () => { throw new Error('storage dead'); },
-          },
-        }),
-        generationId: () => 'gen-1-x',
-        retryClassFor: retryClassForTool,
-      });
-      const calls = spyTool(name, 'write');
-      const result = await dispatchToolCall(
-        resourceCall(name), resourceCtx(name, tracker) as any);
-      expect(calls.count, name).toBe(0);
-      expect(result.ok, name).toBe(false);
-      expect((result as { error: string }).error, name).toContain('NOT executed');
-    }
-  });
-
-  test('operation-log failure after begin but before dispatched refuses every Class F override', async () => {
-    for (const name of RESOURCE_TOOL_NAMES) {
-      let writes = 0;
-      const storage = makeStorage();
-      const persist = storage.set;
-      storage.set = async (key, value) => {
-        writes += 1;
-        if (writes > 1) throw new Error('storage died mid-begin');
-        await persist(key, value);
-      };
-      const tracker = makeDispatchTracker({
-        operationLog: createOperationLog({ storage }),
-        generationId: () => 'gen-1-x',
-        retryClassFor: retryClassForTool,
-      });
-      const calls = spyTool(name, 'write');
-      const result = await dispatchToolCall(
-        resourceCall(name), resourceCtx(name, tracker) as any);
-      expect(writes, name).toBe(2);
-      expect(calls.count, name).toBe(0);
-      expect(result.ok, name).toBe(false);
-      expect((result as { error: string }).error, name).toContain('NOT executed');
-    }
-  });
-
-  test('missing or empty call IDs refuse D, E, and every Class F override', async () => {
-    const cases = [
-      ['dweb_share', 'mutate_external'],
-      ['submit_form', 'mutate_external'],
-      ...RESOURCE_TOOL_NAMES.map((name) => [name, 'write'] as const),
-    ] as const;
-    for (const id of [undefined, ''] as const) {
-      fixture.clear();
-      for (const [name, sideEffect] of cases) {
-        const { log } = makeLog();
-        const tracker = makeDispatchTracker({
-          operationLog: log,
-          generationId: () => 'gen-1-x',
-          retryClassFor: retryClassForTool,
-        });
-        const calls = spyTool(name, sideEffect);
-        const call = RESOURCE_TOOL_NAMES.includes(name as any)
-          ? { ...resourceCall(name as typeof RESOURCE_TOOL_NAMES[number]), id }
-          : { id, name, args: {} };
-        const ctx = RESOURCE_TOOL_NAMES.includes(name as any)
-          ? resourceCtx(name as typeof RESOURCE_TOOL_NAMES[number], tracker)
-          : baseCtx(tracker);
-        const result = await dispatchToolCall(
-          call as any, ctx as any);
-        expect(calls.count, `${name}:${String(id)}`).toBe(0);
-        expect(result.ok, `${name}:${String(id)}`).toBe(false);
-        expect((result as { error: string }).error, name).toContain('identity is missing');
-      }
-    }
-  });
-
-  test('no Class E dispatch proceeds while lifecycle arming is unresolved (the boot-window pattern)', async () => {
-    // The SW's buildToolContext awaits the boot before handing out any ctx;
-    // this pins that pattern: ctx construction blocks, so execute cannot be
-    // reached until the tracker is armed — and the armed result then
-    // governs the dispatch.
-    const { log } = makeLog();
-    let armTracker: (t: unknown) => void = () => {};
-    const armed: Promise<unknown> = new Promise((resolve) => { armTracker = resolve; });
-    const buildCtx = async () => baseCtx(await armed);
-    const calls = spyTool('submit_form', 'mutate_external');
-
-    let settled = false;
-    const inFlight = buildCtx().then((ctx) =>
-      dispatchToolCall({ id: 'tu-1', name: 'submit_form', args: {} }, ctx as any))
-      .then((r) => { settled = true; return r; });
-    await new Promise((r) => setTimeout(r, 20));
-    expect(calls.count).toBe(0); // nothing executed while unarmed
-    expect(settled).toBe(false);
-
-    armTracker(makeDispatchTracker({
-      operationLog: log, generationId: () => 'gen-1-x', retryClassFor: retryClassForTool,
-    }));
-    const result = await inFlight;
-    expect(result.ok).toBe(true);
-    expect(calls.count).toBe(1); // ran exactly once, tracked, after arming
-    expect((await log.get('sess-1:tu-1'))!.state).toBe(S.COMPLETED);
-  });
-});
-
-describe('GUARANTEE 2: an UNEXPECTED beginTracking rejection still fails closed for D/E/F', () => {
-  // The tracker's own failure paths are covered above. This is the harder
-  // question: the dispatcher used to swallow ANY beginTracking rejection
-  // with `.catch(() => null)` and run untracked. These tests force
-  // beginTracking ITSELF to reject — the contract-violating case — and
-  // prove the dispatcher refuses independently of the broken tracker.
-  const rejectingTracker = {
-    beginTracking: async () => { throw new Error('tracker contract violated'); },
-    settleTracking: async () => null,
-  };
-
-  test('Class E: execute() never entered, dispatcher refuses, nothing persisted', async () => {
-    const { storage, log } = makeLog();
-    const calls = spyTool('submit_form', 'mutate_external');
-    const result = await dispatchToolCall(
-      { id: 'tu-1', name: 'submit_form', args: {} },
-      baseCtx(rejectingTracker) as any);
-
-    expect(calls.count).toBe(0);                                  // no side effect
-    expect(result.ok).toBe(false);                                // refusal
-    expect((result as { error: string }).error).toContain('NOT executed');
-    expect((result.meta as any).recovery.category).toBe('security_degradation');
-    // No half-written lifecycle state: the log was never touched, so a
-    // later boot has nothing to reconcile and nothing to misreport.
-    expect(storage.journal).toEqual([]);
-    expect(await log.get('sess-1:tu-1')).toBeUndefined();
-    expect(await log.listNonterminal()).toEqual([]);
-  });
-
-  test('Class D refuses the same way', async () => {
-    const calls = spyTool('dweb_share', 'mutate_external'); // named D override
-    const result = await dispatchToolCall(
-      { id: 'tu-1', name: 'dweb_share', args: {} },
-      baseCtx(rejectingTracker) as any);
-    expect(calls.count).toBe(0);
-    expect(result.ok).toBe(false);
-    expect((result as { error: string }).error).toContain('NOT executed');
-  });
-
-  test('every Class F override refuses an unexpected tracker rejection', async () => {
-    for (const name of RESOURCE_TOOL_NAMES) {
-      const calls = spyTool(name, 'write');
-      const result = await dispatchToolCall(
-        resourceCall(name), resourceCtx(name, rejectingTracker) as any);
-      expect(calls.count, name).toBe(0);
-      expect(result.ok, name).toBe(false);
-      expect((result as { error: string }).error, name).toContain('NOT executed');
-    }
-  });
-
-  test('Class A/B/C keep the safe degradation — a broken tracker cannot take reads down', async () => {
-    const a = spyTool('read_page', 'read');
-    const b = spyTool('fetch_url_like', 'read', 'B');
-    const c = spyTool('js_write_file_like', 'write', 'C');
-    for (const [name, calls] of [['read_page', a], ['fetch_url_like', b], ['js_write_file_like', c]] as const) {
-      const result = await dispatchToolCall(
-        { id: `tu-${name}`, name, args: {} }, baseCtx(rejectingTracker) as any);
-      expect(result.ok).toBe(true);
-      expect(calls.count).toBe(1);
-    }
-  });
-
-  test('the real tracker is TOTAL: internals that blow up produce a refusal, never a rejection', async () => {
-    // Each of these breaks a different internal the tracker depends on.
+describe('authority tracker failure closure', () => {
+  test('internal failures produce a refusal rather than a rejected promise', async () => {
     const cases = [
       ['throwing classifier', makeDispatchTracker({
         operationLog: createOperationLog({ storage: makeStorage() }),
@@ -310,7 +45,7 @@ describe('GUARANTEE 2: an UNEXPECTED beginTracking rejection still fails closed 
         generationId: () => { throw new Error('no generation'); },
         retryClassFor: retryClassForTool,
       })],
-      ['unreadable replay identity (tombstone store down)', makeDispatchTracker({
+      ['unreadable replay identity', makeDispatchTracker({
         operationLog: {
           ...createOperationLog({ storage: makeStorage() }),
           getTombstone: async () => { throw new Error('tombstone store unreadable'); },
@@ -330,36 +65,17 @@ describe('GUARANTEE 2: an UNEXPECTED beginTracking rejection still fails closed 
     }
   });
 
-  test('an unreadable replay-identity store never silently proceeds for Class E', async () => {
-    // The question "has this exact call already run?" is unanswered — the
-    // one answer that is NOT allowed is assuming "no".
-    const tracker = makeDispatchTracker({
-      operationLog: {
-        ...createOperationLog({ storage: makeStorage() }),
-        getTombstone: async () => { throw new Error('store unreadable'); },
-      } as any,
-      generationId: () => 'gen-1-x',
-      retryClassFor: retryClassForTool,
-    });
-    const calls = spyTool('submit_form', 'mutate_external');
-    const result = await dispatchToolCall(
-      { id: 'tu-1', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
-    expect(calls.count).toBe(0);
-    expect((result as { error: string }).error).toContain('replay-identity lookup failed');
-  });
-});
-
-describe('§8 persist-before-report: the settle write lands before the dispatcher returns', () => {
-  test('the COMPLETED transition is journaled before dispatchToolCall resolves', async () => {
+  test('completed settlement is durable before settleTracking resolves', async () => {
     const { storage, log } = makeLog();
     const tracker = makeDispatchTracker({
       operationLog: log, generationId: () => 'gen-1-x', retryClassFor: retryClassForTool,
     });
-    spyTool('submit_form', 'mutate_external');
-    const writesAtResolve = await dispatchToolCall(
-      { id: 'tu-1', name: 'submit_form', args: {} }, baseCtx(tracker) as any)
-      .then(() => storage.journal.length);
-    // …and the record IS completed at that instant (not settled later).
+    const begun = await tracker.beginTracking({
+      callId: 'tu-1', tool: { name: 'submit_form', retryClass: 'E' },
+      sessionId: 'sess-1',
+    });
+    await tracker.settleTracking((begun as { handle: any }).handle, { ok: true });
+    const writesAtResolve = storage.journal.length;
     expect(writesAtResolve).toBe(storage.journal.length);
     expect((await log.get('sess-1:tu-1'))!.state).toBe(S.COMPLETED);
   });
@@ -393,11 +109,12 @@ describe('replay identity survives compaction (tombstones)', () => {
     const tracker = makeDispatchTracker({
       operationLog: agedLog, generationId: () => 'gen-2-y', retryClassFor: retryClassForTool,
     });
-    const calls = spyTool('submit_form', 'mutate_external');
-    const replay = await dispatchToolCall(
-      { id: 'tu-pay', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
-    expect(calls.count).toBe(0); // the tombstone refused it
-    expect((replay as { error: string }).error).toStartWith('completed:');
+    const replay = await tracker.beginTracking({
+      callId: 'tu-pay', sessionId: 'sess-1', args: {},
+      tool: { name: 'submit_form', retryClass: 'E' },
+    });
+    expect((replay as { refuse: { error: string } }).refuse.error)
+      .toStartWith('completed:');
   }, 15_000);
 
   test('an interrupted Class F call stays lost after compaction while a fresh call can replace it', async () => {
@@ -524,12 +241,14 @@ describe('replay identity survives compaction (tombstones)', () => {
       operationLog: createOperationLog({ storage }),
       generationId: () => 'gen-2-y', retryClassFor: retryClassForTool,
     });
-    const calls = spyTool('submit_form', 'mutate_external');
-    const result = await dispatchToolCall(
-      { id: 'tu-pay', name: 'submit_form', args: {} }, baseCtx(tracker) as any);
-    expect(calls.count).toBe(0);
-    expect((result as { error: string }).error).toContain('store unreadable');
-    expect((result as { error: string }).error).toContain('must not run untracked');
+    const result = await tracker.beginTracking({
+      callId: 'tu-pay', sessionId: 'sess-1', args: {},
+      tool: { name: 'submit_form', retryClass: 'E' },
+    });
+    expect((result as { refuse: { error: string } }).refuse.error)
+      .toContain('store unreadable');
+    expect((result as { refuse: { error: string } }).refuse.error)
+      .toContain('must not run untracked');
   });
 
   test('an unreadable Class F replay filter refuses resource creation', async () => {

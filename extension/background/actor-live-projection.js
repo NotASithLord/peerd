@@ -17,9 +17,10 @@ export const createActorLiveProjection = (opts = {}) => {
     ? opts.epoch
     : (globalThis.crypto?.randomUUID?.()
       ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  let boundRevision = 0;
+  let projectionRevision = 0;
 
   const pruneSettledSpawned = () => {
+    let changed = false;
     let pruned = true;
     while (pruned) {
       pruned = false;
@@ -35,16 +36,18 @@ export const createActorLiveProjection = (opts = {}) => {
           .some((candidate) => candidate.parentSessionId === sessionId);
         if (hasDescendant) continue;
         spawned.delete(sessionId);
+        changed = true;
         pruned = true;
       }
     }
+    return changed;
   };
 
   /** @param {any} card */
   const startBound = (card) => {
     if (!card?.rootSessionId || !card?.parentToolUseId) return false;
     bound.set(boundKey(card.rootSessionId, card.parentToolUseId), { ...card });
-    boundRevision += 1;
+    projectionRevision += 1;
     return true;
   };
 
@@ -58,7 +61,7 @@ export const createActorLiveProjection = (opts = {}) => {
         && typeof display.actorCorrelationId === 'string'
         && current.actorCorrelationId !== display.actorCorrelationId) return false;
     bound.set(key, { ...current, ...patch });
-    boundRevision += 1;
+    projectionRevision += 1;
     return true;
   };
 
@@ -72,7 +75,7 @@ export const createActorLiveProjection = (opts = {}) => {
         && typeof display.actorCorrelationId === 'string'
         && current.actorCorrelationId !== display.actorCorrelationId) return false;
     const removed = bound.delete(key);
-    if (removed) boundRevision += 1;
+    if (removed) projectionRevision += 1;
     return removed;
   };
 
@@ -92,6 +95,7 @@ export const createActorLiveProjection = (opts = {}) => {
         running: true, messages: [],
       };
       spawned.set(event.sessionId, session);
+      projectionRevision += 1;
       return {
         type: 'turn/spawned-start', parentToolUseId: event.parentToolUseId,
         parentSessionId: event.parentSessionId, sessionId: event.sessionId,
@@ -106,13 +110,19 @@ export const createActorLiveProjection = (opts = {}) => {
         sessionId: event.sessionId, rootSessionId: live?.rootSessionId ?? event.rootSessionId,
         depth: event.depth,
       };
-      if (live) spawned.set(event.sessionId, { ...live, running: false });
-      pruneSettledSpawned();
+      if (live) {
+        spawned.set(event.sessionId, { ...live, running: false });
+        pruneSettledSpawned();
+        projectionRevision += 1;
+      }
       return message;
     }
     if (event?.type === 'state') {
       const live = spawned.get(event.session?.sessionId);
-      if (live) spawned.set(event.session.sessionId, { ...live, ...event.session, running: true });
+      if (live) {
+        spawned.set(event.session.sessionId, { ...live, ...event.session, running: true });
+        projectionRevision += 1;
+      }
       return { type: 'turn/spawned-state', rootSessionId: live?.rootSessionId, session: event.session };
     }
     return null;
@@ -125,9 +135,12 @@ export const createActorLiveProjection = (opts = {}) => {
   const setAsyncTasks = (parentSessionId, tasks) => {
     const active = (Array.isArray(tasks) ? tasks : [])
       .filter((task) => task?.status === 'running' || task?.status === 'done');
+    const prior = asyncTasks.get(parentSessionId) ?? [];
+    const tasksChanged = JSON.stringify(prior) !== JSON.stringify(active);
     if (active.length > 0) asyncTasks.set(parentSessionId, active);
     else asyncTasks.delete(parentSessionId);
-    pruneSettledSpawned();
+    const pruned = pruneSettledSpawned();
+    if (tasksChanged || pruned) projectionRevision += 1;
   };
 
   /** @param {string | null | undefined} rootSessionId */
@@ -135,7 +148,7 @@ export const createActorLiveProjection = (opts = {}) => {
     if (!rootSessionId) {
       return {
         actorProjectionEpoch: projectionEpoch,
-        actorProjectionRevision: boundRevision,
+        actorProjectionRevision: projectionRevision,
         actors: {}, spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
       };
     }
@@ -145,7 +158,7 @@ export const createActorLiveProjection = (opts = {}) => {
       .map((session) => [session.sessionId, { ...session }]));
     return {
       actorProjectionEpoch: projectionEpoch,
-      actorProjectionRevision: boundRevision,
+      actorProjectionRevision: projectionRevision,
       actors: Object.fromEntries([...bound.values()]
         .filter((card) => card.rootSessionId === rootSessionId)
         .map((card) => [card.parentToolUseId, { ...card }])),
@@ -214,7 +227,7 @@ export const createActorLiveProjection = (opts = {}) => {
     startBound, patchBound, finishBound,
     foldSpawned, rootForSpawned, setAsyncTasks, snapshot,
     epoch: () => projectionEpoch,
-    revision: () => boundRevision,
+    revision: () => projectionRevision,
     rootSessionIds, activeActorCount,
   };
 };

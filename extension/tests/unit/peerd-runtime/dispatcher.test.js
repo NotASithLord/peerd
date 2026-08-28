@@ -221,16 +221,10 @@ describe('dispatcher', () => {
   });
 });
 
-// Confirmation is driven by the Plan/Act permission policy (Feature 03)
-// via ctx.permission = { mode, confirmActions }. These tests pin the
-// dispatcher's integration with that policy (post-2026-06-12 tier
-// collapse: one boolean — ON = every non-read confirms, OFF = nothing
-// confirms).
-/** @param {boolean} confirmActions */
-const act = (confirmActions) => ({ permission: { mode: 'act', confirmActions } });
-
-describe('confirmation (Plan/Act permission policy)', () => {
-  it('PLAN mode blocks a non-read tool at the persona gate (before confirm)', async () => {
+// Semantic dispatch enforces Plan/Act admission, but exact service-worker
+// authority owns confirmation after binding final arguments and targets.
+describe('confirmation ownership', () => {
+  it('PLAN mode blocks a non-read tool before exact authority', async () => {
     clearFixtureTool();
     setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
     let prompted = false;
@@ -241,15 +235,15 @@ describe('confirmation (Plan/Act permission policy)', () => {
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     expect(r.ok).toBe(false);
     expect(errOf(r).startsWith('gate_blocked:persona:')).toBe(true);
-    expect(prompted).toBe(false);  // blocked before the confirm step
+    expect(prompted).toBe(false);
   });
 
-  it('does NOT prompt for read tools even with confirmations on', async () => {
+  it('read tools require no confirmation', async () => {
     clearFixtureTool();
     setFixtureTool(makeTool({ sideEffect: 'read' }));
     let prompted = false;
     const { ctx } = recorderCtx({
-      ...act(true),
+      permission: { mode: 'act', confirmActions: true },
       confirm: async () => { prompted = true; return 'no'; },
     });
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
@@ -257,61 +251,23 @@ describe('confirmation (Plan/Act permission policy)', () => {
     expect(prompted).toBe(false);
   });
 
-  it('confirmations OFF does NOT prompt for a write tool', async () => {
+  it('semantic writes do not prompt or settle before exact authority', async () => {
     clearFixtureTool();
     setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    let prompted = false;
-    const { ctx } = recorderCtx({ ...act(false), confirm: async () => { prompted = true; return 'no'; } });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(true);
-    expect(prompted).toBe(false);
-  });
-
-  it('confirmations ON prompts even for a workspace write (the old auto-edit lane is gone)', async () => {
-    clearFixtureTool();
-    setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'webvm' }));
-    let prompted = false;
-    const { ctx } = recorderCtx({ ...act(true), confirm: async () => { prompted = true; return 'yes_once'; } });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(true);
-    expect(prompted).toBe(true);
-  });
-
-  it('missing/garbage confirmActions fails safe to prompting', async () => {
-    clearFixtureTool();
-    setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    let prompted = false;
-    // A legacy-shaped permission (tier string, no boolean) must confirm.
+    let semanticAuthorityCalls = 0;
     const { ctx } = recorderCtx({
-      permission: { mode: 'act', tier: 'full-auto' },
-      confirm: async () => { prompted = true; return 'yes_once'; },
+      permission: { mode: 'act', confirmActions: true },
+      confirm: async () => { semanticAuthorityCalls += 1; return 'no'; },
+      lifecycle: {
+        beginTracking: async () => { semanticAuthorityCalls += 1; },
+        settleTracking: async () => { semanticAuthorityCalls += 1; },
+      },
     });
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     expect(r.ok).toBe(true);
-    expect(prompted).toBe(true);
-  });
-
-  it('confirmations ON prompts for a write tool; "no" blocks and audits tool_rejected', async () => {
-    clearFixtureTool();
-    setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    const { ctx, audited } = recorderCtx({ ...act(true), confirm: async () => 'no' });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(false);
-    expect(errOf(r).startsWith('gate_blocked:confirmation:')).toBe(true);
+    expect(semanticAuthorityCalls).toBe(0);
     const confirmGate = metaOf(r).gates.find((g) => g.name === 'confirmation');
-    expect(confirmGate?.allowed).toBe(false);
-    await Promise.resolve();
-    expect(audited.some((e) => e.type === 'tool_rejected')).toBe(true);
-  });
-
-  it('confirmations ON prompts for a write tool; "yes_once" allows and runs', async () => {
-    clearFixtureTool();
-    setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    const { ctx } = recorderCtx({ ...act(true), confirm: async () => 'yes_once' });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(true);
-    const confirmGate = metaOf(r).gates.find((g) => g.name === 'confirmation');
-    expect(confirmGate?.allowed).toBe(true);
+    expect(confirmGate?.reason).toBe('exact authority verifies final arguments');
   });
 });
 

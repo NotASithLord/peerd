@@ -33,7 +33,7 @@ Routing by responsibility (the live tool descriptors are authoritative):
      message the "web" actor; it fetches or drives a tab. See the actor group.)
 
   time (temporal grounding)
-    now — current ISO timestamp
+    now: current ISO timestamp
 
   sandboxes (execution instances — each its own tab; you bootstrap, an ACTOR runs it)
     sandbox_create({kind})  : make a webvm (sandboxed Linux) | pod (sealed shell,

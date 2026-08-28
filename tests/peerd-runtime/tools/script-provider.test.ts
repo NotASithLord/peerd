@@ -79,7 +79,12 @@ describe('script — the caps.provider mint (design 5)', () => {
 });
 
 describe('script — the actors mint is refused on an inbound (untrusted) turn (INV-5)', () => {
-  const actorsCtx = () => ({ messageActor: () => {} });
+  const actorsCtx = () => ({
+    messageActor: () => {},
+    operationGrant: new Set([
+      'turn.actor.message', 'turn.introspection.actor-roster',
+    ]),
+  });
 
   test('baseline: a chat turn referencing `actors` mints the delegation surface', async () => {
     const { opts } = await run('await actors.ask("web", "x");', actorsCtx());
@@ -92,6 +97,7 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
       ...actorsCtx(),
       session: { sessionId: 'spawn-1', kind: 'spawned' },
       toolAllow: new Set(['script', 'message_actor']),
+      operationGrant: new Set(['turn.actor.message']),
     });
     expect(opts?.actors).toBe(true);
     expect(opts?.ownerSessionId).toBe('spawn-1');
@@ -122,7 +128,7 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
 
   test('a chat manifest that removes message_actor cannot recover it through script', async () => {
     const { opts } = await run('await actors.ask("web", "x");', {
-      ...actorsCtx(), toolAllow: new Set(['script']),
+      ...actorsCtx(), toolAllow: new Set(['script']), operationGrant: new Set(),
     });
     expect(opts?.actors).toBeUndefined();
   });

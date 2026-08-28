@@ -36,6 +36,8 @@ export const createLocalModelGenerationAuthority = ({
   }
   /** @type {Map<string,any>} */
   const streams = new Map();
+  /** @type {WeakSet<object>} */
+  const retiredOwners = new WeakSet();
 
   const finish = (/** @type {any} */ stream, /** @type {Error|null} */ error = null) => {
     if (stream.done) return;
@@ -54,6 +56,10 @@ export const createLocalModelGenerationAuthority = ({
   /** @param {any} request @param {object} owner @param {AbortSignal|undefined} signal */
   const open = async (request, owner, signal) => {
     const streamId = newId();
+    if (retiredOwners.has(owner) || signal?.aborted) {
+      throw localFailure('local-model-generation-aborted');
+    }
+    if (streams.has(streamId)) throw localFailure('local-model-stream-collision');
     /** @type {{owner:object,port:MessagePort|null,channelId:string|null,queue:string[],
      * waiters:Array<()=>void>,done:boolean,error:Error|null,chars:number,dispatched:boolean,
      * signal?:AbortSignal,abort?:()=>void}} */
@@ -62,12 +68,29 @@ export const createLocalModelGenerationAuthority = ({
       channelId: null, chars: 0, dispatched: false,
       signal,
     };
-    streams.set(streamId, stream);
     /** @type {(value:any)=>void} */ let settleReady = () => {};
     const ready = new Promise((resolve) => { settleReady = resolve; });
+    stream.abort = () => {
+      const error = localFailure('local-model-generation-aborted');
+      if (stream.channelId) {
+        try { stream.port?.postMessage({
+          type: LOCAL_MODEL_CHANNEL_CANCEL,
+          protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+          channelId: stream.channelId,
+        }); } catch {}
+      }
+      settleReady({ ok: false, error });
+      finish(stream, error);
+    };
+    signal?.addEventListener('abort', stream.abort, { once: true });
+    streams.set(streamId, stream);
     const run = featureHost.runtime.runWithLease('model-host', async (lease) => {
       const matches = (await clientsApi.matchAll({ type: 'window', includeUncontrolled: true }))
         .filter((client) => client?.url === offscreenUrl);
+      if (streams.get(streamId) !== stream || stream.done
+          || retiredOwners.has(owner) || signal?.aborted) {
+        throw localFailure('local-model-generation-aborted');
+      }
       if (matches.length !== 1) throw localFailure(
         'local-model-host-unavailable', 'local model host unavailable',
       );
@@ -104,6 +127,11 @@ export const createLocalModelGenerationAuthority = ({
           }
           if (value.type !== LOCAL_MODEL_CHANNEL_RESULT || typeof value.ok !== 'boolean') return;
           if (value.started === true && value.ok === true) {
+            if (streams.get(streamId) !== stream || stream.done
+                || retiredOwners.has(owner) || signal?.aborted) {
+              reject(localFailure('local-model-generation-aborted'));
+              return;
+            }
             stream.dispatched = true;
             settleReady({ ok: true });
             return;
@@ -128,26 +156,18 @@ export const createLocalModelGenerationAuthority = ({
         finish(stream, error);
       },
     );
-    // The channel id is stamped after the lease is acquired; retain a small
-    // exact cancel closure instead of exposing the id to controller code.
-    stream.abort = () => {
-      if (stream.channelId) {
-        try { stream.port?.postMessage({
-          type: LOCAL_MODEL_CHANNEL_CANCEL,
-          protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
-          channelId: stream.channelId,
-        }); } catch {}
-      }
-      finish(stream, localFailure('local-model-generation-aborted'));
-    };
-    signal?.addEventListener('abort', stream.abort, { once: true });
     const opened = await ready;
     if (opened?.ok !== true) {
       signal?.removeEventListener('abort', stream.abort);
       retire(streamId);
       throw opened?.error ?? localFailure('local-model-generation-failed');
     }
-    if (signal?.aborted) stream.abort();
+    if (streams.get(streamId) !== stream || stream.done
+        || retiredOwners.has(owner) || signal?.aborted) {
+      stream.abort();
+      retire(streamId);
+      throw localFailure('local-model-generation-aborted');
+    }
     return streamId;
   };
 
@@ -176,6 +196,7 @@ export const createLocalModelGenerationAuthority = ({
     read,
     cancel,
     closeOwner: async (/** @type {object} */ owner) => {
+      retiredOwners.add(owner);
       for (const [streamId, stream] of streams) {
         if (stream.owner !== owner) continue;
         stream.abort?.();

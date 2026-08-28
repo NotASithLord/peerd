@@ -493,6 +493,7 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
 export const createPreviewContributorRoutes = (/** @type {any} */ {
   kv, optionsUi, sidepanelUi, homeUi, validateFeedback, offscreenUrl, featureHost,
   dispatchSemanticRoute = null,
+  callSemanticRoute = null,
   scheduleDrain = (/** @type {()=>void} */ operation) => queueMicrotask(operation),
   channelDeadlineMs = 15_000,
   storageDeadlineMs = CONTRIBUTOR_STORAGE_DEADLINE_MS,
@@ -500,11 +501,13 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
   if (![optionsUi, sidepanelUi, homeUi, validateFeedback].every(
     (value) => typeof value === 'function') || typeof scheduleDrain !== 'function'
       || dispatchSemanticRoute !== null && typeof dispatchSemanticRoute !== 'function'
-      || dispatchSemanticRoute === null && typeof offscreenUrl !== 'string'
+      || callSemanticRoute !== null && typeof callSemanticRoute !== 'function'
+      || dispatchSemanticRoute === null && callSemanticRoute === null
+        && typeof offscreenUrl !== 'string'
       || !Number.isFinite(channelDeadlineMs)
       || channelDeadlineMs <= 0
       || !Number.isFinite(storageDeadlineMs) || storageDeadlineMs <= 0
-      || dispatchSemanticRoute === null
+      || dispatchSemanticRoute === null && callSemanticRoute === null
         && typeof featureHost?.runtime?.runWithLease !== 'function') {
     throw new TypeError('kernel-preview-contributor-routes-invalid');
   }
@@ -515,14 +518,10 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
     mutationTail = result.then(() => undefined, () => undefined);
     return result;
   };
+  const optionsRoutes = new Set([
+    'contributor/status', 'contributor/enable', 'contributor/disable',
+  ]);
   const allowed = Object.freeze({
-    'contributor/status': Object.freeze({ 'semantic.contributor.read': 1 }),
-    'contributor/enable': Object.freeze({
-      'semantic.contributor.enable-read': 1, 'semantic.contributor.enable': 1,
-    }),
-    'contributor/disable': Object.freeze({
-      'semantic.contributor.clear': 1, 'semantic.contributor.disable-read': 1,
-    }),
     'contributor/settlement': Object.freeze({
       'semantic.contributor.settlement-read': 1,
       'semantic.contributor.settlement-record': 1,
@@ -534,13 +533,18 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
   });
   const dispatch = async (/** @type {string} */ route,
     /** @type {any} */ message) => {
-    if (!Object.hasOwn(allowed, route)) {
+    if (!optionsRoutes.has(route) && !Object.hasOwn(allowed, route)) {
       return { ok: false, code: 'contributor-channel-admission-denied', outcomeKnown: true };
     }
     let entered = false;
     const surface = route === 'contributor/feedback' ? 'chat'
       : route === 'contributor/settlement' ? 'runtime'
         : 'options';
+    if (surface === 'options') {
+      return callSemanticRoute
+        ? callSemanticRoute(route, message)
+        : { ok: false, code: 'contributor-channel-host-unavailable', outcomeKnown: true };
+    }
     if (dispatchSemanticRoute) {
       const counts = new Map();
       let effectDispatched = false;
@@ -753,6 +757,7 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
   });
   const owner = Object.freeze({
     routes,
+    handleKernelCall: authority.handle,
     arm: () => authority.arm(),
     recordWebSettlement: async (/** @type {any} */ message) => {
       const result = await new Promise((resolve) => {

@@ -34,6 +34,7 @@ const TOOL_PROJECTION_OUTER_BYTES = 64 * KIB;
 const GENERIC_OUTER_BYTES = SEMANTIC_DEMAND_MAX_BYTES;
 const TURN_VALUE_BYTES = 4 * MIB;
 const MODEL_EVENT_BYTES = 256 * KIB;
+const MODEL_CONTEXT_OBSERVATION_BYTES = 128 * KIB;
 const MODEL_STREAM_BYTES = 8 * MIB;
 // A 64k-token model stream also carries start/stop/usage/tool framing events.
 // Keep the independent 8 MiB byte rail authoritative while leaving enough
@@ -191,7 +192,7 @@ export const controllerOperationRequiresConfirmation = (
   }
   const policy = controllerDomainOperationPolicy(operation);
   // A headless script is ordinarily ephemeral compute. workspace:true mounts
-  // durable per-session OPFS, so the exact host—not the semantic tool name—
+  // durable per-session OPFS, so the exact host, not the semantic tool name,
   // upgrades only that final argument shape to the permission confirmation.
   const confirmation = operation === 'turn.execution.run-script' && args?.workspace === true
     ? 'permission' : policy?.confirmation ?? 'permission';
@@ -440,6 +441,7 @@ export const createControllerKernelQuota = (
     'turn.model.open-local': 32 * steps,
     'turn.model.read-local': streamBudget,
     'turn.model.cancel-local': 32 * steps,
+    'turn.model.observe-context': 32 * steps,
     'turn.model.observe-event': streamBudget,
     'turn.model.observe-failover': 8 * steps,
     ...Object.fromEntries(Object.keys(CONTROLLER_DOMAIN_OPERATIONS).map((operation) => [
@@ -453,9 +455,11 @@ export const createControllerKernelQuota = (
 
   const admit = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
     if (!allowed.has(operation)) return refusal('kernel-operation-denied');
-    if (!bounded(payload, operation === 'turn.model.read-inference'
-      || operation === 'turn.model.read-local'
-      ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES)) {
+    const payloadCap = operation === 'turn.model.observe-context'
+      ? MODEL_CONTEXT_OBSERVATION_BYTES
+      : operation === 'turn.model.read-inference' || operation === 'turn.model.read-local'
+        ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES;
+    if (!bounded(payload, payloadCap)) {
       return refusal('kernel-operation-payload-too-large');
     }
     const used = counts.get(operation) ?? 0;
@@ -546,12 +550,16 @@ export const createControllerKernelQuota = (
     }
     const replayable = operation === 'turn.session.get'
       || operation === 'turn.prompt.get' || operation === 'turn.tools.refresh'
+      || operation === 'turn.model.observe-context'
       || controllerOperationReplayableAfterSettlement(operation);
     custody.observe(result, replayable);
     return Object.freeze({ ok: true, outcomeKnown: true });
   };
 
   const pendingLoss = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
+    if (operation === 'turn.model.observe-context') {
+      return Object.freeze({ outcomeKnown: true, retryable: true });
+    }
     const domainPolicy = controllerDomainOperationPolicy(operation);
     if (domainPolicy) {
       const effect = record(record(payload)?.value);

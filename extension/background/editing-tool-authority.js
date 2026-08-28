@@ -80,7 +80,7 @@ export const createEditingToolAuthority = ({ binding, ctx, signal, shared = {} }
           : "sandbox_create({kind:'notebook'}) or js_notebook";
         return {
           ok: false, code: 'no_current_instance',
-          error: `An edit needs a current ${kind} in this chat — create one first (${create})`,
+          error: `An edit needs a current ${kind} in this chat: create one first (${create})`,
         };
       }
       try {

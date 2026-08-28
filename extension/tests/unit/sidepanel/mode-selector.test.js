@@ -56,6 +56,11 @@ const need = (root, sel) => {
   return /** @type {T} */ (el);
 };
 
+const settleView = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  m.redraw.sync();
+};
+
 describe('ModeSelector (Plan/Act + confirm toggle)', () => {
   it('renders Plan/Act buttons and a single confirm toggle — no tier select', () => {
     const { root, unmount } = mount({ mode: 'act', confirmActions: false }, makeSend());
@@ -103,11 +108,11 @@ describe('ModeSelector (Plan/Act + confirm toggle)', () => {
     const { root, unmount } = mount({ mode: 'act', confirmActions: false }, send);
     try {
       /** @type {HTMLElement} */ (root.querySelectorAll('.planact-mode')[0]).click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await settleView();
       expect(root.querySelector('.error-line')?.textContent)
         .toBe('Temporarily unavailable. Try again.');
       /** @type {HTMLElement} */ (root.querySelectorAll('.planact-mode')[0]).click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await settleView();
       expect(calls.length).toBe(2);
       expect(root.querySelector('.error-line')).toBe(null);
     } finally { unmount(); }
@@ -118,7 +123,7 @@ describe('ModeSelector (Plan/Act + confirm toggle)', () => {
     const { root, unmount } = mount({ mode: 'act', confirmActions: false }, send);
     try {
       /** @type {HTMLElement} */ (root.querySelectorAll('.planact-mode')[0]).click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await settleView();
       expect(root.querySelector('.error-line')?.textContent).toBe('Connection lost');
     } finally { unmount(); }
   });

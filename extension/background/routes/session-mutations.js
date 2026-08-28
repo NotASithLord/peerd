@@ -1,4 +1,6 @@
 // @ts-check
+import { bindCurrentChat } from '../../shared/current-session-binding.js';
+
 /**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any) => Promise<any>>}
@@ -44,7 +46,7 @@ export const makeSessionMutationRoutes = (deps) => {
           }
         }
       }
-      await sessionCache.sessionDelete('currentSessionId');
+      await bindCurrentChat(sessionCache, null);
       // The caller may send the first message of the new chat immediately
       // after this route resolves. Finish projecting the empty chat first so
       // this reset snapshot cannot arrive after that turn's live events and
@@ -73,7 +75,7 @@ export const makeSessionMutationRoutes = (deps) => {
         return { ok: false, error: 'not-a-chat' };
       }
       const previousId = await sessionCache.sessionGet('currentSessionId');
-      await sessionCache.sessionSet('currentSessionId', sessionId);
+      await bindCurrentChat(sessionCache, session);
       pushState();
       // #72: auto-resume — if THIS chat's last turn was reclaimed mid-flight
       // (SW eviction etc.), continue it now. Fire-and-forget; gated + deduped
@@ -127,7 +129,7 @@ export const makeSessionMutationRoutes = (deps) => {
         // the next agent/send creates a fresh session.
         const currentId = await sessionCache.sessionGet('currentSessionId');
         if (currentId === sessionId) {
-          await sessionCache.sessionDelete('currentSessionId');
+          await bindCurrentChat(sessionCache, null);
         }
         pushState();
         // Auto-memory lifecycle seam: archiving IS the session wrapping

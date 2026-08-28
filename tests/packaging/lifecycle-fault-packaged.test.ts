@@ -7,6 +7,7 @@ import {
   injectLifecycleFaultEffect,
   injectLifecycleFaultJob,
   injectLifecycleFaultKernel,
+  injectLifecycleFaultRecoveryClasses,
   injectLifecycleFaultTurnBudget,
 } from '../../scripts/cdp/run-lifecycle-faults.mjs';
 
@@ -25,6 +26,7 @@ describe('packaged Chrome lifecycle fault lane', () => {
   test('injects production lifecycle recovery before Store packaging', () => {
     const worker = injectLifecycleFaultKernel(kernelSource);
     const authority = injectLifecycleFaultEffect(executionSources.authority);
+    const bridge = injectLifecycleFaultRecoveryClasses(executionSources.bridge);
     const job = injectLifecycleFaultJob(source('offscreen/job-runner.js'));
     expect(assertLifecycleFaultExecutionSeam(executionSources)).toBeUndefined();
     expect(worker).toContain("'lifecycle-fault/dispatch': async (message, sender)");
@@ -39,6 +41,13 @@ describe('packaged Chrome lifecycle fault lane', () => {
     expect(worker).toContain("relays.sessions.create({");
     expect(worker).toContain("provider: 'ollama', model: 'qwen3:8b'");
     expect(authority).toContain('lifecycle fault execution target changed');
+    expect(authority).toContain("binding.operation !== 'turn.execution.run-script'");
+    expect(authority).not.toContain("call?.name !== 'script'");
+    expect(authority).not.toContain('ctx.lifecycle?.beginTracking');
+    expect(bridge).toContain('bridgeAuthority.lifecycle.beginTracking({');
+    expect(bridge).toContain("['fetch_url', 'B', 'chrome-fault-b']");
+    expect(bridge).toContain("['remember', 'C', 'chrome-fault-c']");
+    expect(bridge).toContain("['dweb_share', 'D', 'chrome-fault-d']");
     expect(worker).toContain("phase: 'offscreen.runJob'");
     expect(job).toContain("sendToSW('lifecycle-fault/dispatch'");
     expect(authority).toContain("return 'peerd-lifecycle-fault';");
@@ -105,6 +114,12 @@ describe('packaged Chrome lifecycle fault lane', () => {
         '        const result = await client.execHeadless(code, opts);', '',
       ),
     )).toThrow('source exact script effect seam changed');
+    expect(() => injectLifecycleFaultRecoveryClasses(
+      executionSources.bridge.replace(
+        "          if (!entry) return failed('headless script authority mismatch', true);",
+        '',
+      ),
+    )).toThrow('source lifecycle bridge recovery-class seam changed');
     expect(() => injectLifecycleFaultJob(
       source('offscreen/job-runner.js').replace(
         '  // One ABSOLUTE deadline spans resolution + execution.', '',
@@ -117,12 +132,16 @@ describe('packaged Chrome lifecycle fault lane', () => {
       join(REPO_ROOT, 'scripts/cdp/run-lifecycle-faults.mjs'), 'utf8',
     );
     const admission = harness.indexOf("record?.toolName === 'turn.execution.run-script'");
+    const hostCustody = harness.indexOf(
+      "stored[reachedKey]?.[0]?.phase === 'offscreen.runJob'",
+    );
     const dispatched = harness.indexOf("record?.state === 'awaiting_remote'");
     const killed = harness.indexOf("browserProcess.kill('SIGKILL')");
     const restarted = harness.indexOf("type: 'lifecycle-fault/dispatch', recoverOnly: true");
     const reconciled = harness.indexOf("[id]: 'outcome_unknown'");
     expect(admission).toBeGreaterThan(0);
-    expect(dispatched).toBeGreaterThan(admission);
+    expect(hostCustody).toBeGreaterThan(admission);
+    expect(dispatched).toBeGreaterThan(hostCustody);
     expect(killed).toBeGreaterThan(dispatched);
     expect(restarted).toBeGreaterThan(killed);
     expect(reconciled).toBeGreaterThan(restarted);
@@ -130,7 +149,7 @@ describe('packaged Chrome lifecycle fault lane', () => {
     expect(harness).toContain('no delayed tool-body replay');
   });
 
-  test('keeps source and Store lanes independently gated in CI', () => {
+  test('keeps source, Store, and controller-host fault lanes gated in CI', () => {
     const packageJson = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
     const workflow = readFileSync(
       join(REPO_ROOT, '.github/workflows/package-and-release.yml'), 'utf8',
@@ -139,7 +158,22 @@ describe('packaged Chrome lifecycle fault lane', () => {
       .toBe('bun scripts/cdp/run-lifecycle-faults.mjs');
     expect(packageJson.scripts['test:e2e:lifecycle:store'])
       .toBe('bun scripts/cdp/run-lifecycle-faults.mjs --target=store');
+    expect(packageJson.scripts['test:e2e:controller-faults'])
+      .toBe('bun scripts/cdp/controller-recycle-fault.mjs');
     expect(workflow).toContain('bun run test:e2e:lifecycle\n');
     expect(workflow).toContain('bun run test:e2e:lifecycle:store');
+    const e2e = workflow.slice(
+      workflow.indexOf('\n  e2e:'),
+      workflow.indexOf('\n  visual:'),
+    );
+    const controllerFault = e2e.indexOf('bun run test:e2e:controller-faults');
+    const diagnostics = e2e.indexOf('- name: Upload MV3 lifecycle diagnostics');
+    expect(controllerFault).toBeGreaterThan(0);
+    expect(controllerFault).toBeLessThan(diagnostics);
+    expect(e2e).toContain('CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}');
+    expect(e2e.slice(diagnostics)).toContain('if: always()');
+    expect(e2e.slice(diagnostics)).toContain(
+      'artifacts/e2e/controller-fault-evidence*.json',
+    );
   });
 });

@@ -35,7 +35,7 @@ export const startOllamaAcceptanceFixture = async ({
       if (bytes > 1_000_000) request.destroy(new Error('acceptance request too large'));
       else chunks.push(chunk);
     });
-    request.on('end', () => {
+    request.on('end', async () => {
       const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `${host}:${port}`}`);
       requests.push({ method: request.method ?? '', path: url.pathname, bytes });
       const headers = {
@@ -59,8 +59,10 @@ export const startOllamaAcceptanceFixture = async ({
         try { requestBody = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
         let completion;
         try {
+          // Async responders let physical-fault lanes hold an exact in-flight
+          // response until the browser target has actually been retired.
           completion = typeof completionResponse === 'function'
-            ? completionResponse({ completionCall, requestBody }) : sseText(replyText);
+            ? await completionResponse({ completionCall, requestBody }) : sseText(replyText);
         } catch {
           completion = {
             status: 422,

@@ -29,6 +29,8 @@ const projected = (generation: number, authorityEpoch = 'kernel-epoch-projected'
     localReady: false, canSend: false, reason: 'vault-locked' },
   capabilities: { actorExecution: { status: 'temporarily_unavailable',
     host: 'offscreen-document-worker', reason: 'controller-not-ready', retryable: true } },
+  actors: {}, actorProjectionEpoch: null, actorProjectionRevision: 0,
+  spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
   projection: { schema: KERNEL_STATE_SCHEMA, provenance: KERNEL_STATE_PROVENANCE,
     authorityEpoch, generation, settings: 'hydrated', actorIsolation: 'hydrated',
     semanticController: 'required', deferredFields: [...KERNEL_STATE_DEFERRED_FIELDS], failures: [] },
@@ -425,6 +427,34 @@ describe('reduceChat', () => {
     expect(delayed.actors['reused-snapshot']).toMatchObject({
       sessionId: 'new-actor', actorCorrelationId: 'new-correlation', streaming: true,
     });
+  });
+
+  test('a delayed older full snapshot cannot settle spawned work or erase async tasks', () => {
+    const viewing = withSession('chat-A');
+    const spawned = reduceChat(viewing, {
+      type: 'turn/spawned-start', rootSessionId: 'chat-A', parentToolUseId: 'spawn-new',
+      sessionId: 'child-new', parentSessionId: 'chat-A', task: 'new child',
+      actorProjectionEpoch: 'worker-a', actorProjectionRevision: 2,
+    });
+    const tasked = reduceChat(spawned, {
+      type: 'async-tasks/update', parentSessionId: 'chat-A',
+      tasks: [{ taskId: 'task-new', status: 'running' }],
+      actorProjectionEpoch: 'worker-a', actorProjectionRevision: 3,
+    });
+    const delayed = reduceChat(tasked, {
+      type: 'state', state: {
+        session: { sessionId: 'chat-A', messages: [] },
+        actorProjectionEpoch: 'worker-a', actorProjectionRevision: 1,
+        spawned: { byToolUse: {}, sessions: {} },
+        asyncTasks: {},
+      },
+    });
+
+    expect(delayed.actorProjectionRevision).toBe(3);
+    expect(delayed.spawned.sessions['child-new']).toMatchObject({
+      task: 'new child', running: true,
+    });
+    expect(delayed.asyncTasks['chat-A']).toEqual([{ taskId: 'task-new', status: 'running' }]);
   });
 
   test('a fresh worker epoch is accepted after disconnect and fences delayed old-worker data', () => {

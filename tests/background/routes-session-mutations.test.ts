@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSessionMutationRoutes } from '../../extension/background/routes/session-mutations.js';
 import { makeLifecycleBoot } from '../../extension/peerd-runtime/lifecycle/boot.js';
+import { bindCurrentChat } from '../../extension/shared/current-session-binding.js';
 
 class SessionNotFoundError extends Error {}
 
@@ -63,6 +64,40 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 's2' });
     expect(await deps.sessionCache.sessionGet('currentSessionId')).toBe('s2');
     expect(calls.extract).toEqual([['cur', 'switch']]);
+  });
+  test('Plan chat → new chat gets the independent Act default; switching back restores Plan', async () => {
+    const records: Record<string, any> = {
+      cur: { sessionId: 'cur', permissionMode: 'plan', confirmActions: true },
+      fresh: { sessionId: 'fresh', permissionMode: 'act', confirmActions: false },
+    };
+    const { deps } = baseDeps({
+      sessions: { get: async (id: string) => records[id] ?? null },
+    });
+    await deps.sessionCache.sessionSet('currentPermissionMode', 'plan');
+    await deps.sessionCache.sessionSet('currentConfirmActions', true);
+
+    const routes = makeSessionMutationRoutes(deps);
+    await routes['session/reset']();
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentPermissionMode: 'act', currentConfirmActions: false,
+    });
+    expect(await deps.sessionCache.sessionGet('currentSessionId')).toBeUndefined();
+
+    // Mirrors the first-send creation boundary: durable row first, then all
+    // three current-chat cache fields before any turn projection can continue.
+    await bindCurrentChat(deps.sessionCache, records.fresh);
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentSessionId: 'fresh', currentPermissionMode: 'act', currentConfirmActions: false,
+    });
+
+    await routes['session/switch']({ sessionId: 'cur' });
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentSessionId: 'cur', currentPermissionMode: 'plan', currentConfirmActions: true,
+    });
+    await routes['session/switch']({ sessionId: 'fresh' });
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentSessionId: 'fresh', currentPermissionMode: 'act', currentConfirmActions: false,
+    });
   });
   test('reset STOPS the abandoned session\'s turn AND cascades to its in-flight actors', async () => {
     // The current chat is 'cur' with two actors in flight. "New chat" must abort

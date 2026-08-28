@@ -155,16 +155,16 @@ export const WEB_ACTOR_DOM_TOOLS = WEB_ACTOR_DOM_TOOL_NAMES;
 // surface is derived from the page client manifest: the actor perceives AND
 // acts through page.* (page.snapshot()/page.content() for perception — still
 // the a11y snapshot, the unchanged axis — and page.goto/click/fill for action),
-// every call routing through a fixed SW page-program route to the SAME gated DOM
+// every call returning through the owning actor executor to the SAME gated DOM
 // tools on its owned tab. Operations not represented by a page method stay
 // discrete; today that is site_client_run, because nesting a second sealed job
 // inside page_code would deadlock the bounded relay pool.
 // why NOT also expose direct snapshot/read_page: those resolve the tab from the
 // ACTOR's turn context, which a fresh actor has none of — and a tab adopted
-// mid-turn inside page_code (SW-side) never repins that turn context, so a
+// mid-turn inside page_code (authority-side) never repins that turn context, so a
 // direct snapshot after a page.goto failed and the actor thrashed. Routing ALL
 // page interaction through page_code keeps ONE consistent tab. (page.snapshot()
-// still dispatches the snapshot tool via the route's inner tools-surface ctx.)
+// still executes the snapshot tool through the nested tools-surface ctx.)
 export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set(actorCodeSurfaceTools('web', 'tab')));
 export const APP_ACTOR_CODE_TOOLS = Object.freeze(new Set(actorCodeSurfaceTools('app')));
 

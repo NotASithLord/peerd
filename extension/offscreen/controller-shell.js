@@ -84,7 +84,9 @@ export const makeSealedControllerLoader = ({
       const finishUnknown = () => {
         for (const call of calls.values()) {
           call.signal.removeEventListener('abort', call.onAbort);
-          call.resolve({ ok: false, code: 'controller-worker-lost', outcomeKnown: false });
+          call.resolve({
+            ok: false, code: 'controller-worker-lost', outcomeKnown: false, retryable: false,
+          });
         }
         calls.clear();
       };
@@ -129,7 +131,8 @@ export const makeSealedControllerLoader = ({
             ) => {
               if (closed) {
                 return Promise.resolve({
-                  ok: false, code: 'controller-worker-lost', outcomeKnown: false,
+                  ok: false, code: 'controller-worker-lost',
+                  outcomeKnown: false, retryable: false,
                 });
               }
               if (signal.aborted) {
@@ -198,6 +201,11 @@ export const makeSealedControllerLoader = ({
       port1.onmessageerror = () => {
         fail('sealed controller worker channel failed');
       };
+      // Some hosts report a clean dedicated-Worker exit on its transferred
+      // port; crashes remain covered by the Worker error edges below.
+      port1.addEventListener('close', () => {
+        fail('sealed controller worker channel closed');
+      }, { once: true });
       worker.addEventListener?.('error', () => fail('sealed controller worker crashed'), { once: true });
       worker.addEventListener?.('messageerror', () => fail('sealed controller worker message failed'), { once: true });
       port1.start();
@@ -380,6 +388,100 @@ export const bindControllerChannel = ({
       settle(requestId, { ok: false, code: 'controller-deadline-expired', ...custody });
     }, Math.max(1, operation.deadlineAt - now()));
   };
+  const commitOperation = (/** @type {string} */ requestId, /** @type {any} */ operation) => {
+    if (closed || operations.get(requestId) !== operation || operation.phase !== 'accepted') return;
+    operation.phase = 'committed';
+    operation.abort = new AbortController();
+    concurrent += 1;
+    if (operation.stopLane) stopConcurrent += 1;
+    if (operation.deadlineAt <= now()) {
+      settle(requestId, {
+        ok: false, code: 'controller-deadline-expired',
+        outcomeKnown: true,
+      });
+      return;
+    }
+    post({
+      type: 'controller/committed', requestId, grantId: operation.grantId,
+    });
+    // The host owns an independent deadline. If the kernel event loop stalls
+    // after commit, the sealed Worker still loses its grant on time and the
+    // operation settles conservatively unknown rather than running forever.
+    armDeadline(requestId, operation);
+    // why load only here: accepted is custody without effects. The rich worker
+    // graph and controller do not exist until the kernel commits a real call.
+    // loadController coalesces a live generation itself. Resolve it per call
+    // so a generation that crashes after startup can be replaced on the next
+    // committed operation.
+    Promise.resolve().then(loadController)
+      .then((controller) => controller.call(operation.capability, operation.payload, {
+        signal: /** @type {AbortController} */ (operation.abort).signal,
+        authority: operation.authority,
+        deadlineAt: operation.deadlineAt,
+        kernelCall: (kernelOperation, payload) => {
+          if (operation.phase !== 'committed'
+              || (operation.abort?.signal.aborted
+                && !controllerOperationAllowedAfterCancel(
+                  operation.capability, kernelOperation,
+                ))
+              || operation.kernelCalls.size >= operation.quota.pendingCap
+              || operation.deadlineAt <= now()
+              || typeof kernelOperation !== 'string'
+              || !/^[a-z][a-z0-9./-]{0,127}$/.test(kernelOperation)) {
+            return Promise.resolve({
+              ok: false, code: 'kernel-operation-invalid', outcomeKnown: true,
+            });
+          }
+          const admitted = operation.quota.admit(kernelOperation, payload);
+          if (admitted?.ok !== true) return Promise.resolve(admitted);
+          operation.effectEntered = true;
+          const rpcId = newId();
+          return new Promise((resolve) => {
+            operation.kernelCalls.set(rpcId, {
+              resolve, operation: kernelOperation, payload,
+            });
+            try {
+              post({
+                type: 'controller/kernel-call', requestId,
+                grantId: operation.grantId, rpcId,
+                operation: kernelOperation, payload,
+              });
+            } catch {
+              operation.kernelCalls.delete(rpcId);
+              resolve({ ok: false, code: 'kernel-channel-lost', outcomeKnown: false });
+            }
+          });
+        },
+      }))
+      .then(
+        (result) => {
+          if (operation.deadlineAt <= now()) {
+            operation.abort?.abort();
+            const custody = controllerCustodyIsAuthoritative(operation.capability)
+                || operation.effectEntered
+              ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
+            settle(requestId, {
+              ok: false, code: 'controller-deadline-expired', ...custody,
+            });
+            return;
+          }
+          settle(requestId, {
+            ...result,
+            // A successful settlement is evidence that the handler completed.
+            // A post-dispatch failure is NOT evidence that no effect landed: the
+            // controller must explicitly classify that exceptional safe case.
+            outcomeKnown: result?.ok === true
+              ? result?.outcomeKnown !== false
+              : result?.outcomeKnown === true,
+          });
+        },
+        (cause) => settle(requestId, {
+          ok: false,
+          error: cause instanceof Error ? cause.message : String(cause),
+          outcomeKnown: false,
+        }),
+      );
+  };
   const close = () => {
     if (closed) return;
     closed = true;
@@ -547,99 +649,7 @@ export const bindControllerChannel = ({
       });
       return;
     }
-    operation.phase = 'committed';
-    operation.abort = new AbortController();
-    concurrent += 1;
-    if (operation.stopLane) stopConcurrent += 1;
-    if (operation.deadlineAt <= now()) {
-      settle(message.requestId, {
-        ok: false, code: 'controller-deadline-expired', outcomeKnown: true,
-      });
-      return;
-    }
-    post({
-      type: 'controller/committed', requestId: message.requestId,
-      grantId: operation.grantId,
-    });
-    // The host owns an independent deadline. If the kernel event loop stalls
-    // after commit, the sealed Worker still loses its grant on time and the
-    // operation settles conservatively unknown rather than running forever.
-    armDeadline(message.requestId, operation);
-    // why load only here: accepted is custody without effects. The rich worker
-    // graph and controller do not exist until the kernel commits a real call.
-    // loadController coalesces a live generation itself. Resolve it per call
-    // so a generation that crashes after startup can be replaced on the next
-    // committed operation.
-    Promise.resolve().then(loadController)
-      .then((controller) => controller.call(operation.capability, operation.payload, {
-        signal: /** @type {AbortController} */ (operation.abort).signal,
-        authority: operation.authority,
-        deadlineAt: operation.deadlineAt,
-        kernelCall: (kernelOperation, payload) => {
-          if (operation.phase !== 'committed'
-              || (operation.abort?.signal.aborted
-                && !controllerOperationAllowedAfterCancel(
-                  operation.capability, kernelOperation,
-                ))
-              || operation.kernelCalls.size >= operation.quota.pendingCap
-              || operation.deadlineAt <= now()
-              || typeof kernelOperation !== 'string'
-              || !/^[a-z][a-z0-9./-]{0,127}$/.test(kernelOperation)) {
-            return Promise.resolve({
-              ok: false, code: 'kernel-operation-invalid', outcomeKnown: true,
-            });
-          }
-          const admitted = operation.quota.admit(kernelOperation, payload);
-          if (admitted?.ok !== true) {
-            return Promise.resolve(admitted);
-          }
-          operation.effectEntered = true;
-          const rpcId = newId();
-          return new Promise((resolve) => {
-            operation.kernelCalls.set(rpcId, {
-              resolve, operation: kernelOperation, payload,
-            });
-            try {
-              post({
-                type: 'controller/kernel-call', requestId: message.requestId,
-                grantId: operation.grantId, rpcId,
-                operation: kernelOperation, payload,
-              });
-            } catch {
-              operation.kernelCalls.delete(rpcId);
-              resolve({ ok: false, code: 'kernel-channel-lost', outcomeKnown: false });
-            }
-          });
-        },
-      }))
-      .then(
-        (result) => {
-          if (operation.deadlineAt <= now()) {
-            operation.abort?.abort();
-            const custody = controllerCustodyIsAuthoritative(operation.capability)
-                || operation.effectEntered
-              ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
-            settle(message.requestId, {
-              ok: false, code: 'controller-deadline-expired', ...custody,
-            });
-            return;
-          }
-          settle(message.requestId, {
-            ...result,
-            // A successful settlement is evidence that the handler completed.
-            // A post-dispatch failure is NOT evidence that no effect landed: the
-            // controller must explicitly classify that exceptional safe case.
-            outcomeKnown: result?.ok === true
-              ? result?.outcomeKnown !== false
-              : result?.outcomeKnown === true,
-          });
-        },
-        (cause) => settle(message.requestId, {
-          ok: false,
-          error: cause instanceof Error ? cause.message : String(cause),
-          outcomeKnown: false,
-        }),
-      );
+    commitOperation(message.requestId, operation);
   };
   port.onmessageerror = close;
   port.addEventListener('close', close, { once: true });
@@ -659,6 +669,7 @@ export const bindControllerChannel = ({
  * @param {string} deps.expectedBuildDigest
  * @param {string[]} deps.supportedCaps
  * @param {(() => Promise<any>) & { close?: () => void }} deps.loadController
+ * @param {typeof bindControllerChannel} [deps.bindChannel]
  * @param {() => string} [deps.newId]
  */
 export const makeControllerOfferHandler = ({
@@ -666,6 +677,7 @@ export const makeControllerOfferHandler = ({
   expectedBuildDigest,
   supportedCaps,
   loadController,
+  bindChannel = bindControllerChannel,
   newId = () => crypto.randomUUID(),
 }) => {
   const parseOfferLease = (/** @type {any} */ value, /** @type {any} */ identity) => {
@@ -677,7 +689,11 @@ export const makeControllerOfferHandler = ({
         || value.hostEpoch.length > 256
         || !Number.isSafeInteger(value.generation) || value.generation < 1
         || !kernelIdentityMatches(identity, value)) return null;
-    return Object.freeze({ leaseId: value.leaseId, generation: value.generation });
+    return Object.freeze({
+      leaseId: value.leaseId,
+      generation: value.generation,
+      hostEpoch: value.hostEpoch,
+    });
   };
   // why one monotonic high-water mark: one kernel epoch legitimately releases
   // and reacquires this scope many times. Its lease generation only increases,
@@ -690,7 +706,8 @@ export const makeControllerOfferHandler = ({
   /** @type {Readonly<import('/shared/kernel-identity.js').KernelIdentity>|null} */
   let closedIdentity = null;
   let retiredGeneration = 0;
-  /** @type {{ epoch:string, kernelIdentity:unknown, leaseGeneration:number,
+  /** @type {{ epoch:string, kernelIdentity:unknown, leaseId:string,
+   *   leaseGeneration:number, leaseHostEpoch:string, channelId:string,
    *   close:()=>void } | null} */
   let active = null;
   const noteRetired = (/** @type {NonNullable<typeof active>} */ binding) => {
@@ -729,14 +746,22 @@ export const makeControllerOfferHandler = ({
         return false;
       }
     }
-    if (active?.epoch === data.kernelEpoch) {
-      event.ports[0].close();
-      return false;
-    }
-    if (active?.kernelIdentity
-        && !kernelIdentityIsSuccessor(active.kernelIdentity, offeredIdentity)) {
-      event.ports[0].close();
-      return false;
+    if (active?.kernelIdentity) {
+      const sameKernel = kernelIdentityMatches(active.kernelIdentity, offeredIdentity);
+      // A lease transition and MessagePort close are not one atomic browser
+      // event. Admit only its strict same-host generation successor, then
+      // synchronously retire the stale binding before constructing the next.
+      const newerLeaseSuccessor = sameKernel
+        && active.leaseHostEpoch === offeredLease.hostEpoch
+        && offeredLease.generation > active.leaseGeneration
+        && offeredLease.leaseId !== active.leaseId;
+      const identitySuccessor = kernelIdentityIsSuccessor(
+        active.kernelIdentity, offeredIdentity,
+      );
+      if (!newerLeaseSuccessor && !identitySuccessor) {
+        event.ports[0].close();
+        return false;
+      }
     }
     if (active) {
       noteRetired(active);
@@ -747,7 +772,9 @@ export const makeControllerOfferHandler = ({
       closedIdentity = null;
       retiredGeneration = 0;
     }
-    active = { ...bindControllerChannel({
+    /** @type {NonNullable<typeof active>|null} */
+    let candidate = null;
+    const channel = bindChannel({
       port: event.ports[0],
       channelId: data.channelId,
       buildDigest: data.buildDigest,
@@ -758,13 +785,21 @@ export const makeControllerOfferHandler = ({
       supportedCaps,
       loadController,
       onClose: () => {
-        const closing = active;
-        if (closing && closing.epoch === data.kernelEpoch) {
-          noteRetired(closing);
-          active = null;
-        }
+        // A delayed close from a replaced same-kernel lease has no authority
+        // over its successor. Object identity, rather than kernelEpoch, is the
+        // lifetime fence because both bindings intentionally share that epoch.
+        if (!candidate || active !== candidate) return;
+        noteRetired(candidate);
+        active = null;
       },
-    }), leaseGeneration: offeredLease.generation };
+    });
+    candidate = {
+      ...channel,
+      leaseId: offeredLease.leaseId,
+      leaseGeneration: offeredLease.generation,
+      leaseHostEpoch: offeredLease.hostEpoch,
+    };
+    active = candidate;
     return true;
   };
   // Releasing an exact feature lease closes its channel and Worker, but the

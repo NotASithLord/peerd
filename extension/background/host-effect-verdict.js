@@ -120,6 +120,17 @@ const aggregateAuthorityReceipts = (/** @type {any[]} */ receipts) => {
   };
 };
 
+const IDENTITY_PROVIDER_TRANSIT_ONLY_CODE = 'actor_identity_provider_transit_only';
+const receiptsSafeForSemanticRealm = (/** @type {any[]} */ receipts) => receipts.map((receipt) => {
+  const hidesSuccessorHandle = receipt?.operation === 'turn.actor.message'
+    && receipt?.outcome === 'not-performed' && receipt?.performed === false
+    && (receipt?.code === IDENTITY_PROVIDER_TRANSIT_ONLY_CODE
+      || receipt?.error === IDENTITY_PROVIDER_TRANSIT_ONLY_CODE);
+  if (!hidesSuccessorHandle || !Object.hasOwn(receipt, 'target')) return receipt;
+  const { target: _target, ...safe } = receipt;
+  return safe;
+});
+
 // why: these are exact host-handler outcomes that prove the browser action
 // never reached its dispatch edge. Any unclassified page failure stays
 // unknown; page disappearance or an injection rejection can occur after a
@@ -191,11 +202,12 @@ export const stampAuthorityToolResult = (
 ) => {
   const clean = stripAuthorityVerdict(result);
   if (receipts.length === 0) return clean;
+  const safeReceipts = receiptsSafeForSemanticRealm(receipts);
   const { performed, unknown, refused, retryable, refusal } =
-    aggregateAuthorityReceipts(receipts);
-  const ugcZone = receipts.find((receipt) => typeof receipt.ugcZone === 'string')?.ugcZone;
+    aggregateAuthorityReceipts(safeReceipts);
+  const ugcZone = safeReceipts.find((receipt) => typeof receipt.ugcZone === 'string')?.ugcZone;
   const stamped = {
-    ...clean, authorityReceipts: receipts, authorityPerformed: performed,
+    ...clean, authorityReceipts: safeReceipts, authorityPerformed: performed,
     ...(ugcZone ? { authorityPolicy: Object.freeze({ ugcZone }) } : {}),
   };
   if (unknown) return {
@@ -206,7 +218,7 @@ export const stampAuthorityToolResult = (
     ...stamped, ok: false, outcomeKnown: true, retryable: performed ? false : retryable,
     error: performed
       ? 'Authority host performed only part of the requested effects; do not retry the whole call.'
-      : refusal?.error ?? 'Authority host did not perform the requested effect.',
+      : refusal?.content ?? refusal?.error ?? 'Authority host did not perform the requested effect.',
     ...(typeof refusal?.code === 'string' ? { code: refusal.code } : {}),
   };
   if (clean.ok === false) return {
@@ -222,11 +234,12 @@ export const stampAuthorityToolResultBlock = (
 ) => {
   const clean = stripAuthorityVerdict(block);
   if (receipts.length === 0) return clean;
+  const safeReceipts = receiptsSafeForSemanticRealm(receipts);
   const { performed, unknown, refused, retryable, refusal } =
-    aggregateAuthorityReceipts(receipts);
-  const ugcZone = receipts.find((receipt) => typeof receipt.ugcZone === 'string')?.ugcZone;
+    aggregateAuthorityReceipts(safeReceipts);
+  const ugcZone = safeReceipts.find((receipt) => typeof receipt.ugcZone === 'string')?.ugcZone;
   const stamped = {
-    ...clean, authorityReceipts: receipts, authorityPerformed: performed,
+    ...clean, authorityReceipts: safeReceipts, authorityPerformed: performed,
     ...(ugcZone ? { authorityPolicy: Object.freeze({ ugcZone }) } : {}),
   };
   if (unknown) return {
@@ -237,7 +250,7 @@ export const stampAuthorityToolResultBlock = (
     ...stamped, is_error: true, outcomeKnown: true, retryable: performed ? false : retryable,
     content: performed
       ? 'Authority host performed only part of the requested effects; do not retry the whole call.'
-      : refusal?.error ?? 'Authority host did not perform the requested effect.',
+      : refusal?.content ?? refusal?.error ?? 'Authority host did not perform the requested effect.',
     ...(typeof refusal?.code === 'string' ? { code: refusal.code } : {}),
   };
   if (clean.is_error === true) return {

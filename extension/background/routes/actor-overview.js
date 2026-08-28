@@ -122,7 +122,10 @@ export const makeActorOverviewRoutes = (deps) => {
       if (!busy && !activeTopology) continue;
       // Reverse-read one real user message. No poll assembles a transcript or
       // scans inactive chats merely to label the current work.
-      const latestRequest = await sessions.getLatestNonSyntheticUserMessage(sessionId);
+      const liveActivity = turnSlots.activityFor?.(sessionId);
+      const latestRequest = typeof liveActivity === 'string' && liveActivity
+        ? { content: liveActivity }
+        : await sessions.getLatestNonSyntheticUserMessage(sessionId);
       const title = optionalText(metadata.title, DISPLAY_TEXT_MAX);
       const provider = optionalText(metadata.provider, DISPLAY_TEXT_MAX);
       const model = optionalText(metadata.model, DISPLAY_TEXT_MAX);

@@ -40,7 +40,7 @@ export const semanticHooksFor = (records) => Object.freeze([
           );
           return {
             action: /** @type {const} */ ('block'),
-            reason: `${id}: configured pre-hook unavailable (${detail.slice(0, 256)}) — failing closed`,
+            reason: `${id}: configured pre-hook unavailable (${detail.slice(0, 256)}): failing closed`,
           };
         },
       })];

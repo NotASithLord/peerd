@@ -12,7 +12,7 @@ export { AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE, AUTH_WAI
 export { detectInterruptedTurn, RESUME_NUDGE } from './loop/resume-detect.js';
 export { prepareUserAttachmentsWithDocs, DOC_TEXT_MAX_CHARS } from './loop/attachments.js';
 export { formatDocBody } from './doc/format.js';
-export { makeSpawnActor, restrictCtxCapabilities, finalActorTurnReply, finalAssistantText } from './actor/spawn.js';
+export { makeSpawnActor, finalActorTurnReply, finalAssistantText } from './actor/spawn.js';
 export {
   activityOverlayInjected, clearActivityOverlayInjected,
 } from './dom/activity-overlay-injected.js';
@@ -29,7 +29,6 @@ export { makeScheduler, SCHEDULE_ALARM_NAME } from './loop/scheduler.js';
 export { formatTodoBlock } from './todo/core.js';
 export { makePrewalkController } from './loop/prewalk-controller.js';
 export { makeToolsCommand } from './tools/manifest-command.js';
-export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export { makeLifecycleBoot } from './lifecycle/boot.js';
 export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch-tracking.js';
 export { makeWriteGuard } from './lifecycle/write-guard.js';
@@ -43,7 +42,6 @@ export { registerHook, listHooks, loadUserHooks, saveUserHook, removeHook, expor
 export { parseHookMarkdown } from './tools/hooks/compile.js';
 export { DEFAULT_HOOKS } from './tools/hooks/defaults/index.js';
 export { buildTemporalBlock } from './clock/context.js';
-export { WEB_TOOLS } from './tools/web/index.js';
 export { createCommandStore } from './composer/command-store.js';
 export { localStoreSource, skillRegistrySource, mergeSources } from './composer/command-sources.js';
 export { applyComposer } from './composer/apply.js';

@@ -22,7 +22,7 @@ export {
   liveDocumentLocationInjected,
 } from '../dom/browser-target-probe.js';
 // The one live look at the target document (issues 267 + 276). Deep import for
-// the same reason as above — dom/index.js is fine, but this file is unit-tested
+// the same reason as above: dom/index.js is fine, but this file is unit-tested
 // without a browser and the barrel is wider than the one function needed.
 import { hasPasswordFieldInjected } from '../dom/walk-injected.js';
 import {
@@ -101,7 +101,7 @@ export const passwordFieldSignalFromProbe = (value) => {
  * why here and not in each tool: this is the only place that knows the tool is
  * about to touch a specific tab, and it is the only place every DOM tool passes
  * through. Before this, the password-field signal was observed in exactly ONE
- * tool (`snapshot`) — so an actor that perceived with `read_page` instead never
+ * tool (`snapshot`), so an actor that perceived with `read_page` instead never
  * taught the classifier anything, and staying unlearned was a matter of which
  * tool it chose to call (issue 267). Tool choice belongs to whoever is driving
  * the actor, which is precisely the party the classifier exists to constrain.
@@ -216,13 +216,13 @@ const enforceCommittedBrowserTarget = (target) => {
 
 /**
  * Get the tab the tool should operate on. Returns the chrome.tabs Tab
- * object, or null if not found — OR if the resolved tab is on the
+ * object, or null if not found: OR if the resolved tab is on the
  * denylist.
  *
  * why the denylist check lives HERE: the origin gate runs the denylist
  * against `tool.origins(args, ctx)`, which for DOM tools is
  * `[ctx.activeTab.origin]`. But execute() drives whatever `args.tabId`
- * resolves to — a different tab. origins() is synchronous and can't await
+ * resolves to: a different tab. origins() is synchronous and can't await
  * `tabs.get(args.tabId)`, so it structurally can't see the real target.
  * That left a hole: a tool called with a tabId pointing at a denylisted
  * bank/email/health tab would drive it despite the gate. We close it at
@@ -235,8 +235,8 @@ const enforceCommittedBrowserTarget = (target) => {
  *
  * `judgeLanding` (issue 251) is the origin lock, injected by the SW so this
  * file stays free of actor state and the policy stays pure and unit-tested
- * (`peerd-runtime/actor/landing-rule.js`). Absent — a non-actor context, or an
- * actor kind with no tab — means no lock, which is the pre-251 behaviour.
+ * (`peerd-runtime/actor/landing-rule.js`). Absent: a non-actor context, or an
+ * actor kind with no tab: means no lock, which is the pre-251 behaviour.
  */
 export const resolveTargetTab = async (args, ctx, options = {}) => {
   let tab = null;
@@ -247,11 +247,11 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
   } else if (ctx.actorType) {
     // DESIGN-17 FAIL-CLOSED: an ACTOR has no user-foreground context. A WEB
     // actor OWNS exactly one tab and ctx.activeTab IS it; if that couldn't be
-    // resolved (the owned tab closed mid-turn — the TOCTOU between mint and turn),
+    // resolved (the owned tab closed mid-turn: the TOCTOU between mint and turn),
     // refuse rather than fall through to the foreground query below. Without this
     // guard a web actor whose tab vanished would silently retarget the USER's
-    // active page. (The engine kinds never reach here — their toolset has no DOM
-    // tools — so this is the web actor's wall in practice.)
+    // active page. (The engine kinds never reach here: their toolset has no DOM
+    // tools, so this is the web actor's wall in practice.)
     return null;
   } else {
     const [t] = await ctx.tabs.query({ active: true, currentWindow: true });
@@ -286,18 +286,18 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
     throw new BrowserAutomationPolicyError(sourceVerdict, { effectCompleted: false });
   }
   if (isDenylistedTab(tab.url, ctx.denylist)) return null;
-  // issue 251 — THE ORIGIN LOCK, enforced here and only here.
+  // issue 251: THE ORIGIN LOCK, enforced here and only here.
   //
   // why this chokepoint and not the gate stack: gates are pure and synchronous
   // and run on `args`, but the question is "where did the tab actually END UP",
   // which needs the live read this function has already done. A gate checking
-  // args.url is defeated by any 302 — and navigate.js used to re-stamp the pin
+  // args.url is defeated by any 302, and navigate.js used to re-stamp the pin
   // to the landing origin, laundering an open redirect into an owned one. Every
   // DOM tool funnels through here, so one check covers the whole DOM surface.
   //
   // CAVEAT, found by adversarial review and worth keeping in front of the next
   // reader: null here means BOTH "no tab" and "refused", and navigate.js used to
-  // read the first meaning and adopt a fresh tab — turning a refusal into a new
+  // read the first meaning and adopt a fresh tab: turning a refusal into a new
   // credentialed tab. It now guards on the pin. Any future caller that reacts to
   // null by CREATING something must make the same distinction; "every caller
   // treats null as a refusal" was asserted here once and was not true.
@@ -308,7 +308,7 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
     }
     if (verdict && verdict.action !== 'continue') return null;
   }
-  // ONE live look at the document that is actually there — the answer to two
+  // ONE live look at the document that is actually there: the answer to two
   // findings, and the reason it is worth a round trip.
   //
   // issue 276: everything above judged `tab.url`, which is what the BROWSER
@@ -320,7 +320,7 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
   // caller supplies browserDocumentIdentity(tab). A replacement document makes
   // either channel fail instead of silently retargeting the operation.
   //
-  // issue 267: while we are in there, observe the password field — so every DOM
+  // issue 267: while we are in there, observe the password field, so every DOM
   // tool teaches the classifier, not just `snapshot`.
   const live = /^https?:/i.test(tab.url ?? '') ? await probeLiveDocument(tab, ctx) : null;
   // A document can replace itself after tabs.get(). Check the URL observed in
@@ -340,11 +340,11 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
       }
       if (verdict && verdict.action !== 'continue') return null;
     }
-    // It moved somewhere allowed — so hand the caller where it IS. A copy, not a
+    // It moved somewhere allowed, so hand the caller where it IS. A copy, not a
     // mutation: `tab` is the tabs API's record and navigate.js relies on the pin
     // objects it shares staying its own. why it matters beyond tidiness: login.js
     // derives the origin it https-gates, NAMES IN THE CONFIRM, and audits from
-    // this url. A stale one there is the confused deputy in its purest form — the
+    // this url. A stale one there is the confused deputy in its purest form: the
     // user approves a sign-in on the origin the tab record remembers while the
     // ceremony runs in the document that replaced it.
     if (live?.href) tab = { ...tab, url: live.href };
@@ -352,7 +352,7 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
   if (live?.documentId) tab = { ...tab, peerdDocumentId: live.documentId };
   if (typeof live?.timeOrigin === 'number') tab = { ...tab, peerdDocumentTimeOrigin: live.timeOrigin };
   if (live?.hasPasswordField === true && liveOrigin) {
-    // Attributed to the origin that REPORTED it, never to the tab record — the
+    // Attributed to the origin that REPORTED it, never to the tab record: the
     // #278 rule, held by construction here rather than by comparison.
     try { ctx.noteLearnedOrigin?.(liveOrigin, 'password-field'); } catch { /* best-effort */ }
   }
@@ -368,7 +368,7 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
     }
   }
   // The loop just targeted THIS tab by id (navigate/click/type/read/… on a tab
-  // the agent opened) — update the "current agent tab" card so it tracks where
+  // the agent opened): update the "current agent tab" card so it tracks where
   // the agent is working. Only when explicitly addressed (args.tabId): operating
   // on the user's OWN active tab (no tabId) isn't an agent tab to "go to".
   if (args?.tabId && typeof tab.id === 'number') {

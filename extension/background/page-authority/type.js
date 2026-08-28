@@ -1,7 +1,7 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// type — set the value of an input/textarea and dispatch the events a
+// type: set the value of an input/textarea and dispatch the events a
 // well-behaved page expects (focus, input, change). For
 // contenteditable elements, replaces innerText.
 //
@@ -11,7 +11,7 @@ import { definePageAuthorityHandler } from './handler.js';
 // pages receive as trusted user input.
 //
 // V1 design: a single `set whole value` operation. We don't simulate
-// individual keystrokes — that's a V1.1+ refinement. If a site has
+// individual keystrokes: that's a V1.1+ refinement. If a site has
 // keystroke-by-keystroke autocomplete that needs typing flow, the
 // agent can call type() with progressively longer prefixes.
 
@@ -51,11 +51,11 @@ export const typeTool = definePageAuthorityHandler({
     };
 
     // why: domRefs/debuggerPool are SW-injected onto ctx but absent from the
-    // ToolContext typedef; scripting is typed opaquely — narrow all three.
+    // ToolContext typedef; scripting is typed opaquely: narrow all three.
     const { domRefs, debuggerPool } = /** @type {DomCtxExtras} */ (ctx);
     const scripting = /** @type {typeof chrome.scripting} */ (ctx.scripting);
 
-    // why: hoisted above the ref branch — the cardinality guard applies to
+    // why: hoisted above the ref branch: the cardinality guard applies to
     // BOTH resolution channels the injected body serves (selector match count,
     // walk-ref 0/1), not just selector calls (issue #36).
     const expectedCount = Number.isInteger(args?.expectedCount) && args.expectedCount > 0
@@ -70,12 +70,12 @@ export const typeTool = definePageAuthorityHandler({
     if (typeof args?.ref === 'string' && args.ref.trim()) {
       const ref = args.ref.trim();
       const entry = domRefs?.resolve?.(tab.id, ref);
-      if (!entry) return { ok: false, error: `stale_ref: ${ref} — re-run snapshot on this tab first`, outcomeKind: 'pre-effect-failure' };
+      if (!entry) return { ok: false, error: `stale_ref: ${ref}: re-run snapshot on this tab first`, outcomeKind: 'pre-effect-failure' };
 
       if (entry.backendDOMNodeId != null && typeof debuggerPool?.setValueBackendNode === 'function') {
         // Cardinality guard on the CDP channel too (#36 consistency): a resolved
         // backendDOMNodeId ref IS exactly one node, so any expectedCount other
-        // than 1 is a mismatch — same shape the walk-ref/selector paths return.
+        // than 1 is a mismatch: same shape the walk-ref/selector paths return.
         if (expectedCount != null && expectedCount !== 1) {
           return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
@@ -155,7 +155,7 @@ export const typeTool = definePageAuthorityHandler({
 
       // A CDP-sourced ref but the pool is gone (advanced automation was
       // turned off since the snapshot). A fresh snapshot hands out walk
-      // refs that CAN be typed into here — steer the model there.
+      // refs that CAN be typed into here: steer the model there.
       return {
         ok: false,
         error: 'debugger_unavailable: this ref came from a CDP snapshot but advanced automation is now '
@@ -208,7 +208,7 @@ export const typeTool = definePageAuthorityHandler({
  * @param {number | null} [expectedCount]
  */
 // why: exported for the Bun tests to exercise the REAL body's walk-ref
-// cardinality guard (mocked scriptResults would hide an omission — #103
+// cardinality guard (mocked scriptResults would hide an omission: #103
 // review lesson). Same precedent as domWalkInjected; `export` is not part
 // of Function.prototype.toString, so executeScript serialization is
 // unchanged.
@@ -224,13 +224,13 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
     // DOM-walk ref resolution: the walk (walk-injected.js) registered
     // walkId → element in this same isolated world. Element gone or
     // detached → the snapshot is stale, same contract as a CDP ref.
-    // why: __peerdWalkEls is set on the page world by walk-injected.js — not
+    // why: __peerdWalkEls is set on the page world by walk-injected.js: not
     // a standard global, so reach it through an erased cast.
     const reg = /** @type {{ __peerdWalkEls?: Map<number, HTMLElement> }} */ (globalThis).__peerdWalkEls;
     el = reg && typeof reg.get === 'function' ? (reg.get(walkId) ?? null) : null;
     // why: a walkId names exactly one registered element, so the real match
     // cardinality is 0 (stale/unregistered) or 1 (found). Enforce the guard
-    // against that count — same code + fields as the selector path — instead
+    // against that count, using the same code + fields as the selector path instead
     // of silently ignoring expectedCount on ref calls (issue #36). Checked
     // BEFORE the stale return so the 0 case reports the mismatch the caller
     // asked to be told about, with the re-snapshot hint kept in the text.
@@ -238,16 +238,16 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
     if (expectedCount != null && matchedCount !== expectedCount) {
       return {
         ok: false,
-        error: `matched_count_mismatch: walk ref matched ${matchedCount} element(s), expected ${expectedCount}${matchedCount === 0 ? ' — element no longer in the page; re-run snapshot on this tab first' : ''}`,
+        error: `matched_count_mismatch: walk ref matched ${matchedCount} element(s), expected ${expectedCount}${matchedCount === 0 ? ': element no longer in the page; re-run snapshot on this tab first': ''}`,
         matchedCount,
         expectedCount,
       };
     }
     if (!el || !el.isConnected) {
-      return { ok: false, error: 'stale_ref: element no longer in the page — re-run snapshot on this tab first' };
+      return { ok: false, error: 'stale_ref: element no longer in the page: re-run snapshot on this tab first' };
     }
   } else {
-    // why: erased cast — this branch is reached only when walkId is null, so a
+    // why: erased cast: this branch is reached only when walkId is null, so a
     // selector is always present.
     /** @type {NodeListOf<HTMLElement>} */
     let nodes;
@@ -308,7 +308,7 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
     }
     if (typeof el.focus === 'function') el.focus();
     if (tag === 'input' || tag === 'textarea') {
-      // why: erased cast — the tag guard constrains el to a value-bearing control.
+      // why: erased cast: the tag guard constrains el to a value-bearing control.
       const input = /** @type {HTMLInputElement} */ (el);
       const setter = Object.getOwnPropertyDescriptor(
         tag === 'input' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype,
@@ -324,9 +324,9 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
     } else if (tag === 'select') {
       // Native <select>: match the requested text against option LABELS (what
       // the model sees in the a11y tree), then set the option's VALUE (often
-      // different — label "Two" -> value "2"). Setting el.value to the label is
+      // different: label "Two" -> value "2"). Setting el.value to the label is
       // silently ignored by the browser, which is the exact bug this fixes.
-      // why: erased cast — the tag guard constrains el to a <select>.
+      // why: erased cast: the tag guard constrains el to a <select>.
       const select = /** @type {HTMLSelectElement} */ (el);
       const option = /** @type {HTMLOptionElement} */ (selectedOption);
       const sset = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
@@ -347,12 +347,12 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
       el.dispatchEvent(enter('keypress'));
       el.dispatchEvent(enter('keyup'));
       // Also attempt form submission if the element is in one.
-      // why: erased cast — only form controls carry `.form`; a non-form element
+      // why: erased cast: only form controls carry `.form`; a non-form element
       // yields undefined and skips the requestSubmit path exactly as before.
       const form = /** @type {HTMLInputElement} */ (el).form;
       if (form && typeof form.requestSubmit === 'function') {
         try { form.requestSubmit(); }
-        catch { /* swallow — keydown may be enough */ }
+        catch { /* swallow: keydown may be enough */ }
       }
       submitted = true;
     }

@@ -243,11 +243,10 @@ export default [
     ],
     rules: { 'no-restricted-globals': 'off' },
   },
-  // Storage wrappers and the SW chassis touch chrome.storage directly.
+  // Storage wrappers touch chrome.storage directly.
   {
     files: [
       'extension/peerd-egress/storage/**',
-      'extension/background/service-worker.js',
     ],
     rules: { 'no-restricted-globals': 'off' },
   },
@@ -255,7 +254,7 @@ export default [
   // network egress). The egress allowlist intentionally wouldn't admit our
   // own extension origin, so safeFetch isn't the right tool here. Same for
   // tab-affordances (the pull-in hint reads our own bundled icon32.png via
-  // runtime.getURL) — extracted from service-worker.js, which had this off.
+  // runtime.getURL) - this bundled static read is not network egress.
   {
     files: [
       'extension/peerd-runtime/loop/system-prompt.js',

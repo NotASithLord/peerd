@@ -143,6 +143,9 @@ export const makeKernelFirefoxContributor = ({
         'contributor/feedback': route('contributor/feedback'),
       }),
       arm: () => firefoxContributorArm(deps.kv),
+      handleKernelCall: async (/** @type {string} */ operation,
+        /** @type {unknown} */ payload, /** @type {any} */ context) =>
+        (await owner()).handleKernelCall(operation, payload, context),
       recordWebSettlement: async (/** @type {any} */ input) =>
         (await owner()).recordWebSettlement(input),
       drainPending: async () => (await owner()).drainPending(),

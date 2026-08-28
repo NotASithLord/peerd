@@ -30,11 +30,14 @@ describe('test-only vault kernel package target', () => {
   });
 
   test('release bundling pins the exact staged input closure and byte ceiling', () => {
-    const inputs = Object.freeze(Array.from({ length: 396 }, (_, index) => `input-${index}.js`));
+    const ratchet = NATIVE_CHROME_BUNDLE_RATCHETS['background/vault-kernel-chrome.js'];
+    const inputs = Object.freeze(Array.from(
+      { length: ratchet.inputs }, (_, index) => `input-${index}.js`,
+    ));
     const exact = {
-      bytes: NATIVE_CHROME_BUNDLE_RATCHETS['background/vault-kernel-chrome.js'].bytes,
+      bytes: ratchet.bytes,
       inputs,
-      inputSha256: 'c51755505453e1384498f571772bc006dd27253881da630c9f1de7b2035e84bf',
+      inputSha256: ratchet.inputSha256,
     };
     expect(() => assertNativeChromeBundleRatchet(
       'background/vault-kernel-chrome.js', exact,

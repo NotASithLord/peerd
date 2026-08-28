@@ -2,94 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
-import {
-  makeUiForwarder, makeVoiceControlPlane,
-} from '../../extension/background/service-worker-control-plane.js';
 import { createServiceWorkerChannels } from '../../extension/offscreen/supervisor-channels.js';
 import { backgroundScriptUrl } from '../../extension/offscreen/sender-checks.js';
 
 const source = (path: string) => readFileSync(join(EXTENSION_DIR, path), 'utf8');
 
-const installVoiceRelay = ({
-  acquire,
-  revoke,
-  sendHost,
-  hostTimeoutMs,
-}: {
-  acquire: () => Promise<void>;
-  revoke: () => Promise<void>;
-  sendHost: (message: any) => Promise<any>;
-  hostTimeoutMs?: number;
-}) => {
-  let active = false;
-  const calls: string[] = [];
-  const featureLeases = {
-    snapshot: () => ({
-      leases: { 'media-host': { status: active ? 'active' : 'idle' } },
-    }),
-    revoke: async () => {
-      calls.push('revoke');
-      await revoke();
-      active = false;
-    },
-  };
-  const acquireFeatureLease = async () => {
-    calls.push('acquire');
-    await acquire();
-    active = true;
-  };
-  const browser = {
-    runtime: {
-      sendMessage: async (message: any) => {
-        calls.push(`host:${message.type}`);
-        return sendHost(message);
-      },
-    },
-  };
-  const api = makeVoiceControlPlane({
-    browser,
-    featureLeases,
-    acquire: acquireFeatureLease,
-    isSidepanelSender: () => true,
-    isOptionsSender: () => false,
-    hostTimeoutMs,
-  });
-  const dispatch = (message: any) => new Promise<any>((resolve) => {
-    expect(api.onMessage(message, { url: 'sidepanel' }, resolve)).toBe(true);
-  });
-  return {
-    calls,
-    dispatch,
-    disableVoice: () => api.teardown(),
-    active: () => active,
-  };
-};
-
-const deferred = () => {
-  let resolve!: () => void;
-  const promise = new Promise<void>((yes) => { resolve = yes; });
-  return { promise, resolve };
-};
-
 describe('offscreen production feature-lease wiring', () => {
-  test('voice events accept only their exact owning contexts', () => {
-    const delivered: string[] = [];
-    const forward = makeUiForwarder({
-      isOffscreenSender: (sender: any) => sender?.owner === 'offscreen',
-      isMicSender: (sender: any) => sender?.owner === 'mic',
-      deliver: (message: any) => { delivered.push(message.type); },
-    });
-    for (const type of ['voice/chunk', 'voice/auto-stop', 'voice/error']) {
-      forward({ type }, { owner: 'sibling' });
-      forward({ type }, { owner: 'offscreen' });
-    }
-    forward({ type: 'voice/permission-result' }, { owner: 'offscreen' });
-    forward({ type: 'voice/permission-result' }, { owner: 'mic' });
-    expect(delivered).toEqual([
-      'voice/chunk', 'voice/auto-stop', 'voice/error', 'voice/permission-result',
-    ]);
-  });
-
   test('the offscreen shell has no unconditional generic keepalive', () => {
     const shell = source('offscreen/offscreen.js');
     const channels = source('offscreen/supervisor-channels.js');
@@ -324,82 +242,6 @@ describe('offscreen production feature-lease wiring', () => {
     expect(provenance).toContain('voiceUi);');
     expect(custody).toContain('VOICE_CHANNEL_OFFER');
     expect(custody).toContain("revoke('media-host', 'feature-disabled')");
-  });
-
-  test('voice teardown queues behind a pending init and then revokes the activated media lease', async () => {
-    const initGate = deferred();
-    const relay = installVoiceRelay({
-      acquire: () => initGate.promise,
-      revoke: async () => {},
-      sendHost: async () => ({ ok: true }),
-    });
-
-    const initializing = relay.dispatch({ type: 'voice/init', engine: 'moonshine' });
-    const tearingDown = relay.dispatch({ type: 'voice/teardown' });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(relay.calls).toEqual(['acquire']);
-
-    initGate.resolve();
-    expect(await initializing).toEqual({ ok: true });
-    expect(await tearingDown).toEqual({ ok: true });
-    expect(relay.calls).toEqual([
-      'acquire', 'host:voice/init', 'host:voice/teardown', 'revoke',
-    ]);
-    expect(relay.active()).toBe(false);
-  });
-
-  test('a resolved failed voice start revokes its newly acquired durable media lease', async () => {
-    const relay = installVoiceRelay({
-      acquire: async () => {},
-      revoke: async () => {},
-      sendHost: async () => ({ ok: false, error: 'not-initialized' }),
-    });
-
-    expect(await relay.dispatch({ type: 'voice/listen', targetId: 'composer' })).toEqual({
-      ok: false,
-      error: 'not-initialized',
-    });
-    expect(relay.calls).toEqual(['acquire', 'host:voice/listen', 'revoke']);
-    expect(relay.active()).toBe(false);
-  });
-
-  test('a stuck voice relay releases teardown and admits a clean restart', async () => {
-    let starts = 0;
-    const relay = installVoiceRelay({
-      acquire: async () => {},
-      revoke: async () => {},
-      hostTimeoutMs: 5,
-      sendHost: async (message) => {
-        if (message.type === 'voice/init' && starts++ === 0) return new Promise(() => {});
-        return { ok: true };
-      },
-    });
-
-    const initializing = relay.dispatch({ type: 'voice/init', engine: 'moonshine' });
-    const tearingDown = relay.dispatch({ type: 'voice/teardown' });
-    expect(await initializing).toEqual({ ok: false, error: 'voice-host-timeout' });
-    expect(await tearingDown).toEqual({ ok: true, inactive: true });
-    expect(relay.active()).toBe(false);
-    expect(await relay.dispatch({ type: 'voice/init', engine: 'moonshine' }))
-      .toEqual({ ok: true });
-    expect(relay.active()).toBe(true);
-  });
-
-  test('a non-UI voice-OFF transition tears down and revokes the initialized media feature', async () => {
-    const relay = installVoiceRelay({
-      acquire: async () => {},
-      revoke: async () => {},
-      sendHost: async () => ({ ok: true }),
-    });
-    expect(await relay.dispatch({ type: 'voice/init', engine: 'moonshine' })).toEqual({ ok: true });
-    expect(relay.active()).toBe(true);
-
-    expect(await relay.disableVoice()).toEqual({ ok: true });
-    expect(relay.calls).toEqual([
-      'acquire', 'host:voice/init', 'host:voice/teardown', 'revoke',
-    ]);
-    expect(relay.active()).toBe(false);
   });
 
   test('loading the dweb host cannot open custody or network without a lease', () => {

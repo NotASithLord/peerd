@@ -164,13 +164,17 @@ export const runMainSchedulingScenario = async (
       settleTracking: async () => {},
     },
   };
+  ctx.loadAuthorityContext = async () => ctx;
   try {
     for await (const event of bridge.runUserTurn(ctx)) events.push(event);
   } finally { bridge.close(); }
   expect(events.filter((event) => event.type === 'error')).toEqual([]);
-  expect(events.filter((event) => event.type === 'tool-result')).toHaveLength(
-    batches.reduce((sum, batch) => sum + batch.length, 0),
-  );
+  const toolResults = events.filter((event) => event.type === 'tool-result');
+  expect(toolResults).toHaveLength(batches.reduce((sum, batch) => sum + batch.length, 0));
+  expect(toolResults.map((event) => ({
+    ok: event.result?.ok,
+    error: event.result?.error,
+  }))).toEqual(toolResults.map(() => ({ ok: true, error: undefined })));
 };
 
 class ActorWorkerGlobal {
@@ -292,9 +296,12 @@ export const runActorSchedulingScenario = async (
     ]);
     expect(done).toMatchObject({ type: 'done' });
     expect(worker.events.filter((event) => event.type === 'error')).toEqual([]);
-    expect(worker.events.filter((event) => event.type === 'tool-result')).toHaveLength(
-      batches.reduce((sum, batch) => sum + batch.length, 0),
-    );
+    const toolResults = worker.events.filter((event) => event.type === 'tool-result');
+    expect(toolResults).toHaveLength(batches.reduce((sum, batch) => sum + batch.length, 0));
+    expect(toolResults.map((event) => ({
+      ok: event.result?.ok,
+      error: event.result?.error,
+    }))).toEqual(toolResults.map(() => ({ ok: true, error: undefined })));
   } finally {
     if (previousSelf === undefined) delete (globalThis as any).self;
     else Object.defineProperty(globalThis, 'self', { value: previousSelf, configurable: true });

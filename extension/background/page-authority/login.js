@@ -1,7 +1,7 @@
 // @ts-check
 
 import { definePageAuthorityHandler } from './handler.js';
-// login — INITIATE a user-gesture login (passkey/WebAuthn or "Sign in with <known
+// login: INITIATE a user-gesture login (passkey/WebAuthn or "Sign in with <known
 // IdP>") on the current page. Tier 0 of the credential roadmap: it holds NO secret,
 // stores NOTHING, and NEVER fills a password. The authentication factor always
 // stays with the user (their device for a passkey, the provider for SSO). This tool
@@ -9,16 +9,16 @@ import { definePageAuthorityHandler } from './handler.js';
 // origin-verified, affordance-verified, audited action.
 //
 // Five things make this safe, and each is load-bearing:
-//   1. It carries no credential and touches no password field — see the reader in
+//   1. It carries no credential and touches no password field: see the reader in
 //      login-affordance.js (structure only, never a value).
 //   2. The origin it confirms is SYSTEM-DERIVED from the LIVE resolved tab
-//      (originOfUrl(tab.url)), https-only, fail-closed — never a model-supplied
-//      string — and it is RE-VERIFIED after the consent before any auto-click.
+//      (originOfUrl(tab.url)), https-only, fail-closed: never a model-supplied
+//      string, and it is RE-VERIFIED after the consent before any auto-click.
 //   3. The confirm is UNCONDITIONAL: it calls ctx.confirm DIRECTLY (like
 //      site_client_write), so a login prompts EVEN when confirmations are globally
 //      off. A login is maximal delegation; INV-13-grade.
 //   4. It VERIFIES the target really is a login affordance by reading GROUND TRUTH
-//      off the page and running a pure classifier BEFORE it confirms or clicks —
+//      off the page and running a pure classifier BEFORE it confirms or clicks :
 //      so the model cannot spoof the method/provider the confirm names.
 //   5. It is WEB-ACTOR-ONLY (exposure.js), and a passkey uses the TRUSTED CDP click
 //      (WebAuthn needs transient user activation); it does NOT fake a synthetic
@@ -71,7 +71,7 @@ const afterLoginBindingUnknown = (
 
 /**
  * Harness-injected ctx extras (the snapshot ref registry), absent from the
- * ToolContext typedef — narrowed through an erased cast, same as click.js.
+ * ToolContext typedef: narrowed through an erased cast, same as click.js.
  *
  * @typedef {{ backendDOMNodeId: number|null, walkId?: number|null, role: string, name: string }} RefEntry
  * @typedef {{ resolve?: (tabId: number, ref: string) => RefEntry | null }} DomRefs
@@ -88,16 +88,16 @@ export const loginTool = definePageAuthorityHandler({
     if (!tab?.id) return beforeLoginEffect('no_target_tab');
 
     // why: domRefs is SW-injected onto ctx but off the ToolContext typedef;
-    // scripting is typed opaquely — narrow both, same as click.js.
+    // scripting is typed opaquely: narrow both, same as click.js.
     const { domRefs } = /** @type {DomCtxExtras} */ (ctx);
     const scripting = /** @type {typeof chrome.scripting} */ (ctx.scripting);
 
-    // 2) ORIGIN FAIL-CLOSED — a credential ceremony must never begin on a
+    // 2) ORIGIN FAIL-CLOSED: a credential ceremony must never begin on a
     //    non-secure or unknown origin. The origin is derived from the LIVE resolved
-    //    tab (originOfUrl(tab.url) — the same normalizer navigate/dom-helpers use),
+    //    tab (originOfUrl(tab.url): the same normalizer navigate/dom-helpers use),
     //    NOT the possibly-stale ctx.activeTab snapshot, so the value we https-gate,
     //    confirm, audit, and RE-VERIFY against post-consent is where the tab really
-    //    is. Still system-derived — never a model-supplied string.
+    //    is. Still system-derived: never a model-supplied string.
     const origin = originOfUrl(tab.url);
     if (!origin || !origin.startsWith('https://')) {
       return beforeLoginEffect('login_requires_https_origin');
@@ -106,7 +106,7 @@ export const loginTool = definePageAuthorityHandler({
     // 3) INBOUND. This can never actually fire on login's dispatch paths: ctx.inbound
     //    is set only for synthetic MAIN turns, and login is web-actor-only, reached
     //    through message_actor whose sender gate an inbound (untrusted) turn cannot
-    //    pass — so an inbound turn never gets to wake the web actor at all. The REAL
+    //    pass, so an inbound turn never gets to wake the web actor at all. The REAL
     //    controls are that exposure + that sender gate. This line is inert belt-and-
     //    braces for any FUTURE path that folds ctx.inbound onto an actor dispatch;
     //    it is not a live wall today.
@@ -114,12 +114,12 @@ export const loginTool = definePageAuthorityHandler({
       return beforeLoginEffect('login_refused_inbound');
     }
 
-    // 4) READ GROUND TRUTH — resolve the element the SAME way click.js does (ref's
+    // 4) READ GROUND TRUTH: resolve the element the SAME way click.js does (ref's
     //    walkId, or selector+nth) and read a descriptor. A read needs no trusted
     //    input, so scripting is fine on every channel.
     const refStr = typeof args?.ref === 'string' && args.ref.trim() ? args.ref.trim() : null;
     const entry = refStr ? (domRefs?.resolve?.(tab.id, refStr) ?? null) : null;
-    if (refStr && !entry) return beforeLoginEffect(`stale_ref: ${refStr} — re-run snapshot on this tab first`);
+    if (refStr && !entry) return beforeLoginEffect(`stale_ref: ${refStr}: re-run snapshot on this tab first`);
     const walkId = entry?.walkId ?? null;
     const selector = typeof args?.selector === 'string' && args.selector.trim() ? args.selector : null;
     const nth = Number.isInteger(args?.nth) && args.nth >= 0 ? args.nth : 0;
@@ -148,7 +148,7 @@ export const loginTool = definePageAuthorityHandler({
       return beforeLoginEffect(`login_read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
     }
 
-    // 5) CLASSIFY from ground truth (idp-registry injected — functional-core rule).
+    // 5) CLASSIFY from ground truth (idp-registry injected: functional-core rule).
     //    An unsupported verdict is a NORMAL, non-error outcome the model can relay:
     //    no click, and the user/actor learns exactly why.
     const v = classifyLoginAffordance(descriptor, { isKnownIdp });
@@ -156,7 +156,7 @@ export const loginTool = definePageAuthorityHandler({
       return beforeLoginEffect('login_unsupported', v.reason);
     }
 
-    // 6) ALWAYS CONFIRM — UNCONDITIONAL. Call ctx.confirm DIRECTLY (like
+    // 6) ALWAYS CONFIRM: UNCONDITIONAL. Call ctx.confirm DIRECTLY (like
     //    site_client_write) so it prompts EVEN when confirmations are globally off.
     //    The origin is system-derived (step 2) and the method/provider come from the
     //    verified classifier (step 5), so the summary cannot be spoofed by the model.
@@ -173,7 +173,7 @@ export const loginTool = definePageAuthorityHandler({
       kind: 'login',
       sideEffect: 'write',
       origins: [origin],
-      // Structured fields for a rich login card — safe: origin is system-derived
+      // Structured fields for a rich login card: safe: origin is system-derived
       // and method/provider/verified come from the ground-truth classifier, not the
       // model. `verified` lets the card soften copy for a destination peerd could not
       // prove is a known IdP (it must not vouch for one).
@@ -218,7 +218,7 @@ export const loginTool = definePageAuthorityHandler({
     }
 
     // 7) INITIATE. peerd AUTO-CLICKS only when it has (a) VERIFIED the destination is
-    //    a known IdP, (b) a STABLE walkId (a snapshot node the page cannot re-point —
+    //    a known IdP, (b) a STABLE walkId (a snapshot node the page cannot re-point :
     //    a raw selector or a CDP-only backend ref is NOT stable across the up-to-120s
     //    confirm), and it then (c) RE-VERIFIES origin + affordance AFTER the consent.
     //    Everything else is ASSISTED-MANUAL: peerd verified the origin and took
@@ -227,13 +227,13 @@ export const loginTool = definePageAuthorityHandler({
 
     if (!canAutoClick) {
       // ASSISTED-MANUAL. Passkey is ALWAYS here at Tier 0: WebAuthn needs TRANSIENT
-      // USER ACTIVATION, which only a TRUSTED (CDP) click grants — and the CDP channel
+      // USER ACTIVATION, which only a TRUSTED (CDP) click grants, and the CDP channel
       // resolves the node by a backendDOMNodeId, a DIFFERENT key than this tool's
       // ground-truth READ (walkId/selector), so an auto-fire could be a confused
       // deputy (consent to one element, a trusted click on another). An SSO lands here
       // when its destination is unverified OR it has no stable walkId to pin the
-      // read↔click node. In every case peerd did the load-bearing work — https origin,
-      // ground-truth classify, origin-named consent — and hands off the gesture, where
+      // read↔click node. In every case peerd did the load-bearing work: https origin,
+      // ground-truth classify, origin-named consent, and hands off the gesture, where
       // the factor belongs anyway. No fake synthetic click. (Trusted passkey auto-click
       // via a CDP SAME-NODE read is the documented Tier-0.1 follow-up.)
       ctx.audit({ type: 'login_gesture_required', details: { origin, method: v.method } }).catch(() => {});
@@ -262,7 +262,7 @@ export const loginTool = definePageAuthorityHandler({
         }
       }
       // SSO, not auto-clickable. Be non-committal about the destination when unverified
-      // — peerd must NOT vouch for where the button leads.
+      // Peerd must NOT vouch for where the button leads.
       const provider = v.provider || 'your provider';
       const guidance = v.verified === true
         ? `Click the ${provider} sign-in button. peerd cannot read or act on ${v.idpOrigin}. `
@@ -275,7 +275,7 @@ export const loginTool = definePageAuthorityHandler({
       };
     }
 
-    // AUTO — verified SSO + stable walkId. RE-VERIFY after the confirm, before clicking:
+    // AUTO: verified SSO + stable walkId. RE-VERIFY after the confirm, before clicking:
     // the page can move the tab or swap the element under a raw ref during the (up-to-
     // 120s) confirm, so re-judge the landing, re-check the live origin, and re-read +
     // re-classify via the SAME walkId; abort on ANY change.
@@ -327,7 +327,7 @@ export const loginTool = definePageAuthorityHandler({
       );
     }
 
-    // Click via the SAME walkId — the stable registry node the read resolved, which
+    // Click via the SAME walkId: the stable registry node the read resolved, which
     // the page cannot re-point. expectedCount=1 catches a stale/duplicated ref.
     let scriptResult;
     try {
@@ -353,14 +353,14 @@ export const loginTool = definePageAuthorityHandler({
       return afterLoginBindingUnknown(`login_click_failed: ${scriptResult.error ?? 'click_failed'}`);
     }
 
-    // 8) AUDIT (best-effort — never let an audit hiccup fail the login).
+    // 8) AUDIT (best-effort: never let an audit hiccup fail the login).
     ctx.audit({
       type: 'login_initiated',
       details: { origin, method: v.method, provider: v.provider, idpOrigin },
     }).catch(() => {});
 
     // 9) RETURN a system-authored plain success. No untrusted page text is emitted,
-    //    so no fence is needed — keep the message peerd-authored.
+    //    so no fence is needed: keep the message peerd-authored.
     return {
       ok: true,
       endTurn: true,

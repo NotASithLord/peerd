@@ -130,6 +130,7 @@ export const createKernelSemanticRuntime = (deps) => {
     isHomeSender: deps.isHomeSender,
     vault: deps.vault,
     authority,
+    contributorAuthority: deps.contributorAuthority ?? null,
     localRoutes,
     actorCount: () => typeof deps.loadTurnRuntime === 'function'
       ? ensureTurnOwner().actorCount() : deps.actorCount(),
@@ -239,6 +240,7 @@ export const createKernelSemanticRuntime = (deps) => {
       onLoaded: deps.onTurnRuntimeLoaded,
       providerEgress: deps.providerEgress,
       authorityScheduler: deps.authorityScheduler,
+      recordModelCall: deps.contextSnapshots?.record,
       ...(deps.turnLoadTimeoutMs === undefined ? {} : { loadTimeoutMs: deps.turnLoadTimeoutMs }),
     });
     return turnOwner;
@@ -257,6 +259,8 @@ export const createKernelSemanticRuntime = (deps) => {
   });
   return Object.freeze({
     routes,
+    dispatchContributor: (/** @type {string} */ route, /** @type {any} */ message) =>
+      control.dispatchContributor(route, message),
     callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options = {}) =>
       ensureAdministrativeBinding().callFeature(payload, options),
     actorCount: () => typeof deps.loadTurnRuntime === 'function'

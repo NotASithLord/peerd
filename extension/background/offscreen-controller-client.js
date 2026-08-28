@@ -80,6 +80,15 @@ const stopped = (/** @type {string} */ code, /** @type {boolean} */ known) => ({
   phase: known ? 'startup' : 'run',
 });
 
+const CONTROLLER_LEASE_IDENTITY_FIELDS = Object.freeze([
+  'schema', 'scope', 'leaseId', 'generation', 'buildId', 'bootId',
+  'kernelEpoch', 'hostEpoch',
+]);
+const sameControllerLease = (/** @type {any} */ left, /** @type {any} */ right) =>
+  left === right || !!left && !!right && CONTROLLER_LEASE_IDENTITY_FIELDS.every(
+    (field) => Object.is(left[field], right[field]),
+  );
+
 /**
  * @param {Object} deps
  * @param {() => Promise<void>} deps.ensureOffscreen
@@ -104,6 +113,7 @@ const stopped = (/** @type {string} */ code, /** @type {boolean} */ known) => ({
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
  * @param {(capability:string,payload:unknown)=>any} [deps.createQuota]
+ * @param {()=>void} [deps.onClose]
  */
 export const connectOffscreenController = async ({
   ensureOffscreen,
@@ -122,6 +132,7 @@ export const connectOffscreenController = async ({
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
   createQuota = createControllerKernelQuota,
+  onClose = () => {},
 }) => {
   const offeredCaps = parseControllerCaps(capabilities);
   if (!offeredCaps) throw new ControllerChannelError('invalid controller capabilities', 'caps-invalid');
@@ -226,6 +237,7 @@ export const connectOffscreenController = async ({
     closed = true;
     failAll('controller-channel-closed');
     try { port1.close(); } catch { /* already closed */ }
+    onClose();
   };
   const renewCall = (/** @type {string} */ requestId, /** @type {any} */ call) => {
     if (call.cancelled) return;
@@ -319,6 +331,13 @@ export const connectOffscreenController = async ({
         controller, operation: message.operation, payload: message.payload,
       });
       const settleKernelCall = (/** @type {any} */ result) => {
+        // The outer controller call can settle and release this reverse RPC
+        // while its authority promise is still completing. A late result from
+        // that retired grant has no standing to mutate quota or post into the
+        // replacement channel; discard only the exact stale entry. Live ID or
+        // controller mismatches remain protocol failures in the receive path.
+        if (calls.get(message.requestId) !== call
+            || call.reverse.get(message.rpcId)?.controller !== controller) return;
         call.reverse.delete(message.rpcId);
         const observed = call.quota.observe(message.operation, message.payload, result);
         const bounded = observed?.ok === true ? result : observed;
@@ -555,7 +574,6 @@ const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
  * @param {typeof import('./direct-controller-client.js').connectDirectController} [deps.connectDirectController]
  * @param {number} [deps.connectTimeoutMs]
  * @param {number} [deps.promptLoadTimeoutMs]
- * @param {(reason:string)=>Promise<any>} [deps.retireHost]
  * @param {() => Promise<any[]>} [deps.listWindowClients]
  * @param {(input: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.fetchFn
  */
@@ -581,7 +599,6 @@ export const makeSemanticControllerClient = ({
   connectDirectController: directConnector,
   connectTimeoutMs = 15_000,
   promptLoadTimeoutMs = 10_000,
-  retireHost = async () => {},
   fetchFn,
   listWindowClients = async () => {
     const clientApi = /** @type {any} */ (globalThis).clients;
@@ -621,17 +638,6 @@ export const makeSemanticControllerClient = ({
   const hasFeatureAuthority = typeof authorizeFeatureCall === 'function'
     && typeof handleFeatureKernelCall === 'function';
   const ownsLeaseBoundary = !firefoxDirect && typeof withLease === 'function';
-  // why a leased-user count: the Chrome lease is per bounded operation, but
-  // the CLIENT channel is shared. Retiring it when one operation settles
-  // while a concurrent leased operation (a live turn) is still on the wire
-  // severs that operation mid-flight as outcome-unknown. Only the last user
-  // out retires the realm.
-  let leasedUsers = 0;
-  const enterLeased = () => { leasedUsers += 1; };
-  const exitLeased = () => {
-    leasedUsers = Math.max(0, leasedUsers - 1);
-    if (leasedUsers === 0 && ownsLeaseBoundary && active) retire(active);
-  };
   /** @type {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(error:Error)=>void,lossGraceMs?:number})=>Promise<T>} */
   /** @type {<T>(operation:(lease?:unknown)=>Promise<T>,options?:any)=>Promise<T>} */
   const withControllerLease = firefoxDirect && typeof withDirectLifetime === 'function'
@@ -651,9 +657,6 @@ export const makeSemanticControllerClient = ({
   let connecting = null;
   /** @type {any | null} */
   let active = null;
-  /** @type {Promise<void>|null} */
-  let retirementBarrier = null;
-  let retirementBlocked = false;
   /** @type {Promise<{template:string,dwebBlock:string}> | null} */
   let promptAssets = null;
   const authorizeCall = (
@@ -712,7 +715,7 @@ export const makeSemanticControllerClient = ({
     return { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
   };
 
-  const connect = async (/** @type {unknown} */ lease) => {
+  const connect = async (/** @type {unknown} */ lease, /** @type {()=>void} */ onClose) => {
     if (firefoxDirect) {
       if (typeof directConnector !== 'function') {
         throw new ControllerChannelError(
@@ -731,16 +734,12 @@ export const makeSemanticControllerClient = ({
         workerUrl: browser.runtime.getURL('offscreen/controller-worker.js'),
       });
     }
-    // why two bounded attempts: lease settlement retires the offscreen
-    // document, so a connect can race the successor document's creation. The
-    // offer then lands on the dying WindowClient (or none) and the handshake
-    // starves. The first attempt fails fast; the one retry re-runs
-    // ensureOffscreen + findHost against the then-current exact host with a
-    // FRESH channel. A same-epoch re-offer is safe precisely because the
-    // failed offer never bound: the host refuses a repeated epoch, so a
-    // half-established channel cannot be silently duplicated.
-    /** @param {number} handshakeMs */
-    const attempt = (handshakeMs) => connectOffscreenController({
+    // One short attempt is enough inside an exact lease. If offscreen bootstrap
+    // loses this race, returning releases that controller scope; the caller's
+    // single safe retry then acquires a fresh lease on the same physical host.
+    // Keeping the retry at the lease boundary avoids a second channel protocol
+    // and never holds shared dweb custody behind a 10-second stale handshake.
+    return connectOffscreenController({
       ensureOffscreen,
       capabilities: [...semanticCapabilities],
       buildDigest: CONTROLLER_BUILD_DIGEST,
@@ -750,54 +749,49 @@ export const makeSemanticControllerClient = ({
       handleKernelCall: hasTurnAuthority || hasComposeAuthority || hasSemanticAuthority
         || hasRuntimeHandler || hasFeatureAuthority
         ? handleControllerKernelCall : undefined,
-      handshakeTimeoutMs: handshakeMs,
+      handshakeTimeoutMs: 2_000,
       findHost: async () => selectExactControllerHost(
         await listWindowClients(), controllerHostUrl.href,
       ),
+      onClose,
     });
-    try {
-      return await attempt(2_000);
-    } catch (cause) {
-      const code = /** @type {{code?:string}} */ (cause)?.code;
-      if (code !== 'handshake-failed' && code !== 'host-missing') throw cause;
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      return attempt(10_000);
-    }
   };
 
   let connectionGeneration = 0;
-  const retirePoisonedHost = () => {
-    if (retirementBarrier) return retirementBarrier;
-    /** @type {ReturnType<typeof setTimeout>} */ let timer;
-    const pending = Promise.race([
-      Promise.resolve().then(() => retireHost('controller-host-startup-failed'))
-        .then(() => true, () => false),
-      new Promise((resolve) => {
-        timer = setTimeout(() => resolve(false), connectTimeoutMs);
-      }),
-    ]).then((retired) => {
-      if (!retired) retirementBlocked = true;
-    }).finally(() => {
-      clearTimeout(timer);
-      if (retirementBarrier === pending && !retirementBlocked) retirementBarrier = null;
-    });
-    retirementBarrier = pending;
-    return pending;
-  };
+  /** @type {unknown} */
+  let connectingLease = null;
+  /** @type {unknown} */
+  let activeLease = null;
   const getClient = async (/** @type {unknown} */ lease) => {
-    if (retirementBlocked) throw startupChannelError('controller-host-retirement-failed');
-    if (retirementBarrier) await retirementBarrier;
-    if (retirementBlocked) throw startupChannelError('controller-host-retirement-failed');
-    if (active) return active;
+    if (active && sameControllerLease(activeLease, lease)) return active;
+    if (active) retire(active);
+    if (connecting && !sameControllerLease(connectingLease, lease)) {
+      // why: an offer is authenticated by its exact feature lease. A delayed
+      // connection under the retired lease must not win after its successor
+      // starts connecting, even though both leases share one kernel epoch.
+      connectionGeneration += 1;
+      connecting = null;
+      connectingLease = null;
+    }
     if (!connecting) {
       const generation = connectionGeneration;
+      const holder = { client: /** @type {any|null} */ (null) };
       /** @type {ReturnType<typeof setTimeout>} */ let timer;
-      const candidate = connect(lease).then((client) => {
+      const candidate = connect(lease, () => {
+        // why: a delayed close from a retired binding cannot clear a newer
+        // same-kernel lease. Only the exact client object owns this callback.
+        if (holder.client && active === holder.client) {
+          active = null;
+          activeLease = null;
+        }
+      }).then((client) => {
+        holder.client = client;
         if (generation !== connectionGeneration) {
           try { client.close(); } catch {}
           throw new ControllerChannelError('controller generation retired', 'generation-retired');
         }
         active = client;
+        activeLease = lease;
         return client;
       });
       const bounded = Promise.race([
@@ -811,16 +805,19 @@ export const makeSemanticControllerClient = ({
       const pending = bounded.catch(async (cause) => {
         if (generation === connectionGeneration) {
           connectionGeneration += 1;
-          const retirement = !firefoxDirect ? retirePoisonedHost() : null;
           connecting = null;
-          await retirement;
+          connectingLease = null;
         }
         throw cause;
       }).finally(() => {
         clearTimeout(timer);
-        if (connecting === pending) connecting = null;
+        if (connecting === pending) {
+          connecting = null;
+          connectingLease = null;
+        }
       });
       connecting = pending;
+      connectingLease = lease;
     }
     return connecting;
   };
@@ -840,12 +837,14 @@ export const makeSemanticControllerClient = ({
 
   const retire = (/** @type {any} */ client) => {
     if (active !== client) return;
-    try { client.close(); } catch { /* already retired */ }
     active = null;
+    activeLease = null;
+    try { client.close(); } catch { /* already retired */ }
   };
   const retireActiveOnLifetimeLoss = () => {
     connectionGeneration += 1;
     connecting = null;
+    connectingLease = null;
     const client = active;
     if (client) retire(client);
   };
@@ -918,15 +917,13 @@ export const makeSemanticControllerClient = ({
     // retry therefore reacquires the lease boundary instead of reusing the
     // identity that just lost its controller generation.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const prompt = await withControllerLease(async (/** @type {unknown} */ lease) => {
-        enterLeased();
-        try { return await renderSystemPromptUnleased(ctx, lease); }
-        finally { exitLeased(); }
-      }, {
-        outcomeKnownOnLoss: true,
-        code: 'controller-firefox-prompt-lifetime-lost',
-        onLost: retireActiveOnLifetimeLoss,
-      });
+      const prompt = await withControllerLease(
+        (/** @type {unknown} */ lease) => renderSystemPromptUnleased(ctx, lease), {
+          outcomeKnownOnLoss: true,
+          code: 'controller-firefox-prompt-lifetime-lost',
+          onLost: retireActiveOnLifetimeLoss,
+        },
+      );
       if (typeof prompt === 'string') return prompt;
     }
     throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
@@ -937,34 +934,36 @@ export const makeSemanticControllerClient = ({
     });
   };
 
-  const projectTurnTools = async (/** @type {Record<string, unknown>} */ input) => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const projection = await withControllerLease(async (/** @type {unknown} */ lease) => {
-        enterLeased();
-        try {
-          let client = null;
-          try {
-            client = await getClient(lease);
-            const result = await client.call('turn.tools.project', input, { timeoutMs: 15_000 });
-            if (result?.ok === true && Array.isArray(result.tools)
-                && Array.isArray(result.operations)) return result;
-            if (result?.outcomeKnown === true) {
-              throw Object.assign(new Error(result.code ?? 'turn-tool-projection-failed'), result);
-            }
-          } catch (cause) {
-            if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
-          }
-          if (client) retire(client);
-          return null;
-        } finally { exitLeased(); }
-      }, {
-        outcomeKnownOnLoss: true,
-        code: 'controller-firefox-tool-projection-lifetime-lost',
-        onLost: retireActiveOnLifetimeLoss,
-      });
-      if (projection?.ok === true && Array.isArray(projection.tools)
-          && Array.isArray(projection.operations)) return projection;
+  const projectTurnTools = async (/** @type {Record<string, unknown>} */ input,
+    /** @type {{signal?:AbortSignal}} */ options = {}) => {
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error
+        ? options.signal.reason : new DOMException('The operation was aborted.', 'AbortError');
     }
+    const projection = await withControllerLease(async (/** @type {unknown} */ lease) => {
+      let client = null;
+      try {
+        client = await getClient(lease);
+        const result = await client.call('turn.tools.project', input, {
+          timeoutMs: 15_000, signal: options.signal,
+        });
+        if (result?.ok === true && Array.isArray(result.tools)
+            && Array.isArray(result.operations)) return result;
+        if (result?.outcomeKnown === true) {
+          throw Object.assign(new Error(result.code ?? 'turn-tool-projection-failed'), result);
+        }
+      } catch (cause) {
+        if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
+      }
+      if (client) retire(client);
+      return null;
+    }, {
+      outcomeKnownOnLoss: true,
+      code: 'controller-firefox-tool-projection-lifetime-lost',
+      onLost: retireActiveOnLifetimeLoss,
+    });
+    if (projection?.ok === true && Array.isArray(projection.tools)
+        && Array.isArray(projection.operations)) return projection;
     throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
       code: 'controller-tool-projection-startup-failed',
       outcomeKnown: true, phase: 'startup', retryable: true,
@@ -974,24 +973,21 @@ export const makeSemanticControllerClient = ({
   const planToolsCommand = async (/** @type {Record<string, unknown>} */ input) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const plan = await withControllerLease(async (/** @type {unknown} */ lease) => {
-        enterLeased();
+        let client = null;
         try {
-          let client = null;
-          try {
-            client = await getClient(lease);
-            const result = await client.call('turn.tools.command', input, { timeoutMs: 15_000 });
-            if (result?.ok === true && result.plan && typeof result.plan === 'object') {
-              return result;
-            }
-            if (result?.outcomeKnown === true) {
-              throw Object.assign(new Error(result.code ?? 'turn-tools-command-failed'), result);
-            }
-          } catch (cause) {
-            if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
+          client = await getClient(lease);
+          const result = await client.call('turn.tools.command', input, { timeoutMs: 15_000 });
+          if (result?.ok === true && result.plan && typeof result.plan === 'object') {
+            return result;
           }
-          if (client) retire(client);
-          return null;
-        } finally { exitLeased(); }
+          if (result?.outcomeKnown === true) {
+            throw Object.assign(new Error(result.code ?? 'turn-tools-command-failed'), result);
+          }
+        } catch (cause) {
+          if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
+        }
+        if (client) retire(client);
+        return null;
       }, {
         outcomeKnownOnLoss: true,
         code: 'controller-firefox-tools-command-lifetime-lost',
@@ -1018,37 +1014,34 @@ export const makeSemanticControllerClient = ({
         throw new DOMException('The operation was aborted.', 'AbortError');
       }
       const composed = await withControllerLease(async (/** @type {unknown} */ lease) => {
-        enterLeased();
+        let client = null;
         try {
-          let client = null;
-          try {
-            client = await getClient(lease);
-            const result = await client.call(TURN_COMPOSE_CAPABILITY, input, {
-              timeoutMs: 30_000,
-              signal: options.signal,
-            });
-            if (result?.ok === true && result.value && typeof result.value.text === 'string') {
-              return result;
-            }
-            if (result?.outcomeKnown === false) {
-              retire(client);
-              throw Object.assign(new Error(result.code ?? 'turn-compose-outcome-unknown'), result);
-            }
-            if (result?.outcomeKnown === true) {
-              if (result.retryable === true) {
-                retire(client);
-                return null;
-              }
-              throw Object.assign(new Error(result.code ?? 'turn-compose-failed'), result);
-            }
-          } catch (cause) {
-            const detail = /** @type {{outcomeKnown?:unknown,retryable?:unknown}} */ (cause);
-            if (detail?.outcomeKnown === false
-                || detail?.outcomeKnown === true && detail.retryable !== true) throw cause;
+          client = await getClient(lease);
+          const result = await client.call(TURN_COMPOSE_CAPABILITY, input, {
+            timeoutMs: 30_000,
+            signal: options.signal,
+          });
+          if (result?.ok === true && result.value && typeof result.value.text === 'string') {
+            return result;
           }
-          if (client) retire(client);
-          return null;
-        } finally { exitLeased(); }
+          if (result?.outcomeKnown === false) {
+            retire(client);
+            throw Object.assign(new Error(result.code ?? 'turn-compose-outcome-unknown'), result);
+          }
+          if (result?.outcomeKnown === true) {
+            if (result.retryable === true) {
+              retire(client);
+              return null;
+            }
+            throw Object.assign(new Error(result.code ?? 'turn-compose-failed'), result);
+          }
+        } catch (cause) {
+          const detail = /** @type {{outcomeKnown?:unknown,retryable?:unknown}} */ (cause);
+          if (detail?.outcomeKnown === false
+              || detail?.outcomeKnown === true && detail.retryable !== true) throw cause;
+        }
+        if (client) retire(client);
+        return null;
       }, {
         outcomeKnownOnLoss: true,
         code: 'controller-firefox-turn-compose-lifetime-lost',
@@ -1118,16 +1111,14 @@ export const makeSemanticControllerClient = ({
       // fresh lease + connect against the successor host is replay-safe.
       let attempts = 0;
       for (;;) {
-        const result = await withControllerLease(async (/** @type {unknown} */ lease) => {
-          enterLeased();
-          try { return await callTurnUnleased(payload, lease, options); }
-          finally { exitLeased(); }
-        }, {
-          outcomeKnownOnLoss: false,
-          code: 'controller-firefox-turn-lifetime-lost',
-          onLost: retireActiveOnLifetimeLoss,
-          lossGraceMs: 2_000,
-        });
+        const result = await withControllerLease(
+          (/** @type {unknown} */ lease) => callTurnUnleased(payload, lease, options), {
+            outcomeKnownOnLoss: false,
+            code: 'controller-firefox-turn-lifetime-lost',
+            onLost: retireActiveOnLifetimeLoss,
+            lossGraceMs: 2_000,
+          },
+        );
         attempts += 1;
         if (result?.code !== 'controller-turn-startup-failed' || attempts > 1
             || options.signal?.aborted) return result;
@@ -1174,15 +1165,13 @@ export const makeSemanticControllerClient = ({
       // the semantic dispatch never left the kernel.
       let attempts = 0;
       for (;;) {
-        const result = await withControllerLease(async (/** @type {unknown} */ lease) => {
-          enterLeased();
-          try { return await callSemanticUnleased(payload, lease); }
-          finally { exitLeased(); }
-        }, {
-          outcomeKnownOnLoss: false,
-          code: 'controller-firefox-semantic-lifetime-lost',
-          onLost: retireActiveOnLifetimeLoss,
-        });
+        const result = await withControllerLease(
+          (/** @type {unknown} */ lease) => callSemanticUnleased(payload, lease), {
+            outcomeKnownOnLoss: false,
+            code: 'controller-firefox-semantic-lifetime-lost',
+            onLost: retireActiveOnLifetimeLoss,
+          },
+        );
         attempts += 1;
         if (result?.code !== 'semantic-dispatch-startup-failed' || attempts > 1) return result;
         await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1209,29 +1198,24 @@ export const makeSemanticControllerClient = ({
     const replayable = parseRuntimeDispatch(payload)?.policy.authority.replayClass === 'A';
     try {
       return await withControllerLease(async (/** @type {unknown} */ lease) => {
-        enterLeased();
+        let client;
+        try { client = await getClient(lease); }
+        catch {
+          return startupResult('runtime-dispatch-startup-failed');
+        }
         try {
-          let client;
-          try { client = await getClient(lease); }
-          catch {
-            return startupResult('runtime-dispatch-startup-failed');
-          }
-          try {
-            const result = await client.call(RUNTIME_DISPATCH_CAPABILITY, payload, options);
-            if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) {
-              retire(client);
-            }
-            return result;
-          } catch (cause) {
+          const result = await client.call(RUNTIME_DISPATCH_CAPABILITY, payload, options);
+          if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) {
             retire(client);
-            return {
-              ok: false, code: 'runtime-dispatch-transport-failed',
-              error: cause instanceof Error ? cause.message : String(cause),
-              outcomeKnown: false, phase: 'run',
-            };
           }
-        } finally {
-          exitLeased();
+          return result;
+        } catch (cause) {
+          retire(client);
+          return {
+            ok: false, code: 'runtime-dispatch-transport-failed',
+            error: cause instanceof Error ? cause.message : String(cause),
+            outcomeKnown: false, phase: 'run',
+          };
         }
       }, {
         outcomeKnownOnLoss: replayable,
@@ -1268,29 +1252,24 @@ export const makeSemanticControllerClient = ({
       let attempts = 0;
       for (;;) {
         const result = await withControllerLease(async (/** @type {unknown} */ lease) => {
-          enterLeased();
+          let client;
+          try { client = await getClient(lease); }
+          catch {
+            return startupResult('feature-dispatch-startup-failed');
+          }
           try {
-            let client;
-            try { client = await getClient(lease); }
-            catch {
-              return startupResult('feature-dispatch-startup-failed');
-            }
-            try {
-              const reply = await client.call(capability, payload, options);
-              if (reply?.outcomeKnown === false || controllerGenerationMustRetire(reply)) {
-                retire(client);
-              }
-              return reply;
-            } catch (cause) {
+            const reply = await client.call(capability, payload, options);
+            if (reply?.outcomeKnown === false || controllerGenerationMustRetire(reply)) {
               retire(client);
-              return {
-                ok: false, code: 'feature-dispatch-transport-failed',
-                error: cause instanceof Error ? cause.message : String(cause),
-                outcomeKnown: false, phase: 'run',
-              };
             }
-          } finally {
-            exitLeased();
+            return reply;
+          } catch (cause) {
+            retire(client);
+            return {
+              ok: false, code: 'feature-dispatch-transport-failed',
+              error: cause instanceof Error ? cause.message : String(cause),
+              outcomeKnown: false, phase: 'run',
+            };
           }
         }, {
           outcomeKnownOnLoss: replayable,
@@ -1319,14 +1298,8 @@ export const makeSemanticControllerClient = ({
   const callFeature = (/** @type {unknown} */ payload,
     /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {}) =>
     callFeatureCapability(KERNEL_FEATURE_DISPATCH_CAPABILITY, payload, options);
-  // why the outer leased user: a raw host lease keeps the document alive, but
-  // zero client users still retires its channel and sealed Worker between turns.
   const withRun = (/** @type {()=>Promise<any>} */ operation) =>
-    withControllerLease(async () => {
-      enterLeased();
-      try { return await operation(); }
-      finally { exitLeased(); }
-    }, {
+    withControllerLease(operation, {
       outcomeKnownOnLoss: false,
       code: 'controller-firefox-run-lifetime-lost',
       onLost: retireActiveOnLifetimeLoss,
@@ -1346,6 +1319,7 @@ export const makeSemanticControllerClient = ({
     close: () => {
       connectionGeneration += 1;
       connecting = null;
+      connectingLease = null;
       if (active) retire(active);
     },
   });

@@ -7,6 +7,7 @@ import {
   buildTemporalBlock, buildTemporalContext,
 } from '../../extension/peerd-runtime/controller.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
+import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
 
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -67,6 +68,7 @@ const drain = async (iterable: AsyncIterable<any>) => {
 
 type HarnessOptions = {
   ctx: any;
+  providerEgress?: any;
   inspectOuter?: (payload: any) => void;
   inspectModelRequest?: (request: any, grant: any) => void;
   interceptKernel?: (
@@ -75,10 +77,11 @@ type HarnessOptions = {
     next: () => Promise<any>,
     invoke: (operation: string, payload: any) => Promise<any>,
   ) => Promise<any>;
+  recordModelCall?: (call: Record<string, any>) => void;
 };
 
 const runPrototype = async ({
-  ctx, inspectOuter, inspectModelRequest, interceptKernel,
+  ctx, providerEgress, inspectOuter, inspectModelRequest, interceptKernel, recordModelCall,
 }: HarnessOptions) => {
   let bridge: ReturnType<typeof makeControllerTurnBridge>;
   let id = 0;
@@ -118,10 +121,11 @@ const runPrototype = async ({
   bridge = makeControllerTurnBridge({
     getClient,
     newId: () => `prototype-${++id}`,
-    providerEgress: makeScriptedProviderAuthority(
+    providerEgress: providerEgress ?? makeScriptedProviderAuthority(
       () => ctx.callModel,
       (request, grant) => inspectModelRequest?.(request, grant),
     ) as any,
+    ...(recordModelCall ? { recordModelCall } : {}),
   });
   try {
     const events = [];
@@ -141,6 +145,7 @@ const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]
   }],
   sessions,
   tools: [],
+  allowedOperations: [],
   refreshTools: async () => [],
   classifyToolCall: () => ({ actionClass: 'read', confirm: false }),
   getSystemPrompt: async () => 'PINNED-SYSTEM',
@@ -170,7 +175,166 @@ const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]
   },
 });
 
+const makeFailoverProviderAuthority = () => {
+  const encoder = new TextEncoder();
+  const remoteStreams = new Map<string, { sent: boolean }>();
+  const localStreams = new Map<string, { sent: boolean }>();
+  const known = (value: any) => ({ ok: true, value, outcomeKnown: true });
+  return {
+    openInference: async (request: any) => {
+      const streamId = 'primary-usage-limit';
+      remoteStreams.set(streamId, { sent: false });
+      return known({
+        streamId, status: 402, statusText: 'Payment Required', headers: {}, hasBody: true,
+        providerId: request.providerId,
+      });
+    },
+    readInferenceChunk: async ({ streamId }: any) => {
+      const stream = remoteStreams.get(streamId);
+      if (!stream || stream.sent) {
+        remoteStreams.delete(streamId);
+        return known({ done: true });
+      }
+      stream.sent = true;
+      return known({
+        done: false,
+        chunk: encoder.encode(JSON.stringify({ error: { message: 'credit balance exhausted' } })),
+      });
+    },
+    cancelInference: async ({ streamId }: any) => {
+      remoteStreams.delete(streamId);
+      return known(null);
+    },
+    readModelInventory: async () => known(null),
+    readModelContext: async () => known(null),
+    openLocalGeneration: async () => {
+      const streamId = 'local-fallback';
+      localStreams.set(streamId, { sent: false });
+      return known({ streamId });
+    },
+    readLocalGeneration: async ({ streamId }: any) => {
+      const stream = localStreams.get(streamId);
+      if (!stream || stream.sent) {
+        localStreams.delete(streamId);
+        return known({ done: true });
+      }
+      stream.sent = true;
+      return known({ done: false, token: 'fallback reply' });
+    },
+    cancelLocalGeneration: async ({ streamId }: any) => {
+      localStreams.delete(streamId);
+      return known(null);
+    },
+    closeOwner: async () => {
+      remoteStreams.clear();
+      localStreams.clear();
+    },
+  };
+};
+
 describe('orchestrator controller turn boundary', () => {
+  test('captures the bounded main model context at the controller-to-egress boundary', async () => {
+    const ring = createContextSnapshots();
+    const sessions = makeSessions();
+    await runPrototype({
+      ctx: makeSimpleCtx(sessions, []),
+      recordModelCall: ring.record,
+    });
+
+    const snapshots = ring.snapshotsFor('session-1');
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      label: 'main', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      system: 'PINNED-SYSTEM',
+    });
+    expect(JSON.stringify(snapshots[0])).not.toContain('RAW-PROVIDER-SECRET');
+    expect(JSON.stringify(snapshots[0])).not.toContain('RAW-IMAGE-BYTES');
+  });
+
+  test('captures and labels the actual fallback attempt separately', async () => {
+    const ring = createContextSnapshots();
+    const sessions = makeSessions();
+    await runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []),
+        providerFailoverEnabled: true,
+        providerFallbacks: ['local-webgpu'],
+      },
+      providerEgress: makeFailoverProviderAuthority(),
+      recordModelCall: ring.record,
+    });
+
+    expect(ring.snapshotsFor('session-1').map((snapshot) => ({
+      label: snapshot.label, provider: snapshot.provider,
+    }))).toEqual([
+      { label: 'main', provider: 'anthropic' },
+      { label: 'main:failover', provider: 'local-webgpu' },
+    ]);
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', content: 'fallback reply', streaming: false,
+    });
+  });
+
+  test('ignores an advisory context-recorder exception and still completes inference', async () => {
+    const sessions = makeSessions();
+    await runPrototype({
+      ctx: makeSimpleCtx(sessions, []),
+      recordModelCall: () => { throw new Error('recorder unavailable'); },
+    });
+
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', content: 'done', streaming: false,
+    });
+  });
+
+  test('ignores loss of the advisory context observation without tainting the turn', async () => {
+    const sessions = makeSessions();
+    await runPrototype({
+      ctx: makeSimpleCtx(sessions, []),
+      interceptKernel: async (operation, _payload, next) =>
+        operation === 'turn.model.observe-context'
+          ? { ok: false, code: 'controller-channel-lost', outcomeKnown: false }
+          : next(),
+    });
+
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', content: 'done', streaming: false,
+    });
+  });
+
+  test('a held advisory context recorder cannot delay provider open', async () => {
+    const sessions = makeSessions();
+    let releaseObservation!: () => void;
+    const heldObservation = new Promise<any>((resolve) => {
+      releaseObservation = () => resolve({ ok: true, value: null, outcomeKnown: true });
+    });
+    let markModelStarted!: () => void;
+    const modelStarted = new Promise<void>((resolve) => { markModelStarted = resolve; });
+    let turnSettled = false;
+    const turn = runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []),
+        callModel: async function* () {
+          markModelStarted();
+          yield { type: 'text-delta', text: 'done' };
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        },
+      },
+      interceptKernel: async (operation, _payload, next) =>
+        operation === 'turn.model.observe-context' ? heldObservation : next(),
+    }).finally(() => { turnSettled = true; });
+
+    const opened = await Promise.race([
+      modelStarted.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(opened).toBe(true);
+    expect(turnSettled).toBe(false);
+    releaseObservation();
+    await turn;
+    expect(turnSettled).toBe(true);
+  });
+
   test('Stop reaches both exact remote and local model cancellation operations', async () => {
     const operations: string[] = [];
     const modelEgress = createControllerModelEgress({
@@ -218,6 +382,7 @@ describe('orchestrator controller turn boundary', () => {
     });
     const turn = bridge.runUserTurn({
       sessionId: 'session-emergency-close', tools: [],
+      allowedOperations: [],
       signal: new AbortController().signal,
     });
     void turn.next();
@@ -243,6 +408,7 @@ describe('orchestrator controller turn boundary', () => {
     });
     const turn = bridge.runUserTurn({
       sessionId: 'session-hung-provider-cleanup', tools: [],
+      allowedOperations: [],
       signal: new AbortController().signal,
     });
     void turn.next();
@@ -304,6 +470,7 @@ describe('orchestrator controller turn boundary', () => {
     });
     const run = drain(bridge.runUserTurn({
       sessionId: 'session-late-provider-open', tools: [],
+      allowedOperations: [],
       maxOutputTokens: 4096, signal: controller.signal,
       sessions: {
         get: async () => ({

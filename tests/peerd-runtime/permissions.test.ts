@@ -3,19 +3,9 @@
 //
 // The policy is a PURE function (peerd-runtime/permissions/policy.js) with
 // no IO and no `/peerd-*` absolute imports, so it's directly importable
-// under Bun — unlike the dispatcher, which transitively imports
-// /peerd-egress/index.js (a browser-resolved path Bun can't follow). We
-// therefore test the policy at its real boundary, the same `decideAction`
-// the persona gate and the dispatcher call, against tool descriptors that
-// mirror the actual built-in tools' { name, sideEffect, primitive }.
-//
-// A tiny `simulateDispatch` replays the dispatcher's exact decision flow
-// (persona-gate block in Plan, then the async confirm step in Act) so the
-// required scenarios are asserted end-to-end at the policy layer:
-//   - Plan blocks a write/tab/fetch tool
-//   - Act + confirmActions ON confirms each non-read
-//   - Act + confirmActions OFF allows all without confirming
-// Plus the legacy-tier migration reader (confirmActionsFromRecord).
+// under Bun. Test the pure decision table here; exact service-worker
+// confirmation and lifecycle custody are exercised at their real authority
+// boundary in the controller protocol suites.
 
 import { describe, test, expect } from 'bun:test';
 import {
@@ -230,52 +220,5 @@ describe('confirmActionsFromRecord', () => {
     expect(confirmActionsFromRecord({})).toBeUndefined();
     expect(confirmActionsFromRecord(null)).toBeUndefined();
     expect(confirmActionsFromRecord(undefined)).toBeUndefined();
-  });
-});
-
-// ---- dispatcher replay: prove the policy drives the gate + confirm -----
-//
-// Mirrors dispatcher.js exactly: in Plan, a non-read tool is blocked by
-// the persona gate before execute(); in Act, decideAction decides whether
-// the async confirm fires. We record confirm() calls + execute() calls to
-// assert the observable behavior the real dispatcher produces.
-
-type DispatchOutcome = { blocked: boolean; confirmed: boolean; executed: boolean };
-
-const simulateDispatch = async (
-  { mode, confirmActions }: { mode: string; confirmActions: boolean },
-  tool: { name: string; sideEffect: string; primitive: string },
-): Promise<DispatchOutcome> => {
-  const verdict = decideAction({ mode, confirmActions, tool } as any);
-  // persona gate: Plan blocks non-read outright.
-  if (!verdict.allowed) return { blocked: true, confirmed: false, executed: false };
-  // async confirm step.
-  let confirmed = false;
-  if (verdict.confirm) {
-    confirmed = true; // the dispatcher would await ctx.confirm here
-  }
-  // execute() runs once the action is allowed (and confirmed if required).
-  return { blocked: false, confirmed, executed: true };
-};
-
-describe('simulated dispatch matches the required scenarios', () => {
-  test('Plan blocks a tab write before execute', async () => {
-    const r = await simulateDispatch({ mode: 'plan', confirmActions: false }, TOOLS.click);
-    expect(r).toEqual({ blocked: true, confirmed: false, executed: false });
-  });
-
-  test('confirmations ON confirms then executes a write', async () => {
-    const r = await simulateDispatch({ mode: 'act', confirmActions: true }, TOOLS.vm_write_file);
-    expect(r).toEqual({ blocked: false, confirmed: true, executed: true });
-  });
-
-  test('confirmations ON confirms a shell action too', async () => {
-    const r = await simulateDispatch({ mode: 'act', confirmActions: true }, TOOLS.vm_boot);
-    expect(r).toEqual({ blocked: false, confirmed: true, executed: true });
-  });
-
-  test('confirmations OFF executes everything WITHOUT confirm', async () => {
-    const r = await simulateDispatch({ mode: 'act', confirmActions: false }, TOOLS.open_tab);
-    expect(r).toEqual({ blocked: false, confirmed: false, executed: true });
   });
 });

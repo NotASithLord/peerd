@@ -13,7 +13,7 @@ import {
 } from '../../extension/shared/semantic-route-inventory.js';
 import {
   SEMANTIC_ROUTE_CLASSIFICATIONS,
-} from '../../extension/shared/semantic-route-classification.js';
+} from '../../packaging/semantic-route-classification.ts';
 
 export const LIVE_KERNEL_TARGETS = Object.freeze({
   'store-chrome': Object.freeze({ firefox: false, selfHostedChrome: false, dweb: false }),

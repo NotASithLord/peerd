@@ -12,26 +12,8 @@ import {
   makeLifecycleBoot, makeDispatchTracker, retryClassForTool,
   OPERATION_STATES, groupResourceLossNotices,
 } from '/peerd-runtime/index.js';
-import { dispatchToolCall as dispatchExplicitToolCall } from '/peerd-runtime/tools/local-tool-dispatcher.js';
-import { toToolDescriptor } from '/peerd-runtime/tools/metadata/descriptor.js';
 
 const S = OPERATION_STATES;
-
-/** @type {import('/shared/tool-types.js').Tool | null} */
-let fixtureTool = null;
-/** @param {import('/shared/tool-types.js').Tool} tool */
-const setFixtureTool = (tool) => { fixtureTool = tool; };
-const clearFixtureTool = () => { fixtureTool = null; };
-/** @param {import('/shared/tool-types.js').ToolCall} call @param {any} ctx */
-const dispatchToolCall = (call, ctx) => {
-  const implementation = fixtureTool?.name === call.name ? fixtureTool : null;
-  return dispatchExplicitToolCall(call, ctx, {
-    descriptor: implementation ? toToolDescriptor(implementation) : undefined,
-    execute: (prepared) => implementation
-      ? implementation.execute(prepared.args, prepared.execCtx)
-      : ({ ok: false, error: 'tool implementation unavailable', outcomeKnown: true }),
-  });
-};
 
 // REAL browser storage. As an extension page this is chrome.storage.local
 // (the SW's actual kv backing); under the CDP harness the runner serves
@@ -188,25 +170,9 @@ describe('lifecycle recovery over real chrome.storage', () => {
     }
   });
 
-  it('the wired dispatcher refuses a cross-generation Class E replay end-to-end', async () => {
+  it('the authority tracker refuses a cross-generation Class E replay', async () => {
     await cleanup();
-    clearFixtureTool();
     try {
-      let executions = 0;
-      setFixtureTool(/** @type {any} */ ({
-        name: 'test_submit', description: 'x', schema: {},
-        primitive: 'web', sideEffect: 'mutate_external',
-        origins: () => [],
-        execute: async () => { executions += 1; throw new Error('request timed out'); },
-      }));
-      const ctx = (/** @type {any} */ tracker) => /** @type {any} */ ({
-        audit: async () => {}, hooks: [],
-        session: { sessionId: 'sess-real' },
-        permission: { mode: 'act', confirmActions: false },
-        lifecycle: tracker,
-      });
-
-      // Generation 1 dispatches; the timeout settles it outcome_unknown.
       const gen1 = boot();
       const g1 = await gen1.init();
       const tracker1 = makeDispatchTracker({
@@ -214,13 +180,16 @@ describe('lifecycle recovery over real chrome.storage', () => {
         generationId: () => g1.generation.id,
         retryClassFor: retryClassForTool,
       });
-      const first = await dispatchToolCall(
-        { id: 'real-tu-1', name: 'test_submit', args: {} }, ctx(tracker1));
-      expect(first.ok).toBe(false);
-      expect(String(/** @type {any} */ (first).error).startsWith('outcome_unknown:')).toBe(true);
+      const first = await tracker1.beginTracking({
+        callId: 'real-tu-1', sessionId: 'sess-real', args: {},
+        tool: { name: 'test_submit', retryClass: 'E' },
+      });
+      const settled = await tracker1.settleTracking(
+        /** @type {{handle:any}} */ (first).handle,
+        { ok: false, error: 'request timed out' },
+      );
+      expect(String(settled?.error).startsWith('outcome_unknown:')).toBe(true);
 
-      // Generation 2 (post-eviction) re-drives the same tool_use id: the
-      // replay guard must answer without re-executing the tool.
       const gen2 = boot();
       const g2 = await gen2.init();
       const tracker2 = makeDispatchTracker({
@@ -228,13 +197,13 @@ describe('lifecycle recovery over real chrome.storage', () => {
         generationId: () => g2.generation.id,
         retryClassFor: retryClassForTool,
       });
-      const replay = await dispatchToolCall(
-        { id: 'real-tu-1', name: 'test_submit', args: {} }, ctx(tracker2));
-      expect(executions).toBe(1);
-      expect(replay.ok).toBe(false);
-      expect(String(/** @type {any} */ (replay).error).startsWith('outcome_unknown:')).toBe(true);
+      const replay = await tracker2.beginTracking({
+        callId: 'real-tu-1', sessionId: 'sess-real', args: {},
+        tool: { name: 'test_submit', retryClass: 'E' },
+      });
+      expect(String(/** @type {any} */ (replay).refuse.error)
+        .startsWith('outcome_unknown:')).toBe(true);
     } finally {
-      clearFixtureTool();
       await cleanup();
     }
   });

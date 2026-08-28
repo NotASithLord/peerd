@@ -65,7 +65,7 @@ const buildDeps = (overrides = {}) => {
       });
       return { ok: true, started: true, ...result };
     },
-    getToolDescriptors: () => [],
+    projectChildSurface: async () => ({ tools: [], operations: [] }),
     now: () => (t += 10),
     ...overrides,
   }));

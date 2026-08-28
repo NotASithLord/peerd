@@ -246,8 +246,9 @@ export const createKernelControllerGateway = ({ loadController, controller }) =>
       renderSystemPrompt: (/** @type {Record<string,unknown>} */ context) => useTurn(
         () => clientCall('renderSystemPrompt', context),
       ),
-      projectTurnTools: (/** @type {Record<string,unknown>} */ context) => useTurn(
-        () => clientCall('projectTurnTools', context),
+      projectTurnTools: (/** @type {Record<string,unknown>} */ context,
+        /** @type {{signal?:AbortSignal}} */ options = {}) => useTurn(
+        () => clientCall('projectTurnTools', context, options),
       ),
       planToolsCommand: (/** @type {Record<string,unknown>} */ context) => useTurn(
         () => clientCall('planToolsCommand', context),

@@ -50,7 +50,7 @@ describe('dispatcher phases', () => {
     } as any)).rejects.toThrow('requires an explicit descriptor and execute binding');
   });
 
-  test('prepare stops before execution and settle owns the durable outcome', async () => {
+  test('prepare stops before execution and never owns durable lifecycle', async () => {
     const events: string[] = [];
     let inlineExecutions = 0;
     setFixtureTool(tool({
@@ -82,7 +82,7 @@ describe('dispatcher phases', () => {
     expect(prepared.tool).not.toHaveProperty('execute');
     expect(prepared).not.toHaveProperty('execCtx');
     expect(inlineExecutions).toBe(0);
-    expect(events).toEqual(['prepare:lifecycle']);
+    expect(events).toEqual([]);
 
     const execution = await executePreparedToolCall(prepared, async (request) => {
       events.push('execute');
@@ -95,9 +95,7 @@ describe('dispatcher phases', () => {
     const result: any = await settleToolCall(prepared, execution);
     expect(result).toMatchObject({ ok: true, content: 'injected' });
     expect(result.meta).toMatchObject({ toolName: 'phase_tool', primitive: 'web' });
-    expect(events).toEqual([
-      'prepare:lifecycle', 'execute', 'audit:tool_executed', 'settle:lifecycle',
-    ]);
+    expect(events).toEqual(['execute', 'audit:tool_executed']);
   });
 
   test('prepare arms quarantine before the injected executor', async () => {
@@ -124,7 +122,7 @@ describe('dispatcher phases', () => {
     expect(events).toEqual(['prepare:quarantine', 'execute']);
   });
 
-  test('inert metadata can authorize, confirm, track, and settle remote execution', async () => {
+  test('inert metadata delegates confirmation and lifecycle to exact authority', async () => {
     const events: string[] = [];
     const remoteDescriptor = toToolDescriptor({
       name: 'remote_tool', primitive: 'web', sideEffect: 'write',
@@ -169,9 +167,11 @@ describe('dispatcher phases', () => {
       content: 'remote',
       meta: { toolName: 'remote_tool', primitive: 'web', sideEffect: 'write' },
     });
-    expect(events).toEqual([
-      'confirm', 'prepare:remote_tool:false', 'execute:call-remote', 'settle:true',
-    ]);
+    expect(events).toEqual(['execute:call-remote']);
+    expect(result.meta.gates).toContainEqual({
+      name: 'confirmation', allowed: true,
+      reason: 'exact authority verifies final arguments',
+    });
   });
 
   test('metadata without a local implementation fails before an effect', async () => {

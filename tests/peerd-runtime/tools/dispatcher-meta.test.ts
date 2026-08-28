@@ -4,7 +4,6 @@
 
 import { describe, test, expect, afterEach } from 'bun:test';
 import { createExplicitToolFixture } from './explicit-tool-fixture';
-import { messageActorTool } from '../../../extension/peerd-runtime/tools/defs/message-actor.js';
 import {
   BROWSER_TARGET_STAGES,
   BrowserAutomationPolicyError,
@@ -238,116 +237,33 @@ describe('dispatcher lineage spine fields', () => {
     expect(r.meta.sideEffect).toBe('read');   // enrichment still attached
   });
 
-  test('a lifecycle recovery rewrite preserves actor delivery custody', async () => {
+  test('semantic dispatch preserves actor custody without touching durable lifecycle', async () => {
+    let lifecycleCalls = 0;
     setFixtureTool(baseTool({
       sideEffect: 'write',
       execute: async () => ({
-        ok: false,
-        error: 'transport lost',
+        ok: false, error: 'authority already settled',
+        outcomeKnown: false, retryable: false,
         actorDeliveryId: 'delivery-one',
         actorDeliveryIds: ['delivery-two', 'delivery-two'],
       }),
     }) as any);
     const lifecycle = {
-      beginTracking: async () => ({ handle: { operationId: 'op-1' } }),
-      settleTracking: async () => ({
-        error: 'outcome_unknown: verify before retry',
-        recovery: { category: 'verify_before_retry' },
-      }),
-    };
-
-    const r: any = await dispatchToolCall(
-      { id: 't-custody', name: 'lt', args: {} } as any,
-      { ...ctx, lifecycle },
-    );
-
-    expect(r).toMatchObject({
-      ok: false,
-      error: 'outcome_unknown: verify before retry',
-      actorDeliveryId: 'delivery-one',
-      actorDeliveryIds: ['delivery-two'],
-    });
-  });
-
-  test('outer outcome_unknown overrides stale inner actor certainty and cancellation', async () => {
-    setFixtureTool(baseTool({
-      name: 'message_actor',
-      primitive: 'spawned',
-      sideEffect: 'write',
-      execute: async () => ({
-        ok: false,
-        error: 'clean inner policy stop',
-        actorCorrelationId: 'actor-delivery',
-        actorTerminal: true,
-        actorOutcomeKnown: true,
-        actorPerformed: false,
-        actorAborted: true,
-      }),
-    }) as any);
-    let settledOutcome: any = null;
-    const lifecycle = {
-      beginTracking: async () => ({ handle: { operationId: 'op-actor' } }),
-      settleTracking: async (_handle: any, outcome: any) => {
-        settledOutcome = outcome;
-        return {
-          error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
-          recovery: { state: 'outcome_unknown', category: 'verify_before_retry' },
-        };
-      },
+      beginTracking: async () => { lifecycleCalls += 1; throw new Error('must not run'); },
+      settleTracking: async () => { lifecycleCalls += 1; throw new Error('must not run'); },
+      requiresIntentConfirmation: async () => { lifecycleCalls += 1; return true; },
     };
 
     const result: any = await dispatchToolCall(
-      { id: 'actor-call', name: 'message_actor', args: { await: true } } as any,
+      { id: 'authority-settled', name: 'lt', args: {} } as any,
       { ...ctx, lifecycle },
     );
 
-    expect(settledOutcome.aborted).toBe(true);
+    expect(lifecycleCalls).toBe(0);
     expect(result).toMatchObject({
-      ok: false,
-      actorCorrelationId: 'actor-delivery',
-      actorTerminal: true,
-      actorOutcomeKnown: false,
-      actorPerformed: true,
-      actorAborted: false,
-    });
-    expect(result.error).toStartWith('outcome_unknown:');
-  });
-
-  test('message_actor Not run evidence reaches lifecycle as a typed pre-effect failure', async () => {
-    setFixtureTool(messageActorTool as any);
-    let settledOutcome: any = null;
-    const lifecycle = {
-      beginTracking: async () => ({ handle: { operationId: 'op-not-run' } }),
-      settleTracking: async (_handle: any, outcome: any) => {
-        settledOutcome = outcome;
-        return null;
-      },
-    };
-
-    const result: any = await dispatchToolCall(
-      { id: 'actor-not-run', name: 'message_actor', args: { to: 'web', message: 'read it', await: true } } as any,
-      {
-        ...ctx,
-        lifecycle,
-        messageActor: async () => ({
-          ok: false,
-          error: 'the actor request was not run because that helper was retired.',
-          actorTerminal: true,
-          actorOutcomeKnown: true,
-          actorPerformed: false,
-        }),
-      } as any,
-    );
-
-    expect(settledOutcome).toMatchObject({
-      ok: false, outcomeKind: 'pre-effect-failure', aborted: false,
-    });
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'the actor request was not run because that helper was retired.',
-      outcomeKind: 'pre-effect-failure',
-      actorOutcomeKnown: true,
-      actorPerformed: false,
+      ok: false, error: 'authority already settled',
+      outcomeKnown: false, retryable: false,
+      actorDeliveryId: 'delivery-one', actorDeliveryIds: ['delivery-two'],
     });
   });
 

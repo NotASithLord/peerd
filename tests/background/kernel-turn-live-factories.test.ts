@@ -1,9 +1,12 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnLiveFactories } from '../../extension/background/kernel-turn-live-factories.js';
+import {
+  actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
+} from '../../extension/background/kernel-turn-authority-adapter.js';
 import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime/background.js';
 import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
-import { createContextSnapshots } from '../../extension/background/context-snapshots.js';
+import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
 import { planToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
@@ -106,8 +109,12 @@ const harness = async (
     composeTurn?: (payload: any, options: any) => Promise<any>,
     executeScript?: (request: any) => Promise<any[]>,
     postChatNote?: (...args: any[]) => void,
+    pushState?: () => Promise<any>,
+    confirm?: (prompt: any, signal?: AbortSignal) => Promise<any>,
   } = {},
 ) => {
+  const toolProjections: any[] = [];
+  const audits: any[] = [];
   const idb = memoryStore();
   let sessionSequence = 0;
   const sessions = createSessionStore({
@@ -285,6 +292,7 @@ const harness = async (
     seams: {
       renderSystemPrompt: async () => 'system',
       projectTurnTools: async (input: unknown) => {
+        toolProjections.push(structuredClone(input));
         const result = projectControllerToolSurface(input);
         if (result.ok !== true) throw new Error(result.code);
         return result;
@@ -295,7 +303,7 @@ const harness = async (
         ? options.composeTurn(payload, composeOptions)
         : Promise.reject(new Error('compose-unavailable-in-test')),
     },
-    confirmation: { confirm: async () => 'yes_once' },
+    confirmation: { confirm: options.confirm ?? (async () => 'yes_once') },
     denylist: { ready: async () => ({ ok: true }), patterns: () => [] },
     featureHost: {
       ensureOffscreen: async () => {},
@@ -304,7 +312,7 @@ const harness = async (
         runWithLease: async (_scope: string, operation: (lease?: any) => any) => operation({}),
       },
     },
-    auditLog: { append: async () => {} },
+    auditLog: { append: async (entry: any) => { audits.push(entry); } },
     kv: {
       get: async (key: string) => kvState.get(key) ?? null,
       set: async (key: string, value: any) => { kvState.set(key, structuredClone(value)); },
@@ -316,7 +324,8 @@ const harness = async (
     canWrite: () => {}, ready: Promise.resolve(),
     contextSnapshots: createContextSnapshots(),
     scriptRuns: createScriptRunRegistry(),
-    postChatNote: options.postChatNote ?? (() => {}), pushState: async () => {},
+    postChatNote: options.postChatNote ?? (() => {}),
+    pushState: options.pushState ?? (async () => {}),
     dwebEnabled: false, firefox: options.firefox === true,
     firefoxActorLifetime: options.firefoxActorLifetime,
     loadDirectActorHost: options.loadDirectActorHost ?? (options.firefox
@@ -392,6 +401,8 @@ const harness = async (
     broadcasts, storageState, kvState, cache, settings, notifications, panelBehavior,
     siteCaptureEvents, providerRevision: () => providerRevision,
     sourceProjections,
+    toolProjections,
+    audits,
     appNetworkAdmissions,
     actorConfig: () => actorConfig,
   };
@@ -425,6 +436,170 @@ const dependencies = () => ({
 });
 
 describe('kernel live turn factories', () => {
+  test.each([
+    [
+      'success',
+      { ok: true, started: true },
+      {
+        type: 'actor_ran_isolated',
+        details: expect.objectContaining({ workerType: 'dedicated', realmVerified: true }),
+      },
+    ],
+    [
+      'terminal error',
+      { ok: false, started: true, error: 'worker stopped', outcomeKnown: false },
+      {
+        type: 'actor_isolated_error',
+        details: expect.objectContaining({
+          error: 'worker stopped', performed: true, outcomeKnown: false,
+        }),
+      },
+    ],
+    [
+      'startup refusal',
+      { ok: false, started: false, error: 'host unavailable', code: 'actor_host_unavailable' },
+      {
+        type: 'actor_isolation_failure',
+        details: expect.objectContaining({
+          error: 'host unavailable', code: 'actor_host_unavailable', performed: false,
+        }),
+      },
+    ],
+  ])('SW-owned bound actor isolation audit records %s with lineage', async (
+    _label, result, expected,
+  ) => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      result,
+      { kind: 'actor', sessionId: 'actor-1', parentSessionId: 'chat-1', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([{
+      ...expected,
+      details: expect.objectContaining({
+        ...expected.details,
+        parentSessionId: 'chat-1', actorSessionId: 'actor-1', depth: 2,
+      }),
+    }]);
+  });
+
+  test('bound actor failure custody uses host verdicts, never provider prose', () => {
+    expect(boundActorFailureCustody({
+      outcomeKnown: true,
+      error: 'actor-provider-boundary-blocked: model says not run',
+    })).toEqual({ outcomeKnown: true, performed: false });
+    expect(boundActorFailureCustody({
+      outcomeKnown: true, performed: true,
+      error: 'actor-provider-boundary-blocked: model says not run',
+    })).toEqual({ outcomeKnown: true, performed: true });
+    expect(boundActorFailureCustody({
+      outcomeKnown: false, authorityPerformed: false,
+      error: 'model says safe to retry',
+    })).toEqual({ outcomeKnown: false, performed: false });
+    expect(boundActorFailureCustody({
+      outcomeKnown: false,
+      error: 'model says safe to retry',
+    })).toEqual({ outcomeKnown: false, performed: true });
+  });
+
+  test('the parentless dweb daemon keeps only its fixed stored permission', async () => {
+    const dweb = {
+      sessionId: 'dweb-1', kind: 'actor', actorType: 'dweb',
+      permissionMode: 'act', confirmActions: false,
+    };
+    let rootReads = 0;
+    let sessionReads = 0;
+    expect(await actorPermissionAuthoritySession(
+      dweb,
+      async () => { rootReads += 1; return 'chat-1'; },
+      async () => { sessionReads += 1; return null; },
+    )).toBe(dweb);
+    expect({ rootReads, sessionReads }).toEqual({ rootReads: 0, sessionReads: 0 });
+
+    const child = { sessionId: 'actor-1', kind: 'actor', actorType: 'web' };
+    const root = { sessionId: 'chat-1', kind: 'chat', permissionMode: 'plan' };
+    expect(await actorPermissionAuthoritySession(
+      child, async () => root.sessionId, async () => root,
+    )).toBe(root);
+    expect(await actorPermissionAuthoritySession(
+      child, async () => null, async () => root,
+    )).toBeNull();
+  });
+
+  test.each([
+    ['absent record', null],
+    ['spawned record', { kind: 'spawned', sessionId: 'spawn-1', parentSessionId: 'chat-1', depth: 1 }],
+    ['wrong-kind record', { kind: 'chat', sessionId: 'chat-1', depth: 0 }],
+    ['unidentified actor record', { kind: 'actor', parentSessionId: 'chat-1', depth: 1 }],
+  ])('does not mint an isolation proof from an %s', async (_label, record) => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      { ok: true, started: true }, record,
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([]);
+  });
+
+  test('does not claim success when ok and started disagree', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      { ok: true, started: false },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([{
+      type: 'actor_isolation_failure',
+      details: {
+        error: 'actor isolation unavailable', code: 'unknown', performed: false,
+        parentSessionId: 'chat-real', actorSessionId: 'actor-real', depth: 2,
+      },
+    }]);
+  });
+
+  test('takes every isolation-proof identity field from the persisted actor record', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      { ok: true, started: true, actorSessionId: 'spoofed', depth: 99 },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([{
+      type: 'actor_ran_isolated',
+      details: {
+        workerType: 'dedicated', realmVerified: true,
+        parentSessionId: 'chat-real', actorSessionId: 'actor-real', depth: 2,
+      },
+    }]);
+  });
+
+  test.each([
+    ['Chrome', false], ['Firefox', true],
+  ])('%s executable actor wiring records the same authoritative isolation proof', async (
+    _browserName, firefox,
+  ) => {
+    const h = await harness(async () => ({
+      ok: true, started: true,
+      newMessages: [{ role: 'assistant', content: 'done', id: 'done-parity', when: 2_000 }],
+      usage: { inputTokens: 1, outputTokens: 1 },
+      price: { cost: 0, estimated: true },
+    }), { firefox });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    expect(await ctx.messageActor({
+      to: '9', message: 'inspect', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-parity', awaitReply: true,
+    })).toMatchObject({ ok: true });
+    const actor = (await h.sessions.list()).find((record: any) => record.kind === 'actor');
+    expect(h.audits.filter((entry) => entry.type === 'actor_ran_isolated')).toEqual([{
+      type: 'actor_ran_isolated',
+      details: {
+        workerType: 'dedicated', realmVerified: true,
+        parentSessionId: h.root.sessionId,
+        actorSessionId: actor?.sessionId,
+        depth: actor?.depth,
+      },
+    }]);
+  });
+
   test('constructs the complete production factory surface without host effects', () => {
     const factories = createKernelTurnLiveFactories(dependencies());
     expect(Object.keys(factories).sort()).toEqual([
@@ -570,10 +745,10 @@ describe('kernel live turn factories', () => {
     );
   });
 
-  test('routes Firefox heartbeat loss into the direct actor host', async () => {
+  test('routes Firefox heartbeat loss into the direct actor host and durable isolation state', async () => {
     let onLost = (_error: Error) => {};
     const losses: string[] = [];
-    await harness(undefined, {
+    const h = await harness(undefined, {
       firefox: true,
       firefoxActorLifetime: {
         createHandle: (options: any) => {
@@ -582,18 +757,27 @@ describe('kernel live turn factories', () => {
         },
       },
       loadDirectActorHost: async () => ({
-        makeDirectActorHost: () => ({
+        makeDirectActorHost: (config: any) => ({
           sendMessage: async () => ({ ok: true }),
           bindRelayRoutes: () => {},
           isRelaySender: () => false,
-          failKeepAlive: (error: Error) => { losses.push(error.message); },
+          failKeepAlive: (error: Error) => {
+            losses.push(error.message);
+            void config.onKeepAliveLost(error);
+          },
         }),
       }),
     });
 
     onLost(new Error('storage heartbeat failed'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(losses).toEqual(['storage heartbeat failed']);
+    expect(Object.values(h.storageState)).toEqual([
+      expect.objectContaining({
+        status: 'temporarily_unavailable', code: 'actor_host_keepalive_lost',
+      }),
+    ]);
   });
 
   test('validates every engine attach and binds App provenance to one owner generation', async () => {
@@ -725,6 +909,54 @@ describe('kernel live turn factories', () => {
     });
   });
 
+  test('an exact actor relay reuses its latched surface without reacquiring semantics', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      actorType: 'web', backing: 'tab', instanceId: 'site:https://example.com', depth: 1,
+    });
+    const projectionsBefore = h.toolProjections.length;
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: actor.sessionId, exposure: 'actor',
+      actorType: 'web', actorBacking: 'tab', actorInstanceId: actor.instanceId,
+      actorSurface: 'code', lifecycleTurnId: 'actor-run-1',
+    });
+
+    expect(ctx.actorSurface).toBe('code');
+    expect(h.toolProjections).toHaveLength(projectionsBefore);
+  });
+
+  test('binds an actor confirmation to its active root chat owner', async () => {
+    const prompts: any[] = [];
+    const h = await harness(undefined, {
+      firefox: true,
+      confirm: async (prompt) => { prompts.push(prompt); return 'yes_once'; },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      actorType: 'web', backing: 'tab', instanceId: 'site:https://example.com', depth: 1,
+    });
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: actor.sessionId, exposure: 'actor',
+      actorType: 'web', actorBacking: 'tab', actorInstanceId: actor.instanceId,
+    });
+
+    expect(await ctx.confirm({
+      tool: 'site_client_write', sessionId: actor.sessionId,
+      origins: ['https://example.com'],
+    }, new AbortController().signal)).toBe('yes_once');
+    expect(prompts).toEqual([expect.objectContaining({
+      tool: 'site_client_write',
+      sessionId: actor.sessionId,
+      ownerSessionId: h.root.sessionId,
+      ephemeral: true,
+    })]);
+  });
+
   test('restored App network admission waits only for hydrated trackers', async () => {
     let pending!: ReturnType<typeof harness>;
     const stages: string[] = [];
@@ -783,6 +1015,7 @@ describe('kernel live turn factories', () => {
     await h.runtime.relays.onUiConnect({ postMessage: (message: any) => replay.push(message) });
     expect(replay.some((message) => message.type === 'turn/actor-start')).toBe(true);
     const actorSessionId = jobs[0].actorSessionId;
+    expect(jobs[0].maxOutputTokens).toBe(4096);
     await h.sessions.update(actorSessionId, { cost: { cost: 25 } });
     expect(await h.actorConfig().spendRefusalFor(actorSessionId)).toContain('spend limit');
     releaseRun();
@@ -1025,6 +1258,7 @@ describe('kernel live turn factories', () => {
     const handle = await ctx.actorAuthority.spawnAsync({
       task: 'research safely', parentSessionId: h.root.sessionId,
       parentDepth: 0, parentToolUseId: 'spawn-1',
+      tools: [], grantedToolNames: [], grantedOperations: [],
     });
     expect(handle).toMatchObject({ ok: true, taskId: 'as-1' });
     expect(ctx.actorAuthority.listTasks()).toEqual([
@@ -1068,6 +1302,26 @@ describe('kernel live turn factories', () => {
     const routeDeps = h.factories.makeRouteDeps(h.shared);
     expect(await routeDeps.isolation.retryActorIsolation()).toMatchObject({ ok: true });
     expect(h.storageState).toEqual({});
+  });
+
+  test('restores actor isolation before the state broadcast reacquires controller ownership', async () => {
+    let pushStarted = false;
+    const h = await harness(async (job) => job.probeOnly
+      ? { ok: true, started: false, code: 'actor_worker_ready' }
+      : { ok: false }, {
+      pushState: async () => {
+        pushStarted = true;
+      },
+    });
+    const routeDeps = h.factories.makeRouteDeps(h.shared);
+
+    const result = await Promise.race([
+      routeDeps.isolation.retryActorIsolation(),
+      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 25)),
+    ]);
+
+    expect(result).toMatchObject({ ok: true, capability: { status: 'available' } });
+    expect(pushStarted).toBe(false);
   });
 
   test('rehydrates scheduler custody, repairs provider selection, and applies live settings and capture transitions', async () => {

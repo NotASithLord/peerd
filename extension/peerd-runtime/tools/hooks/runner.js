@@ -129,7 +129,7 @@ const normalizeDecision = (hook, decision) => {
  * Run the pre-tool-use phase.
  *
  * Walks the matching pre-hooks in order. The FIRST hook to block wins and
- * short-circuits the rest — there's no point running
+ * short-circuits the rest: there's no point running
  * softer policy after a hard veto. A hook that throws (or its decision
  * is malformed) blocks too.
  *

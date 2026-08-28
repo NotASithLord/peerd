@@ -1,6 +1,6 @@
 // The spill-and-page pure core (tools/web/spill.js): head+tail windowing for an
 // oversized fetched body, the trusted paging footer, and the offset/limit
-// slicer read_result serves. Pure functions — the invariants that keep the
+// slicer read_result serves. Pure functions: the invariants that keep the
 // paging contract honest live here.
 
 import { describe, test, expect } from 'bun:test';

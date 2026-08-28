@@ -193,28 +193,21 @@ describe('runUserTurn — concurrent tool dispatch', () => {
       origins: () => [],
       execute: async () => ({
         ok: false,
-        error: 'inner policy stop',
+        error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
+        outcomeKnown: false,
+        retryable: false,
         actorCorrelationId: 'correlation-outer-unknown',
         actorTerminal: true,
-        actorOutcomeKnown: true,
+        actorOutcomeKnown: false,
         actorPerformed: true,
-        actorAborted: true,
       }),
     } as any);
     try {
-      const lifecycle = {
-        beginTracking: async () => ({ handle: { operationId: 'op-outer-unknown' } }),
-        settleTracking: async () => ({
-          error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
-          recovery: { state: 'outcome_unknown', category: 'verify_before_retry' },
-        }),
-      };
       const dispatchCtx: any = {
         audit: async () => {},
         confirm: async () => 'yes_once',
         session: { sessionId: 's1', kind: 'chat' },
         permission: { mode: 'act', confirmActions: false },
-        lifecycle,
       };
       const store = makeStore();
       store.seed('s1');

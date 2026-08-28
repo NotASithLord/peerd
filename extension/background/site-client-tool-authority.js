@@ -110,7 +110,7 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
       if (read.refused) return refusal();
       if (read.unavailable) return preEffectFailure('site_clients_unavailable');
       if (!read.record) return preEffectFailure(
-        `no_site_client: none stored for ${origin} — derive one first (site_capture + site_client_write), or just drive the page.`,
+        `no_site_client: none stored for ${origin}: derive one first (site_capture + site_client_write), or just drive the page.`,
       );
       if (abortSignal?.aborted) {
         return preEffectFailure(
@@ -226,7 +226,7 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
       const answer = await ctx.confirm({
         tool: 'site_client_write', sideEffect: 'write', kind: 'site_client_write',
         proposal,
-        summary: `${proposal.op} site client ${origin} — persists ${proposal.bodyBytesAfter}B of `
+        summary: `${proposal.op} site client ${origin}: persists ${proposal.bodyBytesAfter}B of `
           + `RUNNABLE JS (was ${proposal.bodyBytesBefore}B) + ${proposal.dossier.endpoints.length} endpoint(s) `
           + `(+${proposal.endpointDelta.added}/−${proposal.endpointDelta.removed}). Review the module before allowing.`,
         origins: [origin], sessionId: ctx.session?.sessionId ?? null,

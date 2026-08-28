@@ -1,10 +1,10 @@
 // @ts-check
 
-import { SEMANTIC_ROUTE_INVENTORY } from './semantic-route-inventory.js';
+import { SEMANTIC_ROUTE_INVENTORY } from '../extension/shared/semantic-route-inventory.js';
 import {
   compileSemanticRouteClassification,
   semanticDispatchCutoverReport,
-} from './semantic-dispatch-contract.js';
+} from '../extension/shared/semantic-dispatch-contract.js';
 
 const KERNEL_SOURCES = new Set([
   'extension/background/routes/system-read.js',
@@ -116,7 +116,6 @@ export const SEMANTIC_ROUTE_CLASSIFICATIONS = Object.freeze(
     ...row,
     placement: /** @type {'kernel'|'split'} */ (
       KERNEL_SOURCES.has(row.source) || KERNEL_ROUTE_OVERRIDES.has(row.route)
-        || row.route.startsWith('page-program/')
         || row.route.startsWith('dweb/')
         ? 'kernel' : 'split'
     ),

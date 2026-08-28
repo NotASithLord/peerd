@@ -18,7 +18,7 @@ export { detectInterruptedTurn, RESUME_NUDGE } from './loop/resume-detect.js';
 // Per-session turn slots — steer-live aborts stay inside one chat;
 // streams in other conversations survive navigation + new sends.
 export { makeTurnSlots } from './loop/turn-slots.js';
-// The agent turn driver — runAgentTurn + maybeAutoResume with injected IO.
+// The agent turn driver: runAgentTurn + maybeAutoResume with injected IO.
 export { makeTurnAuthorityDriver } from './loop/turn-authority-driver.js';
 // Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
 // agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
@@ -108,7 +108,6 @@ export { makeTurnCostTracker } from './cost/turn-tracker.js';
 // --- spawned (orchestration over sessions; see docs/ACTORS.md) ------
 export {
   makeSpawnActor, narrowTools, finalAssistantText, finalActorTurnReply,
-  restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
 } from './actor/spawn.js';
 // DESIGN-11: async (non-blocking) spawned — spawn returns a handle, the
@@ -256,7 +255,6 @@ export {
 // --- tools --------------------------------------------------------------
 export { dispatchToolCall } from './tools/local-tool-dispatcher.js';
 export { GATES } from './tools/gates.js';
-export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export {
   mainAgentDescriptors, isHiddenFromMain, MAIN_AGENT_HIDDEN_TOOLS,
   filterByDwebEnabled, isDwebTool,
@@ -395,9 +393,6 @@ export {
 } from './clock/index.js';
 
 // --- web (capture wrapper) ----------------------------------------------
-export {
-  WEB_TOOLS,
-} from './tools/web/index.js';
 export { captureTool } from './tools/web/screenshot.js';
 
 // --- voice (lightweight control/UI surface) -----------------------------

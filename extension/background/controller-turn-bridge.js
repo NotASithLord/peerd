@@ -117,6 +117,92 @@ const unknown = (/** @type {any} */ run, /** @type {unknown} */ cause) => {
   return { ...failed(cause, false), retryable: false };
 };
 
+const safeDiagnostic = (/** @type {unknown} */ cause) => {
+  const text = cause instanceof Error ? cause.message : String(cause);
+  return text.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240)
+    || 'unknown lifecycle failure';
+};
+
+const lifecycleRewrite = (/** @type {unknown} */ value) => {
+  if (!isRecord(value) || typeof value.error !== 'string' || !isRecord(value.recovery)) {
+    return null;
+  }
+  const state = value.recovery.state;
+  if (typeof value.recovery.category !== 'string'
+      || typeof state !== 'string'
+      || !['failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state)) return null;
+  return Object.freeze({
+    error: value.error.slice(0, 2_048),
+    recovery: Object.freeze({ ...value.recovery }),
+  });
+};
+
+const lifecycleRecoveryAttribution = (/** @type {any} */ rewrite) => rewrite ? {
+  recoveryCategory: typeof rewrite.recovery?.category === 'string'
+    ? rewrite.recovery.category : 'unknown',
+  recoveryState: typeof rewrite.recovery?.state === 'string'
+    ? rewrite.recovery.state : 'unknown',
+} : {};
+
+const recoveryCustody = (/** @type {any} */ rewrite) => {
+  const state = rewrite?.recovery?.state;
+  return {
+    outcomeKnown: state !== 'outcome_unknown',
+    retryable: false,
+  };
+};
+
+const actorRecoveryCustody = (
+  /** @type {any} */ rewrite,
+  /** @type {Record<string, any>} */ source,
+) => {
+  const hasActorCustody = typeof source.actorCorrelationId === 'string'
+    || typeof source.actorDeliveryId === 'string'
+    || Array.isArray(source.actorDeliveryIds)
+    || typeof source.actorTerminal === 'boolean'
+    || typeof source.actorOutcomeKnown === 'boolean'
+    || typeof source.actorPerformed === 'boolean'
+    || typeof source.actorAborted === 'boolean';
+  if (!hasActorCustody) return {};
+  const actorDeliveryIds = Array.isArray(source.actorDeliveryIds)
+    ? [...new Set(source.actorDeliveryIds.filter(
+      (/** @type {unknown} */ id) => typeof id === 'string' && id.length > 0))]
+    : [];
+  const identity = {
+    ...(typeof source.actorCorrelationId === 'string'
+      ? { actorCorrelationId: source.actorCorrelationId } : {}),
+    ...(typeof source.actorDeliveryId === 'string'
+      ? { actorDeliveryId: source.actorDeliveryId } : {}),
+    ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
+  };
+  switch (rewrite?.recovery?.state) {
+  case 'outcome_unknown':
+    return {
+      ...identity, actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+    };
+  case 'interrupted':
+    return {
+      ...identity, actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: false,
+    };
+  case 'cancelled':
+    return {
+      ...identity, actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: true,
+    };
+  default:
+    return identity;
+  }
+};
+
+const strongestLifecycleRewrite = (/** @type {any[]} */ entries) =>
+  entries.find((entry) => entry.rewrite.recovery?.state === 'outcome_unknown')
+  ?? entries.find((entry) => entry.rewrite.recovery?.state === 'interrupted')
+  ?? entries.find((entry) => entry.rewrite.recovery?.state === 'cancelled')
+  ?? entries[0]
+  ?? null;
+
 const makeEventQueue = () => {
   /** @type {{value:unknown,ack:()=>void}[]} */
   const values = [];
@@ -200,6 +286,7 @@ const controllerCtx = (ctx) => {
  * @param {ReturnType<import('./provider-egress-authority.js').createProviderEgressAuthority>}
  *   [deps.providerEgress]
  * @param {ReturnType<typeof createAuthorityEffectScheduler>} [deps.authorityScheduler]
+ * @param {(call:Record<string,any>)=>void} [deps.recordModelCall]
  * @param {number} [deps.cleanupTimeoutMs]
  */
 export const makeControllerTurnBridge = ({
@@ -208,6 +295,7 @@ export const makeControllerTurnBridge = ({
   digestArgs = canonicalCloneDigest,
   providerEgress,
   authorityScheduler = createAuthorityEffectScheduler(),
+  recordModelCall = () => {},
   cleanupTimeoutMs = 250,
 }) => {
   /** @type {Map<string, any>} */
@@ -348,14 +436,50 @@ export const makeControllerTurnBridge = ({
     /** @type {Record<string,any>} */ result,
   ) => {
     const receipts = authorityReceiptsForCall(run.effectReceipts, callId);
-    return stampAuthorityToolResult(receipts, result);
+    const stamped = stampAuthorityToolResult(receipts, result);
+    const recoveryEntry = strongestLifecycleRewrite(
+      typeof callId === 'string' ? [...run.lifecycleRewrites.values()]
+        .filter((entry) => entry.callId === callId) : [],
+    );
+    if (!recoveryEntry) return stamped;
+    const { rewrite, physical } = recoveryEntry;
+    return {
+      ...stamped,
+      ok: false,
+      error: rewrite.error,
+      recovery: rewrite.recovery,
+      ...recoveryCustody(rewrite),
+      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
+      meta: {
+        ...(isRecord(stamped.meta) ? stamped.meta : {}),
+        recovery: rewrite.recovery,
+      },
+    };
   };
   const stampStoredToolResult = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ block,
   ) => {
     const receipts = authorityReceiptsForCall(run.effectReceipts, block.tool_use_id);
-    return stampAuthorityToolResultBlock(receipts, block);
+    const stamped = stampAuthorityToolResultBlock(receipts, block);
+    const recoveryEntry = strongestLifecycleRewrite(
+      typeof block.tool_use_id === 'string' ? [...run.lifecycleRewrites.values()]
+        .filter((entry) => entry.callId === block.tool_use_id) : [],
+    );
+    if (!recoveryEntry) return stamped;
+    const { rewrite, physical } = recoveryEntry;
+    return {
+      ...stamped,
+      is_error: true,
+      content: rewrite.error,
+      recovery: rewrite.recovery,
+      ...recoveryCustody(rewrite),
+      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
+      meta: {
+        ...(isRecord(stamped.meta) ? stamped.meta : {}),
+        recovery: rewrite.recovery,
+      },
+    };
   };
   const closeSemanticCall = async (
     /** @type {any} */ run, /** @type {string} */ callId,
@@ -486,6 +610,48 @@ export const makeControllerTurnBridge = ({
       if (callDispatches?.size === 0) run.dispatchesByCall.delete(callId);
     }
   };
+  const settleAuthorityTracking = async (/** @type {any} */ {
+    run, authorityCtx, tracking, outcome, receipt, physical,
+  }) => {
+    if (!tracking || typeof authorityCtx.lifecycle?.settleTracking !== 'function') return null;
+    let rawRewrite;
+    try {
+      rawRewrite = await authorityCtx.lifecycle.settleTracking(tracking, outcome);
+    } catch (cause) {
+      // why: settleTracking is a total lifecycle boundary. An unexpected
+      // rejection is diagnosed, but it cannot erase or reinterpret the exact
+      // physical receipt already minted by the authority host.
+      await run.ctx.appendAudit({
+        type: 'authority_lifecycle_settlement_failed', sessionId: run.sessionId,
+        details: {
+          operation: receipt.operation, effectId: receipt.effectId,
+          outcome: receipt.outcome, outcomeKnown: receipt.outcomeKnown === true,
+          performed: receipt.performed === true, runId: run.runId,
+          diagnostic: safeDiagnostic(cause),
+        },
+      }).catch(() => {});
+      return null;
+    }
+    if (rawRewrite === null || rawRewrite === undefined) return null;
+    const rewrite = lifecycleRewrite(rawRewrite);
+    if (!rewrite) {
+      await run.ctx.appendAudit({
+        type: 'authority_lifecycle_settlement_failed', sessionId: run.sessionId,
+        details: {
+          operation: receipt.operation, effectId: receipt.effectId,
+          outcome: receipt.outcome, outcomeKnown: receipt.outcomeKnown === true,
+          performed: receipt.performed === true, runId: run.runId,
+          diagnostic: 'lifecycle settlement returned an invalid rewrite',
+        },
+      }).catch(() => {});
+      return null;
+    }
+    run.lifecycleRewrites.set(receipt.effectId, Object.freeze({
+      callId: receipt.callId, rewrite,
+      physical: isRecord(physical) ? Object.freeze({ ...physical }) : Object.freeze({}),
+    }));
+    return rewrite;
+  };
   const performSemanticEffect = async (
     /** @type {any} */ run,
     /** @type {{callId:string,effectId:string}} */ effect,
@@ -567,14 +733,19 @@ export const makeControllerTurnBridge = ({
         ...(target ? { target } : {}),
       });
       run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
-      if (tracking && typeof authorityCtx.lifecycle?.settleTracking === 'function') {
-        await authorityCtx.lifecycle.settleTracking(tracking, {
+      const recoveryRewrite = await settleAuthorityTracking({
+        run, authorityCtx, tracking, receipt: { ...receipt, callId: effect.callId }, result,
+        physical: result,
+        outcome: {
           ok: verdict === 'performed' || verdict === 'not-performed' && !refusal,
+          aborted: run.signal?.aborted === true
+            || result?.aborted === true || result?.actorAborted === true,
           outcomeKind: verdict === 'performed' ? 'effect-completed'
             : verdict === 'unknown' ? 'host-lost'
               : refusal ? 'pre-effect-failure' : undefined,
-        }).catch(() => null);
-      }
+        },
+      });
+      if (recoveryRewrite?.recovery?.state === 'outcome_unknown') run.nestedUnknown = true;
       await run.ctx.appendAudit({
         type: 'authority_effect', sessionId: run.sessionId,
         details: {
@@ -584,10 +755,18 @@ export const makeControllerTurnBridge = ({
           refused: receipt.refused === true,
           retryable: receipt.retryable === true,
           ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
+          ...lifecycleRecoveryAttribution(recoveryRewrite),
           ...policyAttribution,
           ...(target ? { target } : {}), runId: run.runId,
         },
       }).catch(() => {});
+      if (recoveryRewrite) return {
+        ok: false, code: 'domain-authority-lifecycle-recovery',
+        error: recoveryRewrite.error, recovery: recoveryRewrite.recovery,
+        ...recoveryCustody(recoveryRewrite),
+        ...actorRecoveryCustody(recoveryRewrite, isRecord(result) ? result : {}),
+        authorityReceipt: receipt,
+      };
       return verdict === 'unknown' ? unknown(run, 'authority effect outcome is unknown')
         : known({ authorityValue: result, authorityReceipt: receipt });
     } catch (cause) {
@@ -596,7 +775,7 @@ export const makeControllerTurnBridge = ({
         : 'not-performed';
       const outcomeKnown = replayable || verdict !== 'unknown';
       if (!outcomeKnown) run.nestedUnknown = true;
-      const detail = /** @type {{retryable?:boolean}} */ (cause);
+      const detail = /** @type {{retryable?:boolean,aborted?:boolean,actorAborted?:boolean}} */ (cause);
       const failure = safeHostEffectFailure(cause);
       const performed = verdict === 'performed'
         || verdict === 'unknown'
@@ -616,14 +795,19 @@ export const makeControllerTurnBridge = ({
         ...(target ? { target } : {}),
       });
       run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
-      if (tracking && typeof authorityCtx.lifecycle?.settleTracking === 'function') {
-        await authorityCtx.lifecycle.settleTracking(tracking, {
+      const recoveryRewrite = await settleAuthorityTracking({
+        run, authorityCtx, tracking, receipt: { ...receipt, callId: effect.callId },
+        physical: isRecord(cause) ? cause : {},
+        outcome: {
           ok: verdict === 'performed',
           error: safeError,
+          aborted: run.signal?.aborted === true
+            || detail?.aborted === true || detail?.actorAborted === true,
           outcomeKind: verdict === 'performed' ? 'effect-completed'
             : verdict === 'unknown' ? 'host-lost' : 'pre-effect-failure',
-        }).catch(() => null);
-      }
+        },
+      });
+      if (recoveryRewrite?.recovery?.state === 'outcome_unknown') run.nestedUnknown = true;
       await run.ctx.appendAudit({
         type: 'authority_effect_failed', sessionId: run.sessionId,
         details: {
@@ -633,9 +817,17 @@ export const makeControllerTurnBridge = ({
           refused: receipt.refused === true,
           retryable: receipt.retryable === true,
           ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
+          ...lifecycleRecoveryAttribution(recoveryRewrite),
           ...(target ? { target } : {}), runId: run.runId,
         },
       }).catch(() => {});
+      if (recoveryRewrite) return {
+        ok: false, code: 'domain-authority-lifecycle-recovery',
+        error: recoveryRewrite.error, recovery: recoveryRewrite.recovery,
+        ...recoveryCustody(recoveryRewrite),
+        ...actorRecoveryCustody(recoveryRewrite, isRecord(cause) ? cause : {}),
+        authorityReceipt: receipt,
+      };
       return {
         ok: false, code: 'domain-authority-operation-lost',
         error: safeError,
@@ -704,17 +896,44 @@ export const makeControllerTurnBridge = ({
         error: 'Authority lifecycle is unavailable.', retryable: false,
       } };
     }
-    const begun = await authorityCtx.lifecycle.beginTracking({
-      callId: effect.effectId,
-      tool: authorityTool(operation, retryClass),
-      sessionId: run.sessionId,
-      ownerSessionId: authorityCtx.lifecycleOwnerSessionId ?? run.sessionId,
-      target, args, confirmed, confirmedIntent,
-      turnId: authorityCtx.lifecycleTurnId,
-      userInitiated: authorityCtx.lifecycleUserInitiated,
-    });
+    let begun;
+    try {
+      begun = await authorityCtx.lifecycle.beginTracking({
+        callId: effect.effectId,
+        tool: authorityTool(operation, retryClass),
+        sessionId: run.sessionId,
+        ownerSessionId: authorityCtx.lifecycleOwnerSessionId ?? run.sessionId,
+        target, args, confirmed, confirmedIntent,
+        turnId: authorityCtx.lifecycleTurnId,
+        userInitiated: authorityCtx.lifecycleUserInitiated,
+      });
+    } catch (cause) {
+      // why: beginTracking is specified as total. If an injected or regressed
+      // implementation rejects anyway, the authority leaf must remain behind a
+      // proven pre-effect refusal rather than silently running untracked.
+      const diagnostic = safeDiagnostic(cause);
+      await run.ctx.appendAudit({
+        type: 'authority_lifecycle_begin_failed', sessionId: run.sessionId,
+        details: {
+          operation, effectId: effect.effectId, target, runId: run.runId,
+          outcome: 'not-performed', outcomeKnown: true, performed: false,
+          diagnostic,
+        },
+      }).catch(() => {});
+      return { refuseValue: {
+        ok: false, code: 'authority_lifecycle_failed',
+        error: `failed: ${operation} was NOT executed because lifecycle tracking failed unexpectedly.`,
+        outcomeKnown: true, retryable: false,
+        recovery: {
+          category: 'security_degradation', state: 'failed', autoRetry: false,
+          retryRequires: ['lifecycle-storage'], verificationRequired: false,
+          keepIdempotencyKey: false,
+          reason: 'tracking failed unexpectedly; lifecycle storage must recover before retry',
+        },
+      } };
+    }
     return begun?.refuse ? { refuseValue: {
-      ok: false, error: begun.refuse.error,
+      ok: false, error: begun.refuse.error, outcomeKnown: true,
       ...(begun.refuse.recovery ? { recovery: begun.refuse.recovery } : {}),
       retryable: false,
     } } : { tracking: begun?.handle ?? null };
@@ -831,10 +1050,31 @@ export const makeControllerTurnBridge = ({
     const begun = await beginAuthorityTracking(
       run, effect, operation, target, args, retryClass, confirmed, confirmedIntent,
     );
-    if (begun.refuseValue) return { refuse: await performSemanticEffect(
-      run, effect, operation, target, () => begun.refuseValue,
-      HOST_EFFECT_OUTCOME.okResult,
-    ) };
+    if (begun.refuseValue) {
+      const refusal = await performSemanticEffect(
+        run, effect, operation, target, () => begun.refuseValue,
+        HOST_EFFECT_OUTCOME.okResult,
+      );
+      const rewrite = lifecycleRewrite({
+        error: begun.refuseValue.error,
+        recovery: begun.refuseValue.recovery,
+      });
+      if (rewrite) {
+        run.lifecycleRewrites.set(effect.effectId, Object.freeze({
+          callId: effect.callId, rewrite,
+          physical: Object.freeze({ ...begun.refuseValue }),
+        }));
+        await run.ctx.appendAudit({
+          type: 'authority_lifecycle_refused', sessionId: run.sessionId,
+          details: {
+            operation, effectId: effect.effectId, target, runId: run.runId,
+            outcome: 'not-performed', outcomeKnown: true, performed: false,
+            ...lifecycleRecoveryAttribution(rewrite),
+          },
+        }).catch(() => {});
+      }
+      return { refuse: refusal };
+    }
     if (!runIsLive(run)) {
       return { refuse: await performSemanticEffect(
         run, effect, operation, target,
@@ -1115,7 +1355,12 @@ export const makeControllerTurnBridge = ({
     const entry = domainExecutionEntry(run, value, operation, 'execution', fields);
     if (!entry) return null;
     entry.authority = bindExecutionToolAuthority(entry.domainState, {
-      operation, args: entry.call.args, ctx: entry.custody?.ctx, signal: run.signal,
+      operation, args: entry.call.args,
+      // why: live script-operation receipts are correlated to the model-issued
+      // call, not the cached execution authority class. Keep the call id on
+      // this exact binding so nested actor work cannot lose its transcript card.
+      ctx: { ...entry.custody?.ctx, toolUseId: entry.call.id },
+      signal: run.signal,
     });
     return entry;
   };
@@ -1329,8 +1574,8 @@ export const makeControllerTurnBridge = ({
           // time. It may narrow a capability that failed live, but it cannot
           // widen the clean generation admitted before the turn. Legitimate
           // expansion starts a fresh turn generation and projection.
-          for (const operation of run.allowedOperations) {
-            if (!projected.has(operation)) run.allowedOperations.delete(operation);
+          for (const grantedOperation of run.allowedOperations) {
+            if (!projected.has(grantedOperation)) run.allowedOperations.delete(grantedOperation);
           }
           for (const name of run.allowedToolNames) {
             if (!projectedToolNames.has(name)) run.allowedToolNames.delete(name);
@@ -1413,6 +1658,20 @@ export const makeControllerTurnBridge = ({
           return providerEgress
             ? providerEgress.cancelLocalGeneration(value, modelGrant(run))
             : failed('local model egress unavailable', true);
+        case 'turn.model.observe-context':
+          if (!exactOptionalKeys(value, ['label', 'observation'])
+              || !['main', 'main:failover'].includes(value.label)
+              || !isRecord(value.observation)) {
+            return failed('model context observation invalid', true);
+          }
+          try {
+            recordModelCall({
+              ...value.observation,
+              sessionId: run.sessionId,
+              label: value.label,
+            });
+          } catch { /* advisory recorder failure never fails inference */ }
+          return known(null);
         case 'turn.model.observe-event':
           if (value.type === 'tool-use-start'
               && typeof value.id === 'string' && typeof value.name === 'string') {
@@ -1482,6 +1741,11 @@ export const makeControllerTurnBridge = ({
               && value.task.length <= 65_536 && typeof value.allowRecursion === 'boolean'
               && (value.tools === undefined || (Array.isArray(value.tools)
                 && value.tools.every((/** @type {unknown} */ name) => typeof name === 'string')))
+              && Array.isArray(value.grantedToolNames)
+              && value.grantedToolNames.length <= 256
+              && value.grantedToolNames.every((/** @type {unknown} */ candidate) =>
+                typeof candidate === 'string' && candidate.length <= 128
+                && run.allowedToolNames.has(candidate))
               && Array.isArray(value.grantedOperations)
               && value.grantedOperations.length <= 256
               && value.grantedOperations.every((/** @type {unknown} */ candidate) =>
@@ -1490,7 +1754,7 @@ export const makeControllerTurnBridge = ({
             && (value.maxSteps === undefined || Number.isFinite(value.maxSteps))
             && (value.maxDepth === undefined || Number.isFinite(value.maxDepth))
             ? claimSemanticEffect(run, value, operation, ['task', 'allowRecursion'], [
-              'tools', 'maxSteps', 'maxDepth', 'grantedOperations',
+              'tools', 'maxSteps', 'maxDepth', 'grantedToolNames', 'grantedOperations',
             ]) : null;
           if (!effect || !valid
               || (value.maxSteps !== undefined && !Number.isFinite(value.maxSteps))
@@ -1513,6 +1777,7 @@ export const makeControllerTurnBridge = ({
               ...(value.maxSteps === undefined ? {} : { maxSteps: value.maxSteps }),
               ...(value.maxDepth === undefined ? {} : { maxDepth: value.maxDepth }),
               allowRecursion: value.allowRecursion,
+              grantedToolNames: [...new Set(value.grantedToolNames)],
               grantedOperations: [...new Set(value.grantedOperations)],
             };
             const prepared = await prepareAuthorityEffect(
@@ -2597,6 +2862,7 @@ export const makeControllerTurnBridge = ({
       activeKernelCalls: new Set(),
       dispatchesByCall: new Map(),
       semanticEffectIds: new Set(), semanticCallState: new Map(), effectReceipts: new Map(),
+      lifecycleRewrites: new Map(),
       claimedEffectsByCall: new Map(),
       persistedSemanticCalls: new Set(),
       completedSemanticCalls: new Set(), closingSemanticCalls: new Set(),

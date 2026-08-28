@@ -861,56 +861,6 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
     "source": "extension/peerd-egress/fetch/origin-credential-routes.js"
   },
   {
-    "route": "page-program/navigate",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/click",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/fill",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/snapshot",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/read",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/read-state",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/watch-changes",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/query-dom",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/view",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
-    "route": "page-program/login",
-    "channels": ["store", "preview"],
-    "source": "extension/background/kernel-turn-authority-adapter.js"
-  },
-  {
     "route": "permission/set",
     "channels": [
       "store",

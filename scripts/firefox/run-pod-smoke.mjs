@@ -62,9 +62,14 @@ try {
   const workerPath = join(source, backgroundEntry);
   const workerSource = await readFile(workerPath, 'utf8');
   await writeFile(workerPath, `${workerSource}\n
-import { isTrustedSender as smokeTrustedSender } from '/shared/background-dispatcher.js';
+import { isFirstPartySender as smokeIsFirstPartySender } from '/shared/sender-trust.js';
 import { idb as smokeIdb } from '/peerd-egress/kernel-storage.js';
 import { createPodRegistry as makeSmokePodRegistry } from '/peerd-engine/pod-registry.js';
+const smokeSenderTrust = {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+};
+const smokeTrustedSender = (sender) => smokeIsFirstPartySender(sender, smokeSenderTrust);
 const smokePodRegistry = makeSmokePodRegistry({ storage: {
   get: async (key) => (await smokeIdb.get('pods', key))?.value,
   set: async (key, value) => smokeIdb.put('pods', { key, value }),

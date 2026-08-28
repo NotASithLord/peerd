@@ -3,9 +3,8 @@ export const KERNEL_STATE_SCHEMA = 2;
 export const KERNEL_STATE_PROVENANCE = 'authority-kernel-readonly';
 
 export const KERNEL_STATE_DEFERRED_FIELDS = Object.freeze([
-  'pendingConfirm', 'confirmSettleNotes', 'streaming', 'actors',
-  'actorProjectionEpoch', 'actorProjectionRevision', 'spawned',
-  'asyncTasks', 'goalRuns', 'runtimeCapabilities',
+  'pendingConfirm', 'confirmSettleNotes', 'streaming',
+  'goalRuns', 'runtimeCapabilities',
 ]);
 
 const own = (/** @type {object} */ value, /** @type {string} */ key) => Object.hasOwn(value, key);
@@ -106,6 +105,28 @@ const validProfile = (value) => record(value)
   && typeof value.onboardingComplete === 'boolean';
 
 /** @param {unknown} value */
+const validActorProjection = (value) => {
+  if (!record(value)) return false;
+  const actors = value.actors;
+  const spawned = value.spawned;
+  const asyncTasks = value.asyncTasks;
+  if (!record(actors) || Object.keys(actors).length > 256
+      || Object.values(actors).some((entry) => !record(entry))
+      || !record(spawned) || !record(spawned.byToolUse) || !record(spawned.sessions)
+      || Object.keys(spawned.sessions).length > 256
+      || Object.values(spawned.sessions).some((entry) => !record(entry))
+      || !record(asyncTasks) || Object.keys(asyncTasks).length > 256
+      || Object.values(asyncTasks).some((entry) => !Array.isArray(entry)
+        || entry.length > 256 || entry.some((task) => !record(task)))) return false;
+  return (value.actorProjectionEpoch === null
+      || typeof value.actorProjectionEpoch === 'string'
+        && value.actorProjectionEpoch.length >= 8
+        && value.actorProjectionEpoch.length <= 128)
+    && Number.isSafeInteger(value.actorProjectionRevision)
+    && value.actorProjectionRevision >= 0;
+};
+
+/** @param {unknown} value */
 export const validateKernelStateProjection = (value) => {
   if (!record(value)) return invalid('not-an-object');
   const s = value;
@@ -142,5 +163,6 @@ export const validateKernelStateProjection = (value) => {
   } else if (!validProfile(s.profile)) return invalid('profile-invalid');
   if (!record(s.capabilities) || !validKernelActorIsolation(s.capabilities.actorExecution))
     return invalid('actor-isolation-invalid');
+  if (!validActorProjection(s)) return invalid('actor-projection-invalid');
   return { ok: /** @type {const} */ (true), state: s };
 };

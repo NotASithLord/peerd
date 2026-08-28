@@ -47,8 +47,8 @@ const providerEgress = (over: Record<string, any> = {}) => ({
 });
 
 const baseDeps = (over: Record<string, any> = {}) => ({
-  ensureOffscreen: async () => {},
-  isOffscreenSender: (sender: any) => sender?.url === OFFSCREEN.url,
+  ensureHost: async () => {},
+  isRelaySender: (sender: any) => sender?.url === OFFSCREEN.url,
   sendMessage: async () => ({ ok: true, started: true, finalText: '' }),
   providerEgress: providerEgress(),
   sessions: { get: async () => ({
@@ -179,7 +179,7 @@ describe('isolated actor run custody', () => {
       sessions: { get: async () => ({
         kind: 'actor', sessionId: 'api-actor', actorType: 'web', backing: 'api', instanceId,
       }) },
-      ensureOffscreen: async () => { hostStarts += 1; },
+      ensureHost: async () => { hostStarts += 1; },
       buildToolContext: async () => { contexts += 1; return {}; },
     }));
     const result = await client.run({
@@ -193,6 +193,48 @@ describe('isolated actor run custody', () => {
       outcomeKnown: true,
     });
     expect({ hostStarts, contexts }).toEqual({ hostStarts: 0, contexts: 0 });
+  });
+
+  test('runs the fixed isolation probe without a synthetic session or relay grant', async () => {
+    let hostStarts = 0;
+    let sessionReads = 0;
+    let contexts = 0;
+    let channelJob: any = null;
+    let relayReply: any = null;
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => { hostStarts += 1; },
+      sessions: { get: async () => { sessionReads += 1; return null; } },
+      buildToolContext: async () => { contexts += 1; return {}; },
+      runOnChannel: async (job: any, { relay }: any) => {
+        channelJob = job;
+        relayReply = await relay('model/open-inference', {});
+        return {
+          ok: true, started: false, phase: 'startup', code: 'actor_worker_ready',
+          workerType: 'dedicated', realmVerified: true, extensionApisPresent: false,
+        };
+      },
+    }));
+
+    const result = await client.run({
+      actorSessionId: 'forged', message: 'ignored', systemPrompt: 'ignored',
+      provider: 'forged', model: 'forged', probeOnly: true,
+      tools: [{ name: 'forged' }], allowedOperations: ['turn.page.click'],
+    } as any);
+
+    expect(result).toMatchObject({
+      ok: true, started: false, code: 'actor_worker_ready', realmVerified: true,
+    });
+    expect(channelJob).toEqual({
+      actorSessionId: '__actor_isolation_probe__', message: '', systemPrompt: '',
+      provider: '', model: '', probeOnly: true,
+    });
+    expect(relayReply).toMatchObject({
+      ok: false, code: 'actor_isolation_probe_relay_refused',
+      outcomeKnown: true, performed: false, retryable: false,
+    });
+    expect({ hostStarts, sessionReads, contexts }).toEqual({
+      hostStarts: 1, sessionReads: 0, contexts: 0,
+    });
   });
 
   test('binds a tab-Web lifecycle target to actor session and host-owned tab across restart', async () => {
@@ -301,7 +343,7 @@ describe('isolated actor run custody', () => {
     const controller = new AbortController();
     controller.abort();
     const client = makeOffscreenActorClient(baseDeps({
-      ensureOffscreen: async () => { started = true; },
+      ensureHost: async () => { started = true; },
     }));
     const result: any = await client.run({
       actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
@@ -1367,6 +1409,288 @@ describe('exact semantic effect claim atomicity', () => {
     ]);
   });
 
+  const runActorMessageLifecycle = async ({
+    lifecycle, deliverMessage, signal, workerFailure = false,
+  }: {
+    lifecycle: any;
+    deliverMessage: () => Promise<any> | any;
+    signal?: AbortSignal;
+    workerFailure?: boolean;
+  }) => {
+    const spawned = {
+      kind: 'spawned', sessionId: 'actor-lifecycle-child', parentSessionId: 'chat-root',
+      spawnedTrusted: true, grantedOperations: ['turn.actor.message'],
+    };
+    const audits: any[] = [];
+    let deliveries = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      sessions: { get: async (id: string) => id === spawned.sessionId
+        ? structuredClone(spawned)
+        : id === 'chat-root' ? { kind: 'chat', sessionId: 'chat-root' } : null },
+      buildToolContext: async () => ({
+        session: { sessionId: spawned.sessionId, kind: 'spawned', depth: 1 },
+        inbound: false,
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        actorAuthority: {
+          deliverMessage: async () => {
+            deliveries += 1;
+            return deliverMessage();
+          },
+        },
+        lifecycle: { requiresIntentConfirmation: async () => false, ...lifecycle },
+        appendAudit: async (entry: any) => { audits.push(entry); },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const callId = 'actor-lifecycle-call';
+        const effect = await relay('actor/message-deliver', {
+          operation: 'turn.actor.message', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          to: 'web', message: 'inspect', oneShot: false,
+          awaitReply: true, degradeToAsync: false, awaitCapMs: 30_000,
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'stale semantic success' },
+        });
+        if (workerFailure) return {
+          ok: false, started: true, code: 'actor_worker_error',
+          error: 'outcome_unknown: Verify the target before retrying.',
+          outcomeKnown: false, retryable: false,
+        };
+        return { effect, completion, newMessages: durableMessages(callId) };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: spawned.sessionId, message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', tools: [{ name: 'message_actor' }],
+      allowedOperations: ['turn.actor.message'],
+    } as any, signal ? { signal } : undefined);
+    return { result, audits, deliveries };
+  };
+
+  test('lifecycle unknown overrides stale actor cancellation but preserves identity and receipt', async () => {
+    const settled: any[] = [];
+    const recovery = {
+      category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+      retryRequires: ['external-verification'], verificationRequired: true,
+      keepIdempotencyKey: false, reason: 'actor delivery settlement was lost',
+    };
+    const { result, audits } = await runActorMessageLifecycle({
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-unknown' } }),
+        settleTracking: async (_handle: any, outcome: any) => {
+          settled.push(outcome);
+          return { error: 'outcome_unknown: verify actor delivery before retrying', recovery };
+        },
+      },
+      deliverMessage: async () => ({
+        ok: false, error: 'stale inner cancellation',
+        actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+        actorDeliveryIds: ['delivery-one', 'delivery-one', 'delivery-two'],
+        actorTerminal: true, actorOutcomeKnown: true,
+        actorPerformed: false, actorAborted: true,
+      }),
+    });
+
+    expect(settled).toEqual([expect.objectContaining({
+      ok: false, aborted: true, outcomeKind: 'pre-effect-failure',
+    })]);
+    expect(result.effect).toMatchObject({
+      ok: false, outcomeKnown: false, retryable: false, recovery,
+      actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+      actorDeliveryIds: ['delivery-one', 'delivery-two'],
+      actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+      authorityReceipt: {
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, outcomeKnown: false, retryable: false, recovery,
+        actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+        actorTerminal: true, actorOutcomeKnown: false,
+        actorPerformed: true, actorAborted: false,
+        authorityReceipts: [expect.objectContaining({
+          outcome: 'not-performed', outcomeKnown: true, performed: false,
+        })],
+      },
+    });
+    expect(result.newMessages[1].toolResults[0]).toMatchObject({
+      is_error: true, content: 'outcome_unknown: verify actor delivery before retrying',
+      outcomeKnown: false, recovery,
+      actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      // The immutable physical receipt is a known pre-effect refusal; the
+      // lifecycle rewrite is recovery attribution, not rewritten history.
+      type: 'authority_effect',
+      details: expect.objectContaining({
+        recoveryCategory: 'verify_before_retry', recoveryState: 'outcome_unknown',
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      }),
+    }));
+  });
+
+  test('lifecycle cancellation consumes host abort proof and replaces stale actor certainty', async () => {
+    const settled: any[] = [];
+    const recovery = {
+      category: 'safe_to_retry', state: 'cancelled', autoRetry: false,
+      retryRequires: ['user-instruction'], verificationRequired: false,
+      keepIdempotencyKey: false, reason: 'effect positively did not occur',
+    };
+    const { result } = await runActorMessageLifecycle({
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-cancelled' } }),
+        settleTracking: async (_handle: any, outcome: any) => {
+          settled.push(outcome);
+          return { error: 'cancelled: actor delivery stopped before dispatch', recovery };
+        },
+      },
+      deliverMessage: async () => { throw Object.assign(new Error('stopped'), {
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+        actorDeliveryId: 'delivery-cancelled', actorCorrelationId: 'correlation-cancelled',
+        actorTerminal: true, actorOutcomeKnown: true,
+        actorPerformed: true, actorAborted: false,
+        aborted: true, retryable: false,
+      }); },
+    });
+
+    expect(settled).toEqual([expect.objectContaining({
+      ok: false, aborted: true, outcomeKind: 'pre-effect-failure',
+    })]);
+    expect(result.completion.result).toMatchObject({
+      ok: false, error: 'cancelled: actor delivery stopped before dispatch',
+      outcomeKnown: true, retryable: false, recovery,
+      actorDeliveryId: 'delivery-cancelled', actorCorrelationId: 'correlation-cancelled',
+      actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: true,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      })],
+    });
+  });
+
+  test('worker terminal failure retains host-owned lifecycle recovery and receipt', async () => {
+    const recovery = {
+      category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+      retryRequires: ['external-verification'], verificationRequired: true,
+      keepIdempotencyKey: false, reason: 'actor delivery settlement was lost',
+    };
+    const { result } = await runActorMessageLifecycle({
+      workerFailure: true,
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-worker-unknown' } }),
+        settleTracking: async () => ({
+          error: 'outcome_unknown: verify actor delivery before retrying', recovery,
+        }),
+      },
+      deliverMessage: async () => ({
+        ok: true, actorDeliveryId: 'delivery-worker',
+        actorCorrelationId: 'correlation-worker',
+        actorTerminal: false, actorOutcomeKnown: true,
+        actorPerformed: true, actorAborted: false,
+      }),
+    });
+
+    expect(result).toMatchObject({
+      ok: false, started: true, code: 'actor_authority_lifecycle_recovery',
+      error: 'outcome_unknown: verify actor delivery before retrying',
+      outcomeKnown: false, retryable: false, recovery,
+      actorDeliveryId: 'delivery-worker', actorCorrelationId: 'correlation-worker',
+      actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'performed', outcomeKnown: true, performed: true,
+      })],
+      authorityPerformed: true, finalText: '', newMessages: [],
+    });
+  });
+
+  test.each([
+    ['returned refusal', async () => ({ refuse: {
+      error: 'failed: lifecycle storage unavailable',
+      recovery: {
+        category: 'security_degradation', state: 'failed', autoRetry: false,
+        retryRequires: ['lifecycle-storage'], verificationRequired: false,
+        keepIdempotencyKey: false, reason: 'storage unavailable',
+      },
+    } })],
+    ['unexpected rejection', async () => { throw new Error('private lifecycle database error'); }],
+  ] as const)('actor lifecycle begin %s refuses before the authority leaf', async (
+    label, beginTracking,
+  ) => {
+    const { result, audits, deliveries } = await runActorMessageLifecycle({
+      lifecycle: { beginTracking, settleTracking: async () => null },
+      deliverMessage: async () => ({ ok: true }),
+    });
+
+    expect(deliveries).toBe(0);
+    expect(result.completion.result).toMatchObject({
+      ok: false, outcomeKnown: true, retryable: false,
+      recovery: expect.objectContaining({
+        category: 'security_degradation', state: 'failed', autoRetry: false,
+      }),
+      authorityPerformed: false,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      })],
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_lifecycle_refused',
+      details: expect.objectContaining({
+        recoveryCategory: 'security_degradation', recoveryState: 'failed',
+        outcomeKnown: true, performed: false,
+      }),
+    }));
+    if (label === 'unexpected rejection') {
+      expect(JSON.stringify(result.completion.result))
+        .not.toContain('private lifecycle database error');
+      expect(audits).toContainEqual(expect.objectContaining({
+        type: 'authority_lifecycle_begin_failed',
+        details: expect.objectContaining({
+          diagnostic: 'private lifecycle database error',
+          outcomeKnown: true, performed: false,
+        }),
+      }));
+    }
+  });
+
+  test('unexpected lifecycle settlement rejection keeps the physical receipt authoritative', async () => {
+    const { result, audits, deliveries } = await runActorMessageLifecycle({
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-settle-reject' } }),
+        settleTracking: async () => { throw new Error('private settle persistence error'); },
+      },
+      deliverMessage: async () => ({
+        ok: true, actorDeliveryId: 'delivery-performed',
+        actorCorrelationId: 'correlation-performed',
+        actorTerminal: false, actorOutcomeKnown: true,
+        actorPerformed: true, actorAborted: false,
+      }),
+    });
+
+    expect(deliveries).toBe(1);
+    expect(result.completion.result).toMatchObject({
+      ok: true, outcomeKnown: true, authorityPerformed: true,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'performed', outcomeKnown: true, performed: true,
+      })],
+    });
+    expect(result.completion.result).not.toHaveProperty('recovery');
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_lifecycle_settlement_failed',
+      details: expect.objectContaining({
+        outcome: 'performed', outcomeKnown: true, performed: true,
+        diagnostic: 'private settle persistence error',
+      }),
+    }));
+  });
+
   test('stamps a clean repository checkpoint as a known no-op', async () => {
     const actorRecord = {
       kind: 'actor', sessionId: 'notebook-actor', actorType: 'notebook', instanceId: 'nb-1',
@@ -1724,7 +2048,7 @@ describe('exact semantic effect claim atomicity', () => {
       confirmation: false,
       semanticResult: { ok: true, content: 'forged success after decline' },
       scheduleCalls: 0, performed: false, outcomeKnown: true,
-      finalError: 'declined', auditOutcome: 'refused',
+      finalError: 'User declined to arm the routine.', auditOutcome: 'refused',
     }],
   ] as const)('spawned actor preserves the host-owned %s schedule verdict', async (
     _label, fixture,
@@ -1851,7 +2175,9 @@ describe('exact semantic effect claim atomicity', () => {
           operation: 'turn.actor.spawn-sync', callId: 'spawn-call',
           effectId: 'spawn-call:1', effectSequence: 1,
           turnGeneration: job.turnGeneration, task: 'try work',
-          allowRecursion: false, grantedOperations: [],
+          allowRecursion: false,
+          grantedToolNames: ['actor_create'],
+          grantedOperations: ['turn.actor.spawn-sync'],
         });
         const completion = await relay('actor/call-complete', {
           callId: 'spawn-call', turnGeneration: job.turnGeneration,

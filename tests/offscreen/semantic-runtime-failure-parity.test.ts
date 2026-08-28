@@ -26,6 +26,24 @@ const makeModelCall = () => {
   };
 };
 
+const makeToolModelCall = (name: string, args: Record<string, unknown>) => {
+  let round = 0;
+  return async function* () {
+    round += 1;
+    if (round > 1) {
+      yield { type: 'message-stop', stopReason: 'end_turn' };
+      return;
+    }
+    yield { type: 'tool-use-start', id: 'actor-lifecycle-call', name };
+    yield {
+      type: 'tool-use-delta', id: 'actor-lifecycle-call',
+      partialJson: JSON.stringify(args),
+    };
+    yield { type: 'tool-use-stop', id: 'actor-lifecycle-call' };
+    yield { type: 'message-stop', stopReason: 'tool_use' };
+  };
+};
+
 const sessions = (sessionId: string) => {
   let record: any = {
     sessionId, provider: 'anthropic', model: 'claude-sonnet-4-6', messages: [],
@@ -95,15 +113,16 @@ const runMain = async () => {
 class WorkerGlobal {
   listener: ((event: MessageEvent) => void | Promise<void>) | null = null;
   events: any[] = [];
-  modelCall = makeModelCall();
-  provider = makeScriptedProviderAuthority(() => this.modelCall);
-  grant = {
+  modelCall: any = makeModelCall();
+  provider: any = makeScriptedProviderAuthority(() => this.modelCall);
+  grant: any = {
     owner: {}, signal: new AbortController().signal,
     permits: (providerId: string, modelId: string) =>
       providerId === 'anthropic' && modelId === 'claude-sonnet-4-6',
   };
   done!: (value: any) => void;
   completion = new Promise((resolve) => { this.done = resolve; });
+  authorityReply: any = null;
 
   addEventListener(type: string, listener: (event: MessageEvent) => void | Promise<void>) {
     if (type === 'message') this.listener = listener;
@@ -131,6 +150,16 @@ class WorkerGlobal {
         this.provider.readInferenceChunk(message, this.grant));
     } else if (message.type === 'model-cancel-inference-request') {
       reply('model-cancel-inference-response', this.provider.cancelInference(message, this.grant));
+    } else if (message.type === 'actor-message-deliver-request') {
+      this.dispatch({
+        type: 'actor-message-deliver-response', rid: message.rid,
+        reply: structuredClone(this.authorityReply),
+      });
+    } else if (message.type === 'actor-call-complete-request') {
+      this.dispatch({
+        type: 'actor-call-complete-response', rid: message.rid,
+        reply: { ok: true, result: structuredClone(message.result) },
+      });
     }
   }
 }
@@ -165,7 +194,114 @@ const runActor = async () => {
   }
 };
 
+const runReasoningActorOutputCap = async () => {
+  const worker = new WorkerGlobal();
+  const opened: any[] = [];
+  worker.modelCall = async function* () {
+    yield { type: 'text-delta', text: 'bounded actor reply' };
+    yield { type: 'message-stop', stopReason: 'end_turn' };
+  };
+  worker.grant.maxOutputTokens = 4096;
+  worker.provider = makeScriptedProviderAuthority(
+    () => worker.modelCall,
+    (request, grant) => opened.push({ request: structuredClone(request), grant }),
+  );
+  const previousSelf = globalThis.self;
+  Object.defineProperty(globalThis, 'self', { value: worker, configurable: true });
+  try {
+    startActorWorker();
+    worker.dispatch({
+      type: 'run',
+      execution: describeActorExecution({
+        actorSessionId: 'actor-output-cap', message: 'answer briefly',
+        systemPrompt: 'PINNED', provider: 'anthropic', model: 'claude-sonnet-4-6',
+        maxSteps: 1, maxOutputTokens: 4096,
+        reasoningEnabled: true, reasoningEffort: 'medium',
+        tools: [], priorMessages: [], recordKind: 'actor',
+        turnGeneration: 'actor-output-cap-generation',
+      }, 'actor-output-cap-run'),
+      tools: [], programTools: [], runtimeCapabilities: null,
+      semanticPolicy: { permission: { mode: 'act', confirmActions: false } },
+    });
+    const done: any = await worker.completion;
+    if (done.type === 'error') throw new Error(done.error);
+    return { done: done.result, opened };
+  } finally {
+    if (previousSelf === undefined) delete (globalThis as any).self;
+    else Object.defineProperty(globalThis, 'self', { value: previousSelf, configurable: true });
+  }
+};
+
+const runActorLifecycleFailure = async () => {
+  const actorProjection: any = projectControllerToolSurface({
+    surface: 'selection', toolNames: ['message_actor'],
+  });
+  const worker = new WorkerGlobal();
+  worker.modelCall = makeToolModelCall('message_actor', {
+    to: 'web', message: 'inspect', await_reply: true,
+  });
+  const recovery = {
+    category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+    retryRequires: ['external-verification'], verificationRequired: true,
+    keepIdempotencyKey: false, reason: 'actor delivery settlement was lost',
+  };
+  const authorityReceipt = {
+    effectId: 'actor-lifecycle-call:1', operation: 'turn.actor.message',
+    outcome: 'not-performed', outcomeKnown: true, performed: false,
+    retryable: true, refused: true,
+  };
+  worker.authorityReply = {
+    ok: false, error: 'outcome_unknown: verify actor delivery before retrying',
+    code: 'actor-authority-lifecycle-recovery', outcomeKnown: false,
+    retryable: false, recovery, authorityReceipt,
+    actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+    actorDeliveryIds: ['delivery-one', 'delivery-one', 'delivery-two'],
+    actorTerminal: true, actorOutcomeKnown: false,
+    actorPerformed: true, actorAborted: false,
+  };
+  const previousSelf = globalThis.self;
+  Object.defineProperty(globalThis, 'self', { value: worker, configurable: true });
+  try {
+    startActorWorker();
+    worker.dispatch({
+      type: 'run',
+      execution: describeActorExecution({
+        actorSessionId: 'actor-lifecycle-worker', message: 'inspect web actor',
+        systemPrompt: 'PINNED', provider: 'anthropic', model: 'claude-sonnet-4-6',
+        maxSteps: 1, maxOutputTokens: 256, oneShot: true,
+        tools: actorProjection.tools, priorMessages: [], recordKind: 'spawned',
+        turnGeneration: 'actor-lifecycle-generation',
+      }, 'actor-lifecycle-run'),
+      tools: actorProjection.tools, programTools: [], runtimeCapabilities: null,
+      semanticPolicy: { permission: { mode: 'act', confirmActions: false } },
+    });
+    const done: any = await worker.completion;
+    return {
+      result: worker.events.find((event) => event.type === 'tool-result')?.result,
+      done, recovery, authorityReceipt,
+    };
+  } finally {
+    if (previousSelf === undefined) delete (globalThis as any).self;
+    else Object.defineProperty(globalThis, 'self', { value: previousSelf, configurable: true });
+  }
+};
+
 describe('main and actor semantic failure integration parity', () => {
+  test.serial('caps a reasoning bound-actor request before exact provider custody', async () => {
+    const { done, opened } = await runReasoningActorOutputCap();
+    expect(done).toMatchObject({ finalText: 'bounded actor reply', stopReason: 'end_turn' });
+    expect(opened).toHaveLength(1);
+    expect(opened[0].request).toMatchObject({
+      providerId: 'anthropic', modelId: 'claude-sonnet-4-6',
+      nativeBody: {
+        model: 'claude-sonnet-4-6', max_tokens: 4096,
+        thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+      },
+    });
+    expect(opened[0].request.nativeBody.max_tokens)
+      .toBe(opened[0].grant.maxOutputTokens);
+  });
+
   test.serial('preserves the same zero-effect executor failure through both real runtimes', async () => {
     const original = Intl.DateTimeFormat;
     Object.defineProperty(Intl, 'DateTimeFormat', {
@@ -200,5 +336,23 @@ describe('main and actor semantic failure integration parity', () => {
     } finally {
       Object.defineProperty(Intl, 'DateTimeFormat', { configurable: true, value: original });
     }
+  });
+
+  test.serial('preserves bounded lifecycle recovery across the isolated actor heap', async () => {
+    const { result, done, recovery, authorityReceipt } = await runActorLifecycleFailure();
+    expect(result).toMatchObject({
+      ok: false, outcomeKnown: false, retryable: false,
+      recovery, authorityReceipt,
+      actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+      actorDeliveryIds: ['delivery-one', 'delivery-two'],
+      actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+    });
+    expect(done).toMatchObject({
+      type: 'error', outcomeKnown: false, retryable: false,
+      recovery, authorityReceipt,
+      actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+      actorDeliveryIds: ['delivery-one', 'delivery-two'],
+    });
   });
 });

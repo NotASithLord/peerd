@@ -189,6 +189,9 @@ describe('isSidepanelSender', () => {
 
   it('accepts only the exact browser-owned panel/sidebar document', () => {
     expect(isSidepanelSender({ id: ID, url: sidepanelUrl }, sidepanelTrust)).toBe(true);
+    expect(isSidepanelSender(
+      { id: ID, url: `${sidepanelUrl}#!/chat` }, sidepanelTrust,
+    )).toBe(true);
   });
 
   it('rejects tab-hosted copies, engine pages, and suffix/query variants', () => {

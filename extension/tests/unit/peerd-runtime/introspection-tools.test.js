@@ -8,16 +8,13 @@
 // truncates encrypted blobs), plus the dispatch itself (unknown kind → error).
 
 import { describe, it, expect } from '../../framework.js';
-// why: the individual tool defs are not part of peerd-runtime's public
-// index (only BUILTIN_TOOLS is) — importing them from there fails at
-// module instantiation, which took the WHOLE runner.html import graph
-// down with it (the page sat on "Loading…" forever). Tests are exempt
-// from the public-API import rule, so reach into tools/defs directly.
+// Tests are exempt from the public-API import rule and exercise the concrete
+// implementation directly; the catalog itself comes from the sealed semantic
+// surface used by the production controller.
+import { inspectTool } from '/peerd-runtime/tools/defs/inspect.js';
 import {
-  inspectTool,
-  BUILTIN_TOOLS,
-} from '/peerd-runtime/tools/defs/index.js';
-import { getToolMetadata } from '/peerd-runtime/semantic.js';
+  getToolMetadata, listToolMetadata, TOOL_METADATA_ORDER,
+} from '/peerd-runtime/semantic.js';
 
 const inspectMetadata = getToolMetadata(inspectTool.name);
 
@@ -262,9 +259,9 @@ describe('inspect dispatch', () => {
   });
 });
 
-describe('BUILTIN_TOOLS registry', () => {
-  it('registers the merged inspect tool and none of the old five names', () => {
-    const names = BUILTIN_TOOLS.map((t) => t.name);
+describe('controller tool catalog', () => {
+  it('contains the merged inspect tool and none of the old five names', () => {
+    const names = TOOL_METADATA_ORDER;
     expect(names).toContain('inspect');
     for (const gone of ['inspect_storage', 'inspect_audit_log', 'inspect_session_access',
       'inspect_denylist', 'inspect_provider_config']) {
@@ -272,21 +269,21 @@ describe('BUILTIN_TOOLS registry', () => {
     }
   });
 
-  it('every built-in declares a primitive', () => {
-    for (const t of BUILTIN_TOOLS) {
-      expect(typeof t.primitive).toBe('string');
-      expect(t.primitive.length > 0).toBe(true);
+  it('every catalog entry declares a primitive', () => {
+    for (const metadata of listToolMetadata()) {
+      expect(typeof metadata.primitive).toBe('string');
+      expect(metadata.primitive.length > 0).toBe(true);
     }
   });
 
-  it('every built-in declares a valid sideEffect', () => {
+  it('every catalog entry declares a valid sideEffect', () => {
     // The V1 "everything is read-only" invariant ended when the DOM /
     // engine tool families landed. The durable invariant: every tool
     // self-classifies with one of the SideEffect union members (see
     // shared/tool-types.js) so the dispatcher gates can reason about it.
     const valid = ['read', 'write', 'mutate_external', 'destructive'];
-    for (const t of BUILTIN_TOOLS) {
-      expect(valid.includes(/** @type {string} */ (t.sideEffect))).toBe(true);
+    for (const metadata of listToolMetadata()) {
+      expect(valid.includes(/** @type {string} */ (metadata.sideEffect))).toBe(true);
     }
   });
 });

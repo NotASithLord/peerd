@@ -183,6 +183,93 @@ const exactKeys = (
 const ACTOR_AUTHORITY_RESULT_CAP = 20 * 1024 * 1024;
 const ACTOR_SEMANTIC_TOOL_RESULT_CAP = 2 * 1024 * 1024;
 
+/** @param {unknown} value @returns {value is Record<string, any>} */
+const isRecord = (value) => value !== null
+  && typeof value === 'object' && !Array.isArray(value);
+
+const safeDiagnostic = (/** @type {unknown} */ cause) => {
+  const text = cause instanceof Error ? cause.message : String(cause);
+  return text.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240)
+    || 'unknown lifecycle failure';
+};
+
+const lifecycleRewrite = (/** @type {unknown} */ value) => {
+  if (!isRecord(value) || typeof value.error !== 'string' || !isRecord(value.recovery)) {
+    return null;
+  }
+  const state = value.recovery.state;
+  if (typeof value.recovery.category !== 'string'
+      || typeof state !== 'string'
+      || !['failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state)) return null;
+  return Object.freeze({
+    error: value.error.slice(0, 2_048),
+    recovery: Object.freeze({ ...value.recovery }),
+  });
+};
+
+const lifecycleRecoveryAttribution = (/** @type {any} */ rewrite) => rewrite ? {
+  recoveryCategory: typeof rewrite.recovery?.category === 'string'
+    ? rewrite.recovery.category : 'unknown',
+  recoveryState: typeof rewrite.recovery?.state === 'string'
+    ? rewrite.recovery.state : 'unknown',
+} : {};
+
+const recoveryCustody = (/** @type {any} */ rewrite) => ({
+  outcomeKnown: rewrite?.recovery?.state !== 'outcome_unknown',
+  retryable: false,
+});
+
+const actorRecoveryCustody = (
+  /** @type {any} */ rewrite,
+  /** @type {Record<string, any>} */ source,
+) => {
+  const hasActorCustody = typeof source.actorCorrelationId === 'string'
+    || typeof source.actorDeliveryId === 'string'
+    || Array.isArray(source.actorDeliveryIds)
+    || typeof source.actorTerminal === 'boolean'
+    || typeof source.actorOutcomeKnown === 'boolean'
+    || typeof source.actorPerformed === 'boolean'
+    || typeof source.actorAborted === 'boolean';
+  if (!hasActorCustody) return {};
+  const actorDeliveryIds = Array.isArray(source.actorDeliveryIds)
+    ? [...new Set(source.actorDeliveryIds.filter(
+      (/** @type {unknown} */ id) => typeof id === 'string' && id.length > 0))]
+    : [];
+  const identity = {
+    ...(typeof source.actorCorrelationId === 'string'
+      ? { actorCorrelationId: source.actorCorrelationId } : {}),
+    ...(typeof source.actorDeliveryId === 'string'
+      ? { actorDeliveryId: source.actorDeliveryId } : {}),
+    ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
+  };
+  switch (rewrite?.recovery?.state) {
+  case 'outcome_unknown':
+    return {
+      ...identity, actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+    };
+  case 'interrupted':
+    return {
+      ...identity, actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: false,
+    };
+  case 'cancelled':
+    return {
+      ...identity, actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: true,
+    };
+  default:
+    return identity;
+  }
+};
+
+const strongestLifecycleRewrite = (/** @type {any[]} */ entries) =>
+  entries.find((entry) => entry.rewrite.recovery?.state === 'outcome_unknown')
+  ?? entries.find((entry) => entry.rewrite.recovery?.state === 'interrupted')
+  ?? entries.find((entry) => entry.rewrite.recovery?.state === 'cancelled')
+  ?? entries[0]
+  ?? null;
+
 /** @returns {boolean} */
 const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
   if (Object.is(left, right)) return true;
@@ -225,8 +312,7 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
 // inbound turns until somebody deliberately classifies it here.
 /**
  * @param {Object} deps
- * @param {() => Promise<void>} [deps.ensureHost]
- * @param {() => Promise<void>} [deps.ensureOffscreen] legacy Chrome host alias
+ * @param {() => Promise<void>} deps.ensureHost
  * @param {(msg: object) => Promise<any>} deps.sendMessage
  * @param {(job: object, options: { signal?: AbortSignal, relay: (type: string, payload: any) => any|Promise<any> }) => Promise<any>} [deps.runOnChannel]
  * @param {{
@@ -241,7 +327,6 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * }} deps.providerEgress
  * @param {{ get: (id: string) => Promise<any> }} deps.sessions
  * @param {(opts: object) => Promise<object>} deps.buildToolContext
- * @param {(ctx: any, allowedNames: Set<string>) => any} [deps.restrictCtxCapabilities]  phase 4:
  *   strip an actor ctx down to the capabilities its GRANTED tools need (capability-by-need),
  *   the analog of the actor's kind-scoped strip. Required to run tool-bearing spawned offscreen.
  * @param {(actorSessionId: string) => (number | undefined)} [deps.ownedTabFor]  a
@@ -260,12 +345,11 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * @param {(entry:Record<string,unknown>)=>Promise<void>|void} [deps.appendAudit]
  *   append-only host audit. Actor semantic events are reduced to a closed schema
  *   and stamped with the live run/session identity before this is called.
- * @param {(sender: unknown) => boolean} [deps.isRelaySender]  is this message from the
+ * @param {(sender: unknown) => boolean} deps.isRelaySender  is this message from the
  *   exact actor host? The three relay routes below refuse anything else. REQUIRED in
  *   production and fail-CLOSED by omission (an unwired client refuses every relay), because
  *   this is the boundary, not a hint — see the grants-map note for why the token alone is
  *   not sufficient.
- * @param {(sender: unknown) => boolean} [deps.isOffscreenSender] legacy Chrome sender alias
  * @param {() => string} [deps.mintRelayToken]  mints the per-run relay grant (below).
  *   Injected so the grant is testable without a browser; defaults to crypto.randomUUID.
  * @param {(sessionId: string) => Promise<string | null>} [deps.spendRefusalFor]  spend-limit
@@ -281,7 +365,7 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * @param {ReturnType<typeof createAuthorityEffectScheduler>} [deps.authorityScheduler]
  */
 export const makeOffscreenActorClient = ({
-  ensureHost, ensureOffscreen, sendMessage, runOnChannel, providerEgress,
+  ensureHost, sendMessage, runOnChannel, providerEgress,
   sessions, buildToolContext, ownedTabFor, EXPOSURE_ACTOR = 'actor',
   now = Date.now,
   recordModelCall = () => {},
@@ -289,15 +373,13 @@ export const makeOffscreenActorClient = ({
   appendAudit = async () => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
   spendRefusalFor = undefined,
-  isRelaySender, isOffscreenSender,
+  isRelaySender,
   maxModelRelaysPerRun = Number.POSITIVE_INFINITY,
   maxToolRelaysPerRun = Number.POSITIVE_INFINITY,
   maxLoopEventsPerRun = 256,
   settlementCleanupMs = 250,
   authorityScheduler = createAuthorityEffectScheduler(),
 }) => {
-  const ensureActorHost = ensureHost ?? ensureOffscreen ?? (async () => {});
-  const relaySenderAllowed = isRelaySender ?? isOffscreenSender ?? (() => false);
   const modelRelayLimit = Number.isFinite(maxModelRelaysPerRun) && maxModelRelaysPerRun > 0
     ? Math.floor(maxModelRelaysPerRun) : Number.POSITIVE_INFINITY;
   const toolRelayLimit = Number.isFinite(maxToolRelaysPerRun) && maxToolRelaysPerRun > 0
@@ -353,6 +435,38 @@ export const makeOffscreenActorClient = ({
    * context inspector: inference routes carry no session identity, so the
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
+  const runIsolationProbe = async (/** @type {AbortSignal | undefined} */ signal) => {
+    try {
+      await ensureHost();
+    } catch (error) {
+      return {
+        ok: false, started: false, phase: 'startup', code: 'actor_host_unavailable',
+        error: `actor host unavailable: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`,
+        outcomeKnown: true,
+      };
+    }
+    if (signal?.aborted) {
+      return {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true,
+      };
+    }
+    // why: this health check has deliberately no session or relay grant. Keep
+    // its clone fixed so a probe can prove the sealed Worker realm without
+    // becoming an alternate admission path for semantic or authority work.
+    const probe = {
+      actorSessionId: '__actor_isolation_probe__', message: '', systemPrompt: '',
+      provider: '', model: '', probeOnly: true,
+    };
+    const refuseRelay = () => ({
+      ok: false, code: 'actor_isolation_probe_relay_refused',
+      error: 'actor isolation probe has no relay authority',
+      outcomeKnown: true, performed: false, retryable: false,
+    });
+    return runOnChannel
+      ? runOnChannel(probe, { signal, relay: refuseRelay })
+      : sendMessage({ type: 'actor/run', job: probe });
+  };
   /**
    * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], allowedOperations?: string[], programTools?: any[], programOperations?: string[], priorMessages?: any[], reasoningEnabled?: boolean, reasoningEffort?: string, contextWindowOverrides?:Record<string,number>, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
@@ -364,6 +478,7 @@ export const makeOffscreenActorClient = ({
     if (signal?.aborted) {
       return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
     }
+    if (job.probeOnly === true) return runIsolationProbe(signal);
     const actorRecord = await sessions.get(job.actorSessionId).catch(() => null);
     if (!actorRecord || actorRecord.kind !== 'actor' && actorRecord.kind !== 'spawned') {
       return {
@@ -428,7 +543,7 @@ export const makeOffscreenActorClient = ({
       };
     }
     try {
-      await ensureActorHost();
+      await ensureHost();
     } catch (error) {
       return {
         ok: false, started: false, phase: 'startup', code: 'actor_host_unavailable',
@@ -472,7 +587,10 @@ export const makeOffscreenActorClient = ({
         ? Math.floor(requestedMaxOutputTokens) : undefined,
       providerOwner: Object.freeze({ runId }),
       inbound, relaySignal: relayController.signal, turnGeneration,
-      actorRecord, allowedOperations: new Set(grantedOperations),
+      actorRecord,
+      allowedToolNames: new Set(Array.isArray(tools)
+        ? tools.map((tool) => tool?.name).filter((name) => typeof name === 'string') : []),
+      allowedOperations: new Set(grantedOperations),
       authorityPageResourceKey,
       effectRelayLimit: Math.min(toolRelayLimit, 256 * semanticStepCap),
       modelRelayLimit: Math.min(modelRelayLimit, 32 * semanticStepCap),
@@ -482,7 +600,7 @@ export const makeOffscreenActorClient = ({
       ),
       modelActive: false, modelStreamId: null, contextRead: false,
       semanticEffectIds: new Set(), semanticEffectSequences: new Map(),
-      semanticCallState: new Map(), effectReceipts: new Map(),
+      semanticCallState: new Map(), effectReceipts: new Map(), lifecycleRewrites: new Map(),
       claimedEffectsByCall: new Map(),
       closingCalls: new Set(), completedCalls: new Set(),
       finalizing: false,
@@ -598,6 +716,11 @@ export const makeOffscreenActorClient = ({
             count !== 1 || !issuedCalls.has(callId))
           || [...receiptCallIds].some((callId) =>
             durableResultCounts.get(callId) !== 1 || !issuedCalls.has(callId))) {
+        const recoveryResult = stampActorRunRecovery(grant, {
+          started: result?.started === true,
+          finalText: '', newMessages: [],
+        });
+        if (recoveryResult) return recoveryResult;
         return {
           ok: false,
           code: 'actor_semantic_result_ledger_invalid',
@@ -628,10 +751,7 @@ export const makeOffscreenActorClient = ({
             ...message,
             toolResults: message.toolResults.map((/** @type {any} */ block) => {
               if (!block || typeof block !== 'object' || Array.isArray(block)) return block;
-              const receipts = authorityReceiptsForCall(
-                grant.effectReceipts, block.tool_use_id,
-              );
-              return stampAuthorityToolResultBlock(receipts, block);
+              return stampActorStoredResult(grant, block);
             }),
           };
         });
@@ -648,7 +768,10 @@ export const makeOffscreenActorClient = ({
           }
         }
       }
-      if ([...grant.effectReceipts.values()].some((receipt) => receipt.outcomeKnown === false)) {
+      const runRecovery = stampActorRunRecovery(grant, result);
+      if (runRecovery) Object.assign(result, runRecovery);
+      if (!runRecovery
+          && [...grant.effectReceipts.values()].some((receipt) => receipt.outcomeKnown === false)) {
         result.ok = false;
         result.code = 'actor_authority_outcome_unknown';
         result.error = 'An accepted authority operation ended without a known host outcome.';
@@ -681,6 +804,7 @@ export const makeOffscreenActorClient = ({
           grant.semanticEffectIds.clear();
           grant.semanticCallState.clear();
           grant.effectReceipts.clear();
+          grant.lifecycleRewrites.clear();
           grant.claimedEffectsByCall.clear();
           grant.closingCalls.clear();
           grant.completedCalls.clear();
@@ -714,7 +838,7 @@ export const makeOffscreenActorClient = ({
    */
   const grantFor = (msg, sender, boundGrant = null) => {
     if (boundGrant) return boundGrant;
-    if (!relaySenderAllowed(sender)) return null;
+    if (!isRelaySender(sender)) return null;
     const token = msg?.relayToken;
     if (typeof token !== 'string' || token.length === 0) return null;
     return grants.get(token) ?? null;
@@ -935,6 +1059,14 @@ export const makeOffscreenActorClient = ({
   const introspectionEntry = entryForDomain('introspection');
   const scheduleEntry = entryForDomain('schedule');
   const dwebEntry = entryForDomain('dweb');
+  // why: domain admission reserves the run claim before route-local validation.
+  const refuseClaimedEntry = (/** @type {any} */ entry, /** @type {any} */ refusal) => {
+    entry?.releaseClaim?.();
+    return refusal;
+  };
+  // why: semantic effects have one sealed envelope; accepting another shape would create a fallback.
+  const exactAuthorityValue = (/** @type {any} */ result) => result?.ok === true
+    ? result.value?.authorityValue : undefined;
   const receiptFor = (
     /** @type {any} */ entry,
     /** @type {string} */ outcome,
@@ -951,6 +1083,7 @@ export const makeOffscreenActorClient = ({
     /** @type {any} */ entry,
     /** @type {any} */ receipt,
     /** @type {boolean} */ failed,
+    /** @type {any} */ rewrite = null,
   ) => {
     const append = entry.ctx?.appendAudit ?? entry.ctx?.audit;
     if (typeof append !== 'function') return;
@@ -966,6 +1099,7 @@ export const makeOffscreenActorClient = ({
         retryable: receipt.retryable === true,
         ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
         ...(typeof receipt.ugcZone === 'string' ? { ugcZone: receipt.ugcZone } : {}),
+        ...lifecycleRecoveryAttribution(rewrite),
         target: receipt.target, runId: entry.grant.runId,
         actorSessionId: entry.grant.actorSessionId,
       },
@@ -984,6 +1118,54 @@ export const makeOffscreenActorClient = ({
         { ...receipt, callId: entry.effect.parentEffect.callId },
       );
     }
+  };
+  const settleAuthorityTracking = async (
+    /** @type {any} */ entry,
+    /** @type {any} */ tracking,
+    /** @type {any} */ outcome,
+    /** @type {any} */ receipt,
+    /** @type {unknown} */ physical,
+  ) => {
+    if (!tracking || typeof entry.ctx?.lifecycle?.settleTracking !== 'function') return null;
+    const append = entry.ctx?.appendAudit ?? entry.ctx?.audit ?? appendAudit;
+    let rawRewrite;
+    try {
+      rawRewrite = await entry.ctx.lifecycle.settleTracking(tracking, outcome);
+    } catch (cause) {
+      // why: settlement persistence cannot rewrite the physical host verdict.
+      // Diagnose the broken lifecycle boundary while retaining the exact receipt.
+      await Promise.resolve(append({
+        type: 'authority_lifecycle_settlement_failed',
+        sessionId: entry.grant.actorSessionId,
+        details: {
+          operation: receipt.operation, effectId: receipt.effectId,
+          outcome: receipt.outcome, outcomeKnown: receipt.outcomeKnown === true,
+          performed: receipt.performed === true, runId: entry.grant.runId,
+          diagnostic: safeDiagnostic(cause),
+        },
+      })).catch(() => {});
+      return null;
+    }
+    if (rawRewrite === null || rawRewrite === undefined) return null;
+    const rewrite = lifecycleRewrite(rawRewrite);
+    if (!rewrite) {
+      await Promise.resolve(append({
+        type: 'authority_lifecycle_settlement_failed',
+        sessionId: entry.grant.actorSessionId,
+        details: {
+          operation: receipt.operation, effectId: receipt.effectId,
+          outcome: receipt.outcome, outcomeKnown: receipt.outcomeKnown === true,
+          performed: receipt.performed === true, runId: entry.grant.runId,
+          diagnostic: 'lifecycle settlement returned an invalid rewrite',
+        },
+      })).catch(() => {});
+      return null;
+    }
+    entry.grant.lifecycleRewrites.set(receipt.effectId, Object.freeze({
+      callId: receipt.callId, rewrite,
+      physical: isRecord(physical) ? Object.freeze({ ...physical }) : Object.freeze({}),
+    }));
+    return rewrite;
   };
   const performSemanticEffect = async (
     /** @type {any} */ entry,
@@ -1078,15 +1260,26 @@ export const makeOffscreenActorClient = ({
         ...policyAttribution,
       });
       recordAuthorityReceipt(entry, stampedReceipt);
-      if (tracking && typeof entry.ctx?.lifecycle?.settleTracking === 'function') {
-        await entry.ctx.lifecycle.settleTracking(tracking, {
+      const recoveryRewrite = await settleAuthorityTracking(
+        entry, tracking, {
           ok: verdict === 'performed' || verdict === 'not-performed' && !refusal,
+          aborted: entry.grant.relaySignal.aborted === true
+            || value?.aborted === true || value?.actorAborted === true,
           outcomeKind: verdict === 'performed' ? 'effect-completed'
             : verdict === 'unknown' ? 'host-lost'
               : refusal ? 'pre-effect-failure' : undefined,
-        }).catch(() => null);
+        }, { ...stampedReceipt, callId: entry.effect.callId }, value,
+      );
+      await appendAuthorityAudit(entry, stampedReceipt, false, recoveryRewrite);
+      if (recoveryRewrite) {
+        return {
+          ok: false, code: 'actor-authority-lifecycle-recovery',
+          error: recoveryRewrite.error, recovery: recoveryRewrite.recovery,
+          ...recoveryCustody(recoveryRewrite),
+          ...actorRecoveryCustody(recoveryRewrite, isRecord(value) ? value : {}),
+          authorityReceipt: stampedReceipt,
+        };
       }
-      await appendAuthorityAudit(entry, stampedReceipt, false);
       const resultBytes = structuredClonePayloadBytes(value, {
         maxDepth: 32, maxNodes: 250_000,
       });
@@ -1122,14 +1315,26 @@ export const makeOffscreenActorClient = ({
       const stampedReceipt = verdict === 'not-performed'
         ? Object.freeze({ ...receipt, refused: true, ...failure }) : receipt;
       recordAuthorityReceipt(entry, stampedReceipt);
-      if (tracking && typeof entry.ctx?.lifecycle?.settleTracking === 'function') {
-        await entry.ctx.lifecycle.settleTracking(tracking, {
+      const recoveryRewrite = await settleAuthorityTracking(
+        entry, tracking, {
           ok: verdict === 'performed', error: safeError,
+          aborted: entry.grant.relaySignal.aborted === true
+            || /** @type {{aborted?:unknown,actorAborted?:unknown}} */ (cause)?.aborted === true
+            || /** @type {{aborted?:unknown,actorAborted?:unknown}} */ (cause)?.actorAborted === true,
           outcomeKind: verdict === 'performed' ? 'effect-completed'
             : verdict === 'unknown' ? 'host-lost' : 'pre-effect-failure',
-        }).catch(() => null);
+        }, { ...stampedReceipt, callId: entry.effect.callId }, cause,
+      );
+      await appendAuthorityAudit(entry, stampedReceipt, true, recoveryRewrite);
+      if (recoveryRewrite) {
+        return {
+          ok: false, code: 'actor-authority-lifecycle-recovery',
+          error: recoveryRewrite.error, recovery: recoveryRewrite.recovery,
+          ...recoveryCustody(recoveryRewrite),
+          ...actorRecoveryCustody(recoveryRewrite, isRecord(cause) ? cause : {}),
+          authorityReceipt: stampedReceipt,
+        };
       }
-      await appendAuthorityAudit(entry, stampedReceipt, true);
       return {
         ok: false, error: safeError,
         outcomeKnown, retryable: stampedReceipt.retryable, authorityReceipt: stampedReceipt,
@@ -1144,20 +1349,56 @@ export const makeOffscreenActorClient = ({
   ) => {
     const policy = controllerDomainOperationPolicy(entry.operation);
     if (typeof entry.ctx?.lifecycle?.beginTracking !== 'function') return {
-      refuse: { error: 'authority lifecycle is unavailable' },
+      refuse: {
+        ok: false, code: 'authority_lifecycle_unavailable',
+        error: 'Authority lifecycle is unavailable.',
+        outcomeKnown: true, retryable: false,
+      },
     };
     const tool = Object.freeze({
       name: entry.operation, primitive: 'authority', retryClass: policy?.retryClass ?? 'E',
       sideEffect: policy?.riskClass === 'resource' ? 'mutate_external' : 'write',
     });
-    const begun = await entry.ctx.lifecycle.beginTracking({
-      callId: entry.effect.effectId, tool,
-      sessionId: entry.grant.actorSessionId,
-      ownerSessionId: entry.ctx.lifecycleOwnerSessionId ?? entry.grant.actorSessionId,
-      target, args: entry.args, confirmed, confirmedIntent,
-      turnId: entry.grant.runId, userInitiated: !entry.grant.inbound,
-    });
-    return begun?.refuse ? { refuse: begun.refuse } : { tracking: begun?.handle ?? null };
+    let begun;
+    try {
+      begun = await entry.ctx.lifecycle.beginTracking({
+        callId: entry.effect.effectId, tool,
+        sessionId: entry.grant.actorSessionId,
+        ownerSessionId: entry.ctx.lifecycleOwnerSessionId ?? entry.grant.actorSessionId,
+        target, args: entry.args, confirmed, confirmedIntent,
+        turnId: entry.grant.runId, userInitiated: !entry.grant.inbound,
+      });
+    } catch (cause) {
+      // why: beginTracking is a total boundary. An unexpected rejection must
+      // refuse before the authority leaf rather than degrade to an untracked write.
+      const append = entry.ctx?.appendAudit ?? entry.ctx?.audit ?? appendAudit;
+      await Promise.resolve(append({
+        type: 'authority_lifecycle_begin_failed',
+        sessionId: entry.grant.actorSessionId,
+        details: {
+          operation: entry.operation, effectId: entry.effect.effectId,
+          target, runId: entry.grant.runId,
+          outcome: 'not-performed', outcomeKnown: true, performed: false,
+          diagnostic: safeDiagnostic(cause),
+        },
+      })).catch(() => {});
+      return { refuse: {
+        ok: false, code: 'authority_lifecycle_failed',
+        error: `failed: ${entry.operation} was NOT executed because lifecycle tracking failed unexpectedly.`,
+        outcomeKnown: true, retryable: false,
+        recovery: {
+          category: 'security_degradation', state: 'failed', autoRetry: false,
+          retryRequires: ['lifecycle-storage'], verificationRequired: false,
+          keepIdempotencyKey: false,
+          reason: 'tracking failed unexpectedly; lifecycle storage must recover before retry',
+        },
+      } };
+    }
+    return begun?.refuse ? { refuse: {
+      ok: false, error: begun.refuse.error, outcomeKnown: true,
+      ...(begun.refuse.recovery ? { recovery: begun.refuse.recovery } : {}),
+      retryable: false,
+    } } : { tracking: begun?.handle ?? null };
   };
   const prepareAuthorityEffect = async (
     /** @type {any} */ entry,
@@ -1237,10 +1478,32 @@ export const makeOffscreenActorClient = ({
       }), HOST_EFFECT_OUTCOME.okResult,
     ) };
     const begun = await beginAuthorityTracking(entry, target, confirmed, confirmedIntent);
-    if (begun?.refuse) return { refuse: await performSemanticEffect(
-      entry, target, () => ({ ok: false, error: begun.refuse.error ?? 'lifecycle_refused' }),
-      HOST_EFFECT_OUTCOME.okResult,
-    ) };
+    if (begun?.refuse) {
+      const refusal = await performSemanticEffect(
+        entry, target, () => begun.refuse, HOST_EFFECT_OUTCOME.okResult,
+      );
+      const rewrite = lifecycleRewrite({
+        error: begun.refuse.error, recovery: begun.refuse.recovery,
+      });
+      if (rewrite) {
+        entry.grant.lifecycleRewrites.set(entry.effect.effectId, Object.freeze({
+          callId: entry.effect.callId, rewrite,
+          physical: Object.freeze({ ...begun.refuse }),
+        }));
+        const append = entry.ctx?.appendAudit ?? entry.ctx?.audit ?? appendAudit;
+        await Promise.resolve(append({
+          type: 'authority_lifecycle_refused',
+          sessionId: entry.grant.actorSessionId,
+          details: {
+            operation: entry.operation, effectId: entry.effect.effectId,
+            target, runId: entry.grant.runId,
+            outcome: 'not-performed', outcomeKnown: true, performed: false,
+            ...lifecycleRecoveryAttribution(rewrite),
+          },
+        })).catch(() => {});
+      }
+      return { refuse: refusal };
+    }
     if (!runIsLive(entry.grant)) return { refuse: await performSemanticEffect(
       entry, target, () => ({ ok: false, error: 'authority_effect_aborted' }),
       HOST_EFFECT_OUTCOME.okResult, begun?.tracking,
@@ -1324,7 +1587,70 @@ export const makeOffscreenActorClient = ({
     const base = value && typeof value === 'object' && !Array.isArray(value)
       ? /** @type {Record<string,any>} */ (value) : { ok: true, value };
     const receipts = authorityReceiptsForCall(grant.effectReceipts, callId);
-    return stampAuthorityToolResult(receipts, base);
+    const stamped = stampAuthorityToolResult(receipts, base);
+    const recoveryEntry = strongestLifecycleRewrite(
+      [...grant.lifecycleRewrites.values()].filter((entry) => entry.callId === callId),
+    );
+    if (!recoveryEntry) return stamped;
+    const { rewrite, physical } = recoveryEntry;
+    return {
+      ...stamped,
+      ok: false,
+      error: rewrite.error,
+      recovery: rewrite.recovery,
+      ...recoveryCustody(rewrite),
+      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
+      meta: {
+        ...(isRecord(stamped.meta) ? stamped.meta : {}),
+        recovery: rewrite.recovery,
+      },
+    };
+  };
+  const stampActorStoredResult = (
+    /** @type {any} */ grant,
+    /** @type {Record<string,any>} */ block,
+  ) => {
+    const receipts = authorityReceiptsForCall(grant.effectReceipts, block.tool_use_id);
+    const stamped = stampAuthorityToolResultBlock(receipts, block);
+    const recoveryEntry = strongestLifecycleRewrite(
+      typeof block.tool_use_id === 'string' ? [...grant.lifecycleRewrites.values()]
+        .filter((entry) => entry.callId === block.tool_use_id) : [],
+    );
+    if (!recoveryEntry) return stamped;
+    const { rewrite, physical } = recoveryEntry;
+    return {
+      ...stamped,
+      is_error: true,
+      content: rewrite.error,
+      recovery: rewrite.recovery,
+      ...recoveryCustody(rewrite),
+      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
+      meta: {
+        ...(isRecord(stamped.meta) ? stamped.meta : {}),
+        recovery: rewrite.recovery,
+      },
+    };
+  };
+  const stampActorRunRecovery = (
+    /** @type {any} */ grant,
+    /** @type {Record<string,any>} */ base,
+  ) => {
+    const recoveryEntry = strongestLifecycleRewrite([...grant.lifecycleRewrites.values()]);
+    if (!recoveryEntry) return null;
+    const { rewrite, physical, callId } = recoveryEntry;
+    const receipts = authorityReceiptsForCall(grant.effectReceipts, callId);
+    return {
+      ...base,
+      ok: false,
+      code: 'actor_authority_lifecycle_recovery',
+      error: rewrite.error,
+      recovery: rewrite.recovery,
+      ...recoveryCustody(rewrite),
+      ...actorRecoveryCustody(rewrite, physical),
+      authorityReceipts: receipts,
+      authorityPerformed: receipts.some((receipt) => receipt.performed === true),
+      finalText: '',
+    };
   };
 
   const routes = /** @type {Record<string, (...args: any[]) => any>} */ ({
@@ -1590,7 +1916,7 @@ export const makeOffscreenActorClient = ({
     'actor/spawn-sync': async (msg = {}, sender = undefined, boundGrant = null) => {
       const grant = grantFor(msg, sender, boundGrant);
       const fields = ['task', 'allowRecursion',
-        'grantedOperations',
+        'grantedToolNames', 'grantedOperations',
         ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
       const entry = await domainEntry(grant, msg, 'actor', fields);
       if (!entry || entry.operation !== 'turn.actor.spawn-sync'
@@ -1598,6 +1924,10 @@ export const makeOffscreenActorClient = ({
           || typeof msg.allowRecursion !== 'boolean'
           || msg.tools !== undefined && (!Array.isArray(msg.tools)
             || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'))
+          || !Array.isArray(msg.grantedToolNames)
+          || msg.grantedToolNames.length > 256
+          || msg.grantedToolNames.some((/** @type {unknown} */ name) => typeof name !== 'string'
+            || !grant.allowedToolNames.has(name))
           || !Array.isArray(msg.grantedOperations)
           || msg.grantedOperations.length > 256
           || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
@@ -1614,6 +1944,7 @@ export const makeOffscreenActorClient = ({
           ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
           ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
           allowRecursion: msg.allowRecursion,
+          grantedToolNames: [...new Set(msg.grantedToolNames)],
           grantedOperations: [...new Set(msg.grantedOperations)],
           parentSessionId: entry.ctx.session?.sessionId,
           parentDepth: entry.ctx.session?.depth ?? 0,
@@ -1625,7 +1956,7 @@ export const makeOffscreenActorClient = ({
     'actor/spawn-async': async (msg = {}, sender = undefined, boundGrant = null) => {
       const grant = grantFor(msg, sender, boundGrant);
       const fields = ['task', 'allowRecursion',
-        'grantedOperations',
+        'grantedToolNames', 'grantedOperations',
         ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
       const entry = await domainEntry(grant, msg, 'actor', fields);
       if (!entry || entry.operation !== 'turn.actor.spawn-async'
@@ -1633,6 +1964,10 @@ export const makeOffscreenActorClient = ({
           || typeof msg.allowRecursion !== 'boolean'
           || msg.tools !== undefined && (!Array.isArray(msg.tools)
             || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'))
+          || !Array.isArray(msg.grantedToolNames)
+          || msg.grantedToolNames.length > 256
+          || msg.grantedToolNames.some((/** @type {unknown} */ name) => typeof name !== 'string'
+            || !grant.allowedToolNames.has(name))
           || !Array.isArray(msg.grantedOperations)
           || msg.grantedOperations.length > 256
           || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
@@ -1649,6 +1984,7 @@ export const makeOffscreenActorClient = ({
           ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
           ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
           allowRecursion: msg.allowRecursion,
+          grantedToolNames: [...new Set(msg.grantedToolNames)],
           grantedOperations: [...new Set(msg.grantedOperations)],
           parentSessionId: entry.ctx.session?.sessionId,
           parentDepth: entry.ctx.session?.depth ?? 0,
@@ -1719,17 +2055,22 @@ export const makeOffscreenActorClient = ({
         ? entry.ctx.actorInstanceId : null;
       if (!entry || boundPodId && msg.podId !== undefined && msg.podId !== boundPodId
           || !boundPodId && msg.podId !== entry.args?.podId) {
-        return { ok: false, error: 'pod/resolve: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/resolve: authority mismatch', outcomeKnown: true,
+        });
       }
       const resolve = entry.ctx?.podClient?.resolveId;
       if (typeof resolve !== 'function') {
-        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod_unavailable', outcomeKnown: true,
+        });
       }
       const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/resolve', 'read', () => resolve({
         sessionId: entry.ctx.session?.sessionId, podId: boundPodId ?? msg.podId,
       })));
-      if (result.ok === true && typeof result.value === 'string') {
-        entry.domainState.podId = result.value;
+      const resolvedPodId = exactAuthorityValue(result);
+      if (typeof resolvedPodId === 'string') {
+        entry.domainState.podId = resolvedPodId;
         if (typeof msg.command === 'string') entry.domainState.command = msg.command;
       }
       return result;
@@ -1743,13 +2084,16 @@ export const makeOffscreenActorClient = ({
       const intent = entry ? podGitRemoteIntents(entry.domainState.command ?? '')[0] : null;
       if (!entry || typeof msg.podId !== 'string' || msg.podId !== entry.domainState.podId
           || !intent || intent.url) {
-        return { ok: false, error: 'pod/read-remote: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/read-remote: authority mismatch', outcomeKnown: true,
+        });
       }
       const readRemote = entry.ctx?.repositories?.getRemote;
       const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/read-remote', 'read', () =>
         typeof readRemote === 'function'
           ? readRemote({ kind: 'pod', id: msg.podId }) : null));
-      if (result.ok === true) entry.domainState.remote = result.value;
+      const remote = exactAuthorityValue(result);
+      if (remote !== undefined) entry.domainState.remote = remote;
       return result;
     },
     'pod/confirm-git': async (
@@ -1763,14 +2107,20 @@ export const makeOffscreenActorClient = ({
       const target = intent?.url ?? entry?.domainState?.remote?.url;
       if (!entry || typeof entry.domainState.podId !== 'string'
           || !intent || msg.op !== intent.op || typeof target !== 'string') {
-        return { ok: false, error: 'pod/confirm-git: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/confirm-git: authority mismatch', outcomeKnown: true,
+        });
       }
       let origin;
       try { origin = new URL(target).origin; }
-      catch { return { ok: false, error: 'pod/confirm-git: invalid remote', outcomeKnown: true }; }
+      catch {
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/confirm-git: invalid remote', outcomeKnown: true,
+        });
+      }
       const confirm = entry.ctx?.confirm;
       if (typeof confirm !== 'function') {
-        return { ok: true, value: false, outcomeKnown: true };
+        return refuseClaimedEntry(entry, { ok: true, value: false, outcomeKnown: true });
       }
       const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/confirm-git', 'control', () => confirm({
         tool: 'pod_exec', kind: `git_${intent.op}`,
@@ -1780,8 +2130,8 @@ export const makeOffscreenActorClient = ({
           ? `Allow this one Pod job to push code and commit history to ${target}?`
           : `Allow this one Pod job to ${intent.op} ${target} through peerd's audited Git transport?`,
       }, entry.grant.relaySignal), false, HOST_EFFECT_OUTCOME.confirmation));
-      if (result.ok === true && runIsLive(entry.grant)
-          && [true, 'yes_once', 'yes_session'].includes(result.value)) {
+      const answer = exactAuthorityValue(result);
+      if (runIsLive(entry.grant) && [true, 'yes_once', 'yes_session'].includes(answer)) {
         entry.domainState.remoteGitGrant = { op: intent.op, url: target };
       }
       return result;
@@ -1801,7 +2151,9 @@ export const makeOffscreenActorClient = ({
         program = parsePodShell(args?.command ?? '');
         intents = podGitRemoteIntents(args?.command ?? '');
       } catch {
-        return { ok: false, error: 'pod/exec: invalid admitted command', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/exec: invalid admitted command', outcomeKnown: true,
+        });
       }
       const expectedTimeout = Math.min(300_000, Math.max(1, Number(args?.timeoutMs) || 30_000));
       const expectedBackground = args?.background === true || program.background;
@@ -1811,12 +2163,16 @@ export const makeOffscreenActorClient = ({
           || msg.command !== args?.command || msg.podId !== entry.domainState.podId
           || msg.timeoutMs !== expectedTimeout || msg.background !== expectedBackground
           || !sameClone(msg.remoteGitGrant, expectedGrant)) {
-        return { ok: false, error: 'pod/exec: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/exec: authority mismatch', outcomeKnown: true,
+        });
       }
       if (expectedGrant) entry.domainState.remoteGitGrant = null;
       const execute = entry.ctx?.podClient?.exec;
       if (typeof execute !== 'function') {
-        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod_unavailable', outcomeKnown: true,
+        });
       }
       return runDomainEffect(entry, 'pod/exec', 'resource', () => execute(msg.command, {
         podId: msg.podId,
@@ -1841,11 +2197,15 @@ export const makeOffscreenActorClient = ({
           || msg.stream !== args?.stream || msg.offset !== args?.offset
           || msg.limit !== args?.limit
           || boundPodId && msg.podId !== boundPodId) {
-        return { ok: false, error: 'pod/status: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/status: authority mismatch', outcomeKnown: true,
+        });
       }
       const status = entry.ctx?.podClient?.status;
       if (typeof status !== 'function') {
-        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod_unavailable', outcomeKnown: true,
+        });
       }
       return runDomainEffect(entry, 'pod/status', 'read', () => status({
         sessionId: entry.ctx.session?.sessionId,
@@ -1864,11 +2224,15 @@ export const makeOffscreenActorClient = ({
         ? entry.ctx.actorInstanceId : null;
       if (!entry || typeof msg.jobId !== 'string' || msg.jobId !== args?.jobId
           || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
-        return { ok: false, error: 'pod/cancel: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/cancel: authority mismatch', outcomeKnown: true,
+        });
       }
       const cancel = entry.ctx?.podClient?.cancel;
       if (typeof cancel !== 'function') {
-        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod_unavailable', outcomeKnown: true,
+        });
       }
       return runDomainEffect(entry, 'pod/cancel', 'control', () => cancel(msg.jobId, {
         sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
@@ -1885,11 +2249,15 @@ export const makeOffscreenActorClient = ({
         ? entry.ctx.actorInstanceId : null;
       if (!entry || typeof msg.path !== 'string' || msg.path !== args?.path
           || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
-        return { ok: false, error: 'pod/read-file: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/read-file: authority mismatch', outcomeKnown: true,
+        });
       }
       const readFile = entry.ctx?.podClient?.readFile;
       if (typeof readFile !== 'function') {
-        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod_unavailable', outcomeKnown: true,
+        });
       }
       return runDomainEffect(entry, 'pod/read-file', 'read', () => readFile(msg.path, {
         sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
@@ -1909,11 +2277,15 @@ export const makeOffscreenActorClient = ({
       if (!entry || typeof msg.path !== 'string' || typeof msg.content !== 'string'
           || msg.path !== args?.path || msg.content !== args?.content
           || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
-        return { ok: false, error: 'pod/write-file: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod/write-file: authority mismatch', outcomeKnown: true,
+        });
       }
       const writeFile = entry.ctx?.podClient?.writeFile;
       if (typeof writeFile !== 'function') {
-        return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'pod_unavailable', outcomeKnown: true,
+        });
       }
       return runDomainEffect(entry, 'pod/write-file', 'commit', () => writeFile(
         msg.path, msg.content, {

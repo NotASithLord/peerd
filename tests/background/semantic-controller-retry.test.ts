@@ -57,7 +57,9 @@ describe('semantic controller unavailable/retry behavior', () => {
     await expect(lane.semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
       .resolves.toBe('recovered prompt');
     expect(calls).toBe(2);
-    expect(lane.ensures()).toBe(3);
+    // The fresh lease replaces the stale same-kernel binding directly; it no
+    // longer burns a handshake against that retired binding first.
+    expect(lane.ensures()).toBe(2);
     lane.semantic.close();
   });
 
@@ -71,7 +73,7 @@ describe('semantic controller unavailable/retry behavior', () => {
     await expect(lane.semantic.renderSystemPrompt({ actorType: 'orchestrator' }))
       .rejects.toThrow(STARTUP_UNAVAILABLE_USER_FAILURE);
     expect(calls).toBe(2);
-    expect(lane.ensures()).toBe(3);
+    expect(lane.ensures()).toBe(2);
     lane.semantic.close();
   });
 });

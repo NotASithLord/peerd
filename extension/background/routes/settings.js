@@ -136,7 +136,7 @@ export const makeSettingsRoutes = (deps) => {
       }
       let dweb = null;
       try {
-        dweb = await dwebTransfer.exportRecord(passphrase);
+        dweb = dwebTransfer ? await dwebTransfer.exportRecord(passphrase) : null;
       } catch {
         // Once a local identity exists, omitting it would create a backup that
         // looks successful but cannot restore the user's permanent did.

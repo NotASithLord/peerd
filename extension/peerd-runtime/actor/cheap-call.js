@@ -19,7 +19,7 @@
 //     the cost tracker / CostChip / the next turn's hard-limit check
 //     all see these calls. Background spend is never invisible.
 //
-// All IO injected (spawnActor, sessions) — Bun-testable.
+// All IO injected (spawnActor, sessions): Bun-testable.
 
 import { normalizeTally, addUsage, limitExceeded } from '../cost/accumulator.js';
 

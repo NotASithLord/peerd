@@ -126,8 +126,9 @@ export const injectLifecycleFaultKernel = (input) => {
         }
         await sessionCache.sessionSet('currentSessionId', session.sessionId);
         // The exact authority effect intentionally never settles, so the
-        // request cannot be awaited. Its durable marker below is the proof of
-        // admission; any early refusal is persisted as a harness failure.
+        // request cannot be awaited. The exact durable lifecycle record and
+        // offscreen-host marker are polled by the harness; any early refusal
+        // is persisted as a harness failure.
         void demandRoutes['agent/send']({
           text: 'Run the lifecycle fault script exactly once.',
           sessionId: session.sessionId,
@@ -160,30 +161,41 @@ export const injectLifecycleFaultTurnBudget = (input) => replaceExact(
 export const injectLifecycleFaultEffect = (input) => {
   const anchor = '        const result = await client.execHeadless(code, opts);';
   const injected = replaceExact(input, anchor, `        if (code === ${JSON.stringify(FAULT_CODE)}) {
-          if (call?.name !== 'script') {
+          if (binding.operation !== 'turn.execution.run-script') {
             throw new Error('lifecycle fault execution target changed');
-          }
-          if (typeof ctx.lifecycle?.beginTracking !== 'function') {
-            throw new Error('lifecycle fault tracking unavailable');
-          }
-          for (const [toolName, retryClass, callId] of [
-            ['fetch_url', 'B', 'chrome-fault-b'],
-            ['remember', 'C', 'chrome-fault-c'],
-            ['dweb_share', 'D', 'chrome-fault-d'],
-          ]) {
-            const tracking = await ctx.lifecycle.beginTracking({
-              callId, tool: { name: toolName, retryClass },
-              sessionId, ownerSessionId: sessionId,
-              target: 'tool:' + toolName,
-              args: { lifecycleFault: true },
-              turnId: 'chrome-physical-fault-turn',
-              userInitiated: true,
-            });
-            if (!tracking?.handle) throw new Error('lifecycle fault tracking failed');
           }
         }
 ${anchor}`, 'source exact script effect');
   return injected;
+};
+
+export const injectLifecycleFaultRecoveryClasses = (input) => {
+  const anchor = `          if (!entry) return failed('headless script authority mismatch', true);
+          return runDomainEffect(`;
+  return replaceExact(input, anchor, `          if (!entry) return failed('headless script authority mismatch', true);
+          if (value.code === ${JSON.stringify(FAULT_CODE)}) {
+            const bridgeAuthority = authorityBridgeContext(run);
+            if (typeof bridgeAuthority?.lifecycle?.beginTracking !== 'function') {
+              throw new Error('lifecycle fault tracking unavailable');
+            }
+            for (const [toolName, retryClass, callId] of [
+              ['fetch_url', 'B', 'chrome-fault-b'],
+              ['remember', 'C', 'chrome-fault-c'],
+              ['dweb_share', 'D', 'chrome-fault-d'],
+            ]) {
+              const tracking = await bridgeAuthority.lifecycle.beginTracking({
+                callId, tool: { name: toolName, retryClass },
+                sessionId: run.sessionId,
+                ownerSessionId: bridgeAuthority.lifecycleOwnerSessionId ?? run.sessionId,
+                target: 'tool:' + toolName,
+                args: { lifecycleFault: true },
+                turnId: bridgeAuthority.lifecycleTurnId,
+                userInitiated: bridgeAuthority.lifecycleUserInitiated === true,
+              });
+              if (!tracking?.handle) throw new Error('lifecycle fault tracking failed');
+            }
+          }
+          return runDomainEffect(`, 'source lifecycle bridge recovery-class');
 };
 
 export const injectLifecycleFaultJob = (input) => {
@@ -215,6 +227,7 @@ export const assertLifecycleFaultExecutionSeam = ({ tracking, controller, bridge
     [bridge, 'run.persistedSemanticCalls.add(result.tool_use_id);'],
     [bridge, "case 'turn.finalize':"],
     [bridge, '!run.persistedSemanticCalls.has(receipt.callId)'],
+    [authority, "requireOperation('turn.execution.run-script');"],
     [authority, 'const result = await client.execHeadless(code, opts);'],
   ];
   if (canaries.some(([source, canary]) => source.split(canary).length !== 2)) {
@@ -237,6 +250,11 @@ const injectLifecycleFaultTree = (extension) => {
     authority: authoritySource,
   });
   overwriteRegularFile(authority, injectLifecycleFaultEffect(authoritySource));
+  const bridge = join(extension, 'background', 'controller-turn-bridge.js');
+  overwriteRegularFile(
+    bridge,
+    injectLifecycleFaultRecoveryClasses(readFileSync(bridge, 'utf8')),
+  );
   const jobRunner = join(extension, 'offscreen', 'job-runner.js');
   overwriteRegularFile(
     jobRunner,
@@ -304,7 +322,7 @@ const makePackagedFaultExtension = async () => {
   for (const canary of [
     REACHED_KEY, BOOT_ERROR_KEY, 'lifecycle-fault/dispatch',
     'turn.execution.run-script', FAULT_CODE, 'lifecycle fault execution target changed',
-    'turn.finalize', 'persistedSemanticCalls', 'markDispatched',
+    'chrome-fault-b', 'turn.finalize', 'persistedSemanticCalls', 'markDispatched',
   ]) {
     if (!stagedSources.includes(canary)) {
       throw new Error(`packaged lifecycle probe was removed before launch: ${canary}`);

@@ -381,6 +381,33 @@ describe('kernel browser network owner', () => {
     expect(calls).toEqual([]);
   });
 
+  test('evicts a closed restored source before network authority resync', async () => {
+    const tab = {
+      id: 7, url: restoredSource.url, openerTabId: undefined,
+      cookieStoreId: restoredSource.cookieStoreId,
+    };
+    let sourceIdsDuringRemoval: number[] = [-1];
+    const owner = createKernelBrowserNetworkOwner({
+      firefox: true,
+      browser: { tabs: { query: async () => [tab] } }, dnr: {}, denylist: {},
+      sessionCache: { sessionGet: async (key: string) => key === 'webActorTabBindings'
+        ? [[7, 'actor-7']]
+        : key === WEB_ACTOR_SOURCE_PROJECTION_KEY ? [restoredSource] : null },
+      startupGuard: { release: async () => {} },
+      createAuthority: (config: any) => directAuthority({
+        onRemoved: async () => { sourceIdsDuringRemoval = config.getExternalTabIds(); },
+      }),
+    });
+    await expect(owner.ensureSourceProjection()).resolves.toBe(true);
+    await owner.call('syncDenylistNetwork');
+    expect(owner.relays()?.isDrivenSource(7)).toBe(true);
+
+    await owner.onRemoved(7);
+
+    expect(sourceIdsDuringRemoval).toEqual([]);
+    expect(owner.relays()?.isDrivenSource(7)).toBe(false);
+  });
+
   test('bounds a frozen startup proof and closes only a tracker-confirmed child', async () => {
     for (const driven of [false, true]) {
       const calls: any[] = [];
@@ -452,6 +479,55 @@ describe('kernel browser network owner', () => {
         outcomeKnown: false, retryable: true, contained: false,
       });
     }
+  });
+
+  test('uses the exact Firefox request fence after startup child copying is sealed', async () => {
+    const calls: any[] = [];
+    const source = {
+      tabId: 7, sessionId: 'actor-7', url: 'https://source.test/',
+      openerTabId: null, cookieStoreId: 'firefox-default',
+    };
+    const browser = { tabs: { query: async () => [{
+      id: 7, url: source.url, cookieStoreId: source.cookieStoreId,
+    }] } };
+    const owner = createKernelBrowserNetworkOwner({
+      firefox: true, browser, dnr: { getSessionRules: async () => [] },
+      sessionCache: { sessionGet: async (key: string) => key === 'webActorTabBindings'
+        ? [[7, 'actor-7']]
+        : key === WEB_ACTOR_SOURCE_PROJECTION_KEY ? [source] : null },
+      denylist: {},
+      startupGuard: {
+        adopt: async () => { calls.push(['startup']); return false; },
+        release: async () => {}, isGuarded: () => false,
+      },
+      guardFirefoxChildRequest: (event: any) => {
+        calls.push(['guard', event.sourceTabId, event.tabId]);
+      },
+      createAuthority: () => directAuthority({
+        onCreated: async (event: any) => {
+          calls.push(['created', event.openerTabId, event.id]);
+        },
+        onNavigationTarget: async (event: any) => {
+          calls.push(['authority', event.sourceTabId, event.tabId]);
+        },
+      }),
+    });
+    const child = {
+      onNavigationTarget: (event: any) => calls.push(['child', event.sourceTabId, event.tabId]),
+      resolveNavigationTarget: (event: any) => calls.push(['resolved', event.tabId]),
+      release: () => {}, reconcile: () => true, onBeforeRequest: () => ({}),
+    };
+    const custody = createKernelTabCustody({
+      firefox: true, browser, network: owner, child, getRelays: () => null,
+    });
+
+    await owner.onCreated({ id: 8, openerTabId: 7 });
+    await custody.onNavigationTarget({ sourceTabId: 7, tabId: 8 });
+    await Promise.resolve();
+    expect(calls).toEqual([
+      ['guard', 7, 8], ['startup'], ['created', 7, 8],
+      ['child', 7, 8], ['startup'], ['authority', 7, 8], ['resolved', 8],
+    ]);
   });
 
   test('does not contain a reused tab after its observed generation closes', async () => {

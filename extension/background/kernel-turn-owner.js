@@ -67,12 +67,13 @@ const closedFailure = () => ({
  *   [deps.providerEgress]
  * @param {ReturnType<import('./authority-effect-scheduler.js').createAuthorityEffectScheduler>}
  *   [deps.authorityScheduler]
+ * @param {(call:Record<string,any>)=>void} [deps.recordModelCall]
  * @param {(runtime:Record<string,any>,custody:{isCurrent:()=>boolean,publish:()=>boolean})=>Promise<void>|void} [deps.onLoaded]
  */
 export const createKernelTurnOwner = ({
   createController, loadRuntime, onLoaded,
   loadTimeoutMs = TURN_RUNTIME_LOAD_TIMEOUT_MS,
-  newId, providerEgress, authorityScheduler,
+  newId, providerEgress, authorityScheduler, recordModelCall,
 }) => {
   if (typeof createController !== 'function' || typeof loadRuntime !== 'function') {
     throw new TypeError('kernel-turn-owner-config-invalid');
@@ -91,17 +92,18 @@ export const createKernelTurnOwner = ({
   const bridge = makeControllerTurnBridge({
     getClient: async () => ({
       call: (capability, payload, options) => {
-        const live = controller;
+        const activeController = controller;
         if (capability !== 'turn.run') return Promise.resolve({
           ok: false, code: 'controller-capability-denied', outcomeKnown: true,
         });
-        return live ? live.callTurn(payload, options) : Promise.resolve({
+        return activeController ? activeController.callTurn(payload, options) : Promise.resolve({
           ok: false, code: 'controller-not-ready', outcomeKnown: true,
         });
       },
     }),
     providerEgress,
     authorityScheduler,
+    ...(recordModelCall ? { recordModelCall } : {}),
     ...(newId ? { newId } : {}),
   });
   controller = createController({

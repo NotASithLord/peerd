@@ -46,7 +46,11 @@ describe('site_client_run code-run custody', () => {
       scriptRuns: { mintRunId: () => 'x', register: () => {}, release: () => {} },
       jsOffscreenClient: { execHeadless: async () => { started = true; return {}; } },
     } as any);
-    expect(result).toEqual({ ok: false, error: 'site_client_run_aborted: the turn was stopped before the run started' });
+    expect(result).toEqual({
+      ok: false,
+      error: 'site_client_run_aborted: the turn was stopped before the run started',
+      outcomeKind: 'pre-effect-failure',
+    });
     expect(started).toBe(false);
   });
 
@@ -81,6 +85,7 @@ describe('site_client_run code-run custody', () => {
     expect(await pending).toEqual({
       ok: false,
       error: 'site_client_run_aborted: the turn stopped while loading the client',
+      outcomeKind: 'pre-effect-failure',
     });
     expect(registered).toBe(false);
     expect(started).toBe(false);
@@ -118,6 +123,7 @@ describe('site_client_run code-run custody', () => {
     expect(await pending).toEqual({
       ok: false,
       error: 'site_client_run_aborted: the turn was stopped during the run',
+      outcomeKind: 'pre-effect-failure',
     });
     expect(recordRuns).toBe(0);
   });

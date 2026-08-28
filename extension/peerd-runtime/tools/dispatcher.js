@@ -20,23 +20,12 @@ import {
 } from '../actor/auth-wait.js';
 import { listHooks } from './hooks/registry.js';
 import { runPreToolUse, runPostToolUse } from './hooks/runner.js';
-import { ugcWriteConfirm } from '../actor/ugc-registry.js';
 import { describeToolActivity, displayOrigin } from '../actor/activity-label.js';
 import {
   normalizeBrowserChildPolicyNotices,
   withAsyncBrowserChildPolicyNotices,
   withBrowserChildPolicyNotices,
 } from '../browser-authority/child-policy-result.js';
-import {
-  decideAction,
-  DEFAULT_CONFIRM_ACTIONS,
-  normalizeMode,
-} from '../permissions/policy.js';
-// The lifecycle classifier — pure, no IO. Used ONLY by the fail-closed
-// backstop below, so the dispatcher never has to duplicate (and drift
-// from) the retry-class taxonomy.
-import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
-import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
 import { resolveDeclaredToolOrigins } from '../tool-origin-policy.js';
 import { DEFAULT_HOOKS } from './hooks/defaults/index.js';
@@ -55,25 +44,6 @@ import { DEFAULT_HOOKS } from './hooks/defaults/index.js';
 const safeOrigins = (tool, args, ctx) => {
   try { return resolveDeclaredToolOrigins(tool, args, ctx); }
   catch { return []; }
-};
-
-/**
- * Stable external target for lifecycle intent. Tools normally return origins,
- * but normalize defensively so equivalent URL spellings cannot split the
- * sibling-actor replay guard. Non-URL capability addresses remain exact.
- *
- * @param {ToolDescriptor} tool @param {any} args @param {ToolContext} ctx
- * @returns {string}
- */
-const lifecycleTarget = (tool, args, ctx) => {
-  const raw = safeOrigins(tool, args, ctx).find((value) =>
-    typeof value === 'string' && value.trim().length > 0);
-  if (!raw) return `tool:${tool.name ?? 'unknown-tool'}`;
-  const trimmed = raw.trim();
-  try {
-    const parsed = new URL(trimmed);
-    return parsed.origin === 'null' ? parsed.href : parsed.origin;
-  } catch { return trimmed; }
 };
 
 const EXPOSED_ERROR_CODE = /^[a-z][a-z0-9_]{0,79}$/;
@@ -167,65 +137,6 @@ const projectSemanticFailureCustody = (error) => {
   };
 };
 
-/**
- * One-line, human-readable summary of a tool call for the confirm
- * prompt — e.g. `click({ selector: "button.send" })`. Values are
- * truncated; this is a glanceable label, not a full serialization.
- *
- * @param {string} name @param {Record<string, unknown>} args
- * @returns {string}
- */
-const summarizeCall = (name, args) => {
-  if (!args || typeof args !== 'object') return `${name}()`;
-  const parts = Object.entries(args).map(([k, v]) => {
-    let val;
-    if (typeof v === 'string') val = `"${v.length > 40 ? `${v.slice(0, 39)}…` : v}"`;
-    else if (Array.isArray(v)) val = `[${v.length}]`;
-    else if (v && typeof v === 'object') val = '{…}';
-    else val = String(v);
-    return `${k}: ${val}`;
-  });
-  return `${name}({ ${parts.join(', ')} })`;
-};
-
-// The one sentence the #242 confirm card adds. why this wording: it names the
-// property that makes the page dangerous (someone else wrote it) and the
-// property that makes the action dangerous (it runs as you), in the user's
-// words, with no jargon and no security theatre. It does NOT claim an attack is
-// happening — most of the time there isn't one, and a prompt that cries wolf is
-// a prompt that gets clicked through.
-const UGC_CONFIRM_NOTE = 'This page can contain text written by other people, '
-  + 'and this action would run with your signed-in access to it.';
-
-/**
- * The URL of the page a browser-session call is about to act on, read LIVE.
- *
- * why not just ctx.activeTab.url: that pin is stamped when the turn's context is
- * built and re-stamped by navigate(), but a same-origin SPA hop moves the page
- * with no tool call at all — the actor clicks from a repo root into an issue and
- * the pin still says the root. The UGC registry classifies on PATH, so a stale
- * pin silently under-protects exactly the case #242 exists for. One
- * tabs.get() is the honest read.
- *
- * Never throws and never blocks the dispatch: a failed read falls back to the
- * pin, and a missing pin to ''. classifyUrl fails open on both.
- *
- * @param {ToolContext} ctx
- * @returns {Promise<string>}
- */
-const liveTabUrl = async (ctx) => {
-  const pin = ctx.activeTab;
-  if (!pin?.id) return pin?.url ?? '';
-  try {
-    // ctx.tabs is the opaque `Object` contract slot; narrow to the one read.
-    const tabsApi = /** @type {{ get?: (id: number) => Promise<{ url?: string }> }} */ (ctx.tabs);
-    const live = await tabsApi?.get?.(pin.id);
-    return live?.url || pin.url || '';
-  } catch {
-    return pin.url ?? '';
-  }
-};
-
 /** @param {DispatchContext} ctx @param {ToolDescriptor} tool */
 const withToolMetadata = (ctx, tool) => ({
   ...ctx,
@@ -305,15 +216,11 @@ const userHookContext = (ctx, tool) => freezePlainSnapshot(structuredClone({
 *     }) => unknown,
  *     end: (tabId: number) => unknown,
  *   } | null,
- *   lifecycle?: ReturnType<import('../lifecycle/dispatch-tracking.js').makeDispatchTracker> | null,
- *   lifecycleTurnId?: string,
- *   lifecycleUserInitiated?: boolean,
  *   consumeBrowserChildPolicyNotice?: (tabId: number) => Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
  *   waitForBrowserChildPolicyNotice?: (tabId: number, timeoutMs: number, terminal?: boolean) => Promise<boolean>,
  *   hasPendingBrowserChildPolicy?: (tabId: number) => boolean,
  *   browserChildQuarantineRequired?: boolean,
  *   armBrowserChildQuarantine?: (tabId: number) => Promise<{ok?:boolean,reason?:string,error?:string,code?:string}>,
- *   authorityOwnsLifecycle?: boolean,
  * }} DispatchContext
  */
 
@@ -324,13 +231,8 @@ const userHookContext = (ctx, tool) => freezePlainSnapshot(structuredClone({
  * structurally a ToolMeta where the result type needs one.
  *
  * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned',
- *   recovery?: Record<string, unknown>,
  *   browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
  *   browserAsyncPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }} DispatchMeta
- *   `recovery` is the lifecycle contract's agent-facing semantic record —
- *   present only when a dispatch settled as interrupted/outcome_unknown/
- *   refused-replay, so the agent hears the recovery category, not a
- *   generic error string.
  */
 
 /**
@@ -520,289 +422,20 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   }
   if (ctx.abortSignal?.aborted) return abortedResult('after_pre_tool_hook');
 
-  // ---- Async confirmation (driven by the Plan/Act permission policy) -----
-  // The six sync gates above can't await a user round-trip, so the
-  // confirmation step lives here. The persona gate already BLOCKED any
-  // non-read action in Plan mode; by this point mode is Act (or the call
-  // is read-only). The confirmActions toggle decides whether the action
-  // still needs the user to approve it: ON confirms every non-read
-  // action, OFF confirms nothing (the 2026-06-12 tier collapse — the old
-  // suggest/full-auto endpoints kept, the auto-edit middle removed).
-  // decideAction is the single source of that rule. Outcome is reflected
-  // back into the confirmation gate's meta entry so the lineage stays
-  // honest.
-  // why: memory tools and site_client_write run their OWN always-on
-  // confirmation inside execute(), security surfaces that can't be toggled
-  // off and that render the actual diff/dossier. The site-client tool performs
-  // its final live-origin authorization BEFORE that prompt, which a generic
-  // dispatcher confirmation cannot do. Skip the ordinary generic prompt for
-  // both so the user is neither asked twice nor prompted for an origin the
-  // actor no longer owns. The rare repeat-after-unknown prompt still runs here:
-  // lifecycle tracking must receive that authority before execute(), then the
-  // tool's detailed proposal remains the final consent surface. Plan mode was
-  // already enforced by the persona gate above.
-  const selfConfirms = tool.primitive === 'memory' || tool.name === 'site_client_write';
-  const permMode = normalizeMode(ctx.permission?.mode);
-  const permConfirm = ctx.permission?.confirmActions ?? DEFAULT_CONFIRM_ACTIONS;
-  const verdict = decideAction({ mode: permMode, confirmActions: permConfirm, tool });
-  if (ctx.abortSignal?.aborted) return abortedResult('before_confirmation');
-
-  // ---- The UGC-zone forced confirmation (#242) ---------------------------
-  // A non-read browser-session action on a page that hosts THIRD-PARTY content
-  // (a GitHub issue, a Jira ticket, a Reddit thread — actor/ugc-registry.js) is
-  // the lethal trifecta at its sharpest: the text steering the agent was written
-  // by a stranger, and the cookies it would act with belong to the user. So this
-  // asks EVEN WHEN confirmActions is off. That override is deliberate: the
-  // toggle expresses "I trust this agent to act unattended", which is a
-  // statement about the AGENT, and on a UGC page the instruction under
-  // consideration did not come from the agent. Same reasoning as `selfConfirms`
-  // above, which is why memory keeps its own always-on prompt and is excluded
-  // here rather than double-prompted.
-  //
-  // Skipped entirely when the policy already blocked the call — no reason to
-  // read a tab for an action that is not going to run.
-  const ugcRuleId = verdict.allowed && !selfConfirms
-    ? ugcWriteConfirm({
-      toolName: call.name,
-      primitive: tool.primitive,
-      sideEffect: tool.sideEffect,
-      url: await liveTabUrl(ctx),
-    })
-    : null;
-  // An unresolved matching D/E intent is a special forced-confirm case. Only
-  // a user-initiated turn may open this prompt. Synthetic continuations stay
-  // nonmodal and are refused by beginTracking after the hooks run.
-  const preHookLifecycleTarget = lifecycleTarget(tool, args, ctx);
-  const lifecycleRepeatCandidate = verdict.allowed
-    && ctx.lifecycleUserInitiated === true
-    ? await Promise.resolve(ctx.lifecycle?.requiresIntentConfirmation?.({
-      tool,
-      sessionId: ctx.session?.sessionId ?? undefined,
-      ownerSessionId: ctx.lifecycleOwnerSessionId ?? undefined,
-      target: preHookLifecycleTarget,
-      args,
-      userInitiated: true,
-    })).catch(() => false)
-    : false;
-  const lifecycleRepeatConfirm = lifecycleRepeatCandidate
-    && typeof lifecycleRepeatCandidate === 'object'
-    && lifecycleRepeatCandidate.required === true
-    ? lifecycleRepeatCandidate
-    : false;
-  if (ctx.abortSignal?.aborted) return abortedResult('before_confirmation');
-
-  // Whether the USER approved this exact dispatch via a confirm round-trip
-  // — the lifecycle tracker turns it into a durable single-use proof.
-  let userApprovedThisDispatch = false;
-  const needsDispatcherConfirmation = lifecycleRepeatConfirm
-    || (!ctx.authorityOwnsLifecycle && !selfConfirms && (verdict.confirm || ugcRuleId));
-  if (ctx.authorityOwnsLifecycle && tool.sideEffect !== 'read') {
+  // The semantic dispatcher never owns confirmation or durable lifecycle.
+  // Exact host operations bind the final arguments and target, then apply the
+  // live permission, confirmation, replay, audit, and settlement policy. Keeping
+  // an optional semantic fallback here would create a second authority path.
+  if (tool.sideEffect !== 'read') {
     const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
     if (confirmEntry) confirmEntry.reason = 'exact authority verifies final arguments';
   }
-  if (verdict.allowed && needsDispatcherConfirmation) {
-    const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
-    /** @type {import('/shared/tool-types.js').ConfirmAnswer | undefined} */
-    let answer = 'no';
-    try {
-      // why: the SW's confirm coordinator accepts a richer prompt than the
-      // ConfirmPrompt typedef (it adds `tool`/`summary`/`sessionId` for the
-      // side-panel card). Cast the call so the dispatcher keeps building the
-      // shape the coordinator actually consumes without widening the contract.
-      const confirm = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<import('/shared/tool-types.js').ConfirmAnswer>) | undefined} */ (ctx.confirm);
-      answer = await confirm?.({
-        tool: call.name,
-        sideEffect: tool.sideEffect,
-        actionClass: verdict.actionClass,
-        // Confirmation already names the action. Keep mutable tab origins out
-        // of this pre-dispatch UI payload so a later policy stop stays URL-free.
-        origins: [],
-        summary: summarizeCall(call.name, args),
-        // The repeat approval is bound to this immutable lifecycle claim, not
-        // the tab's mutable live URL. Show the exact value the tracker will
-        // consume so the user can verify what they are authorizing.
-        lifecycleTarget: lifecycleRepeatConfirm
-          ? lifecycleRepeatConfirm.target
-          : undefined,
-        // Unknown-outcome recovery is an approval of this exact repeat, not a
-        // reusable tool grant. The SW independently bypasses and refuses to
-        // create session grants when this flag is present.
-        oneShot: lifecycleRepeatConfirm ? true : undefined,
-        // why the note and not a longer summary: summarizeCall truncates every
-        // string arg to 40 chars, so the card can't show the payload anyway —
-        // what it CAN do is tell the user the one fact they can't see, which is
-        // that this page is attacker-authorable. Absent on an ordinary confirm,
-        // so the card is unchanged for the common case.
-        note: ugcRuleId
-          ? UGC_CONFIRM_NOTE
-          : (lifecycleRepeatConfirm
-            ? ('overflow' in lifecycleRepeatConfirm && lifecycleRepeatConfirm.overflow === true
-              ? 'Stored unresolved-action evidence exceeded its local bound. Peerd cannot prove this action is new. Verify the exact target before approving.'
-              : (ctx.session?.kind === 'actor' || ctx.session?.kind === 'spawned'
-                ? 'An actor in this chat wants to repeat an action whose earlier outcome is unknown. Verify the target before approving.'
-                : 'A matching earlier action has an unknown outcome. Verify the target before approving this repeat.'))
-            : undefined),
-        sessionId: ctx.session?.sessionId ?? null,
-        dispatchId: call.id ?? null,
-      }, ctx.abortSignal);
-    } catch {
-      answer = 'no';  // fail closed — a broken confirm channel blocks the action
-    }
-    if (ctx.abortSignal?.aborted) return abortedResult('after_confirmation');
-    const approved = answer === 'yes_once' || answer === 'yes_session';
-    userApprovedThisDispatch = approved;
-    if (confirmEntry) {
-      confirmEntry.allowed = approved;
-      // why the ruleId rides in the reason: the lineage chip in the transcript
-      // renders `${gate}: ${reason}` as its tooltip (sidepanel/components/
-      // message-list.js), so attributing the zone here surfaces WHICH rule
-      // forced the prompt with no new UI and no new plumbing.
-      const how = ugcRuleId
-        ? ` [ugc zone: ${ugcRuleId}]`
-        : (lifecycleRepeatConfirm ? ' [repeat after unknown outcome]' : '');
-      confirmEntry.reason = (approved
-        ? (answer === 'yes_session' ? 'approved by user (session)' : 'approved by user')
-        : 'rejected by user') + how;
-    }
-    if (!approved) {
-      ctx.audit({
-        type: 'tool_rejected',
-        details: { tool: call.name, gate: 'confirmation', answer, ugcZone: ugcRuleId ?? undefined },
-      }).catch(() => {});
-      return {
-        ok: false,
-        error: `gate_blocked:confirmation:${confirmEntry?.reason ?? 'rejected by user'}`,
-        meta: /** @type {DispatchMeta} */ ({
-          toolName: call.name,
-          primitive: tool.primitive, dispatch: tool.dispatch,
-          gates: gateResults,
-          hooks: hookOutcomes,
-          durationMs: 0,
-        }),
-      };
-    }
-    ctx.audit({
-      type: 'tool_confirmed',
-      details: { tool: call.name, answer, ugcZone: ugcRuleId ?? undefined },
-    }).catch(() => {});
-  }
-  if (ctx.abortSignal?.aborted) return abortedResult('after_confirmation');
+  if (ctx.abortSignal?.aborted) return abortedResult('before_execution');
 
-  // ---- Lifecycle tracking (the recovery contract) ------------------------
-  // why HERE: every gate/confirm/hook has passed, so what follows is a real
-  // dispatch — the durable operation record must exist BEFORE execute() so
-  // an SW eviction mid-effect leaves evidence (interrupted vs
-  // outcome_unknown) instead of silence. beginTracking may also REFUSE the
-  // call outright: the auto-resume path re-drives pending tool calls with
-  // their original tool_use ids, and re-running a non-idempotent action
-  // whose first dispatch has no proven outcome is the unsafe replay the
-  // contract forbids. Absent ctx.lifecycle (tests, Firefox pre-init), the
-  // dispatch is byte-for-byte unchanged.
-  let tracking = null;
-  if (!ctx.authorityOwnsLifecycle && ctx.lifecycle?.beginTracking) {
-    const begun = await ctx.lifecycle.beginTracking({
-      callId: call.id,
-      tool,
-      sessionId: ctx.session?.sessionId ?? undefined,
-      ownerSessionId: ctx.lifecycleOwnerSessionId ?? undefined,
-      actorId: /** @type {{ actorInstanceId?: string }} */ (ctx).actorInstanceId,
-      target: lifecycleTarget(tool, args, ctx),
-      // The user's approval, if a confirm round-trip ran above — the
-      // tracker mints + consumes the single-use, generation-bound proof
-      // and persists it on the durable record (§8.3).
-      confirmed: userApprovedThisDispatch,
-      confirmedIntent: lifecycleRepeatConfirm,
-      // Post-hook args: Class C/D records derive their deterministic
-      // idempotency key from these.
-      args,
-      turnId: ctx.lifecycleTurnId,
-      userInitiated: ctx.lifecycleUserInitiated,
-    }).catch((error) => {
-      // beginTracking is a TOTAL function (see its wrapper) — reaching this
-      // catch means something violated that contract. The old behavior here
-      // was `() => null`, i.e. "run untracked", which for a non-idempotent
-      // action is the one degradation the contract cannot allow: no record
-      // means a later interruption is unreportable AND unguarded.
-      //
-      // So this is an INDEPENDENT fail-closed decision, deliberately not
-      // routed through the tracker that just failed: classify the tool
-      // directly and refuse D/E/F. A/B/C keep the historical degradation.
-      // duplicate reads are invisible and idempotent writes are safe to
-      // repeat, so a broken tracker must not take the read surface down
-      // with it.
-      const retryClass = (() => {
-        try { return retryClassForTool(tool); }
-        catch { return RETRY_CLASSES.SIDE_EFFECT; } // classification threw: assume the worst
-      })();
-      if (retryClass !== RETRY_CLASSES.SIDE_EFFECT
-          && retryClass !== RETRY_CLASSES.CONDITIONAL_ACTION
-          && retryClass !== RETRY_CLASSES.RESOURCE) return null;
-      const detail = error instanceof Error ? error.message : String(error);
-      const risk = retryClass === RETRY_CLASSES.RESOURCE
-        ? 'a long-lived resource must not run untracked: an interruption could '
-          + 'then never be reported or guarded against, and could leave an orphan'
-        : 'a non-idempotent action must not run untracked: an interruption could '
-          + 'then never be reported or guarded against';
-      return {
-        refuse: {
-          error: `failed: ${call.name} was NOT executed — lifecycle tracking `
-            + `failed unexpectedly (${detail}) and ${risk}.`,
-          recovery: {
-            category: 'security_degradation',
-            state: 'failed',
-            autoRetry: false,
-            retryRequires: ['lifecycle-storage'],
-            verificationRequired: false,
-            keepIdempotencyKey: false,
-            reason: `tracking rejected unexpectedly: ${detail}`,
-          },
-        },
-      };
-    });
-    if (begun && 'refuse' in begun && begun.refuse) {
-      ctx.audit({
-        type: 'tool_blocked',
-        details: { tool: call.name, gate: 'lifecycle-replay-guard', reason: begun.refuse.error },
-      }).catch(() => {});
-      return {
-        ok: false,
-        error: begun.refuse.error,
-        meta: /** @type {DispatchMeta} */ ({
-          toolName: call.name,
-          primitive: tool.primitive, dispatch: tool.dispatch,
-          gates: gateResults,
-          hooks: hookOutcomes,
-          durationMs: 0,
-          recovery: begun.refuse.recovery,
-        }),
-      };
-    }
-    tracking = begun && 'handle' in begun ? begun.handle : null;
-  }
-  if (ctx.abortSignal?.aborted) {
-    if (tracking && ctx.lifecycle?.settleTracking) {
-      await ctx.lifecycle.settleTracking(tracking, {
-        ok: false, error: 'aborted before execution', aborted: true,
-      }).catch(() => null);
-    }
-    return abortedResult('before_execution');
-  }
-
-  // Confirmation, hooks, and lifecycle persistence all yield. Recheck at the
-  // last possible point so a redirect during any of them cannot reach execute.
+  // Hooks can yield. Recheck at the last possible point so a redirect during
+  // semantic policy cannot reach the exact authority operation.
   const finalLandingRefusal = await refuseInvalidLanding();
-  if (finalLandingRefusal) {
-    if (tracking && ctx.lifecycle?.settleTracking) {
-      await ctx.lifecycle.settleTracking(tracking, {
-        ok: false,
-        error: 'error' in finalLandingRefusal
-          ? finalLandingRefusal.error
-          : 'landing refused before execution',
-        aborted: true,
-      }).catch(() => null);
-    }
-    return finalLandingRefusal;
-  }
+  if (finalLandingRefusal) return finalLandingRefusal;
 
   // ---- Execute -----------------------------------------------------------
   // why: thread the call's tool_use_id into ctx so tools that stream
@@ -888,7 +521,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   return {
     prepared: true,
     call, ctx, tool, args, hooks, hookOutcomes, gateResults,
-    tracking, activityTabId, start, childPolicyEligible, childCapable,
+    activityTabId, start, childPolicyEligible, childCapable,
     browserAsyncPolicyNotices,
     browserChildQuarantineArmedTabId,
     preExecutionResult, preExecutionError, preExecutionFailed,
@@ -950,7 +583,7 @@ export const executePreparedToolCall = async (prepared, execute = undefined) => 
 export const settleToolCall = async (prepared, execution) => {
   const {
     call, ctx, tool, args, hooks, hookOutcomes, gateResults,
-    tracking, activityTabId, start, childPolicyEligible, childCapable,
+    activityTabId, start, childPolicyEligible, childCapable,
     browserAsyncPolicyNotices,
   } = prepared;
   const userHooks = /** @type {import('./hooks/runner.js').Hook[]} */ (hooks)
@@ -1039,26 +672,6 @@ export const settleToolCall = async (prepared, execution) => {
       ctx: /** @type {any} */ (userHookContext(ctx, tool)),
     });
     hookOutcomes.push(...post.outcomes);
-    // Settle the lifecycle record from the tool's own outcome. A returned
-    // failure whose error is an ambiguous transport loss is REWRITTEN to
-    // the semantic state (interrupted / outcome_unknown) — §16.2: the agent
-    // never sees a bare timeout on a tracked side effect.
-    /** @type {{ error: string, recovery: Record<string, unknown> } | null} */
-    let recoveryRewrite = null;
-    if (tracking && ctx.lifecycle?.settleTracking) {
-      recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
-        ok: result?.ok !== false,
-        error: result?.ok === false ? String(result.error ?? '') : undefined,
-        aborted: result?.actorAborted === true,
-        // A typed failure outcome a tool stamped on its result — the
-        // deterministic path (lifecycle/failure-taxonomy.js).
-        outcomeKind: /** @type {{ outcomeKind?: any }} */ (result)?.outcomeKind,
-      }).catch(() => null);
-    }
-    // A rewrite replaces the model-facing failure shape, but custody metadata
-    // is not presentation. An awaited actor reply may already exist and its
-    // mailbox row cannot be acknowledged unless these host-only ids reach the
-    // durable tool-result block.
     const actorDeliveryId = typeof result?.actorDeliveryId === 'string'
       ? result.actorDeliveryId : undefined;
     const actorDeliveryIds = Array.isArray(result?.actorDeliveryIds)
@@ -1070,7 +683,7 @@ export const settleToolCall = async (prepared, execution) => {
       || typeof result?.actorOutcomeKnown === 'boolean'
       || typeof result?.actorPerformed === 'boolean'
       || typeof result?.actorAborted === 'boolean';
-    let actorHostState = {
+    const actorHostState = {
       ...(typeof result?.actorCorrelationId === 'string'
         ? { actorCorrelationId: result.actorCorrelationId } : {}),
       ...(typeof result?.actorTerminal === 'boolean'
@@ -1081,71 +694,13 @@ export const settleToolCall = async (prepared, execution) => {
         ? { actorPerformed: result.actorPerformed } : {}),
       ...(result?.actorAborted === true ? { actorAborted: true } : {}),
     };
-    // The outer lifecycle owns the final custody verdict. An actor can report a
-    // locally-known policy stop while the message_actor dispatch itself loses
-    // durable proof; in that case the outer outcome_unknown must replace, not
-    // sit beside, the stale inner certainty/cancellation flags.
-    if (recoveryRewrite && hasActorHostState) {
-      const state = recoveryRewrite.recovery?.state;
-      if (state === 'outcome_unknown') {
-        actorHostState = {
-          ...actorHostState,
-          actorTerminal: true,
-          actorOutcomeKnown: false,
-          actorPerformed: true,
-          actorAborted: false,
-        };
-      } else if (state === 'interrupted') {
-        actorHostState = {
-          ...actorHostState,
-          actorTerminal: true,
-          actorOutcomeKnown: true,
-          actorPerformed: false,
-          actorAborted: false,
-        };
-      } else if (state === 'cancelled') {
-        actorHostState = {
-          ...actorHostState,
-          actorTerminal: true,
-          actorOutcomeKnown: true,
-          actorPerformed: false,
-          actorAborted: true,
-        };
-      }
-    }
-    const recoveryState = recoveryRewrite?.recovery?.state;
-    const resultCustody = /** @type {{code?:unknown,outcomeKind?:unknown,outcomeKnown?:unknown,retryable?:unknown}} */ (result);
-    const resultCode = typeof resultCustody?.code === 'string' && TOOL_RESULT_CODE.test(resultCustody.code)
-      ? resultCustody.code : null;
-    const resultOutcomeKind = FAILURE_OUTCOME_VALUES.has(/** @type {any} */ (resultCustody?.outcomeKind))
-      ? /** @type {'transport-lost'|'host-lost'|'pre-effect-failure'|'effect-completed'} */ (resultCustody.outcomeKind)
-      : null;
-    // A lifecycle rewrite replaces presentation, not custody. Preserve a
-    // bounded machine code and the typed host/transport-loss verdict so UI,
-    // audit, and model orchestration cannot mistake an ambiguous Git/App
-    // mutation for a normal retryable failure.
-    const recoveryCustody = recoveryRewrite ? {
-      ...(resultCode ? { code: resultCode } : {}),
-      ...(resultOutcomeKind ? { outcomeKind: resultOutcomeKind } : {}),
-      ...(recoveryState === 'outcome_unknown'
-        ? { outcomeKnown: false, retryable: false }
-        : {
-            ...(typeof resultCustody?.outcomeKnown === 'boolean'
-              ? { outcomeKnown: resultCustody.outcomeKnown } : {}),
-            ...(typeof resultCustody?.retryable === 'boolean'
-              ? { retryable: resultCustody.retryable } : {}),
-          }),
-    } : {};
-    /** @type {ToolResult} */
-    const settled = recoveryRewrite
+    const settled = hasActorHostState || actorDeliveryId || actorDeliveryIds.length > 0
       ? {
-        ok: false,
-        error: recoveryRewrite.error,
-        ...recoveryCustody,
-        ...actorHostState,
-        ...(actorDeliveryId ? { actorDeliveryId } : {}),
-        ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
-      }
+          ...result,
+          ...actorHostState,
+          ...(actorDeliveryId ? { actorDeliveryId } : {}),
+          ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
+        }
       : result;
     /** @type {ToolResult} */
     const enriched = {
@@ -1162,7 +717,6 @@ export const settleToolCall = async (prepared, execution) => {
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
-        ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
         ...(browserChildPolicyNotices.length > 0
           ? { browserPolicies: browserChildPolicyNotices }
           : {}),
@@ -1207,28 +761,12 @@ export const settleToolCall = async (prepared, execution) => {
       ctx: /** @type {any} */ (userHookContext(ctx, tool)),
     });
     hookOutcomes.push(...post.outcomes);
-    // A THROW after dispatch is the most ambiguous shape of all — settle
-    // the lifecycle record and adopt the semantic error where it applies.
-    /** @type {{ error: string, recovery: Record<string, unknown> } | null} */
-    let recoveryRewrite = null;
-    if (tracking && ctx.lifecycle?.settleTracking) {
-      recoveryRewrite = await ctx.lifecycle.settleTracking(tracking, {
-        ok: false,
-        error: message,
-        aborted: /** @type {{ name?: string }} */ (e)?.name === 'AbortError',
-        // A typed outcome stamped on the thrown error (survives relay
-        // boundaries as a plain field — see lifecycle/failure-taxonomy.js).
-        outcomeKind: /** @type {{ outcomeKind?: any }} */ (e)?.outcomeKind,
-      }).catch(() => null);
-    }
     /** @type {ToolResult} */
     let failedResult = {
       ok: false,
-      error: recoveryRewrite?.error ?? exposedError?.error ?? message,
-      ...(exposedError && !recoveryRewrite ? exposedError : {}),
-      ...(recoveryRewrite?.recovery?.state === 'outcome_unknown'
-        ? { ...semanticCustody, outcomeKnown: false, retryable: false }
-        : semanticCustody),
+      error: exposedError?.error ?? message,
+      ...(exposedError ?? {}),
+      ...semanticCustody,
       ...(endTurn ? {
         content: typeof endingContent === 'string'
           ? endingContent
@@ -1245,7 +783,6 @@ export const settleToolCall = async (prepared, execution) => {
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs,
-        ...(recoveryRewrite ? { recovery: recoveryRewrite.recovery } : {}),
       }),
     };
     if (childPolicyEligible && consumeBrowserChildPolicyNotice) {
