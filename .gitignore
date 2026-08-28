@@ -76,6 +76,11 @@ scripts/cdp/bench-results/
 # Headless test output
 /test-output/
 
+# GTM graph crawls (gtm/README.md): cached crawl data + generated
+# outputs contain other people's handles/social edges - keep them local.
+/gtm/data/
+/gtm/out/
+
 # Online-Mind2Web (gated dataset + exported trajectories/screenshots + the
 # upstream scorer repo cloned on demand by score.mjs)
 scripts/cdp/om2w/data/
