@@ -61,8 +61,8 @@ const safeActor = (actor) => {
     ...(name ? { name } : {}),
     ...(task ? { task } : {}),
     depth: actor?.depth,
-    grantedTools: Array.isArray(actor?.grantedTools)
-      ? actor.grantedTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
+    visibleTools: Array.isArray(actor?.visibleTools)
+      ? actor.visibleTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
     streaming: actor?.streaming === true,
     running: actor?.running === true,
     cost: typeof actor?.cost?.cost === 'number' ? { cost: actor.cost.cost } : null,
@@ -89,8 +89,8 @@ const safeTopology = (snapshot) => ({
           childSessionId: task?.childSessionId,
           ...(taskLabel ? { task: taskLabel } : {}),
           status: task?.status,
-          grantedTools: Array.isArray(task?.grantedTools)
-            ? task.grantedTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
+          visibleTools: Array.isArray(task?.visibleTools)
+            ? task.visibleTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
         };
       })])),
 });

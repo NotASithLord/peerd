@@ -33,9 +33,10 @@ const AUTHORITY_FIELDS = Object.freeze([
 ]);
 
 /**
- * Add model-facing prose/schema to an SW-selected descriptor list without
- * allowing the sealed heap to widen policy or introduce a tool name.
- * Runtime-specific prose shaping happens only after semantic hydration.
+ * Add model-facing prose/schema while proving that compact projection fields
+ * still match the sealed catalog. This is a drift/consistency check inside the
+ * semantic realm; fixed exact-operation ceilings and live host gates remain the
+ * authority boundary. Runtime-specific prose shaping happens only afterward.
  * @param {ReadonlyArray<Record<string, any>>} descriptors
  * @param {any} [runtimeCapabilities]
  */

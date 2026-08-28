@@ -42,7 +42,7 @@ const makeWorker = (generation: number, terminated: number[]) => ({
       }
     };
     port.start();
-    port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+    port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM, prototypeFetchBlocked: true, prototypeStorageBlocked: true });
   },
   addEventListener: () => {},
   terminate: () => { terminated.push(generation); },
@@ -206,7 +206,7 @@ describe('Firefox direct controller adapter', () => {
               });
             };
             port.start();
-            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM, prototypeFetchBlocked: true, prototypeStorageBlocked: true });
           },
           addEventListener: (type: string, listener: () => void) => {
             if (type === 'error') crash.push(listener);
@@ -259,7 +259,7 @@ describe('Firefox direct controller adapter', () => {
               });
             };
             port.start();
-            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM, prototypeFetchBlocked: true, prototypeStorageBlocked: true });
           },
           addEventListener: (type: string, listener: () => void) => {
             if (type === 'error') onError = listener;

@@ -33,7 +33,7 @@ describe('repository tool authority', () => {
       afterClose: async () => {},
     });
     const authority = createRepositoryToolAuthority({
-      call: { name: 'repo_version', args: { op: 'checkpoint' } },
+      binding: { operation: 'turn.repository.checkpoint', args: { message: 'checkpoint' } },
       ctx: repositoryContext(repositories, { appQuiescence }), signal,
     });
     await authority.checkpoint('checkpoint');
@@ -63,23 +63,44 @@ describe('repository tool authority', () => {
       },
     };
 
-    const fetchAuthority = createRepositoryToolAuthority({
-      call: { name: 'repo_remote', args: { op: 'fetch' } },
-      ctx: repositoryContext(repositories, { confirm: async () => true, appQuiescence }), signal,
-    });
-    await fetchAuthority.readRemote();
-    await fetchAuthority.confirmRemote('fetch', remote.url, undefined);
-    await fetchAuthority.fetch(remote.url);
+    const ctx = repositoryContext(repositories, { confirm: async () => true, appQuiescence });
+    const fetchShared: any = {};
+    await createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.read-remote', args: {} },
+      ctx, signal, shared: fetchShared,
+    }).readRemote();
+    await createRepositoryToolAuthority({
+      binding: {
+        operation: 'turn.repository.confirm-remote',
+        args: { op: 'fetch', target: remote.url, branch: undefined },
+      },
+      ctx, signal, shared: fetchShared,
+    }).confirmRemote('fetch', remote.url, undefined);
+    await createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.fetch', args: { target: remote.url } },
+      ctx, signal, shared: fetchShared,
+    }).fetch(remote.url);
     expect(order).toEqual(['lock', 'fetch', 'unlock']);
 
     order.length = 0;
-    const pushAuthority = createRepositoryToolAuthority({
-      call: { name: 'repo_remote', args: { op: 'push' } },
-      ctx: repositoryContext(repositories, { confirm: async () => true, appQuiescence }), signal,
-    });
-    await pushAuthority.readRemote();
-    await pushAuthority.confirmRemote('push', remote.url, undefined);
-    await pushAuthority.push(remote.url, undefined);
+    const pushShared: any = {};
+    await createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.read-remote', args: {} },
+      ctx, signal, shared: pushShared,
+    }).readRemote();
+    await createRepositoryToolAuthority({
+      binding: {
+        operation: 'turn.repository.confirm-remote',
+        args: { op: 'push', target: remote.url, branch: undefined },
+      },
+      ctx, signal, shared: pushShared,
+    }).confirmRemote('push', remote.url, undefined);
+    await createRepositoryToolAuthority({
+      binding: {
+        operation: 'turn.repository.push', args: { target: remote.url, branch: undefined },
+      },
+      ctx, signal, shared: pushShared,
+    }).push(remote.url, undefined);
     expect(order).toEqual(['quiesce', 'lock', 'checkpoint', 'push', 'unlock', 'resume']);
   });
 
@@ -99,14 +120,18 @@ describe('repository tool authority', () => {
       resumeTab: async () => { order.push('resume'); return true; },
       reloadTab: async () => { order.push('reload'); return true; },
     };
-    const authority = createRepositoryToolAuthority({
-      call: { name: 'repo_version', args: { op: 'restore', to: 'abc123' } },
-      ctx: repositoryContext(repositories, {
+    const ctx = repositoryContext(repositories, {
         actorType: 'notebook', jsTabTracker: tracker, confirm: async () => true,
-      }),
-      signal,
+      });
+    const shared: any = {};
+    await createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.confirm-restore', args: { to: 'abc123' } },
+      ctx, signal, shared,
+    }).confirmRestore('abc123');
+    const authority = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.restore', args: { to: 'abc123' } },
+      ctx, signal, shared,
     });
-    await authority.confirmRestore('abc123');
     await authority.restore('abc123');
     expect(order).toEqual(['flush', 'lock', 'restore', 'unlock', 'reload']);
   });
@@ -122,17 +147,30 @@ describe('repository tool authority', () => {
       commit: async () => ({ created: false }),
       push: async () => { pushed = true; return { ok: true }; },
     };
-    const authority = createRepositoryToolAuthority({
-      call: { name: 'repo_remote', args: { op: 'push' } },
-      ctx: repositoryContext(repositories, {
+    const ctx = repositoryContext(repositories, {
         confirm: async () => true,
         appQuiescence: { run: async (_id: string, operation: () => Promise<any>) => operation() },
-      }),
-      signal,
+      });
+    const shared: any = {};
+    const reader = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.read-remote', args: {} },
+      ctx, signal, shared,
     });
-    const approved = await authority.readRemote();
-    await authority.confirmRemote('push', approved.url, undefined);
-    await expect(authority.push(approved.url, undefined))
+    const approved = await reader.readRemote();
+    await createRepositoryToolAuthority({
+      binding: {
+        operation: 'turn.repository.confirm-remote',
+        args: { op: 'push', target: approved.url, branch: undefined },
+      },
+      ctx, signal, shared,
+    }).confirmRemote('push', approved.url, undefined);
+    const pusher = createRepositoryToolAuthority({
+      binding: {
+        operation: 'turn.repository.push', args: { target: approved.url, branch: undefined },
+      },
+      ctx, signal, shared,
+    });
+    await expect(pusher.push(approved.url, undefined))
       .rejects.toThrow('remote changed while authorization was pending');
     expect(pushed).toBe(false);
   });
@@ -140,10 +178,42 @@ describe('repository tool authority', () => {
   test('rejects a mismatched named call before touching repository authority', async () => {
     let touched = false;
     const authority = createRepositoryToolAuthority({
-      call: { name: 'repo_version', args: { op: 'checkpoint' } },
+      binding: { operation: 'turn.repository.checkpoint', args: { message: 'checkpoint' } },
       ctx: repositoryContext({ status: async () => { touched = true; } }), signal,
     });
     expect(() => authority.readStatus()).toThrow('repository authority mismatch');
     expect(touched).toBe(false);
+  });
+
+  test('Stop while queued on the repository lock prevents the mutation', async () => {
+    let releaseLock!: () => void;
+    let lockEntered!: () => void;
+    const lockGate = new Promise<void>((resolve) => { releaseLock = resolve; });
+    const entered = new Promise<void>((resolve) => { lockEntered = resolve; });
+    const controller = new AbortController();
+    let commits = 0;
+    const repositories = {
+      coordinate: async (_ref: any, operation: () => Promise<any>) => {
+        lockEntered();
+        await lockGate;
+        return operation();
+      },
+      commit: async () => { commits += 1; return { created: true }; },
+    };
+    const authority = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.checkpoint', args: { message: 'checkpoint' } },
+      ctx: repositoryContext(repositories, {
+        appQuiescence: { run: async (_id: string, operation: () => Promise<any>) => operation() },
+      }),
+      signal: controller.signal,
+    });
+    const pending = authority.checkpoint('checkpoint');
+    await entered;
+    controller.abort();
+    releaseLock();
+    await expect(pending).rejects.toMatchObject({
+      outcomeKnown: true, retryable: false,
+    });
+    expect(commits).toBe(0);
   });
 });

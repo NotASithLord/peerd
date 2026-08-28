@@ -4,39 +4,32 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  pageCallToRelay,
+  pageCallToToolCall,
   shapePageCallOutcome,
 } from '../../extension/peerd-runtime/actor/page-api.js';
 
-describe('page program exact routes', () => {
-  test('each semantic method selects a fixed authority route', () => {
-    expect(pageCallToRelay({ method: 'goto', args: { url: 'https://example.com' } }))
+describe('page program sealed semantic translation', () => {
+  test('each declared method selects one semantic tool without an SW route', () => {
+    expect(pageCallToToolCall({ method: 'goto', args: { url: 'https://example.com' } }))
+      .toEqual({ name: 'navigate', args: { url: 'https://example.com' } });
+    expect(pageCallToToolCall({ method: 'click', args: { selector: 'button.send' } }))
       .toEqual({
-        route: 'page-program/navigate',
-        args: { url: 'https://example.com' },
+        name: 'click', args: { selector: 'button.send', expectedCount: 1 },
       });
-    expect(pageCallToRelay({ method: 'click', args: { selector: 'button.send' } }))
-      .toEqual({
-        route: 'page-program/click',
-        args: { selector: 'button.send', expectedCount: 1 },
-      });
-    expect(pageCallToRelay({ method: 'fill', args: { target: '@e4', text: 'hello' } }))
-      .toEqual({
-        route: 'page-program/fill',
-        args: { ref: '@e4', text: 'hello' },
-      });
+    expect(pageCallToToolCall({ method: 'fill', args: { target: '@e4', text: 'hello' } }))
+      .toEqual({ name: 'type', args: { ref: '@e4', text: 'hello' } });
   });
 
   test('unknown methods and caller-selected routes fail before the boundary', () => {
-    expect(() => pageCallToRelay({ method: 'evaluate', args: {} }))
+    expect(() => pageCallToToolCall({ method: 'evaluate', args: {} }))
       .toThrow(/unknown page method/);
-    expect(() => pageCallToRelay({
+    expect(() => pageCallToToolCall({
       method: 'click',
       args: { route: 'page-program/navigate', tool: 'navigate' },
     })).toThrow(/target must be/);
-    expect(() => pageCallToRelay({
+    expect(pageCallToToolCall({
       method: 'fetch', args: { url: 'https://example.com' },
-    })).toThrow(/no fixed authority route/);
+    })).toEqual({ name: 'fetch_url', args: { url: 'https://example.com' } });
   });
 });
 

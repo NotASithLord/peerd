@@ -917,14 +917,15 @@ export const makeSemanticControllerClient = ({
 
   const projectTurnTools = async (/** @type {Record<string, unknown>} */ input) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const tools = await withControllerLease(async (/** @type {unknown} */ lease) => {
+      const projection = await withControllerLease(async (/** @type {unknown} */ lease) => {
         enterLeased();
         try {
           let client = null;
           try {
             client = await getClient(lease);
             const result = await client.call('turn.tools.project', input, { timeoutMs: 15_000 });
-            if (result?.ok === true && Array.isArray(result.tools)) return result.tools;
+            if (result?.ok === true && Array.isArray(result.tools)
+                && Array.isArray(result.operations)) return result;
             if (result?.outcomeKnown === true) {
               throw Object.assign(new Error(result.code ?? 'turn-tool-projection-failed'), result);
             }
@@ -939,7 +940,8 @@ export const makeSemanticControllerClient = ({
         code: 'controller-firefox-tool-projection-lifetime-lost',
         onLost: retireActiveOnLifetimeLoss,
       });
-      if (Array.isArray(tools)) return tools;
+      if (projection?.ok === true && Array.isArray(projection.tools)
+          && Array.isArray(projection.operations)) return projection;
     }
     throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
       code: 'controller-tool-projection-startup-failed',

@@ -22,9 +22,17 @@ const mkCtx = (over: any = {}) => {
   return { ctx, calls };
 };
 
+const operationFor = (name: string) => ({
+  dweb_share: 'turn.dweb.publish-confirmed-app',
+  dweb_discover: 'turn.dweb.discover-apps',
+  dweb_install: 'turn.dweb.install-confirmed-app',
+}[name]);
+
 const execute = (tool: any, args: any, ctx: any) => tool.execute(args, {
   session: ctx.session,
-  dwebAuthority: createDwebToolAuthority({ call: { name: tool.name, args }, ctx }),
+  dwebAuthority: createDwebToolAuthority({
+    binding: { operation: operationFor(tool.name), args }, ctx,
+  }),
 } as any);
 
 describe('dweb tools — share', () => {
@@ -40,10 +48,10 @@ describe('dweb tools — share', () => {
     });
   });
 
-  test('confirmActions ON: shares without a tool-level confirm (the gate owns it)', async () => {
+  test('confirmActions ON: the exact dweb authority owns exactly one confirmation', async () => {
     const { ctx, calls } = mkCtx();
     const r = await execute(dwebShareTool, { appId: 'a1' }, ctx);
-    expect(calls.confirm.length).toBe(0);            // no double-confirm
+    expect(calls.confirm.length).toBe(1);
     expect(calls.share).toEqual(['a1']);
     expect(r.ok).toBe(true);
     expect(JSON.parse((r as any).content)).toMatchObject({ shared: true, uri: 'peerd://did:key:zA/abc' });

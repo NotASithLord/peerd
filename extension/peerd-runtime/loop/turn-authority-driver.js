@@ -19,16 +19,17 @@ import {
 } from '../actor/isolation.js';
 import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
-import { decideAction } from '../permissions/policy.js';
 import { makeTurnCostTracker } from '../cost/turn-tracker.js';
 import { detectInterruptedTurn } from './resume-detect.js';
-import {
-  CONTROLLER_AUTHORITY_MANIFEST,
-  controllerAuthorityClassAllowed,
-} from '../../shared/controller-authority-manifest.js';
-import { hostToolExecutionResultAllowed } from '../../shared/tool-execution-protocol.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
+// why: an enabled pre-hook is a user policy veto. If durable hook state cannot
+// be read, the semantic realm receives a deliberately un-compilable enabled
+// record, which semanticHooksFor turns into a blocking sentinel.
+const HOOK_RECORDS_UNAVAILABLE = Object.freeze([Object.freeze({
+  id: 'user-hook-records-unavailable', event: 'pre-tool-use',
+  kind: 'unavailable', enabled: true,
+})]);
 const providerFailureFrom = (/** @type {unknown} */ value) => {
   if (typeof value !== 'string') return null;
   if (value === 'provider-key-missing' || value === 'unknown-provider'
@@ -74,7 +75,7 @@ export const makeTurnAuthorityDriver = (/** @type {any} */ deps) => {
     sessions, turnSlots, memory, browser,
     skillRegistry, renderSystemPrompt, buildToolContext,
     settingsStore, DWEB_ENABLED, goalActiveFor,
-    dwebEngagedSessions, prepareToolCall, settleToolCall,
+    dwebEngagedSessions,
     uiConnected, uiPorts, auditLog,
     postChatNote, runUserTurn,
     trimEnricher,
@@ -100,6 +101,8 @@ export const makeTurnAuthorityDriver = (/** @type {any} */ deps) => {
     // turn may snapshot it. Tests and non-browser callers stay synchronous.
     waitForActorIsolation = async () => {},
     getRuntimeCapabilities = () => null,
+    getUserHookRecords = async () => [],
+    completeGoalRun = null,
     // The controller is the sole owner of inventory and exposure semantics.
     // The driver never reconstructs a local fallback from an authority graph.
     projectToolDescriptors,
@@ -292,18 +295,22 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
   // EXPOSURE CUTOVER: the MAIN agent's browser surface is message_actor (+
   // actor_list/open_tab). The low-level DOM/page tools are hidden here so a11y
   // trees, refs, and raw page content never enter the main context — they're
-  // the web actor's, reached only by messaging a tab's actor. The tools stay
-  // REGISTERED (listTools is full); the actor narrows from the full set via
-  // getToolDescriptors. This filter is main-turn-only. See tools/exposure.js.
+  // the web actor's, reached only by messaging a tab's actor. Each sealed
+  // semantic owner receives its own projected descriptor surface. See
+  // tools/exposure.js.
   //
   // SECOND cut: the session's tool MANIFEST (/tools — tools/manifests.js).
   // Intersecting here means the model never SEES an excluded tool; the
-  // exposure gate re-refuses by name at dispatch (buildToolContext feeds it
-  // the same record), so the descriptor filter is UX, the gate is the wall.
+  // semantic dispatcher also refuses an excluded name. This is model-surface
+  // narrowing and defense in depth, not the host authority boundary: the SW
+  // separately enforces its fixed exact-operation ceiling and live gates.
   // Re-read per turn so a mid-chat /tools change applies on the next turn —
   // the same freshness contract getSystemPrompt keeps for /system.
   const manifestSession = await sessions.get(sessionId);
   const turnPermission = await resolvePermission(manifestSession);
+  const userHookRecords = await Promise.resolve(getUserHookRecords())
+    .then((records) => Array.isArray(records) ? records : HOOK_RECORDS_UNAVAILABLE)
+    .catch(() => HOOK_RECORDS_UNAVAILABLE);
 
   const toolContextArgs = {
     exposure: 'main', sessionId, activeTabId, synthetic, trusted,
@@ -319,9 +326,6 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     });
     return toolContextReady;
   };
-  /** @type {Map<string,any>} */
-  let currentToolDescriptorsByName = new Map();
-
   // Recomputed PER STEP (the loop's refreshTools): the dweb-engagement and
   // goal cuts below change mid-turn, so the advertised list must follow.
   const refreshMainTools = async () => {
@@ -329,141 +333,33 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     if (typeof projectToolDescriptors !== 'function') {
       throw new TypeError('controller tool projection unavailable');
     }
-    const descriptors = await projectToolDescriptors({
+    const surface = await projectToolDescriptors({
       surface: 'main', toolManifest: manifestSession?.toolManifest,
       dwebEnabled: DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
       dwebEngaged: dwebEngagedSessions.has(sessionId),
       goalActive: !!goalActiveFor?.(sessionId),
       actorIsolation: isolation, runtimeCapabilities,
     });
-    currentToolDescriptorsByName = new Map(descriptors.map(
-      (/** @type {any} */ descriptor) => [descriptor.name, descriptor],
-    ));
+    if (!surface || !Array.isArray(surface.tools) || !Array.isArray(surface.operations)
+        || surface.tools.some((/** @type {any} */ tool) =>
+          !tool || typeof tool.name !== 'string')
+        || surface.operations.some((/** @type {unknown} */ operation) =>
+          typeof operation !== 'string')) {
+      throw new TypeError('controller tool projection is invalid');
+    }
     actorIsolationForModelStep = isolation;
-    return descriptors;
-  };
-  const refreshTools = refreshMainTools;
-  const toolDescriptors = await refreshTools();
-  const toolExecution = typeof prepareToolCall === 'function'
-    && typeof settleToolCall === 'function' ? Object.freeze({
-      prepare: async (/** @type {any} */ call, /** @type {any} */ binding) => {
-        const authorityClass = binding?.authorityClass;
-        if (!controllerAuthorityClassAllowed(authorityClass)) return null;
-        const toolContext = await getToolContext();
-        const prepared = await prepareToolCall(call, toolContext, binding?.descriptor);
-        if (prepared?.prepared !== true) return { mode: 'result', result: prepared };
-        const projection = authorityClass === 'actor'
-          ? {
-              sessionId: toolContext.session?.sessionId,
-              sessionDepth: toolContext.session?.depth ?? 0,
-              sessionKind: toolContext.session?.kind ?? 'chat',
-              inbound: toolContext.inbound === true,
-            }
-            : authorityClass === 'repository'
-              ? {
-                sessionId: toolContext.session?.sessionId,
-                actorType: toolContext.actorType,
-                actorInstanceId: toolContext.actorInstanceId,
-              }
-            : authorityClass === 'persistence'
-              ? {
-                sessionId: toolContext.session?.sessionId,
-                activeTabOrigin: toolContext.activeTab?.origin,
-                goalActive: !!toolContext.todoStore,
-              }
-              : authorityClass === 'resource'
-                ? {
-                  sessionId: toolContext.session?.sessionId,
-                  runtimeCapabilities: toolContext.runtimeCapabilities,
-                }
-              : authorityClass === 'execution'
-                ? {
-                  sessionId: toolContext.session?.sessionId,
-                  sessionKind: toolContext.session?.kind ?? 'chat',
-                }
-              : authorityClass === 'introspection'
-                ? {
-                  sessionId: toolContext.session?.sessionId,
-                  messageCount: toolContext.session?.messageCount ?? 0,
-                  trimCovered: toolContext.session?.trimCovered ?? 0,
-                }
-                : authorityClass === 'dweb'
-                  ? {
-                    sessionId: toolContext.session?.sessionId,
-                    dwebAvailable: toolContext.dweb != null,
-                  }
-                  : ['pod', 'vm', 'notebook', 'app', 'page', 'siteclient', 'schedule']
-                      .includes(authorityClass)
-                    ? { sessionId: toolContext.session?.sessionId }
-                    : {};
-        return {
-          mode: 'execute',
-          // why ctx is explicit: the controller bridge binds finite named
-          // authority methods from this in-memory custody object. Keeping it
-          // only inside `prepared` made every production domain binder see an
-          // empty context even though settlement still had the full record.
-          custody: { prepared, authorityClass, ctx: prepared.ctx },
-          args: prepared.args,
-          projection,
-          manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
-        };
-      },
-      settle: async (/** @type {any} */ custody, /** @type {any} */ reported) => {
-        const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[custody?.authorityClass];
-        if (!policy || !hostToolExecutionResultAllowed(reported, policy.resultBytes)) {
-          throw new Error('tool execution result is invalid');
-        }
-        const hostCustody = typeof reported.performed === 'boolean' ? {
-          outcomeKnown: true,
-          effectEntered: reported.effectEntered,
-          performed: reported.performed,
-          ...(typeof reported.outcomeKind === 'string'
-            ? { outcomeKind: reported.outcomeKind } : {}),
-        } : {};
-        const semanticValue = reported.value && typeof reported.value === 'object'
-          && !Array.isArray(reported.value) ? reported.value : null;
-        const result = reported.ok === true
-          ? semanticValue
-            ? { ...semanticValue, ...hostCustody }
-            : typeof reported.performed === 'boolean'
-              ? {
-                  ok: false,
-                  code: 'controller-tool-result-invalid-after-effect',
-                  error: 'Controller tool result was invalid after exact authority ran.',
-                  retryable: reported.performed !== true,
-                  ...hostCustody,
-                  outcomeKind: reported.performed
-                    ? 'effect-completed' : 'pre-effect-failure',
-                }
-              : reported.value
-          : {
-              ok: false,
-              error: reported.error ?? reported.code,
-              code: reported.code,
-              outcomeKnown: reported.outcomeKnown,
-              retryable: reported.retryable,
-              outcomeKind: reported.outcomeKind ?? (reported.outcomeKnown === true
-                ? 'pre-effect-failure' : 'host-lost'),
-              ...hostCustody,
-            };
-        return settleToolCall(custody.prepared, { result });
-      },
-    }) : null;
-  // why: the loop's concurrent-dispatch scheduler partitions a multi-tool
-  // turn by the SAME decideAction policy the dispatcher enforces — READ-
-  // class calls (which never confirm) may run concurrently; anything that
-  // writes or would need a confirmation round-trip stays serial, so two
-  // side effects can't interleave and confirm modals never stack.
-  const classifyToolCall = (/** @type {string} */ name) => {
-    const tool = currentToolDescriptorsByName.get(name);
-    if (!tool) return null;
-    return decideAction({
-      mode: /** @type {any} */ (turnPermission?.mode),
-      confirmActions: turnPermission?.confirmActions,
-      tool,
+    return Object.freeze({
+      tools: Object.freeze([...surface.tools]),
+      operations: Object.freeze([...surface.operations]),
     });
   };
-
+  const refreshTools = refreshMainTools;
+  // why: projection runs in the build-identity-pinned semantic owner before
+  // model bytes or user hooks enter that heap. Freeze its exact operation
+  // subset beside the visible descriptors so the authority bridge can reject
+  // raw calls for hidden/session-disabled tools without routing by tool name.
+  const initialToolSurface = await refreshTools();
+  const toolDescriptors = initialToolSurface.tools;
   let lastSession = null;
   /** @type {{ messages: any[], usage: any } | null} */
   let turnSnapshot = null;
@@ -551,14 +447,30 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
       getSystemPrompt,
       appendAudit: /** @type {any} */ (auditLog.append),
       postChatNote,
+      completeGoalRun: (/** @type {string} */ summary) =>
+        typeof completeGoalRun === 'function'
+          ? completeGoalRun(sessionId, summary) === true : false,
       tools: toolDescriptors,
+      allowedOperations: initialToolSurface.operations,
       runtimeCapabilities,
+      semanticPolicy: {
+        exposure: 'main',
+        permission: turnPermission,
+        denylist: getDenylist(),
+        userHookRecords,
+        ...(activeTabContext?.url ? {
+          activeTab: { origin: activeTabContext.url },
+        } : {}),
+        goalActive: !!goalActiveFor?.(sessionId),
+        dwebAvailable: DWEB_ENABLED && !!settingsStore.get().dwebEnabled,
+        messageCount: Array.isArray(promptSession?.messages)
+          ? promptSession.messages.length : 0,
+        trimCovered: promptSession?.trimSummary?.covered ?? 0,
+      },
       // why: the loop calls this before each model step, then re-renders the
       // system prompt against the isolation snapshot selected here. Mid-turn
       // exposure changes therefore update the prompt and tools together.
       refreshTools,
-      ...(toolExecution ? { toolExecution } : {}),
-      classifyToolCall,
       // Reasoning normalization is provider/model semantics. Authority passes
       // only the user settings snapshot; the sealed controller applies its
       // fixed budget and accepted effort vocabulary before model egress.

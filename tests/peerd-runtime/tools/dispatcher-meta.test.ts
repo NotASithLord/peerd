@@ -57,10 +57,28 @@ describe('dispatcher lineage spine fields', () => {
       origins: () => ['https://api.bank.com'],
       execute: async () => { throw new Error('boom'); },
     }) as any);
-    const r: any = await dispatchToolCall({ id: 't2', name: 'lt', args: {} } as any, ctx);
+    const r: any = await dispatchToolCall(
+      { id: 't2', name: 'lt', args: {} } as any,
+      { ...ctx, allowlist: ['https://api.bank.com'] },
+    );
     expect(r.ok).toBe(false);
     expect(r.meta.sideEffect).toBe('mutate_external');
     expect(r.meta.origins).toEqual(['https://api.bank.com']);
+  });
+
+  test('a normalized semantic throw keeps its bounded custody fields', async () => {
+    registerTool(baseTool({
+      execute: async () => { throw Object.assign(new Error('semantic execution failed'), {
+        code: 'controller-tool-execution-failed', outcomeKnown: false, retryable: true,
+      }); },
+    }) as any);
+    const result: any = await dispatchToolCall(
+      { id: 'semantic-custody', name: 'lt', args: {} } as any, ctx,
+    );
+    expect(result).toMatchObject({
+      ok: false, error: 'semantic execution failed',
+      code: 'controller-tool-execution-failed', outcomeKnown: false, retryable: false,
+    });
   });
 
   test('a thrown browser policy refusal preserves human and structured details', async () => {

@@ -1,7 +1,8 @@
 // @ts-check
 // Live Actor Fabric: one compact topology for isolated model contexts working
 // under the current chat. The transcript remains the durable receipt; this view
-// answers what is alive, what it can access, and which boundary is physical.
+// answers what is alive, which tools its model is shown, and which boundary is
+// physical. Tool labels are UX metadata, never a statement of host authority.
 
 import m from '/vendor/mithril/mithril.js';
 import { buildActorFabric } from './actor-fabric-model.js';
@@ -112,7 +113,7 @@ const renderDetail = (node, detailId, settled) => m('.actor-fabric-detail', {
   ]),
   m('dl.actor-fabric-facts', [
     m('div', [m('dt', 'activity'), m('dd', settled ? 'Finished; the transcript below is the durable receipt.' : node.activity)]),
-    m('div', [m('dt', 'access'), m('dd', node.access)]),
+    m('div', [m('dt', 'tools shown'), m('dd', node.access)]),
     m('div', [m('dt', 'boundary'), m('dd', node.boundary)]),
   ]),
 ]);
@@ -237,7 +238,7 @@ export const ActorFabric = {
       const next = ui.selectedId === id ? null : allNodes.find((node) => node.id === id);
       ui.selectedId = next?.id ?? '';
       ui.announcement = next
-        ? `${next.label} details shown. Access: ${next.access}. Boundary: ${next.boundary}`
+        ? `${next.label} details shown. Tools shown: ${next.access}. Boundary: ${next.boundary}`
         : 'Actor details hidden.';
     };
     const bodyId = `actor-fabric-${String(attrs.session?.sessionId ?? 'chat')}`;

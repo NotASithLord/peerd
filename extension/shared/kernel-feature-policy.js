@@ -1,6 +1,7 @@
 // @ts-check
 
 import { controllerPayloadBytes, parseControllerAuthority } from './structured-clone-size.js';
+import { isDefaultHookId } from './default-hook-manifest.js';
 import {
   KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
   KERNEL_DWEB_ROUTE_NAMES,
@@ -76,8 +77,9 @@ export const validAdministrativeHookRecord = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const hook = /** @type {Record<string,any>} */ (value);
   if (!nestedExactKeys(hook, ['id', 'event', 'enabled', 'kind', 'doc'], [
-    'order', 'match', 'trusted', 'body', 'rule',
+    'order', 'match', 'rule',
   ]) || typeof hook.id !== 'string' || !hook.id || hook.id.length > 128
+      || isDefaultHookId(hook.id)
       || (hook.event !== 'pre-tool-use' && hook.event !== 'post-tool-use')
       || typeof hook.enabled !== 'boolean'
       || typeof hook.doc !== 'string' || hook.doc.length > 64 * KIB
@@ -85,18 +87,14 @@ export const validAdministrativeHookRecord = (value) => {
         || Math.abs(hook.order) > 1_000_000))
       || (hook.match !== undefined
         && (typeof hook.match !== 'string' || hook.match.length > 1024))) return false;
-  if (hook.kind === 'js') {
-    return hook.trusted === true && typeof hook.body === 'string'
-      && hook.body.trim().length > 0 && hook.body.length <= 64 * KIB
-      && hook.rule === undefined;
-  }
-  if (hook.kind !== 'declarative' || hook.trusted !== undefined || hook.body !== undefined
+  if (hook.kind !== 'declarative'
       || !hook.rule || typeof hook.rule !== 'object' || Array.isArray(hook.rule)) return false;
   const rule = /** @type {Record<string,any>} */ (hook.rule);
-  return nestedExactKeys(rule, ['matchArg', 'pattern'], ['onMatch', 'reason'])
+  return nestedExactKeys(rule, ['matchArg', 'contains'], ['onMatch', 'reason'])
     && typeof rule.matchArg === 'string' && rule.matchArg.length > 0
-    && rule.matchArg.length <= 256
-    && typeof rule.pattern === 'string' && rule.pattern.length <= 4096
+    && rule.matchArg.length <= 128
+    && typeof rule.contains === 'string' && rule.contains.length > 0
+    && rule.contains.length <= 1024
     && (rule.onMatch === undefined || rule.onMatch === 'block' || rule.onMatch === 'allow')
     && (rule.reason === undefined
       || (typeof rule.reason === 'string' && rule.reason.length <= 4096));

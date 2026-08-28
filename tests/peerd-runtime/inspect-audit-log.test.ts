@@ -24,7 +24,13 @@ const ENTRIES = [
 const ctx = { idb: { getAll: async (_store: string) => ENTRIES } } as any;
 const invoke = (args: Record<string, unknown>, source: any) => {
   const authority = createIntrospectionToolAuthority({
-    call: { name: 'inspect', args }, ctx: source,
+    binding: {
+      operation: args.kind === 'audit_log'
+        ? 'turn.introspection.audit-entries'
+        : 'turn.introspection.automatable-tabs',
+      args,
+    },
+    ctx: source,
   });
   return inspectTool.execute(args, { introspectionAuthority: authority } as any);
 };

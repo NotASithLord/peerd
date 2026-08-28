@@ -39,6 +39,7 @@ import { SessionNotFoundError } from '../errors.js';
 // (descriptor filter, exposure gate, actor inheritance, UI chips)
 // reads the same thing. Pure module — keeps this store bun-testable.
 import { normalizeToolManifest } from '../tools/manifests.js';
+import { controllerDomainOperationPolicy } from '/shared/controller-kernel-quota.js';
 
 const STORE = 'sessions';
 // why a sibling store, not an index on `sessions`: each message is its own
@@ -46,6 +47,28 @@ const STORE = 'sessions';
 // and assembly is a batched get of exactly the session's ids — no scan, no
 // whole-array rewrite. The session record's `msgIndex` carries order.
 const MSGS = 'session_messages';
+const MAX_GRANTED_OPERATIONS = 256;
+const MUTABLE_SESSION_FIELDS = new Set([
+  'provider', 'model', 'permissionMode', 'confirmActions', 'originState',
+  'cost', 'todos', 'autoMemory', 'routineId',
+]);
+
+const normalizeGrantedOperations = (/** @type {unknown} */ value) => {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_GRANTED_OPERATIONS) {
+    throw new TypeError('session-granted-operations-invalid');
+  }
+  const operations = value.map((operation) => {
+    if (typeof operation !== 'string' || !controllerDomainOperationPolicy(operation)) {
+      throw new TypeError('session-granted-operation-invalid');
+    }
+    return operation;
+  });
+  if (new Set(operations).size !== operations.length) {
+    throw new TypeError('session-granted-operation-duplicate');
+  }
+  return Object.freeze([...operations]);
+};
 
 /**
  * @typedef {import('./types.js').Session} Session
@@ -95,13 +118,14 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    *   parentSessionId?: string,
    *   spawnedTrusted?: boolean,
    *   task?: string,
-   *   grantedTools?: string[],
+   *   grantedOperations?: string[],
    *   depth?: number,
    *   permissionMode?: string,
    *   confirmActions?: boolean,
    *   customSystemPrompt?: string,
    *   appManifestDigest?: string,
    *   appOwnerAuthorityDigest?: string,
+   *   ownerSemanticPostureDigest?: string,
    *   appRole?: {source:'local'|'unsigned-import'|'dweb', publisher:string, manifestDigest:string, name?:string, instructions?:string},
    *   actorSurface?: 'code',
    *   toolManifest?: import('../tools/manifests.js').ToolManifest | null,
@@ -119,13 +143,14 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     parentSessionId,
     spawnedTrusted,
     task,
-    grantedTools,
+    grantedOperations,
     depth = 0,
     permissionMode,
     confirmActions,
     customSystemPrompt,
     appManifestDigest,
     appOwnerAuthorityDigest,
+    ownerSemanticPostureDigest,
     appRole,
     actorSurface,
     toolManifest,
@@ -134,6 +159,10 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     backing,
     originState,
   } = {}) => {
+    const normalizedGrantedOperations = normalizeGrantedOperations(grantedOperations);
+    if (normalizedGrantedOperations !== undefined && kind !== 'spawned') {
+      throw new TypeError('session-granted-operations-kind-invalid');
+    }
     const normalizedManifest = normalizeToolManifest(toolManifest);
     const createdAt = now();
     const record = {
@@ -160,6 +189,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       ...(typeof appOwnerAuthorityDigest === 'string' && /^[0-9a-f]{64}$/.test(appOwnerAuthorityDigest)
         ? { appOwnerAuthorityDigest }
         : {}),
+      ...(typeof ownerSemanticPostureDigest === 'string' && /^[0-9a-f]{64}$/.test(ownerSemanticPostureDigest)
+        ? { ownerSemanticPostureDigest }
+        : {}),
       ...(appRole && typeof appRole === 'object'
           && (appRole.source === 'local' || appRole.source === 'unsigned-import' || appRole.source === 'dweb')
           && typeof appRole.publisher === 'string'
@@ -182,10 +214,8 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
       // absent (getAncestry treats an unparented record as trusted).
       ...(spawnedTrusted !== undefined ? { spawnedTrusted } : {}),
       ...(task ? { task } : {}),
-      // Heap-split phase 4: an actor's narrowed toolset, persisted so the offscreen
-      // tool-dispatch route rebuilds the child's restricted ctx from it and re-checks
-      // every relayed call (never the worker's word). Absent for non-tool children.
-      ...(Array.isArray(grantedTools) && grantedTools.length > 0 ? { grantedTools } : {}),
+      ...(normalizedGrantedOperations && normalizedGrantedOperations.length > 0
+        ? { grantedOperations: normalizedGrantedOperations } : {}),
       // DESIGN-17: an actor self-describes the instance it owns + its kind.
       ...(instanceId ? { instanceId } : {}),
       ...(actorType ? { actorType } : {}),
@@ -402,15 +432,23 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
   };
 
   /**
-   * Shallow-patch arbitrary top-level fields on a session and persist.
-   * Used by the Plan/Act permission UI and session/setModel.
+   * Patch the deliberately mutable portion of a session record. Authority
+   * identity, lineage, actor bindings and exact-operation grants are
+   * create-once: accepting them here would turn an ordinary metadata write
+   * into a durable privilege-escalation primitive.
    *
    * @param {string} sessionId
    * @param {Record<string, unknown>} patch
    */
   const update = (sessionId, patch) => updateSessionRecord(
     sessionId,
-    (record) => ({ ...record, ...patch }),
+    (record) => {
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)
+          || Object.keys(patch).some((field) => !MUTABLE_SESSION_FIELDS.has(field))) {
+        throw new TypeError('session-update-field-invalid');
+      }
+      return { ...record, ...patch };
+    },
   );
 
   /**

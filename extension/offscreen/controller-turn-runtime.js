@@ -21,6 +21,9 @@ import {
   controllerHostsDwebTool,
   controllerAuthorityClassForTool,
   controllerHostsTool,
+  controllerOperationsForSpawnedTools,
+  decideAction,
+  dispatchToolCall,
   executeControllerActorTool,
   executeControllerLocalTool,
   executeControllerPodTool,
@@ -40,6 +43,7 @@ import {
   projectControllerToolSurface,
   reasoningForTurn,
   runUserTurn,
+  semanticHooksFor,
 } from '/peerd-runtime/controller-turn.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
 import { buildTemporalBlock, buildTemporalContext } from '/peerd-runtime/controller.js';
@@ -55,6 +59,7 @@ import {
   shouldFailover,
 } from '/peerd-provider/controller.js';
 import { createControllerModelEgress } from './model-egress-client.js';
+import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
@@ -142,6 +147,8 @@ const turnValue = async (
   Object.assign(error, {
     code: result?.code ?? 'kernel-call-failed',
     outcomeKnown: result?.outcomeKnown === true,
+    ...(typeof result?.retryable === 'boolean' ? { retryable: result.retryable } : {}),
+    ...(result?.authorityReceipt ? { authorityReceipt: result.authorityReceipt } : {}),
   });
   throw error;
 };
@@ -155,7 +162,7 @@ const isTurnPayload = (value) => {
     && input.sessionId.length <= 512
     && typeof input.ctxJson === 'string'
     && typeof input.toolsJson === 'string'
-    && isRecord(input.classifications);
+    && Number.isSafeInteger(input.turnGeneration);
 };
 
 /**
@@ -182,12 +189,34 @@ const runControllerTurnWith = async (payload, options) => {
     return { ok: false, code: 'turn-payload-invalid', outcomeKnown: true };
   }
   const tools = hydrateToolDescriptors(toolProjection, ctx.runtimeCapabilities);
+  let descriptorsByName = new Map(tools.map((tool) => [tool.name, tool]));
+  const childOperationsFor = (/** @type {any} */ request) =>
+    controllerOperationsForSpawnedTools(
+      descriptorsByName.keys(), request.tools, request.allowRecursion === true,
+    );
+  const semanticPolicy = isRecord(ctx.semanticPolicy) ? ctx.semanticPolicy : {};
+  const semanticHooks = semanticHooksFor(semanticPolicy.userHookRecords);
+  const effectSequences = new Map();
+  const effectBinding = (/** @type {string} */ callId) => {
+    const effectSequence = (effectSequences.get(callId) ?? 0) + 1;
+    effectSequences.set(callId, effectSequence);
+    return Object.freeze({
+      callId, effectId: `${callId}:${effectSequence}`,
+      effectSequence, turnGeneration: input.turnGeneration,
+    });
+  };
   const withToolSlot = makeToolBackpressure(options.signal);
   const runId = input.runId;
   let nestedUnknown = false;
   let abortFinalized = false;
-  const rpc = (/** @type {string} */ operation, /** @type {unknown} */ value) =>
-    turnValue(kernelCall, operation, { runId, value }, () => { nestedUnknown = true; });
+  const rpc = async (/** @type {string} */ operation, /** @type {unknown} */ value) => {
+    try {
+      const reply = await turnValue(
+        kernelCall, operation, { runId, value }, () => { nestedUnknown = true; },
+      );
+      return isRecord(reply?.authorityReceipt) ? reply.authorityValue : reply;
+    } catch (cause) { throw cause; }
+  };
   /** @type {Set<Promise<unknown>>} */
   const advisory = new Set();
   const trackAdvisory = (/** @type {Promise<unknown>} */ promise) => {
@@ -195,7 +224,6 @@ const runControllerTurnWith = async (payload, options) => {
     promise.finally(() => advisory.delete(promise)).catch(() => {});
     return promise;
   };
-  let classifications = /** @type {Record<string, any>} */ ({ ...input.classifications });
   const modelEgress = createControllerModelEgress({ call: rpc });
   const providersByName = new Map(listProviders().map((provider) => [provider.name, provider]));
   const configuredFallbacks = ctx.providerFailoverEnabled === true
@@ -323,53 +351,65 @@ const runControllerTurnWith = async (payload, options) => {
       getSecret: async () => { throw new Error('credential access is kernel-owned'); },
       safeFetch: async () => { throw new Error('egress is kernel-owned'); },
       getSystemPrompt: () => rpc('turn.prompt.get', {}),
-      appendAudit: (/** @type {unknown} */ entry) =>
-        trackAdvisory(rpc('turn.audit.append', { entry })),
+      // Semantic diagnostics stay in bounded tool results. Durable audit facts
+      // are derived by the exact host authority from validated effects.
+      appendAudit: async () => {},
       refreshTools: async () => {
         const refreshed = await rpc('turn.tools.refresh', {});
-        classifications = isRecord(refreshed?.classifications)
-          ? { ...refreshed.classifications } : {};
         if (typeof refreshed?.toolsJson !== 'string') return [];
         const projection = parseJson(refreshed.toolsJson, 'turn tools');
         if (!Array.isArray(projection)) throw new Error('turn tools wire payload is invalid');
-        return hydrateToolDescriptors(projection, ctx.runtimeCapabilities);
+        const refreshedTools = hydrateToolDescriptors(projection, ctx.runtimeCapabilities);
+        descriptorsByName = new Map(refreshedTools.map((tool) => [tool.name, tool]));
+        return refreshedTools;
       },
       toolDispatch: (/** @type {unknown} */ call) => withToolSlot(async () => {
-        const authorityClass = controllerAuthorityClassForTool(
-          /** @type {any} */ (call)?.name,
-        );
-        if (authorityClass === null) {
+        const localName = /** @type {any} */ (call)?.name;
+        const descriptor = descriptorsByName.get(localName);
+        if (!descriptor || !controllerHostsTool(localName)) {
           throw Object.assign(new Error('tool has no execution owner'), {
             code: 'tool-execution-owner-missing', outcomeKnown: true,
           });
         }
-        const prepared = await rpc('turn.tool.prepare', {
-          callJson: JSON.stringify(call), authorityClass,
-        });
-        if (prepared?.mode === 'result') {
-          const result = parseJson(prepared.resultJson, 'tool result');
-          if (result?.outcomeKnown === false) nestedUnknown = true;
-          return result;
-        }
-        if (prepared?.mode !== 'execute' || typeof prepared.requestJson !== 'string'
-            || !Number.isSafeInteger(prepared.deadlineAt)) {
-          throw new Error('kernel tool preparation is invalid');
-        }
-        const request = parseJson(prepared.requestJson, 'tool execution request');
-        if (!isRecord(request) || typeof request.executionId !== 'string'
-            || typeof request.argsDigest !== 'string'
-            || !Number.isSafeInteger(request.turnGeneration)
-            || typeof request.toolName !== 'string'
-            || request.authorityClass !== authorityClass) {
-          throw new Error('kernel tool execution request is invalid');
-        }
-        let execution;
-        try {
-          const binding = {
-            executionId: request.executionId,
-            argsDigest: request.argsDigest,
-            turnGeneration: request.turnGeneration,
-          };
+        return dispatchToolCall(/** @type {any} */ (call), {
+          ...semanticPolicy,
+          hooks: semanticHooks,
+          session,
+          abortSignal: options.signal,
+          authorityOwnsLifecycle: true,
+          runtimeCapabilities: ctx.runtimeCapabilities,
+          audit: async () => {},
+        }, {
+          descriptor,
+          execute: async (prepared) => {
+            const request = {
+              toolName: localName,
+              args: prepared.args,
+              projection: {
+                sessionId: session?.sessionId,
+                sessionDepth: session?.depth ?? 0,
+                sessionKind: session?.kind ?? 'chat',
+                inbound: semanticPolicy.inbound === true,
+                activeTabOrigin: semanticPolicy.activeTab?.origin,
+                goalActive: semanticPolicy.goalActive === true,
+                runtimeCapabilities: ctx.runtimeCapabilities,
+                messageCount: semanticPolicy.messageCount ?? 0,
+                trimCovered: semanticPolicy.trimCovered ?? 0,
+                // why: use the already-fetched, externally sanitized session.
+                // The outer turn policy must never duplicate raw transcript or
+                // attachment bytes beside the opaque-token session channel.
+                messages: Array.isArray(session?.messages) ? session.messages : [],
+                dwebAvailable: semanticPolicy.dwebAvailable === true,
+                actorType: semanticPolicy.actorType,
+                actorInstanceId: semanticPolicy.actorInstanceId,
+              },
+            };
+            let effectCount = 0;
+            const binding = () => {
+              effectCount += 1;
+              return effectBinding(/** @type {any} */ (call).id);
+            };
+            try {
           if (controllerHostsLocalTool(request.toolName)) {
             const value = await executeControllerLocalTool(
               request.toolName,
@@ -378,42 +418,36 @@ const runControllerTurnWith = async (payload, options) => {
                 completeGoal: async (/** @type {string} */ summary) => ({
                   ok: true,
                   outcomeKnown: true,
-                  value: await rpc('turn.goal.complete', { ...binding, summary }),
+                  value: await rpc('turn.goal.complete', { ...binding(), summary }),
                 }),
               }),
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: request.toolName === 'complete_goal',
-              value,
-            };
+            return value;
           } else if (controllerHostsActorTool(request.toolName)) {
             const actorAuthority = Object.freeze({
               spawnSync: (/** @type {any} */ actorRequest) => rpc('turn.actor.spawn-sync', {
-                ...binding,
+                ...binding(),
                 task: actorRequest.task,
                 allowRecursion: actorRequest.allowRecursion === true,
+                grantedOperations: childOperationsFor(actorRequest),
                 ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
                 ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
                 ...(actorRequest.maxDepth === undefined ? {} : { maxDepth: actorRequest.maxDepth }),
               }),
               spawnAsync: (/** @type {any} */ actorRequest) => rpc('turn.actor.spawn-async', {
-                ...binding,
+                ...binding(),
                 task: actorRequest.task,
                 allowRecursion: actorRequest.allowRecursion === true,
+                grantedOperations: childOperationsFor(actorRequest),
                 ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
                 ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
                 ...(actorRequest.maxDepth === undefined ? {} : { maxDepth: actorRequest.maxDepth }),
               }),
-              listTasks: () => rpc('turn.actor.tasks', binding),
+              listTasks: () => rpc('turn.actor.tasks', binding()),
               cancelTask: (/** @type {string} */ taskId) =>
-                rpc('turn.actor.cancel', { ...binding, taskId }),
+                rpc('turn.actor.cancel', { ...binding(), taskId }),
               message: (/** @type {any} */ actorRequest) => rpc('turn.actor.message', {
-                ...binding,
+                ...binding(),
                 to: actorRequest.to,
                 message: actorRequest.message,
                 oneShot: actorRequest.oneShot === true,
@@ -424,30 +458,24 @@ const runControllerTurnWith = async (payload, options) => {
             });
             const value = await executeControllerActorTool(
               request.toolName, request.args, request.projection, actorAuthority,
-              { callId: request.callId, signal: options.signal },
+              { callId: /** @type {any} */ (call).id, signal: options.signal },
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsPodTool(request.toolName)) {
             const podAuthority = Object.freeze({
               resolve: (/** @type {any} */ podRequest) => rpc('turn.pod.resolve', {
-                ...binding, podId: podRequest?.podId,
+                ...binding(), podId: podRequest?.podId,
+                ...(typeof request.args?.command === 'string'
+                  ? { command: request.args.command } : {}),
               }),
               readRemote: (/** @type {string} */ podId) => rpc('turn.pod.read-remote', {
-                ...binding, podId,
+                ...binding(), podId,
               }),
               confirmGit: (/** @type {string} */ op) => rpc('turn.pod.confirm-git', {
-                ...binding, op,
+                ...binding(), op,
               }),
               executeCommand: (/** @type {any} */ podRequest) => rpc('turn.pod.exec', {
-                ...binding,
+                ...binding(),
                 command: podRequest.command,
                 podId: podRequest.podId,
                 timeoutMs: podRequest.timeoutMs,
@@ -455,7 +483,7 @@ const runControllerTurnWith = async (payload, options) => {
                 remoteGitGrant: podRequest.remoteGitGrant ?? null,
               }),
               readStatus: (/** @type {any} */ podRequest) => rpc('turn.pod.status', {
-                ...binding,
+                ...binding(),
                 podId: podRequest.podId,
                 jobId: podRequest.jobId,
                 stream: podRequest.stream,
@@ -463,13 +491,13 @@ const runControllerTurnWith = async (payload, options) => {
                 limit: podRequest.limit,
               }),
               cancelJob: (/** @type {any} */ podRequest) => rpc('turn.pod.cancel', {
-                ...binding, podId: podRequest.podId, jobId: podRequest.jobId,
+                ...binding(), podId: podRequest.podId, jobId: podRequest.jobId,
               }),
               readFile: (/** @type {any} */ podRequest) => rpc('turn.pod.read-file', {
-                ...binding, podId: podRequest.podId, path: podRequest.path,
+                ...binding(), podId: podRequest.podId, path: podRequest.path,
               }),
               writeFile: (/** @type {any} */ podRequest) => rpc('turn.pod.write-file', {
-                ...binding, podId: podRequest.podId, path: podRequest.path,
+                ...binding(), podId: podRequest.podId, path: podRequest.path,
                 content: podRequest.content,
               }),
             });
@@ -477,131 +505,102 @@ const runControllerTurnWith = async (payload, options) => {
               request.toolName, request.args, request.projection, podAuthority,
               { signal: options.signal },
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsRepositoryTool(request.toolName)) {
             const repositoryAuthority = Object.freeze({
               readPod: (/** @type {string} */ podId) => rpc('turn.repository.read-pod', {
-                ...binding, podId,
+                ...binding(), podId,
               }),
               destroyPod: (/** @type {string} */ podId) => rpc('turn.repository.destroy-pod', {
-                ...binding, podId,
+                ...binding(), podId,
               }),
-              readStatus: () => rpc('turn.repository.read-status', binding),
+              readStatus: () => rpc('turn.repository.read-status', binding()),
               readHistory: (/** @type {number} */ depth) => rpc('turn.repository.read-history', {
-                ...binding, depth,
+                ...binding(), depth,
               }),
-              readRemote: () => rpc('turn.repository.read-remote', binding),
+              readRemote: () => rpc('turn.repository.read-remote', binding()),
               readDiff: (/** @type {string} */ from, /** @type {string|null} */ to) =>
-                rpc('turn.repository.read-diff', { ...binding, from, to }),
+                rpc('turn.repository.read-diff', { ...binding(), from, to }),
               confirmRestore: (/** @type {string} */ to) =>
-                rpc('turn.repository.confirm-restore', { ...binding, to }),
+                rpc('turn.repository.confirm-restore', { ...binding(), to }),
               checkpoint: (/** @type {string} */ message) =>
-                rpc('turn.repository.checkpoint', { ...binding, message }),
+                rpc('turn.repository.checkpoint', { ...binding(), message }),
               branch: (/** @type {string} */ name) =>
-                rpc('turn.repository.branch', { ...binding, name }),
+                rpc('turn.repository.branch', { ...binding(), name }),
               checkout: (/** @type {string} */ name) =>
-                rpc('turn.repository.checkout', { ...binding, name }),
+                rpc('turn.repository.checkout', { ...binding(), name }),
               restore: (/** @type {string} */ to) =>
-                rpc('turn.repository.restore', { ...binding, to }),
+                rpc('turn.repository.restore', { ...binding(), to }),
               confirmRemote: (/** @type {string} */ op, /** @type {string} */ target,
                 /** @type {string|undefined} */ branch) =>
-                rpc('turn.repository.confirm-remote', { ...binding, op, target, branch }),
+                rpc('turn.repository.confirm-remote', {
+                  ...binding(), op, target, branch,
+                  ...(typeof request.args?.url === 'string' ? { url: request.args.url } : {}),
+                }),
               link: (/** @type {string} */ url) =>
-                rpc('turn.repository.link', { ...binding, url }),
+                rpc('turn.repository.link', { ...binding(), url }),
               fetch: (/** @type {string} */ target) =>
-                rpc('turn.repository.fetch', { ...binding, target }),
+                rpc('turn.repository.fetch', { ...binding(), target }),
               push: (/** @type {string} */ target, /** @type {string|undefined} */ branch) =>
-                rpc('turn.repository.push', { ...binding, target, branch }),
+                rpc('turn.repository.push', { ...binding(), target, branch }),
             });
             const value = await executeControllerRepositoryTool(
               request.toolName, request.args, request.projection, repositoryAuthority,
               { signal: options.signal },
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsVmTool(request.toolName)) {
             const vmAuthority = Object.freeze({
               readVm: (/** @type {string} */ vmId) => rpc('turn.vm.read', {
-                ...binding, vmId,
+                ...binding(), vmId,
               }),
-              listVms: () => rpc('turn.vm.list', binding),
+              listVms: () => rpc('turn.vm.list', binding()),
               setDefaultVm: (/** @type {string} */ vmId) => rpc('turn.vm.set-default', {
-                ...binding, vmId,
+                ...binding(), vmId,
               }),
               runVm: (/** @type {string} */ command, /** @type {number} */ timeoutMs,
                 /** @type {string|undefined} */ vmId) => rpc('turn.vm.run', {
-                ...binding, command, timeoutMs, vmId,
+                ...binding(), command, timeoutMs, vmId,
               }),
               importFile: (/** @type {string} */ url, /** @type {string} */ path,
                 /** @type {number} */ maxBytes) => rpc('turn.vm.import-file', {
-                ...binding, url, path, maxBytes,
+                ...binding(), url, path, maxBytes,
               }),
               writeTextFile: (/** @type {string} */ path, /** @type {string} */ content) =>
-                rpc('turn.vm.write-text-file', { ...binding, path, content }),
+                rpc('turn.vm.write-text-file', { ...binding(), path, content }),
               destroyVm: (/** @type {string} */ vmId) => rpc('turn.vm.destroy', {
-                ...binding, vmId,
+                ...binding(), vmId,
               }),
             });
             const value = await executeControllerVmTool(
               request.toolName, request.args, vmAuthority,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsNotebookTool(request.toolName)) {
             const notebookAuthority = Object.freeze({
               readNotebook: (/** @type {string} */ notebookId) => rpc('turn.notebook.read', {
-                ...binding, notebookId,
+                ...binding(), notebookId,
               }),
-              listNotebooks: () => rpc('turn.notebook.list', binding),
+              listNotebooks: () => rpc('turn.notebook.list', binding()),
               setDefaultNotebook: (/** @type {string} */ notebookId) =>
-                rpc('turn.notebook.set-default', { ...binding, notebookId }),
+                rpc('turn.notebook.set-default', { ...binding(), notebookId }),
               runNotebook: (/** @type {string} */ code, /** @type {number} */ timeoutMs,
                 /** @type {string|undefined} */ notebookId) => rpc('turn.notebook.run', {
-                ...binding, code, timeoutMs, notebookId,
+                ...binding(), code, timeoutMs, notebookId,
               }),
               writeFile: (/** @type {string} */ path, /** @type {string} */ content,
                 /** @type {string|undefined} */ notebookId) =>
-                rpc('turn.notebook.write-file', { ...binding, path, content, notebookId }),
+                rpc('turn.notebook.write-file', { ...binding(), path, content, notebookId }),
               readFile: (/** @type {string} */ path,
                 /** @type {string|undefined} */ notebookId) =>
-                rpc('turn.notebook.read-file', { ...binding, path, notebookId }),
+                rpc('turn.notebook.read-file', { ...binding(), path, notebookId }),
               destroyNotebook: (/** @type {string} */ notebookId) =>
-                rpc('turn.notebook.destroy', { ...binding, notebookId }),
+                rpc('turn.notebook.destroy', { ...binding(), notebookId }),
             });
             const value = await executeControllerNotebookTool(
               request.toolName, request.args, notebookAuthority, { signal: options.signal },
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsAppTool(request.toolName)) {
             const appAuthority = Object.freeze({
               updateApp: (
@@ -611,316 +610,272 @@ const runControllerTurnWith = async (payload, options) => {
                 /** @type {string[]|undefined} */ tags,
                 /** @type {string|undefined} */ entryFile,
               ) => rpc('turn.app.update', {
-                ...binding, appId, name, html, tags, entryFile,
+                ...binding(), appId, name, html, tags, entryFile,
               }),
               openApp: (/** @type {string} */ appId) => rpc('turn.app.open', {
-                ...binding, appId,
+                ...binding(), appId,
               }),
               searchApps: (/** @type {string} */ query) => rpc('turn.app.search', {
-                ...binding, query,
+                ...binding(), query,
               }),
               readApp: (/** @type {string} */ appId) => rpc('turn.app.read', {
-                ...binding, appId,
+                ...binding(), appId,
               }),
               deleteApp: (/** @type {string} */ appId) => rpc('turn.app.delete', {
-                ...binding, appId,
+                ...binding(), appId,
               }),
               writeFile: (
                 /** @type {string|undefined} */ appId,
                 /** @type {string} */ path,
                 /** @type {unknown} */ content,
-              ) => rpc('turn.app.write-file', { ...binding, appId, path, content }),
+              ) => rpc('turn.app.write-file', { ...binding(), appId, path, content }),
               readFile: (
                 /** @type {string|undefined} */ appId, /** @type {string} */ path,
-              ) => rpc('turn.app.read-file', { ...binding, appId, path }),
+              ) => rpc('turn.app.read-file', { ...binding(), appId, path }),
               listFiles: (/** @type {string|undefined} */ appId) =>
-                rpc('turn.app.list-files', { ...binding, appId }),
+                rpc('turn.app.list-files', { ...binding(), appId }),
               deleteFile: (
                 /** @type {string|undefined} */ appId, /** @type {string} */ path,
-              ) => rpc('turn.app.delete-file', { ...binding, appId, path }),
-              observeRuntime: () => rpc('turn.app.observe', binding),
+              ) => rpc('turn.app.delete-file', { ...binding(), appId, path }),
+              observeRuntime: () => rpc('turn.app.observe', binding()),
               actRuntime: (
                 /** @type {string} */ action,
                 /** @type {Record<string,unknown>} */ params,
-              ) => rpc('turn.app.act', { ...binding, action, params }),
+              ) => rpc('turn.app.act', { ...binding(), action, params }),
               runCode: (/** @type {string} */ code, /** @type {number} */ timeoutMs) =>
-                rpc('turn.app.run-code', { ...binding, code, timeoutMs }),
+                rpc('turn.app.run-code', { ...binding(), code, timeoutMs }),
             });
             const value = await executeControllerAppTool(
               request.toolName, request.args, appAuthority, request.projection,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsPersistenceTool(request.toolName)) {
             const persistenceAuthority = Object.freeze({
               readMemoryScope: (/** @type {any} */ scope) =>
-                rpc('turn.memory.read-scope', { ...binding, scope }),
+                rpc('turn.memory.read-scope', { ...binding(), scope }),
               readMemorySubtree: (/** @type {string} */ workspace,
                 /** @type {string} */ subpath) => rpc('turn.memory.read-subtree', {
-                ...binding, workspace, subpath,
+                ...binding(), workspace, subpath,
               }),
               writeMemory: (/** @type {any} */ scope, /** @type {string} */ body) =>
-                rpc('turn.memory.write', { ...binding, scope, body }),
-              readTodos: () => rpc('turn.todo.read', binding),
+                rpc('turn.memory.write', { ...binding(), scope, body }),
+              readTodos: () => rpc('turn.todo.read', binding()),
               replaceTodos: (/** @type {string} */ version, /** @type {any[]} */ todos) =>
-                rpc('turn.todo.replace', { ...binding, version, todos }),
+                rpc('turn.todo.replace', { ...binding(), version, todos }),
             });
             const value = await executeControllerPersistenceTool(
               request.toolName, request.args, request.projection, persistenceAuthority,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsPageTool(request.toolName)) {
             const pageAuthority = Object.freeze({
-              openProtectedBackgroundTab: () => rpc('turn.page.open-tab', binding),
-              readOwnedPage: () => rpc('turn.page.read', binding),
-              captureOwnedAccessibilityTree: () => rpc('turn.page.snapshot', binding),
-              readOwnedFrameworkState: () => rpc('turn.page.read-state', binding),
-              drainOwnedDomChanges: () => rpc('turn.page.watch-changes', binding),
-              queryOwnedDom: () => rpc('turn.page.query-dom', binding),
-              navigateOwnedTab: () => rpc('turn.page.navigate', binding),
-              fillOwnedTarget: () => rpc('turn.page.fill', binding),
-              clickOwnedTarget: () => rpc('turn.page.click', binding),
-              performConfirmedOwnedLogin: () => rpc('turn.page.login', binding),
-              runOwnedPageProgram: () => rpc('turn.page.run-program', binding),
-              captureForegroundPixels: () => rpc('turn.page.capture-foreground', binding),
-              captureOwnedTabPixels: () => rpc('turn.page.capture-owned', binding),
+              openProtectedBackgroundTab: () => rpc('turn.page.open-tab', {
+                ...binding(), args: prepared.args,
+              }),
+              readOwnedPage: () => rpc('turn.page.read', {
+                ...binding(), args: prepared.args,
+              }),
+              captureOwnedAccessibilityTree: () => rpc('turn.page.snapshot', {
+                ...binding(), args: prepared.args,
+              }),
+              readOwnedFrameworkState: () => rpc('turn.page.read-state', {
+                ...binding(), args: prepared.args,
+              }),
+              drainOwnedDomChanges: () => rpc('turn.page.watch-changes', {
+                ...binding(), args: prepared.args,
+              }),
+              queryOwnedDom: () => rpc('turn.page.query-dom', {
+                ...binding(), args: prepared.args,
+              }),
+              navigateOwnedTab: () => rpc('turn.page.navigate', {
+                ...binding(), args: prepared.args,
+              }),
+              fillOwnedTarget: () => rpc('turn.page.fill', {
+                ...binding(), args: prepared.args,
+              }),
+              clickOwnedTarget: () => rpc('turn.page.click', {
+                ...binding(), args: prepared.args,
+              }),
+              performConfirmedOwnedLogin: () => rpc('turn.page.login', {
+                ...binding(), args: prepared.args,
+              }),
+              runOwnedPageProgram: () => rpc('turn.page.run-program', {
+                ...binding(), args: prepared.args,
+              }),
+              captureForegroundPixels: () => rpc('turn.page.capture-foreground', {
+                ...binding(), args: prepared.args,
+              }),
+              captureOwnedTabPixels: () => rpc('turn.page.capture-owned', {
+                ...binding(), args: prepared.args,
+              }),
             });
             const value = await executeControllerPageTool(
               request.toolName, request.args, pageAuthority,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsResourceTool(request.toolName)) {
             const resourceAuthority = Object.freeze({
-              confirmWebWrite: (/** @type {string} */ url, /** @type {string} */ method) =>
-                rpc('turn.resource.confirm-web-write', { ...binding, url, method }),
+              confirmWebWrite: (/** @type {any} */ webRequest) =>
+                rpc('turn.resource.confirm-web-write', { ...binding(), ...webRequest }),
               requestWebText: (/** @type {any} */ webRequest) =>
-                rpc('turn.resource.request-web-text', { ...binding, ...webRequest }),
+                rpc('turn.resource.request-web-text', { ...binding(), ...webRequest }),
               extractReadableMarkdown: (/** @type {string} */ html,
                 /** @type {string} */ url) => rpc('turn.resource.extract-markdown', {
-                ...binding, html, url,
+                ...binding(), html, url,
               }),
               extractDocument: (/** @type {any} */ documentRequest) =>
-                rpc('turn.resource.extract-document', { ...binding, ...documentRequest }),
+                rpc('turn.resource.extract-document', { ...binding(), ...documentRequest }),
               spillResult: (/** @type {any} */ record) =>
-                rpc('turn.resource.spill-result', { ...binding, ...record }),
+                rpc('turn.resource.spill-result', { ...binding(), ...record }),
               readResult: (/** @type {string} */ key) =>
-                rpc('turn.resource.read-result', { ...binding, key }),
+                rpc('turn.resource.read-result', { ...binding(), key }),
             });
             const value = await executeControllerResourceTool(
               request.toolName, request.args, resourceAuthority, request.projection,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsSiteClientTool(request.toolName)) {
             const siteClientAuthority = Object.freeze({
               readStoredClient: (/** @type {string} */ origin) =>
-                rpc('turn.site-client.read', { ...binding, origin }),
+                rpc('turn.site-client.read', { ...binding(), origin }),
               runStoredClient: (/** @type {string} */ origin, /** @type {string} */ code,
                 /** @type {number} */ timeoutMs) =>
-                rpc('turn.site-client.run', { ...binding, origin, code, timeoutMs }),
+                rpc('turn.site-client.run', { ...binding(), origin, code, timeoutMs }),
               commitConfirmedClient: (/** @type {string} */ origin) =>
-                rpc('turn.site-client.commit', { ...binding, origin }),
-              startOwnedCapture: () => rpc('turn.site-client.capture-start', binding),
-              stopOwnedCapture: () => rpc('turn.site-client.capture-stop', binding),
+                rpc('turn.site-client.commit', {
+                  ...binding(), origin,
+                  ...(typeof request.args?.summary === 'string'
+                    ? { summary: request.args.summary } : {}),
+                  ...(Array.isArray(request.args?.endpoints)
+                    ? { endpoints: request.args.endpoints } : {}),
+                  ...(request.args?.auth !== undefined ? { auth: request.args.auth } : {}),
+                  ...(request.args?.deriver !== undefined
+                    ? { deriver: request.args.deriver } : {}),
+                  ...(typeof request.args?.body === 'string' ? { body: request.args.body } : {}),
+                }),
+              startOwnedCapture: () => rpc('turn.site-client.capture-start', binding()),
+              stopOwnedCapture: () => rpc('turn.site-client.capture-stop', binding()),
             });
             const value = await executeControllerSiteClientTool(
               request.toolName, request.args, siteClientAuthority,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsExecutionTool(request.toolName)) {
             const executionAuthority = Object.freeze({
               createWebVm: (/** @type {any} */ plan) =>
-                rpc('turn.execution.create-webvm', { ...binding, plan }),
+                rpc('turn.execution.create-webvm', { ...binding(), plan }),
               createNotebook: (/** @type {any} */ plan) =>
-                rpc('turn.execution.create-notebook', { ...binding, plan }),
+                rpc('turn.execution.create-notebook', { ...binding(), plan }),
               createPod: (/** @type {any} */ plan) =>
-                rpc('turn.execution.create-pod', { ...binding, plan }),
+                rpc('turn.execution.create-pod', { ...binding(), plan }),
               createApp: (/** @type {any} */ plan) =>
-                rpc('turn.execution.create-app', { ...binding, plan }),
+                rpc('turn.execution.create-app', { ...binding(), plan }),
               runHeadlessScript: (/** @type {any} */ scriptRequest) =>
-                rpc('turn.execution.run-script', { ...binding, ...scriptRequest }),
+                rpc('turn.execution.run-script', { ...binding(), ...scriptRequest }),
               spillScriptValue: (/** @type {any} */ record) =>
-                rpc('turn.execution.spill-script', { ...binding, ...record }),
+                rpc('turn.execution.spill-script', { ...binding(), ...record }),
             });
             const value = await executeControllerExecutionTool(
               request.toolName, request.args, executionAuthority, request.projection,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsEditingTool(request.toolName)) {
             const editingAuthority = Object.freeze({
               readEditTarget: (/** @type {any} */ target) =>
-                rpc('turn.editing.read-target', { ...binding, ...target }),
+                rpc('turn.editing.read-target', { ...binding(), ...target }),
               writeEditTarget: (/** @type {any} */ target) =>
-                rpc('turn.editing.write-target', { ...binding, ...target }),
+                rpc('turn.editing.write-target', { ...binding(), ...target }),
             });
             const value = await executeControllerEditingTool(
               request.toolName, request.args, editingAuthority,
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsIntrospectionTool(request.toolName)) {
             const introspectionAuthority = Object.freeze({
-              readActorRoster: () => rpc('turn.introspection.actor-roster', binding),
-              readProviderPosture: () => rpc('turn.introspection.provider-posture', binding),
+              readActorRoster: () => rpc('turn.introspection.actor-roster', binding()),
+              readProviderPosture: () => rpc('turn.introspection.provider-posture', binding()),
               readStorageSnapshot: (/** @type {string|undefined} */ prefix) =>
-                rpc('turn.introspection.storage-snapshot', { ...binding, prefix }),
+                rpc('turn.introspection.storage-snapshot', { ...binding(), prefix }),
               readAutomatableTabs: () =>
-                rpc('turn.introspection.automatable-tabs', binding),
+                rpc('turn.introspection.automatable-tabs', binding()),
               readDenylistPatterns: () =>
-                rpc('turn.introspection.denylist-patterns', binding),
-              readAuditEntries: () => rpc('turn.introspection.audit-entries', binding),
+                rpc('turn.introspection.denylist-patterns', binding()),
+              readAuditEntries: () => rpc('turn.introspection.audit-entries', binding()),
               readInstalledSkill: (/** @type {string} */ name) =>
-                rpc('turn.introspection.installed-skill', { ...binding, name }),
+                rpc('turn.introspection.installed-skill', { ...binding(), name }),
             });
             const value = await executeControllerIntrospectionTool(
               request.toolName, request.args, request.projection,
               introspectionAuthority, { signal: options.signal },
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsScheduleTool(request.toolName)) {
             const scheduleAuthority = Object.freeze({
-              readRoutines: () => rpc('turn.schedule.read-routines', binding),
+              readRoutines: () => rpc('turn.schedule.read-routines', binding()),
               armConfirmedRoutine: (/** @type {any} */ routine) =>
-                rpc('turn.schedule.arm-confirmed-routine', { ...binding, ...routine }),
+                rpc('turn.schedule.arm-confirmed-routine', { ...binding(), ...routine }),
               cancelRoutine: (/** @type {string} */ id) =>
-                rpc('turn.schedule.cancel-routine', { ...binding, id }),
+                rpc('turn.schedule.cancel-routine', { ...binding(), id }),
             });
             const value = await executeControllerScheduleTool(
               request.toolName, request.args, scheduleAuthority, { signal: options.signal },
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else if (controllerHostsDwebTool(request.toolName)) {
             const dwebAuthority = Object.freeze({
-              discoverApps: () => rpc('turn.dweb.discover-apps', binding),
+              discoverApps: () => rpc('turn.dweb.discover-apps', binding()),
               publishConfirmedApp: (/** @type {string} */ appId) =>
-                rpc('turn.dweb.publish-confirmed-app', { ...binding, appId }),
+                rpc('turn.dweb.publish-confirmed-app', { ...binding(), appId }),
               installConfirmedApp: (/** @type {string} */ uri,
                 /** @type {string|undefined} */ name) =>
-                rpc('turn.dweb.install-confirmed-app', { ...binding, uri, name }),
-              readPeers: () => rpc('turn.dweb.read-peers', binding),
+                rpc('turn.dweb.install-confirmed-app', { ...binding(), uri, name }),
+              readPeers: () => rpc('turn.dweb.read-peers', binding()),
               setPeerBlocked: (/** @type {string} */ did, /** @type {boolean} */ block,
                 /** @type {string|undefined} */ reason) =>
-                rpc('turn.dweb.set-peer-blocked', { ...binding, did, block, reason }),
+                rpc('turn.dweb.set-peer-blocked', { ...binding(), did, block, reason }),
               setDiscoveryEnabled: (/** @type {boolean} */ enabled) =>
-                rpc('turn.dweb.set-discovery-enabled', { ...binding, enabled }),
+                rpc('turn.dweb.set-discovery-enabled', { ...binding(), enabled }),
               runMeshProgram: (/** @type {string} */ code,
                 /** @type {number} */ timeoutMs) =>
-                rpc('turn.dweb.run-mesh-program', { ...binding, code, timeoutMs }),
+                rpc('turn.dweb.run-mesh-program', { ...binding(), code, timeoutMs }),
             });
             const value = await executeControllerDwebTool(
               request.toolName, request.args, request.projection,
               dwebAuthority, { signal: options.signal },
             );
-            execution = {
-              protocol: request.protocol,
-              executionId: request.executionId,
-              argsDigest: request.argsDigest,
-              ok: true,
-              outcomeKnown: true,
-              effectEntered: true,
-              value,
-            };
+            return value;
           } else throw Object.assign(new Error('controller tool executor unavailable'), {
             code: 'controller-tool-executor-unavailable', outcomeKnown: true,
           });
         } catch (cause) {
-          const error = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-          execution = {
-            protocol: request.protocol,
-            executionId: request.executionId,
-            argsDigest: request.argsDigest,
+          const failure = normalizeSemanticToolFailure(cause, { effectCount });
+          return {
             ok: false,
-            code: error?.code ?? 'controller-tool-execution-failed',
-            error: error?.message ?? 'Tool execution interrupted.',
-            outcomeKnown: error?.outcomeKnown !== false,
-            effectEntered: false,
-            retryable: error?.retryable ?? error?.outcomeKnown !== false,
-            phase: 'run',
+            error: failure.error,
+            code: failure.code ?? 'controller-tool-execution-failed',
+            outcomeKnown: failure.outcomeKnown,
+            retryable: failure.retryable,
           };
         }
-        const result = parseJson(await rpc('turn.tool.settle', {
-          executionId: request.executionId,
-          argsDigest: request.argsDigest,
-          turnGeneration: request.turnGeneration,
-          resultJson: JSON.stringify(execution),
-        }), 'tool result');
-        if (result?.outcomeKnown === false) nestedUnknown = true;
-        return result;
+          },
+        });
       }),
+      // Name/descriptor scheduling stays inside this sealed semantic heap. The
+      // authority host receives only exact operation requests and never a tool
+      // classification table.
+      classifyToolCall: (/** @type {string} */ name) => {
+        const descriptor = descriptorsByName.get(name);
+        if (!descriptor) return null;
+        return decideAction({
+          mode: semanticPolicy.permission?.mode,
+          confirmActions: semanticPolicy.permission?.confirmActions,
+          tool: descriptor,
+        });
+      },
       finalizeAbort: async (/** @type {any} */ value) => {
         await rpc('turn.abort.finalize', value);
         abortFinalized = true;
       },
-      classifyToolCall: (/** @type {string} */ name) => classifications[name] ?? null,
       enrichTrimSummary: (/** @type {unknown} */ request) => {
         trackAdvisory(rpc('turn.trim.enrich', { request })).catch(() => {});
       },

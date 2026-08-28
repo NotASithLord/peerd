@@ -30,6 +30,13 @@ export {
 export { captureVisible } from './tools/web/primitives.js';
 export { classifyLoginAffordance, loginTargetReader } from './tools/login-affordance.js';
 export { isKnownIdp } from './actor/idp-registry.js';
+export { classifyUrl as classifyUgcUrl } from './actor/ugc-registry.js';
+export { describeToolActivity, displayOrigin } from './actor/activity-label.js';
+export {
+  normalizeBrowserChildPolicyNotices,
+  withAsyncBrowserChildPolicyNotices,
+  withBrowserChildPolicyNotices,
+} from './browser-authority/child-policy-result.js';
 export { wrapUntrusted } from './tools/prompt-wrap.js';
 export { disarmMarkup } from './dom/cdr.js';
 export { excerptFooter, excerptRelevant, pagingFooter, windowText } from './tools/web/spill.js';

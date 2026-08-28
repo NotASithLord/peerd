@@ -259,15 +259,15 @@ describe('reduceChat', () => {
   test('spawned lifecycle keeps live parentage + server-resolved grants through state, then settles', () => {
     const seeded = reduceChat(INITIAL_STATE, {
       type: 'turn/spawned-start', sessionId: 'c1', parentSessionId: 'root',
-      depth: 1, task: 'research', grantedTools: ['script'],
+      depth: 1, task: 'research', visibleTools: ['script'],
     });
     expect(seeded.spawned.sessions.c1).toMatchObject({
-      task: 'research', parentSessionId: 'root', grantedTools: ['script'], running: true,
+      task: 'research', parentSessionId: 'root', visibleTools: ['script'], running: true,
     });
     const folded = reduceChat(seeded, { type: 'turn/spawned-state', session: { sessionId: 'c1', messages: [{ id: 'x' }] } });
     expect(folded.spawned.sessions.c1.messages).toHaveLength(1);
     expect(folded.spawned.sessions.c1).toMatchObject({
-      parentSessionId: 'root', grantedTools: ['script'], running: true,
+      parentSessionId: 'root', visibleTools: ['script'], running: true,
     });
     const done = reduceChat(folded, { type: 'turn/spawned-done', sessionId: 'c1' });
     expect(done.spawned.sessions.c1.running).toBe(false);
@@ -1052,7 +1052,7 @@ describe('reduceChat', () => {
     const started = reduceChat(viewing, {
       type: 'turn/actor-start', rootSessionId: 'A', parentSessionId: 'A',
       parentToolUseId: 'tu-1', sessionId: 'actor-a', fromIndex: 0,
-      task: 'inspect', grantedTools: ['read_page'],
+      task: 'inspect', visibleTools: ['read_page'],
     });
     const withActivity = reduceChat(started, {
       type: 'turn/actor-state', rootSessionId: 'A', parentToolUseId: 'tu-1', fromIndex: 0,
@@ -1065,7 +1065,7 @@ describe('reduceChat', () => {
       },
     });
     expect(snap.actors['tu-1']).toMatchObject({
-      sessionId: 'actor-a', task: 'inspect', grantedTools: ['read_page'],
+      sessionId: 'actor-a', task: 'inspect', visibleTools: ['read_page'],
       streaming: false, messages: [{ id: 'reply' }],
     });
   });

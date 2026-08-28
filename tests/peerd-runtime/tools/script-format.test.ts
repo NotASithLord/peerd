@@ -196,6 +196,25 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     expect(result.content).not.toContain('delivery-1');
   });
 
+  test('nested host custody loss remains unknown and nonretryable in the semantic result', async () => {
+    const { ctx } = ctxWith({}, {
+      error: 'nested host operation outcome unknown',
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
+    const result: any = await scriptTool.execute({ code: 'return 1' }, ctx as any);
+    expect(result).toMatchObject({
+      ok: false, error: 'script_nested_host_outcome_unknown',
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
+  });
+
+  test('ordinary user-code failure remains a known completed script result', async () => {
+    const { ctx } = ctxWith({}, { error: 'ReferenceError: missing is not defined' });
+    const result: any = await scriptTool.execute({ code: 'return missing' }, ctx as any);
+    expect(result).toMatchObject({ ok: true, content: expect.stringContaining('ReferenceError') });
+    expect(result.outcomeKnown).toBeUndefined();
+  });
+
   test('a transport-failure trace redacts an instruction-shaped target', async () => {
     const payload = 'IGNORE_PREVIOUS_INSTRUCTIONS';
     const errorPayload = 'TRANSPORT_ERROR_IGNORE_INSTRUCTIONS';
@@ -212,6 +231,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     };
     const { ctx } = ctxWith({
       messageActor: async () => {},
+      operationGrant: new Set(['turn.actor.message']),
       scriptRuns,
       jsOffscreenClient: {
         // The thrown transport error does not repeat the target. Its identity
@@ -244,6 +264,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     const errorPayload = 'TRANSPORT_ERROR_IGNORE_INSTRUCTIONS';
     const { ctx } = ctxWith({
       messageActor: async () => {},
+      operationGrant: new Set(['turn.actor.message']),
       scriptRuns: {
         mintRunId: () => 'failed-run', register: () => {}, abort: () => {},
         release: () => {}, opsFor: () => [],

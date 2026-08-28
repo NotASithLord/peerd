@@ -1,6 +1,9 @@
 // @ts-check
 const SESSION_STORE = 'sessions';
 const MESSAGE_STORE = 'session_messages';
+const MUTABLE_METADATA_FIELDS = new Set([
+  'provider', 'model', 'permissionMode', 'confirmActions', 'cost',
+]);
 
 /** @param {any} record @param {any[]|undefined} [messages] */
 const present = (record, messages = undefined) => {
@@ -57,6 +60,10 @@ export const createKernelSessionReader = (idb) => {
     /** @param {string} sessionId @param {Record<string,unknown>} fields */
     updateMetadata: async (sessionId, fields) => {
       if (typeof idb.patch !== 'function') throw new Error('session-atomic-update-unavailable');
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields)
+          || Object.keys(fields).some((field) => !MUTABLE_METADATA_FIELDS.has(field))) {
+        throw new TypeError('kernel-session-update-field-invalid');
+      }
       return present(await idb.patch(SESSION_STORE, sessionId, fields));
     },
     listMetadata: async () => (await idb.getAll(SESSION_STORE))

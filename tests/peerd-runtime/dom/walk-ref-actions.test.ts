@@ -389,4 +389,31 @@ describe('injected bodies — walk-ref cardinality guard (real functions)', () =
       expect(r.error).toContain('stale_ref');
     });
   });
+
+  test('typeInjected validates a select option before a hostile focus handler can run', () => {
+    let focusCalls = 0;
+    const select = {
+      isConnected: true, tagName: 'SELECT',
+      options: [{ label: 'Safe', text: 'Safe', value: 'safe' }],
+      focus: () => { focusCalls += 1; },
+    };
+    withRegistry([[3, select]], () => {
+      const result: any = typeInjected(null, 'missing', false, 3, 1);
+      expect(result).toEqual({ ok: false, error: 'no_option_matching' });
+      expect(focusCalls).toBe(0);
+    });
+  });
+
+  test('typeInjected proves typability before a hostile focus handler can run', () => {
+    let focusCalls = 0;
+    const element = {
+      isConnected: true, tagName: 'DIV', isContentEditable: false,
+      focus: () => { focusCalls += 1; },
+    };
+    withRegistry([[4, element]], () => {
+      const result: any = typeInjected(null, 'payload', false, 4, 1);
+      expect(result).toEqual({ ok: false, error: 'not_typable' });
+      expect(focusCalls).toBe(0);
+    });
+  });
 });

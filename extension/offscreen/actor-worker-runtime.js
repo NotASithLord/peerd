@@ -7,6 +7,7 @@
 // to the SW, which holds the key, engine clients, instance pin, and gate. The
 // untrusted instance/page output stays in this heap. Module worker → strict.
 import {
+  controllerHostsLocalTool,
   controllerHostsActorTool,
   controllerHostsPodTool,
   controllerHostsRepositoryTool,
@@ -22,8 +23,10 @@ import {
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
-  controllerAuthorityClassForTool,
   controllerHostsTool,
+  controllerOperationsForSpawnedTools,
+  dispatchToolCall,
+  executeControllerLocalTool,
   executeControllerActorTool,
   executeControllerPodTool,
   executeControllerRepositoryTool,
@@ -41,6 +44,7 @@ import {
   executeControllerDwebTool,
   reasoningForTurn,
   runUserTurn,
+  semanticHooksFor,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
 import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
@@ -52,8 +56,11 @@ import {
   providerModelContextWindow,
 } from '/peerd-provider/controller.js';
 import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
+import { originOf } from '/shared/url-origin.js';
 import { createActorModelEgress } from './actor-model-egress.js';
 import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
+import { nestedActorProgramCallId } from '/shared/actor-channel-protocol.js';
+import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
 
 let seq = 0;
 let runId = '';
@@ -63,10 +70,60 @@ const modelPending = new Map();
 const toolPending = new Map();
 const abort = new AbortController();
 let hasRun = false;
-/** @type {((call:any,options?:{pageProgramParentExecutionId?:string})=>Promise<any>)|null} */
+/** @type {((call:any,options?:{programParentExecutionId?:string})=>Promise<any>)|null} */
 let executeOwnedTool = null;
 
+const recoveredPrototypeCapabilityBlocked = async (
+  /** @type {any} */ target, /** @type {string} */ name, /** @type {unknown} */ argument,
+) => {
+  for (let object = Object.getPrototypeOf(target); object; object = Object.getPrototypeOf(object)) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, name);
+    if (!descriptor) continue;
+    try {
+      const recovered = typeof descriptor.get === 'function'
+        ? descriptor.get.call(target) : descriptor.value;
+      if (typeof recovered === 'function') {
+        await Promise.resolve(recovered.call(target, argument)).catch(() => {});
+      } else if (recovered && typeof recovered.getDirectory === 'function') {
+        await Promise.resolve(recovered.getDirectory()).catch(() => {});
+      }
+    } catch { /* a throwing recovered primitive is still a reachable primitive */ }
+    return false;
+  }
+  return true;
+};
+
 const pageProgramRequest = (/** @type {any} */ message) => {
+  if (message.type === 'page-program-navigate-request') {
+    return { response: 'page-program-navigate-response', tool: 'navigate' };
+  }
+  if (message.type === 'page-program-click-request') {
+    return { response: 'page-program-click-response', tool: 'click' };
+  }
+  if (message.type === 'page-program-fill-request') {
+    return { response: 'page-program-fill-response', tool: 'type' };
+  }
+  if (message.type === 'page-program-snapshot-request') {
+    return { response: 'page-program-snapshot-response', tool: 'snapshot' };
+  }
+  if (message.type === 'page-program-read-request') {
+    return { response: 'page-program-read-response', tool: 'read_page' };
+  }
+  if (message.type === 'page-program-read-state-request') {
+    return { response: 'page-program-read-state-response', tool: 'read_state' };
+  }
+  if (message.type === 'page-program-watch-changes-request') {
+    return { response: 'page-program-watch-changes-response', tool: 'watch_changes' };
+  }
+  if (message.type === 'page-program-query-request') {
+    return { response: 'page-program-query-response', tool: 'query_dom' };
+  }
+  if (message.type === 'page-program-view-request') {
+    return { response: 'page-program-view-response', tool: 'view' };
+  }
+  if (message.type === 'page-program-login-request') {
+    return { response: 'page-program-login-response', tool: 'login' };
+  }
   if (message.type === 'page-program-fetch-request') {
     return { response: 'page-program-fetch-response', tool: 'fetch_url' };
   }
@@ -88,21 +145,59 @@ const pageProgramRequest = (/** @type {any} */ message) => {
   return null;
 };
 
+const appProgramRequest = (/** @type {any} */ message) => {
+  if (message.type === 'app-program-observe-request') {
+    return { response: 'app-program-observe-response', tool: 'app_observe' };
+  }
+  if (message.type === 'app-program-act-request') {
+    return { response: 'app-program-act-response', tool: 'app_act' };
+  }
+  return null;
+};
+
 /** Start one actor Worker with an optional target-owned result projection. */
 export const startActorWorker = (
   /** @type {null|((result:any,program:any,metadata:any)=>any)} */
   projectResult = null,
+  /** @type {(()=>Record<string, boolean>)|null} */
+  realmProbe = null,
 ) => {
 self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
   const m = /** @type {any} */ (ev.data);
   if (!m || typeof m !== 'object') return;
 
   if (m.type === 'probe') {
+    // why: readiness is not just a one-time snapshot. Attempt the same ambient
+    // sabotage hostile semantic code would use, then require the bootstrap's
+    // closure to prove every non-configurable denial is still installed.
+    for (const name of [
+      'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'WebTransport',
+      'RTCPeerConnection', 'Worker', 'SharedWorker', 'BroadcastChannel',
+      'indexedDB', 'caches', 'importScripts',
+    ]) {
+      const ambient = /** @type {Record<string, any>} */ (globalThis);
+      try { ambient[name] = () => {}; } catch { /* sealed */ }
+      try { delete ambient[name]; } catch { /* sealed */ }
+    }
+    const ambientNavigator = /** @type {Record<string, any>} */ (/** @type {unknown} */ (navigator));
+    for (const name of ['sendBeacon', 'storage', 'serviceWorker', 'locks']) {
+      try { ambientNavigator[name] = {}; } catch { /* sealed */ }
+      try { delete ambientNavigator[name]; } catch { /* sealed */ }
+    }
+    const prototypeFetchBlocked = await recoveredPrototypeCapabilityBlocked(
+      globalThis, 'fetch', 'data:text/plain,actor-seal-probe',
+    );
+    const prototypeStorageBlocked = await recoveredPrototypeCapabilityBlocked(
+      navigator, 'storage', undefined,
+    );
     self.postMessage({
       type: 'probe-response',
       protocol: ACTOR_WORKER_PROTOCOL,
       rid: m.rid,
       canaryAbsent: typeof m.canaryName === 'string' && !(m.canaryName in globalThis),
+      realm: realmProbe?.() ?? null,
+      prototypeFetchBlocked,
+      prototypeStorageBlocked,
     });
     return;
   }
@@ -118,8 +213,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     modelPending.delete(m.rid);
     return;
   }
-  if (m.type === 'actor-tool-prepare-response'
-      || m.type === 'actor-spawn-sync-response'
+  if (m.type === 'actor-spawn-sync-response'
       || m.type === 'actor-spawn-async-response'
       || m.type === 'actor-tasks-read-response'
       || m.type === 'actor-task-cancel-response'
@@ -227,25 +321,27 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'dweb-read-peers-response'
       || m.type === 'dweb-set-peer-blocked-response'
       || m.type === 'dweb-set-discovery-enabled-response'
-      || m.type === 'actor-tool-settle-response') {
+      || m.type === 'actor-call-complete-response') {
     toolPending.get(m.rid)?.(m.reply);
     toolPending.delete(m.rid);
     return;
   }
-  const nestedPageProgram = pageProgramRequest(m);
-  if (nestedPageProgram) {
+  const nestedProgram = pageProgramRequest(m) ?? appProgramRequest(m);
+  if (nestedProgram) {
     const result = executeOwnedTool
       ? await executeOwnedTool({
-          id: `${runId}:${String(m.rid ?? '')}`,
-          name: nestedPageProgram.tool,
+          id: nestedActorProgramCallId(
+            runId, String(m.parentExecutionId ?? ''), String(m.rid ?? ''),
+          ),
+          name: nestedProgram.tool,
           args: m.args ?? {},
-        }, { pageProgramParentExecutionId: m.parentExecutionId })
+        }, { programParentExecutionId: m.parentExecutionId })
       : {
-          ok: false, error: 'page program semantic owner is not ready',
+          ok: false, error: 'program semantic owner is not ready',
           outcomeKnown: true,
         };
     self.postMessage({
-      type: nestedPageProgram.response, rid: m.rid, result,
+      type: nestedProgram.response, rid: m.rid, result,
     });
     return;
   }
@@ -279,6 +375,41 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       return;
     }
     runId = execution.id;
+    const hydratedTools = hydrateToolDescriptors(
+      Array.isArray(m.tools) ? m.tools : [], m.runtimeCapabilities,
+    );
+    const programTools = hydrateToolDescriptors(
+      Array.isArray(m.programTools) ? m.programTools : [], m.runtimeCapabilities,
+    );
+    const descriptorsByName = new Map(
+      [...hydratedTools, ...programTools].map((tool) => [tool.name, tool]),
+    );
+    const visibleToolNames = new Set(hydratedTools.map((tool) => tool.name));
+    const childOperationsFor = (/** @type {any} */ request) =>
+      controllerOperationsForSpawnedTools(
+        visibleToolNames, request.tools, request.allowRecursion === true,
+      );
+    const semanticPolicy = m.semanticPolicy && typeof m.semanticPolicy === 'object'
+      ? m.semanticPolicy : {};
+    const semanticHooks = semanticHooksFor(semanticPolicy.userHookRecords);
+    const ownedSiteClientOrigin = metadata.backing === 'api'
+      ? metadata.instanceId : metadata.tabOrigin;
+    const canUseSiteClientOrigin = (/** @type {unknown} */ candidate) => {
+      if (typeof candidate !== 'string') return false;
+      try {
+        const candidateOrigin = originOf(candidate);
+        // API actors own one immutable origin. A tab actor can legitimately
+        // navigate and rebind during this same turn; semantic code validates
+        // the origin shape while exact SW authority rechecks the live binding.
+        return metadata.backing === 'api'
+          ? typeof ownedSiteClientOrigin === 'string'
+            && candidateOrigin === originOf(ownedSiteClientOrigin)
+          : metadata.backing !== 'api';
+      }
+      catch { return false; }
+    };
+    /** @type {any} */
+    let semanticSession = null;
     const openInference = (/** @type {any} */ request) => new Promise((resolve) => {
       const rid = `mo-${++seq}`;
       modelPending.set(rid, resolve);
@@ -350,7 +481,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     });
     const authorityValue = async (/** @type {Promise<any>} */ pending) => {
       const reply = await pending;
-      if (reply?.ok === true) return reply.value;
+      if (reply?.ok === true && reply.value?.authorityReceipt
+          && Object.hasOwn(reply.value, 'authorityValue')) {
+        return reply.value.authorityValue;
+      }
       const error = new Error(reply?.error ?? 'actor authority operation failed');
       Object.assign(error, {
         code: reply?.code ?? 'actor-authority-failed',
@@ -361,44 +495,108 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
     };
     const executeActorTool = async (
       /** @type {any} */ call,
-      /** @type {{pageProgramParentExecutionId?:string}} */ options = {},
+      /** @type {{programParentExecutionId?:string,semanticPrepared?:boolean,effectCounter?:{count:number}}} */ options = {},
     ) => {
-      const authorityClass = controllerAuthorityClassForTool(call?.name);
-      if (authorityClass === null) {
+      if (!controllerHostsTool(call?.name) || typeof call?.id !== 'string') {
         return {
-          ok: false, error: 'actor tool has no controller authority class', outcomeKnown: true,
+          ok: false, error: 'actor tool has no controller semantic owner', outcomeKnown: true,
           meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
         };
       }
-      const prepared = await actorToolRequest(
-        'actor-tool-prepare-request', {
-          call, authorityClass,
-          ...(options.pageProgramParentExecutionId
-            ? { pageProgramParentExecutionId: options.pageProgramParentExecutionId }
+      if (options.semanticPrepared !== true) {
+        const descriptor = descriptorsByName.get(call.name);
+        if (!descriptor) return {
+          ok: false, error: `unknown_tool: ${String(call.name)}`, outcomeKnown: true,
+        };
+        const effectCounter = { count: 0 };
+        const boundActor = metadata.recordKind === 'actor';
+        const dispatched = await dispatchToolCall(call, {
+          ...semanticPolicy,
+          exposure: boundActor ? 'actor' : undefined,
+          actorType: boundActor ? metadata.actorType : undefined,
+          // why: code-surface actors expose page_code to the model, but the
+          // hidden page-program helpers are ordinary page tools semantically.
+          // Only a live parent execution can switch this one nested dispatch
+          // to the tools surface; direct model calls remain code-gated.
+          actorSurface: boundActor
+            ? options.programParentExecutionId ? 'tools' : metadata.actorSurface
+            : undefined,
+          backing: boundActor ? metadata.backing : undefined,
+          actorBacking: boundActor ? metadata.backing : undefined,
+          actorInstanceId: boundActor ? metadata.instanceId : undefined,
+          activeTab: boundActor
+            ? semanticPolicy.activeTab ?? (metadata.tabOrigin
+              ? { origin: metadata.tabOrigin } : undefined)
+            : undefined,
+          canUseSiteClientOrigin,
+          hooks: semanticHooks,
+          session: semanticSession ? {
+            ...semanticSession,
+            messageCount: semanticSession.messages?.length ?? 0,
+            trimCovered: semanticSession.trimSummary?.covered ?? 0,
+          } : {
+            sessionId: metadata.sessionId,
+            kind: metadata.recordKind === 'spawned' ? 'spawned' : 'actor',
+            messageCount: 0, trimCovered: 0,
+          },
+          abortSignal: abort.signal,
+          authorityOwnsLifecycle: true,
+          runtimeCapabilities: m.runtimeCapabilities,
+          audit: async () => {},
+        }, {
+          descriptor,
+          execute: (prepared) => executeActorTool(
+            { ...call, args: prepared.args }, {
+              ...options, semanticPrepared: true, effectCounter,
+            },
+          ),
+        });
+        if (effectCounter.count === 0) return dispatched;
+        const settled = await actorToolRequest('actor-call-complete-request', {
+          callId: call.id, turnGeneration: metadata.turnGeneration, result: dispatched,
+        });
+        if (settled?.ok === true) return settled.result;
+        return {
+          ok: false, error: settled?.error ?? 'actor call completion failed',
+          outcomeKnown: settled?.outcomeKnown === true,
+          ...(settled?.outcomeKnown === true ? {} : { retryable: false }),
+          meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
+        };
+      }
+      let effectSequence = 0;
+      const effectBinding = () => {
+        effectSequence += 1;
+        if (options.effectCounter) options.effectCounter.count += 1;
+        return {
+          callId: call.id,
+          effectId: `${call.id}:${effectSequence}`,
+          effectSequence,
+          turnGeneration: metadata.turnGeneration,
+          ...(options.programParentExecutionId
+            ? { parentCallId: options.programParentExecutionId }
             : {}),
-        },
-      );
-      if (prepared?.ok !== true) {
-        return {
-          ok: false, error: prepared?.error ?? 'actor tool preparation failed',
-          outcomeKnown: prepared?.outcomeKnown === true,
-          ...(prepared?.outcomeKnown === true ? {} : { retryable: false }),
-          meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
         };
-      }
-      if (prepared.mode === 'result') return prepared.result;
-      if (prepared.mode !== 'execute' || typeof prepared.executionId !== 'string') {
-        return {
-          ok: false, error: 'actor tool preparation was invalid', outcomeKnown: true,
-          meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
-        };
-      }
-      const executionId = prepared.executionId;
+      };
+      const projection = {
+        sessionId: metadata.sessionId,
+        sessionDepth: metadata.depth ?? 0,
+        sessionKind: metadata.recordKind === 'spawned' ? 'spawned' : 'actor',
+        messageCount: semanticSession?.messages?.length ?? 0,
+        trimCovered: semanticSession?.trimSummary?.covered ?? 0,
+        messages: semanticSession?.messages ?? [],
+        inbound: metadata.inbound === true,
+        actorType: metadata.actorType,
+        actorBacking: metadata.backing,
+        actorInstanceId: metadata.instanceId,
+        activeTabOrigin: metadata.tabOrigin,
+        runtimeCapabilities: m.runtimeCapabilities,
+      };
       const actorAuthority = Object.freeze({
         spawnSync: (/** @type {any} */ request) => authorityValue(actorToolRequest(
           'actor-spawn-sync-request', {
-            executionId, task: request.task,
+            ...effectBinding(), task: request.task,
             allowRecursion: request.allowRecursion === true,
+            grantedOperations: childOperationsFor(request),
             ...(request.tools === undefined ? {} : { tools: request.tools }),
             ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
             ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
@@ -406,22 +604,23 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         )),
         spawnAsync: (/** @type {any} */ request) => authorityValue(actorToolRequest(
           'actor-spawn-async-request', {
-            executionId, task: request.task,
+            ...effectBinding(), task: request.task,
             allowRecursion: request.allowRecursion === true,
+            grantedOperations: childOperationsFor(request),
             ...(request.tools === undefined ? {} : { tools: request.tools }),
             ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
             ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
           },
         )),
         listTasks: () => authorityValue(actorToolRequest(
-          'actor-tasks-read-request', { executionId },
+          'actor-tasks-read-request', effectBinding(),
         )),
         cancelTask: (/** @type {string} */ taskId) => authorityValue(actorToolRequest(
-          'actor-task-cancel-request', { executionId, taskId },
+          'actor-task-cancel-request', { ...effectBinding(), taskId },
         )),
         message: (/** @type {any} */ request) => authorityValue(actorToolRequest(
           'actor-message-deliver-request', {
-            executionId, to: request.to, message: request.message,
+            ...effectBinding(), to: request.to, message: request.message,
             oneShot: request.oneShot === true,
             awaitReply: request.awaitReply === true,
             degradeToAsync: request.degradeToAsync === true,
@@ -431,174 +630,189 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       });
       let result;
       try {
-        if (controllerHostsActorTool(prepared.toolName)) {
+        if (controllerHostsLocalTool(call.name)) {
+          result = await executeControllerLocalTool(call.name, call.args, Object.freeze({
+            completeGoal: async () => {
+              throw Object.assign(new Error('goal completion is unavailable to this actor'), {
+                code: 'actor-goal-completion-denied', outcomeKnown: true,
+              });
+            },
+          }));
+        } else if (controllerHostsActorTool(call.name)) {
           result = await executeControllerActorTool(
-            prepared.toolName, prepared.args, prepared.projection, actorAuthority,
-            { callId: prepared.callId, signal: abort.signal },
+            call.name, call.args, projection, actorAuthority,
+            { callId: call.id, signal: abort.signal },
           );
-        } else if (controllerHostsPodTool(prepared.toolName)) {
+        } else if (controllerHostsPodTool(call.name)) {
           const podAuthority = Object.freeze({
             resolve: (/** @type {any} */ request) => authorityValue(actorToolRequest(
-              'pod-resolve-request', { executionId, podId: request?.podId },
+              'pod-resolve-request', {
+                ...effectBinding(), podId: request?.podId,
+                ...(typeof call.args?.command === 'string'
+                  ? { command: call.args.command } : {}),
+              },
             )),
             readRemote: (/** @type {string} */ podId) => authorityValue(actorToolRequest(
-              'pod-read-remote-request', { executionId, podId },
+              'pod-read-remote-request', { ...effectBinding(), podId },
             )),
             confirmGit: (/** @type {string} */ op) => authorityValue(actorToolRequest(
-              'pod-confirm-git-request', { executionId, op },
+              'pod-confirm-git-request', { ...effectBinding(), op },
             )),
             executeCommand: (/** @type {any} */ request) => authorityValue(actorToolRequest(
               'pod-exec-request', {
-                executionId, command: request.command, podId: request.podId,
+                ...effectBinding(), command: request.command, podId: request.podId,
                 timeoutMs: request.timeoutMs, background: request.background === true,
                 remoteGitGrant: request.remoteGitGrant ?? null,
               },
             )),
             readStatus: (/** @type {any} */ request) => authorityValue(actorToolRequest(
               'pod-status-request', {
-                executionId, podId: request.podId, jobId: request.jobId,
+                ...effectBinding(), podId: request.podId, jobId: request.jobId,
                 stream: request.stream, offset: request.offset, limit: request.limit,
               },
             )),
             cancelJob: (/** @type {any} */ request) => authorityValue(actorToolRequest(
               'pod-cancel-request', {
-                executionId, podId: request.podId, jobId: request.jobId,
+                ...effectBinding(), podId: request.podId, jobId: request.jobId,
               },
             )),
             readFile: (/** @type {any} */ request) => authorityValue(actorToolRequest(
               'pod-read-file-request', {
-                executionId, podId: request.podId, path: request.path,
+                ...effectBinding(), podId: request.podId, path: request.path,
               },
             )),
             writeFile: (/** @type {any} */ request) => authorityValue(actorToolRequest(
               'pod-write-file-request', {
-                executionId, podId: request.podId, path: request.path,
+                ...effectBinding(), podId: request.podId, path: request.path,
                 content: request.content,
               },
             )),
           });
           result = await executeControllerPodTool(
-            prepared.toolName, prepared.args, prepared.projection, podAuthority,
+            call.name, call.args, projection, podAuthority,
             { signal: abort.signal },
           );
-        } else if (controllerHostsRepositoryTool(prepared.toolName)) {
+        } else if (controllerHostsRepositoryTool(call.name)) {
           const repositoryAuthority = Object.freeze({
             readPod: (/** @type {string} */ podId) => authorityValue(actorToolRequest(
-              'repository-read-pod-request', { executionId, podId },
+              'repository-read-pod-request', { ...effectBinding(), podId },
             )),
             destroyPod: (/** @type {string} */ podId) => authorityValue(actorToolRequest(
-              'repository-destroy-pod-request', { executionId, podId },
+              'repository-destroy-pod-request', { ...effectBinding(), podId },
             )),
             readStatus: () => authorityValue(actorToolRequest(
-              'repository-read-status-request', { executionId },
+              'repository-read-status-request', effectBinding(),
             )),
             readHistory: (/** @type {number} */ depth) => authorityValue(actorToolRequest(
-              'repository-read-history-request', { executionId, depth },
+              'repository-read-history-request', { ...effectBinding(), depth },
             )),
             readRemote: () => authorityValue(actorToolRequest(
-              'repository-read-remote-request', { executionId },
+              'repository-read-remote-request', effectBinding(),
             )),
             readDiff: (/** @type {string} */ from, /** @type {string|null} */ to) =>
               authorityValue(actorToolRequest(
-                'repository-read-diff-request', { executionId, from, to },
+                'repository-read-diff-request', { ...effectBinding(), from, to },
               )),
             confirmRestore: (/** @type {string} */ to) => authorityValue(actorToolRequest(
-              'repository-confirm-restore-request', { executionId, to },
+              'repository-confirm-restore-request', { ...effectBinding(), to },
             )),
             checkpoint: (/** @type {string} */ message) => authorityValue(actorToolRequest(
-              'repository-checkpoint-request', { executionId, message },
+              'repository-checkpoint-request', { ...effectBinding(), message },
             )),
             branch: (/** @type {string} */ name) => authorityValue(actorToolRequest(
-              'repository-branch-request', { executionId, name },
+              'repository-branch-request', { ...effectBinding(), name },
             )),
             checkout: (/** @type {string} */ name) => authorityValue(actorToolRequest(
-              'repository-checkout-request', { executionId, name },
+              'repository-checkout-request', { ...effectBinding(), name },
             )),
             restore: (/** @type {string} */ to) => authorityValue(actorToolRequest(
-              'repository-restore-request', { executionId, to },
+              'repository-restore-request', { ...effectBinding(), to },
             )),
             confirmRemote: (/** @type {string} */ op, /** @type {string} */ target,
               /** @type {string|undefined} */ branch) => authorityValue(actorToolRequest(
-              'repository-confirm-remote-request', { executionId, op, target, branch },
+              'repository-confirm-remote-request', {
+                ...effectBinding(), op, target, branch,
+                ...(typeof call.args?.url === 'string' ? { url: call.args.url } : {}),
+              },
             )),
             link: (/** @type {string} */ url) => authorityValue(actorToolRequest(
-              'repository-link-request', { executionId, url },
+              'repository-link-request', { ...effectBinding(), url },
             )),
             fetch: (/** @type {string} */ target) => authorityValue(actorToolRequest(
-              'repository-fetch-request', { executionId, target },
+              'repository-fetch-request', { ...effectBinding(), target },
             )),
             push: (/** @type {string} */ target, /** @type {string|undefined} */ branch) =>
               authorityValue(actorToolRequest(
-                'repository-push-request', { executionId, target, branch },
+                'repository-push-request', { ...effectBinding(), target, branch },
               )),
           });
           result = await executeControllerRepositoryTool(
-            prepared.toolName, prepared.args, prepared.projection, repositoryAuthority,
+            call.name, call.args, projection, repositoryAuthority,
             { signal: abort.signal },
           );
-        } else if (controllerHostsVmTool(prepared.toolName)) {
+        } else if (controllerHostsVmTool(call.name)) {
           const vmAuthority = Object.freeze({
             readVm: (/** @type {string} */ vmId) => authorityValue(actorToolRequest(
-              'vm-read-request', { executionId, vmId },
+              'vm-read-request', { ...effectBinding(), vmId },
             )),
             listVms: () => authorityValue(actorToolRequest(
-              'vm-list-request', { executionId },
+              'vm-list-request', effectBinding(),
             )),
             setDefaultVm: (/** @type {string} */ vmId) => authorityValue(actorToolRequest(
-              'vm-set-default-request', { executionId, vmId },
+              'vm-set-default-request', { ...effectBinding(), vmId },
             )),
             runVm: (/** @type {string} */ command, /** @type {number} */ timeoutMs,
               /** @type {string|undefined} */ vmId) => authorityValue(actorToolRequest(
-              'vm-run-request', { executionId, command, timeoutMs, vmId },
+              'vm-run-request', { ...effectBinding(), command, timeoutMs, vmId },
             )),
             importFile: (/** @type {string} */ url, /** @type {string} */ path,
               /** @type {number} */ maxBytes) => authorityValue(actorToolRequest(
-              'vm-import-file-request', { executionId, url, path, maxBytes },
+              'vm-import-file-request', { ...effectBinding(), url, path, maxBytes },
             )),
             writeTextFile: (/** @type {string} */ path, /** @type {string} */ content) =>
               authorityValue(actorToolRequest(
-                'vm-write-text-file-request', { executionId, path, content },
+                'vm-write-text-file-request', { ...effectBinding(), path, content },
               )),
             destroyVm: (/** @type {string} */ vmId) => authorityValue(actorToolRequest(
-              'vm-destroy-request', { executionId, vmId },
+              'vm-destroy-request', { ...effectBinding(), vmId },
             )),
           });
           result = await executeControllerVmTool(
-            prepared.toolName, prepared.args, vmAuthority,
+            call.name, call.args, vmAuthority,
           );
-        } else if (controllerHostsNotebookTool(prepared.toolName)) {
+        } else if (controllerHostsNotebookTool(call.name)) {
           const notebookAuthority = Object.freeze({
             readNotebook: (/** @type {string} */ notebookId) => authorityValue(actorToolRequest(
-              'notebook-read-request', { executionId, notebookId },
+              'notebook-read-request', { ...effectBinding(), notebookId },
             )),
             listNotebooks: () => authorityValue(actorToolRequest(
-              'notebook-list-request', { executionId },
+              'notebook-list-request', effectBinding(),
             )),
             setDefaultNotebook: (/** @type {string} */ notebookId) =>
               authorityValue(actorToolRequest(
-                'notebook-set-default-request', { executionId, notebookId },
+                'notebook-set-default-request', { ...effectBinding(), notebookId },
               )),
             runNotebook: (/** @type {string} */ code, /** @type {number} */ timeoutMs,
               /** @type {string|undefined} */ notebookId) => authorityValue(actorToolRequest(
-              'notebook-run-request', { executionId, code, timeoutMs, notebookId },
+              'notebook-run-request', { ...effectBinding(), code, timeoutMs, notebookId },
             )),
             writeFile: (/** @type {string} */ path, /** @type {string} */ content,
               /** @type {string|undefined} */ notebookId) => authorityValue(actorToolRequest(
-              'notebook-write-file-request', { executionId, path, content, notebookId },
+              'notebook-write-file-request', { ...effectBinding(), path, content, notebookId },
             )),
             readFile: (/** @type {string} */ path,
               /** @type {string|undefined} */ notebookId) => authorityValue(actorToolRequest(
-              'notebook-read-file-request', { executionId, path, notebookId },
+              'notebook-read-file-request', { ...effectBinding(), path, notebookId },
             )),
             destroyNotebook: (/** @type {string} */ notebookId) =>
               authorityValue(actorToolRequest(
-                'notebook-destroy-request', { executionId, notebookId },
+                'notebook-destroy-request', { ...effectBinding(), notebookId },
               )),
           });
           result = await executeControllerNotebookTool(
-            prepared.toolName, prepared.args, notebookAuthority, { signal: abort.signal },
+            call.name, call.args, notebookAuthority, { signal: abort.signal },
           );
-        } else if (controllerHostsAppTool(prepared.toolName)) {
+        } else if (controllerHostsAppTool(call.name)) {
           const appAuthority = Object.freeze({
             updateApp: (
               /** @type {string|undefined} */ appId,
@@ -607,85 +821,85 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               /** @type {string[]|undefined} */ tags,
               /** @type {string|undefined} */ entryFile,
             ) => authorityValue(actorToolRequest(
-              'app-update-request', { executionId, appId, name, html, tags, entryFile },
+              'app-update-request', { ...effectBinding(), appId, name, html, tags, entryFile },
             )),
             openApp: (/** @type {string} */ appId) => authorityValue(actorToolRequest(
-              'app-open-request', { executionId, appId },
+              'app-open-request', { ...effectBinding(), appId },
             )),
             searchApps: (/** @type {string} */ query) => authorityValue(actorToolRequest(
-              'app-search-request', { executionId, query },
+              'app-search-request', { ...effectBinding(), query },
             )),
             readApp: (/** @type {string} */ appId) => authorityValue(actorToolRequest(
-              'app-read-request', { executionId, appId },
+              'app-read-request', { ...effectBinding(), appId },
             )),
             deleteApp: (/** @type {string} */ appId) => authorityValue(actorToolRequest(
-              'app-delete-request', { executionId, appId },
+              'app-delete-request', { ...effectBinding(), appId },
             )),
             writeFile: (
               /** @type {string|undefined} */ appId,
               /** @type {string} */ path,
               /** @type {unknown} */ content,
             ) => authorityValue(actorToolRequest(
-              'app-write-file-request', { executionId, appId, path, content },
+              'app-write-file-request', { ...effectBinding(), appId, path, content },
             )),
             readFile: (
               /** @type {string|undefined} */ appId, /** @type {string} */ path,
             ) => authorityValue(actorToolRequest(
-              'app-read-file-request', { executionId, appId, path },
+              'app-read-file-request', { ...effectBinding(), appId, path },
             )),
             listFiles: (/** @type {string|undefined} */ appId) =>
               authorityValue(actorToolRequest(
-                'app-list-files-request', { executionId, appId },
+                'app-list-files-request', { ...effectBinding(), appId },
               )),
             deleteFile: (
               /** @type {string|undefined} */ appId, /** @type {string} */ path,
             ) => authorityValue(actorToolRequest(
-              'app-delete-file-request', { executionId, appId, path },
+              'app-delete-file-request', { ...effectBinding(), appId, path },
             )),
             observeRuntime: () => authorityValue(actorToolRequest(
-              'app-observe-request', { executionId },
+              'app-observe-request', effectBinding(),
             )),
             actRuntime: (
               /** @type {string} */ action,
               /** @type {Record<string,unknown>} */ params,
             ) => authorityValue(actorToolRequest(
-              'app-act-request', { executionId, action, params },
+              'app-act-request', { ...effectBinding(), action, params },
             )),
             runCode: (/** @type {string} */ code, /** @type {number} */ timeoutMs) =>
               authorityValue(actorToolRequest(
-                'app-run-code-request', { executionId, code, timeoutMs },
+                'app-run-code-request', { ...effectBinding(), code, timeoutMs },
               )),
           });
           result = await executeControllerAppTool(
-            prepared.toolName, prepared.args, appAuthority, prepared.projection,
+            call.name, call.args, appAuthority, projection,
           );
-        } else if (controllerHostsPersistenceTool(prepared.toolName)) {
+        } else if (controllerHostsPersistenceTool(call.name)) {
           const persistenceAuthority = Object.freeze({
             readMemoryScope: (/** @type {any} */ scope) => authorityValue(actorToolRequest(
-              'memory-read-scope-request', { executionId, scope },
+              'memory-read-scope-request', { ...effectBinding(), scope },
             )),
             readMemorySubtree: (/** @type {string} */ workspace,
               /** @type {string} */ subpath) => authorityValue(actorToolRequest(
-              'memory-read-subtree-request', { executionId, workspace, subpath },
+              'memory-read-subtree-request', { ...effectBinding(), workspace, subpath },
             )),
             writeMemory: (/** @type {any} */ scope, /** @type {string} */ body) =>
               authorityValue(actorToolRequest(
-                'memory-write-request', { executionId, scope, body },
+                'memory-write-request', { ...effectBinding(), scope, body },
               )),
             readTodos: () => authorityValue(actorToolRequest(
-              'todo-read-request', { executionId },
+              'todo-read-request', effectBinding(),
             )),
             replaceTodos: (/** @type {string} */ version, /** @type {any[]} */ todos) =>
               authorityValue(actorToolRequest(
-                'todo-replace-request', { executionId, version, todos },
+                'todo-replace-request', { ...effectBinding(), version, todos },
               )),
           });
           result = await executeControllerPersistenceTool(
-            prepared.toolName, prepared.args, prepared.projection, persistenceAuthority,
+            call.name, call.args, projection, persistenceAuthority,
           );
-        } else if (controllerHostsPageTool(prepared.toolName)) {
+        } else if (controllerHostsPageTool(call.name)) {
           const request = (/** @type {string} */ type) => authorityValue(actorToolRequest(
-            type, { executionId },
+            type, { ...effectBinding(), args: call.args },
           ));
           const pageAuthority = Object.freeze({
             openProtectedBackgroundTab: () => request('page-open-tab-request'),
@@ -703,14 +917,14 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             captureOwnedTabPixels: () => request('page-capture-owned-request'),
           });
           result = await executeControllerPageTool(
-            prepared.toolName, prepared.args, pageAuthority,
+            call.name, call.args, pageAuthority,
           );
-        } else if (controllerHostsResourceTool(prepared.toolName)) {
+        } else if (controllerHostsResourceTool(call.name)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
-            authorityValue(actorToolRequest(type, { executionId, ...value }));
+            authorityValue(actorToolRequest(type, { ...effectBinding(), ...value }));
           const resourceAuthority = Object.freeze({
-            confirmWebWrite: (/** @type {string} */ url, /** @type {string} */ method) =>
-              request('resource-confirm-web-write-request', { url, method }),
+            confirmWebWrite: (/** @type {any} */ webRequest) =>
+              request('resource-confirm-web-write-request', webRequest),
             requestWebText: (/** @type {any} */ webRequest) =>
               request('resource-request-web-text-request', webRequest),
             extractReadableMarkdown: (/** @type {string} */ html,
@@ -724,11 +938,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               request('resource-read-result-request', { key }),
           });
           result = await executeControllerResourceTool(
-            prepared.toolName, prepared.args, resourceAuthority, prepared.projection,
+            call.name, call.args, resourceAuthority, projection,
           );
-        } else if (controllerHostsSiteClientTool(prepared.toolName)) {
+        } else if (controllerHostsSiteClientTool(call.name)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
-            authorityValue(actorToolRequest(type, { executionId, ...value }));
+            authorityValue(actorToolRequest(type, { ...effectBinding(), ...value }));
           const siteClientAuthority = Object.freeze({
             readStoredClient: (/** @type {string} */ origin) =>
               request('site-client-read-request', { origin }),
@@ -736,16 +950,25 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               /** @type {number} */ timeoutMs) =>
               request('site-client-run-request', { origin, code, timeoutMs }),
             commitConfirmedClient: (/** @type {string} */ origin) =>
-              request('site-client-commit-request', { origin }),
+              request('site-client-commit-request', {
+                origin,
+                ...(typeof call.args?.summary === 'string'
+                  ? { summary: call.args.summary } : {}),
+                ...(Array.isArray(call.args?.endpoints)
+                  ? { endpoints: call.args.endpoints } : {}),
+                ...(call.args?.auth !== undefined ? { auth: call.args.auth } : {}),
+                ...(call.args?.deriver !== undefined ? { deriver: call.args.deriver } : {}),
+                ...(typeof call.args?.body === 'string' ? { body: call.args.body } : {}),
+              }),
             startOwnedCapture: () => request('site-client-capture-start-request'),
             stopOwnedCapture: () => request('site-client-capture-stop-request'),
           });
           result = await executeControllerSiteClientTool(
-            prepared.toolName, prepared.args, siteClientAuthority,
+            call.name, call.args, siteClientAuthority,
           );
-        } else if (controllerHostsExecutionTool(prepared.toolName)) {
+        } else if (controllerHostsExecutionTool(call.name)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
-            authorityValue(actorToolRequest(type, { executionId, ...value }));
+            authorityValue(actorToolRequest(type, { ...effectBinding(), ...value }));
           const executionAuthority = Object.freeze({
             createWebVm: (/** @type {any} */ plan) =>
               request('execution-create-webvm-request', { plan }),
@@ -761,11 +984,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               request('execution-spill-script-request', record),
           });
           result = await executeControllerExecutionTool(
-            prepared.toolName, prepared.args, executionAuthority, prepared.projection,
+            call.name, call.args, executionAuthority, projection,
           );
-        } else if (controllerHostsEditingTool(prepared.toolName)) {
+        } else if (controllerHostsEditingTool(call.name)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value) =>
-            authorityValue(actorToolRequest(type, { executionId, ...value }));
+            authorityValue(actorToolRequest(type, { ...effectBinding(), ...value }));
           const editingAuthority = Object.freeze({
             readEditTarget: (/** @type {any} */ target) =>
               request('editing-read-target-request', target),
@@ -773,11 +996,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               request('editing-write-target-request', target),
           });
           result = await executeControllerEditingTool(
-            prepared.toolName, prepared.args, editingAuthority,
+            call.name, call.args, editingAuthority,
           );
-        } else if (controllerHostsIntrospectionTool(prepared.toolName)) {
+        } else if (controllerHostsIntrospectionTool(call.name)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
-            authorityValue(actorToolRequest(type, { executionId, ...value }));
+            authorityValue(actorToolRequest(type, { ...effectBinding(), ...value }));
           const introspectionAuthority = Object.freeze({
             readActorRoster: () => request('introspection-actor-roster-request'),
             readProviderPosture: () => request('introspection-provider-posture-request'),
@@ -790,12 +1013,12 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               request('introspection-installed-skill-request', { name }),
           });
           result = await executeControllerIntrospectionTool(
-            prepared.toolName, prepared.args, prepared.projection,
+            call.name, call.args, projection,
             introspectionAuthority, { signal: abort.signal },
           );
-        } else if (controllerHostsScheduleTool(prepared.toolName)) {
+        } else if (controllerHostsScheduleTool(call.name)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
-            authorityValue(actorToolRequest(type, { executionId, ...value }));
+            authorityValue(actorToolRequest(type, { ...effectBinding(), ...value }));
           const scheduleAuthority = Object.freeze({
             readRoutines: () => request('schedule-read-routines-request'),
             armConfirmedRoutine: (/** @type {any} */ routine) =>
@@ -804,11 +1027,11 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               request('schedule-cancel-routine-request', { id }),
           });
           result = await executeControllerScheduleTool(
-            prepared.toolName, prepared.args, scheduleAuthority, { signal: abort.signal },
+            call.name, call.args, scheduleAuthority, { signal: abort.signal },
           );
-        } else if (controllerHostsDwebTool(prepared.toolName)) {
+        } else if (controllerHostsDwebTool(call.name)) {
           const request = (/** @type {string} */ type, /** @type {any} */ value = {}) =>
-            authorityValue(actorToolRequest(type, { executionId, ...value }));
+            authorityValue(actorToolRequest(type, { ...effectBinding(), ...value }));
           const dwebAuthority = Object.freeze({
             discoverApps: () => request('dweb-discover-apps-request'),
             publishConfirmedApp: (/** @type {string} */ appId) =>
@@ -827,32 +1050,23 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               request('dweb-run-mesh-program-request', { code, timeoutMs }),
           });
           result = await executeControllerDwebTool(
-            prepared.toolName, prepared.args, prepared.projection,
+            call.name, call.args, projection,
             dwebAuthority, { signal: abort.signal },
           );
         } else throw Object.assign(new Error('controller tool has no semantic owner'), {
           code: 'controller-tool-execution-owner-missing', outcomeKnown: true,
         });
       } catch (cause) {
-        const failure = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+        const failure = normalizeSemanticToolFailure(cause, {
+          effectCount: options.effectCounter?.count ?? 0,
+        });
         result = {
           ok: false,
-          error: failure?.message ?? String(cause),
-          ...(typeof failure?.code === 'string' ? { code: failure.code } : {}),
-          outcomeKnown: failure?.outcomeKnown === true,
-          retryable: failure?.outcomeKnown === true && failure?.retryable !== false,
+          ...failure,
+          code: failure.code ?? 'controller-tool-execution-failed',
         };
       }
-      const settled = await actorToolRequest('actor-tool-settle-request', {
-        executionId, result,
-      });
-      if (settled?.ok === true) return settled.result;
-      return {
-        ok: false, error: settled?.error ?? 'actor tool settlement failed',
-        outcomeKnown: settled?.outcomeKnown === true,
-        ...(settled?.outcomeKnown === true ? {} : { retryable: false }),
-        meta: { toolName: call?.name, primitive: 'spawned', gates: [], durationMs: 0 },
-      };
+      return result;
     };
     executeOwnedTool = executeActorTool;
     try {
@@ -861,9 +1075,12 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         sessionId: metadata.sessionId,
         provider: program.provider,
         model: program.model,
+        kind: metadata.recordKind === 'spawned' ? 'spawned' : 'actor',
         depth: metadata.depth,
         messages: state.messages,
+        trimSummary: state.trimSummary,
       });
+      semanticSession = await sessions.get(metadata.sessionId);
       const modelEgress = createActorModelEgress({
         openInference, readInferenceChunk, cancelInference, readModelContext,
         openLocalGeneration, readLocalGeneration, cancelLocalGeneration,
@@ -908,9 +1125,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           getSystemPrompt: () => program.systemPrompt,
           appendAudit: async () => {},
           onEvent: (/** @type {object} */ event) => self.postMessage({ type: 'loop-event', runId, event }),
-          tools: hydrateToolDescriptors(
-            Array.isArray(m.tools) ? m.tools : [], m.runtimeCapabilities,
-          ),
+          tools: hydratedTools,
           ...(fenceActorSummary ? { fenceActorSummary } : {}),
         },
         {
@@ -954,12 +1169,6 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
 self.postMessage({
   type: 'ready',
   protocol: ACTOR_WORKER_PROTOCOL,
-  realm: {
-    dedicatedWorker: globalThis.constructor?.name === 'DedicatedWorkerGlobalScope',
-    window: typeof window !== 'undefined',
-    document: typeof document !== 'undefined',
-    browser: 'browser' in globalThis,
-    chrome: 'chrome' in globalThis,
-  },
+  realm: realmProbe?.() ?? null,
 });
 };

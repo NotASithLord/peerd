@@ -80,10 +80,10 @@ export class ActorPersistenceError extends Error {
  *     what's actually registered). An empty array means NO tools.
  *   - otherwise → inherit the parent's full set.
  *   - either way → intersect with `allow` (the parent SESSION's resolved
- *     tool manifest, tools/manifests.js) when one is set. A manifest is
- *     an authority BOUND on the whole session tree: a child's effective
- *     set can be narrower than its parent's, never wider. null = no
- *     manifest = no extra cut.
+ *     tool manifest, tools/manifests.js) when one is set. This preserves
+ *     semantic/model-surface narrowing down the session tree. Exact host
+ *     operation grants are derived and intersected separately. null = no
+ *     manifest = no extra model-surface cut.
  *   - either way → strip `actor_create` unless `allowRecursion`. This
  *     is the recursion guard; it always applies, even to an explicit
  *     list, so an actor can't out-clever its way into spawning.
@@ -362,6 +362,7 @@ export const makeSpawnActor = (deps) => {
    * @param {Object} req
    * @param {string} req.task                      the spawning prompt
    * @param {string[]} [req.tools]                 explicit tool-name subset
+   * @param {string[]} [req.grantedOperations]     sealed semantic operation projection
    * @param {string} [req.model]                   override the inherited model
    * @param {number} [req.maxSteps]                step cap (default 20)
    * @param {number} [req.maxOutputTokens]         per-call output cap (default 4096)
@@ -386,6 +387,7 @@ export const makeSpawnActor = (deps) => {
     const {
       task,
       tools,
+      grantedOperations: projectedOperations,
       model,
       maxSteps = DEFAULT_MAX_STEPS,
       maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
@@ -469,9 +471,27 @@ export const makeSpawnActor = (deps) => {
     const surface = filterByGoalActive(
       filterActorSurface(mainAgentDescriptors(getToolDescriptors())), false,
     );
-    const subset = narrowTools(surface, { tools, allowRecursion, allow: parentAllow });
-    const allowedNames = new Set(subset.map((t) => t.name));
+    const requestedSubset = narrowTools(surface, { tools, allowRecursion, allow: parentAllow });
+    // why: descriptor narrowing is semantic behavior in the sealed owner.
+    // This host uses only the independently projected exact-operation ceiling
+    // for authority; it never reconstructs authority from persisted names.
+    const subset = requestedSubset;
+    const visibleNames = new Set(subset.map((t) => t.name));
     const subsetDescriptors = subset.map(projectToolAuthority);
+    const parentGrantedOperations = parent?.kind === 'spawned'
+      ? new Set(Array.isArray(parent.grantedOperations) ? parent.grantedOperations : []) : null;
+    // why: name→operation projection belongs to the sealed semantic owner.
+    // This authority shell persists only the bounded projection and narrows it
+    // again by the parent/lineage operation ceiling below.
+    const candidateOperations = Array.isArray(projectedOperations)
+      ? [...new Set(projectedOperations.filter((operation) => typeof operation === 'string'))]
+      : [];
+    const lineageMayDelegate = parent?.kind !== 'spawned' || parent.spawnedTrusted === true;
+    const grantedOperations = candidateOperations.filter((operation) =>
+      (!parentGrantedOperations || parentGrantedOperations.has(operation))
+      && (lineageMayDelegate
+        || !['turn.actor.spawn-sync', 'turn.actor.spawn-async', 'turn.actor.message']
+          .includes(operation)));
 
     const child = await sessions.create({
       kind: 'spawned',
@@ -491,18 +511,15 @@ export const makeSpawnActor = (deps) => {
       ...(parent?.permissionMode !== undefined ? { permissionMode: parent.permissionMode } : {}),
       ...(parentConfirmActions !== undefined ? { confirmActions: parentConfirmActions } : {}),
       // why: the tool MANIFEST inherits (unlike customSystemPrompt, which
-      // deliberately does not — see below). The manifest is an authority
-      // bound, not a preference: copying it into the child record means
-      // the child's OWN tool context (buildToolContext reads the child
-      // session) re-enforces it at dispatch, and a grandchild spawn
-      // intersects against it again — no depth at which the narrowing
-      // evaporates.
+      // deliberately does not — see below). Copying it into the child record
+      // keeps the advertised/model-call surface narrowed across descendants;
+      // exact operation authority is persisted separately below and is
+      // independently intersected by the host.
       ...(parent?.toolManifest !== undefined ? { toolManifest: parent.toolManifest } : {}),
-      // Heap-split phase 4: the child's GRANTED toolset (post-narrowing), persisted
-      // so the SW-side offscreen tool-dispatch route rebuilds the child's restricted
-      // ctx from THIS list and re-checks every relayed call against it — the actor
-      // analog of the actor instance-pin. The worker's call args are never trusted.
-      grantedTools: [...allowedNames],
+      // The controller owns the name→operation projection. Persist only exact
+      // operation capabilities so a fresh authority kernel can reconstruct the
+      // same narrowed grant without importing tool names or semantic registries.
+      grantedOperations,
       // PR #134 phase 3 — the trusted-lineage hop verdict, stamped SERVER-SIDE
       // at create so the chain is never model-supplied. Trusted ONLY when the
       // spawning turn explicitly proved itself non-inbound; an inbound spawn
@@ -599,14 +616,12 @@ export const makeSpawnActor = (deps) => {
       onEvent?.({
         type: 'actor-start', parentToolUseId, parentSessionId, rootSessionId,
         sessionId: child.sessionId, depth, task,
-        grantedTools: [...allowedNames],
+        visibleTools: [...visibleNames],
       });
-      // Heap split: EVERY child runs its loop in a dedicated Worker with its own
-      // heap, no key or extension APIs. A tool-LESS child (phase 1) only
-      // relays its model call; a tool-BEARING child (phase 4) also relays each tool
-      // call to the SW, which rebuilds the child's restricted ctx from the persisted
-      // grantedTools and dispatches there. A missing or failed host is terminal:
-      // no child loop may run in the privileged background heap.
+      // Every child runs its semantic loop in a dedicated sealed Worker. The
+      // worker owns descriptor dispatch; the SW admits only the persisted exact
+      // operation grant. A missing host is terminal rather than falling back to
+      // the privileged background heap.
       const canRunOffscreen = typeof runChildOffscreen === 'function'
         && typeof renderSystemPromptForChild === 'function';
       if (canRunOffscreen) {
@@ -615,8 +630,8 @@ export const makeSpawnActor = (deps) => {
           sessionId: child.sessionId, task, systemPrompt,
           provider, model: model ?? parent?.model, depth,
           maxSteps, maxOutputTokens, budgetMs,
-          // The granted descriptors the worker advertises to the model; each call
-          // it makes relays back to the SW-gated, grantedTools-checked dispatch.
+          // Semantic descriptors advertised inside the sealed worker. They are
+          // presentation/execution metadata, never an SW authority allowlist.
           tools: subsetDescriptors,
         }, { signal: controller.signal, onEvent });
         if (r && (r.ok || r.started)) {

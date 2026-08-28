@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
   makeKernelAppActorChatRoutes,
-  makeKernelAppRuntimeRoutes,
 } from '../../extension/background/kernel-direct-route-owners.js';
 
 describe('kernel direct route owners', () => {
@@ -49,87 +48,6 @@ describe('kernel direct route owners', () => {
     }, sender)).toEqual({ ok: true });
     expect(delivered[0]).toMatchObject({
       to: 'app-1', message: 'help', senderSessionId: 'root-1', trustedAppTab: true,
-    });
-  });
-
-  test('exact App-code routes bind a live run to the current App actor generation', async () => {
-    const signal = new AbortController().signal;
-    const calls: any[] = [];
-    const routes = makeKernelAppRuntimeRoutes({
-      isRelay: (sender: any) => sender?.url === 'offscreen',
-      vault: { isLocked: () => false },
-      scriptRuns: {
-        ownerFor: () => 'actor-1', allows: () => true, admitOp: () => true,
-        signalFor: () => signal,
-      },
-      sessions: { get: async () => ({
-        sessionId: 'actor-1', kind: 'actor', actorType: 'app', actorSurface: 'code',
-        instanceId: 'app-1',
-      }) },
-      validateGeneration: async () => true,
-      retireStale: async () => {},
-      observeAppRuntime: async (request: any) => {
-        calls.push({ kind: 'observe', ...request }); return { ok: true, value: 1 };
-      },
-      actAppRuntime: async (request: any) => {
-        calls.push({ kind: 'act', ...request }); return { ok: true, value: 2 };
-      },
-    });
-    const message = { ownerSessionId: 'actor-1', runId: 'run-1' };
-    expect(await routes['app-code/observe'](message, { url: 'other' }))
-      .toEqual({ ok: false, error: 'app_runtime_unauthorized_relay' });
-    expect(await routes['app-code/observe'](message, { url: 'offscreen' }))
-      .toEqual({ ok: true, value: 1 });
-    expect(await routes['app-code/act']({
-      ...message, action: 'move', params: { x: 1 },
-    }, { url: 'offscreen' })).toEqual({ ok: true, value: 2 });
-    expect(calls[0]).toMatchObject({
-      kind: 'observe', sessionId: 'actor-1', appId: 'app-1', signal,
-    });
-    expect(calls[1]).toMatchObject({
-      kind: 'act', sessionId: 'actor-1', appId: 'app-1',
-      action: 'move', params: { x: 1 }, signal,
-    });
-    expect(await routes['app-code/act']({
-      ...message, action: '../../eval', params: {},
-    }, { url: 'offscreen' })).toMatchObject({
-      ok: false, error: 'app_runtime_action_invalid', outcomeKnown: true,
-    });
-  });
-
-  test('stale generations refuse before dispatch and post-admission loss is unknown', async () => {
-    let retired = 0;
-    let calls = 0;
-    const base = {
-      isRelay: () => true,
-      vault: { isLocked: () => false },
-      scriptRuns: {
-        ownerFor: () => 'actor-1', allows: () => true, admitOp: () => true,
-        signalFor: () => new AbortController().signal,
-      },
-      sessions: { get: async () => ({
-        kind: 'actor', actorType: 'app', actorSurface: 'code', instanceId: 'app-1',
-      }) },
-      retireStale: async () => { retired += 1; },
-      observeAppRuntime: async () => { calls += 1; return { ok: true }; },
-      actAppRuntime: async () => { calls += 1; return { ok: true }; },
-    };
-    const message = { ownerSessionId: 'actor-1', runId: 'run-1' };
-    const stale = makeKernelAppRuntimeRoutes({ ...base, validateGeneration: async () => false });
-    expect(await stale['app-code/observe'](message, {})).toMatchObject({
-      ok: false, error: 'app_runtime_stale_actor_generation', outcomeKnown: true,
-    });
-    expect(retired).toBe(1);
-    expect(calls).toBe(0);
-
-    const lost = makeKernelAppRuntimeRoutes({
-      ...base, validateGeneration: async () => true,
-      actAppRuntime: async () => { throw new Error('transport lost'); },
-    });
-    expect(await lost['app-code/act']({
-      ...message, action: 'write', params: {},
-    }, {})).toMatchObject({
-      ok: false, code: 'app-act-outcome-unknown', outcomeKnown: false,
     });
   });
 });

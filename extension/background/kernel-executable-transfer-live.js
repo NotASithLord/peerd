@@ -6,11 +6,11 @@ import {
   EXPORT_PASSPHRASE_MIN_LENGTH,
   ExportPassphraseError,
   inspectImport,
+  portableHookDisposition,
 } from '/peerd-runtime/transfer/transfer.js';
 import { createMemoryStore } from '/peerd-runtime/memory/store.js';
 import { createSkillRegistry } from '/peerd-runtime/skills/registry.js';
 import { createSkillStore } from '/peerd-runtime/skills/store.js';
-import { exportHooks, saveUserHook } from '/peerd-runtime/tools/hooks/registry.js';
 import { isCustodySecretName } from '/peerd-runtime/transfer/secret-policy.js';
 import { normalizeEngine, normalizeVariant } from '/peerd-runtime/voice/settings.js';
 
@@ -21,6 +21,24 @@ export const createKernelTransferLive = async (deps) => {
     store: createSkillStore({ canWrite: () => deps.canWrite('skills') }),
     audit: deps.auditLog.append,
   });
+  const exportHooks = async () => {
+    const records = await deps.kv.get('hooks.user.v1');
+    return Array.isArray(records)
+      ? structuredClone(records.filter((record) => portableHookDisposition(record) !== 'invalid'))
+      : [];
+  };
+  const saveUserHook = async (/** @type {{kv:{get:Function,set:Function}}} */ io,
+    /** @type {any} */ record) => {
+    if (portableHookDisposition(record) === 'invalid') {
+      throw new TypeError('imported-hook-record-invalid');
+    }
+    const existing = await io.kv.get('hooks.user.v1');
+    const records = Array.isArray(existing)
+      ? existing.filter((candidate) => candidate?.id !== record.id) : [];
+    records.push(structuredClone({ ...record, enabled: false }));
+    await io.kv.set('hooks.user.v1', records);
+    return record;
+  };
   return Object.freeze({
     vault: deps.vault,
     auditLog: deps.auditLog,

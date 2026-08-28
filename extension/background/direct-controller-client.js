@@ -145,7 +145,9 @@ export const makeIdleDirectControllerLoader = ({
     port1.onmessage = (event) => {
       const message = /** @type {any} */ (event.data);
       if (message?.type === 'controller-worker/ready' && !ready && !closed) {
-        if (!isSealedControllerRealm(message.realm)) {
+        if (!isSealedControllerRealm(message.realm)
+            || message.prototypeFetchBlocked !== true
+            || message.prototypeStorageBlocked !== true) {
           clearTimeoutFn(readyTimer);
           close('controller-worker-realm-unsealed');
           return;

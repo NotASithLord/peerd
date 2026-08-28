@@ -34,6 +34,41 @@ import {
 } from '/peerd-runtime/browser-authority.js';
 import { clickInjected } from './click.js';
 
+const beforeLoginEffect = (/** @type {string} */ error, /** @type {string} */ content = '') => ({
+  ok: false,
+  error,
+  ...(content ? { content } : {}),
+  performed: false,
+  outcomeKnown: true,
+  outcomeKind: 'pre-effect-failure',
+  retryable: true,
+});
+
+// why: binding a roaming actor to its relying-site origin is itself a durable
+// authority mutation. Every later refusal must retain that custody even when
+// no login click occurred.
+const afterLoginBinding = (/** @type {string} */ error, /** @type {string} */ content = '') => ({
+  ok: false,
+  error,
+  ...(content ? { content } : {}),
+  performed: true,
+  outcomeKnown: true,
+  outcomeKind: 'effect-completed',
+  retryable: false,
+});
+
+const afterLoginBindingUnknown = (
+  /** @type {string} */ error, /** @type {string} */ content = '',
+) => ({
+  ok: false,
+  error,
+  ...(content ? { content } : {}),
+  performed: true,
+  outcomeKnown: false,
+  outcomeKind: 'host-lost',
+  retryable: false,
+});
+
 /**
  * Harness-injected ctx extras (the snapshot ref registry), absent from the
  * ToolContext typedef — narrowed through an erased cast, same as click.js.
@@ -50,7 +85,7 @@ export const loginTool = definePageAuthorityHandler({
     // 1) Resolve the tab through the DOM chokepoint (runs the origin lock /
     //    judgeLanding, fails closed for a vanished actor tab).
     const tab = await resolveTargetTab(args, ctx);
-    if (!tab?.id) return { ok: false, error: 'no_target_tab' };
+    if (!tab?.id) return beforeLoginEffect('no_target_tab');
 
     // why: domRefs is SW-injected onto ctx but off the ToolContext typedef;
     // scripting is typed opaquely — narrow both, same as click.js.
@@ -65,7 +100,7 @@ export const loginTool = definePageAuthorityHandler({
     //    is. Still system-derived — never a model-supplied string.
     const origin = originOfUrl(tab.url);
     if (!origin || !origin.startsWith('https://')) {
-      return { ok: false, error: 'login_requires_https_origin' };
+      return beforeLoginEffect('login_requires_https_origin');
     }
 
     // 3) INBOUND. This can never actually fire on login's dispatch paths: ctx.inbound
@@ -76,7 +111,7 @@ export const loginTool = definePageAuthorityHandler({
     //    braces for any FUTURE path that folds ctx.inbound onto an actor dispatch;
     //    it is not a live wall today.
     if (/** @type {{ inbound?: boolean }} */ (ctx).inbound === true) {
-      return { ok: false, error: 'login_refused_inbound' };
+      return beforeLoginEffect('login_refused_inbound');
     }
 
     // 4) READ GROUND TRUTH — resolve the element the SAME way click.js does (ref's
@@ -84,12 +119,12 @@ export const loginTool = definePageAuthorityHandler({
     //    input, so scripting is fine on every channel.
     const refStr = typeof args?.ref === 'string' && args.ref.trim() ? args.ref.trim() : null;
     const entry = refStr ? (domRefs?.resolve?.(tab.id, refStr) ?? null) : null;
-    if (refStr && !entry) return { ok: false, error: `stale_ref: ${refStr} — re-run snapshot on this tab first` };
+    if (refStr && !entry) return beforeLoginEffect(`stale_ref: ${refStr} — re-run snapshot on this tab first`);
     const walkId = entry?.walkId ?? null;
     const selector = typeof args?.selector === 'string' && args.selector.trim() ? args.selector : null;
     const nth = Number.isInteger(args?.nth) && args.nth >= 0 ? args.nth : 0;
     if (walkId == null && !selector) {
-      return { ok: false, error: 'login_target_not_found', content: 'Provide a snapshot {ref} (with a walk id) or a CSS {selector} for the sign-in element.' };
+      return beforeLoginEffect('login_target_not_found', 'Provide a snapshot {ref} (with a walk id) or a CSS {selector} for the sign-in element.');
     }
 
     let descriptor;
@@ -100,17 +135,17 @@ export const loginTool = definePageAuthorityHandler({
         args: [selector, nth, walkId],
       });
       const r = results[0]?.result;
-      if (!r) return { ok: false, error: 'login_read_failed' };
+      if (!r) return beforeLoginEffect('login_read_failed');
       if (!r.ok) {
         // A resolution miss is "not found"; anything else surfaces its reason.
         if (/^no_match|^stale_ref|^nth_out_of_range|^selector_or_ref_required/.test(String(r.error))) {
-          return { ok: false, error: 'login_target_not_found', content: r.error };
+          return beforeLoginEffect('login_target_not_found', r.error);
         }
-        return { ok: false, error: `login_read_failed: ${r.error}` };
+        return beforeLoginEffect(`login_read_failed: ${r.error}`);
       }
       descriptor = r.descriptor;
     } catch (e) {
-      return { ok: false, error: `login_read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      return beforeLoginEffect(`login_read_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
     }
 
     // 5) CLASSIFY from ground truth (idp-registry injected — functional-core rule).
@@ -118,7 +153,7 @@ export const loginTool = definePageAuthorityHandler({
     //    no click, and the user/actor learns exactly why.
     const v = classifyLoginAffordance(descriptor, { isKnownIdp });
     if (!v.supported) {
-      return { ok: false, error: 'login_unsupported', content: v.reason };
+      return beforeLoginEffect('login_unsupported', v.reason);
     }
 
     // 6) ALWAYS CONFIRM — UNCONDITIONAL. Call ctx.confirm DIRECTLY (like
@@ -127,7 +162,7 @@ export const loginTool = definePageAuthorityHandler({
     //    verified classifier (step 5), so the summary cannot be spoofed by the model.
     const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
-    if (!confirmAny) return { ok: false, error: 'login_declined', content: 'No confirmation channel available for a sign-in.' };
+    if (!confirmAny) return beforeLoginEffect('login_declined', 'No confirmation channel available for a sign-in.');
     const summary = v.method === 'passkey'
       ? `Begin a passkey / security-key sign-in on ${origin}? You'll complete it with your device.`
       : v.verified === true && v.idpOrigin
@@ -150,28 +185,36 @@ export const loginTool = definePageAuthorityHandler({
       sessionId: ctx.session?.sessionId ?? null,
     }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
-      return { ok: false, error: 'login_declined', content: 'User declined the sign-in.' };
+      return beforeLoginEffect('login_declined', 'User declined the sign-in.');
     }
-    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (ctx.abortSignal?.aborted) return beforeLoginEffect('login_aborted');
+    const livePermission = typeof ctx.readAuthorityPermission === 'function'
+      ? await ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+      : ctx.permission;
+    if (livePermission?.mode !== 'act') return {
+      ok: false, error: 'plan_mode_refused',
+      content: 'Permission changed before the sign-in action could start.',
+      outcomeKind: 'pre-effect-failure', retryable: false,
+    };
 
     // Consent names the relying site, not the identity provider it may visit.
     // Re-read the owned tab after consent, then bind a roaming actor to that
     // system-derived origin. The origin lock uses this boundary to permit one
     // bounded sign-in excursion without ever making the provider an actor home.
     const authorizedTab = await resolveTargetTab(args, ctx);
-    if (!authorizedTab?.id) return { ok: false, error: 'login_target_gone' };
-    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (!authorizedTab?.id) return beforeLoginEffect('login_target_gone');
+    if (ctx.abortSignal?.aborted) return beforeLoginEffect('login_aborted');
     if (originOfUrl(authorizedTab.url) !== origin) {
-      return { ok: false, error: 'login_origin_changed', content: 'the page moved during the confirm; re-run login after a fresh snapshot.' };
+      return beforeLoginEffect('login_origin_changed', 'the page moved during the confirm; re-run login after a fresh snapshot.');
     }
     const originAuthorized = await ctx.authorizeSignInOrigin?.(origin, ctx.abortSignal);
-    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (ctx.abortSignal?.aborted) return originAuthorized === true
+      ? afterLoginBinding('login_aborted') : beforeLoginEffect('login_aborted');
     if (originAuthorized !== true) {
-      return {
-        ok: false,
-        error: 'login_origin_authority_refused',
-        content: 'The relying-site boundary could not be verified after confirmation. Re-run login from a fresh page snapshot.',
-      };
+      return beforeLoginEffect(
+        'login_origin_authority_refused',
+        'The relying-site boundary could not be verified after confirmation. Re-run login from a fresh page snapshot.',
+      );
     }
 
     // 7) INITIATE. peerd AUTO-CLICKS only when it has (a) VERIFIED the destination is
@@ -206,15 +249,16 @@ export const loginTool = definePageAuthorityHandler({
       if (v.verified === true && v.idpOrigin) {
         const armed = await ctx.authorizeSignInExcursion?.(v.idpOrigin, ctx.abortSignal);
         if (ctx.abortSignal?.aborted) {
-          if (armed === true) await ctx.revokeSignInExcursion?.(v.idpOrigin).catch(() => false);
-          return { ok: false, error: 'login_aborted' };
+          const revoked = armed !== true
+            || await ctx.revokeSignInExcursion?.(v.idpOrigin).catch(() => false) === true;
+          return revoked ? afterLoginBinding('login_aborted')
+            : afterLoginBindingUnknown('login_aborted');
         }
         if (armed !== true) {
-          return {
-            ok: false,
-            error: 'login_excursion_authority_refused',
-            content: 'The verified provider step could not be authorized. Finish signing in yourself, then tell peerd to continue.',
-          };
+          return afterLoginBinding(
+            'login_excursion_authority_refused',
+            'The verified provider step could not be authorized. Finish signing in yourself, then tell peerd to continue.',
+          );
         }
       }
       // SSO, not auto-clickable. Be non-committal about the destination when unverified
@@ -236,41 +280,51 @@ export const loginTool = definePageAuthorityHandler({
     // 120s) confirm, so re-judge the landing, re-check the live origin, and re-read +
     // re-classify via the SAME walkId; abort on ANY change.
     const tab2 = await resolveTargetTab(args, ctx);
-    if (!tab2?.id) return { ok: false, error: 'login_target_gone' };
+    if (!tab2?.id) return afterLoginBinding('login_target_gone');
     if (originOfUrl(tab2.url) !== origin) {
-      return { ok: false, error: 'login_origin_changed', content: 'the page moved during the confirm; re-run login after a fresh snapshot.' };
+      return afterLoginBinding('login_origin_changed', 'the page moved during the confirm; re-run login after a fresh snapshot.');
     }
     let d2;
     try {
       const rr = await scripting.executeScript({ target: scriptingTarget(tab2), func: loginTargetReader, args: [null, 0, walkId] });
       const r2 = rr[0]?.result;
-      if (!r2 || !r2.ok) return { ok: false, error: 'login_affordance_changed', content: 'the sign-in element changed after you approved; re-run.' };
+      if (!r2 || !r2.ok) return afterLoginBinding('login_affordance_changed', 'the sign-in element changed after you approved; re-run.');
       d2 = r2.descriptor;
     } catch (e) {
-      return { ok: false, error: `login_affordance_changed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      return afterLoginBinding(`login_affordance_changed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
     }
     const v2 = classifyLoginAffordance(d2, { isKnownIdp });
     if (!(v2.supported && v2.method === v.method && v2.verified === true
       && v2.provider === v.provider && v2.idpOrigin === v.idpOrigin)) {
-      return { ok: false, error: 'login_affordance_changed', content: 'the sign-in element changed after you approved; re-run.' };
+      return afterLoginBinding('login_affordance_changed', 'the sign-in element changed after you approved; re-run.');
     }
-    if (ctx.abortSignal?.aborted) return { ok: false, error: 'login_aborted' };
+    if (ctx.abortSignal?.aborted) return afterLoginBinding('login_aborted');
     const idpOrigin = v2.idpOrigin;
     if (!idpOrigin) {
-      return { ok: false, error: 'login_affordance_changed', content: 'the verified provider destination is no longer available; re-run.' };
+      return afterLoginBinding('login_affordance_changed', 'the verified provider destination is no longer available; re-run.');
     }
 
     const armed = await ctx.authorizeSignInExcursion?.(idpOrigin, ctx.abortSignal);
     if (ctx.abortSignal?.aborted) {
-      await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
-      return { ok: false, error: 'login_aborted' };
+      const revoked = await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false) === true;
+      return revoked ? afterLoginBinding('login_aborted')
+        : afterLoginBindingUnknown('login_aborted');
     }
     if (armed !== true) {
-      return {
-        ok: false,
-        error: 'login_excursion_authority_refused',
-        content: 'The verified provider step could not be authorized. Re-run login from a fresh page snapshot.',
-      };
+      return afterLoginBinding(
+        'login_excursion_authority_refused',
+        'The verified provider step could not be authorized. Re-run login from a fresh page snapshot.',
+      );
+    }
+
+    const permissionRefusal = await ctx.assertPageMutationPermission?.();
+    if (permissionRefusal) {
+      const revoked = await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false) === true;
+      if (!revoked) return afterLoginBindingUnknown('login_excursion_cleanup_unverified');
+      return afterLoginBinding(
+        permissionRefusal.error ?? permissionRefusal.code ?? 'login_permission_refused',
+        permissionRefusal.content,
+      );
     }
 
     // Click via the SAME walkId — the stable registry node the read resolved, which
@@ -288,15 +342,15 @@ export const loginTool = definePageAuthorityHandler({
       scriptResult = results[0]?.result;
     } catch (e) {
       await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
-      return { ok: false, error: `login_click_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      return afterLoginBindingUnknown(`login_click_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
     }
     if (!scriptResult) {
       await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
-      return { ok: false, error: 'login_click_failed' };
+      return afterLoginBindingUnknown('login_click_failed');
     }
     if (!scriptResult.ok) {
       await ctx.revokeSignInExcursion?.(idpOrigin).catch(() => false);
-      return { ok: false, error: `login_click_failed: ${scriptResult.error ?? 'click_failed'}` };
+      return afterLoginBindingUnknown(`login_click_failed: ${scriptResult.error ?? 'click_failed'}`);
     }
 
     // 8) AUDIT (best-effort — never let an audit hiccup fail the login).

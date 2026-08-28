@@ -21,6 +21,11 @@ import {
 import {
   projectControllerToolSurface,
 } from '../../../extension/peerd-runtime/controller-tool-projection.js';
+import { ORCHESTRATOR_OPERATION_GRANT } from '../../../extension/shared/controller-kernel-quota.js';
+import {
+  APP_PROGRAM_EXACT_OPERATIONS,
+  PAGE_PROGRAM_EXACT_OPERATIONS,
+} from '../../../extension/shared/page-program-authority.js';
 import {
   clearTools, listTools, registerTool,
 } from '../../../extension/peerd-runtime/tools/registry.js';
@@ -211,6 +216,82 @@ describe('controller tool projection', () => {
     })).toEqual({
       ok: false, code: 'turn-tool-projection-invalid', outcomeKnown: true,
     });
+  });
+
+  test('an explicitly unknown actor backing or surface projects no authority', () => {
+    for (const invalid of [
+      { backing: 'unknown', actorSurface: 'tools' },
+      { backing: 'tab', actorSurface: 'unknown' },
+    ]) {
+      expect(projectControllerToolSurface({
+        surface: 'actor', actorType: 'web', inbound: false,
+        runtimeCapabilities: {}, ...invalid,
+      })).toEqual({ ok: true, tools: [], operations: [] });
+    }
+  });
+
+  test('projects the exact main operation subset from trusted turn policy', () => {
+    const base = {
+      surface: 'main', dwebEnabled: false, dwebEngaged: false,
+      actorIsolation: {
+        status: 'available', host: 'background-page-worker', reason: null, retryable: false,
+      },
+      runtimeCapabilities: null,
+    };
+    const full: any = projectControllerToolSurface({
+      ...base, toolManifest: null, goalActive: true,
+    });
+    expect(new Set(full.operations)).toEqual(new Set(ORCHESTRATOR_OPERATION_GRANT));
+
+    const empty: any = projectControllerToolSurface({
+      ...base, toolManifest: { allow: [] }, goalActive: false,
+    });
+    expect(empty.operations).toEqual([]);
+
+    const custom: any = projectControllerToolSurface({
+      ...base, toolManifest: { allow: ['schedule_list'] }, goalActive: false,
+    });
+    expect(custom.operations).toEqual(['turn.schedule.read-routines']);
+
+    const inactive: any = projectControllerToolSurface({
+      ...base, toolManifest: { allow: ['complete_goal', 'todo_init', 'todo_add'] },
+      goalActive: false,
+    });
+    expect(inactive.operations).toEqual([]);
+    const active: any = projectControllerToolSurface({
+      ...base, toolManifest: { allow: ['complete_goal', 'todo_init', 'todo_add'] },
+      goalActive: true,
+    });
+    expect(new Set(active.operations)).toEqual(new Set([
+      'turn.goal.complete', 'turn.todo.read', 'turn.todo.replace',
+    ]));
+
+    const runtimeDisabled: any = projectControllerToolSurface({
+      ...base, toolManifest: { allow: ['script'] }, goalActive: false,
+      runtimeCapabilities: {
+        sealedJobs: { status: 'unsupported' },
+      },
+    });
+    expect(runtimeDisabled.operations).toEqual([]);
+
+    const isolationDisabled: any = projectControllerToolSurface({
+      ...base, toolManifest: { allow: ['message_actor', 'actor_create', 'actor_list'] },
+      goalActive: false,
+      actorIsolation: { status: 'unsupported', host: null, reason: '', retryable: false },
+    });
+    expect(isolationDisabled.operations).toEqual(['turn.introspection.actor-roster']);
+  });
+
+  test('page-program projection and privileged parent admission share one exact operation set', () => {
+    const surface: any = projectControllerToolSurface({ surface: 'page-program' });
+    expect(surface.ok).toBe(true);
+    expect(new Set(surface.operations)).toEqual(new Set(PAGE_PROGRAM_EXACT_OPERATIONS));
+  });
+
+  test('app-program projection and privileged parent admission share one exact operation set', () => {
+    const surface: any = projectControllerToolSurface({ surface: 'app-program' });
+    expect(surface.ok).toBe(true);
+    expect(new Set(surface.operations)).toEqual(new Set(APP_PROGRAM_EXACT_OPERATIONS));
   });
 });
 

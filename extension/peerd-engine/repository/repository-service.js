@@ -543,6 +543,13 @@ export const createRepositoryService = ({
     return snapshotAtUnlocked(ctx, at);
   });
 
+  /** Return a copy of the visible live worktree without creating a commit. */
+  /** @param {{kind:string,id:string}} ref */
+  const workingSnapshot = (ref) => run(ref, async (ctx) => {
+    await ensureUnlocked(ctx);
+    return readVisibleWorkingTree(ctx, {});
+  });
+
   /** Compare every live byte (including ignored files) with one commit tree. */
   /** @param {{kind:string,id:string}} ref @param {{at?:string}} [opts] */
   const matches = (ref, { at = 'HEAD' } = {}) => run(ref, async (ctx) => {
@@ -607,7 +614,8 @@ export const createRepositoryService = ({
   return {
     coordinate,
     init, stage, commit, status, branches, history, diff, restore, branch, checkout,
-    setRemote, getRemote, fetch: fetchRemote, push, clone, snapshot, matches, fork: forkRepository,
+    setRemote, getRemote, fetch: fetchRemote, push, clone, snapshot, workingSnapshot,
+    matches, fork: forkRepository,
     replaceWorkingTree, destroy,
     initApp: (/** @type {string} */ appId, /** @type {{message?:string}} */ opts) => init(appRepositoryRef(appId), opts),
     commitApp: (/** @type {string} */ appId, /** @type {{message?:string}} */ opts) => commit(appRepositoryRef(appId), opts),

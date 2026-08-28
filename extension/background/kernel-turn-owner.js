@@ -59,12 +59,14 @@ const closedFailure = () => ({
  * @param {()=>string} [deps.newId]
  * @param {ReturnType<import('./provider-egress-authority.js').createProviderEgressAuthority>}
  *   [deps.providerEgress]
+ * @param {ReturnType<import('./authority-effect-scheduler.js').createAuthorityEffectScheduler>}
+ *   [deps.authorityScheduler]
  * @param {(runtime:Record<string,any>,custody:{isCurrent:()=>boolean,publish:()=>boolean})=>Promise<void>|void} [deps.onLoaded]
  */
 export const createKernelTurnOwner = ({
   createController, loadRuntime, onLoaded,
   loadTimeoutMs = TURN_RUNTIME_LOAD_TIMEOUT_MS,
-  newId, providerEgress,
+  newId, providerEgress, authorityScheduler,
 }) => {
   if (typeof createController !== 'function' || typeof loadRuntime !== 'function') {
     throw new TypeError('kernel-turn-owner-config-invalid');
@@ -83,15 +85,8 @@ export const createKernelTurnOwner = ({
         });
       },
     }),
-    prepareToolCall: (call, ctx, binding) =>
-      ctx.toolExecution?.prepare?.(call, binding) ?? null,
-    settleToolCall: ({ custody, result, ctx, binding }) => {
-      if (typeof ctx.toolExecution?.settle !== 'function') {
-        throw new Error('tool execution settlement unavailable');
-      }
-      return ctx.toolExecution.settle(custody, result, binding);
-    },
     providerEgress,
+    authorityScheduler,
     ...(newId ? { newId } : {}),
   });
   controller = createController({

@@ -5,11 +5,6 @@ import { runControllerTurn } from '../../extension/offscreen/controller-turn-run
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
 import { getToolPolicy } from '../../extension/peerd-runtime/tools/metadata/policy.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
-import {
-  prepareToolCall as prepareRuntimeToolCall,
-  settleToolCall as settleRuntimeToolCall,
-} from '../../extension/peerd-runtime/tools/dispatcher.js';
-import { CONTROLLER_AUTHORITY_MANIFEST } from '../../extension/shared/controller-authority-manifest.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -67,21 +62,6 @@ const connectHarness = async () => {
     getClient: async () => client,
     newId,
     providerEgress: makeScriptedProviderAuthority(() => modelCall) as any,
-    toolManifest: CONTROLLER_AUTHORITY_MANIFEST,
-    prepareToolCall: async (call: any, ctx: any, binding: any) => {
-      const prepared: any = await prepareRuntimeToolCall(call, ctx, binding.descriptor);
-      return prepared?.prepared === true ? {
-        mode: 'execute', custody: prepared, args: prepared.args,
-        projection: {
-          sessionId: ctx.session?.sessionId,
-          runtimeCapabilities: ctx.runtimeCapabilities,
-        },
-        manifestDigest: CONTROLLER_AUTHORITY_MANIFEST.digest,
-      } : { mode: 'result', result: prepared };
-    },
-    settleToolCall: async ({ custody, result }: any) => settleRuntimeToolCall(custody, {
-      result: result.value,
-    }),
   });
   client = await connectDirectController({
     capabilities: ['turn.run'],
@@ -283,10 +263,6 @@ describe('production direct-controller tool backpressure', () => {
       expect(sessions.snapshot().messages.at(-1)).toMatchObject({
         role: 'assistant', streaming: false, stopReason: 'aborted',
       });
-      const workerSource = await Bun.file(
-        new URL('../../extension/offscreen/controller-worker.js', import.meta.url),
-      ).text();
-      expect(workerSource).toContain("'turn.tool.settle'");
     } finally {
       harness.close();
     }

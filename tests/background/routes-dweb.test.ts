@@ -253,6 +253,25 @@ describe('dweb app store', () => {
     expect(result).toEqual({ ok: false, error: 'app disappeared while recording install lineage' });
     expect(deleted).toEqual(['app-new12345']);
   });
+  test('failed install rollback preserves unknown durable App custody', async () => {
+    const { deps } = baseDeps({
+      appRegistry: {
+        get: async () => null,
+        list: async () => [],
+        update: async () => null,
+      },
+      appClient: {
+        create: async (args: any) => ({ id: args.appId, ...args }),
+        delete: async () => { throw new Error('OPFS cleanup failed'); },
+      },
+    });
+    expect(await makeDwebRoutes(deps)['dweb/app-install']({
+      appId: 'app-new12345', name: 'X', files: {}, entryFile: 'i.html', dweb: { uri: 'u' },
+    }, offscreenSender)).toEqual({
+      ok: false, error: 'dweb-install-rollback-failed',
+      performed: true, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false,
+    });
+  });
   test('lock invalidation crossing an offscreen install callback removes the created App', async () => {
     let generation = 7;
     let releaseCreate = () => {};

@@ -14,6 +14,138 @@ const withAppLifecycle = <T>(_appId: string, operation: () => Promise<T>) => ope
 const withDwebPublication = <T>(operation: (isCurrent: () => boolean) => Promise<T>) => operation(() => true);
 
 describe('identity-bound dweb share', () => {
+  test('refuses a changed live tree before the mesh publication edge', async () => {
+    let liveText = 'approved';
+    const messages: any[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
+        update: async () => ({ id: 'app-1' }),
+      },
+      repositories: {
+        workingSnapshot: async () => ({
+          'index.html': new TextEncoder().encode(liveText),
+        }),
+        statusApp: async () => ({ changed: [] }),
+        commitApp: async () => ({ oid: 'a'.repeat(40) }),
+        historyApp: async () => [],
+        snapshot: async () => ({ 'index.html': new TextEncoder().encode(liveText) }),
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => { messages.push(message); return { ok: true }; },
+    });
+
+    const prepared = await share.prepare('app-1');
+    liveText = 'changed-after-confirmation';
+    expect(await share('app-1', undefined, prepared)).toEqual({
+      ok: false, error: 'share-prepared-snapshot-changed',
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+    expect(messages.some((message) => message.type === 'dweb/base-host/share-app')).toBe(false);
+  });
+
+  test('a post-commit snapshot mismatch preserves durable commit custody', async () => {
+    const messages: any[] = [];
+    let committed = false;
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
+        update: async () => ({ id: 'app-1' }),
+      },
+      repositories: {
+        workingSnapshot: async () => ({
+          'index.html': new TextEncoder().encode('approved'),
+        }),
+        statusApp: async () => ({ changed: [] }),
+        commitApp: async () => { committed = true; return { oid: 'a'.repeat(40) }; },
+        historyApp: async () => [],
+        snapshot: async () => ({
+          'index.html': new TextEncoder().encode('different-commit'),
+        }),
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async (message) => { messages.push(message); return { ok: true }; },
+    });
+
+    const prepared = await share.prepare('app-1');
+    expect(await share('app-1', undefined, prepared)).toEqual({
+      ok: false, error: 'share-prepared-snapshot-changed', performed: true,
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(committed).toBe(true);
+    expect(messages.some((message) => message.type === 'dweb/base-host/share-app')).toBe(false);
+  });
+
+  test.each([
+    ['mesh refusal', 'mesh-refused', async () => ({ ok: false, error: 'mesh-refused' })],
+    ['metadata rollback', 'share-metadata-store-failed', async (message: any) =>
+      message.type === 'dweb/base-host/rollback-share'
+        ? { ok: true } : { ok: true, hash: 'new', transactionId: 'tx' }],
+  ] as const)('preserves the local commit after post-commit %s', async (
+    _label, expectedError, sendMessage,
+  ) => {
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
+        update: async () => {
+          if (expectedError === 'share-metadata-store-failed') throw new Error('disk');
+          return { id: 'app-1' };
+        },
+      },
+      repositories: {
+        workingSnapshot: async () => ({
+          'index.html': new TextEncoder().encode('approved'),
+        }),
+        statusApp: async () => ({ changed: [] }),
+        commitApp: async () => ({ oid: 'a'.repeat(40) }),
+        historyApp: async () => [],
+        snapshot: async () => ({
+          'index.html': new TextEncoder().encode('approved'),
+        }),
+      },
+      prepareRuntime: async () => ({ ok: true }), sendMessage,
+    });
+    const prepared = await share.prepare('app-1');
+    expect(await share('app-1', undefined, prepared)).toMatchObject({
+      ok: false, error: expectedError, performed: true,
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+  });
+
+  test('a thrown mesh failure after a local commit remains unknown and nonretryable', async () => {
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: {
+        get: async () => ({ name: 'App', entryFile: 'index.html', dweb: {} }),
+        update: async () => ({ id: 'app-1' }),
+      },
+      repositories: {
+        workingSnapshot: async () => ({
+          'index.html': new TextEncoder().encode('approved'),
+        }),
+        statusApp: async () => ({ changed: [] }),
+        commitApp: async () => ({ oid: 'a'.repeat(40) }),
+        historyApp: async () => [],
+        snapshot: async () => ({
+          'index.html': new TextEncoder().encode('approved'),
+        }),
+      },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async () => { throw new Error('mesh disconnected'); },
+    });
+    const prepared = await share.prepare('app-1');
+    await expect(share('app-1', undefined, prepared)).rejects.toMatchObject({
+      performed: true, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false,
+    });
+  });
+
   test('publish and complete identity metadata persistence stay in the custody lane', async () => {
     const events: string[] = [];
     const lane = makeLane();
@@ -155,6 +287,10 @@ describe('identity-bound dweb share', () => {
       published_hashes: ['e'.repeat(64), publishedHash],
     });
     expect(events).toEqual([
+      'flush',
+      'lock-enter',
+      'lock-exit',
+      'resume',
       'flush',
       'lock-enter',
       'commit:release: update index.html, module.wasm',

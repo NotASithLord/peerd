@@ -46,37 +46,33 @@ const serializeHook = (/** @type {any} */ hook) => ({
   isDefault: false,
   kind: hook._record?.kind ?? 'builtin',
   doc: hook._record?.doc ?? hook.description ?? '',
+  unsupported: hook.unsupported === true,
+  unsupportedReason: hook.unsupportedReason ?? '',
 });
 
 const defaultIds = new Set(DEFAULT_HOOK_MANIFEST.map((hook) => hook.id));
 const defaultHooks = DEFAULT_HOOK_MANIFEST.map(({ description, ...hook }) => ({
   ...hook, isDefault: true, kind: 'builtin', doc: description,
 }));
-/** @type {Promise<unknown>|null} */
-let hooksReady = null;
-const ensureHooks = (/** @type {any} */ context) => {
-  if (!hooksReady) {
-    const current = loadUserHooks({
-      kv: { get: () => effectValue(context, 'administrative.hooks.read', {}) },
-    }).catch((cause) => {
-      if (hooksReady === current) hooksReady = null;
-      throw cause;
-    });
-    hooksReady = current;
-  }
-  return hooksReady;
-};
+// Durable records are the cross-realm truth. Reload on every administrative
+// call so a transfer import performed in the SW becomes visible immediately;
+// semantic turns independently read the same KV key at turn admission.
+const ensureHooks = (/** @type {any} */ context) => loadUserHooks({
+  kv: { get: () => effectValue(context, 'administrative.hooks.read', {}) },
+});
 const hookWrites = makeSerialLane();
 const mutateHook = (/** @type {string} */ route) => async (
   /** @type {any} */ message, /** @type {any} */ context,
 ) => hookWrites(async () => {
   await ensureHooks(context);
+  const hasUserRecord = (/** @type {string} */ id) => exportHooks()
+    .some((record) => record.id === id);
   if (route === 'hooks/remove'
-      && defaultIds.has(message?.id)) {
+      && defaultIds.has(message?.id) && !hasUserRecord(message.id)) {
     return { ok: false, error: 'cannot remove a default hook' };
   }
   if (route === 'hooks/toggle'
-      && defaultIds.has(message?.id)) {
+      && defaultIds.has(message?.id) && !hasUserRecord(message.id)) {
     return { ok: false, error: 'cannot disable a built-in hook' };
   }
   try {

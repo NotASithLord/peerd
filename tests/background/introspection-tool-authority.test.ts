@@ -6,7 +6,7 @@ import {
 describe('exact introspection authority', () => {
   test('filters sensitive browser targets before returning an actor roster', async () => {
     const authority = createIntrospectionToolAuthority({
-      call: { name: 'actor_list', args: {} },
+      binding: { operation: 'turn.introspection.actor-roster', args: {} },
       ctx: {
         session: { sessionId: 's1' },
         tabs: { query: async () => [
@@ -26,7 +26,7 @@ describe('exact introspection authority', () => {
 
   test('pins a storage inspection to the admitted facet and prefix', async () => {
     const authority = createIntrospectionToolAuthority({
-      call: { name: 'inspect', args: { kind: 'storage', prefix: 'session:' } },
+      binding: { operation: 'turn.introspection.storage-snapshot', args: { prefix: 'session:' } },
       ctx: { kv: { list: async (prefix: string) => ({ prefix }) } },
     });
     await expect(authority.readStorageSnapshot('session:')).resolves
@@ -39,7 +39,7 @@ describe('exact introspection authority', () => {
   test('pins an installed-skill read to the admitted normalized name', async () => {
     let reads = 0;
     const authority = createIntrospectionToolAuthority({
-      call: { name: 'load_skill', args: { name: ' writer ' } },
+      binding: { operation: 'turn.introspection.installed-skill', args: { name: ' writer ' } },
       ctx: { skills: { loadBody: async (name: string) => {
         reads += 1;
         return { meta: { name }, body: 'body' };

@@ -81,22 +81,6 @@ export const SEMANTIC_ROUTE_INVENTORY = Object.freeze([
     "source": "extension/background/vault-kernel.js"
   },
   {
-    "route": "app-code/observe",
-    "channels": [
-      "store",
-      "preview"
-    ],
-    "source": "appRuntimeRoutes"
-  },
-  {
-    "route": "app-code/act",
-    "channels": [
-      "store",
-      "preview"
-    ],
-    "source": "appRuntimeRoutes"
-  },
-  {
     "route": "app/editor-delete",
     "channels": [
       "store",

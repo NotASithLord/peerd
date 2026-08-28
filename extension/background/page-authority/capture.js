@@ -68,6 +68,9 @@ export const captureTool = definePageAuthorityHandler({
       const windowId = typeof beforeForeground.windowId === 'number'
         ? beforeForeground.windowId
         : requestedWindowId ?? undefined;
+      if (ctx.abortSignal?.aborted) return {
+        ok: false, error: 'capture_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+      };
       const dataUrl = await captureVisible(windowId, ctx);
       if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
         return { ok: false, error: 'capture_returned_unexpected_shape' };

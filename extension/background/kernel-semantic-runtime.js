@@ -221,6 +221,7 @@ export const createKernelSemanticRuntime = (deps) => {
       loadRuntime: deps.loadTurnRuntime,
       onLoaded: deps.onTurnRuntimeLoaded,
       providerEgress: deps.providerEgress,
+      authorityScheduler: deps.authorityScheduler,
       ...(deps.turnLoadTimeoutMs === undefined ? {} : { loadTimeoutMs: deps.turnLoadTimeoutMs }),
     });
     return turnOwner;

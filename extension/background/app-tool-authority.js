@@ -14,15 +14,26 @@ const sameClone = (left, right) => {
   catch { return false; }
 };
 
-/** @param {{call:any,ctx:any,signal?:AbortSignal}} input */
-export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal }) => {
-  const args = call?.args ?? {};
+/** @param {{binding:any,ctx:any,signal?:AbortSignal,shared?:any,appProgramSemanticToken?:string}} input */
+export const createAppToolAuthority = ({
+  binding, ctx, signal = ctx?.abortSignal, shared = {}, appProgramSemanticToken,
+}) => {
+  const args = binding.args;
   const sessionId = ctx?.session?.sessionId;
-  /** @type {{id:string,name:string}|null} */ let inspected = null;
-  const requireTool = (/** @type {string} */ name) => {
-    if (call?.name !== name) throw mismatch();
+  const boundAppId = ctx?.actorType === 'app' ? ctx.actorInstanceId : null;
+  const requireOperation = (/** @type {string} */ name) => {
+    if (binding.operation !== name) throw mismatch();
   };
-  const sameApp = (/** @type {unknown} */ appId) => appId === args.appId;
+  const sameApp = (/** @type {unknown} */ appId) => boundAppId
+    ? appId === undefined || appId === boundAppId
+    : appId === args.appId;
+  const appIdFor = (/** @type {string|undefined} */ appId) => boundAppId ?? appId;
+  const requireLive = () => {
+    if (!signal?.aborted) return;
+    throw Object.assign(new Error('App operation stopped before mutation'), {
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+  };
 
   return Object.freeze({
     updateApp: async (
@@ -32,12 +43,12 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
       /** @type {string[]|undefined} */ tags,
       /** @type {string|undefined} */ entryFile,
     ) => {
-      requireTool('app_update');
+      requireOperation('turn.app.update');
       if (!sameApp(appId) || name !== args.name || html !== args.html
           || entryFile !== args.entryFile || !sameClone(tags, args.tags)
           || typeof ctx?.appClient?.update !== 'function') throw mismatch();
       const record = await ctx.appClient.update({
-        appId, name, html, tags, entryFile, sessionId,
+        appId: appIdFor(appId), name, html, tags, entryFile, sessionId,
       });
       return record ? {
         id: record.id, name: record.name, entryFile: record.entryFile,
@@ -45,13 +56,15 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
       } : null;
     },
     openApp: async (/** @type {string} */ appId) => {
-      requireTool('app_open');
-      if (appId !== args.appId || typeof ctx?.appClient?.open !== 'function') throw mismatch();
+      requireOperation('turn.app.open');
+      if (boundAppId || appId !== args.appId || typeof ctx?.appClient?.open !== 'function') {
+        throw mismatch();
+      }
       return ctx.appClient.open({ appId, sessionId, focus: false });
     },
     searchApps: async (/** @type {string} */ query) => {
-      requireTool('app_search');
-      if (query !== String(args.query ?? '').trim()
+      requireOperation('turn.app.search');
+      if (boundAppId || query !== String(args.query ?? '').trim()
           || typeof ctx?.appClient?.search !== 'function') throw mismatch();
       const hits = await ctx.appClient.search(query);
       return hits.map((/** @type {any} */ hit) => ({
@@ -63,56 +76,62 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
       }));
     },
     readApp: async (/** @type {string} */ appId) => {
-      requireTool('app_delete');
-      if (appId !== args.appId || typeof ctx?.appRegistry?.get !== 'function') throw mismatch();
-      const record = await ctx.appRegistry.get(appId);
-      inspected = record ? { id: record.id ?? appId, name: String(record.name ?? '') } : null;
-      return inspected;
+      requireOperation('turn.app.read');
+      if (!sameApp(appId) || typeof ctx?.appRegistry?.get !== 'function') throw mismatch();
+      const targetAppId = appIdFor(appId);
+      const record = await ctx.appRegistry.get(targetAppId);
+      shared.inspected = record
+        ? { id: record.id ?? targetAppId, name: String(record.name ?? '') } : null;
+      return shared.inspected;
     },
     deleteApp: async (/** @type {string} */ appId) => {
-      requireTool('app_delete');
-      if (appId !== args.appId || inspected?.id !== appId
+      requireOperation('turn.app.delete');
+      const targetAppId = appIdFor(appId);
+      if (!sameApp(appId) || shared.inspected?.id !== targetAppId
           || typeof ctx?.appRegistry?.get !== 'function'
           || typeof ctx?.appClient?.delete !== 'function') throw mismatch();
-      const fresh = await ctx.appRegistry.get(appId);
+      const fresh = await ctx.appRegistry.get(targetAppId);
       if (!fresh) throw mismatch();
-      return ctx.appClient.delete(appId);
+      // why: the registry probe may wait behind another App mutation. Stop
+      // must still win before deletion crosses its first physical edge.
+      requireLive();
+      return ctx.appClient.delete(targetAppId);
     },
     writeFile: (
       /** @type {string|undefined} */ appId,
       /** @type {string} */ path,
       /** @type {unknown} */ content,
     ) => {
-      requireTool('app_write_file');
+      requireOperation('turn.app.write-file');
       const expected = typeof args.contentBase64 === 'string'
         ? { base64: args.contentBase64 }
         : args.content;
       if (!sameApp(appId) || path !== args.path || !sameClone(content, expected)
           || typeof ctx?.appClient?.writeFile !== 'function') throw mismatch();
-      return ctx.appClient.writeFile({ appId, path, content, sessionId });
+      return ctx.appClient.writeFile({ appId: appIdFor(appId), path, content, sessionId });
     },
     readFile: (/** @type {string|undefined} */ appId, /** @type {string} */ path) => {
-      requireTool('app_read_file');
+      requireOperation('turn.app.read-file');
       if (!sameApp(appId) || path !== args.path
           || typeof ctx?.appClient?.readFile !== 'function') throw mismatch();
-      return ctx.appClient.readFile({ appId, path, sessionId });
+      return ctx.appClient.readFile({ appId: appIdFor(appId), path, sessionId });
     },
     listFiles: async (/** @type {string|undefined} */ appId) => {
-      requireTool('app_list_files');
+      requireOperation('turn.app.list-files');
       if (!sameApp(appId) || typeof ctx?.appClient?.listFiles !== 'function') throw mismatch();
-      const files = await ctx.appClient.listFiles({ appId, sessionId });
+      const files = await ctx.appClient.listFiles({ appId: appIdFor(appId), sessionId });
       return files.map((/** @type {any} */ file) => ({ path: file.path, size: file.size }));
     },
     deleteFile: (
       /** @type {string|undefined} */ appId, /** @type {string} */ path,
     ) => {
-      requireTool('app_delete_file');
+      requireOperation('turn.app.delete-file');
       if (!sameApp(appId) || path !== args.path
           || typeof ctx?.appClient?.deleteFile !== 'function') throw mismatch();
-      return ctx.appClient.deleteFile({ appId, path, sessionId });
+      return ctx.appClient.deleteFile({ appId: appIdFor(appId), path, sessionId });
     },
     observeRuntime: () => {
-      requireTool('app_observe');
+      requireOperation('turn.app.observe');
       if (typeof ctx?.appAgentCall !== 'function') return {
         ok: false, error: 'app_playtest_not_available', outcomeKnown: true,
         outcomeKind: 'pre-effect-failure',
@@ -120,7 +139,7 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
       return ctx.appAgentCall('observe', {}, signal);
     },
     actRuntime: (/** @type {string} */ action, /** @type {Record<string,unknown>} */ params) => {
-      requireTool('app_act');
+      requireOperation('turn.app.act');
       if (action !== args.action || !sameClone(params, args.params ?? {})) throw mismatch();
       if (typeof ctx?.appAgentCall !== 'function') return {
         ok: false, error: 'app_playtest_not_available', outcomeKnown: true,
@@ -129,7 +148,7 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
       return ctx.appAgentCall('act', { action, params }, signal);
     },
     runCode: async (/** @type {string} */ code, /** @type {number} */ timeoutMs) => {
-      requireTool('app_code');
+      requireOperation('turn.app.run-code');
       const expectedTimeout = Math.min(180_000, Math.max(1000, Number(args.timeoutMs ?? 60_000)));
       if (code !== args.code || timeoutMs !== expectedTimeout) throw mismatch();
       const client = ctx?.jsOffscreenClient;
@@ -156,6 +175,7 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
           caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
           ownerSessionId: sessionId,
           runId,
+          ...(appProgramSemanticToken ? { appProgramSemanticToken } : {}),
           signal,
           onExecutionDispatch: () => { executionDispatched = true; },
         });
@@ -178,5 +198,7 @@ export const createAppToolAuthority = ({ call, ctx, signal = ctx?.abortSignal })
   });
 };
 
-export const bindAppToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
-  state.authority ??= createAppToolAuthority(input);
+export const bindAppToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) => {
+  const binding = Object.freeze({ operation: input.operation, args: structuredClone(input.args) });
+  return createAppToolAuthority({ ...input, binding, shared: state });
+};

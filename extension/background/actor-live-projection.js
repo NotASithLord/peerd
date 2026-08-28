@@ -88,7 +88,7 @@ export const createActorLiveProjection = (opts = {}) => {
         sessionId: event.sessionId, kind: 'spawned', depth: event.depth,
         task: event.task, parentSessionId: event.parentSessionId,
         rootSessionId: event.rootSessionId, parentToolUseId: event.parentToolUseId,
-        grantedTools: Array.isArray(event.grantedTools) ? event.grantedTools : [],
+        visibleTools: Array.isArray(event.visibleTools) ? event.visibleTools : [],
         running: true, messages: [],
       };
       spawned.set(event.sessionId, session);
@@ -96,7 +96,7 @@ export const createActorLiveProjection = (opts = {}) => {
         type: 'turn/spawned-start', parentToolUseId: event.parentToolUseId,
         parentSessionId: event.parentSessionId, sessionId: event.sessionId,
         rootSessionId: event.rootSessionId, depth: event.depth, task: event.task,
-        grantedTools: session.grantedTools,
+        visibleTools: session.visibleTools,
       };
     }
     if (event?.type === 'actor-stop') {

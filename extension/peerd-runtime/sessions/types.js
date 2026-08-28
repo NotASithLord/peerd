@@ -37,9 +37,8 @@
  * @property {SessionKind} kind               'chat' (default) | 'spawned' | 'actor'
  * @property {string} [parentSessionId]       who spawned this; absent for top-level
  * @property {string} [task]                  the spawning prompt (spawned only)
- * @property {string[]} [grantedTools]        an actor's narrowed toolset (post-manifest
- *   intersection), persisted at spawn so the heap-split offscreen tool-dispatch rebuilds
- *   the child's restricted ctx from it and re-checks every relayed call — never the worker's.
+ * @property {string[]} [grantedOperations]   immutable exact host-operation grant minted by
+ *   the sealed semantic owner at spawn, narrowed by every ancestor and revalidated on run.
  * @property {number} depth                   0 for top-level; parent.depth + 1 otherwise
  * @property {boolean} [spawnedTrusted]       was the SPAWNING turn trusted (non-inbound)?
  *   The per-hop verdict the trusted-lineage gate (actor/delegation-lineage.js)
@@ -100,20 +99,21 @@
  *
  * Manifest-defined App role. Unlike customSystemPrompt this is publisher-
  * provenance package metadata, not user-authored /system text. The digest is
- * also part of the actor's durable authority identity: a changed peerd.json
+ * also part of the actor's durable owner/execution identity: a changed peerd.json
  * must never reconnect to the prior actor generation.
  * @property {string} [appManifestDigest]
- * @property {string} [appOwnerAuthorityDigest] durable fingerprint of effective allow + Plan/Act posture
+ * @property {string} [appOwnerAuthorityDigest] durable fingerprint of the effective App model surface
+ * @property {string} [ownerSemanticPostureDigest] bound actor owner's effective model surface
  * @property {{source:'local'|'unsigned-import'|'dweb', publisher:string, manifestDigest:string, name?:string, instructions?:string}} [appRole]
  * @property {'code'} [actorSurface]            manifest-defined App actors use the code-first surface
  *
  * Per-session tool exposure manifest (the /tools composer command;
  * tools/manifests.js). Absent = every registered tool stays exposed —
  * today's behavior. When present, the main turn's descriptor list and
- * the exposure gate both intersect with it (fail-closed), and spawned
- * INHERIT it (the inverse of customSystemPrompt — a manifest is an
- * authority bound, not a preference, so a child must never escalate
- * past it). Cleared by removing the key (setToolManifest).
+ * the semantic exposure gate both intersect with it (fail-closed), and
+ * spawned actors INHERIT it so descendants keep the same model-surface
+ * narrowing. Exact host authority is represented and enforced separately.
+ * Cleared by removing the key (setToolManifest).
  * @property {import('../tools/manifests.js').ToolManifest} [toolManifest]
  */
 

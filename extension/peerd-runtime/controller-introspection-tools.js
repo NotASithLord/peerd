@@ -23,7 +23,7 @@ export const controllerHostsIntrospectionTool = (/** @type {unknown} */ name) =>
 /**
  * @param {string} name
  * @param {unknown} args
- * @param {{sessionId?:string,messageCount?:number,trimCovered?:number}} projection
+ * @param {{sessionId?:string,messageCount?:number,trimCovered?:number,messages?:any[]}} projection
  * @param {Record<string,Function>} authority
  * @param {{signal?:AbortSignal}} [options]
  */
@@ -49,6 +49,7 @@ export const executeControllerIntrospectionTool = async (
       sessionId: projection.sessionId,
       messageCount: projection.messageCount ?? 0,
       trimCovered: projection.trimCovered ?? 0,
+      messages: projection.messages,
     },
   }));
 };

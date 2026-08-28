@@ -121,4 +121,31 @@ describe('site_client_run code-run custody', () => {
     });
     expect(recordRuns).toBe(0);
   });
+
+  test('a caught inner write transport loss remains unknown at the outer authority edge', async () => {
+    const pending = executeSiteClientTool(siteClientRunTool, {
+      origin: 'https://api.example.com', code: 'try { await client.save() } catch {} return "ok"',
+    }, {
+      session: { sessionId: 'api-actor-1' },
+      canUseSiteClientOrigin: () => true,
+      authorizeSiteClientOrigin: async () => true,
+      siteClients: {
+        get: async () => ({ body: 'return { save: () => site.fetch("/items", {method:"POST"}) };' }),
+        recordRun: async () => {},
+      },
+      scriptRuns: {
+        mintRunId: () => 'site-run-unknown', register: () => {}, release: () => {},
+      },
+      jsOffscreenClient: {
+        execHeadless: async () => ({
+          value: 'ok', error: 'site write outcome unknown: response lost',
+          siteOutcomeUnknown: true, siteOutcomeError: 'response lost',
+        }),
+      },
+    } as any);
+    await expect(pending).rejects.toMatchObject({
+      message: 'response lost', outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    });
+  });
 });

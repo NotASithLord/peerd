@@ -6,38 +6,41 @@ import { createExecutionToolAuthority } from '../../extension/background/executi
  * adapter fixture exactly as they do in the service worker.
  */
 export const executionToolContext = (raw: any) => {
-  let scriptAuthority: any;
-  const bind = (name: string, args: any) => createExecutionToolAuthority({
-    call: { id: `test:${name}`, name, args }, ctx: raw, signal: raw.abortSignal,
+  const shared: any = {};
+  let scriptArgs: any = null;
+  const bind = (operation: string, args: any) => createExecutionToolAuthority({
+    binding: { operation, args }, ctx: raw, signal: raw.abortSignal, shared,
   });
   return {
     session: raw.session,
     executionAuthority: {
       createWebVm: (plan: any) => {
         const bound = { ...plan, kind: 'webvm' };
-        return bind('sandbox_create', bound).createWebVm(bound);
+        return bind('turn.execution.create-webvm', { plan: bound }).createWebVm(bound);
       },
       createNotebook: (plan: any) => {
         const bound = { ...plan, kind: 'notebook' };
-        return bind('sandbox_create', bound).createNotebook(bound);
+        return bind('turn.execution.create-notebook', { plan: bound }).createNotebook(bound);
       },
       createPod: (plan: any) => {
         const bound = { ...plan, kind: 'pod' };
-        return bind('sandbox_create', bound).createPod(bound);
+        return bind('turn.execution.create-pod', { plan: bound }).createPod(bound);
       },
       createApp: (plan: any) => {
         const bound = { ...plan, kind: 'app' };
-        return bind('sandbox_create', bound).createApp(bound);
+        return bind('turn.execution.create-app', { plan: bound }).createApp(bound);
       },
       runHeadlessScript: (request: any) => {
-        scriptAuthority = bind('script', {
+        scriptArgs = {
           code: request.code,
           ...(request.workspace ? { workspace: true } : {}),
           ...(request.timeoutMs === null ? {} : { timeoutMs: request.timeoutMs }),
-        });
-        return scriptAuthority.runHeadlessScript(request);
+        };
+        return bind('turn.execution.run-script', scriptArgs).runHeadlessScript(request);
       },
-      spillScriptValue: (record: any) => scriptAuthority.spillScriptValue(record),
+      spillScriptValue: (record: any) => bind(
+        'turn.execution.spill-script', { ...(scriptArgs ?? {}), record },
+      ).spillScriptValue(record),
     },
   };
 };

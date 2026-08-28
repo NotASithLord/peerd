@@ -8,68 +8,71 @@ const mismatch = () => Object.assign(new Error('VM authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
 
-/** @param {{call:any,ctx:any}} input */
-export const createVmToolAuthority = ({ call, ctx }) => {
-  const args = call?.args ?? {};
+/** @param {{binding:any,ctx:any,signal?:AbortSignal,shared?:any}} input */
+export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal, shared = {} }) => {
+  const args = binding.args;
   const sessionId = ctx?.session?.sessionId;
-  /** @type {any} */ let inspected = null;
-  /** @type {string|undefined} */ let resolvedVmId;
+  const boundVmId = ctx?.actorType === 'webvm' ? ctx.actorInstanceId : null;
+  const requireBoundVm = (/** @type {unknown} */ vmId) => {
+    if (boundVmId && vmId !== boundVmId) throw mismatch();
+  };
 
-  const requireTool = (/** @type {string} */ name) => {
-    if (call?.name !== name) throw mismatch();
+  const requireOperation = (/** @type {string} */ name) => {
+    if (binding.operation !== name) throw mismatch();
+  };
+  const requireLive = () => {
+    if (!signal?.aborted) return;
+    throw Object.assign(new Error('VM operation stopped before mutation'), {
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
   };
 
   return Object.freeze({
     readVm: async (/** @type {string} */ vmId) => {
-      if (!['vm_boot', 'vm_delete'].includes(call?.name)
+      if (binding.operation !== 'turn.vm.read'
           || typeof vmId !== 'string' || typeof ctx?.vmRegistry?.get !== 'function') {
         throw mismatch();
       }
-      if (call.name === 'vm_boot') {
-        const wanted = typeof args.vm === 'string' ? args.vm.trim() : '';
-        if (!wanted.startsWith('vm-') || vmId !== wanted) throw mismatch();
-      } else if (vmId !== args.vmId) throw mismatch();
+      if (vmId !== args.vmId) throw mismatch();
+      requireBoundVm(vmId);
       const record = await ctx.vmRegistry.get(vmId);
-      if (record && call.name === 'vm_boot') resolvedVmId = vmId;
-      if (call.name === 'vm_delete') inspected = record ?? null;
+      if (record) shared.resolvedVmId = vmId;
+      shared.inspected = record ?? null;
       return record ? { id: record.id, name: record.name, pinned: record.pinned === true } : null;
     },
     listVms: async () => {
-      requireTool('vm_boot');
-      const wanted = typeof args.vm === 'string' ? args.vm.trim() : '';
-      if (!wanted || wanted.startsWith('vm-') || typeof ctx?.vmRegistry?.list !== 'function') {
+      requireOperation('turn.vm.list');
+      if (typeof ctx?.vmRegistry?.list !== 'function') {
         throw mismatch();
       }
       const records = await ctx.vmRegistry.list();
-      return records.map((/** @type {any} */ record) => ({ id: record.id, name: record.name }));
+      return records.filter((/** @type {any} */ record) => !boundVmId || record.id === boundVmId)
+        .map((/** @type {any} */ record) => ({ id: record.id, name: record.name }));
     },
     setDefaultVm: async (/** @type {string} */ vmId) => {
-      requireTool('vm_boot');
+      requireOperation('turn.vm.set-default');
       if (typeof vmId !== 'string' || typeof ctx?.vmRegistry?.get !== 'function') throw mismatch();
-      const wanted = typeof args.vm === 'string' ? args.vm.trim() : '';
-      if (!wanted) throw mismatch();
       const record = await ctx.vmRegistry.get(vmId);
-      if (!record || (wanted.startsWith('vm-') ? vmId !== wanted
-        : String(record.name).toLowerCase() !== wanted.toLowerCase())) throw mismatch();
-      resolvedVmId = vmId;
-      if (!sessionId) return undefined;
+      if (!record || vmId !== args.vmId) throw mismatch();
+      requireBoundVm(vmId);
+      shared.resolvedVmId = vmId;
+      if (!sessionId) return false;
       if (typeof ctx?.vmRegistry?.setDefaultForSession !== 'function') throw mismatch();
-      return ctx.vmRegistry.setDefaultForSession(sessionId, vmId);
+      requireLive();
+      await ctx.vmRegistry.setDefaultForSession(sessionId, vmId);
+      return true;
     },
     runVm: (/** @type {string} */ command, /** @type {number} */ timeoutMs,
       /** @type {string|undefined} */ vmId) => {
-      requireTool('vm_boot');
-      const expectedTimeout = Math.min(300_000, Math.max(1000, Number(args.timeoutMs ?? 60_000)));
-      const explicit = typeof args.vm === 'string' && args.vm.trim();
-      if (command !== args.cmd || timeoutMs !== expectedTimeout
-          || (explicit && vmId !== resolvedVmId)
-          || (!explicit && vmId !== undefined)
+      requireOperation('turn.vm.run');
+      if (command !== args.command || timeoutMs !== args.timeoutMs
+          || vmId !== args.vmId || boundVmId && vmId !== undefined && vmId !== boundVmId
           || typeof ctx?.vm?.run !== 'function') throw mismatch();
-      return ctx.vm.run(command, { timeoutMs, sessionId, vmId });
+      return ctx.vm.run(command, { timeoutMs, sessionId, vmId: boundVmId ?? vmId });
     },
     importFile: async (/** @type {string} */ url, /** @type {string} */ path,
       /** @type {number} */ maxBytes) => {
-      requireTool('vm_import');
+      requireOperation('turn.vm.import-file');
       if (url !== args.url || path !== args.path || maxBytes !== 50 * 1024 * 1024
           || typeof ctx?.webFetch !== 'function' || typeof ctx?.vm?.writeFile !== 'function') {
         throw mismatch();
@@ -94,7 +97,12 @@ export const createVmToolAuthority = ({ call, ctx }) => {
         new Error(`payload_too_large: ${buffer.byteLength}B > ${maxBytes}B`),
         { outcomeKnown: true },
       );
-      try { await ctx.vm.writeFile(path, new Uint8Array(buffer), { sessionId }); }
+      try {
+        requireLive();
+        await ctx.vm.writeFile(path, new Uint8Array(buffer), {
+          sessionId, ...(boundVmId ? { vmId: boundVmId } : {}),
+        });
+      }
       catch (cause) {
         const detail = /** @type {{name?:string,message?:string}} */ (cause);
         throw new Error(`write_threw: ${detail?.name ?? 'Error'}: ${detail?.message ?? String(cause)}`);
@@ -105,19 +113,23 @@ export const createVmToolAuthority = ({ call, ctx }) => {
       };
     },
     writeTextFile: (/** @type {string} */ path, /** @type {string} */ content) => {
-      requireTool('vm_write_file');
+      requireOperation('turn.vm.write-text-file');
       if (path !== args.path || content !== args.content
           || typeof ctx?.vm?.writeFile !== 'function') throw mismatch();
-      return ctx.vm.writeFile(path, new TextEncoder().encode(content), { sessionId });
+      return ctx.vm.writeFile(path, new TextEncoder().encode(content), {
+        sessionId, ...(boundVmId ? { vmId: boundVmId } : {}),
+      });
     },
     destroyVm: async (/** @type {string} */ vmId) => {
-      requireTool('vm_delete');
-      if (vmId !== args.vmId || inspected?.id !== vmId || inspected?.pinned
+      requireOperation('turn.vm.destroy');
+      requireBoundVm(vmId);
+      if (vmId !== args.vmId || shared.inspected?.id !== vmId || shared.inspected?.pinned
           || typeof ctx?.vmRegistry?.get !== 'function'
           || typeof ctx?.vmRegistry?.delete !== 'function'
           || typeof ctx?.vmTabTracker?.closeTab !== 'function') throw mismatch();
       const fresh = await ctx.vmRegistry.get(vmId);
       if (!fresh || fresh.pinned === true) throw mismatch();
+      requireLive();
       await ctx.vmTabTracker.closeTab(vmId);
       await new Promise((resolve) => setTimeout(resolve, 200));
       try {
@@ -139,5 +151,7 @@ export const createVmToolAuthority = ({ call, ctx }) => {
   });
 };
 
-export const bindVmToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
-  state.authority ??= createVmToolAuthority(input);
+export const bindVmToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) => {
+  const binding = Object.freeze({ operation: input.operation, args: structuredClone(input.args) });
+  return createVmToolAuthority({ ...input, binding, shared: state });
+};

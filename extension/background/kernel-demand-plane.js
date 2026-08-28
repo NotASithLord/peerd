@@ -24,6 +24,7 @@ import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
 import { createProviderEgressAuthority } from './provider-egress-authority.js';
 import { HARDCODED_ALLOWLIST, makeSafeFetch } from '/peerd-egress/background.js';
 import { costOf, hasPricing } from '/peerd-provider/background.js';
+import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 
 const OPTIONAL_CONTROLLER_ROUTES = new Set([
   'provider/test', 'models/options', 'openrouter/models',
@@ -32,6 +33,7 @@ const OPTIONAL_CONTROLLER_ROUTES = new Set([
 
 /** @param {Record<string,any>} deps */
 export const createKernelDemandPlane = (deps) => {
+  const authorityScheduler = createAuthorityEffectScheduler();
   if (typeof deps.createProductionRuntime !== 'function'
       || !deps.controllerGateway || typeof deps.controllerGateway.withRun !== 'function') {
     throw new TypeError('kernel-demand-plane-config-invalid');
@@ -159,6 +161,7 @@ export const createKernelDemandPlane = (deps) => {
     let sourceProjectionRevision = 0;
     const runtime = await deps.controllerGateway.withRun(() => deps.createProductionRuntime({
       ...deps,
+      authorityScheduler,
       seams,
       turnCustody,
       providerEgress,
@@ -197,6 +200,7 @@ export const createKernelDemandPlane = (deps) => {
     if (controllerOwner) return controllerOwner;
     controllerOwner = createKernelSemanticRuntime({
       ...deps,
+      authorityScheduler,
       ready: deps.vaultReady,
       appCatalog: support.appCatalog,
       appFiles: support.appFiles,
@@ -303,7 +307,6 @@ export const createKernelDemandPlane = (deps) => {
     createRuntime: createKernelExecutableRuntime,
     loadEngineLive: async () => (await getRichOwner()).executableLive,
     loadActorChatRelays: async () => (await getRichOwner()).relays,
-    loadAppRuntimeRelays: async () => (await getRichOwner()).relays,
     loadRelayRoutes: async () => {
       const owner = await getRichOwner();
       return { ...owner.relayRoutes, ...owner.relays?.engineRoutes };

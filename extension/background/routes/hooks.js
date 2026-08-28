@@ -19,8 +19,9 @@ export const makeHooksRoutes = (deps) => {
     // The Context → Hooks tab reads + edits user hooks through these.
     // Default (code) hooks surface in list but can't be removed or
     // disabled — reversibility is for USER config, not the always-on
-    // egress floor. Every mutation is audited (same discipline as
-    // denylist edits: hooks are security-relevant policy state).
+    // semantic egress guardrail. Every mutation is audited because changing a
+    // user-visible model policy must remain inspectable. Mandatory host egress,
+    // target, and confirmation floors are enforced independently.
     'hooks/list': async () => ({
       ok: true,
       hooks: listHooks().map((/** @type {any} */ h) => ({
@@ -29,13 +30,15 @@ export const makeHooksRoutes = (deps) => {
         enabled: h.enabled !== false,
         order: h.order ?? 100,
         match: h.match ?? '*',
-        isDefault: DEFAULT_HOOKS.some((/** @type {any} */ d) => d.id === h.id),
+        isDefault: !h._record && DEFAULT_HOOKS.some((/** @type {any} */ d) => d.id === h.id),
         // why: the UI shows provenance + one human line per hook. Defaults
         // carry `description` in code (doubling as the visible reason they
         // can't be disabled); user hooks carry their markdown prose +
         // body kind in the serializable record.
         kind: h._record?.kind ?? 'builtin',
         doc: h._record?.doc ?? h.description ?? '',
+        unsupported: h.unsupported === true,
+        unsupportedReason: h.unsupportedReason ?? '',
       })),
     }),
 
@@ -57,7 +60,8 @@ export const makeHooksRoutes = (deps) => {
     },
 
     'hooks/remove': async ({ id }) => {
-      if (DEFAULT_HOOKS.some((/** @type {any} */ d) => d.id === id)) {
+      if (DEFAULT_HOOKS.some((/** @type {any} */ d) => d.id === id)
+          && !exportHooks().some((/** @type {any} */ record) => record.id === id)) {
         return { ok: false, error: 'cannot remove a default hook' };
       }
       await removeHook({ kv }, id);
@@ -73,7 +77,8 @@ export const makeHooksRoutes = (deps) => {
     // the louder audit event — protection being turned off must stay
     // visible (mirrors denylist_removed).
     'hooks/toggle': async ({ id, enabled }) => {
-      if (DEFAULT_HOOKS.some((/** @type {any} */ d) => d.id === id)) {
+      if (DEFAULT_HOOKS.some((/** @type {any} */ d) => d.id === id)
+          && !exportHooks().some((/** @type {any} */ record) => record.id === id)) {
         return { ok: false, error: 'cannot disable a built-in hook' };
       }
       const record = exportHooks().find((/** @type {any} */ r) => r.id === id);

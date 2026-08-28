@@ -149,7 +149,7 @@ export const makeSettingsRoutes = (deps) => {
         secrets,
         passphrase,
         memory: await memory.exportAll(),
-        hooks: exportHooks(),
+        hooks: await exportHooks(),
         skills: await skillRegistry.list(),
         // The did:key travels ONLY as this capsule record (built offscreen,
         // openable with the same export passphrase) — buildExport excludes

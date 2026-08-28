@@ -86,7 +86,10 @@ export const createAppSandbox = async (args, ctx) => {
       // create-result. Only the runtime note (how the iframe behaves) belongs
       // here — and once per session (schema-diet 6b): a second app this session
       // doesn't need the full note re-stated, a pointer suffices.
-      const note = oncePerSession(ctx.session?.sessionId, 'app-runtime-note')
+      const note = oncePerSession(
+        ctx.session?.sessionId, 'app-runtime-note', ctx.session?.messages,
+        'sandbox_create', APP_RUNTIME_NOTE,
+      )
         ? APP_RUNTIME_NOTE
         : '(App runtime note shown earlier this session — same iframe rules apply.)';
       return {

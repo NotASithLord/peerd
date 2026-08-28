@@ -21,7 +21,7 @@ const LOCAL_MODEL_METHODS = new Set(['status', 'catalog', 'probe', 'init', 'gene
 export const REPOSITORY_METHODS = Object.freeze([
   'init', 'stage', 'commit', 'status', 'branches', 'history', 'diff', 'restore',
   'branch', 'checkout', 'setRemote', 'getRemote', 'fetch', 'push', 'clone',
-  'snapshot', 'matches', 'fork', 'replaceWorkingTree', 'destroy',
+  'snapshot', 'workingSnapshot', 'matches', 'fork', 'replaceWorkingTree', 'destroy',
   'appRead', 'appList', 'appInspect', 'appWrite', 'appDelete',
 ]);
 const METHODS = new Set(REPOSITORY_METHODS);

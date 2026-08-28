@@ -35,6 +35,24 @@ describe('oncePerSession', () => {
     expect(oncePerSession(undefined, 'note')).toBe(true);
     expect(oncePerSession('', 'note')).toBe(true);
   });
+
+  test('a fresh Worker derives an earlier disclosure from the persisted transcript', () => {
+    const messages = [{
+      role: 'user',
+      toolResults: [{
+        content: 'prefix UNIQUE RUNTIME NOTE suffix',
+        meta: { toolName: 'script' },
+      }],
+    }];
+    _resetOncePerSession();
+    expect(oncePerSession(
+      's1', 'note', messages, 'script', 'UNIQUE RUNTIME NOTE',
+    )).toBe(false);
+    // An unrelated tool cannot forge/suppress the disclosure marker.
+    expect(oncePerSession(
+      's2', 'note', messages, 'sandbox_create', 'UNIQUE RUNTIME NOTE',
+    )).toBe(true);
+  });
 });
 
 describe('shouldInjectBody — trim-aware once-per-session', () => {

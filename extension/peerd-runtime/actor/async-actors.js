@@ -80,7 +80,7 @@ export const makeAsyncActors = (deps) => {
    * @property {boolean} executionFailed the Worker failed after execution began
    * @property {boolean} outcomeKnown false when effects may have landed before failure
    * @property {string | null} childSessionId
-   * @property {string[] | null} grantedTools  server-resolved grant set once the child starts
+   * @property {string[] | null} visibleTools  semantic labels shown while the child runs
    * @property {boolean} reintegrated
    * @property {string[]} ring
    * @property {string | null} parentToolUseId the actor_create call that launched it
@@ -111,7 +111,7 @@ export const makeAsyncActors = (deps) => {
       status: c.reintegrated ? 'delivered' : c.status,
       lastOutput: c.ring.join('').slice(-500),
       childSessionId: c.childSessionId,
-      grantedTools: c.grantedTools,
+      visibleTools: c.visibleTools,
     }));
   };
 
@@ -292,7 +292,7 @@ export const makeAsyncActors = (deps) => {
       childSessionId: null, reintegrated: false, ring: [],
       parentToolUseId: typeof req.parentToolUseId === 'string' ? req.parentToolUseId : null,
       parentStopGeneration: turnSlots.generation?.(parentSessionId) ?? 0,
-      grantedTools: null,
+      visibleTools: null,
     };
     kids.set(taskId, entry);
     onTasksChanged(parentSessionId); // new task → appears on the live bar
@@ -312,8 +312,8 @@ export const makeAsyncActors = (deps) => {
       if (ev.type === 'actor-start') {
         entry.childSessionId = ev.sessionId ?? null;
         settleAllocation(entry.childSessionId);
-        entry.grantedTools = Array.isArray(ev.grantedTools)
-          ? ev.grantedTools.filter((tool) => typeof tool === 'string')
+        entry.visibleTools = Array.isArray(ev.visibleTools)
+          ? ev.visibleTools.filter((tool) => typeof tool === 'string')
           : null;
         // Stop can land after the async entry is created but before spawn.js
         // publishes the minted child id. The parent generation is the only

@@ -21,11 +21,22 @@ const baseCtx = (over: any = {}) => ({
   ...over,
 });
 
-const executeEdit = (args: any, ctx: any) => editFileTool.execute(args, {
-  editingAuthority: createEditingToolAuthority({
-    call: { name: 'edit_file', args }, ctx,
-  }),
-} as any);
+const executeEdit = (args: any, ctx: any) => {
+  const shared = {};
+  const authorityFor = (operation: string, target: any) => createEditingToolAuthority({
+    binding: { operation, args: structuredClone(target) }, ctx, shared,
+  });
+  return editFileTool.execute(args, {
+    editingAuthority: {
+      readEditTarget: (target: any) => authorityFor(
+        'turn.editing.read-target', target,
+      ).readEditTarget(target),
+      writeEditTarget: (target: any) => authorityFor(
+        'turn.editing.write-target', target,
+      ).writeEditTarget(target),
+    },
+  } as any);
+};
 
 describe('edit_file — create-first hint (progressive disclosure consistency)', () => {
   test('app: no current app → create-first hint naming sandbox_create', async () => {
@@ -70,6 +81,59 @@ const withInstance = (over: any = {}) =>
   baseCtx({ appRegistry: { getDefaultForSession: async () => 'app-1' }, ...over });
 
 describe('edit_file — 3a–3d robustness surface', () => {
+  test.each(['app', 'notebook'] as const)(
+    'Stop during the %s CAS read prevents the write',
+    async (kind) => {
+      let releaseRead!: () => void;
+      let secondReadStarted!: () => void;
+      const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+      const started = new Promise<void>((resolve) => { secondReadStarted = resolve; });
+      const controller = new AbortController();
+      let reads = 0;
+      let writes = 0;
+      const readFile = async (..._args: any[]) => {
+        reads += 1;
+        if (reads === 2) {
+          secondReadStarted();
+          await readGate;
+        }
+        return 'before';
+      };
+      const writeFile = async (..._args: any[]) => { writes += 1; };
+      const ctx: any = kind === 'app'
+        ? baseCtx({
+            actorType: 'app', actorInstanceId: 'app-1',
+            appClient: { readFile, writeFile },
+          })
+        : baseCtx({
+            actorType: 'notebook', actorInstanceId: 'nb-1',
+            jsClient: { readFile, writeFile },
+          });
+      const target = {
+        kind, targetId: kind === 'app' ? 'app-1' : 'nb-1', path: 'entry.js',
+      };
+      const shared = {};
+      const readAuthority = createEditingToolAuthority({
+        binding: { operation: 'turn.editing.read-target', args: target },
+        ctx, shared, signal: controller.signal,
+      });
+      await expect(readAuthority.readEditTarget(target)).resolves.toMatchObject({ ok: true });
+      const writeTarget = { ...target, content: 'after' };
+      const writeAuthority = createEditingToolAuthority({
+        binding: { operation: 'turn.editing.write-target', args: writeTarget },
+        ctx, shared, signal: controller.signal,
+      });
+      const pending = writeAuthority.writeEditTarget(writeTarget);
+      await started;
+      controller.abort();
+      releaseRead();
+      await expect(pending).resolves.toMatchObject({
+        ok: false, code: 'edit_aborted', outcomeKind: 'pre-effect-failure',
+      });
+      expect(writes).toBe(0);
+    },
+  );
+
   test('anchored edit against a missing file → file_not_found (not search_not_found)', async () => {
     // readFile returns null → the file does not exist.
     const ctx = withInstance({ appClient: { readFile: async () => null, writeFile: async () => {} } });

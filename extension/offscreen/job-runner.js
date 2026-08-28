@@ -41,17 +41,28 @@ import {
   ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS,
   actorsCallToOp, buildCodeClientSource, canonicalCodeTraceLabel,
   CODE_RUN_MAX_TRACE_OPS, MAX_FILE_CONTENT_CHARS,
-  pageCallToRelay, pageCallToToolCall, shapePageCallOutcome,
+  pageCallToToolCall, shapePageCallOutcome,
   shapeActorRoster, shapeActorsResult,
 } from '/peerd-runtime/offscreen.js';
 import {
   capturePageProgramSite,
+  clickPageProgram,
   fetchPageProgramResource,
+  fillPageProgram,
+  loginPageProgram,
+  navigatePageProgram,
+  queryPageProgram,
   readPageProgramDocument,
+  readPageProgram,
   readPageProgramResult,
   readPageProgramSiteClient,
+  readStatePageProgram,
+  snapshotPageProgram,
+  viewPageProgram,
+  watchChangesPageProgram,
   writePageProgramSiteClient,
 } from './page-program-semantic-owner.js';
+import { actAppProgram, observeAppProgram } from './app-program-semantic-owner.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
 import {
   JAVASCRIPT_PROGRAM,
@@ -172,12 +183,6 @@ const MAX_RELAYING_JOBS = 2;
 let activeRelayingJobs = 0;
 const RELAYING_MESSAGE_TYPES = Object.freeze(new Set([
   'sw/web-fetch', 'actor/spawn', 'actors/call',
-  'page-program/navigate', 'page-program/click', 'page-program/fill',
-  'page-program/snapshot', 'page-program/read', 'page-program/read-state',
-  'page-program/watch-changes', 'page-program/query-dom',
-  'page-program/view',
-  'page-program/login', 'app-code/observe',
-  'app-code/act',
   'a2a/call', 'site-fetch/call', 'script/model-call',
 ]));
 
@@ -192,7 +197,7 @@ let activeJobs = 0;
  * Run one headless job. Resolves with the same shape js_notebook returns. Rejects
  * (as a result, not a throw) when too many jobs are already in flight.
  *
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, pageProgramSemanticToken?:string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, pageProgramSemanticToken?:string, appProgramSemanticToken?:string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   caps: capability profile (default DEFAULT_WORKER_CAPS — the historical
  *   script surface; the distributed cap is not a caller knob here — headless
  *   forces it off unconditionally); caps.page needs ownerSessionId — the actor
@@ -203,7 +208,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, usedApp?: boolean, appOutcomeUnknown?:boolean, appOutcomeError?:string, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, usedApp?: boolean, appOutcomeUnknown?:boolean, appOutcomeError?:string, siteOutcomeUnknown?:boolean, siteOutcomeError?:string, outcomeKnown?:boolean, outcomeKind?:string, retryable?:boolean, hostOutcomeError?:string, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -250,7 +255,7 @@ export const runJob = async (job, deps) => {
 };
 
 /**
- * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, pageProgramSemanticToken?:string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
+ * @param {{ code: string, timeoutMs?: number, startedAt?: number, deadlineAt?: number, a2a?: boolean, actors?: boolean, siteFetch?: string, caps?: { page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean }, ownerSessionId?: string, ownerToolUseId?: string, runId?: string, pageProgramSemanticToken?:string, appProgramSemanticToken?:string, workspaceSessionId?: string, workspaceBudgetBytes?: number }} job
  *   a2a: expose the `mesh` client (agent-to-agent); actors: expose the `actors`
  *   delegation client (the orchestrator's script surface); caps: capability
  *   profile (default DEFAULT_WORKER_CAPS; caps.page is the web actor's
@@ -263,7 +268,7 @@ export const runJob = async (job, deps) => {
  *   extractMarkdown is the LOCAL web-extract entry (same offscreen document),
  *   injected so the in-browser tests can stub it without the vendored parsers.
  */
-const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = '', caps, ownerSessionId, ownerToolUseId, runId, pageProgramSemanticToken, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {
+const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = false, actors = false, siteFetch = '', caps, ownerSessionId, ownerToolUseId, runId, pageProgramSemanticToken, appProgramSemanticToken, workspaceSessionId, workspaceBudgetBytes = WORKSPACE_BUDGET_BYTES }, { sendToSW, extractMarkdown, opfsForRoot = opfsHelpers }) => {
   // One ABSOLUTE deadline spans resolution + execution. Phase-local timers
   // derive only the remaining budget; no phase may mint a fresh timeout and
   // quietly make the advertised wall-clock additive.
@@ -353,12 +358,31 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
       await Promise.allSettled([...pendingHostOperations]);
     }
   };
+  /** @param {number} budgetMs */
+  const settleHostOperationsWithin = async (budgetMs) => {
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
+    let timerId;
+    const drained = await Promise.race([
+      settleHostOperations().then(() => true),
+      new Promise((resolve) => {
+        timerId = setTimeout(() => resolve(false), Math.max(1, budgetMs));
+      }),
+    ]);
+    if (timerId) clearTimeout(timerId);
+    return drained === true;
+  };
   // Cleanup is hygiene, but ordering is correctness: pending host mutations
   // must settle before an ephemeral root is removed. The deletion itself keeps
   // the historical small grace budget and remains best-effort.
   const cleanupScratch = async () => {
     abortHostOperations();
-    await settleHostOperations();
+    // A broken broker may never settle an admitted relay. Terminal custody is
+    // already unknown in that case; cleanup must not turn the bounded Stop /
+    // timeout response into an unbounded hang. Skip the scratch nuke when a
+    // host operation ignores abort, because deleting underneath a late OPFS
+    // callback would be less safe than leaving an orphaned, namespaced root.
+    const drained = await settleHostOperationsWithin(250);
+    if (!drained) return;
     if (usedWorkspace) return;
     const cleanup = opfs.nuke().catch(() => {});
     const budgetMs = remainingMs();
@@ -407,6 +431,19 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   let appOutcomeError = '';
   const appCustody = () => appOutcomeUnknown
     ? { appOutcomeUnknown: true, appOutcomeError: appOutcomeError || 'App action outcome is unknown' }
+    : {};
+  let siteOutcomeUnknown = false;
+  let siteOutcomeError = '';
+  const siteCustody = () => siteOutcomeUnknown
+    ? { siteOutcomeUnknown: true, siteOutcomeError: siteOutcomeError || 'Site write outcome is unknown' }
+    : {};
+  let hostOutcomeUnknown = false;
+  let hostOutcomeError = '';
+  const hostCustody = () => hostOutcomeUnknown
+    ? {
+        outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+        hostOutcomeError: hostOutcomeError || 'A nested host operation outcome is unknown',
+      }
     : {};
   /** @type {Array<{ data: string, mediaType: string }>} */
   let pageImages = [];
@@ -460,10 +497,45 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
       throw error;
     }
   };
+  /**
+   * Every admitted bridge call is part of the outer job's custody. Generated
+   * code may omit `await`, but it cannot make the host forget a dispatched
+   * mutation or model/delegation request before returning success.
+   * @template T
+   * @param {string} bridge @param {unknown} method @param {() => Promise<T>} operation
+   * @param {(value:T)=>boolean} [succeeded]
+   */
+  const runTrackedCodeOp = async (bridge, method, operation, succeeded) => {
+    try {
+      const value = await trackHostOperation(runCodeOp(bridge, method, operation, succeeded));
+      if (/** @type {any} */ (value)?.outcomeKnown === false) {
+        hostOutcomeUnknown = true;
+        hostOutcomeError = String(/** @type {any} */ (value)?.error
+          ?? 'A nested host operation outcome is unknown');
+      }
+      return value;
+    } catch (cause) {
+      if (/** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== true) {
+        hostOutcomeUnknown = true;
+        hostOutcomeError = 'A nested host operation lost host custody';
+      }
+      throw cause;
+    }
+  };
   /** @param {string} bridge @param {unknown} method */
   const recordRefusedCodeOp = (bridge, method) => beginCodeOp(bridge, method)(false);
   const pageSemanticOperation = (/** @type {{name:string,args:Record<string,unknown>}} */ call) => {
     if (typeof pageProgramSemanticToken !== 'string' || !pageProgramSemanticToken) return null;
+    if (call.name === 'navigate') return () => navigatePageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'click') return () => clickPageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'type') return () => fillPageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'snapshot') return () => snapshotPageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'read_page') return () => readPageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'read_state') return () => readStatePageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'watch_changes') return () => watchChangesPageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'query_dom') return () => queryPageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'view') return () => viewPageProgram(pageProgramSemanticToken, call.args);
+    if (call.name === 'login') return () => loginPageProgram(pageProgramSemanticToken, call.args);
     if (call.name === 'fetch_url') {
       return () => fetchPageProgramResource(pageProgramSemanticToken, call.args);
     }
@@ -626,20 +698,48 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
 
   try {
     return await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        abortHostOperations();
+      let terminalStarted = false;
+      const drainTerminalHostOperations = async (
+        /** @type {'done'|'stop'|'timeout'|'policy'} */ reason,
+      ) => {
+        if (reason !== 'done') abortHostOperations();
         try { worker.terminate(); } catch {}
-        resolve({ value: undefined, consoleOutput: [], durationMs: timeoutMs, error: `job timed out after ${timeoutMs}ms`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
-      }, Math.ceil(remainingMs()));
+        const budgetMs = reason === 'done'
+          ? Math.max(1, Math.ceil(remainingMs())) : 250;
+        const drained = await settleHostOperationsWithin(budgetMs);
+        if (!drained) {
+          hostOutcomeUnknown = true;
+          hostOutcomeError = `A nested host operation remained unsettled after ${reason}`;
+        }
+        abortHostOperations();
+      };
+      const terminalResult = (/** @type {Record<string,unknown>} */ fields) => ({
+        value: undefined, consoleOutput: [],
+        usedEgress, usedRemoteModules, usedActors, ...actorCustody(),
+        usedPage, usedApp, ...appCustody(), ...siteCustody(), ...hostCustody(),
+        images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget,
+        actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens,
+        ...fields,
+      });
+      const finishInterrupted = async (
+        /** @type {'stop'|'timeout'} */ reason,
+      ) => {
+        if (terminalStarted) return;
+        terminalStarted = true;
+        clearTimeout(timer);
+        await drainTerminalHostOperations(reason);
+        resolve(terminalResult({
+          durationMs: reason === 'timeout' ? timeoutMs : 0,
+          error: hostOutcomeUnknown
+            ? `nested host operation outcome unknown: ${hostOutcomeError}`
+            : reason === 'timeout' ? `job timed out after ${timeoutMs}ms` : 'job aborted (Stop)',
+        }));
+      };
+      const timer = setTimeout(() => { void finishInterrupted('timeout'); }, Math.ceil(remainingMs()));
       // Stop plumbing: a runId-carrying job can be terminated from the SW
       // (script tool abort). The trace survives — partial work stays visible.
       if (runId) {
-        const kill = () => {
-          clearTimeout(timer);
-          abortHostOperations();
-          try { worker.terminate(); } catch {}
-          resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: 'job aborted (Stop)', usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
-        };
+        const kill = () => { void finishInterrupted('stop'); };
         liveJobs.set(runId, { kill, owner: ownerSessionId });
         // Stop already arrived while we were still building — honor it now.
         if (consumeEarlyAbort(runId, ownerSessionId)) kill();
@@ -649,7 +749,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
         // why any: worker postMessage payload, discriminated by m.type below.
         /** @type {any} */
         const m = ev.data;
-        if (!m || typeof m !== 'object') return;
+        if (!m || typeof m !== 'object' || terminalStarted) return;
         // Headless: no UI. console accumulates in the worker and rides 'done';
         // display() has no surface here (the agent should RETURN its result).
         if (m.type === 'log' || m.type === 'display') return;
@@ -712,7 +812,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           actorsTrace.push(entry);
           const t0 = performance.now();
           try {
-            const resp = await runCodeOp(
+            const resp = await runTrackedCodeOp(
               'actors', m.method,
               () => sendToSW(translated.op === 'list' ? 'actors/list' : 'actors/call', {
                 args: translated.args,
@@ -769,7 +869,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           usedProvider = true;   // money may move → the result line must show it
           try {
-            const resp = await runCodeOp(
+            const resp = await runTrackedCodeOp(
               'provider', 'call',
               () => sendToSW('script/model-call', {
                 ownerSessionId, runId, args: m.args, deadlineAt: absoluteDeadline,
@@ -805,7 +905,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
             return;
           }
           try {
-            const resp = await runCodeOp(
+            const resp = await runTrackedCodeOp(
               'a2a', m.method,
               () => sendToSW('a2a/call', { method: m.method, args: m.args, ownerSessionId, runId }),
               (response) => response?.ok === true,
@@ -834,7 +934,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           usedEgress = true;   // the run touched the web → its output carries untrusted bytes
           try {
-            const resp = await runCodeOp('fetch', m.method ?? 'GET', async () => {
+            const resp = await runTrackedCodeOp('fetch', m.method ?? 'GET', async () => {
               const raw = await sendToSW('sw/web-fetch', {
                 url: m.url, method: m.method, headers: m.headers, body: m.body,
                 runId, ownerSessionId, deadlineAt: absoluteDeadline,
@@ -872,10 +972,18 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           usedEgress = true;   // the run reached the web (its pinned origin) → untrusted bytes
           try {
-            const resp = await runCodeOp('site-fetch', m.method ?? 'GET', () => sendToSW('site-fetch/call', {
+            const resp = await runTrackedCodeOp('site-fetch', m.method ?? 'GET', () => sendToSW('site-fetch/call', {
               ownerSessionId, runId, siteOrigin: siteFetch,
               pathOrUrl: m.pathOrUrl, method: m.method, headers: m.headers, body: m.body,
             }), (response) => response?.ok === true);
+            if (resp?.outcomeKnown === false || resp?.outcomeKind === 'transport-lost'
+                || resp?.outcomeKind === 'host-lost') {
+              // why: generated site-client code may catch its bridge rejection,
+              // but it cannot launder an ambiguous external write into a clean
+              // outer result. This sticky host bit survives until job settlement.
+              siteOutcomeUnknown = true;
+              siteOutcomeError = String(resp?.error ?? 'Site write outcome is unknown');
+            }
             // The bridge resolves on m.result and rejects on m.error — so the
             // response object rides under `result`, and an SW-side refusal (ok:false)
             // surfaces as a thrown Error inside the run.
@@ -887,8 +995,9 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           return;
         }
         if (m.type === 'app-request') {
-          // The worker cannot name its owner or App. Those identities ride from
-          // trusted job parameters and are re-derived again by the SW route.
+          // The worker cannot name its owner or App. Nested App calls return to
+          // the owning actor's sealed semantic executor, which applies the same
+          // schemas, gates, hooks, and exact-operation binding as direct tools.
           if (!runtimeProfile.app || typeof ownerSessionId !== 'string' || !ownerSessionId || typeof runId !== 'string' || !runId) {
             recordRefusedCodeOp('app', m.method);
             worker.postMessage({ type: 'app-response', rid: m.rid, error: usedRemoteModules
@@ -898,28 +1007,31 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           }
           usedApp = true;
           try {
-            const request = m.method === 'observe'
-              ? { type: 'app-code/observe', payload: { ownerSessionId, runId, rid: m.rid } }
+            if (typeof appProgramSemanticToken !== 'string' || !appProgramSemanticToken) {
+              throw new Error('app program semantic owner is unavailable');
+            }
+            const operation = m.method === 'observe'
+              ? () => observeAppProgram(appProgramSemanticToken)
               : m.method === 'act'
-                ? {
-                  type: 'app-code/act',
-                  payload: {
-                    ownerSessionId, runId, rid: m.rid,
-                    action: m.args?.action, params: m.args?.params,
-                  },
-                }
+                ? () => actAppProgram(appProgramSemanticToken, {
+                  action: m.args?.action, params: m.args?.params,
+                })
                 : null;
-            if (!request) throw new Error(`unknown app method: ${String(m.method)}`);
-            const resp = await runCodeOp(
+            if (!operation) throw new Error(`unknown app method: ${String(m.method)}`);
+            const resp = await runTrackedCodeOp(
               'app', m.method,
-              () => sendToSW(request.type, request.payload),
+              operation,
               (response) => response?.ok === true,
             );
             if (resp?.outcomeKnown === false || resp?.outcomeKind === 'transport-lost' || resp?.outcomeKind === 'host-lost') {
               appOutcomeUnknown = true;
               appOutcomeError = String(resp?.error ?? 'App action outcome is unknown');
             }
-            if (resp?.ok) worker.postMessage({ type: 'app-response', rid: m.rid, result: resp.value });
+            if (resp?.ok) worker.postMessage({
+              type: 'app-response', rid: m.rid,
+              result: resp?.structured && Object.hasOwn(resp.structured, 'value')
+                ? resp.structured.value : resp.value,
+            });
             else worker.postMessage({ type: 'app-response', rid: m.rid, error: resp?.error ?? 'app call failed' });
           } catch (error) {
             appOutcomeUnknown = true;
@@ -945,13 +1057,12 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           try {
             const toolCall = pageCallToToolCall({ method: m.method, args: m.args });
             const semanticOperation = pageSemanticOperation(toolCall);
-            const relay = semanticOperation ? null
-              : pageCallToRelay({ method: m.method, args: m.args });
-            const raw = await runCodeOp(
+            if (!semanticOperation) throw new Error(
+              `page method has no sealed semantic owner: ${String(m.method)}`,
+            );
+            const raw = await runTrackedCodeOp(
               'page', m.method,
-              semanticOperation ?? (() => sendToSW(/** @type {any} */ (relay).route, {
-                args: /** @type {any} */ (relay).args, ownerSessionId, runId,
-              })),
+              semanticOperation,
               (response) => response?.ok === true,
             );
             const resp = /** @type {any} */ (
@@ -967,20 +1078,18 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
               pagePolicies.push(policy);
             }
             if (resp?.endTurn === true) {
+              if (terminalStarted) return;
+              terminalStarted = true;
               clearTimeout(timer);
-              abortHostOperations();
-              try { worker.terminate(); } catch {}
-              resolve({
+              await drainTerminalHostOperations('policy');
+              resolve(terminalResult({
                 value: undefined, consoleOutput: [], durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)),
                 error: null, endTurn: true,
                 endTurnContent: typeof resp.endTurnContent === 'string' ? resp.endTurnContent : '',
                 ...(typeof resp.endTurnOutcomeKind === 'string'
                   ? { endTurnOutcomeKind: resp.endTurnOutcomeKind }
                   : {}),
-                usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(),
-                images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget,
-                actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens,
-              });
+              }));
               return;
             }
             if (resp?.ok) {
@@ -1017,18 +1126,16 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
             // Dynamic import is unsupported, so this host-owned event is
             // terminal. That binds the stable policy code to the run outcome
             // even if user code tries to catch the bridge rejection.
+            if (terminalStarted) return;
+            terminalStarted = true;
             const error = new UnsupportedNativeModuleImportError();
             clearTimeout(timer);
-            abortHostOperations();
-            try { worker.terminate(); } catch {}
-            resolve({
-              value: undefined, consoleOutput: [], durationMs: 0,
+            await drainTerminalHostOperations('policy');
+            resolve(terminalResult({
+              durationMs: 0,
               error: `import resolution failed: ${error.message}`,
               errorCode: error.code,
-              usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(),
-              usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace,
-              usedProvider, providerCalls, providerTokens,
-            });
+            }));
             return;
           }
           try {
@@ -1080,32 +1187,45 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           return;
         }
         if (m.type === 'done') {
+          if (terminalStarted) return;
+          terminalStarted = true;
           clearTimeout(timer);
-          // A script may start an OPFS promise and return without awaiting it.
-          // Its Worker is done, so that host operation no longer has an owner.
-          abortHostOperations();
-          try { worker.terminate(); } catch {}
+          // Stop the program from opening more relays, then drain every bridge
+          // request already admitted. This includes App/page/site/A2A/actor/
+          // provider operations, not only OPFS. The outer exact effect cannot
+          // settle ahead of a fire-and-forget child.
+          await drainTerminalHostOperations('done');
           // Map blob-URL stack frames back to job.js:<line> — the model reads
           // this error; a user-code line number is actionable, a blob one isn't.
           const workerError = m.error ? mapWorkerError(m.error, blobUrl, bodyLine, 'job.js') : null;
           // Host custody outranks catchable worker code. A worker may catch the
           // app bridge rejection, but it cannot convert an ambiguous action
           // acknowledgement into a successful app_code result.
-          const error = appOutcomeUnknown
-            ? `app action outcome unknown: ${appOutcomeError}`
-            : workerError;
-          resolve({ value: m.value, consoleOutput: m.consoleOutput, durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+          const error = siteOutcomeUnknown
+            ? `site write outcome unknown: ${siteOutcomeError}`
+            : appOutcomeUnknown
+              ? `app action outcome unknown: ${appOutcomeError}`
+              : hostOutcomeUnknown
+                ? `nested host operation outcome unknown: ${hostOutcomeError}`
+                : workerError;
+          resolve(terminalResult({
+            value: m.value, consoleOutput: m.consoleOutput,
+            durationMs: Math.min(timeoutMs, Math.max(0, Date.now() - runStartedAt)), error,
+          }));
         }
       });
 
-      worker.addEventListener('error', (e) => {
+      worker.addEventListener('error', async (e) => {
+        if (terminalStarted) return;
+        terminalStarted = true;
         clearTimeout(timer);
-        abortHostOperations();
-        try { worker.terminate(); } catch {}
+        await drainTerminalHostOperations('policy');
         const detail = mapWorkerError(
           e.error?.stack || e.error?.message || e.message || 'worker crashed (no detail)',
           blobUrl, bodyLine, 'job.js');
-        resolve({ value: undefined, consoleOutput: [], durationMs: 0, error: `worker error: ${detail}`, usedEgress, usedRemoteModules, usedActors, ...actorCustody(), usedPage, usedApp, ...appCustody(), images: pageImages, ...pagePolicyCustody(), usedWorkspace, workspaceOverBudget, actorsTrace, codeTrace, usedProvider, providerCalls, providerTokens });
+        resolve(terminalResult({ durationMs: 0, error: hostOutcomeUnknown
+          ? `nested host operation outcome unknown: ${hostOutcomeError}`
+          : `worker error: ${detail}` }));
       });
     });
   } finally {

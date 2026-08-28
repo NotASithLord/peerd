@@ -10,9 +10,9 @@ describe('hooks routes', () => {
   const deps = (over: any = {}) => ({
     auditLog: { append: async () => {} },
     kv: {},
-    listHooks: () => [{ id: 'egress-allowlist', event: 'preToolUse', enabled: true, description: 'floor' }, { id: 'u1', event: 'postToolUse', enabled: false, _record: { kind: 'js', doc: 'mine' } }],
+    listHooks: () => [{ id: 'egress-allowlist', event: 'preToolUse', enabled: true, description: 'floor' }, { id: 'u1', event: 'postToolUse', enabled: false, _record: { kind: 'declarative', doc: 'mine' } }],
     DEFAULT_HOOKS,
-    parseHookMarkdown: (_m: string) => ({ id: 'u2', event: 'preToolUse', kind: 'js' }),
+    parseHookMarkdown: (_m: string) => ({ id: 'u2', event: 'preToolUse', kind: 'declarative' }),
     saveUserHook: async (_io: any, rec: any) => ({ id: rec.id ?? 'u2' }),
     removeHook: async () => {},
     exportHooks: () => [{ id: 'u1', event: 'postToolUse', enabled: false }],
@@ -22,7 +22,7 @@ describe('hooks routes', () => {
     const r = makeHooksRoutes(deps());
     const res = await r['hooks/list']();
     expect(res.hooks[0]).toMatchObject({ id: 'egress-allowlist', isDefault: true, kind: 'builtin', doc: 'floor' });
-    expect(res.hooks[1]).toMatchObject({ id: 'u1', isDefault: false, kind: 'js', doc: 'mine', enabled: false });
+    expect(res.hooks[1]).toMatchObject({ id: 'u1', isDefault: false, kind: 'declarative', doc: 'mine', enabled: false });
   });
   test('remove refuses a default hook', async () => {
     const r = makeHooksRoutes(deps());

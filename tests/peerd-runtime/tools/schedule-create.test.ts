@@ -9,11 +9,11 @@ describe('schedule_create cancellation', () => {
     let additions = 0;
     const args = { prompt: 'check releases', every: '1h' };
     const authority = createScheduleToolAuthority({
-      call: { name: 'schedule_create', args },
+      operation: 'turn.schedule.arm-confirmed-routine', args,
       signal: controller.signal,
       ctx: {
       abortSignal: controller.signal,
-      permission: { confirmActions: false },
+      permission: { mode: 'act', confirmActions: false },
       session: { sessionId: 'chat-1' },
       confirm: async (_prompt: unknown, signal?: AbortSignal) => {
         seenSignal = signal;

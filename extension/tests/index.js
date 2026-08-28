@@ -47,6 +47,7 @@ import './unit/peerd-runtime/query-dom.test.js';
 import './unit/peerd-runtime/dom-walk.test.js';
 import './unit/peerd-runtime/activity-overlay.test.js';
 import './unit/peerd-runtime/default-hooks.test.js';
+import './unit/peerd-runtime/user-hook-csp.test.js';
 import './unit/peerd-runtime/prompt-wrap.test.js';
 import './unit/peerd-runtime/system-prompt.test.js';
 import './unit/peerd-runtime/tool-manifests.test.js';
@@ -89,6 +90,7 @@ import './unit/peerd-engine/repository.test.js';
 import './unit/offscreen/job-runner.test.js';
 import './unit/offscreen/job-runner-workspace.test.js';
 import './unit/offscreen/controller-worker.test.js';
+import './unit/offscreen/actor-worker.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';

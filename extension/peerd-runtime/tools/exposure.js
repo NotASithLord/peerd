@@ -321,8 +321,9 @@ export const actorWebTabTarget = (args) =>
 
 /**
  * The descriptor list an actor of `kind`/`backing` should SEE — its own toolset.
- * Pure. (The gate is the wall; this keeps the model's advertised list tight so it
- * isn't shown tools it would only get refused for.) DESIGN-18: backing-aware, so an
+ * Pure. This keeps the model's advertised list tight so it is not shown tools
+ * its semantic context would refuse. Host authority remains the fixed exact-op
+ * grant and live policy edge. DESIGN-18: backing-aware, so an
  * API actor is advertised ONLY fetch_url, matching its lore + the gate. PR #119:
  * surface-aware, so a code-surface web actor is advertised only its code toolset.
  * @template {{ name: string }} T

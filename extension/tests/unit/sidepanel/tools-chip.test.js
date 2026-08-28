@@ -1,6 +1,6 @@
 // @ts-check
-// /tools presence chip — the chat mode-row must make a narrowed tool
-// manifest VISIBLE where the authority is exercised (same contract as
+// /tools presence chip — the chat mode-row must make a narrowed model
+// surface VISIBLE where it affects the conversation (same contract as
 // the /system chip it sits next to). Real ChatView mounted against a
 // fake SW send(); we assert the chip's presence/label tracks
 // state.session.toolManifest.

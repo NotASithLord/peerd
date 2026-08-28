@@ -93,9 +93,9 @@ export const makeScheduler = ({
    * Register a new routine. Normalizes the spec through parseSchedule and
    * enforces the count cap. Returns the created routine or an error object.
    * @param {{ prompt: string, every?: string, dailyAt?: string, mode?: string }} req
-   * @returns {{ ok: true, routine: Routine } | { ok: false, error: string }}
+   * @returns {Promise<{ ok: true, routine: Routine } | { ok: false, error: string }>}
    */
-  const add = ({ prompt, every, dailyAt, mode } = /** @type {any} */ ({})) => {
+  const add = async ({ prompt, every, dailyAt, mode } = /** @type {any} */ ({})) => {
     if (typeof prompt !== 'string' || !prompt.trim()) return { ok: false, error: 'prompt-required' };
     if (routines.size >= MAX_ROUTINES) return { ok: false, error: 'too-many-routines' };
     const schedule = parseSchedule({ every, dailyAt });
@@ -117,17 +117,33 @@ export const makeScheduler = ({
       lastOutcomeUnknownAt: null,
     };
     routines.set(routine.id, routine);
-    void persist().catch(() => {});
+    try { await persist(); }
+    catch (cause) {
+      routines.delete(routine.id);
+      throw Object.assign(cause instanceof Error ? cause : new Error(String(cause)), {
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+      });
+    }
     reschedule();
     emit('schedule/changed', { routines: list() });
     return { ok: true, routine };
   };
 
-  /** @param {string} id @returns {boolean} existed */
-  const remove = (id) => {
-    const existed = routines.delete(id);
-    if (existed) { void persist().catch(() => {}); reschedule(); emit('schedule/changed', { routines: list() }); }
-    return existed;
+  /** @param {string} id @returns {Promise<boolean>} existed */
+  const remove = async (id) => {
+    const prior = routines.get(id);
+    if (!prior) return false;
+    routines.delete(id);
+    try { await persist(); }
+    catch (cause) {
+      routines.set(id, prior);
+      throw Object.assign(cause instanceof Error ? cause : new Error(String(cause)), {
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+      });
+    }
+    reschedule();
+    emit('schedule/changed', { routines: list() });
+    return true;
   };
 
   /** @param {string} id @param {boolean} on */

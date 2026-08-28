@@ -211,6 +211,44 @@ describe('session store v2 — per-message records', () => {
     expect((await store.get(tab.sessionId))!.backing).toBeUndefined();
   });
 
+  test('spawned exact-operation grants are bounded, durable, and create-once', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const child = await store.create({
+      kind: 'spawned', parentSessionId: 'parent', spawnedTrusted: true,
+      grantedOperations: ['turn.memory.read-scope', 'turn.memory.read-subtree'],
+    });
+    const restarted = await store.get(child.sessionId);
+    expect(restarted!.grantedOperations).toEqual([
+      'turn.memory.read-scope', 'turn.memory.read-subtree',
+    ]);
+    expect((restarted as any)!.grantedTools).toBeUndefined();
+    await expect(store.update(child.sessionId, {
+      grantedOperations: ['turn.actor.message'],
+    })).rejects.toThrow('session-update-field-invalid');
+    await expect(store.update(child.sessionId, {
+      parentSessionId: 'attacker-parent',
+    })).rejects.toThrow('session-update-field-invalid');
+    expect((await store.get(child.sessionId))!.grantedOperations).toEqual([
+      'turn.memory.read-scope', 'turn.memory.read-subtree',
+    ]);
+  });
+
+  test('invalid, duplicate, and non-spawned exact grants fail before persistence', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    await expect(store.create({
+      kind: 'spawned', grantedOperations: ['turn.unknown.effect'],
+    })).rejects.toThrow('session-granted-operation-invalid');
+    await expect(store.create({
+      kind: 'spawned', grantedOperations: ['turn.memory.read-scope', 'turn.memory.read-scope'],
+    })).rejects.toThrow('session-granted-operation-duplicate');
+    await expect(store.create({
+      kind: 'chat', grantedOperations: ['turn.memory.read-scope'],
+    })).rejects.toThrow('session-granted-operations-kind-invalid');
+    expect(idb._tbl('sessions').size).toBe(0);
+  });
+
   // DESIGN-18: reconnect-on-miss. An API actor's routing binding is ephemeral, but its
   // memory is durable on the session — findActorSession re-finds it by (origin, chat) so
   // a post-restart re-address resumes accumulated memory instead of minting empty.

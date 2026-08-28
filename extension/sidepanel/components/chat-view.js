@@ -263,9 +263,9 @@ export const ChatView = {
         state.session?.customSystemPrompt ? m('span.session-sys-badge', {
           title: `Session instructions active:\n${state.session.customSystemPrompt}\n\n"/system" shows them - "/system clear" removes them.`,
         }, '/system') : null,
-        // /tools presence chip — a narrowed tool manifest silently changes
-        // what the agent CAN do, so it gets the same visibility contract
-        // as /system: a monochrome chip where the authority is exercised.
+        // /tools presence chip — a narrowed manifest silently changes which
+        // tools the model is offered, so it gets the same visibility contract
+        // as /system: a monochrome chip where the model surface is active.
         state.session?.toolManifest ? m('span.session-sys-badge', {
           title: `Tool manifest active: ${manifestLabel(state.session.toolManifest)} - only that toolset is exposed to the agent this chat.\n\n"/tools" shows it - "/tools full" restores everything.`,
         }, `/tools ${manifestLabel(state.session.toolManifest)}`) : null,

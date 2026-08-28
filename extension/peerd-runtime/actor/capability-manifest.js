@@ -5,11 +5,11 @@
 //
 // why one manifest: these capabilities cross four independently-loaded realms
 // (model prompt → generated worker client → offscreen host relay → SW policy
-// route). A hand-maintained method list at each hop turns a rename into either a
-// hallucinated API or, worse, an authority hole. The manifest contains only
-// inert data. Translation modules still validate arguments and policy routes
-// still dispatch through their existing gates; consumers generate from or
-// positively validate against this data.
+// route). A hand-maintained method list at each hop turns a rename into a
+// hallucinated or unusable API. The manifest contains only inert semantic
+// surface data. Exact host grants and live policy independently constrain the
+// translated operations; consumers generate from or positively validate
+// against this data.
 
 /** @typedef {'read'|'write'|'delegate'|'spend'} CodeEffect */
 /** @typedef {{ op: string, signature: string, effect: CodeEffect, tool?: string, canonical?: boolean, worker?: string }} CodeMethod */
@@ -298,7 +298,7 @@ export const DWEB_ACTOR_TOOL_NAMES = Object.freeze([
 // acquire a signing, install, spend, or delegation edge. Every prompt/descriptor
 // and both execution paths consume this same positive subset.
 export const DWEB_INBOUND_TOOL_NAMES = Object.freeze([
-  'dweb_discover', 'dweb_peers', 'dweb_block',
+  'dweb_discover', 'dweb_peers',
 ]);
 
 /** @type {Readonly<Record<string, { tools: readonly string[], codeTool: string, client: string|null, codeDecision: string }>>} */
@@ -316,11 +316,11 @@ export const ACTOR_CAPABILITY_MANIFESTS = Object.freeze({
 export const actorCapabilityManifest = (actorType, backing) =>
   actorType === 'web' && backing === 'api'
     ? ACTOR_CAPABILITY_MANIFESTS.api
-    : ACTOR_CAPABILITY_MANIFESTS[actorType] ?? Object.freeze({ tools: [], codeTool: '', client: null, codeDecision: 'unknown actor kind: no authority' });
+    : ACTOR_CAPABILITY_MANIFESTS[actorType] ?? Object.freeze({ tools: [], codeTool: '', client: null, codeDecision: 'unknown actor kind: no model surface' });
 
 /**
- * Derive the actor's code-facing tool surface from the same manifest that
- * defines its direct authority. A client with per-method tool mappings absorbs
+ * Derive the actor's code-facing model surface from the same manifest that
+ * defines its direct semantic tools. A client with per-method tool mappings absorbs
  * exactly those direct tools; any unmapped operation must remain discrete.
  * Clients whose methods have no tool mapping are themselves the complete
  * consolidated capability, so only their code tool is exposed.

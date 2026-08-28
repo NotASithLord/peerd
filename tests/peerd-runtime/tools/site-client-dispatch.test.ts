@@ -33,11 +33,21 @@ const context = (over: Record<string, unknown> = {}) => {
     canUseSiteClientOrigin: (origin: string) => origin === 'https://a.test',
     ...over,
   };
+  const shared = {};
+  const authorityFor = (operation: string, args: any) => createSiteClientToolAuthority({
+    binding: { operation, args }, ctx: authorityContext,
+    signal: authorityContext.abortSignal, shared,
+  });
   return {
     ...authorityContext,
-    siteClientAuthority: createSiteClientToolAuthority({
-      call, ctx: authorityContext, signal: authorityContext.abortSignal,
-    }),
+    siteClientAuthority: {
+      readStoredClient: (origin: string) => authorityFor(
+        'turn.site-client.read', { origin },
+      ).readStoredClient(origin),
+      commitConfirmedClient: (origin: string) => authorityFor(
+        'turn.site-client.commit', call.args,
+      ).commitConfirmedClient(origin),
+    },
   };
 };
 

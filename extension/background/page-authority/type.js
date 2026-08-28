@@ -42,10 +42,13 @@ export const typeTool = definePageAuthorityHandler({
 
   execute: async (args, ctx) => {
     if (typeof args?.text !== 'string') {
-      return { ok: false, error: 'text_required' };
+      return { ok: false, error: 'text_required', outcomeKind: 'pre-effect-failure' };
     }
     const tab = await resolveTargetTab(args, ctx);
     if (!tab?.id) return { ok: false, error: 'no_target_tab', outcomeKind: 'pre-effect-failure' };
+    if (ctx.abortSignal?.aborted) return {
+      ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+    };
 
     // why: domRefs/debuggerPool are SW-injected onto ctx but absent from the
     // ToolContext typedef; scripting is typed opaquely — narrow all three.
@@ -77,12 +80,18 @@ export const typeTool = definePageAuthorityHandler({
           return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
         try {
+          const permissionRefusal = await ctx.assertPageMutationPermission?.();
+          if (permissionRefusal) return permissionRefusal;
+          if (ctx.abortSignal?.aborted) return {
+            ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+          };
           const r = await debuggerPool.setValueBackendNode(
             tab.id, entry.backendDOMNodeId, args.text, !!args.submit, browserDocumentIdentity(tab));
           if (!r.ok) return formSubmissionRefusalFrom(r) ?? browserDocumentRefusalFrom(r) ?? {
             ok: false,
             error: r.error ?? 'ref_type_failed',
-            ...(r.outcomeKind ? { outcomeKind: r.outcomeKind } : {}),
+            outcomeKind: r.outcomeKind ?? 'host-lost',
+            ...(r.outcomeKind ? {} : { outcomeKnown: false, retryable: false }),
           };
           return {
             ok: true,
@@ -101,7 +110,8 @@ export const typeTool = definePageAuthorityHandler({
           return {
             ok: false,
             error: `ref_type_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
-            ...(outcomeKind ? { outcomeKind } : {}),
+            outcomeKind: outcomeKind ?? 'host-lost',
+            ...(outcomeKind ? {} : { outcomeKnown: false, retryable: false }),
           };
         }
       }
@@ -109,6 +119,11 @@ export const typeTool = definePageAuthorityHandler({
       if (entry.walkId != null) {
         let scriptResult;
         try {
+          const permissionRefusal = await ctx.assertPageMutationPermission?.();
+          if (permissionRefusal) return permissionRefusal;
+          if (ctx.abortSignal?.aborted) return {
+            ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+          };
           const results = await scripting.executeScript({
             target: scriptingTarget(tab),
             func: typeInjected,
@@ -116,9 +131,9 @@ export const typeTool = definePageAuthorityHandler({
           });
           scriptResult = results[0]?.result;
         } catch (e) {
-          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
+          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
         }
-        if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
+        if (!scriptResult) return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
         if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
           ?? { ok: false, error: scriptResult.error ?? 'ref_type_failed' };
         return {
@@ -155,6 +170,11 @@ export const typeTool = definePageAuthorityHandler({
 
     let scriptResult;
     try {
+      const permissionRefusal = await ctx.assertPageMutationPermission?.();
+      if (permissionRefusal) return permissionRefusal;
+      if (ctx.abortSignal?.aborted) return {
+        ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+      };
       const results = await scripting.executeScript({
         target: scriptingTarget(tab),
         func: typeInjected,
@@ -162,9 +182,9 @@ export const typeTool = definePageAuthorityHandler({
       });
       scriptResult = results[0]?.result;
     } catch (e) {
-      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
+      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
     }
-    if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
+    if (!scriptResult) return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
     if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
       ?? { ok: false, error: scriptResult.error ?? 'type_failed' };
 
@@ -267,8 +287,26 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
         return { ok: false, error: 'cross_origin_form_submission_blocked' };
       }
     }
-    if (typeof el.focus === 'function') el.focus();
     const tag = el.tagName.toLowerCase();
+    // Validate the whole mutation shape before focus. Page focus handlers can
+    // navigate, submit, or issue network requests, so a later `not_typable` or
+    // missing-option refusal cannot truthfully be stamped as no-effect if focus
+    // has already fired.
+    /** @type {HTMLOptionElement | null} */
+    let selectedOption = null;
+    if (tag === 'select') {
+      const select = /** @type {HTMLSelectElement} */ (el);
+      const want = (`${text}`).trim();
+      const options = Array.from(select.options || []);
+      selectedOption = options.find((o) => (`${o.label || o.text || ''}`).trim() === want)
+        || options.find((o) => o.value === want)
+        || options.find((o) => (`${o.text || ''}`).trim().toLowerCase() === want.toLowerCase())
+        || null;
+      if (!selectedOption) return { ok: false, error: 'no_option_matching' };
+    } else if (tag !== 'input' && tag !== 'textarea' && !el.isContentEditable) {
+      return { ok: false, error: 'not_typable' };
+    }
+    if (typeof el.focus === 'function') el.focus();
     if (tag === 'input' || tag === 'textarea') {
       // why: erased cast — the tag guard constrains el to a value-bearing control.
       const input = /** @type {HTMLInputElement} */ (el);
@@ -290,26 +328,15 @@ export function typeInjected(selector, text, submit, walkId, expectedCount) {
       // silently ignored by the browser, which is the exact bug this fixes.
       // why: erased cast — the tag guard constrains el to a <select>.
       const select = /** @type {HTMLSelectElement} */ (el);
-      const want = (`${text}`).trim();
-      const options = Array.from(select.options || []);
-      const opt =
-        options.find((o) => (`${o.label || o.text || ''}`).trim() === want)
-        || options.find((o) => o.value === want)
-        || options.find((o) => (`${o.text || ''}`).trim().toLowerCase() === want.toLowerCase());
-      if (!opt) {
-        const avail = options.map((o) => (`${o.text || ''}`).trim()).filter(Boolean).slice(0, 25);
-        return { ok: false, error: `no_option_matching: "${want}" — available: ${avail.join(' | ')}` };
-      }
+      const option = /** @type {HTMLOptionElement} */ (selectedOption);
       const sset = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-      if (sset) sset.call(select, opt.value);
-      else select.value = opt.value;
+      if (sset) sset.call(select, option.value);
+      else select.value = option.value;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (el.isContentEditable) {
       el.innerText = text;
       el.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      return { ok: false, error: `not_typable: ${tag} is not an input/textarea/contenteditable` };
     }
     let submitted = false;
     if (submit) {

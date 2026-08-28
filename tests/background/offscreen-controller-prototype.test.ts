@@ -709,7 +709,7 @@ describe('Chrome lazy controller private channel prototype', () => {
               }
             };
             port.start();
-            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM, prototypeFetchBlocked: true, prototypeStorageBlocked: true });
           },
           terminate: () => {},
         } as unknown as Worker;
@@ -741,7 +741,7 @@ describe('Chrome lazy controller private channel prototype', () => {
             if (generation === 1) {
               port.postMessage({ type: 'controller-worker/error', error: 'bad first load' });
             } else {
-              port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+              port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM, prototypeFetchBlocked: true, prototypeStorageBlocked: true });
             }
           },
           terminate: () => { terminated += 1; },
@@ -778,7 +778,7 @@ describe('Chrome lazy controller private channel prototype', () => {
               }
             };
             port.start();
-            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+            port.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM, prototypeFetchBlocked: true, prototypeStorageBlocked: true });
           },
           terminate: () => {},
           addEventListener: (type: string, listener: () => void) => {
@@ -1134,8 +1134,9 @@ describe('Chrome lazy controller private channel prototype', () => {
     ]) expect(source).toContain(`'${name}'`);
     for (const operation of [
       'turn.model.cancel-inference', 'turn.model.cancel-local',
-      'turn.tool.settle', 'turn.abort.finalize', 'turn.finalize',
+      'turn.abort.finalize', 'turn.finalize',
     ]) expect(source).toContain(`'${operation}'`);
+    expect(source).not.toContain("'turn.tool.settle'");
   });
 });
 

@@ -151,14 +151,14 @@ describe('makeAsyncActors', () => {
     let finish!: (value: any) => void;
     const as = makeAsyncActors(baseDeps({
       spawnActor: async (req: any) => {
-        req.onEvent({ type: 'actor-start', sessionId: 'c1', grantedTools: ['script', 'message_actor'] });
+        req.onEvent({ type: 'actor-start', sessionId: 'c1', visibleTools: ['script', 'message_actor'] });
         return new Promise((resolve) => { finish = resolve; });
       },
     }));
     await as.spawnActorAsync({ task: 'T', parentSessionId: 'parent' });
     const live = as.actorTasks('parent')[0];
     expect(live).toMatchObject({
-      status: 'running', childSessionId: 'c1', grantedTools: ['script', 'message_actor'],
+      status: 'running', childSessionId: 'c1', visibleTools: ['script', 'message_actor'],
     });
     finish({ result: 'ok', sessionId: 'c1' });
     await flush();
@@ -195,7 +195,7 @@ describe('makeAsyncActors', () => {
     const as = makeAsyncActors(baseDeps({
       caps: { outstanding: 4, rateCap: 100 },
       spawnActor: (req: any) => {
-        req.onEvent({ type: 'actor-start', sessionId: `child-${req.task}`, grantedTools: [] });
+        req.onEvent({ type: 'actor-start', sessionId: `child-${req.task}`, visibleTools: [] });
         return new Promise(() => {});
       }, // never resolves after allocation
     }));
@@ -308,7 +308,7 @@ describe('makeAsyncActors', () => {
       spawnActor: (req: any) => new Promise((resolve) => {
         publishStart = () => {
           childLease = slots.claim('child-delayed');
-          req.onEvent({ type: 'actor-start', sessionId: 'child-delayed', grantedTools: [] });
+          req.onEvent({ type: 'actor-start', sessionId: 'child-delayed', visibleTools: [] });
         };
         finishChild = resolve;
       }),
@@ -359,7 +359,7 @@ describe('makeAsyncActors', () => {
     const reenters: any[] = [];
     const as = makeAsyncActors(baseDeps({
       spawnActor: (req: any) => {
-        req.onEvent({ type: 'actor-start', sessionId: 'child-cancel', grantedTools: [] });
+        req.onEvent({ type: 'actor-start', sessionId: 'child-cancel', visibleTools: [] });
         return new Promise(() => {});
       }, // never settles on its own
       reenter: async (o: any) => { reenters.push(o); },

@@ -40,6 +40,8 @@ describe('sealed controller Worker (real browser realm)', () => {
     await withControllerWorker(async ({ ready }) => {
       expect(Object.keys(ready.realm).sort()).toEqual([...CONTROLLER_REALM_FACT_KEYS].sort());
       for (const key of CONTROLLER_REALM_FACT_KEYS) expect(ready.realm[key]).toBe(false);
+      expect(ready.prototypeFetchBlocked).toBe(true);
+      expect(ready.prototypeStorageBlocked).toBe(true);
     });
   });
 

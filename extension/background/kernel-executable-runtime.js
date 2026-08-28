@@ -5,10 +5,7 @@ import {
   makeKernelPodRoutes,
   makeKernelWebFetchRoutes,
 } from './kernel-engine-route-owners.js';
-import {
-  makeKernelAppActorChatRoutes,
-  makeKernelAppRuntimeRoutes,
-} from './kernel-direct-route-owners.js';
+import { makeKernelAppActorChatRoutes } from './kernel-direct-route-owners.js';
 import { makeKernelTransferRoutes } from './kernel-transfer-routes.js';
 import {
   KERNEL_ENGINE_ATTACH_ROUTE_NAMES,
@@ -28,7 +25,6 @@ const DEFAULT_FACTORIES = Object.freeze({
   makeKernelPodRoutes,
   makeKernelWebFetchRoutes,
   makeKernelAppActorChatRoutes,
-  makeKernelAppRuntimeRoutes,
   makeKernelTransferRoutes,
 });
 const SEALED_RELAY_ROUTES = new Set(['script/model-call', 'script-run/abort']);
@@ -36,7 +32,7 @@ const SEALED_RELAY_ROUTES = new Set(['script/model-call', 'script-run/abort']);
 /** @param {Record<string,any>} deps */
 export const createKernelExecutableRuntime = (deps) => {
   if (typeof deps.admit !== 'function' || !deps.engine || !deps.actorChat
-      || !deps.appRuntime || !deps.relay || !deps.transfer) {
+      || !deps.relay || !deps.transfer) {
     throw new TypeError('kernel-executable-runtime-config-invalid');
   }
   const factories = { ...DEFAULT_FACTORIES, ...deps.factories };
@@ -127,12 +123,6 @@ export const createKernelExecutableRuntime = (deps) => {
         isAllowed('app/actor-chat', message, sender),
       isTrustedSender: (/** @type {any} */ sender) =>
         isAllowed('app/actor-chat', {}, sender),
-    }),
-    ...factories.makeKernelAppRuntimeRoutes({
-      ...deps.appRuntime,
-      isRelay: (/** @type {any} */ sender) =>
-        isAllowed('app-code/observe', {}, sender)
-        && isAllowed('app-code/act', {}, sender),
     }),
     ...relayRoutes,
   });

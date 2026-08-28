@@ -24,7 +24,7 @@ await useFakeIndexedDB();
 
 const hookMarkdown = (id: string) => [
   '---', `id: ${id}`, 'event: pre-tool-use', 'rule:', '  matchArg: url',
-  '  pattern: blocked', '  onMatch: block', '---', 'Block one URL pattern.',
+  '  contains: blocked', '  onMatch: block', '---', 'Block one URL literal.',
 ].join('\n');
 
 const makeHarness = (overrides: Record<string, any> = {}) => {

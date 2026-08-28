@@ -52,7 +52,10 @@ const makePayload = (over: Record<string, unknown> = {}) => ({
   providerEndpoints: null,
   secrets: null,
   memory: { version: 1, docs: [{ id: 'user', body: 'x', updatedAt: 5 }] },
-  hooks: [{ id: 'h1', event: 'pre-tool-use' }],
+  hooks: [{
+    id: 'h1', event: 'pre-tool-use', kind: 'declarative',
+    rule: { matchArg: 'url', contains: 'blocked' },
+  }],
   skills: [{ id: 's1', name: 'review' }],
   ...over,
 });
@@ -280,23 +283,32 @@ describe('R6 import gates', () => {
     expect((res.notices as string[]).some((n) => n.includes('Dropped 3'))).toBe(true);
   });
 
-  test('imported hooks land DISABLED and UNTRUSTED regardless of the file\'s flags', async () => {
+  test('imported declarative hooks land disabled for explicit review', async () => {
     const { calls, io } = stubIo();
     await applyImport({
-      payload: makePayload({ hooks: [{ id: 'h1', event: 'pre-tool-use', kind: 'js', enabled: true, trusted: true, body: 'return {}' }] }),
+      payload: makePayload({ hooks: [{
+        id: 'h1', event: 'pre-tool-use', kind: 'declarative', enabled: true,
+        rule: { matchArg: 'url', contains: 'blocked' },
+      }] }),
       channel: 'preview', knownSettingKeys: KNOWN_KEYS, io,
     });
     expect(calls.saveHook.length).toBe(1);
     expect(calls.saveHook[0].enabled).toBe(false);
-    expect(calls.saveHook[0].trusted).toBe(false);
-    expect(calls.saveHook[0].body).toBe('return {}'); // the record itself is preserved for review
+    expect(calls.saveHook[0].trusted).toBeUndefined();
+    expect(calls.saveHook[0].rule).toEqual({ matchArg: 'url', contains: 'blocked' });
   });
 
   test('the inspect summary names endpoint urls and hook quarantine BEFORE apply', () => {
     const res = inspectImport({
       payload: makePayload({
         providerEndpoints: { endpoints: [{ url: 'https://api.custom.example/v1' }] },
-        hooks: [{ id: 'h1', event: 'pre-tool-use' }, { id: 'h2', event: 'post-tool-use' }],
+        hooks: [{
+          id: 'h1', event: 'pre-tool-use', kind: 'declarative',
+          rule: { matchArg: 'url', contains: 'blocked' },
+        }, {
+          id: 'h2', event: 'post-tool-use', kind: 'declarative',
+          rule: { matchArg: 'text', contains: 'observed' },
+        }],
       }),
       channel: 'preview', knownSettingKeys: KNOWN_KEYS,
     });
@@ -306,6 +318,32 @@ describe('R6 import gates', () => {
     const joined = res.summary.notices.join(' ');
     expect(joined).toContain('api.custom.example');
     expect(joined).toContain('DISABLED');
+  });
+
+  test('legacy JS and regex hooks are announced then imported as disabled retired records', async () => {
+    const legacyHooks = [{
+      id: 'legacy-js', event: 'pre-tool-use', enabled: true,
+      kind: 'js', body: 'return { action: "allow" };', trusted: true,
+    }, {
+      id: 'legacy-regex', event: 'post-tool-use', enabled: true,
+      kind: 'declarative', rule: { matchArg: 'url', pattern: '(a+)+$' },
+    }];
+    const payload = makePayload({ version: 1, hooks: legacyHooks });
+    const inspected = inspectImport({
+      payload, channel: 'preview', knownSettingKeys: KNOWN_KEYS,
+    });
+    if (!inspected.ok || !inspected.summary) throw new Error('expected inspect success');
+    expect(inspected.summary.unsupportedHookIds).toEqual(['legacy-js', 'legacy-regex']);
+    expect(inspected.summary.notices.join(' ')).toContain('appear as retired');
+
+    const { calls, io } = stubIo();
+    const applied = await applyImport({
+      payload, channel: 'preview', knownSettingKeys: KNOWN_KEYS, io,
+    });
+    expect(applied).toMatchObject({ ok: true, imported: { hooks: 2 } });
+    expect(calls.saveHook).toEqual(legacyHooks.map((record) => ({
+      ...record, enabled: false,
+    })));
   });
 
   test('the inspect summary calls out an imported Ollama egress destination', () => {

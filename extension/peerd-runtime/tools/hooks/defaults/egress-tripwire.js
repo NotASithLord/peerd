@@ -57,10 +57,8 @@ import { DEFAULT_HOOK_MANIFEST } from '/shared/default-hook-manifest.js';
  * @property {string} [actorInstanceId]
  */
 
-/** @type {import('../runner.js').Hook} */
-export const egressTripwireHook = {
-  ...DEFAULT_HOOK_MANIFEST[1],
-  run: (inv) => {
+/** @returns {import('../runner.js').HookDecision} */
+export const checkEgressTripwire = (/** @type {any} */ inv) => {
     const { args, toolName } = inv;
     const ctx = /** @type {import('/shared/tool-types.js').ToolContext & TripwireHookCtx} */ (inv.ctx);
     const tool = ctx.getToolMeta?.(toolName);
@@ -110,5 +108,10 @@ export const egressTripwireHook = {
     return verdict.action === 'block'
       ? verdict
       : { action: 'allow', reason: 'egress-tripwire: no exfiltration shape detected' };
-  },
+};
+
+/** @type {import('../runner.js').Hook} */
+export const egressTripwireHook = {
+  ...DEFAULT_HOOK_MANIFEST[1],
+  run: checkEgressTripwire,
 };

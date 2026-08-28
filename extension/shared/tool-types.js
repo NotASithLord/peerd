@@ -111,6 +111,8 @@
  * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
  * @property {boolean} [actorPerformed] host-stamped execution state.
  * @property {boolean} [actorAborted] host-stamped user cancellation state.
+ * @property {any[]} [authorityReceipts] host-stamped exact-effect receipt ledger.
+ * @property {boolean} [authorityPerformed] whether any exact authority effect performed.
  */
 
 /**
@@ -142,6 +144,8 @@
  * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
  * @property {boolean} [actorPerformed] host-stamped execution state.
  * @property {boolean} [actorAborted] host-stamped user cancellation state.
+ * @property {any[]} [authorityReceipts] host-stamped exact-effect receipt ledger.
+ * @property {boolean} [authorityPerformed] whether any exact authority effect performed.
  */
 
 /** @typedef {ToolResultOk | ToolResultErr} ToolResult */
@@ -160,6 +164,7 @@
  * @property {number} [depth]          delegation depth (parent + 1); SW-injected
  * @property {number} [messageCount]   session message count at ctx-build — the load_skill dedup anchor; SW-injected
  * @property {number} [trimCovered]    leading messages the rolling summary folded out of the sent slice — the load_skill dedup watermark; SW-injected
+ * @property {any[]} [messages]        bounded live transcript projection for once-per-session result notes.
  */
 
 /**

@@ -355,9 +355,11 @@ gotchas to know going in:
   a narrowed-general toolset). The worker holds NO key, NO `chrome.*`, NO
   engine clients; its only outward edges are two SW-gated relays — the model
   call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
-  and every tool call (the SW rebuilds the caller's instance-pinned or
-  `grantedTools`-restricted ctx and re-checks it, NEVER trusting the worker's
-  args). Chrome pins both relays to the offscreen document and a per-run grant.
+  and every tool call (the SW rebuilds the caller's instance-pinned context,
+  intersects its exact operation grant, and re-checks final args without ever
+  trusting the worker). The narrower tool-name list is semantic/model surface,
+  not host authority. Chrome pins both relays to the offscreen document and a
+  per-run grant.
   Firefox keeps the runner and relay calls inside the background page behind a
   private object-identity sender. The grant adds run identity and liveness on
   both hosts, so a replayed relay from a settled run is refused. A run-scoped,

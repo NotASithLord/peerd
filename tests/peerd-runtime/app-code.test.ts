@@ -2,13 +2,47 @@ import { describe, expect, mock, test } from 'bun:test';
 import { appCodeTool } from '../../extension/peerd-runtime/tools/defs/app-code.js';
 import { appActTool } from '../../extension/peerd-runtime/tools/defs/app-act.js';
 import { makeOffscreenJsClient } from '../../extension/background/offscreen-js-client.js';
-import { createAppToolAuthority } from '../../extension/background/app-tool-authority.js';
 import { executeControllerAppTool } from '../../extension/peerd-runtime/controller-app-tools.js';
 
+const appCodeAuthority = (ctx: any) => ({
+  runCode: async (code: string, timeoutMs: number) => {
+    const client = ctx?.jsOffscreenClient;
+    if (typeof client?.execHeadless !== 'function') return { refusal: 'app_code_unavailable' };
+    const sessionId = ctx?.session?.sessionId;
+    if (!sessionId) return { refusal: 'app_code_requires_actor_session' };
+    const runs = ctx?.scriptRuns;
+    if (!runs) return { refusal: 'app_code_run_registry_unavailable' };
+    if (ctx.abortSignal?.aborted) return { aborted: true };
+    const runId = runs.mintRunId(sessionId);
+    runs.register(runId, ctx.abortSignal, sessionId, { app: true });
+    let executionDispatched = false;
+    const onAbort = () => { void client.abortHeadless?.(runId, sessionId); };
+    ctx.abortSignal?.addEventListener?.('abort', onAbort, { once: true });
+    try {
+      return await client.execHeadless(code, {
+        timeoutMs,
+        caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
+        ownerSessionId: sessionId, runId, signal: ctx.abortSignal,
+        onExecutionDispatch: () => { executionDispatched = true; },
+      });
+    } catch (cause) {
+      const failure = cause instanceof Error ? cause : new Error(String(cause));
+      Object.assign(failure, {
+        executionDispatched: executionDispatched
+          || (cause as { executionDispatched?: boolean })?.executionDispatched === true,
+        outcomeKnown: executionDispatched
+          ? false : (cause as { outcomeKnown?: boolean })?.outcomeKnown,
+      });
+      throw failure;
+    } finally {
+      runs.release(runId);
+      ctx.abortSignal?.removeEventListener?.('abort', onAbort);
+    }
+  },
+});
+
 const executeAppCode = (args: any, ctx: any) => {
-  const authority = createAppToolAuthority({
-    call: { name: 'app_code', args }, ctx, signal: ctx.abortSignal,
-  });
+  const authority = appCodeAuthority(ctx);
   return executeControllerAppTool('app_code', args, authority, {
     actorInstanceId: 'app-1',
   });

@@ -47,7 +47,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * @property {string} [task]
  * @property {string} [parentSessionId]
  * @property {string} [rootSessionId]
- * @property {string[]} [grantedTools]
+ * @property {string[]} [visibleTools]
  * @property {boolean} [running]
  * @property {string} [loadError]
  * @property {any} [cost]
@@ -380,7 +380,7 @@ export const putSpawnedSession = (state, session) => {
     ...state,
     spawned: { ...state.spawned,
       // why merge: a turn/spawned-state snapshot is the durable session shape,
-      // but the live projection adds parent/running/grantedTools from the start
+      // but the live projection adds parent/running/visibleTools from the start
       // event. Replacing the record made the Actor Fabric forget its boundary
       // exactly when the first transcript snapshot arrived.
       sessions: { ...state.spawned.sessions,
@@ -709,7 +709,7 @@ export const reduceChat = (state, msg) => {
             sessionId: sid, kind: 'spawned', depth: msg.depth,
             task: msg.task, parentSessionId: msg.parentSessionId,
             rootSessionId: typeof msg.rootSessionId === 'string' ? msg.rootSessionId : undefined,
-            grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+            visibleTools: Array.isArray(msg.visibleTools) ? msg.visibleTools : undefined,
             running: true,
             messages: state.spawned.sessions[sid]?.messages ?? [],
           } } } };
@@ -758,7 +758,7 @@ export const reduceChat = (state, msg) => {
         actorCorrelationId: msg.actorCorrelationId,
         rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
         task: msg.task,
-        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+        visibleTools: Array.isArray(msg.visibleTools) ? msg.visibleTools : undefined,
         fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null,
         aborted: false, outcomeKnown: undefined, performed: undefined, cost: null,
       }), msg);
@@ -780,7 +780,7 @@ export const reduceChat = (state, msg) => {
         actorCorrelationId: msg.actorCorrelationId,
         rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
         task: msg.task,
-        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+        visibleTools: Array.isArray(msg.visibleTools) ? msg.visibleTools : undefined,
         streaming: true, error: null, cost: null,
       };
       return stampActorProjectionRevision(

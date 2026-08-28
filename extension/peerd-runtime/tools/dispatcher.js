@@ -23,6 +23,11 @@ import { runPreToolUse, runPostToolUse } from './hooks/runner.js';
 import { ugcWriteConfirm } from '../actor/ugc-registry.js';
 import { describeToolActivity, displayOrigin } from '../actor/activity-label.js';
 import {
+  normalizeBrowserChildPolicyNotices,
+  withAsyncBrowserChildPolicyNotices,
+  withBrowserChildPolicyNotices,
+} from '../browser-authority/child-policy-result.js';
+import {
   decideAction,
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
@@ -34,6 +39,10 @@ import { retryClassForTool } from '../lifecycle/tool-retry-class.js';
 import { RETRY_CLASSES } from '../lifecycle/retry-class.js';
 import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
 import { resolveDeclaredToolOrigins } from '../tool-origin-policy.js';
+import { checkEgressAllowlist } from './hooks/defaults/egress-allowlist.js';
+import { checkEgressTripwire } from './hooks/defaults/egress-tripwire.js';
+import { DEFAULT_HOOKS } from './hooks/defaults/index.js';
+import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 
 /** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} ToolDescriptor */
 
@@ -111,112 +120,6 @@ const browserPolicyAuditDetails = (carrier) => {
 };
 
 /**
- * Add ordered host-stamped child-navigation receipts without breaking tools whose
- * content is a JSON protocol consumed by the page-code bridge.
- * @param {ToolResult} result
- * @param {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} notices
- * @returns {ToolResult}
- */
-const withBrowserChildPolicyNotices = (result, notices) => {
-  if (notices.length === 0) return result;
-  const [notice] = notices;
-  const policyFields = {
-    browserPolicy: notice,
-    ...(notices.length > 1 ? { browserPolicies: notices } : {}),
-  };
-  let content = typeof result.content === 'string' ? result.content : '';
-  try {
-    const parsed = JSON.parse(content);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      content = JSON.stringify({ ...parsed, ...policyFields }, null, 2);
-    } else {
-      throw new Error('not an object');
-    }
-  } catch {
-    const receipt = (
-      /** @type {{ reason: string, outcome: string, child: string, retryable: boolean }} */ entry,
-      /** @type {number} */ index,
-    ) => {
-      const outcome = entry.outcome === 'not_run'
-        ? entry.reason === 'protected_child_request'
-          ? 'A protected child request did not run.'
-          : 'A protected child navigation did not run.'
-        : entry.reason === 'child_authority_unavailable'
-          ? 'Child browser authority became unavailable.'
-        : 'A child navigation was not verified.';
-      const child = entry.child === 'closed'
-        ? 'The child tab was closed.'
-        : entry.child === 'left_blank'
-          ? 'The child tab was left blank.'
-          : entry.child === 'guarded'
-            ? 'The child tab remained guarded.'
-          : 'The browser did not confirm that the child tab was closed or blank.';
-      const label = notices.length > 1 ? `[HOST POLICY ${index + 1}/${notices.length}]` : '[HOST POLICY]';
-      return `${label}\n${outcome} ${child} `
-        + `No destination details or protected page content were exposed. ${entry.retryable ? 'Retry after browser control recovers.' : 'Do not retry automatically.'}\n`
-        + `Receipt: ${JSON.stringify(entry)}`;
-    };
-    content = `${content}${content ? '\n\n' : ''}${notices.map(receipt).join('\n\n')}`;
-  }
-  return {
-    ...result,
-    content,
-    structured: {
-      ...(result.structured && typeof result.structured === 'object'
-        ? result.structured
-        : {}),
-      ...policyFields,
-    },
-  };
-};
-
-/** @param {any} result @param {Array<{reason:string,outcome:string,child:string,retryable:boolean}>} notices */
-const withAsyncBrowserChildPolicyNotices = (result, notices) => {
-  if (notices.length === 0) return result;
-  const browserAsyncPolicies = notices;
-  const asyncFields = {
-    browserAsyncPolicyAttribution: 'prior_action', browserAsyncPolicies,
-  };
-  let content = typeof result.content === 'string' ? result.content : '';
-  try {
-    const parsed = JSON.parse(content);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not-object');
-    content = JSON.stringify({ ...parsed, ...asyncFields }, null, 2);
-  } catch {
-    content = `${content}${content ? '\n\n' : ''}[ASYNC HOST POLICY — PRIOR ACTION]\n`
-      + 'A child-browser outcome from an earlier action arrived after that action settled. '
-      + 'It is not an outcome of this tool call. No destination details were exposed.\n'
-      + `Receipts: ${JSON.stringify(browserAsyncPolicies)}`;
-  }
-  return {
-    ...result,
-    content,
-    structured: {
-      ...(result.structured && typeof result.structured === 'object' ? result.structured : {}),
-      ...asyncFields,
-    },
-  };
-};
-
-/** @param {unknown} value */
-const normalizeBrowserChildPolicyNotices = (value) => (Array.isArray(value) ? value : value ? [value] : [])
-  .filter((entry) => {
-    const notice = /** @type {any} */ (entry);
-    return notice && typeof notice === 'object'
-      && ['protected_child_navigation', 'protected_child_request', 'child_navigation_failed', 'child_navigation_unverified', 'child_authority_unavailable']
-        .includes(notice.reason)
-      && ['not_run', 'unverified'].includes(notice.outcome)
-      && ['closed', 'left_blank', 'guarded', 'uncontained'].includes(notice.child)
-      && typeof notice.retryable === 'boolean';
-  })
-  .map((entry) => ({
-    reason: entry.reason,
-    outcome: entry.outcome,
-    child: entry.child,
-    retryable: entry.retryable,
-  }));
-
-/**
  * Project an explicitly exposed typed tool error without depending on the
  * concrete error class or realm that created it. Unknown thrown fields remain
  * private. The marker alone is not enough: every projected field is bounded
@@ -243,6 +146,27 @@ const projectExposedToolError = (error) => {
     content: value.content,
     structured: /** @type {Record<string, unknown>} */ (value.structured),
     outcomeKind: value.outcomeKind,
+  };
+};
+
+/**
+ * Preserve only closed custody fields from an internal semantic executor
+ * failure. These fields describe whether retry is safe; they are not an
+ * authority claim, and any host receipt still overrides them at settlement.
+ * @param {unknown} error
+ */
+const projectSemanticFailureCustody = (error) => {
+  if (!error || typeof error !== 'object') return {};
+  const value = /** @type {Record<string, unknown>} */ (error);
+  const code = typeof value.code === 'string' && TOOL_RESULT_CODE.test(value.code)
+    ? value.code : null;
+  const outcomeKnown = typeof value.outcomeKnown === 'boolean'
+    ? value.outcomeKnown : null;
+  return {
+    ...(code ? { code } : {}),
+    ...(outcomeKnown !== null ? { outcomeKnown } : {}),
+    ...(typeof value.retryable === 'boolean'
+      ? { retryable: outcomeKnown === false ? false : value.retryable } : {}),
   };
 };
 
@@ -318,6 +242,65 @@ const withToolMetadata = (ctx, tool) => ({
   },
 });
 
+const HOOK_ARGS_MAX_BYTES = 20 * 1024 * 1024;
+
+/** @param {unknown} value */
+const freezePlainSnapshot = (value) => {
+  if (!value || typeof value !== 'object' || ArrayBuffer.isView(value)
+      || value instanceof ArrayBuffer) return value;
+  for (const child of Object.values(/** @type {Record<string,unknown>} */ (value))) {
+    freezePlainSnapshot(child);
+  }
+  return Object.freeze(value);
+};
+
+/**
+ * User hooks may return getters, proxies, or retain their replacement object
+ * and mutate it after approval. Admit only the bounded structured-clone subset,
+ * copy it once, then freeze the exact bytes used by every final gate and RPC.
+ * @param {unknown} value
+ */
+const snapshotHookArgs = (value) => {
+  const bytes = structuredClonePayloadBytes(value, { maxDepth: 16, maxNodes: 10_000 });
+  if (!Number.isFinite(bytes) || bytes > HOOK_ARGS_MAX_BYTES) {
+    throw new TypeError('hook arguments are not a bounded structured-clone payload');
+  }
+  const cloned = structuredClone(value);
+  return /** @type {Record<string,any>} */ (freezePlainSnapshot(cloned));
+};
+
+/**
+ * User hook code gets data, never the live controller context or the shared
+ * hook registry. This keeps code-owned floors, metadata resolvers, clients,
+ * confirmation and authority closures outside the programmable policy realm.
+ * @param {DispatchContext} ctx @param {ToolDescriptor} tool
+ */
+const userHookContext = (ctx, tool) => freezePlainSnapshot(structuredClone({
+  session: ctx.session ? {
+    sessionId: ctx.session.sessionId,
+    kind: ctx.session.kind,
+  } : null,
+  permission: ctx.permission ? {
+    mode: ctx.permission.mode,
+    confirmActions: ctx.permission.confirmActions,
+  } : null,
+  activeTab: ctx.activeTab ? {
+    id: ctx.activeTab.id,
+    origin: ctx.activeTab.origin,
+  } : null,
+  backing: /** @type {any} */ (ctx).backing,
+  exposure: /** @type {any} */ (ctx).exposure,
+  actorType: /** @type {any} */ (ctx).actorType,
+  actorInstanceId: /** @type {any} */ (ctx).actorInstanceId,
+  allowlist: Array.isArray(/** @type {any} */ (ctx).allowlist)
+    ? [.../** @type {any} */ (ctx).allowlist] : [],
+  denylist: Array.isArray(/** @type {any} */ (ctx).denylist)
+    ? [.../** @type {any} */ (ctx).denylist] : [],
+  tool: {
+    name: tool.name, primitive: tool.primitive, sideEffect: tool.sideEffect,
+  },
+}));
+
 /** @typedef {import('/shared/tool-types.js').ToolCall} ToolCall */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
@@ -350,6 +333,7 @@ const withToolMetadata = (ctx, tool) => ({
  *   hasPendingBrowserChildPolicy?: (tabId: number) => boolean,
  *   browserChildQuarantineRequired?: boolean,
  *   armBrowserChildQuarantine?: (tabId: number) => Promise<{ok?:boolean,reason?:string,error?:string,code?:string}>,
+ *   authorityOwnsLifecycle?: boolean,
  * }} DispatchContext
  */
 
@@ -403,6 +387,12 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   // is injected (ctx.hooks) when present so tests can supply a fixed set;
   // production falls back to the module registry.
   const hooks = ctx.hooks ?? listHooks();
+  const userHooks = /** @type {import('./hooks/runner.js').Hook[]} */ (hooks)
+    // why: provenance is object identity, not the display ID. A historical
+    // user record may collide with a now-reserved built-in ID; that retired
+    // sentinel must still run fail-closed while the real code-owned default
+    // continues through its mandatory floor below.
+    .filter((hook) => !DEFAULT_HOOKS.includes(hook));
   /** @type {import('./hooks/runner.js').HookOutcome[]} */
   const hookOutcomes = [];
 
@@ -500,6 +490,129 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
     }
   }
 
+  // ---- Pre-tool-use hooks ------------------------------------------------
+  // Hooks transform the semantic request before any user prompt or durable
+  // lifecycle claim is minted. The authority host therefore confirms and
+  // tracks exactly the bytes that can reach an effect, never the model's stale
+  // pre-hook proposal.
+  const hookCtx = withToolMetadata(ctx, tool);
+  // Code-owned policy hooks are an immutable floor. They run outside the user
+  // population, so an order=0 hook cannot run first or mutate their registry /
+  // metadata context. The same checks run again below on final transformed args.
+  const mandatoryPre = await runPreToolUse({
+    hooks: /** @type {any} */ (DEFAULT_HOOKS),
+    toolName: call.name, args, ctx: hookCtx,
+  });
+  hookOutcomes.push(...mandatoryPre.outcomes);
+  if (!mandatoryPre.allowed) {
+    ctx.audit({
+      type: 'tool_blocked', details: {
+        tool: call.name, gate: 'mandatory-pre-tool-use-hook', reason: mandatoryPre.reason,
+      },
+    }).catch(() => {});
+    return {
+      ok: false,
+      error: `hook_blocked:mandatory-pre-tool-use:${mandatoryPre.reason}`,
+      meta: /** @type {DispatchMeta} */ ({
+        toolName: call.name,
+        primitive: tool.primitive, dispatch: tool.dispatch,
+        gates: gateResults,
+        hooks: hookOutcomes,
+        durationMs: 0,
+      }),
+    };
+  }
+  const pre = await runPreToolUse({
+    hooks: userHooks, toolName: call.name, args,
+    ctx: /** @type {any} */ (userHookContext(ctx, tool)),
+  });
+  hookOutcomes.push(...pre.outcomes);
+  if (!pre.allowed) {
+    ctx.audit({
+      type: 'tool_blocked',
+      details: { tool: call.name, gate: 'pre-tool-use-hook', reason: pre.reason },
+    }).catch(() => {});
+    return {
+      ok: false,
+      error: `hook_blocked:pre-tool-use:${pre.reason}`,
+      meta: /** @type {DispatchMeta} */ ({
+        toolName: call.name,
+        primitive: tool.primitive, dispatch: tool.dispatch,
+        gates: gateResults,
+        hooks: hookOutcomes,
+        durationMs: 0,
+      }),
+    };
+  }
+  try { args = snapshotHookArgs(pre.args); }
+  catch (cause) {
+    const reason = /** @type {{message?:string}} */ (cause)?.message
+      ?? 'hook arguments could not be snapshotted';
+    hookOutcomes.push({ id: 'hook-args-snapshot', action: 'block', reason });
+    return {
+      ok: false,
+      error: `hook_blocked:final-args:${reason}`,
+      meta: /** @type {DispatchMeta} */ ({
+        toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        gates: gateResults, hooks: hookOutcomes, durationMs: 0,
+      }),
+    };
+  }
+  if (ctx.abortSignal?.aborted) return abortedResult('after_pre_tool_hook');
+
+  // User hooks may rewrite the target after the ordinary gate/default-hook
+  // pass. Re-run the non-modifying mandatory floors on those frozen final
+  // bytes so an allowed URL cannot be rewritten into a denylisted or
+  // exfiltration-shaped target. These checks are not hook invocations and do
+  // not duplicate hook lineage; defaults and user hooks still each execute
+  // exactly once.
+  for (const { name, fn } of GATES) {
+    let result;
+    try { result = fn(tool, args, ctx); }
+    catch (cause) {
+      result = {
+        allowed: false,
+        reason: `final gate threw: ${/** @type {{message?:string}} */ (cause)?.message ?? String(cause)}`,
+      };
+    }
+    if (!result.allowed) {
+      const reason = `post-hook ${result.reason}`;
+      ctx.audit({
+        type: 'tool_blocked',
+        details: { tool: call.name, gate: `final-${name}`, reason },
+      }).catch(() => {});
+      return {
+        ok: false,
+        error: `gate_blocked:final-${name}:${result.reason}`,
+        meta: /** @type {DispatchMeta} */ ({
+          toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+          gates: [...gateResults, { name: `final-${name}`, ...result }],
+          hooks: hookOutcomes, durationMs: 0,
+        }),
+      };
+    }
+  }
+  for (const [name, check] of /** @type {const} */ ([
+    ['egress-allowlist', checkEgressAllowlist],
+    ['egress-tripwire', checkEgressTripwire],
+  ])) {
+    const decision = check({ event: 'pre-tool-use', toolName: call.name, args, ctx: hookCtx });
+    if (decision?.action === 'block') {
+      ctx.audit({
+        type: 'tool_blocked',
+        details: { tool: call.name, gate: `final-${name}`, reason: decision.reason },
+      }).catch(() => {});
+      return {
+        ok: false,
+        error: `hook_blocked:final-${name}:${decision.reason}`,
+        meta: /** @type {DispatchMeta} */ ({
+          toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+          gates: gateResults, hooks: hookOutcomes, durationMs: 0,
+        }),
+      };
+    }
+  }
+
   // ---- Async confirmation (driven by the Plan/Act permission policy) -----
   // The six sync gates above can't await a user round-trip, so the
   // confirmation step lives here. The persona gate already BLOCKED any
@@ -575,7 +688,11 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   // — the lifecycle tracker turns it into a durable single-use proof.
   let userApprovedThisDispatch = false;
   const needsDispatcherConfirmation = lifecycleRepeatConfirm
-    || (!selfConfirms && (verdict.confirm || ugcRuleId));
+    || (!ctx.authorityOwnsLifecycle && !selfConfirms && (verdict.confirm || ugcRuleId));
+  if (ctx.authorityOwnsLifecycle && tool.sideEffect !== 'read') {
+    const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
+    if (confirmEntry) confirmEntry.reason = 'exact authority verifies final arguments';
+  }
   if (verdict.allowed && needsDispatcherConfirmation) {
     const confirmEntry = gateResults.find((g) => g.name === 'confirmation');
     /** @type {import('/shared/tool-types.js').ConfirmAnswer | undefined} */
@@ -664,42 +781,6 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   }
   if (ctx.abortSignal?.aborted) return abortedResult('after_confirmation');
 
-  // ---- Pre-tool-use hooks ------------------------------------------------
-  // why: this is the LAST programmable veto before a side effect runs —
-  // central to the lethal-trifecta defense. It sits after the sync gates
-  // and the async confirmation (so a human "yes" can still be overruled
-  // by a deterministic policy hook), and before execute(). A pre-hook may
-  // BLOCK (fail-closed) or MODIFY the args. Hook errors fail closed: the
-  // runner converts a throw/garbage into a block, never a silent pass.
-  //
-  // We give hooks a read view of tool metadata (sideEffect/origins) and
-  // the egress allowlist via ctx augmentation so the default egress hook
-  // can reason about a call's footprint without the dispatcher special-
-  // casing it.
-  const hookCtx = withToolMetadata(ctx, tool);
-  const pre = await runPreToolUse({ hooks, toolName: call.name, args, ctx: hookCtx });
-  hookOutcomes.push(...pre.outcomes);
-  if (!pre.allowed) {
-    ctx.audit({
-      type: 'tool_blocked',
-      details: { tool: call.name, gate: 'pre-tool-use-hook', reason: pre.reason },
-    }).catch(() => {});
-    return {
-      ok: false,
-      error: `hook_blocked:pre-tool-use:${pre.reason}`,
-      meta: /** @type {DispatchMeta} */ ({
-        toolName: call.name,
-        primitive: tool.primitive, dispatch: tool.dispatch,
-        gates: gateResults,
-        hooks: hookOutcomes,
-        durationMs: 0,
-      }),
-    };
-  }
-  // Adopt any args the pre-hooks rewrote. execute() + the audit see these.
-  args = pre.args;
-  if (ctx.abortSignal?.aborted) return abortedResult('after_pre_tool_hook');
-
   // ---- Lifecycle tracking (the recovery contract) ------------------------
   // why HERE: every gate/confirm/hook has passed, so what follows is a real
   // dispatch — the durable operation record must exist BEFORE execute() so
@@ -711,7 +792,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
   // contract forbids. Absent ctx.lifecycle (tests, Firefox pre-init), the
   // dispatch is byte-for-byte unchanged.
   let tracking = null;
-  if (ctx.lifecycle?.beginTracking) {
+  if (!ctx.authorityOwnsLifecycle && ctx.lifecycle?.beginTracking) {
     const begun = await ctx.lifecycle.beginTracking({
       callId: call.id,
       tool,
@@ -965,7 +1046,8 @@ export const settleToolCall = async (prepared, execution) => {
     tracking, activityTabId, start, childPolicyEligible, childCapable,
     browserAsyncPolicyNotices,
   } = prepared;
-  const hookCtx = withToolMetadata(ctx, tool);
+  const userHooks = /** @type {import('./hooks/runner.js').Hook[]} */ (hooks)
+    .filter((hook) => !DEFAULT_HOOKS.includes(hook));
   const activity = tool.primitive === 'tab' ? ctx.onToolActivity : null;
   const consumeBrowserChildPolicyNotice = typeof ctx.consumeBrowserChildPolicyNotice === 'function'
     ? ctx.consumeBrowserChildPolicyNotice
@@ -1042,7 +1124,13 @@ export const settleToolCall = async (prepared, execution) => {
     // change it — the side effect already happened, so a post-hook throw
     // is recorded and ignored rather than failing closed (failing closed
     // here would mean misreporting an effect that already occurred).
-    const post = await runPostToolUse({ hooks, toolName: call.name, args, result, ctx: hookCtx });
+    const post = await runPostToolUse({
+      hooks: userHooks,
+      toolName: call.name,
+      args,
+      result,
+      ctx: /** @type {any} */ (userHookContext(ctx, tool)),
+    });
     hookOutcomes.push(...post.outcomes);
     // Settle the lifecycle record from the tool's own outcome. A returned
     // failure whose error is an ambiguous transport loss is REWRITTEN to
@@ -1187,6 +1275,7 @@ export const settleToolCall = async (prepared, execution) => {
     }
     const message = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
     const exposedError = projectExposedToolError(e);
+    const semanticCustody = projectSemanticFailureCustody(e);
     const endTurn = /** @type {{ endTurn?: boolean }} */ (e)?.endTurn === true;
     const endingContent = /** @type {{ content?: unknown }} */ (e)?.content;
     const browserPolicy = browserPolicyAuditDetails(exposedError);
@@ -1204,7 +1293,11 @@ export const settleToolCall = async (prepared, execution) => {
     // why: post-hooks still observe a FAILED execution — a failure is an
     // observable event (e.g. an audit/metrics hook wants to count it).
     const post = await runPostToolUse({
-      hooks, toolName: call.name, args, result: { ok: false, error: message }, ctx: hookCtx,
+      hooks: userHooks,
+      toolName: call.name,
+      args,
+      result: { ok: false, error: message },
+      ctx: /** @type {any} */ (userHookContext(ctx, tool)),
     });
     hookOutcomes.push(...post.outcomes);
     // A THROW after dispatch is the most ambiguous shape of all — settle
@@ -1226,6 +1319,9 @@ export const settleToolCall = async (prepared, execution) => {
       ok: false,
       error: recoveryRewrite?.error ?? exposedError?.error ?? message,
       ...(exposedError && !recoveryRewrite ? exposedError : {}),
+      ...(recoveryRewrite?.recovery?.state === 'outcome_unknown'
+        ? { ...semanticCustody, outcomeKnown: false, retryable: false }
+        : semanticCustody),
       ...(endTurn ? {
         content: typeof endingContent === 'string'
           ? endingContent

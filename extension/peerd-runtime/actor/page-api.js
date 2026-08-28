@@ -227,19 +227,6 @@ const PAGE_METHODS = {
 /** The page.* methods the actor may call (drives the worker stub + the prompt). */
 export const PAGE_API_METHODS = Object.freeze(codeClientMethods('page'));
 
-const PAGE_TOOL_ROUTES = Object.freeze({
-  navigate: 'page-program/navigate',
-  click: 'page-program/click',
-  type: 'page-program/fill',
-  snapshot: 'page-program/snapshot',
-  read_page: 'page-program/read',
-  read_state: 'page-program/read-state',
-  watch_changes: 'page-program/watch-changes',
-  query_dom: 'page-program/query-dom',
-  view: 'page-program/view',
-  login: 'page-program/login',
-});
-
 /**
  * Translate a `page.<method>(args)` call into the peerd tool call to dispatch.
  * Pure. Throws {@link PageApiError} on an unknown method or malformed args.
@@ -252,18 +239,6 @@ export const pageCallToToolCall = (call) => {
   const declared = typeof method === 'string' ? codeClientMethod('page', method) : null;
   if (!spec || !declared || declared.tool !== spec.tool) throw new PageApiError(`unknown page method: ${String(method)}`);
   return { name: spec.tool, args: spec.toArgs(call?.args ?? {}) };
-};
-
-/**
- * Resolve one declared page method to its fixed SW relay route. The caller
- * cannot supply a route or tool name; both come from the sealed manifest.
- * @param {PageCall} call
- */
-export const pageCallToRelay = (call) => {
-  const toolCall = pageCallToToolCall(call);
-  const route = PAGE_TOOL_ROUTES[/** @type {keyof typeof PAGE_TOOL_ROUTES} */ (toolCall.name)];
-  if (!route) throw new PageApiError(`page method has no fixed authority route: ${call.method}`);
-  return { route, args: toolCall.args };
 };
 
 /**

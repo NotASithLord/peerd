@@ -8,82 +8,97 @@ const mismatch = () => Object.assign(new Error('Notebook authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
 
-/** @param {{call:any,ctx:any,signal:AbortSignal}} input */
-export const createNotebookToolAuthority = ({ call, ctx, signal }) => {
-  const args = call?.args ?? {};
+/** @param {{binding:any,ctx:any,signal:AbortSignal,shared?:any}} input */
+export const createNotebookToolAuthority = ({ binding, ctx, signal, shared = {} }) => {
+  const args = binding.args;
   const sessionId = ctx?.session?.sessionId;
-  /** @type {string|undefined} */ let resolvedNotebookId;
-  /** @type {any} */ let inspected = null;
-  const requireTool = (/** @type {string} */ name) => {
-    if (call?.name !== name) throw mismatch();
+  const boundNotebookId = ctx?.actorType === 'notebook' ? ctx.actorInstanceId : null;
+  const requireBoundNotebook = (/** @type {unknown} */ notebookId) => {
+    if (boundNotebookId && notebookId !== boundNotebookId) throw mismatch();
+  };
+  const requireOperation = (/** @type {string} */ name) => {
+    if (binding.operation !== name) throw mismatch();
+  };
+  const requireLive = () => {
+    if (!signal?.aborted) return;
+    throw Object.assign(new Error('Notebook operation stopped before mutation'), {
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
   };
 
   return Object.freeze({
     readNotebook: async (/** @type {string} */ notebookId) => {
-      if (!['js_notebook', 'js_delete'].includes(call?.name)
+      if (binding.operation !== 'turn.notebook.read'
           || typeof notebookId !== 'string' || typeof ctx?.jsRegistry?.get !== 'function') {
         throw mismatch();
       }
-      if (call.name === 'js_notebook') {
-        const wanted = typeof args.notebook === 'string' ? args.notebook.trim() : '';
-        if (!wanted.startsWith('notebook-') || notebookId !== wanted) throw mismatch();
-      } else if (notebookId !== args.notebookId) throw mismatch();
+      if (notebookId !== args.notebookId) throw mismatch();
+      requireBoundNotebook(notebookId);
       const record = await ctx.jsRegistry.get(notebookId);
-      if (record && call.name === 'js_notebook') resolvedNotebookId = notebookId;
-      if (call.name === 'js_delete') inspected = record ?? null;
+      if (record) shared.resolvedNotebookId = notebookId;
+      shared.inspected = record ?? null;
       return record ? {
         id: record.id ?? notebookId, name: String(record.name ?? ''), pinned: record.pinned === true,
       } : null;
     },
     listNotebooks: async () => {
-      requireTool('js_notebook');
-      const wanted = typeof args.notebook === 'string' ? args.notebook.trim() : '';
-      if (!wanted || wanted.startsWith('notebook-')
-          || typeof ctx?.jsRegistry?.list !== 'function') throw mismatch();
+      requireOperation('turn.notebook.list');
+      if (typeof ctx?.jsRegistry?.list !== 'function') throw mismatch();
       const records = await ctx.jsRegistry.list();
-      return records.map((/** @type {any} */ record) => ({ id: record.id, name: record.name }));
+      return records.filter((/** @type {any} */ record) =>
+        !boundNotebookId || record.id === boundNotebookId)
+        .map((/** @type {any} */ record) => ({ id: record.id, name: record.name }));
     },
     setDefaultNotebook: async (/** @type {string} */ notebookId) => {
-      requireTool('js_notebook');
-      const wanted = typeof args.notebook === 'string' ? args.notebook.trim() : '';
-      if (!wanted || typeof notebookId !== 'string'
+      requireOperation('turn.notebook.set-default');
+      if (typeof notebookId !== 'string'
           || typeof ctx?.jsRegistry?.get !== 'function') throw mismatch();
       const record = await ctx.jsRegistry.get(notebookId);
-      if (!record || (wanted.startsWith('notebook-') ? notebookId !== wanted
-        : String(record.name).toLowerCase() !== wanted.toLowerCase())) throw mismatch();
-      resolvedNotebookId = notebookId;
-      if (!sessionId) return undefined;
+      if (!record || notebookId !== args.notebookId) throw mismatch();
+      requireBoundNotebook(notebookId);
+      shared.resolvedNotebookId = notebookId;
+      if (!sessionId) return false;
       if (typeof ctx?.jsRegistry?.setDefaultForSession !== 'function') throw mismatch();
-      return ctx.jsRegistry.setDefaultForSession(sessionId, notebookId);
+      requireLive();
+      await ctx.jsRegistry.setDefaultForSession(sessionId, notebookId);
+      return true;
     },
     runNotebook: (/** @type {string} */ code, /** @type {number} */ timeoutMs,
       /** @type {string|undefined} */ notebookId) => {
-      requireTool('js_notebook');
-      const expectedTimeout = Math.min(120_000, Math.max(1000, Number(args.timeoutMs ?? 30_000)));
-      const explicit = typeof args.notebook === 'string' && args.notebook.trim();
-      if (code !== args.code || timeoutMs !== expectedTimeout
-          || (explicit && notebookId !== resolvedNotebookId)
-          || (!explicit && notebookId !== undefined)
+      requireOperation('turn.notebook.run');
+      if (code !== args.code || timeoutMs !== args.timeoutMs
+          || notebookId !== args.notebookId
+          || boundNotebookId && notebookId !== undefined && notebookId !== boundNotebookId
           || typeof ctx?.jsClient?.eval !== 'function') throw mismatch();
-      return ctx.jsClient.eval(code, { timeoutMs, sessionId, notebookId, signal });
+      return ctx.jsClient.eval(code, {
+        timeoutMs, sessionId, notebookId: boundNotebookId ?? notebookId, signal,
+      });
     },
     writeFile: (/** @type {string} */ path, /** @type {string} */ content,
       /** @type {string|undefined} */ notebookId) => {
-      requireTool('js_write_file');
-      if (path !== args.path || content !== args.content || notebookId !== args.notebook
+      requireOperation('turn.notebook.write-file');
+      if (path !== args.path || content !== args.content || notebookId !== args.notebookId
+          || boundNotebookId && notebookId !== undefined && notebookId !== boundNotebookId
           || typeof ctx?.jsClient?.writeFile !== 'function') throw mismatch();
-      return ctx.jsClient.writeFile(path, content, { sessionId, notebookId });
+      return ctx.jsClient.writeFile(path, content, {
+        sessionId, notebookId: boundNotebookId ?? notebookId,
+      });
     },
     readFile: (/** @type {string} */ path, /** @type {string|undefined} */ notebookId) => {
-      requireTool('js_read_file');
-      if (path !== args.path || notebookId !== args.notebook
+      requireOperation('turn.notebook.read-file');
+      if (path !== args.path || notebookId !== args.notebookId
+          || boundNotebookId && notebookId !== undefined && notebookId !== boundNotebookId
           || typeof ctx?.jsClient?.readFile !== 'function') throw mismatch();
-      return ctx.jsClient.readFile(path, { sessionId, notebookId });
+      return ctx.jsClient.readFile(path, {
+        sessionId, notebookId: boundNotebookId ?? notebookId,
+      });
     },
     destroyNotebook: async (/** @type {string} */ notebookId) => {
-      requireTool('js_delete');
+      requireOperation('turn.notebook.destroy');
+      requireBoundNotebook(notebookId);
       const repositories = ctx?.repositories;
-      if (notebookId !== args.notebookId || inspected?.id !== notebookId || inspected?.pinned
+      if (notebookId !== args.notebookId || shared.inspected?.id !== notebookId
+          || shared.inspected?.pinned
           || typeof ctx?.jsRegistry?.get !== 'function'
           || typeof ctx?.jsRegistry?.delete !== 'function'
           || typeof ctx?.jsTabTracker?.closeTab !== 'function'
@@ -92,6 +107,9 @@ export const createNotebookToolAuthority = ({ call, ctx, signal }) => {
       return repositories.coordinate({ kind: 'notebook', id: notebookId }, async () => {
         const fresh = await ctx.jsRegistry.get(notebookId);
         if (!fresh || fresh.pinned === true) throw mismatch();
+        // why: the repository queue and fresh registry read may both outlive
+        // the turn. Retired work must not close the tab or destroy OPFS.
+        requireLive();
         await ctx.jsTabTracker.closeTab(notebookId);
         await repositories.destroy({ kind: 'notebook', id: notebookId }, { worktree: true });
         await ctx.jsRegistry.delete(notebookId);
@@ -100,5 +118,7 @@ export const createNotebookToolAuthority = ({ call, ctx, signal }) => {
   });
 };
 
-export const bindNotebookToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
-  state.authority ??= createNotebookToolAuthority(input);
+export const bindNotebookToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) => {
+  const binding = Object.freeze({ operation: input.operation, args: structuredClone(input.args) });
+  return createNotebookToolAuthority({ ...input, binding, shared: state });
+};

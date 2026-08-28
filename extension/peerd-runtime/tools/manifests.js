@@ -2,8 +2,8 @@
 // Per-session tool exposure manifests (ROADMAP "Tool exposure manifests
 // per session").
 //
-// Registration stays GLOBAL (the SW registers every tool once); a session
-// may opt into a NARROW exposed set via `session.toolManifest`:
+// A session may opt into a NARROW model-visible set via
+// `session.toolManifest`:
 //
 //     { preset?: string, allow?: string[] }
 //
@@ -13,12 +13,13 @@
 // tool narrowing (actor/spawn.js); it can never re-expose a tool one
 // of those layers removed.
 //
-// Enforced at BOTH layers, same pattern as the main-hidden tool split:
-//   1. descriptors — the SW intersects the main turn's descriptor list
-//      with the manifest, so the model never SEES an excluded tool;
-//   2. dispatch — the exposure gate (gates.js) refuses an excluded tool
-//      BY NAME via ctx.toolAllow, so a hallucinated/injected call still
-//      fails closed, with the refusal reason in the lineage.
+// Applied twice inside the sealed semantic runtime:
+//   1. descriptor projection keeps excluded names out of the model request;
+//   2. the semantic exposure gate refuses an excluded emitted name.
+// This is model-surface policy and defense in depth. Host authority is the
+// fixed exact-operation ceiling plus actor grants and live target/mode/
+// confirmation/lifecycle checks; manifests do not promise name-level
+// isolation between tools that intentionally share an exact operation.
 //
 // Pure module — data + value-in/value-out helpers only. Bun-testable.
 
@@ -67,9 +68,10 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
   'browse-only': Object.freeze({
     description: 'passive browsing — read-only page access via a tab\'s actor, navigation, web reads; no page actions, no memory, no execution',
     allow: Object.freeze([
-      // enumerate actors + open + message a tab's actor; the actor is held
-      // READ-ONLY by this manifest (only the READ DOM tools below are allowed, so
-      // it can observe but not click/type — the manifest constrains the actor too).
+      // enumerate actors + open + message a tab's actor; the manifest advertises
+      // only the READ DOM tools below, so the semantic actor surface observes but
+      // does not offer click/type. The host still applies its exact per-kind ceiling
+      // and live page gates independently.
       'actor_list', 'open_tab', 'navigate', 'message_actor',
       // read-only DOM subset (observe, never mutate) — inherited by the web actor.
       'snapshot', 'read_page', 'read_state', 'query_dom', 'read_doc', 'view',
