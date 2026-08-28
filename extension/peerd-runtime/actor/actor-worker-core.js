@@ -174,6 +174,8 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @param {ReturnType<typeof makeInMemorySessions>} deps.sessions
  * @param {(args: object) => AsyncIterable<any>} deps.callModel   the relayed callModel
  * @param {(call: object) => Promise<any>} deps.toolDispatch      the relayed toolDispatch
+ * @param {(name: string) => (import('../permissions/policy.js').PermissionVerdict | null)} [deps.classifyToolCall]
+ *   sealed descriptor + pinned-permission scheduler classification
  * @param {() => (Promise<string> | string)} deps.getSystemPrompt
  * @param {(entry: object) => (Promise<unknown> | void)} [deps.appendAudit]
  * @param {(ev: object) => void} [deps.onEvent]
@@ -184,7 +186,10 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @returns {Promise<{ finalText: string, newMessages: any[], usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runActorLoop = async (deps, req) => {
-  const { runUserTurn, sessions, callModel, toolDispatch, getSystemPrompt, onEvent, tools, fenceActorSummary } = deps;
+  const {
+    runUserTurn, sessions, callModel, toolDispatch, classifyToolCall,
+    getSystemPrompt, onEvent, tools, fenceActorSummary,
+  } = deps;
   // Defensive (phase-1 lesson): the loop fire-and-forgets audits as
   // appendAudit(...).catch(...) — a sync stub returning undefined would crash it.
   const appendAudit = (/** @type {object} */ e) => Promise.resolve(deps.appendAudit?.(e));
@@ -213,6 +218,7 @@ export const runActorLoop = async (deps, req) => {
     appendAudit,
     tools,
     toolDispatch,
+    ...(classifyToolCall ? { classifyToolCall } : {}),
     persistDeltas: false,
     // Preserve the SW's inbound provenance in the loop request as well as the
     // relay grant. These are strict literals derived from one monotonic bit; the

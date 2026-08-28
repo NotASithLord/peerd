@@ -73,16 +73,6 @@ const REQUIRED_CTX = [
   'sessions', 'getSystemPrompt', 'appendAudit',
 ];
 
-// Tools safe to dispatch CONCURRENTLY by NAME, independent of permission
-// classification. actor_create orchestrates a child session that owns
-// its own gate pipeline + session and shares no external mutable state with
-// its siblings, so N spawns in one turn can run in parallel instead of
-// one-at-a-time. Everything else earns concurrency only via the injected
-// permission classifier (ctx.classifyToolCall → READ class), preserving
-// peerd's single-writer posture for DOM / VM / file side effects (two
-// clicks or two file edits must not interleave).
-const CONCURRENT_TOOLS = new Set(['actor_create']);
-
 // Hard ceiling on ONE tool dispatch (issue #176). A dispatch that never
 // settles — the concrete leaf is an un-timed CDP Runtime.evaluate against a
 // hung page — parks the turn generator forever: the turn's finally never runs,
@@ -200,8 +190,7 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   returns the SAME decideAction verdict the dispatcher will enforce
  *   (action class + confirm), or null for unknown tools. READ-class,
  *   non-confirming calls may run concurrently; everything else stays
- *   serial. Omitted (actor/runner loops today) → only the by-name
- *   CONCURRENT_TOOLS set (actor_create) is treated as safe.
+ *   serial. Omitted → fail closed to serial dispatch.
  * @param {{ enabled?: boolean, budgetTokens?: number, effort?: 'low'|'medium'|'high'|'xhigh'|'max' }} [ctx.reasoning]
  *   Extended-thinking control, passed straight to the provider. When
  *   enabled, reasoning streams as `reasoning` loop events and signed
@@ -1094,21 +1083,21 @@ export async function* runUserTurn(ctx) {
     // EXISTING permission classification doing double duty as the scheduler:
     //   - READ class → safe (reads share no mutable state, and decideAction
     //     never confirms a read, so no modal can race another).
-    //   - confirm:true → NEVER safe, even for actor_create — a turn must
+    //   - confirm:true → NEVER safe — a turn must
     //     not stack two confirmation modals (serialize confirms).
-    //   - otherwise only the by-name CONCURRENT_TOOLS set (actor_create)
-    //     qualifies; every write stays strictly serial in emitted order.
-    // Without a classifier (actor/runner loops) we keep the original
-    // actor_create-only behavior.
+    //   - every write stays strictly serial in emitted order.
+    // Missing classification fails closed to serial dispatch. Both sealed
+    // production runtimes inject the same descriptor-based classifier; keeping
+    // no by-name exception here prevents a tool rename or new call path from
+    // silently acquiring concurrency outside semantic policy.
     const classify = typeof ctx.classifyToolCall === 'function' ? ctx.classifyToolCall : null;
     /** @param {ToolUseBlock} tu */
     const isConcurrencySafe = (tu) => {
-      if (!classify) return CONCURRENT_TOOLS.has(tu.name);
+      if (!classify) return false;
       let verdict = null;
       try { verdict = classify(tu.name); } catch { verdict = null; }
       if (!verdict || verdict.confirm === true) return false;
-      if (verdict.actionClass === 'read') return true;
-      return CONCURRENT_TOOLS.has(tu.name);
+      return verdict.actionClass === 'read';
     };
 
     /** @type {ToolResultBlock[]} */
