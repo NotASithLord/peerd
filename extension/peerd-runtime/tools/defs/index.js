@@ -1,5 +1,5 @@
 // @ts-check
-// Built-in tool registry — the V1 set.
+// Controller-owned built-in tool definitions.
 //
 // Each tool maps to one §02 primitive on the homepage. The five
 // introspection tools together let the agent prove the architectural

@@ -10,7 +10,7 @@ import {
   makeSpawnActor, createSessionStore, runUserTurn,
 } from '/peerd-runtime/index.js';
 import {
-  makeInMemorySessions, makeRelayedToolDispatch, runActorLoop,
+  makeInMemorySessions, runActorLoop,
 } from '/peerd-runtime/actor/actor-worker-core.js';
 import { makeMockIdb } from '../../mocks/idb.js';
 
@@ -54,7 +54,7 @@ const buildDeps = (overrides = {}) => {
         runUserTurn,
         sessions: workerSessions,
         callModel,
-        toolDispatch: makeRelayedToolDispatch(async () => ({ ok: true, result: { ok: true, content: 'ran' } })),
+        toolDispatch: async () => ({ ok: true, content: 'ran' }),
         getSystemPrompt: () => job.systemPrompt,
         appendAudit: async () => {},
         onEvent: opts.onEvent,

@@ -254,17 +254,6 @@ export {
   defaultWritePermissions, resolveCanWrite,
 } from './edit/permissions-adapter.js';
 // --- tools --------------------------------------------------------------
-export {
-  registerTool,
-  getTool,
-  listTools,
-  clearTools,
-} from './tools/registry.js';
-export {
-  registerMetadataInventory,
-  getToolDescriptor,
-  listToolDescriptors,
-} from './tools/metadata-registry.js';
 export { dispatchToolCall } from './tools/local-tool-dispatcher.js';
 export { GATES } from './tools/gates.js';
 export { BUILTIN_TOOLS } from './tools/defs/index.js';

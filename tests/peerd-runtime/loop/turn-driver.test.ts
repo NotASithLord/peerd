@@ -139,11 +139,9 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   waitForAbort = false, uiDisconnected = false,
   waitForActorIsolation = async () => {},
   dynamicIsolation = false,
-  metadataOnly = false,
   runtimeUnsupported = false,
   turnUnknown = false,
   controllerFailureCode = '',
-  goalControl = false,
 } = {}) => {
   const turnAbortController = new AbortController();
   const session: any = {
@@ -166,9 +164,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   let systemPromptRenders = 0;
   const systemPromptInputs: any[] = [];
   let releases = 0;
-  let goalSummary: string | null = null;
-  let goalEffect: any = null;
-  let goalSettled: any = null;
   const settings = {
     reasoningEnabled: false,
     reasoningEffort: 'medium',
@@ -181,7 +176,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     providerFallbacks: failover ? ['openrouter'] : [],
   };
   const identity = (value: any) => value;
-  const descriptorInventory = metadataOnly || dynamicIsolation
+  const descriptorInventory = dynamicIsolation
     ? ['message_actor', 'actor_create', 'actor_list']
       .map((name) => ({
         name, description: `${name} test tool.`, schema: { type: 'object' },
@@ -263,9 +258,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       toolContextArgs = args;
       return {
         permission: {}, actorSurface: 'tools', schemaReply: false,
-        ...(goalControl ? {
-          completeGoalRun: (summary: string) => { goalSummary = summary; return true; },
-        } : {}),
       };
     },
     filterByDwebActive: identity,
@@ -279,30 +271,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     goalActiveFor: () => false,
     dwebEngagedSessions: new Set(),
     markDwebEngaged: () => {},
-    prepareToolCall: goalControl || dynamicIsolation ? async (call: any, ctx: any) => ({
-      prepared: true, call, ctx, args: call.args ?? {},
-    }) : undefined,
-    settleToolCall: goalControl || dynamicIsolation ? async (_custody: any, execution: any) => {
-      goalSettled = execution.result;
-      return execution.result;
-    } : undefined,
-    dispatchToolCall: async () => {
-      actorIsolation = {
-        status: 'temporarily_unavailable', host: 'background-page-worker',
-        reason: 'worker startup failed', retryable: true,
-      };
-      return { ok: false, error: 'actor worker unavailable' };
-    },
     maybeNudgeDebuggerGrant: () => {},
-    getTool: () => {
-      if (metadataOnly) throw new Error('executable definition must stay cold');
-      return null;
-    },
-    getToolDescriptor: metadataOnly
-      ? (name: string) => ({
-        name, primitive: 'actor', sideEffect: name === 'actor_list' ? 'read' : 'write',
-      })
-      : undefined,
     decideAction: () => null,
     isKeylessProvider: () => false,
     costOf: () => ({ usd: 0, known: true }),
@@ -319,49 +288,20 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
         // old fixture ran the raw loop in the SW shell, bypassing the
         // controller-owned tool executor it was meant to cover.
         await ctx.getSystemPrompt();
-        const firstTools = await ctx.refreshTools();
+        const firstSurface = await ctx.refreshTools();
         await ctx.getSystemPrompt();
-        modelCalls.push({ tools: firstTools });
-        const descriptor = firstTools.find((tool: any) => tool.name === 'message_actor');
-        const prepared = await ctx.toolExecution.prepare({
-          id: 'actor-tool', name: 'message_actor', args: { to: 'web', message: 'work' },
-        }, { authorityClass: 'actor', descriptor });
-        if (prepared?.mode !== 'execute') throw new Error('tool preparation did not enter custody');
+        modelCalls.push({ tools: firstSurface.tools });
         actorIsolation = {
           status: 'temporarily_unavailable', host: 'background-page-worker',
           reason: 'worker startup failed', retryable: true,
         };
-        await ctx.toolExecution.settle(prepared.custody, {
-          protocol: 1, executionId: 'actor-execution', argsDigest: 'a'.repeat(64),
-          ok: true, outcomeKnown: true, effectEntered: true,
-          value: { ok: false, error: 'actor worker unavailable' },
-        });
-        const nextTools = await ctx.refreshTools();
+        const nextSurface = await ctx.refreshTools();
         await ctx.getSystemPrompt();
-        modelCalls.push({ tools: nextTools });
+        modelCalls.push({ tools: nextSurface.tools });
         yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
       }
       : async function* (ctx: any) {
       loopCtx = ctx;
-      if (goalControl) {
-        const prepared = await ctx.toolExecution.prepare({
-          id: 'goal-call', name: 'complete_goal', args: { summary: 'done' },
-        }, { authorityClass: 'local' });
-        goalEffect = {
-          ok: true,
-          outcomeKnown: true,
-          value: {
-            ended: prepared.custody.ctx.completeGoalRun('done') === true,
-          },
-        };
-        await ctx.toolExecution.settle(prepared.custody, {
-          protocol: 1, executionId: 'goal-execution', argsDigest: 'a'.repeat(64),
-          ok: true, outcomeKnown: true, effectEntered: true,
-          value: { ok: true, content: 'Goal run ended. Summary: done' },
-        });
-        yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
-        return;
-      }
       if (turnUnknown) {
         session.messages.push({
           role: 'assistant', id: 'assistant-unknown', content: 'partial', streaming: true,
@@ -418,9 +358,6 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     systemPromptRenders: () => systemPromptRenders,
     systemPromptInputs,
     releases: () => releases,
-    goalSummary: () => goalSummary,
-    goalEffect: () => goalEffect,
-    goalSettled: () => goalSettled,
     loopCtx: () => loopCtx,
     toolContextArgs: () => toolContextArgs,
     toolContextBuilds: () => toolContextBuilds,
@@ -430,32 +367,11 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
 };
 
 describe('runAgentTurn credential custody', () => {
-  test('complete_goal retains exact completion custody in the SW', async () => {
-    const fixture = turnDeps('chat', { goalControl: true });
-    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'finish' });
-    expect(fixture.goalSummary()).toBe('done');
-    expect(fixture.goalEffect()).toEqual({
-      ok: true, outcomeKnown: true, value: { ended: true },
-    });
-    expect(fixture.goalSettled()).toMatchObject({
-      ok: true, content: 'Goal run ended. Summary: done',
-    });
-  });
-
   test('a no-tool turn never builds rich tool authority', async () => {
     const fixture = turnDeps('chat');
     await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' });
     expect(fixture.toolContextBuilds()).toBe(0);
     expect(fixture.toolContextArgs()).toBeNull();
-  });
-
-  test('a tool turn builds one context for every dispatch path', async () => {
-    const fixture = turnDeps('chat', { dynamicIsolation: true, metadataOnly: true });
-    await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' });
-    expect(fixture.toolContextBuilds()).toBe(1);
-    expect(fixture.toolContextArgs()).toMatchObject({
-      exposure: 'main', sessionId: 's1', lifecycleUserInitiated: true,
-    });
   });
 
   test('an unsupported runtime removes host tools and corrects static prompt lore', async () => {
@@ -488,6 +404,7 @@ describe('runAgentTurn credential custody', () => {
     expect(fixture.modelCalls[0].tools.map((tool: any) => tool.name))
       .toEqual(['message_actor', 'actor_create', 'actor_list']);
     expect(fixture.modelCalls[1].tools.map((tool: any) => tool.name)).toEqual(['actor_list']);
+    expect(fixture.toolContextBuilds()).toBe(0);
     // The loop seeds the model contract, refreshes it before step one, then
     // refreshes again after the effect. The controller sees the live bounded
     // projection on every render; authority no longer shapes the prompt text.

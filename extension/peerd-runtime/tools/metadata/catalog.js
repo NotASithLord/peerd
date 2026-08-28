@@ -2237,3 +2237,12 @@ export const TOOL_METADATA_RECORDS = {
     }
   },
 };
+
+/** @template T @param {T} value @returns {T} */
+const deepFreeze = (value) => {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return Object.freeze(value);
+};
+
+deepFreeze(TOOL_METADATA_RECORDS);

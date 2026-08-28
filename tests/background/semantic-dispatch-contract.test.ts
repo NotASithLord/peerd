@@ -36,15 +36,15 @@ const DIRECT_KERNEL_ROUTES = [
 
 describe('semantic route inventory', () => {
   test('pins cardinality, channel variance, ownership, and the complete cutover', () => {
-    expect(SEMANTIC_ROUTE_INVENTORY).toHaveLength(169);
+    expect(SEMANTIC_ROUTE_INVENTORY).toHaveLength(167);
     expect(SEMANTIC_ROUTE_INVENTORY.filter((row) => row.channels.length === 1)
       .map((row) => row.route)).toEqual([
       'contributor/disable', 'contributor/enable',
       'contributor/feedback', 'contributor/status',
     ]);
-    expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(169);
+    expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(167);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'kernel'))
-      .toHaveLength(151);
+      .toHaveLength(149);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split'))
       .toHaveLength(18);
     expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.state === 'migrated')
@@ -52,7 +52,7 @@ describe('semantic route inventory', () => {
         SEMANTIC_ROUTE_INVENTORY.map((row) => row.route),
       );
     expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
-      ready: true, expected: 169, classified: 169, missing: [], extra: [],
+      ready: true, expected: 167, classified: 167, missing: [], extra: [],
     });
     expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toEqual([]);
   });
@@ -76,7 +76,7 @@ describe('semantic route inventory', () => {
       'semantic.contacts.list-saved', 'semantic.contacts.list-apps',
       'semantic.contacts.list-audit', 'semantic.contacts.upsert', 'semantic.contacts.remove',
       'semantic.memory.export', 'semantic.skills.list', 'semantic.skills.set-enabled',
-      'semantic.skills.remove', 'semantic.toolbox.get-body', 'semantic.toolbox.record-runs',
+      'semantic.skills.remove',
     ];
     for (const route of DIRECT_KERNEL_ROUTES) {
       expect(SEMANTIC_ROUTE_CLASSIFICATION.get(route)).toMatchObject({ placement: 'kernel' });

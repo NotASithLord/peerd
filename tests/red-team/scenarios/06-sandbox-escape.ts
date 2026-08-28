@@ -316,7 +316,7 @@ export const scenario: Scenario = {
       'extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js (real worker realm)',
       'extension/tests/unit/offscreen/job-runner.test.js (a2a run denied egress + delegation)',
       'extension/tests/unit/offscreen/job-runner-workspace.test.js (worker and actor-lane OPFS posture bypass refusal)',
-      'tests/peerd-engine/module-resolver-toolbox.test.ts (remote-to-local toolbox refusal)',
+      'tests/peerd-engine/module-import-policy.test.ts (remote-to-local module refusal)',
       'tests/engine-tabs/notebook-tab/worker-caps-profile.test.ts (remote whole-run profile)',
       'tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence)',
       'tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads)',

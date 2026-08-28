@@ -17,10 +17,6 @@ const withoutClock = (value: any) => {
 };
 
 const harness = (overrides: Record<string, any> = {}) => {
-  const toolboxStore = overrides.toolboxStore ?? {
-    getBody: async (name: string) => name === 'known' ? 'export default 1' : null,
-    recordRuns: async () => {},
-  };
   const vault = overrides.vault ?? { isLocked: () => false };
   const sessions = overrides.sessions ?? {
     getMetadata: async () => ({ kind: 'chat', title: 'Main', provider: 'p', model: 'm' }),
@@ -72,7 +68,6 @@ const harness = (overrides: Record<string, any> = {}) => {
     isHomeSender: (sender: any) => sender === HOME,
     vault,
     authority,
-    toolboxStore,
     localRoutes: { 'contacts/list': contactRoutes['contacts/list'] },
     actorCount: () => actorRoutes['actors/count']({}, HOME),
     actorOverview: () => actorRoutes['actors/overview']({}, HOME),

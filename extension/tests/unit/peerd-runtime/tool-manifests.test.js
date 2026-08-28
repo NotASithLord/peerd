@@ -1,7 +1,7 @@
 // @ts-check
 // Per-session tool exposure manifests — the surfaces that want the REAL
 // extension environment:
-//   - preset data validated against the REAL registered tool inventory
+//   - preset data validated against the real controller catalog
 //     (a tool rename that strands a preset entry fails here, not in prod);
 //   - the main-turn descriptor pipeline (mainAgentDescriptors ∘ manifest
 //     filter) over the real tool list;
@@ -21,7 +21,7 @@ import {
   MAIN_AGENT_HIDDEN_TOOLS,
   createSessionStore,
 } from '/peerd-runtime/index.js';
-import { listToolPolicies } from '/peerd-runtime/tools/metadata/policy.js';
+import { listToolAuthorities } from '/peerd-runtime/tools/metadata/authority.js';
 import { makeMockIdb } from '../../mocks/idb.js';
 
 /** @typedef {import('/peerd-runtime/sessions/types.js').Session} Session */
@@ -35,10 +35,10 @@ const present = (s) => /** @type {Session} */ (s);
 const id = (v) => /** @type {string} */ (v);
 
 // The full compact descriptor inventory, including controller-owned tools.
-const registered = listToolPolicies();
+const registered = listToolAuthorities();
 const registeredNames = new Set(registered.map((t) => t.name));
 
-describe('tool manifests — presets vs the real registry', () => {
+describe('tool manifests — presets vs the real catalog', () => {
   it('every preset entry names a REGISTERED tool (rename-drift guard)', () => {
     for (const [presetName, preset] of Object.entries(TOOL_MANIFEST_PRESETS)) {
       const stranded = preset.allow.filter((n) => !registeredNames.has(n));

@@ -13,10 +13,13 @@
 
 import { describe, test, expect } from 'bun:test';
 import { runUserTurn } from '../../../extension/peerd-runtime/loop/agent-loop.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
-import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
+import { createExplicitToolFixture } from '../tools/explicit-tool-fixture';
 import { detectInterruptedTurn } from '../../../extension/peerd-runtime/loop/resume-detect.js';
 import { INITIAL_STATE, reduceChat } from '../../../extension/sidepanel/chat-reducer.js';
+
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
 
 // ---- harness ----------------------------------------------------------------
 
@@ -183,8 +186,8 @@ describe('runUserTurn — concurrent tool dispatch', () => {
   });
 
   test('outer actor uncertainty survives dispatcher, persistence, and reducer replay', async () => {
-    clearTools();
-    registerTool({
+    fixture.clear();
+    setFixtureTool({
       name: 'message_actor', description: '', primitive: 'spawned', sideEffect: 'write',
       schema: { type: 'object', properties: {} },
       origins: () => [],
@@ -256,7 +259,7 @@ describe('runUserTurn — concurrent tool dispatch', () => {
         error: 'the actor turn ended with an unknown outcome',
       });
     } finally {
-      clearTools();
+      fixture.clear();
     }
   });
 

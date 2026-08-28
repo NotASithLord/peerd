@@ -134,35 +134,6 @@ export const makeActorSummaryFence = ({ actorType, backing, tabOrigin, origin } 
 };
 
 /**
- * Build the RELAYED toolDispatch the actor worker hands to runUserTurn. Each tool
- * call is delegated across the boundary to the SW, which pins + gates + dispatches
- * it and returns the ToolResult. The call object ({ name, args, id }) is
- * serializable; the result is a plain ToolResult (serializable). A relay failure
- * surfaces as a tool error (never throws the loop).
- *
- * @param {(call: object) => Promise<{ ok?: boolean, result?: any, error?: string }>} requestTool
- */
-export const makeRelayedToolDispatch = (requestTool) =>
-  async (/** @type {any} */ call) => {
-    try {
-      const reply = await requestTool({ name: call?.name, args: call?.args, id: call?.id });
-      if (reply && reply.ok && reply.result !== undefined) return reply.result;
-      // Shape a relay/dispatch failure into a ToolResult the loop can carry.
-      return {
-        ok: false,
-        error: reply?.error ?? 'actor tool relay failed',
-        meta: { toolName: call?.name, primitive: 'unknown', gates: [], durationMs: 0 },
-      };
-    } catch (e) {
-      return {
-        ok: false,
-        error: `actor tool relay threw: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
-        meta: { toolName: call?.name, primitive: 'unknown', gates: [], durationMs: 0 },
-      };
-    }
-  };
-
-/**
  * Drive one agent-loop turn to completion in the worker heap — a BOUND actor turn
  * (tools + relayed dispatch + prior-history statefulness) OR an ephemeral reasoning
  * actor (tools:[] → the relayed dispatch is never invoked). Returns the result

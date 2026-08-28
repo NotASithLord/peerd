@@ -4,8 +4,10 @@ import {
   prepareToolCall,
   settleToolCall,
 } from '../../../extension/peerd-runtime/tools/dispatcher.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
-import { semanticHooksFor } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
+import {
+  dispatchToolCall as dispatchExplicitToolCall,
+  semanticHooksFor,
+} from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { DEFAULT_HOOKS } from '../../../extension/peerd-runtime/tools/hooks/defaults/index.js';
 import {
   _clearAllHooks,
@@ -13,15 +15,8 @@ import {
   loadUserHooks,
   registerHook,
 } from '../../../extension/peerd-runtime/tools/hooks/registry.js';
-import {
-  clearTools,
-  getTool,
-  registerTool,
-} from '../../../extension/peerd-runtime/tools/registry.js';
-import {
-  getToolDescriptor as getMetadataToolDescriptor,
-  registerMetadataInventory,
-} from '../../../extension/peerd-runtime/tools/metadata-registry.js';
+import { toToolDescriptor } from '../../../extension/peerd-runtime/tools/metadata/descriptor.js';
+import { createExplicitToolFixture } from './explicit-tool-fixture';
 
 const tool = (over: Record<string, unknown> = {}) => ({
   name: 'phase_tool', description: 'phase tool', primitive: 'web', sideEffect: 'read',
@@ -36,17 +31,29 @@ const context = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
+
 afterEach(() => {
-  clearTools();
-  registerMetadataInventory([]);
+  fixture.clear();
   _clearAllHooks();
 });
 
 describe('dispatcher phases', () => {
+  test('local dispatch has no ambient lookup or implementation fallback', async () => {
+    const call = { id: 'call-explicit', name: 'phase_tool', args: {} } as any;
+    await expect(dispatchExplicitToolCall(call, context() as any, undefined as any))
+      .rejects.toThrow('requires an explicit descriptor and execute binding');
+    await expect(dispatchExplicitToolCall(call, context() as any, {
+      descriptor: toToolDescriptor(tool()),
+    } as any)).rejects.toThrow('requires an explicit descriptor and execute binding');
+  });
+
   test('prepare stops before execution and settle owns the durable outcome', async () => {
     const events: string[] = [];
     let inlineExecutions = 0;
-    registerTool(tool({
+    setFixtureTool(tool({
       execute: async () => {
         inlineExecutions += 1;
         return { ok: true, content: 'inline' };
@@ -69,7 +76,7 @@ describe('dispatcher phases', () => {
     const prepared: any = await prepareToolCall(
       { id: 'call-1', name: 'phase_tool', args: {} } as any,
       ctx,
-      getMetadataToolDescriptor('phase_tool'),
+      fixture.descriptor('phase_tool'),
     );
     expect(prepared.prepared).toBe(true);
     expect(prepared.tool).not.toHaveProperty('execute');
@@ -95,7 +102,7 @@ describe('dispatcher phases', () => {
 
   test('prepare arms quarantine before the injected executor', async () => {
     const events: string[] = [];
-    registerTool(tool({ name: 'click', primitive: 'tab', sideEffect: 'write' }) as any);
+    setFixtureTool(tool({ name: 'click', primitive: 'tab', sideEffect: 'write' }) as any);
     const prepared: any = await prepareToolCall(
       { id: 'call-2', name: 'click', args: {} } as any,
       context({
@@ -106,7 +113,7 @@ describe('dispatcher phases', () => {
           return { ok: true };
         },
       }) as any,
-      getMetadataToolDescriptor('click'),
+      fixture.descriptor('click'),
     );
     const execution = await executePreparedToolCall(prepared, async (request) => {
       events.push('execute');
@@ -119,10 +126,10 @@ describe('dispatcher phases', () => {
 
   test('inert metadata can authorize, confirm, track, and settle remote execution', async () => {
     const events: string[] = [];
-    registerMetadataInventory([{
+    const remoteDescriptor = toToolDescriptor({
       name: 'remote_tool', primitive: 'web', sideEffect: 'write',
       originRule: { kind: 'none' },
-    }]);
+    });
     const prepared: any = await prepareToolCall(
       { id: 'call-remote', name: 'remote_tool', args: { value: 1 } } as any,
       context({
@@ -144,7 +151,7 @@ describe('dispatcher phases', () => {
           },
         },
       }) as any,
-      getMetadataToolDescriptor('remote_tool'),
+      remoteDescriptor,
     );
 
     expect(prepared).toMatchObject({ prepared: true, args: { value: 1 } });
@@ -168,14 +175,14 @@ describe('dispatcher phases', () => {
   });
 
   test('metadata without a local implementation fails before an effect', async () => {
-    registerMetadataInventory([{
+    const remoteDescriptor = toToolDescriptor({
       name: 'remote_only', primitive: 'web', sideEffect: 'read',
       originRule: { kind: 'none' },
-    }]);
+    });
     const prepared: any = await prepareToolCall(
       { id: 'call-missing', name: 'remote_only', args: {} } as any,
       context() as any,
-      getMetadataToolDescriptor('remote_only'),
+      remoteDescriptor,
     );
     const result: any = prepared.prepared === true
       ? await settleToolCall(prepared, await executePreparedToolCall(prepared))
@@ -190,32 +197,10 @@ describe('dispatcher phases', () => {
     });
   });
 
-  test('the default dispatcher and injected inline seam settle identically', async () => {
-    registerTool(tool() as any);
-    const inline: any = await dispatchToolCall(
-      { id: 'call-3', name: 'phase_tool', args: { value: 1 } } as any,
-      context() as any,
-    );
-    const injected: any = await dispatchToolCall(
-      { id: 'call-4', name: 'phase_tool', args: { value: 1 } } as any,
-      context() as any,
-      {
-        execute: (request) => {
-          const implementation = getTool(request.tool.name);
-          if (!implementation) throw new Error('tool implementation missing');
-          return implementation.execute(request.args, request.execCtx);
-        },
-      },
-    );
-    inline.meta.durationMs = 0;
-    injected.meta.durationMs = 0;
-    expect(injected).toEqual(inline);
-  });
-
   test('user hooks receive a frozen data projection and cannot rewrite arguments', async () => {
     let executed = false;
     let contextWasFrozen = false;
-    registerTool(tool({
+    setFixtureTool(tool({
       name: 'navigate', primitive: 'tab', sideEffect: 'mutate_external',
       schema: { type: 'object', required: ['url'], properties: { url: { type: 'string' } } },
       origins: (args: any) => [args.url],
@@ -243,7 +228,7 @@ describe('dispatcher phases', () => {
 
   test('an enabled malformed semantic pre-hook becomes a blocking sentinel', async () => {
     let executed = false;
-    registerTool(tool({ execute: async () => { executed = true; return { ok: true }; } }) as any);
+    setFixtureTool(tool({ execute: async () => { executed = true; return { ok: true }; } }) as any);
     const hooks = semanticHooksFor([{
       id: 'broken-policy', event: 'pre-tool-use', kind: 'declarative',
     }]);
@@ -257,7 +242,7 @@ describe('dispatcher phases', () => {
 
   test('a user hook cannot shadow a mandatory built-in ID', async () => {
     let executed = false;
-    registerTool(tool({ execute: async () => { executed = true; return { ok: true }; } }) as any);
+    setFixtureTool(tool({ execute: async () => { executed = true; return { ok: true }; } }) as any);
     const hooks = semanticHooksFor([{
       id: 'egress-allowlist', event: 'pre-tool-use', kind: 'declarative',
       rule: { matchArg: 'url', contains: 'never-match', onMatch: 'allow' },
@@ -272,9 +257,9 @@ describe('dispatcher phases', () => {
     expect(result.error).toContain('reserved for a built-in hook');
   });
 
-  test('a persisted enabled pre-hook collision blocks through the real registry-backed dispatch', async () => {
+  test('a persisted enabled pre-hook collision blocks through explicit semantic dispatch', async () => {
     let executed = false;
-    registerTool(tool({ execute: async () => { executed = true; return { ok: true }; } }) as any);
+    setFixtureTool(tool({ execute: async () => { executed = true; return { ok: true }; } }) as any);
     for (const hook of DEFAULT_HOOKS) registerHook(hook);
     await loadUserHooks({
       kv: { get: async () => [{
@@ -292,7 +277,7 @@ describe('dispatcher phases', () => {
   });
 
   test('a persisted post-hook collision stays visible without rewriting the completed result', async () => {
-    registerTool(tool() as any);
+    setFixtureTool(tool() as any);
     for (const hook of DEFAULT_HOOKS) registerHook(hook);
     await loadUserHooks({
       kv: { get: async () => [{

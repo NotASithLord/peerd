@@ -88,7 +88,7 @@ export const mainAgentDescriptors = (descriptors) =>
   // `dweb:true` flag: the descriptor PROJECTION (getToolDescriptors →
   // {name,description,schema}) strips the flag, so isDwebTool would be a no-op
   // on a projected list — the name is the only reliable signal here. (The gate
-  // sees the full registered tool and keeps using the flag.)
+  // sees the full controller tool and keeps using the flag.)
   descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name) && !isDwebToolName(t.name));
 
 // ── DESIGN-17: actor tab agents — the capability tier ────────────────────
@@ -357,7 +357,7 @@ export const isDwebTool = (tool) => tool?.dweb === true;
 // The name-based twin, for descriptor lists where the `dweb:true` flag has been
 // projected away (getToolDescriptors). Every dweb tool is named `dweb_*` and no
 // non-dweb tool is — the naming convention IS the contract. why both exist: the
-// gate holds the full registered tool (flag intact) and uses isDwebTool; the
+// gate holds the full controller tool (flag intact) and uses isDwebTool; the
 // exposure filters see a stripped projection and must go by name.
 /** @param {string} name @returns {boolean} */
 export const isDwebToolName = (name) => typeof name === 'string' && (name.startsWith('dweb_') || name === 'a2a_run');

@@ -15,8 +15,8 @@
 //      is injected (DI) so this module stays testable and so the SW
 //      owns the single sanctioned write path.
 //
-// Registration is synchronous against module state (same shape as the
-// tool registry). Loading user hooks from storage is async and happens
+// Registration is synchronous against module state. Loading user hooks from
+// storage is async and happens
 // once at boot; the result is folded into the same module-level list so
 // the runner sees one merged, ordered population.
 //

@@ -3,8 +3,7 @@
 // classify and render them. They ride in meta (off the wire).
 
 import { describe, test, expect, afterEach } from 'bun:test';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
-import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
+import { createExplicitToolFixture } from './explicit-tool-fixture';
 import { messageActorTool } from '../../../extension/peerd-runtime/tools/defs/message-actor.js';
 import {
   BROWSER_TARGET_STAGES,
@@ -39,11 +38,15 @@ const baseTool = (over: any = {}) => ({
   ...over,
 });
 
-afterEach(() => clearTools());
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
+
+afterEach(fixture.clear);
 
 describe('dispatcher lineage spine fields', () => {
   test('success: sideEffect + origins on meta', async () => {
-    registerTool(baseTool() as any);
+    setFixtureTool(baseTool() as any);
     const r: any = await dispatchToolCall({ id: 't1', name: 'lt', args: {} } as any, ctx);
     expect(r.ok).toBe(true);
     expect(r.meta.sideEffect).toBe('read');
@@ -52,7 +55,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('failure (execute throws): spine fields still present', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       sideEffect: 'mutate_external',
       origins: () => ['https://api.bank.com'],
       execute: async () => { throw new Error('boom'); },
@@ -67,7 +70,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a normalized semantic throw keeps its bounded custody fields', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => { throw Object.assign(new Error('semantic execution failed'), {
         code: 'controller-tool-execution-failed', outcomeKnown: false, retryable: true,
       }); },
@@ -86,7 +89,7 @@ describe('dispatcher lineage spine fields', () => {
       stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
     });
     if (verdict.allowed) throw new Error('expected browser target to be refused');
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => { throw new BrowserAutomationPolicyError(verdict, { effectCompleted: false }); },
     }) as any);
     const r: any = await dispatchToolCall({ id: 'policy', name: 'lt', args: {} } as any, ctx);
@@ -100,7 +103,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a serialized exposed error is projected without a concrete error class', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => { throw {
         exposeToModel: true,
         code: 'typed_policy_stop',
@@ -121,7 +124,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('an unvalidated thrown marker cannot expose arbitrary fields', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => { throw {
         exposeToModel: true,
         code: 'Bad Code',
@@ -138,7 +141,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('return-value failure ({ok:false}) audits tool_failed, not tool_executed', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       primitive: 'web',
       execute: async () => ({ ok: false, error: 'declined' }),
     }) as any);
@@ -159,7 +162,7 @@ describe('dispatcher lineage spine fields', () => {
       stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
     });
     if (verdict.allowed) throw new Error('expected browser target to be refused');
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => browserTargetRefusalResult(verdict, {
         effectCompleted: false,
         neutralized: true,
@@ -183,7 +186,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a sensitive-site landing audits its URL-free recovery fields', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => browserTargetRefusalResult(sensitiveSiteBrowserTargetVerdict(), {
         neutralized: false,
       }),
@@ -201,7 +204,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('success audits tool_executed', async () => {
-    registerTool(baseTool() as any);
+    setFixtureTool(baseTool() as any);
     const { ctx: rctx, audited } = recorderCtx();
     await dispatchToolCall({ id: 't5', name: 'lt', args: {} } as any, rctx);
     await Promise.resolve();
@@ -210,7 +213,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a throwing tool audits tool_failed enriched with primitive + durationMs', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       primitive: 'web',
       execute: async () => { throw new Error('boom'); },
     }) as any);
@@ -228,7 +231,7 @@ describe('dispatcher lineage spine fields', () => {
     // The agent loop redacts at the larger paged ceiling only when the DISPATCH
     // result carries paged:true — but dispatch spreads the tool result to attach
     // meta, so a spread that dropped unknown fields would silently un-page it.
-    registerTool(baseTool({ execute: async () => ({ ok: true, content: 'slice', paged: true }) }) as any);
+    setFixtureTool(baseTool({ execute: async () => ({ ok: true, content: 'slice', paged: true }) }) as any);
     const r: any = await dispatchToolCall({ id: 't4b', name: 'lt', args: {} } as any, ctx);
     expect(r.ok).toBe(true);
     expect(r.paged).toBe(true);
@@ -236,7 +239,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a lifecycle recovery rewrite preserves actor delivery custody', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       sideEffect: 'write',
       execute: async () => ({
         ok: false,
@@ -267,7 +270,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('outer outcome_unknown overrides stale inner actor certainty and cancellation', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'message_actor',
       primitive: 'spawned',
       sideEffect: 'write',
@@ -311,7 +314,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('message_actor Not run evidence reaches lifecycle as a typed pre-effect failure', async () => {
-    registerTool(messageActorTool as any);
+    setFixtureTool(messageActorTool as any);
     let settledOutcome: any = null;
     const lifecycle = {
       beginTracking: async () => ({ handle: { operationId: 'op-not-run' } }),
@@ -349,7 +352,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a throwing origins() fails closed at the origin gate (never reaches meta)', async () => {
-    registerTool(baseTool({ origins: () => { throw new Error('origins blew up'); } }) as any);
+    setFixtureTool(baseTool({ origins: () => { throw new Error('origins blew up'); } }) as any);
     const r: any = await dispatchToolCall({ id: 't3', name: 'lt', args: {} } as any, ctx);
     // The origin gate runs origins() and fails CLOSED on throw — so the call
     // is blocked before execute(); the spine-field path is never reached.
@@ -359,7 +362,7 @@ describe('dispatcher lineage spine fields', () => {
 
   test('a child policy receipt reaches the model without destination details', async () => {
     const queuedNotices: any[] = [];
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
       execute: async () => {
@@ -388,7 +391,7 @@ describe('dispatcher lineage spine fields', () => {
 
   test('a blocked child subrequest has an honest guarded receipt', async () => {
     const queuedNotices: any[] = [];
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
       execute: async () => {
@@ -417,7 +420,7 @@ describe('dispatcher lineage spine fields', () => {
 
   test('ordered child policy receipts survive one tool result', async () => {
     const queuedNotices: any[] = [];
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
       execute: async () => {
@@ -447,7 +450,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a delayed child receipt returns with the action that created it', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click',
       primitive: 'tab',
       sideEffect: 'write',
@@ -475,9 +478,9 @@ describe('dispatcher lineage spine fields', () => {
 
   test('Chrome arms navigation and direct page-action tools before their effect', async () => {
     for (const name of ['navigate', 'click', 'type']) {
-      clearTools();
+      fixture.clear();
       const calls: string[] = [];
-      registerTool(baseTool({
+      setFixtureTool(baseTool({
         name, primitive: 'tab', sideEffect: 'write',
         execute: async (_args: any, executionContext: any) => {
           if (name === 'navigate'
@@ -507,7 +510,7 @@ describe('dispatcher lineage spine fields', () => {
 
   test('a failed Chrome quarantine never reaches the page effect', async () => {
     let effects = 0;
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click', primitive: 'tab', sideEffect: 'write',
       execute: async () => { effects += 1; return { ok: true }; },
     }) as any);
@@ -531,7 +534,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a delayed prior action receipt is detached before the next click', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click', primitive: 'tab', sideEffect: 'write',
       execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
     }) as any);
@@ -565,7 +568,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a guarded authority failure is retryable without exposing its destination', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click', primitive: 'tab', sideEffect: 'write',
       execute: async () => ({ ok: true, content: 'evaluated' }),
     }) as any);
@@ -589,7 +592,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a pending cold child outcome cannot move to the next action', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click', primitive: 'tab', sideEffect: 'write',
       execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
     }) as any);
@@ -631,7 +634,7 @@ describe('dispatcher lineage spine fields', () => {
     const notice = {
       reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false,
     };
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'page_code',
       primitive: 'web',
       sideEffect: 'write',
@@ -661,7 +664,7 @@ describe('dispatcher lineage spine fields', () => {
       reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
     };
     const queued = [notice];
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click',
       primitive: 'tab',
       sideEffect: 'write',

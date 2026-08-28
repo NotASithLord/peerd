@@ -15,11 +15,13 @@ import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/ope
 import { confirmationSatisfies } from '../../../extension/peerd-runtime/lifecycle/confirmation.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import { decideRecovery } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
-import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
+import { createExplicitToolFixture } from '../tools/explicit-tool-fixture';
 import { fromOpenAiStream } from '../../../extension/peerd-provider/format/from-openai.js';
 
 const S = OPERATION_STATES;
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
 
 const makeStorage = () => {
   const map = new Map<string, unknown>();
@@ -38,7 +40,7 @@ const makeLog = (storage = makeStorage()) => ({
 
 const spyTool = (name: string, sideEffect: string, retryClass?: string) => {
   const calls = { count: 0 };
-  registerTool({
+  setFixtureTool({
     name, description: 'x', schema: {}, primitive: 'web', sideEffect,
     ...(retryClass ? { retryClass } : {}),
     origins: () => ['https://example.com'],
@@ -73,7 +75,7 @@ const resourceCtx = (name: typeof RESOURCE_TOOL_NAMES[number], lifecycle: unknow
     })
     : baseCtx(lifecycle);
 
-beforeEach(() => clearTools());
+beforeEach(fixture.clear);
 
 describe('GUARANTEE 2 + fail-closed: Class D/E/F never execute when tracking cannot start', () => {
   test('operationLog.begin throws + Class E → refusal at the dispatcher, execute() never entered', async () => {
@@ -180,7 +182,7 @@ describe('GUARANTEE 2 + fail-closed: Class D/E/F never execute when tracking can
       ...RESOURCE_TOOL_NAMES.map((name) => [name, 'write'] as const),
     ] as const;
     for (const id of [undefined, ''] as const) {
-      clearTools();
+      fixture.clear();
       for (const [name, sideEffect] of cases) {
         const { log } = makeLog();
         const tracker = makeDispatchTracker({

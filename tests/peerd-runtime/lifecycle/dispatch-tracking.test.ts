@@ -9,23 +9,21 @@ import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/
 import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
-import {
-  registerTool, clearTools,
-} from '../../../extension/peerd-runtime/tools/registry.js';
-import {
-  getToolDescriptor as getMetadataToolDescriptor,
-  registerMetadataInventory,
-} from '../../../extension/peerd-runtime/tools/metadata-registry.js';
+import { createExplicitToolFixture } from '../tools/explicit-tool-fixture';
+import { getToolAuthority } from '../../../extension/peerd-runtime/tools/metadata/authority.js';
+import { toToolDescriptor } from '../../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import {
   prepareToolCall, settleToolCall,
 } from '../../../extension/peerd-runtime/tools/dispatcher.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/local-tool-dispatcher.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import {
   executeControllerRepositoryTool,
 } from '../../../extension/peerd-runtime/controller-repository-tools.js';
 
 const S = OPERATION_STATES;
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
 
 const makeLog = () => {
   const map = new Map<string, unknown>();
@@ -657,11 +655,11 @@ describe('the full dispatcher path', () => {
     hooks: [],
   });
 
-  beforeEach(() => clearTools());
+  beforeEach(fixture.clear);
 
   test('a tracked tool that times out returns the semantic error and recovery meta', async () => {
     const { tracker, log } = makeTracker();
-    registerTool({
+    setFixtureTool({
       name: 'flaky_submit', description: 'x', schema: {},
       primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
       origins: () => ['https://example.com'],
@@ -678,7 +676,6 @@ describe('the full dispatcher path', () => {
   });
 
   test('Git mutation host loss remains unknown through controller settlement', async () => {
-    registerMetadataInventory();
     for (const operation of ['checkpoint', 'restore', 'link', 'fetch', 'push'] as const) {
       const { tracker, log } = makeTracker();
       const failure = Object.assign(new Error('late host reply'), {
@@ -706,7 +703,7 @@ describe('the full dispatcher path', () => {
         ...baseCtx(), lifecycle: tracker,
         exposure: 'actor', actorType: 'app', actorInstanceId: 'app-1',
         session: { sessionId: 'sess-1', kind: 'actor' },
-      } as any, getMetadataToolDescriptor(name));
+      } as any, toToolDescriptor(getToolAuthority(name)));
       expect(prepared.prepared).toBe(true);
       const semantic = await executeControllerRepositoryTool(
         name, args, { actorType: 'app', actorInstanceId: 'app-1' },
@@ -731,7 +728,7 @@ describe('the full dispatcher path', () => {
   test('re-dispatching the same tool_use id does NOT re-execute the tool', async () => {
     const { tracker } = makeTracker();
     let executions = 0;
-    registerTool({
+    setFixtureTool({
       name: 'pay_once', description: 'x', schema: {},
       primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
       origins: () => [],
@@ -755,7 +752,7 @@ describe('the full dispatcher path', () => {
     };
     let executions = 0;
     const prompts: any[] = [];
-    registerTool({
+    setFixtureTool({
       name: 'pay_once', description: 'x', schema: {},
       primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
       origins: () => ['https://payments.example/checkout'],
@@ -795,7 +792,7 @@ describe('the full dispatcher path', () => {
     const { tracker } = makeTracker();
     let executions = 0;
     const prompts: any[] = [];
-    registerTool({
+    setFixtureTool({
       name: 'site_client_write', description: 'x', schema: {},
       primitive: 'web', sideEffect: 'write', retryClass: 'E',
       origins: () => ['https://shop.example'],
@@ -835,7 +832,7 @@ describe('the full dispatcher path', () => {
   test('a synthetic repeat is refused without opening a confirmation prompt', async () => {
     const { tracker } = makeTracker();
     let prompts = 0;
-    registerTool({
+    setFixtureTool({
       name: 'pay_once', description: 'x', schema: {},
       primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
       origins: () => [],
@@ -862,7 +859,7 @@ describe('the full dispatcher path', () => {
   });
 
   test('without ctx.lifecycle the dispatch is unchanged (no tracking, no rewrite)', async () => {
-    registerTool({
+    setFixtureTool({
       name: 'plain', description: 'x', schema: {},
       primitive: 'web', sideEffect: 'mutate_external',
       origins: () => [],

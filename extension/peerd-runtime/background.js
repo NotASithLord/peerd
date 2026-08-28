@@ -21,16 +21,6 @@ export { pullInHintInjected } from './dom/pull-in-hint-injected.js';
 export { installFetchTapInjected, drainFetchTapInjected } from './dom/fetch-tap-injected.js';
 export { isDenylistedTab, liveDocumentLocationInjected } from './browser-authority/dom-helpers.js';
 export { SessionNotFoundError } from './errors.js';
-export {
-  registerTool,
-  getTool,
-  listTools,
-} from './tools/registry.js';
-export {
-  registerMetadataInventory,
-  getToolDescriptor,
-  listToolDescriptors,
-} from './tools/metadata-registry.js';
 export { mainAgentDescriptors, filterByDwebEnabled, filterByDwebActive, filterByGoalActive, actorAllowedToolsFor, EXPOSURE_ACTOR, pinActorCall, actorDescriptors } from './tools/exposure.js';
 export { resolveManifestAllow, manifestLabel, filterDescriptorsByManifest } from './tools/manifests.js';
 export { resolveRuntimeCapabilities, filterByRuntimeCapabilities, requireRuntimeCapability } from './runtime-capabilities.js';

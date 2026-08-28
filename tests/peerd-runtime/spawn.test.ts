@@ -24,7 +24,7 @@ describe('narrowTools', () => {
       .toEqual(['a', 'b', 'actor_create']);
   });
 
-  test('explicit list intersects with registered tools', () => {
+  test('explicit list intersects with available tools', () => {
     expect(narrowTools(all, { tools: ['a', 'nope'] }).map((t) => t.name)).toEqual(['a']);
   });
 

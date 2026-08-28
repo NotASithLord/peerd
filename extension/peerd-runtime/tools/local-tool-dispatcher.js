@@ -1,7 +1,6 @@
 // @ts-check
-// Controller/test-only semantic lookup around the fixed authority lifecycle.
+// Controller/test-only adapter around the fixed authority lifecycle.
 
-import { getTool, getToolDescriptor } from './registry.js';
 import {
   executePreparedToolCall,
   prepareToolCall,
@@ -50,31 +49,22 @@ export const semanticHooksFor = (records) => Object.freeze([
 ]);
 
 /**
- * Execute a locally registered semantic tool through the shared authority
- * lifecycle. Production controller calls use an exact authority binding and
- * therefore never import this registry-backed convenience path into the SW.
+ * Execute one explicitly bound semantic tool through the shared authority
+ * lifecycle. The immutable projected descriptor and its implementation must
+ * come from the same sealed controller surface; no ambient mutable registry or
+ * name-based implementation fallback exists.
  * @param {import('/shared/tool-types.js').ToolCall} call
  * @param {any} ctx
- * @param {{descriptor?:any,execute?:(prepared:Record<string, any>)=>Promise<any>|any}} [options]
+ * @param {{descriptor:any,execute:(prepared:Record<string, any>)=>Promise<any>|any}} options
  */
-export const dispatchToolCall = async (call, ctx, options = {}) => {
+export const dispatchToolCall = async (call, ctx, options) => {
+  if (!options || !Object.hasOwn(options, 'descriptor')
+      || typeof options.execute !== 'function') {
+    throw new TypeError('dispatchToolCall requires an explicit descriptor and execute binding');
+  }
   const descriptor = options.descriptor?.name === call.name
-    ? options.descriptor : getToolDescriptor(call.name);
+    ? options.descriptor : undefined;
   const prepared = /** @type {any} */ (await prepareToolCall(call, ctx, descriptor));
   if (prepared?.prepared !== true) return prepared;
-  const execute = options.execute ?? ((request) => {
-    const implementation = getTool(request.tool.name);
-    if (!implementation || getToolDescriptor(request.tool.name) !== request.tool) {
-      return {
-        ok: false,
-        error: `tool_implementation_unavailable:${request.tool.name}`,
-        code: 'tool-implementation-unavailable',
-        outcomeKnown: true,
-        outcomeKind: /** @type {const} */ ('pre-effect-failure'),
-        retryable: true,
-      };
-    }
-    return implementation.execute(request.args, request.execCtx);
-  });
-  return settleToolCall(prepared, await executePreparedToolCall(prepared, execute));
+  return settleToolCall(prepared, await executePreparedToolCall(prepared, options.execute));
 };

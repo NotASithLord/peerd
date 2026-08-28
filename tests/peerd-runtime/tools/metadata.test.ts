@@ -9,7 +9,7 @@ import {
   TOOL_METADATA_ORDER,
 } from '../../../extension/peerd-runtime/semantic.js';
 import { composeTool } from '../../../extension/peerd-runtime/tools/metadata/index.js';
-import { getToolPolicy } from '../../../extension/peerd-runtime/tools/metadata/policy.js';
+import { getToolAuthority } from '../../../extension/peerd-runtime/tools/metadata/authority.js';
 import {
   projectToolAuthority,
   toToolDescriptor,
@@ -26,9 +26,6 @@ import {
   APP_PROGRAM_EXACT_OPERATIONS,
   PAGE_PROGRAM_EXACT_OPERATIONS,
 } from '../../../extension/shared/page-program-authority.js';
-import {
-  clearTools, listTools, registerTool,
-} from '../../../extension/peerd-runtime/tools/registry.js';
 import {
   CONTROLLER_LOCAL_TOOL_NAMES,
 } from '../../../extension/peerd-runtime/controller-local-tools.js';
@@ -86,7 +83,7 @@ const sourceFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes:
     : entry.name.endsWith('.js') ? [join(dir, entry.name)] : []);
 
 describe('tool metadata authority', () => {
-  test('covers the exact production registry in production order', () => {
+  test('covers the exact controller catalog in production order', () => {
     expect(TOOL_METADATA_ORDER.filter((name) => !CONTROLLER_ONLY_TOOL_NAMES.has(name)))
       .toEqual(ALL_TOOLS.map((tool) => tool.name));
     expect(new Set([...EXECUTION_TOOL_NAMES, ...CONTROLLER_ONLY_TOOL_NAMES]))
@@ -112,7 +109,7 @@ describe('tool metadata authority', () => {
 
   test('execution tools compose only compact authority policy and origins', () => {
     for (const tool of ALL_TOOLS) {
-      const policy = getToolPolicy(tool.name);
+      const policy = getToolAuthority(tool.name);
       const { originRule, ...descriptor } = policy;
       const actual = Object.fromEntries(Object.entries(tool).filter(
         ([key]) => key !== 'origins' && key !== 'execute',
@@ -126,19 +123,6 @@ describe('tool metadata authority', () => {
     }
   });
 
-  test('registry accepts only the composed inventory without changing order', () => {
-    const previous = listTools();
-    try {
-      clearTools();
-      for (const tool of ALL_TOOLS) registerTool(tool as any);
-      expect(listTools().map((tool) => tool.name))
-        .toEqual(TOOL_METADATA_ORDER.filter((name) => !CONTROLLER_ONLY_TOOL_NAMES.has(name)));
-    } finally {
-      clearTools();
-      for (const tool of previous) registerTool(tool);
-    }
-  });
-
   test('composition refuses unknown metadata and missing execution', () => {
     expect(() => composeTool('missing-tool', { execute: async () => ({}) })).toThrow();
     expect(() => composeTool(TOOL_METADATA_ORDER[0], {})).toThrow();
@@ -149,7 +133,7 @@ describe('tool metadata authority', () => {
       '../../../extension/peerd-runtime/semantic.js'
     );
     const projection = projectToolAuthority(toToolDescriptor(
-      getToolPolicy(ALL_TOOLS[0].name),
+      getToolAuthority(ALL_TOOLS[0].name),
     ));
     expect(Object.keys(projection)).not.toContain('description');
     expect(Object.keys(projection)).not.toContain('schema');

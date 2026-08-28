@@ -9,16 +9,16 @@ import {
 } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import { isRetryClass } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
 
-import { listToolPolicies } from '../../../extension/peerd-runtime/tools/metadata/policy.js';
+import { listToolAuthorities } from '../../../extension/peerd-runtime/tools/metadata/authority.js';
 
 /** The whole compact authority inventory the SW installs at boot. */
-const ALL_TOOLS = listToolPolicies();
+const ALL_TOOLS = listToolAuthorities();
 
 const byName = new Map(ALL_TOOLS.map((t) => [t.name, t] as const));
 
 const classOf = (name: string): string => {
   const tool = byName.get(name);
-  if (!tool) throw new Error(`no registered tool named ${name}`);
+  if (!tool) throw new Error(`no controller tool named ${name}`);
   return retryClassForTool(tool);
 };
 
@@ -107,13 +107,13 @@ describe('garbage in, Class E out', () => {
   });
 });
 
-describe('§16.1 — the whole registered inventory is classified', () => {
+describe('§16.1 — the whole controller inventory is classified', () => {
   test('the inventory actually loaded', () => {
     expect(ALL_TOOLS.length).toBeGreaterThan(50);
     expect(byName.size).toBe(ALL_TOOLS.length);
   });
 
-  test('EVERY registered tool resolves to a valid retry class', () => {
+  test('EVERY controller tool resolves to a valid retry class', () => {
     const unclassified = ALL_TOOLS
       .map((tool) => [tool.name, retryClassForTool(tool)] as const)
       .filter(([, cls]) => !isRetryClass(cls));
@@ -135,7 +135,7 @@ describe('§16.1 — the whole registered inventory is classified', () => {
     for (const tool of destructive) expect(retryClassForTool(tool)).toBe('E');
   });
 
-  test('the override table has no dead entries — every name is a registered tool', () => {
+  test('the override table has no dead entries — every name is a controller tool', () => {
     const dead = Object.keys(RETRY_CLASS_OVERRIDES).filter((name) => !byName.has(name));
     expect(dead).toEqual([]);
   });

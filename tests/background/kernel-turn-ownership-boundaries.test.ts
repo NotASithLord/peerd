@@ -12,6 +12,25 @@ const modulesFor = async (entry: string) => new Set(
 );
 
 describe('kernel turn ownership boundaries', () => {
+  it('keeps the retired mutable tool protocol absent from production source', () => {
+    for (const path of [
+      'peerd-runtime/tools/registry.js',
+      'peerd-runtime/tools/metadata-registry.js',
+      'peerd-runtime/tools/metadata/policy.js',
+    ]) expect(existsSync(join(EXTENSION_ROOT, path)), path).toBe(false);
+
+    const source = [...new Bun.Glob('**/*.js').scanSync({ cwd: EXTENSION_ROOT })]
+      .filter((path) => !path.startsWith('tests/'))
+      .map((path) => readFileSync(join(EXTENSION_ROOT, path), 'utf8'))
+      .join('\n');
+    for (const retired of [
+      'registerTool', 'makeRelayedToolDispatch',
+      'turn.tool.prepare', 'turn.tool.settle', 'turn.tool.dispatch',
+      'page_eval', 'page_exec', 'page_keys', 'wait_until', 'dweb_guide',
+      'read_web_cache', 'read_run_cache', 'toolbox',
+    ]) expect(source, retired).not.toContain(retired);
+  });
+
   it('keeps semantic aggregate barrels out of the service-worker graph', async () => {
     const modules = await modulesFor('background/vault-kernel.js');
     for (const module of [
@@ -166,7 +185,6 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/controller-tools.js',
       'peerd-runtime/semantic.js',
       'peerd-runtime/site-clients/digest.js',
-      'peerd-runtime/tools/registry.js',
     ]);
 
     expect([...modules].filter((module) =>
@@ -178,14 +196,14 @@ describe('kernel turn ownership boundaries', () => {
     const authorityModules = await modulesFor('background/kernel-turn-live-factories.js');
     for (const module of [
       'peerd-runtime/controller-tool-projection.js',
-      'peerd-runtime/tools/metadata-registry.js',
+      'peerd-runtime/tools/metadata/authority.js',
       'peerd-runtime/tools/metadata/catalog.js',
     ]) expect(authorityModules.has(module), `authority graph imports ${module}`).toBe(false);
 
     const controllerModules = await modulesFor('offscreen/controller-turn-runtime.js');
     for (const module of [
       'peerd-runtime/controller-tool-projection.js',
-      'peerd-runtime/tools/metadata/policy.js',
+      'peerd-runtime/tools/metadata/authority.js',
       'peerd-runtime/tools/metadata/catalog.js',
     ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
 

@@ -274,7 +274,7 @@ export const finalActorTurnReply = (session) => {
  * @param {(entry: object) => Promise<unknown>} deps.appendAudit
  * @param {() => Array<{ name:string, primitive?:any, sideEffect?:any,
  *   dispatch?:any, retryClass?:any, dweb?:any }>} deps.getToolDescriptors
- *   Returns the full registered tool descriptor set (parent's tools).
+ *   Returns the full available tool descriptor set (parent's tools).
  * @param {() => number} [deps.now]
  * @param {{ claim: (sessionId: string) => { controller: AbortController, release: () => void }, stop: (sessionId: string) => boolean }} [deps.turnSlots]
  *   The per-session turn-slot system (loop/turn-slots.js). PR #134 phase 1: a
