@@ -8,8 +8,10 @@ const makeHarness = (over: { provisional?: boolean, siteActorBindings?: any } = 
   const released: number[] = [];
   const audits: any[] = [];
   let judgeDeps: any;
-  const state = { mode: 'bound', provisional: over.provisional ?? false };
+  const state = { mode: 'bound', provisional: over.provisional ?? true };
   const persisted: number[] = [];
+  const siteActorBindings = over.siteActorBindings ?? makeApiActorBindings();
+  if (!over.siteActorBindings) siteActorBindings.bind('chat-1', 'https://safe.example', 'actor');
   const deps: any = {
     originStates: {
       read: () => state,
@@ -33,8 +35,7 @@ const makeHarness = (over: { provisional?: boolean, siteActorBindings?: any } = 
     webActorTabBindings: { tabFor: () => 7, drop: () => true },
     persistWebBindings: () => {},
     pageActivity: { release: async (id: number) => { released.push(id); } },
-    siteActorBindings: over.siteActorBindings
-      ?? { entries: () => [], drop: () => {}, dropBySession: () => 0 },
+    siteActorBindings,
     persistSiteActors: () => { persisted.push(1); },
     auditLog: { append: async (event: any) => { audits.push(event); } },
     originPhrase: (url: string) => new URL(url).origin,
@@ -49,7 +50,7 @@ const makeHarness = (over: { provisional?: boolean, siteActorBindings?: any } = 
     liveSiteClientLandingFor: async () => ({ status: 'none' }),
   };
   const resolve = makeOriginLockResolver(deps);
-  return { resolve, turnTokens, stopped, released, audits, persisted, getJudgeDeps: () => judgeDeps };
+  return { resolve, turnTokens, stopped, released, audits, persisted, siteActorBindings, getJudgeDeps: () => judgeDeps };
 };
 
 describe('origin lock controller', () => {
@@ -69,17 +70,16 @@ describe('origin lock controller', () => {
     });
   });
 
-  test('stops the current turn, releases its binding, and narrows audit URLs', async () => {
+  test('stops the current turn, drops its bindings, and narrows audit URLs', async () => {
     const harness = makeHarness();
     harness.resolve('actor');
     await harness.getJudgeDeps().onStop({
       action: 'handoff', from: 'https://safe.example/',
       to: 'https://other.example/attacker-controlled?payload=1',
     });
-    await Promise.resolve();
-
     expect(harness.stopped).toEqual(['actor']);
     expect(harness.released).toEqual([7]);
+    expect(harness.siteActorBindings.resolve('chat-1', 'https://safe.example')).toBeNull();
     expect(harness.audits[0].details.to).toBe('https://other.example');
     expect(JSON.stringify(harness.audits[0])).not.toContain('attacker-controlled');
   });
