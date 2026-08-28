@@ -116,7 +116,7 @@ const mutateHook = (/** @type {string} */ route) => async (
   }
 });
 
-const runMemoryInit = async (/** @type {any} */ context) => {
+const runMemoryInit = async (/** @type {any} */ message, /** @type {any} */ context) => {
   const [tabProbe, apps] = await Promise.all([
     effectValue(context, 'administrative.memory.probeTab', {}),
     effectValue(context, 'administrative.memory.listApps', {}),
@@ -186,11 +186,17 @@ export const routes = Object.freeze({
   'hooks/save': mutateHook('hooks/save'),
   'hooks/remove': mutateHook('hooks/remove'),
   'hooks/toggle': mutateHook('hooks/toggle'),
-  'memory/init': async (/** @type {any} */ _message, /** @type {any} */ context) => {
-    try { return await runMemoryInit(context); }
+  'memory/init': async (/** @type {any} */ message, /** @type {any} */ context) => {
+    try { return await runMemoryInit(message, context); }
     catch (cause) {
       await note(context, `/init failed: ${/** @type {{message?:string}} */ (cause)?.message ?? String(cause)}`);
-      return { ok: false, error: 'init-failed' };
+      if (cause instanceof AdministrativeEffectError) {
+        return {
+          ok: false, error: cause.code, code: cause.code,
+          outcomeKnown: cause.outcomeKnown,
+        };
+      }
+      return { ok: false, error: 'init-failed', code: 'init-failed', outcomeKnown: false };
     }
   },
   'skills/installGit': async () => ({ ok: false, error: 'remote-install-disabled' }),

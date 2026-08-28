@@ -34,7 +34,8 @@ export const createKernelAdministrativeMemory = ({
   }
   const serial = makeSerialLane();
   const commitInit = (/** @type {{workspace:string,body:string,checklist:string[]}} */ input,
-    /** @type {AbortSignal} */ signal) => serial(async () => {
+    /** @type {AbortSignal} */ signal,
+    /** @type {string|null|undefined} */ boundSessionId = undefined) => serial(async () => {
     if (signal?.aborted) return { ok: false, error: 'aborted' };
     await assertAllowed();
     canWrite();
@@ -44,7 +45,8 @@ export const createKernelAdministrativeMemory = ({
     const priorVersion = versionOf(prior);
     const proposal = buildWriteProposal({ scope, prior, body: input.body, origin: 'agent' });
     if (proposal.op !== 'noop') {
-      const sessionId = await currentSessionId();
+      const sessionId = boundSessionId === undefined
+        ? await currentSessionId() : boundSessionId;
       if (typeof sessionId !== 'string' || !sessionId) {
         return { ok: false, error: 'memory-session-unavailable' };
       }

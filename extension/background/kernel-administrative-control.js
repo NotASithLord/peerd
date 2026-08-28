@@ -49,13 +49,14 @@ const routeFrom = (/** @type {any} */ context) => {
  * @param {{append:(entry:any)=>Promise<any>}} deps.auditLog
  * @param {(store:string)=>void} deps.canWrite
  * @param {(text:string,options:any)=>Promise<any>} deps.commitSkill
- * @param {()=>Promise<any>} deps.probeMemoryTab
+ * @param {(binding:any)=>Promise<any>} deps.probeMemoryTab
  * @param {()=>Promise<any[]>} deps.listApps
  * @param {{get:(store:string,key:string)=>Promise<any>,transact:(stores:string[],operation:Function)=>Promise<any>}} deps.idb
  * @param {(prompt:any,signal?:AbortSignal)=>Promise<any>} deps.confirm
  * @param {()=>Promise<string|null>|string|null} deps.currentSessionId
+ * @param {(sessionId:string)=>Promise<any>} [deps.sessionById]
  * @param {()=>Promise<void>|void} deps.assertMemoryInitAllowed
- * @param {(text:string)=>unknown} deps.postChatNote
+ * @param {(text:string, detail?:unknown, sessionId?:string|null)=>unknown} deps.postChatNote
  * @param {number} [deps.probeTimeoutMs]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
@@ -169,6 +170,22 @@ export const createKernelAdministrativeControl = (deps) => {
     const timer = setTimeoutFn(() => finish(fallback), probeTimeoutMs);
     Promise.resolve().then(operation).then(finish, () => finish(fallback));
   });
+  const initBinding = (/** @type {any} */ context) => {
+    const message = context?.message;
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return null;
+    const sessionSpecified = Object.hasOwn(message, 'sessionId');
+    const activeTabSpecified = Object.hasOwn(message, 'activeTabId');
+    if (sessionSpecified && !(message.sessionId === null
+        || typeof message.sessionId === 'string' && message.sessionId)) return null;
+    if (activeTabSpecified && !(message.activeTabId === null
+        || Number.isSafeInteger(message.activeTabId) && message.activeTabId > 0)) return null;
+    return Object.freeze({
+      sessionSpecified,
+      sessionId: sessionSpecified ? message.sessionId : undefined,
+      activeTabSpecified,
+      activeTabId: activeTabSpecified ? message.activeTabId : undefined,
+    });
+  };
   const handleEffect = async (/** @type {string} */ operation, /** @type {any} */ payload,
     /** @type {any} */ context) => {
     if (context?.signal?.aborted) return failure('administrative-call-aborted', true);
@@ -212,7 +229,9 @@ export const createKernelAdministrativeControl = (deps) => {
       }
     }
     if (operation === 'administrative.memory.probeTab') {
-      const value = await boundedProbe(deps.probeMemoryTab, {
+      const binding = initBinding(context);
+      if (!binding) return failure('administrative-memory-binding-invalid', true);
+      const value = await boundedProbe(() => deps.probeMemoryTab(binding), {
         tab: null,
         warning: '/init skipped the browser page because the probe did not finish.',
       });
@@ -230,11 +249,25 @@ export const createKernelAdministrativeControl = (deps) => {
       if (!expectedEffect(operation, payload, context)) {
         return failure('administrative-effect-substitution', true);
       }
-      try { return success(await memory.commitInit(payload, context.signal)); }
+      const binding = initBinding(context);
+      if (!binding) return failure('administrative-memory-binding-invalid', true);
+      try {
+        return success(await memory.commitInit(
+          payload, context.signal,
+          binding.sessionSpecified ? binding.sessionId : undefined,
+        ));
+      }
       catch (cause) { return failure('administrative-memory-write-unknown', false, cause); }
     }
     if (operation === 'administrative.memory.note') {
-      try { await deps.postChatNote(payload.text); } catch {}
+      const binding = initBinding(context);
+      if (!binding) return failure('administrative-memory-binding-invalid', true);
+      try {
+        await deps.postChatNote(
+          payload.text, null,
+          binding.sessionSpecified ? binding.sessionId : null,
+        );
+      } catch {}
       return success();
     }
     return failure('kernel-operation-denied', true);
@@ -250,6 +283,17 @@ export const createKernelAdministrativeControl = (deps) => {
       if (route === 'memory/init') {
         await deps.assertMemoryInitAllowed();
         deps.canWrite('memory');
+        const binding = initBinding({ message });
+        if (!binding) return failure('administrative-memory-binding-invalid', true);
+        if (binding.sessionSpecified) {
+          if (typeof binding.sessionId !== 'string' || !binding.sessionId) {
+            return failure('administrative-memory-session-unavailable', true);
+          }
+          if (typeof deps.sessionById !== 'function'
+              || !await deps.sessionById(binding.sessionId)) {
+            return failure('administrative-memory-session-unavailable', true);
+          }
+        }
       }
       const result = await feature.dispatch('administrative', route, message, options);
       return result?.ok === true && Object.hasOwn(result, 'value') ? result.value : result;
@@ -272,6 +316,10 @@ export const createKernelAdministrativeControl = (deps) => {
   ])));
   return Object.freeze({
     routes,
+    // Private turn ingress waits for confirmation and durable commit. The
+    // public route remains fire-and-forget for UI responsiveness.
+    runMemoryInit: (/** @type {any} */ message = {}, /** @type {any} */ options = undefined) =>
+      dispatch('memory/init', message, { timeoutMs: 30 * 60_000, ...options }),
     authorize: feature.authorize,
     handleKernelCall: feature.handleKernelCall,
   });

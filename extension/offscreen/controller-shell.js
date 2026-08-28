@@ -17,6 +17,7 @@ import {
   controllerOperationAllowedAfterCancel,
   controllerOuterPayloadCap,
   controllerPayloadAllowed,
+  controllerResultAllowed,
   controllerRenewalIdleCap,
   controllerCustodyIsAuthoritative,
   createControllerKernelQuota,
@@ -346,8 +347,11 @@ export const bindControllerChannel = ({
       stopPending = Math.max(0, stopPending - 1);
       stopPendingBytes = Math.max(0, stopPendingBytes - operation.payloadBytes);
     }
+    const checked = controllerResultAllowed(operation.capability, result) ? result : {
+      ok: false, code: 'controller-result-invalid', outcomeKnown: false, retryable: false,
+    };
     const settlement = normalizeControllerCustody(
-      operation.capability, result, custody, pendingEffect,
+      operation.capability, checked, custody, pendingEffect,
     );
     try { post({
       type: 'controller/settled', requestId, grantId: operation.grantId, result: settlement,

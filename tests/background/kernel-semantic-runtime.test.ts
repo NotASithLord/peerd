@@ -16,6 +16,8 @@ const controller = (overrides: Record<string, any> = {}) => ({
   callFeature: async () => ({ ok: true }),
   renderSystemPrompt: async () => '',
   projectTurnTools: async () => [],
+  planToolsCommand: async () => ({ action: 'note', note: 'ok' }),
+  composeTurn: async ({ text }: any) => ({ text, refs: [], command: null }),
   withRun: async (operation: () => Promise<any>) => operation(),
   retire: () => {},
   close: () => {},
@@ -76,7 +78,7 @@ const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
     } : {}),
   });
   return {
-    runtime, controllerCalls: () => controllerCalls,
+    runtime, controllerGateway, controllerCalls: () => controllerCalls,
     controllerCreates: () => controllerCreates, io: () => io,
   };
 };
@@ -301,5 +303,22 @@ describe('kernel semantic runtime', () => {
     expect({ physicalRuns, productionRuns }).toEqual({ physicalRuns: 0, productionRuns: 1 });
     expect(runtime.relays).toEqual({ sessions: base.runtime });
     await runtime.close();
+  });
+
+  test('a compose-owner conflict rolls back the paired turn binding for retry', async () => {
+    const state = makeRuntime(false, [], true);
+    const composeBlocker = state.controllerGateway.bindCompose({
+      authorize: () => null,
+      handle: async () => ({ ok: false }),
+    });
+    expect(() => state.runtime.actorCount()).toThrow('kernel-compose-owner-conflict');
+    const recoveredTurn = state.controllerGateway.bindTurn({
+      authorize: () => null,
+      handle: async () => ({ ok: false }),
+    });
+    recoveredTurn.release();
+    composeBlocker.release();
+    await expect(state.runtime.actorCount()).resolves.toEqual({ activeActors: 0 });
+    await state.runtime.close();
   });
 });

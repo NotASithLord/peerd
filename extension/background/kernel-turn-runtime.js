@@ -26,7 +26,8 @@ const formatGoalTodoBlock = (/** @type {unknown} */ value) => {
 
 /**
  * @param {Object} deps
- * @param {{runUserTurn:Function,renderSystemPrompt:Function,projectTurnTools:Function,withRun:Function}} deps.seams
+ * @param {{runUserTurn:Function,renderSystemPrompt:Function,projectTurnTools:Function,
+ *   planToolsCommand?:Function,withRun:Function}} deps.seams
  * @param {Record<string,any>} deps.turnDriverDeps
  * @param {Record<string,any>} deps.turnRouteDeps
  * @param {Record<string,any>} deps.sessionDeps

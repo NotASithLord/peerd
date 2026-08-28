@@ -24,7 +24,7 @@ export const createKernelSemanticRuntime = (deps) => {
   const gateway = deps.controllerGateway;
   if (!gateway || typeof gateway.bindSemantic !== 'function'
       || typeof gateway.bindTurn !== 'function' || typeof gateway.bindRuntime !== 'function'
-      || typeof gateway.bindFeature !== 'function') {
+      || typeof gateway.bindCompose !== 'function' || typeof gateway.bindFeature !== 'function') {
     throw new TypeError('kernel-semantic-controller-gateway-invalid');
   }
   const skills = createKernelSkillsAuthority({
@@ -208,14 +208,31 @@ export const createKernelSemanticRuntime = (deps) => {
     }
     turnOwner = createKernelTurnOwner({
       createController: (/** @type {any} */ turnAuthority) => {
-        const binding = ensureGateway().bindTurn({
+        const turnBinding = ensureGateway().bindTurn({
           authorize: turnAuthority.authorizeTurnCall,
           handle: turnAuthority.handleTurnKernelCall,
         });
-        if (typeof deps.withProductionRun !== 'function') return binding;
+        let composeBinding;
+        try {
+          composeBinding = ensureGateway().bindCompose({
+            authorize: turnAuthority.authorizeComposeCall,
+            handle: turnAuthority.handleComposeKernelCall,
+          });
+        } catch (cause) {
+          // why: the turn and compose slots form one logical owner. A compose
+          // conflict must not strand the turn slot and poison every retry.
+          turnBinding.release();
+          throw cause;
+        }
         return Object.freeze({
-          ...binding,
-          withRun: deps.withProductionRun,
+          ...turnBinding,
+          composeTurn: composeBinding.composeTurn,
+          ...(typeof deps.withProductionRun === 'function'
+            ? { withRun: deps.withProductionRun } : {}),
+          release: () => {
+            turnBinding.release();
+            composeBinding.release();
+          },
         });
       },
       loadRuntime: deps.loadTurnRuntime,

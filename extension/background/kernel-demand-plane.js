@@ -188,6 +188,12 @@ export const createKernelDemandPlane = (deps) => {
           revision: ++sourceProjectionRevision,
         }),
       ),
+      // why: /init semantics already live in the sealed administrative host.
+      // The turn ingress reuses that exact finite route instead of assembling a
+      // second memory initializer inside the service-worker turn graph.
+      runMemoryInit: (/** @type {any} */ message = {}, /** @type {any} */ options = undefined) =>
+        administrativeControl?.runMemoryInit?.(message, options)
+        ?? Promise.resolve({ ok: false, error: 'memory-init-unavailable' }),
     }));
     const owner = Object.freeze({
       ...runtime,
@@ -361,6 +367,7 @@ export const createKernelDemandPlane = (deps) => {
     commitSkill: skillPersistence.commit,
     probeMemoryTab: memoryInitProbe.probeTab,
     listApps: support.appCatalog.list,
+    sessionById: (/** @type {string} */ sessionId) => deps.sessions.get(sessionId),
     confirm: deps.confirmation.confirm,
     currentSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
     assertMemoryInitAllowed: async () => {

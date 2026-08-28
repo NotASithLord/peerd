@@ -51,6 +51,7 @@ import {
   PAGE_PROGRAM_EXACT_OPERATIONS,
 } from '/shared/page-program-authority.js';
 import { authorityEffectConfirmationPresentation } from '/shared/authority-confirmation-presentation.js';
+import { createReadOnlyOperationGrant } from './controller-turn-authority-scope.js';
 
 const PAGE_PROGRAM_EXACT_OPERATION_SET = new Set(PAGE_PROGRAM_EXACT_OPERATIONS);
 const APP_PROGRAM_EXACT_OPERATION_SET = new Set(APP_PROGRAM_EXACT_OPERATIONS);
@@ -775,7 +776,7 @@ export const makeOffscreenActorClient = ({
         ? { authorityPageResourceKey: grant.authorityPageResourceKey } : {}),
       // why: nested script capabilities must derive from the same immutable
       // run grant as their outer exact operation. Absence is never permission.
-      operationGrant: Object.freeze(new Set(grant.allowedOperations)),
+      operationGrant: createReadOnlyOperationGrant(grant.allowedOperations),
       ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
     } : null;
   };

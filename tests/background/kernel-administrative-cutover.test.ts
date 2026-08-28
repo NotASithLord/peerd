@@ -325,6 +325,56 @@ describe('sealed administrative root cutover', () => {
     expect(harness.memory.size).toBe(1);
   });
 
+  test('private /init pins confirmation, notes, and tab probe to its receipt session', async () => {
+    let prompt: any;
+    const noteSessions: Array<string | null> = [];
+    const probeBindings: any[] = [];
+    const harness = makeHarness({
+      currentSessionId: async () => 'session:B',
+      sessionById: async (sessionId: string) => sessionId === 'session:A'
+        ? { sessionId } : null,
+      confirm: async (value: any) => { prompt = value; return 'yes_once'; },
+      probeMemoryTab: async (binding: any) => {
+        probeBindings.push(binding);
+        return { tab: { url: 'https://a.example/work' } };
+      },
+      postChatNote: (_text: string, _action: any, sessionId: string | null) => {
+        noteSessions.push(sessionId);
+      },
+    });
+    await expect(harness.control.runMemoryInit({
+      sessionId: 'session:A', activeTabId: 7,
+    })).resolves.toMatchObject({ ok: true });
+    expect(prompt).toMatchObject({
+      sessionId: 'session:A', ownerSessionId: 'session:A',
+    });
+    expect(probeBindings).toEqual([{
+      sessionSpecified: true, sessionId: 'session:A',
+      activeTabSpecified: true, activeTabId: 7,
+    }]);
+    expect(noteSessions.length).toBeGreaterThan(0);
+    expect(new Set(noteSessions)).toEqual(new Set(['session:A']));
+  });
+
+  test('private /init refuses a null or deleted receipt session before probes or confirmation', async () => {
+    let probes = 0;
+    let confirms = 0;
+    const harness = makeHarness({
+      sessionById: async () => null,
+      probeMemoryTab: async () => { probes += 1; return { tab: null }; },
+      confirm: async () => { confirms += 1; return 'yes_once'; },
+    });
+    for (const sessionId of [null, 'deleted']) {
+      await expect(harness.control.runMemoryInit({ sessionId }))
+        .resolves.toMatchObject({
+          ok: false, code: 'administrative-memory-session-unavailable',
+          outcomeKnown: true,
+        });
+    }
+    expect({ probes, confirms }).toEqual({ probes: 0, confirms: 0 });
+    expect(harness.memory.size).toBe(0);
+  });
+
   test('uses the real confirmation claim and Stop retires the card without a late write', async () => {
     const acceptedPrompts: any[] = [];
     const acceptedCoordinator = makeConfirmCoordinator({
@@ -556,7 +606,8 @@ describe('sealed administrative root cutover', () => {
     expect(await feature.dispatch('administrative', 'hooks/list', {}))
       .toEqual({ ok: true, outcomeKnown: true, value: [] });
     expect(offered).toEqual([[
-      'prompt.render', 'turn.tools.project', KERNEL_FEATURE_DISPATCH_CAPABILITY,
+      'prompt.render', 'turn.tools.project', 'turn.tools.command',
+      KERNEL_FEATURE_DISPATCH_CAPABILITY,
     ]]);
     semantic.close();
   });

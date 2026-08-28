@@ -6,8 +6,12 @@ import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
 import { createContextSnapshots } from '../../extension/background/context-snapshots.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
+import { planToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
 import { canonicalActorOwnerPosture } from '../../extension/background/app-actor-policy.js';
 import { sha256Hex } from '../../extension/shared/util.js';
+import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
+import { composeTurn } from '../../extension/offscreen/controller-compose-runtime.js';
+import { browserProbeResult, TEST_DOCUMENT_ID } from '../helpers/browser-scripting.ts';
 
 const event = () => {
   const listeners = new Set<(...args: any[]) => void>();
@@ -99,6 +103,9 @@ const harness = async (
     loadDirectActorHost?: () => Promise<any>,
     contributor?: any,
     durableApiOrigin?: string,
+    composeTurn?: (payload: any, options: any) => Promise<any>,
+    executeScript?: (request: any) => Promise<any[]>,
+    postChatNote?: (...args: any[]) => void,
   } = {},
 ) => {
   const idb = memoryStore();
@@ -206,7 +213,7 @@ const harness = async (
       reload: async () => {},
       sendMessage: async () => ({ ok: true, value: { text: 'app response' } }),
     },
-    scripting: { executeScript: async () => [] },
+    scripting: { executeScript: options.executeScript ?? (async () => []) },
     windows: {
       WINDOW_ID_NONE: -1, onFocusChanged: event(),
       getLastFocused: async () => ({ id: 1, focused: true }), update: async () => {},
@@ -282,6 +289,11 @@ const harness = async (
         if (result.ok !== true) throw new Error(result.code);
         return result;
       },
+      planToolsCommand: async ({ argument, currentManifest }: any) =>
+        planToolsCommand(argument, currentManifest),
+      composeTurn: (payload: any, composeOptions: any) => options.composeTurn
+        ? options.composeTurn(payload, composeOptions)
+        : Promise.reject(new Error('compose-unavailable-in-test')),
     },
     confirmation: { confirm: async () => 'yes_once' },
     denylist: { ready: async () => ({ ok: true }), patterns: () => [] },
@@ -304,7 +316,7 @@ const harness = async (
     canWrite: () => {}, ready: Promise.resolve(),
     contextSnapshots: createContextSnapshots(),
     scriptRuns: createScriptRunRegistry(),
-    postChatNote: () => {}, pushState: async () => {},
+    postChatNote: options.postChatNote ?? (() => {}), pushState: async () => {},
     dwebEnabled: false, firefox: options.firefox === true,
     firefoxActorLifetime: options.firefoxActorLifetime,
     loadDirectActorHost: options.loadDirectActorHost ?? (options.firefox
@@ -416,9 +428,140 @@ describe('kernel live turn factories', () => {
   test('constructs the complete production factory surface without host effects', () => {
     const factories = createKernelTurnLiveFactories(dependencies());
     expect(Object.keys(factories).sort()).toEqual([
-      'buildToolContext', 'goalMaxIterations', 'makeActorRuntime', 'makeDriver',
+      'buildToolContext', 'composeAuthority', 'goalMaxIterations', 'makeActorRuntime', 'makeDriver',
       'makeDriverDeps', 'makeGoals', 'makeRouteDeps',
     ]);
+  });
+
+  test('real system and tools handlers mutate only their exact bound session', async () => {
+    const notes: any[] = [];
+    const h = await harness(undefined, {
+      postChatNote: (...args: any[]) => { notes.push(args); },
+    });
+    const other = await h.sessions.create({
+      provider: 'anthropic', model: 'claude-sonnet-4-6',
+      permissionMode: 'act', confirmActions: false,
+    });
+    h.cache.set('currentSessionId', other.sessionId);
+    const routeDeps = h.factories.makeRouteDeps(h.shared).turn;
+    await routeDeps.handleSystemCommand('bound instructions', h.root.sessionId);
+    await routeDeps.handleToolsCommand('research', h.root.sessionId);
+    expect(await h.sessions.get(h.root.sessionId)).toMatchObject({
+      customSystemPrompt: 'bound instructions',
+      toolManifest: { preset: 'research' },
+    });
+    expect(notes.at(-1)?.[2]).toBe(h.root.sessionId);
+    let untouched = await h.sessions.get(other.sessionId);
+    expect(untouched?.customSystemPrompt).toBeUndefined();
+    expect(untouched?.toolManifest).toBeUndefined();
+
+    await routeDeps.handleSystemCommand('must not land', null);
+    await routeDeps.handleToolsCommand('coding', null);
+    expect(notes.slice(-2).map((note) => note[2])).toEqual([null, null]);
+    untouched = await h.sessions.get(other.sessionId);
+    expect(untouched?.customSystemPrompt).toBeUndefined();
+    expect(untouched?.toolManifest).toBeUndefined();
+  });
+
+  test('real bare and explicit @tab composition never substitutes a later foreground tab', async () => {
+    const executed: number[] = [];
+    let invokeCompose: (payload: any, options: any) => Promise<any> = async () => {
+      throw new Error('compose-not-bound');
+    };
+    let blockCapture = false;
+    let releaseCapture = () => {};
+    let captureStarted = () => {};
+    let captureGate = Promise.resolve();
+    let h: Awaited<ReturnType<typeof harness>>;
+    h = await harness(undefined, {
+      composeTurn: (payload, options) => invokeCompose(payload, options),
+      executeScript: async (request: any) => {
+        executed.push(request.target.tabId);
+        const tab = h.tabs.get(request.target.tabId);
+        if (!tab) throw new Error('tab-closed');
+        const probe = browserProbeResult(request, { url: tab.url });
+        if (probe) return probe;
+        if (blockCapture && request.func?.name === 'captureComposerTabInjected') {
+          captureStarted();
+          await captureGate;
+        }
+        return [{
+          documentId: TEST_DOCUMENT_ID,
+          result: { title: tab.title ?? '', url: tab.url, text: `body-${tab.id}` },
+        }];
+      },
+    });
+    let switchMode: 'foreground'|'close' = 'foreground';
+    let composeAttempts = 0;
+    invokeCompose = async (payload, options) => {
+      composeAttempts += 1;
+      if (switchMode === 'foreground') {
+        h.tabs.get(9).active = false;
+        h.tabs.get(17).active = true;
+      } else {
+        h.tabs.delete(9);
+        h.tabs.get(17).active = true;
+      }
+      const authority = h.factories.composeAuthority.authorize(payload);
+      const composed = await composeTurn(payload, {
+        ...options,
+        kernelCall: (operation: string, effectPayload: any) =>
+          h.factories.composeAuthority.handleKernelCall(operation, effectPayload, {
+            capability: 'turn.compose', outerPayload: payload, authority,
+            signal: options?.signal,
+          }),
+      });
+      return composed?.ok === true ? composed.value : composed;
+    };
+    const turns: any[] = [];
+    let admitted = true;
+    const routes = makeSessionRoutes({
+      ...h.factories.makeRouteDeps(h.shared).turn,
+      runAgentTurn: async (input: any) => { turns.push(input); },
+      actorRecoveryReady: async () => true,
+      admitSend: () => admitted,
+    });
+    const firstCompose = await routes['agent/send']({
+      text: 'inspect @tab', sessionId: h.root.sessionId,
+    });
+    expect(firstCompose).toMatchObject({ ok: true });
+    expect(turns[0].userText).toContain('body-9');
+    expect(executed).not.toContain(17);
+
+    h.tabs.set(9, {
+      id: 9, windowId: 1, url: 'https://example.com/work', title: 'Example', active: true,
+    });
+    h.tabs.get(17).active = false;
+    executed.length = 0;
+    switchMode = 'close';
+    await expect(routes['agent/send']({
+      text: 'inspect @tab:9', sessionId: h.root.sessionId, activeTabId: 9,
+    })).resolves.toMatchObject({ ok: true });
+    expect(turns[1].userText).toContain('could not resolve');
+    expect(executed).not.toContain(17);
+
+    h.tabs.set(9, {
+      id: 9, windowId: 1, url: 'https://example.com/work', title: 'Example', active: true,
+    });
+    h.tabs.get(17).active = false;
+    switchMode = 'foreground';
+    blockCapture = true;
+    captureGate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+    const captureEntered = new Promise<void>((resolve) => { captureStarted = resolve; });
+    const abort = new AbortController();
+    const attemptBeforeStop = composeAttempts;
+    const stopped = routes['agent/send'](
+      { text: 'stop @tab', sessionId: h.root.sessionId }, { signal: abort.signal },
+    );
+    await captureEntered;
+    admitted = false;
+    abort.abort();
+    releaseCapture();
+    await expect(stopped).resolves.toMatchObject({
+      ok: false, code: 'agent-send-stopped-before-dispatch', outcomeKnown: true,
+    });
+    expect(turns).toHaveLength(2);
+    expect(composeAttempts).toBe(attemptBeforeStop + 1);
   });
 
   test('rejects a partial production graph before creating state', () => {

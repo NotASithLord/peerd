@@ -48,6 +48,7 @@ describe('kernel turn runtime assembly', () => {
       runUserTurn: async () => {},
       renderSystemPrompt: async () => 'sealed-system',
       projectTurnTools: async () => [],
+      planToolsCommand: async () => ({ action: 'note', note: 'planned' }),
       withRun: async (operation: () => Promise<void>) => {
         sequence.push('withRun');
         await operation();
@@ -150,6 +151,7 @@ describe('kernel turn runtime assembly', () => {
       seams: {
         runUserTurn: async () => {}, renderSystemPrompt: async () => '',
         projectTurnTools: async () => [],
+        planToolsCommand: async () => ({ action: 'note', note: 'planned' }),
         withRun: async (operation: () => Promise<void>) => operation(),
       },
       turnDriverDeps: {},

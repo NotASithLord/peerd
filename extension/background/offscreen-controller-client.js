@@ -37,6 +37,7 @@ import {
   createRuntimeEffectQuota,
   parseRuntimeDispatch,
 } from '../shared/kernel-runtime-policy.js';
+import { TURN_COMPOSE_CAPABILITY } from '../shared/controller-turn-phase-policy.js';
 
 export class ControllerChannelError extends Error {
   /** @param {string} message @param {string} code */
@@ -90,6 +91,7 @@ const stopped = (/** @type {string} */ code, /** @type {boolean} */ known) => ({
  * @param {(capability: string, payload: unknown) => unknown} deps.authorizeCall
  * @param {(operation: string, payload: unknown, context: {
  *   capability: string,
+ *   outerPayload: unknown,
  *   authority: NonNullable<ReturnType<typeof parseControllerAuthority>>,
  *   signal: AbortSignal,
  *   deadlineAt: number,
@@ -149,6 +151,7 @@ export const connectOffscreenController = async ({
    *   grantId: string,
    *   deadlineAt: number,
    *   capability: string,
+   *   outerPayload: unknown,
    *   authority: NonNullable<ReturnType<typeof parseControllerAuthority>>,
    *   nestedUnknown: boolean,
    *   effectEntered: boolean,
@@ -338,6 +341,7 @@ export const connectOffscreenController = async ({
       }
       Promise.resolve(handleKernelCall(message.operation, message.payload, {
         capability: call.capability,
+        outerPayload: call.outerPayload,
         authority: call.authority,
         signal: call.lifetime.signal,
         deadlineAt: call.deadlineAt,
@@ -503,6 +507,7 @@ export const connectOffscreenController = async ({
         grantId,
         deadlineAt,
         capability,
+        outerPayload: payload,
         authority,
         nestedUnknown: false,
         effectEntered: false,
@@ -537,6 +542,8 @@ const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
  * @param {import('../shared/kernel-identity.js').KernelIdentity} deps.kernelIdentity
  * @param {(payload:unknown)=>unknown} [deps.authorizeTurnCall]
  * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleTurnKernelCall]
+ * @param {(payload:unknown)=>unknown} [deps.authorizeComposeCall]
+ * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleComposeKernelCall]
  * @param {(payload:unknown)=>unknown} [deps.authorizeSemanticCall]
  * @param {(operation:string,payload:unknown,context:any)=>Promise<any>|any} [deps.handleSemanticKernelCall]
  * @param {(payload:unknown)=>unknown} [deps.authorizeRuntimeCall]
@@ -561,6 +568,8 @@ export const makeSemanticControllerClient = ({
   kernelIdentity,
   authorizeTurnCall,
   handleTurnKernelCall,
+  authorizeComposeCall,
+  handleComposeKernelCall,
   authorizeSemanticCall,
   handleSemanticKernelCall,
   authorizeRuntimeCall,
@@ -603,6 +612,8 @@ export const makeSemanticControllerClient = ({
   }
   const hasTurnAuthority = typeof authorizeTurnCall === 'function'
     && typeof handleTurnKernelCall === 'function';
+  const hasComposeAuthority = typeof authorizeComposeCall === 'function'
+    && typeof handleComposeKernelCall === 'function';
   const hasSemanticAuthority = typeof authorizeSemanticCall === 'function'
     && typeof handleSemanticKernelCall === 'function';
   const hasRuntimeAuthority = typeof authorizeRuntimeCall === 'function';
@@ -629,7 +640,8 @@ export const makeSemanticControllerClient = ({
       ? (operation) => withLease(operation)
       : (operation) => operation();
   const semanticCapabilities = Object.freeze([
-    'prompt.render', 'turn.tools.project',
+    'prompt.render', 'turn.tools.project', 'turn.tools.command',
+    ...(hasComposeAuthority ? [TURN_COMPOSE_CAPABILITY] : []),
     ...(hasRuntimeAuthority ? [RUNTIME_DISPATCH_CAPABILITY] : []),
     ...(hasSemanticAuthority ? ['semantic.dispatch'] : []),
     ...(hasTurnAuthority ? ['turn.run'] : []),
@@ -647,10 +659,12 @@ export const makeSemanticControllerClient = ({
   const authorizeCall = (
     /** @type {string} */ capability,
     /** @type {unknown} */ payload,
-  ) => capability === 'prompt.render' || capability === 'turn.tools.project' ? {
+  ) => capability === 'prompt.render' || capability === 'turn.tools.project'
+    || capability === 'turn.tools.command' ? {
       ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
       origin: null,
-      target: capability === 'prompt.render' ? 'system-prompt' : 'turn-tool-projection',
+      target: capability === 'prompt.render' ? 'system-prompt'
+        : capability === 'turn.tools.project' ? 'turn-tool-projection' : 'turn-tools-command',
       replayClass: 'A',
     }
     : capability === 'turn.run' && hasTurnAuthority ? authorizeTurnCall(payload) : null;
@@ -661,6 +675,9 @@ export const makeSemanticControllerClient = ({
     }
     if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY && hasFeatureAuthority) {
       return authorizeFeatureCall(payload);
+    }
+    if (capability === TURN_COMPOSE_CAPABILITY && hasComposeAuthority) {
+      return authorizeComposeCall(payload);
     }
     return capability === 'semantic.dispatch' && hasSemanticAuthority
       ? authorizeSemanticCall(payload) : authorizeCall(capability, payload);
@@ -675,6 +692,11 @@ export const makeSemanticControllerClient = ({
     if (context?.capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
       return hasFeatureAuthority
         ? handleFeatureKernelCall(operation, payload, context)
+        : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
+    }
+    if (context?.capability === TURN_COMPOSE_CAPABILITY) {
+      return hasComposeAuthority
+        ? handleComposeKernelCall(operation, payload, context)
         : { ok: false, code: 'kernel-operation-denied', outcomeKnown: true };
     }
     if (context?.capability === 'semantic.dispatch') {
@@ -703,8 +725,8 @@ export const makeSemanticControllerClient = ({
         buildDigest: CONTROLLER_BUILD_DIGEST,
         kernelIdentity,
         authorizeCall: authorizeControllerCall,
-        handleKernelCall: hasTurnAuthority || hasSemanticAuthority || hasRuntimeHandler
-          || hasFeatureAuthority
+        handleKernelCall: hasTurnAuthority || hasComposeAuthority || hasSemanticAuthority
+          || hasRuntimeHandler || hasFeatureAuthority
           ? handleControllerKernelCall : undefined,
         workerUrl: browser.runtime.getURL('offscreen/controller-worker.js'),
       });
@@ -725,8 +747,8 @@ export const makeSemanticControllerClient = ({
       lease,
       kernelIdentity,
       authorizeCall: authorizeControllerCall,
-      handleKernelCall: hasTurnAuthority || hasSemanticAuthority || hasRuntimeHandler
-        || hasFeatureAuthority
+      handleKernelCall: hasTurnAuthority || hasComposeAuthority || hasSemanticAuthority
+        || hasRuntimeHandler || hasFeatureAuthority
         ? handleControllerKernelCall : undefined,
       handshakeTimeoutMs: handshakeMs,
       findHost: async () => selectExactControllerHost(
@@ -945,6 +967,100 @@ export const makeSemanticControllerClient = ({
     }
     throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
       code: 'controller-tool-projection-startup-failed',
+      outcomeKnown: true, phase: 'startup', retryable: true,
+    });
+  };
+
+  const planToolsCommand = async (/** @type {Record<string, unknown>} */ input) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const plan = await withControllerLease(async (/** @type {unknown} */ lease) => {
+        enterLeased();
+        try {
+          let client = null;
+          try {
+            client = await getClient(lease);
+            const result = await client.call('turn.tools.command', input, { timeoutMs: 15_000 });
+            if (result?.ok === true && result.plan && typeof result.plan === 'object') {
+              return result;
+            }
+            if (result?.outcomeKnown === true) {
+              throw Object.assign(new Error(result.code ?? 'turn-tools-command-failed'), result);
+            }
+          } catch (cause) {
+            if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
+          }
+          if (client) retire(client);
+          return null;
+        } finally { exitLeased(); }
+      }, {
+        outcomeKnownOnLoss: true,
+        code: 'controller-firefox-tools-command-lifetime-lost',
+        onLost: retireActiveOnLifetimeLoss,
+      });
+      if (plan?.ok === true && plan.plan && typeof plan.plan === 'object') return plan.plan;
+    }
+    throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
+      code: 'controller-tools-command-startup-failed',
+      outcomeKnown: true, phase: 'startup', retryable: true,
+    });
+  };
+
+  const composeTurn = async (/** @type {{text:string}} */ input,
+    /** @type {{signal?:AbortSignal}} */ options = {}) => {
+    if (!hasComposeAuthority) {
+      throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
+        code: 'controller-turn-compose-authority-unavailable',
+        outcomeKnown: true, phase: 'startup', retryable: true,
+      });
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (options.signal?.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+      const composed = await withControllerLease(async (/** @type {unknown} */ lease) => {
+        enterLeased();
+        try {
+          let client = null;
+          try {
+            client = await getClient(lease);
+            const result = await client.call(TURN_COMPOSE_CAPABILITY, input, {
+              timeoutMs: 30_000,
+              signal: options.signal,
+            });
+            if (result?.ok === true && result.value && typeof result.value.text === 'string') {
+              return result;
+            }
+            if (result?.outcomeKnown === false) {
+              retire(client);
+              throw Object.assign(new Error(result.code ?? 'turn-compose-outcome-unknown'), result);
+            }
+            if (result?.outcomeKnown === true) {
+              if (result.retryable === true) {
+                retire(client);
+                return null;
+              }
+              throw Object.assign(new Error(result.code ?? 'turn-compose-failed'), result);
+            }
+          } catch (cause) {
+            const detail = /** @type {{outcomeKnown?:unknown,retryable?:unknown}} */ (cause);
+            if (detail?.outcomeKnown === false
+                || detail?.outcomeKnown === true && detail.retryable !== true) throw cause;
+          }
+          if (client) retire(client);
+          return null;
+        } finally { exitLeased(); }
+      }, {
+        outcomeKnownOnLoss: true,
+        code: 'controller-firefox-turn-compose-lifetime-lost',
+        onLost: retireActiveOnLifetimeLoss,
+      });
+      if (composed?.ok === true) return composed.value;
+      if (options.signal?.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }
+    }
+    throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
+      code: 'controller-turn-compose-startup-failed',
       outcomeKnown: true, phase: 'startup', retryable: true,
     });
   };
@@ -1219,6 +1335,8 @@ export const makeSemanticControllerClient = ({
   return Object.freeze({
     renderSystemPrompt,
     projectTurnTools,
+    planToolsCommand,
+    composeTurn,
     callTurn,
     callSemantic,
     callRuntime,

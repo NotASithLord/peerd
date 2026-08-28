@@ -30,7 +30,7 @@ const baseDeps = (over: any = {}) => {
       commandSources: { list: async () => [{ name: 'c', description: 'd' }] },
       prepareUserAttachmentsWithDocs: async ({ text }: any) => ({ text, attachments: [] }),
       runAgentTurn: async (a: any) => { calls.turns.push(a); },
-      runInit: async () => { calls.runInit += 1; },
+      runInit: async () => { calls.runInit += 1; return { ok: true }; },
       startGoalRun: async (req: any) => { calls.sequence.push('start'); calls.goal.push(req); },
       haltGoalRun: (sid: string) => { calls.halted.push(sid); },
       ensureSession: async () => 'a',
@@ -97,6 +97,26 @@ describe('agent/send slash-command routing', () => {
     expect(await makeSessionRoutes(deps)['agent/send']({ text: '/init' })).toEqual({ ok: true, handled: 'init' });
     expect(calls.runInit).toBe(1);
     expect(calls.turns.length).toBe(0);
+  });
+  test('/init from a fresh chat creates and binds one exact session', async () => {
+    const calls: any[] = [];
+    const { deps } = baseDeps({
+      ensureSession: async (options: any) => {
+        calls.push(['ensure', options]);
+        return 'fresh';
+      },
+      runInit: async (message: any, options: any) => {
+        calls.push(['init', message, options]);
+        return { ok: true };
+      },
+    });
+    await expect(makeSessionRoutes(deps)['agent/send']({
+      text: '/init', sessionId: null, activeTabId: null,
+    })).resolves.toEqual({ ok: true, handled: 'init' });
+    expect(calls).toEqual([
+      ['ensure', { exactFresh: true }],
+      ['init', { sessionId: 'fresh', activeTabId: null }, { signal: undefined }],
+    ]);
   });
   test('goal:true starts an autonomous goal run (no model turn)', async () => {
     const { deps, calls } = baseDeps();
@@ -175,6 +195,117 @@ describe('agent/send slash-command routing', () => {
     const { deps, calls } = baseDeps();
     expect(await makeSessionRoutes(deps)['agent/send']({ text: 'hello' })).toEqual({ ok: true });
     expect(calls.turns[0].userText).toBe('hello!');
+  });
+  test('composer preserves omitted, null, and exact tab bindings without ambient fallback', async () => {
+    const contexts: any[] = [];
+    const { deps } = baseDeps({
+      buildToolContext: async (options: any) => {
+        contexts.push(options);
+        return { signal: options.signal };
+      },
+    });
+    await makeSessionRoutes(deps)['agent/send']({ text: 'foreground' });
+    await makeSessionRoutes(deps)['agent/send']({ text: 'none', activeTabId: null });
+    await makeSessionRoutes(deps)['agent/send']({ text: 'exact', activeTabId: 9 });
+    expect(Object.hasOwn(contexts[0], 'activeTabId')).toBe(false);
+    expect(contexts[1].activeTabId).toBeNull();
+    expect(contexts[2].activeTabId).toBe(9);
+    expect(deps.browser.tabs.query).not.toHaveProperty('called');
+  });
+  test('composer receives the exact admitted chat even after ambient selection changes', async () => {
+    let current = 'b';
+    const contexts: any[] = [];
+    const { deps } = baseDeps({
+      sessionCache: { sessionGet: async () => current, sessionSet: async () => {} },
+      buildToolContext: async (options: any) => {
+        contexts.push(options);
+        current = 'a';
+        return {};
+      },
+    });
+    await makeSessionRoutes(deps)['agent/send']({ text: '@file:x', sessionId: 'b' });
+    expect(contexts).toEqual([expect.objectContaining({ sessionId: 'b' })]);
+  });
+  test('explicit absent-tab intent fingerprints differently from an omitted foreground binding', async () => {
+    const stored: Record<string, any> = {};
+    const sessionCache = {
+      sessionGet: async (key: string) => key === 'currentSessionId' ? 'a' : stored[key],
+      sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
+    };
+    const operationId = sendId('tab-presence');
+    const first = baseDeps({ sessionCache });
+    await expect(makeSessionRoutes(first.deps)['agent/send']({
+      text: 'same', operationId, sessionId: 'a',
+    })).resolves.toMatchObject({ ok: true });
+    await until(() => stored['agentSendReceipts.v1']?.[operationId]?.status === 'settled');
+    await expect(makeSessionRoutes(first.deps)['agent/send']({
+      text: 'same', operationId, sessionId: 'a', activeTabId: null,
+    })).resolves.toMatchObject({
+      ok: false, error: 'agent-send-operation-id-conflict', outcomeKnown: true,
+    });
+  });
+  test('Stop during composer preparation wins and dispatches no model turn', async () => {
+    let admitted = true;
+    const abort = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const { deps, calls } = baseDeps({
+      admitSend: () => admitted,
+      buildToolContext: async (options: any) => {
+        observedSignal = options.signal;
+        admitted = false;
+        abort.abort();
+        throw new DOMException('stopped', 'AbortError');
+      },
+    });
+    await expect(makeSessionRoutes(deps)['agent/send'](
+      { text: '@tab' }, { signal: abort.signal },
+    )).resolves.toMatchObject({
+      ok: false, code: 'agent-send-stopped-before-dispatch', outcomeKnown: true,
+    });
+    expect(observedSignal).toBe(abort.signal);
+    expect(calls.turns).toEqual([]);
+  });
+  test('Stop races stalled attachment conversion and dispatches no model turn', async () => {
+    let admitted = true;
+    const abort = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const stalled = new Promise(() => {});
+    const { deps, calls } = baseDeps({
+      admitSend: () => admitted,
+      prepareUserAttachmentsWithDocs: async (input: any) => {
+        observedSignal = input.signal;
+        return stalled;
+      },
+    });
+    const pending = makeSessionRoutes(deps)['agent/send'](
+      { text: 'read it', attachments: [{ name: 'x.docx' }] },
+      { signal: abort.signal },
+    );
+    admitted = false;
+    abort.abort();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, code: 'agent-send-stopped-before-dispatch', outcomeKnown: true,
+    });
+    expect(observedSignal).toBe(abort.signal);
+    expect(calls.turns).toEqual([]);
+  });
+  test('composer infrastructure failure preserves a retryable pre-dispatch send', async () => {
+    const failure = Object.assign(new Error('controller unavailable'), {
+      code: 'controller-turn-compose-startup-failed', outcomeKnown: false,
+    });
+    const { deps, calls } = baseDeps({
+      applyComposer: async () => { throw failure; },
+    });
+    await expect(makeSessionRoutes(deps)['agent/send']({ text: '/review @tab' }))
+      .resolves.toEqual({
+        ok: false,
+        error: 'turn-compose-unavailable',
+        code: 'controller-turn-compose-startup-failed',
+        outcomeKnown: true,
+        phase: 'pre-dispatch',
+        retryable: true,
+      });
+    expect(calls.turns).toEqual([]);
   });
   test('invalid attachment batch fails closed', async () => {
     const { deps } = baseDeps({ prepareUserAttachmentsWithDocs: async () => { throw new Error('bad file'); } });
@@ -454,7 +585,10 @@ describe('agent/send slash-command routing', () => {
       sessionSet: async (key: string, value: any) => { stored[key] = structuredClone(value); },
     };
     const operationId = sendId('slash-await');
-    const slash = baseDeps({ sessionCache, runInit: async () => { await gate; } });
+    const slash = baseDeps({ sessionCache, runInit: async () => {
+      await gate;
+      return { ok: true };
+    } });
     let settled = false;
     const response = makeSessionRoutes(slash.deps)['agent/send']({
       text: '/init', operationId, sessionId: 'a',
@@ -463,6 +597,50 @@ describe('agent/send slash-command routing', () => {
     expect(settled).toBe(false);
     release();
     await expect(response).resolves.toMatchObject({ ok: true, handled: 'init', operationId });
+  });
+
+  test('/init preserves exact results and Stop wins while confirmation is pending', async () => {
+    const cases = [
+      [{ ok: false, rejected: true }, {
+        ok: false, code: 'init-cancelled', outcomeKnown: true,
+        outcomeKind: 'cancelled', retryable: false,
+      }],
+      [{ ok: false, code: 'memory-denied', outcomeKnown: true, retryable: false }, {
+        ok: false, code: 'memory-denied', outcomeKnown: true,
+        outcomeKind: 'known-failure', retryable: false,
+      }],
+      [{ ok: false, code: 'memory-unknown', outcomeKnown: false }, {
+        ok: false, code: 'memory-unknown', outcomeKnown: false,
+        outcomeKind: 'unknown', retryable: false,
+      }],
+    ] as const;
+    for (const [result, expected] of cases) {
+      const { deps } = baseDeps({ runInit: async () => result });
+      await expect(makeSessionRoutes(deps)['agent/send']({ text: '/init' }))
+        .resolves.toMatchObject({ ...expected, handled: 'init' });
+    }
+
+    let admitted = true;
+    const abort = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stoppedInit = baseDeps({
+      admitSend: () => admitted,
+      runInit: async (_message: any, options: any) => {
+        expect(options.signal).toBe(abort.signal);
+        await gate;
+        return { ok: false, rejected: true };
+      },
+    });
+    const pending = makeSessionRoutes(stoppedInit.deps)['agent/send'](
+      { text: '/init', sessionId: 'a', activeTabId: 7 }, { signal: abort.signal },
+    );
+    admitted = false;
+    abort.abort();
+    release();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, code: 'agent-send-stopped-before-dispatch', outcomeKnown: true,
+    });
   });
 });
 

@@ -17,6 +17,12 @@ import {
   parseKernelFeatureCall,
 } from './kernel-feature-policy.js';
 import { RUNTIME_DISPATCH_CAPABILITY } from './kernel-runtime-policy.js';
+import {
+  createTurnPhaseQuota,
+  turnPhaseOuterPayloadCap,
+  turnPhasePayloadAllowed,
+  turnPhaseResultAllowed,
+} from './controller-turn-phase-policy.js';
 import { exactEffectLossSemantics } from './exact-effect-outcome.js';
 
 const KIB = 1024;
@@ -327,15 +333,23 @@ export const controllerOuterPayloadCap = (/** @type {string} */ capability) =>
   capability === 'turn.run' ? TURN_OUTER_BYTES
     : capability === 'prompt.render' ? PROMPT_OUTER_BYTES
       : capability === 'turn.tools.project' ? TOOL_PROJECTION_OUTER_BYTES
-        : kernelFeatureOuterPayloadCap(capability) || GENERIC_OUTER_BYTES;
+        : turnPhaseOuterPayloadCap(capability)
+          || kernelFeatureOuterPayloadCap(capability) || GENERIC_OUTER_BYTES;
 
 export const controllerPayloadAllowed = (/** @type {string} */ capability,
   /** @type {unknown} */ payload) => {
   if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
     return kernelFeaturePayloadAllowed(capability, payload);
   }
+  if (turnPhaseOuterPayloadCap(capability) > 0) {
+    return turnPhasePayloadAllowed(capability, payload);
+  }
   return true;
 };
+
+export const controllerResultAllowed = (/** @type {string} */ capability,
+  /** @type {unknown} */ result) => turnPhaseOuterPayloadCap(capability) > 0
+  ? turnPhaseResultAllowed(capability, result) : true;
 
 export const controllerCallMaxDuration = (/** @type {string} */ capability,
   /** @type {unknown} */ payload) => parseKernelFeatureCall(capability, payload)
@@ -362,6 +376,9 @@ export const createControllerKernelQuota = (
 ) => {
   if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
     return createKernelFeatureEffectQuota(capability, outerPayload);
+  }
+  if (turnPhaseOuterPayloadCap(capability) > 0) {
+    return createTurnPhaseQuota(capability, outerPayload);
   }
   if (capability === 'semantic.dispatch') {
     const quota = createSemanticDemandQuota(outerPayload);

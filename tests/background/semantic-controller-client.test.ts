@@ -969,6 +969,38 @@ describe('production semantic controller slice', () => {
     client.close();
   });
 
+  test('compose forwards Stop to the exact controller call and never starts retry two', async () => {
+    const abort = new AbortController();
+    let calls = 0;
+    let observedSignal: AbortSignal | undefined;
+    const client = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      authorizeComposeCall: () => ({
+        ownerId: 'peerd-authority-kernel', sessionId: 'root', instanceId: null,
+        origin: null, target: 'turn-compose', replayClass: 'A',
+      }),
+      handleComposeKernelCall: async () => ({ ok: true }),
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      connectDirectController: async () => ({
+        call: async (_capability: string, _payload: any, options: any) => {
+          calls += 1;
+          observedSignal = options.signal;
+          abort.abort();
+          return { ok: false, code: 'host-busy', outcomeKnown: true, retryable: true };
+        },
+        close() {},
+      } as any),
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    await expect(client.composeTurn({ text: '@tab' }, { signal: abort.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(observedSignal).toBe(abort.signal);
+    expect(calls).toBe(1);
+    client.close();
+  });
+
   test('repeated frozen connectors stop after one safe retry and a later call recovers', async () => {
     let connections = 0;
     const client = makeSemanticControllerClient({

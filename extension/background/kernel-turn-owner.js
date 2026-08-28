@@ -34,10 +34,13 @@ const closedFailure = () => ({
 
 /**
  * @param {Object} deps
- * @param {(authority:{authorizeTurnCall:Function,handleTurnKernelCall:Function})=>{
+ * @param {(authority:{authorizeTurnCall:Function,handleTurnKernelCall:Function,
+ *   authorizeComposeCall:Function,handleComposeKernelCall:Function})=>{
  *   callTurn:(payload:unknown,options?:any)=>Promise<any>,
  *   renderSystemPrompt:(ctx:Record<string,unknown>)=>Promise<string>,
- *   projectTurnTools:(ctx:Record<string,unknown>)=>Promise<any[]>,
+ *   projectTurnTools:(ctx:Record<string,unknown>)=>Promise<{tools:any[],operations:string[]}>,
+ *   planToolsCommand:(input:Record<string,unknown>)=>Promise<any>,
+ *   composeTurn:(input:{text:string},options?:{signal?:AbortSignal})=>Promise<any>,
  *   withRun:(operation:()=>Promise<void>)=>Promise<void>,
  *   release:()=>void,
  * }} deps.createController
@@ -45,6 +48,8 @@ const closedFailure = () => ({
  *   runUserTurn:Function,
  *   renderSystemPrompt:Function,
  *   projectTurnTools:Function,
+ *   planToolsCommand:Function,
+ *   composeTurn:Function,
  *   withRun:Function,
  * })=>Promise<{
  *   turnDeps:Record<string,any>,
@@ -53,6 +58,7 @@ const closedFailure = () => ({
  *   actorCount:()=>Promise<{activeActors:number}>|{activeActors:number},
  *   actorOverview:()=>Promise<{roots:any[]}>|{roots:any[]},
  *   relays?:Record<string,any>,
+ *   composeAuthority?:{authorize:Function,handleKernelCall:Function},
  *   close?:()=>Promise<void>|void,
  * }>} deps.loadRuntime
  * @param {number} [deps.loadTimeoutMs]
@@ -71,6 +77,15 @@ export const createKernelTurnOwner = ({
   if (typeof createController !== 'function' || typeof loadRuntime !== 'function') {
     throw new TypeError('kernel-turn-owner-config-invalid');
   }
+  /** @type {{
+   *   epoch:number,
+   *   runtime:{close?:()=>Promise<void>|void,relays?:Record<string,any>,composeAuthority?:any},
+   *   routes:Record<string,(message?:any,sender?:any)=>Promise<any>>,
+   *   release:()=>Promise<void>,
+   *   retire:()=>void,
+   *   published:boolean,
+   * }|null} */
+  let live = null;
   /** @type {ReturnType<typeof createController>|null} */
   let controller = null;
   const bridge = makeControllerTurnBridge({
@@ -92,10 +107,18 @@ export const createKernelTurnOwner = ({
   controller = createController({
     authorizeTurnCall: bridge.authorize,
     handleTurnKernelCall: bridge.handleKernelCall,
+    authorizeComposeCall: (/** @type {unknown} */ payload) =>
+      live?.runtime.composeAuthority?.authorize(payload) ?? null,
+    handleComposeKernelCall: (/** @type {string} */ operation,
+      /** @type {unknown} */ payload, /** @type {any} */ context) =>
+      live?.runtime.composeAuthority?.handleKernelCall(operation, payload, context)
+        ?? { ok: false, code: 'kernel-operation-denied', outcomeKnown: true },
   });
   if (typeof controller?.callTurn !== 'function'
       || typeof controller.renderSystemPrompt !== 'function'
       || typeof controller.projectTurnTools !== 'function'
+      || typeof controller.planToolsCommand !== 'function'
+      || typeof controller.composeTurn !== 'function'
       || typeof controller.withRun !== 'function'
       || typeof controller.release !== 'function') {
     void bridge.close();
@@ -108,15 +131,6 @@ export const createKernelTurnOwner = ({
   let closeHandoff;
   /** @type {Promise<void>} */
   const handoffClosed = new Promise((resolve) => { closeHandoff = () => resolve(); });
-  /** @type {{
-   *   epoch:number,
-   *   runtime:{close?:()=>Promise<void>|void,relays?:Record<string,any>},
-   *   routes:Record<string,(message?:any,sender?:any)=>Promise<any>>,
-   *   release:()=>Promise<void>,
-   *   retire:()=>void,
-   *   published:boolean,
-   * }|null} */
-  let live = null;
   let loadEpoch = 0;
   const claimedRuntimes = new WeakSet();
   const loadCandidate = async (/** @type {number} */ epoch) => {
@@ -124,6 +138,8 @@ export const createKernelTurnOwner = ({
       runUserTurn: bridge.runUserTurn,
       renderSystemPrompt: controller.renderSystemPrompt.bind(controller),
       projectTurnTools: controller.projectTurnTools.bind(controller),
+      planToolsCommand: controller.planToolsCommand.bind(controller),
+      composeTurn: controller.composeTurn.bind(controller),
       withRun: controller.withRun.bind(controller),
     }));
     if (!loaded || typeof loaded !== 'object'

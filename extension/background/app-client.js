@@ -57,6 +57,17 @@ export class AppBinaryFileError extends Error {
   }
 }
 
+export class AppDefaultMissingError extends Error {
+  constructor() {
+    // why: resolving a session default happens before OPFS is touched. The
+    // type lets trusted callers report that proven refusal without matching
+    // or forwarding storage-layer prose.
+    super('no current app for this session; create one first');
+    this.name = 'AppDefaultMissingError';
+    this.code = 'app_default_missing';
+  }
+}
+
 /**
  * @param {unknown} original
  * @param {PromiseSettledResult<unknown>[]} cleanup
@@ -404,7 +415,7 @@ export const createAppClient = ({
     }
     if (!sessionId) throw new Error('sessionId or appId required');
     const defaultId = await registry.getDefaultForSession(sessionId);
-    if (!defaultId) throw new Error('no current app for this session — create one first');
+    if (!defaultId) throw new AppDefaultMissingError();
     return defaultId;
   };
 

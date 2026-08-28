@@ -41,6 +41,12 @@ import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js'
 import { authorityEffectResourceKey } from './authority-effect-resource.js';
 import { canonicalCloneDigest } from '../shared/canonical-clone-digest.js';
 import { authorityEffectConfirmationPresentation } from '../shared/authority-confirmation-presentation.js';
+import {
+  createReadOnlyOperationGrant,
+  projectControllerTurnAuthorityClass,
+  projectControllerTurnBridgeAuthority,
+  snapshotControllerTurnAuthorityBinding,
+} from './controller-turn-authority-scope.js';
 
 const TURN_EVENT_QUEUE_CAP = 8;
 const OPAQUE_PREFIX = 'peerd-controller-opaque:';
@@ -210,6 +216,51 @@ export const makeControllerTurnBridge = ({
   const sessionGenerations = new Map();
   const runIsLive = (/** @type {any} */ run) =>
     runs.get(run.runId) === run && run.signal.aborted !== true;
+  const ensureAuthorityBinding = async (/** @type {any} */ run) => {
+    if (run.authorityBindingReady) return run.authorityBindingReady;
+    if (typeof run.loadAuthorityContext !== 'function') {
+      throw new TypeError('turn authority context loader unavailable');
+    }
+    run.authorityBindingReady = Promise.resolve().then(() =>
+      run.loadAuthorityContext()).then((value) => {
+      // why: take one stable host snapshot without copying transcript, prompt,
+      // projection, or controller-owned callbacks into the privileged root.
+      // Exact class scopes below can only narrow this fixed binding.
+      run.authorityBinding = snapshotControllerTurnAuthorityBinding(value, {
+        sessionId: run.sessionId,
+        operationGrant: run.ctx.operationGrant,
+        abortSignal: run.signal,
+      });
+      return run.authorityBinding;
+    });
+    return run.authorityBindingReady;
+  };
+  const authorityContextForOperation = (/** @type {any} */ run,
+    /** @type {string} */ operation) => {
+    const policy = controllerDomainOperationPolicy(operation);
+    if (!policy) return null;
+    if (!run.authorityBinding) return null;
+    const cached = run.authorityScopes.get(policy.authorityClass);
+    if (cached) return cached;
+    // why: the semantic caller chooses no host object and no selector. The
+    // bridge's fixed operation policy admits one authority class, then exposes
+    // only that class's named dependencies to its exact in-kernel binder.
+    const scope = projectControllerTurnAuthorityClass(
+      run.authorityBinding, policy.authorityClass,
+    );
+    if (!scope) return null;
+    run.authorityScopes.set(policy.authorityClass, scope);
+    return scope;
+  };
+  const authorityBridgeContext = (/** @type {any} */ run) => {
+    if (!run.authorityBinding) return null;
+    if (run.authorityBridge) return run.authorityBridge;
+    // why: lifecycle tracking never enters a domain binder. Confirmation and
+    // live permission remain duplicated only where an exact domain requires
+    // its own final-edge recheck; receipts and audit stay in this bridge.
+    run.authorityBridge = projectControllerTurnBridgeAuthority(run.authorityBinding);
+    return run.authorityBridge;
+  };
   const cleanupFuseMs = Number.isFinite(cleanupTimeoutMs) && cleanupTimeoutMs > 0
     ? Math.floor(cleanupTimeoutMs) : 250;
   const boundedCleanup = (/** @type {Promise<unknown>} */ pending) =>
@@ -447,6 +498,8 @@ export const makeControllerTurnBridge = ({
     /** @type {{args:unknown,confirmed:boolean,confirmedIntentRequired:boolean}|null} */ dispatchAdmission = null,
   ) => {
     const policy = controllerDomainOperationPolicy(operation);
+    const authorityCtx = authorityBridgeContext(run);
+    if (!authorityCtx) return failed('domain authority context unavailable', true);
     const replayable = policy?.riskClass === 'read';
     if (!replayable && (typeof effectOutcome?.fulfilled !== 'function'
         || typeof effectOutcome?.rejected !== 'function')) {
@@ -462,9 +515,9 @@ export const makeControllerTurnBridge = ({
           { outcomeKnown: true, retryable: false },
         );
         if (dispatchAdmission) {
-          const livePermission = typeof run.ctx.readAuthorityPermission === 'function'
-            ? await run.ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
-            : run.ctx.permission;
+          const livePermission = typeof authorityCtx.readAuthorityPermission === 'function'
+            ? await authorityCtx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+            : authorityCtx.permission;
           if (!controllerOperationAllowedInPermissionMode(
             operation, livePermission?.mode, dispatchAdmission.args,
           )) throw Object.assign(
@@ -514,8 +567,8 @@ export const makeControllerTurnBridge = ({
         ...(target ? { target } : {}),
       });
       run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
-      if (tracking && typeof run.ctx.lifecycle?.settleTracking === 'function') {
-        await run.ctx.lifecycle.settleTracking(tracking, {
+      if (tracking && typeof authorityCtx.lifecycle?.settleTracking === 'function') {
+        await authorityCtx.lifecycle.settleTracking(tracking, {
           ok: verdict === 'performed' || verdict === 'not-performed' && !refusal,
           outcomeKind: verdict === 'performed' ? 'effect-completed'
             : verdict === 'unknown' ? 'host-lost'
@@ -563,8 +616,8 @@ export const makeControllerTurnBridge = ({
         ...(target ? { target } : {}),
       });
       run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
-      if (tracking && typeof run.ctx.lifecycle?.settleTracking === 'function') {
-        await run.ctx.lifecycle.settleTracking(tracking, {
+      if (tracking && typeof authorityCtx.lifecycle?.settleTracking === 'function') {
+        await authorityCtx.lifecycle.settleTracking(tracking, {
           ok: verdict === 'performed',
           error: safeError,
           outcomeKind: verdict === 'performed' ? 'effect-completed'
@@ -608,7 +661,8 @@ export const makeControllerTurnBridge = ({
     /** @type {string} */ operation,
     /** @type {unknown} */ args,
   ) => {
-    const ctx = run.ctx;
+    const ctx = await authorityContextForOperation(run, operation);
+    if (!ctx) throw new TypeError('domain authority context unavailable');
     const actorKind = typeof ctx?.actorType === 'string' ? ctx.actorType : 'orchestrator';
     const actorInstance = typeof ctx?.actorInstanceId === 'string'
       ? ctx.actorInstanceId : 'session';
@@ -643,20 +697,21 @@ export const makeControllerTurnBridge = ({
     /** @type {boolean} */ confirmed,
     /** @type {any} */ confirmedIntent,
   ) => {
-    if (typeof run.ctx.lifecycle?.beginTracking !== 'function') {
+    const authorityCtx = authorityBridgeContext(run);
+    if (!authorityCtx || typeof authorityCtx.lifecycle?.beginTracking !== 'function') {
       return { refuseValue: {
         ok: false, code: 'authority_lifecycle_unavailable',
         error: 'Authority lifecycle is unavailable.', retryable: false,
       } };
     }
-    const begun = await run.ctx.lifecycle.beginTracking({
+    const begun = await authorityCtx.lifecycle.beginTracking({
       callId: effect.effectId,
       tool: authorityTool(operation, retryClass),
       sessionId: run.sessionId,
-      ownerSessionId: run.ctx.lifecycleOwnerSessionId ?? run.sessionId,
+      ownerSessionId: authorityCtx.lifecycleOwnerSessionId ?? run.sessionId,
       target, args, confirmed, confirmedIntent,
-      turnId: run.ctx.lifecycleTurnId,
-      userInitiated: run.ctx.lifecycleUserInitiated,
+      turnId: authorityCtx.lifecycleTurnId,
+      userInitiated: authorityCtx.lifecycleUserInitiated,
     });
     return begun?.refuse ? { refuseValue: {
       ok: false, error: begun.refuse.error,
@@ -673,9 +728,11 @@ export const makeControllerTurnBridge = ({
     /** @type {string} */ _summary,
   ) => {
     const policy = controllerDomainOperationPolicy(operation);
-    const livePermission = typeof run.ctx.readAuthorityPermission === 'function'
-      ? await run.ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
-      : run.ctx.permission;
+    const authorityCtx = authorityBridgeContext(run);
+    if (!authorityCtx) return { refuse: failed('domain authority context unavailable', true) };
+    const livePermission = typeof authorityCtx.readAuthorityPermission === 'function'
+      ? await authorityCtx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+      : authorityCtx.permission;
     if (!controllerOperationAllowedInPermissionMode(
       operation, livePermission?.mode, args,
     )) {
@@ -691,10 +748,10 @@ export const makeControllerTurnBridge = ({
     const retryClass = typeof policy?.retryClass === 'string' ? policy.retryClass : 'E';
     const tool = authorityTool(operation, retryClass);
     const confirmedIntent = await Promise.resolve(
-      run.ctx.lifecycle?.requiresIntentConfirmation?.({
+      authorityCtx.lifecycle?.requiresIntentConfirmation?.({
         tool, sessionId: run.sessionId,
-        ownerSessionId: run.ctx.lifecycleOwnerSessionId ?? run.sessionId,
-        target, args, userInitiated: run.ctx.lifecycleUserInitiated,
+        ownerSessionId: authorityCtx.lifecycleOwnerSessionId ?? run.sessionId,
+        target, args, userInitiated: authorityCtx.lifecycleUserInitiated,
       }),
     ).catch(() => false);
     const mustConfirm = controllerOperationRequiresConfirmation(
@@ -702,7 +759,7 @@ export const makeControllerTurnBridge = ({
     );
     let confirmed = false;
     if (mustConfirm) {
-      if (typeof run.ctx.confirm !== 'function') {
+      if (typeof authorityCtx.confirm !== 'function') {
         return { refuse: await performSemanticEffect(
           run, effect, operation, target,
           () => ({ ok: false, error: 'confirmation_unavailable', retryable: false }),
@@ -722,7 +779,7 @@ export const makeControllerTurnBridge = ({
       }
       let answer;
       try {
-        answer = await run.ctx.confirm({
+        answer = await authorityCtx.confirm({
           tool: operation,
           sideEffect: policy?.riskClass === 'resource' ? 'mutate_external' : 'write',
           origins: [...presentation.origins], sessionId: run.sessionId,
@@ -756,9 +813,9 @@ export const makeControllerTurnBridge = ({
         ) };
       }
     }
-    const dispatchPermission = typeof run.ctx.readAuthorityPermission === 'function'
-      ? await run.ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
-      : run.ctx.permission;
+    const dispatchPermission = typeof authorityCtx.readAuthorityPermission === 'function'
+      ? await authorityCtx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+      : authorityCtx.permission;
     if (!controllerOperationAllowedInPermissionMode(
       operation, dispatchPermission?.mode, args,
     )) {
@@ -793,6 +850,22 @@ export const makeControllerTurnBridge = ({
       },
     };
   };
+  const semanticEffectEnvelopeAllowed = (
+    /** @type {any} */ run,
+    /** @type {Record<string, any>} */ value,
+    /** @type {string} */ operation,
+  ) => typeof value.callId === 'string'
+    && typeof value.effectId === 'string'
+    && Number.isSafeInteger(value.effectSequence)
+    && value.effectSequence >= 1 && value.effectSequence <= 256
+    && value.effectId === `${value.callId}:${value.effectSequence}`
+    && value.turnGeneration === run.turnGeneration
+    && !run.semanticEffectIds.has(value.effectId)
+    && run.allowedOperations.has(operation)
+    && !run.completedSemanticCalls.has(value.callId)
+    && !run.closingSemanticCalls.has(value.callId)
+    && run.finalizing !== true
+    && run.modelToolCalls.has(value.callId);
   const claimSemanticEffect = (
     /** @type {any} */ run,
     /** @type {Record<string, any>} */ value,
@@ -803,18 +876,7 @@ export const makeControllerTurnBridge = ({
     if (!exactOptionalKeys(value, [
       'callId', 'effectId', 'effectSequence', 'turnGeneration', ...businessKeys,
     ], optionalKeys)
-        || typeof value.callId !== 'string'
-        || typeof value.effectId !== 'string'
-        || !Number.isSafeInteger(value.effectSequence)
-        || value.effectSequence < 1 || value.effectSequence > 256
-        || value.effectId !== `${value.callId}:${value.effectSequence}`
-        || value.turnGeneration !== run.turnGeneration
-        || run.semanticEffectIds.has(value.effectId)
-        || !run.allowedOperations.has(operation)
-        || run.completedSemanticCalls.has(value.callId)
-        || run.closingSemanticCalls.has(value.callId)
-        || run.finalizing === true
-        || !run.modelToolCalls.has(value.callId)) return null;
+        || !semanticEffectEnvelopeAllowed(run, value, operation)) return null;
     run.semanticEffectIds.add(value.effectId);
     const claimed = run.claimedEffectsByCall.get(value.callId) ?? new Map();
     claimed.set(value.effectId, operation);
@@ -890,7 +952,9 @@ export const makeControllerTurnBridge = ({
       .filter((key) => Object.hasOwn(value, key)).map((key) => [key, value[key]]));
     return /** @type {any} */ ({
       semanticEffect: effect,
-      call: { id: effect.callId, args }, custody: { ctx: run.ctx },
+      call: { id: effect.callId, args }, custody: {
+        ctx: authorityContextForOperation(run, operation),
+      },
       domain, domainCalls: effect.domainCalls, domainState: effect.domainState,
     });
   };
@@ -904,7 +968,9 @@ export const makeControllerTurnBridge = ({
     /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome = null,
   ) => {
     const policy = controllerDomainOperationPolicy(operation);
-    const schedulerTarget = authorityEffectResourceKey(operation, entry.call.args, run.ctx);
+    const schedulerTarget = authorityEffectResourceKey(
+      operation, entry.call.args, entry.custody.ctx,
+    );
     return runAuthorityOperation(run, operation, async () => {
       // why: the accepted claim enters this call's dispatch drain before
       // canonical hashing can yield. An early tool-result close therefore
@@ -1156,6 +1222,24 @@ export const makeControllerTurnBridge = ({
     const sameSession = () => value.sessionId === run.sessionId;
     try {
       try {
+        const domainPolicy = controllerDomainOperationPolicy(operation);
+        if (domainPolicy && !run.allowedOperations.has(operation)) {
+          return failed('domain authority operation is not granted', true);
+        }
+        // why: a compromised semantic realm must first prove that this exact
+        // effect belongs to a live model-issued call. Forged, stale, duplicate,
+        // or ungranted envelopes cannot force construction of the rich host
+        // authority binding even though the binding remains lazy per turn.
+        if (domainPolicy && !semanticEffectEnvelopeAllowed(run, value, operation)) {
+          return failed('domain authority effect envelope is invalid', true);
+        }
+        if (domainPolicy) {
+          await ensureAuthorityBinding(run);
+          if ((context.signal.aborted || run.signal.aborted)
+              && !ABORT_CLEANUP_OPERATIONS.has(operation)) return {
+            ok: false, code: 'turn-run-aborted', outcomeKnown: true,
+          };
+        }
         switch (operation) {
         case 'turn.session.get':
           if (!sameSession()) return failed('session authority mismatch', true);
@@ -1357,7 +1441,9 @@ export const makeControllerTurnBridge = ({
           return known(null);
         }
         case 'turn.goal.complete': {
-          const complete = run.ctx.completeGoalRun;
+          const authorityCtx = authorityContextForOperation(run, operation);
+          const bridgeAuthority = authorityBridgeContext(run);
+          const complete = authorityCtx?.completeGoalRun;
           const effect = typeof value.summary === 'string'
             && value.summary.length <= 4_096
             ? claimSemanticEffect(run, value, operation, ['summary']) : null;
@@ -1370,9 +1456,9 @@ export const makeControllerTurnBridge = ({
           return runSemanticEffect(
             run, effect, operation, 'active-goal',
             async () => {
-              const livePermission = typeof run.ctx.readAuthorityPermission === 'function'
-                ? await run.ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
-                : run.ctx.permission;
+              const livePermission = typeof bridgeAuthority?.readAuthorityPermission === 'function'
+                ? await bridgeAuthority.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+                : bridgeAuthority?.permission;
               if (!controllerOperationAllowedInPermissionMode(
                 operation, livePermission?.mode, { summary: value.summary },
               )) return {
@@ -1411,7 +1497,7 @@ export const makeControllerTurnBridge = ({
               || (value.maxDepth !== undefined && !Number.isFinite(value.maxDepth))) {
             return failed('actor spawn authority mismatch', true);
           }
-          const ctx = run.ctx;
+          const ctx = authorityContextForOperation(run, operation);
           const actorAuthority = ctx?.actorAuthority;
           const spawn = operation === 'turn.actor.spawn-sync'
             ? actorAuthority?.spawnSync : actorAuthority?.spawnAsync;
@@ -1447,7 +1533,7 @@ export const makeControllerTurnBridge = ({
         case 'turn.actor.tasks': {
           const effect = claimSemanticEffect(run, value, operation, []);
           if (!effect) return failed('actor tasks authority mismatch', true);
-          const list = run.ctx?.actorAuthority?.listTasks;
+          const list = authorityContextForOperation(run, operation)?.actorAuthority?.listTasks;
           return runSemanticEffect(
             run, effect, operation, 'actor-task-list',
             () => typeof list === 'function' ? list() : [],
@@ -1460,7 +1546,7 @@ export const makeControllerTurnBridge = ({
           if (!effect || typeof value.taskId !== 'string') {
             return failed('actor cancel authority mismatch', true);
           }
-          const cancel = run.ctx?.actorAuthority?.cancelTask;
+          const cancel = authorityContextForOperation(run, operation)?.actorAuthority?.cancelTask;
           const target = `actor-task:${value.taskId}`;
           return runAuthorityOperation(run, operation, async () => {
             const prepared = await prepareAuthorityEffect(
@@ -1493,7 +1579,7 @@ export const makeControllerTurnBridge = ({
               || value.awaitCapMs > 3 * 60_000) {
             return failed('actor message authority mismatch', true);
           }
-          const ctx = run.ctx;
+          const ctx = authorityContextForOperation(run, operation);
           const messageActor = ctx?.actorAuthority?.deliverMessage;
           if (typeof messageActor !== 'function') {
             return known({ ok: false, error: 'actor messaging is not enabled', outcomeKnown: true });
@@ -2482,17 +2568,22 @@ export const makeControllerTurnBridge = ({
     const allowedToolNames = projectedToolNameSet(ctx.tools);
     if (!allowedOperations) throw new TypeError('controller operation projection is invalid');
     if (!allowedToolNames) throw new TypeError('controller tool projection is invalid');
+    const operationGrant = createReadOnlyOperationGrant(allowedOperations);
     const authorityContext = {
       ...ctx,
       // why: code-mode nested capabilities must be a frozen projection of this
-      // run's exact host grant. A missing grant is deliberately no authority.
-      // Set freezing prevents property replacement, while the host-owned Set
-      // identity stays live across trusted per-step surface refreshes.
-      operationGrant: Object.freeze(allowedOperations),
+      // run's exact host grant. Only membership is exposed; the backing Set is
+      // closure-private and stays live as trusted refresh narrows the turn.
+      operationGrant,
     };
     const run = {
       runId, sessionId: ctx.sessionId, turnGeneration,
       ctx: authorityContext, events, abort: localAbort, signal: localAbort.signal,
+      loadAuthorityContext: ctx.loadAuthorityContext,
+      authorityBindingReady: null,
+      authorityBinding: null,
+      authorityScopes: new Map(),
+      authorityBridge: null,
       opaque: new Map(), modelToolCalls: new Map(),
       providerOwner: Object.freeze({ runId }), modelCandidates: [],
       maxOutputTokens: Number.isSafeInteger(ctx.maxOutputTokens)

@@ -400,8 +400,9 @@ describe('runAgentTurn credential custody', () => {
     const fixture = turnDeps('chat', { dynamicIsolation: true });
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' }))
       .toEqual({ ok: true, stopReason: 'end_turn' });
-    expect(fixture.modelCalls).toHaveLength(2);
-    expect(fixture.modelCalls[0].tools.map((tool: any) => tool.name))
+    const projectedCalls = fixture.modelCalls.filter((call) => Array.isArray(call.tools));
+    expect(projectedCalls).toHaveLength(2);
+    expect(projectedCalls[0].tools.map((tool: any) => tool.name))
       .toEqual(['message_actor', 'actor_create', 'actor_list']);
     expect(fixture.modelCalls[1].tools.map((tool: any) => tool.name)).toEqual(['actor_list']);
     expect(fixture.toolContextBuilds()).toBe(0);

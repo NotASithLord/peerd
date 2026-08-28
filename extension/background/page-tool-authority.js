@@ -17,13 +17,13 @@ import {
   classifyUgcUrl,
   describeToolActivity,
   displayOrigin,
+  inspectTabToolCall,
   normalizeBrowserChildPolicyNotices,
   resolveTargetTab,
   withAsyncBrowserChildPolicyNotices,
   withBrowserChildPolicyNotices,
 } from '/peerd-runtime/browser-authority.js';
 import { controllerOperationAllowedInPermissionMode } from '/shared/controller-kernel-quota.js';
-import { inspectTabToolCall } from '/peerd-runtime/background.js';
 
 const PAGE_PROGRAM_CAPS = Object.freeze({
   page: true, egress: false, subagent: false, opfs: false,
@@ -204,6 +204,14 @@ export const createPageToolAuthority = ({
   };
   const run = async (/** @type {string} */ operation, /** @type {{execute:Function}} */ handler) => {
     if (binding.operation !== operation || typeof handler?.execute !== 'function') throw mismatch();
+    // why: credential ceremonies are forbidden for inbound turns before even
+    // a browser target probe. The lower login handler repeats the rule, but
+    // this outer authority edge ensures the defense is operational rather
+    // than occurring after page reads and activity bookkeeping.
+    if (operation === 'turn.page.login' && ctx?.inbound === true) return {
+      ok: false, error: 'login_refused_inbound', performed: false,
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+    };
     const preflight = await preflightAction(operation);
     if (preflight.refuse) return typeof preflight.ugcRuleId === 'string'
       ? {

@@ -7,6 +7,7 @@ import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
 } from '/shared/kernel-feature-policy.js';
 import { createKernelFeatureHost } from './kernel-feature-host.js';
+import { TURN_COMPOSE_CAPABILITY } from '/shared/controller-turn-phase-policy.js';
 
 const loadSemanticRoutes = makeBoundedModuleLoader(() => import('./semantic-route-host.js'));
 const loadTurnRuntime = makeBoundedModuleLoader(() => import('./controller-turn-runtime.js'));
@@ -15,6 +16,7 @@ const loadAdministrativeHost = () => import('./kernel-administrative-host.js');
 const loadRepositoryHost = () => import('./kernel-repository-host.js');
 const loadLocalHost = () => import('./kernel-local-host.js');
 const loadSupportHost = () => import('./kernel-support-host.js');
+const loadComposeRuntime = makeBoundedModuleLoader(() => import('./controller-compose-runtime.js'));
 const loadFailure = (/** @type {any} */ cause) => ({
   ok: false,
   code: cause?.code ?? 'controller-module-load-failed',
@@ -92,6 +94,19 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
     try { runtime = await loadTurnRuntime(); }
     catch (cause) { return loadFailure(cause); }
     return runtime.createControllerTurnRuntime().projectTools(payload);
+  },
+  'turn.tools.command': async (/** @type {unknown} */ payload) => {
+    let runtime;
+    try { runtime = await loadTurnRuntime(); }
+    catch (cause) { return loadFailure(cause); }
+    return runtime.createControllerTurnRuntime().planToolsCommand(payload);
+  },
+  [TURN_COMPOSE_CAPABILITY]: async (/** @type {unknown} */ payload,
+    /** @type {any} */ options) => {
+    let runtime;
+    try { runtime = await loadComposeRuntime(); }
+    catch (cause) { return loadFailure(cause); }
+    return runtime.composeTurn(payload, options);
   },
   [KERNEL_FEATURE_DISPATCH_CAPABILITY]: featureHost.dispatch,
 });

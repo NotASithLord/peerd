@@ -115,7 +115,13 @@ export const makeTurnAuthorityDriver = (/** @type {any} */ deps) => {
  * state pushes so the UI can incrementally update without re-rendering
  * the whole session shape).
  */
-const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, sessionId: targetSessionId = null, synthetic = false, trusted = false, resume = false, activeTabId = null, oneShot = false, actorReply = null, captureTurnSnapshot = false, onBeforeRelease = null, turnLease = null }) => {
+const runAgentTurn = async (/** @type {any} */ input) => {
+  const { userText, attachments = null, sessionId: targetSessionId = null,
+    synthetic = false, trusted = false, resume = false, oneShot = false,
+    actorReply = null, captureTurnSnapshot = false, onBeforeRelease = null,
+    turnLease = null } = input;
+  const activeTabSpecified = Object.hasOwn(input, 'activeTabId');
+  const activeTabId = activeTabSpecified ? input.activeTabId : null;
   if (vault.isLocked()) throw new VaultLockedError();
   // why before session work: a cold background page starts fail-closed while
   // durable actor-host health loads. Sampling that sentinel would falsely tell
@@ -314,7 +320,7 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
     .catch(() => HOOK_RECORDS_UNAVAILABLE);
 
   const toolContextArgs = {
-    exposure: 'main', sessionId, activeTabId, synthetic, trusted,
+    exposure: 'main', sessionId, ...(activeTabSpecified ? { activeTabId } : {}), synthetic, trusted,
     lifecycleTurnId, lifecycleUserInitiated: synthetic !== true,
   };
   /** @type {Promise<any>|null} */
@@ -468,6 +474,11 @@ const runAgentTurn = async (/** @type {any} */ { userText, attachments = null, s
           ? promptSession.messages.length : 0,
         trimCovered: promptSession?.trimSummary?.covered ?? 0,
       },
+      // why: exact authority stays host-private and is constructed only if the
+      // sealed controller claims one of this turn's finite operations. The
+      // bridge never serializes this closure or exposes the resulting context
+      // to the semantic heap.
+      loadAuthorityContext: getToolContext,
       // why: the loop calls this before each model step, then re-renders the
       // system prompt against the isolation snapshot selected here. Mid-turn
       // exposure changes therefore update the prompt and tools together.
