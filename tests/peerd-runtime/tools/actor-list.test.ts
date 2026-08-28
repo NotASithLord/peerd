@@ -44,7 +44,7 @@ const fullCtx = (over: Record<string, any> = {}) => {
   ...over,
   };
   const authority = createIntrospectionToolAuthority({
-    call: { name: 'actor_list', args: {} }, ctx: source,
+    binding: { operation: 'turn.introspection.actor-roster', args: {} }, ctx: source,
   });
   return { actorDirectory: { readRoster: authority.readActorRoster } };
 };

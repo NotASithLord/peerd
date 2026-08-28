@@ -1,5 +1,7 @@
 // @ts-check
 
+import { controllerOperationAllowedInPermissionMode } from '/shared/controller-kernel-quota.js';
+
 const mismatch = () => Object.assign(new Error('schedule authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
@@ -19,35 +21,63 @@ const sameClone = (left, right) => {
   catch { return false; }
 };
 
-/** @param {{call:any,ctx:any,signal?:AbortSignal}} input */
-export const createScheduleToolAuthority = ({ call, ctx, signal }) => {
-  const args = call?.args ?? {};
-  const requireTool = (/** @type {string} */ name) => {
-    if (call?.name !== name) throw mismatch();
+/** @param {{operation:string,args:any,ctx:any,signal?:AbortSignal}} input */
+export const createScheduleToolAuthority = ({ operation, args = {}, ctx, signal }) => {
+  const requireOperation = (/** @type {string} */ expected) => {
+    if (operation !== expected) throw mismatch();
   };
   const aborted = () => signal?.aborted === true || ctx?.abortSignal?.aborted === true;
+  const permissionAllows = async () => {
+    const permission = typeof ctx?.readAuthorityPermission === 'function'
+      ? await ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+      : ctx?.permission;
+    return controllerOperationAllowedInPermissionMode(operation, permission?.mode, args);
+  };
   return Object.freeze({
     readRoutines: () => {
-      requireTool('schedule_list');
+      requireOperation('turn.schedule.read-routines');
       if (typeof ctx?.scheduleList !== 'function') throw mismatch();
       return ctx.scheduleList() ?? [];
     },
     armConfirmedRoutine: async (/** @type {any} */ request) => {
-      requireTool('schedule_create');
+      requireOperation('turn.schedule.arm-confirmed-routine');
       const expected = {
         prompt: args.prompt,
         every: args.every,
         dailyAt: args.dailyAt,
         mode: args.mode,
       };
-      if (!sameClone(request, expected) || typeof ctx?.scheduleAdd !== 'function') {
+      const validCadence = (typeof request?.every === 'string'
+        && request.every.length >= 1 && request.every.length <= 128)
+        !== (typeof request?.dailyAt === 'string'
+          && request.dailyAt.length >= 1 && request.dailyAt.length <= 128);
+      if (!sameClone(request, expected)
+          || typeof request?.prompt !== 'string'
+          || request.prompt.length < 1 || request.prompt.length > 16_384
+          || !validCadence
+          || (request.mode !== undefined && request.mode !== 'turn' && request.mode !== 'goal')
+          || typeof ctx?.scheduleAdd !== 'function') {
         throw mismatch();
       }
+      if (!await permissionAllows()) return {
+        ok: false, code: 'plan_mode_refused',
+        error: 'plan mode is read-only for this authority operation', retryable: false,
+        outcomeKind: 'pre-effect-failure',
+      };
       if (aborted()) return {
         ok: false, error: 'schedule_aborted',
         content: 'The routine was not armed because the run was stopped.',
+        retryable: false,
       };
-      if (ctx?.permission?.confirmActions === false && typeof ctx?.confirm === 'function') {
+      // why: scheduling is unattended execution. This named authority operation
+      // owns its one confirmation regardless of the ordinary action preference.
+      if (typeof ctx?.confirm !== 'function') return {
+        ok: false,
+        error: 'confirmation_unavailable',
+        content: 'The routine was not armed because confirmation is unavailable.',
+        outcomeKind: 'pre-effect-failure', retryable: false,
+      };
+      {
         const cadence = request.every
           ? `every ${String(request.every).trim()}`
           : `daily at ${String(request.dailyAt).trim()}`;
@@ -70,26 +100,38 @@ export const createScheduleToolAuthority = ({ call, ctx, signal }) => {
         if (aborted()) return {
           ok: false, error: 'schedule_aborted',
           content: 'The routine was not armed because the run was stopped.',
+          retryable: false,
         };
         if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) {
           return {
             ok: false, error: 'declined', content: 'User declined to arm the routine.',
+            retryable: false,
           };
         }
       }
+      if (!await permissionAllows()) return {
+        ok: false, code: 'plan_mode_refused',
+        error: 'plan mode became read-only before the routine was armed', retryable: false,
+        outcomeKind: 'pre-effect-failure',
+      };
       if (aborted()) return {
         ok: false, error: 'schedule_aborted',
         content: 'The routine was not armed because the run was stopped.',
+        retryable: false,
       };
       return ctx.scheduleAdd(request);
     },
     cancelRoutine: (/** @type {string} */ id) => {
-      requireTool('schedule_cancel');
-      if (id !== args.id || typeof ctx?.scheduleRemove !== 'function') throw mismatch();
+      requireOperation('turn.schedule.cancel-routine');
+      if (id !== args.id || typeof id !== 'string' || id.length < 1 || id.length > 512
+          || typeof ctx?.scheduleRemove !== 'function') throw mismatch();
       return ctx.scheduleRemove(id);
     },
   });
 };
 
-export const bindScheduleToolAuthority = (/** @type {any} */ state, /** @type {any} */ input) =>
-  state.authority ??= createScheduleToolAuthority(input);
+export const bindScheduleToolAuthority = (/** @type {any} */ _state, /** @type {any} */ input) =>
+  createScheduleToolAuthority({
+    ...input,
+    args: structuredClone(input.args),
+  });

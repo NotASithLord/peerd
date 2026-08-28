@@ -45,7 +45,10 @@ export const loadSkillTool = composeTool("load_skill", {
       // it returns false (dedup to a pointer) only while the prior body is still
       // in context. ctx.session carries messageCount/trimCovered (SW-injected).
       const { sessionId, messageCount, trimCovered } = ctx.session ?? {};
-      const inject = shouldInjectBody(sessionId, `skill:${meta.name}`, messageCount ?? 0, trimCovered ?? 0);
+      const inject = shouldInjectBody(
+        sessionId, `skill:${meta.name}`, messageCount ?? 0, trimCovered ?? 0,
+        ctx.session?.messages, 'load_skill', `<skill name="${meta.name}"`,
+      );
       // why: frame the body as an instruction playbook the agent should
       // follow, while reminding the model these are operating
       // instructions for a task — not a new system policy and not a

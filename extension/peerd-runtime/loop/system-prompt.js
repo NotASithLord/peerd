@@ -129,7 +129,7 @@ const loadDwebBlock = async () => {
  *   effectiveTools grant is supplied.
  * @param {string} [ctx.actorType]
  *   Selects a compact BOUND ACTOR profile for one instance, tab, origin or mesh.
- *   Its authority signature comes from actorCapabilityManifest; the orchestrator
+ *   Its advertised model surface comes from actorCapabilityManifest; the orchestrator
  *   template, memory and skills are deliberately excluded.
  * @param {'tab'|'api'} [ctx.backing]
  *   DESIGN-18: for an actorType:'web' actor, which backing — 'tab' (DOM lore) or

@@ -15,23 +15,26 @@ const mismatch = () => Object.assign(new Error('repository authority mismatch'),
 });
 
 /**
- * @param {{call:any,ctx:any,signal:AbortSignal}} input
+ * @param {{binding:any,ctx:any,signal:AbortSignal,shared?:any}} input
  */
-export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
-  const args = call?.args ?? {};
+export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {} }) => {
+  const args = binding.args;
   const kind = ctx?.actorType;
   const id = ctx?.actorInstanceId;
   const repositories = ctx?.repositories;
+  const boundPodId = kind === 'pod' && typeof id === 'string' && id ? id : null;
   const repositoryRef = ['app', 'notebook', 'pod'].includes(kind)
     && typeof id === 'string' && id ? Object.freeze({ kind, id }) : null;
-  let remoteRead = false;
-  /** @type {any} */ let remote = null;
-  /** @type {any} */ let approvedRemote = null;
-  /** @type {any} */ let podRecord = null;
 
   const requireRepository = () => {
     if (!repositoryRef || !repositories) throw mismatch();
     return repositoryRef;
+  };
+  const requireLive = () => {
+    if (!signal?.aborted) return;
+    throw Object.assign(new Error('repository operation stopped before mutation'), {
+      outcomeKnown: true, retryable: false,
+    });
   };
 
   const coordinateMutation = async (
@@ -39,7 +42,13 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
     /** @type {{quiesce?:boolean,replacesTree?:boolean}} */ options = {},
   ) => {
     const ref = requireRepository();
-    const coordinated = () => repositories.coordinate(ref, operation);
+    const coordinated = () => repositories.coordinate(ref, async () => {
+      // why: the repository's own lock may outlive the turn that queued this
+      // operation. Recheck inside that queue, immediately before touching the
+      // worktree, rather than relying on the earlier authority-scheduler gate.
+      requireLive();
+      return operation();
+    });
     if (options.quiesce !== true) return coordinated();
     if (kind === 'app') {
       const result = await ctx?.appQuiescence?.run?.(id, coordinated, { close: true });
@@ -72,61 +81,83 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
 
   const readRemote = async () => {
     const ref = requireRepository();
-    if (!['repo_history', 'repo_remote'].includes(call?.name)) throw mismatch();
-    remote = await repositories.getRemote(ref);
-    remoteRead = true;
-    return remote;
+    if (!['turn.repository.read-remote'].includes(binding.operation)) throw mismatch();
+    shared.remote = await repositories.getRemote(ref);
+    shared.remoteRead = true;
+    return shared.remote;
+  };
+  const approved = (/** @type {unknown} */ answer) => answer === true
+    || answer === 'yes_once' || answer === 'yes_session';
+  const consumeRemoteApproval = (
+    /** @type {string} */ op,
+    /** @type {string} */ target,
+    /** @type {string|undefined} */ branch,
+  ) => {
+    const approval = shared.repositoryRemoteApproval;
+    shared.repositoryRemoteApproval = null;
+    if (!approval || approval.op !== op || approval.target !== target
+        || approval.branch !== branch) throw mismatch();
+    return approval.remote;
   };
 
   return Object.freeze({
     readPod: async (/** @type {string} */ podId) => {
-      if (call?.name !== 'pod_destroy' || podId !== args.podId
+      if (binding.operation !== 'turn.repository.read-pod' || podId !== args.podId
+          || (boundPodId !== null && podId !== boundPodId)
           || typeof ctx?.podRegistry?.get !== 'function') throw mismatch();
       const record = await ctx.podRegistry.get(podId);
-      podRecord = record ? { id: podId, name: String(record.name ?? ''), pinned: record.pinned === true } : null;
-      return podRecord;
+      shared.podRecord = record
+        ? { id: podId, name: String(record.name ?? ''), pinned: record.pinned === true } : null;
+      return shared.podRecord;
     },
     destroyPod: async (/** @type {string} */ podId) => {
-      if (call?.name !== 'pod_destroy' || podId !== args.podId
-          || podRecord?.id !== podId || podRecord.pinned
+      if (binding.operation !== 'turn.repository.destroy-pod' || podId !== args.podId
+          || (boundPodId !== null && podId !== boundPodId)
+          || shared.podRecord?.id !== podId || shared.podRecord.pinned
           || typeof ctx?.podTabTracker?.closeTab !== 'function'
           || typeof ctx?.podRegistry?.delete !== 'function'
           || !repositories) throw mismatch();
       return repositories.coordinate({ kind: 'pod', id: podId }, async () => {
+        requireLive();
         await ctx.podTabTracker.closeTab(podId);
         await repositories.destroy({ kind: 'pod', id: podId }, { worktree: true });
         await ctx.podRegistry.delete(podId);
       });
     },
     readStatus: () => {
-      if (call?.name !== 'repo_history') throw mismatch();
+      if (binding.operation !== 'turn.repository.read-status') throw mismatch();
       return repositories.status(requireRepository());
     },
     readHistory: (/** @type {number} */ depth) => {
       const expected = Math.min(100, Math.max(1, Number(args?.depth) || 20));
-      if (call?.name !== 'repo_history' || depth !== expected) throw mismatch();
+      if (binding.operation !== 'turn.repository.read-history' || depth !== expected) throw mismatch();
       return repositories.history(requireRepository(), { depth });
     },
     readRemote,
     readDiff: (/** @type {string} */ from, /** @type {string|null} */ to) => {
       const expectedFrom = typeof args.from === 'string' ? args.from : 'HEAD';
       const expectedTo = typeof args.to === 'string' ? args.to : null;
-      if (call?.name !== 'repo_history' || args.includeDiff !== true
+      if (binding.operation !== 'turn.repository.read-diff'
           || from !== expectedFrom || to !== expectedTo) throw mismatch();
       return repositories.diff(requireRepository(), { from, to });
     },
-    confirmRestore: (/** @type {string} */ to) => {
+    confirmRestore: async (/** @type {string} */ to) => {
       const ref = requireRepository();
-      if (call?.name !== 'repo_version' || args.op !== 'restore' || to !== args.to
-          || typeof ctx?.confirm !== 'function') throw mismatch();
-      return ctx.confirm({
-        tool: 'repo_version', kind: 'repository_restore', sideEffect: 'destructive', origins: [],
+      if (binding.operation !== 'turn.repository.confirm-restore' || to !== args.to) {
+        throw mismatch();
+      }
+      if (typeof ctx?.confirm !== 'function') return false;
+      const answer = await ctx.confirm({
+        tool: binding.operation, kind: 'repository_restore', sideEffect: 'destructive', origins: [],
         summary: `Restore ${ref.kind} ${ref.id} to ${to.slice(0, 12)}? Current history is retained and the restore becomes a new commit.`,
-      });
+      }, signal);
+      if (signal?.aborted) return false;
+      if (approved(answer)) shared.repositoryRestoreApproval = Object.freeze({ to });
+      return answer;
     },
     checkpoint: (/** @type {string} */ message) => {
       const expected = typeof args.message === 'string' ? args.message : 'checkpoint';
-      if (call?.name !== 'repo_version' || args.op !== 'checkpoint' || message !== expected) {
+      if (binding.operation !== 'turn.repository.checkpoint' || message !== expected) {
         throw mismatch();
       }
       return coordinateMutation(
@@ -134,7 +165,7 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
       );
     },
     branch: (/** @type {string} */ name) => {
-      if (call?.name !== 'repo_version' || args.op !== 'branch' || name !== args.name) {
+      if (binding.operation !== 'turn.repository.branch' || name !== args.name) {
         throw mismatch();
       }
       return coordinateMutation(() => repositories.branch(requireRepository(), {
@@ -142,7 +173,7 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
       }), { quiesce: true });
     },
     checkout: (/** @type {string} */ name) => {
-      if (call?.name !== 'repo_version' || args.op !== 'checkout' || name !== args.name) {
+      if (binding.operation !== 'turn.repository.checkout' || name !== args.name) {
         throw mismatch();
       }
       return coordinateMutation(
@@ -151,7 +182,10 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
       );
     },
     restore: (/** @type {string} */ to) => {
-      if (call?.name !== 'repo_version' || args.op !== 'restore' || to !== args.to) {
+      const approval = shared.repositoryRestoreApproval;
+      shared.repositoryRestoreApproval = null;
+      if (binding.operation !== 'turn.repository.restore' || to !== args.to
+          || approval?.to !== to) {
         throw mismatch();
       }
       return coordinateMutation(
@@ -165,16 +199,15 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
       /** @type {string|undefined} */ branch,
     ) => {
       const ref = requireRepository();
-      if (call?.name !== 'repo_remote' || op !== args.op
-          || branch !== (typeof args.branch === 'string' ? args.branch : undefined)
-          || typeof ctx?.confirm !== 'function') throw mismatch();
+      if (binding.operation !== 'turn.repository.confirm-remote'
+          || branch !== (typeof args.branch === 'string' ? args.branch : undefined)) throw mismatch();
       const candidate = op === 'link'
         ? normalizeGitRemote(args.url)
-        : remoteRead ? remote : null;
+        : shared.remoteRead ? shared.remote : null;
       if (!candidate || target !== candidate.url) throw mismatch();
-      approvedRemote = candidate;
-      return ctx.confirm({
-        tool: 'repo_remote', kind: `git_${op}`,
+      if (typeof ctx?.confirm !== 'function') return false;
+      const answer = await ctx.confirm({
+        tool: binding.operation, kind: `git_${op}`,
         sideEffect: op === 'push' ? 'mutate_external' : 'write',
         origins: [new URL(target).origin],
         summary: op === 'push'
@@ -182,16 +215,21 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
           : op === 'fetch'
             ? `Fetch repository metadata and objects for ${ref.kind} ${ref.id} from ${target}?`
             : `Link ${ref.kind} ${ref.id} to Git remote ${target}? Future fetch/push can use its vault-bound host token.`,
+      }, signal);
+      if (signal?.aborted) return false;
+      if (approved(answer)) shared.repositoryRemoteApproval = Object.freeze({
+        op, target, branch, remote: Object.freeze({ ...candidate }),
       });
+      return answer;
     },
     link: (/** @type {string} */ url) => {
-      if (call?.name !== 'repo_remote' || args.op !== 'link'
-          || approvedRemote?.url !== url) throw mismatch();
+      if (binding.operation !== 'turn.repository.link') throw mismatch();
+      consumeRemoteApproval('link', url, undefined);
       return coordinateMutation(() => repositories.setRemote(requireRepository(), { url }));
     },
     fetch: (/** @type {string} */ target) => {
-      if (call?.name !== 'repo_remote' || args.op !== 'fetch'
-          || approvedRemote?.url !== target) throw mismatch();
+      if (binding.operation !== 'turn.repository.fetch') throw mismatch();
+      const approvedRemote = consumeRemoteApproval('fetch', target, undefined);
       return coordinateMutation(async () => {
         const live = await repositories.getRemote(requireRepository());
         if (!sameRemote(live, approvedRemote)) throw new Error(
@@ -202,15 +240,25 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
     },
     push: (/** @type {string} */ target, /** @type {string|undefined} */ branch) => {
       const expectedBranch = typeof args.branch === 'string' ? args.branch : undefined;
-      if (call?.name !== 'repo_remote' || args.op !== 'push'
-          || approvedRemote?.url !== target || branch !== expectedBranch) throw mismatch();
+      if (binding.operation !== 'turn.repository.push' || branch !== expectedBranch) {
+        throw mismatch();
+      }
+      const approvedRemote = consumeRemoteApproval('push', target, branch);
       return coordinateMutation(async () => {
         const live = await repositories.getRemote(requireRepository());
         if (!sameRemote(live, approvedRemote)) throw new Error(
           'Git remote changed while authorization was pending; review and retry',
         );
         await repositories.commit(requireRepository(), { message: 'checkpoint before push' });
-        return repositories.push(requireRepository(), { ref: branch, signal });
+        try {
+          const result = await repositories.push(requireRepository(), { ref: branch, signal });
+          return result?.ok === false
+            ? { ...result, performed: true, retryable: false } : result;
+        } catch (cause) {
+          const failure = cause instanceof Error ? cause : new Error(String(cause));
+          Object.assign(failure, { performed: true, retryable: false });
+          throw failure;
+        }
       }, { quiesce: true });
     },
   });
@@ -220,5 +268,7 @@ export const createRepositoryToolAuthority = ({ call, ctx, signal }) => {
 // binding instead of rebuilding domain custody in each route table.
 export const bindRepositoryToolAuthority = (
   /** @type {any} */ state, /** @type {any} */ input,
-) =>
-  state.authority ??= createRepositoryToolAuthority(input);
+) => {
+  const binding = Object.freeze({ operation: input.operation, args: structuredClone(input.args) });
+  return createRepositoryToolAuthority({ ...input, binding, shared: state });
+};

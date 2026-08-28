@@ -24,9 +24,53 @@ const context = (overrides: Record<string, any> = {}) => ({
 });
 
 describe('exact App authority', () => {
+  test('Stop during the fresh delete probe prevents every physical delete edge', async () => {
+    let releaseProbe!: () => void;
+    let probeStarted!: () => void;
+    const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    const started = new Promise<void>((resolve) => { probeStarted = resolve; });
+    const controller = new AbortController();
+    const shared: any = {};
+    let reads = 0;
+    let deletes = 0;
+    const ctx = context({
+      actorType: 'app', actorInstanceId: 'app-1',
+      appRegistry: {
+        get: async () => {
+          reads += 1;
+          if (reads === 2) {
+            probeStarted();
+            await probeGate;
+          }
+          return { id: 'app-1', name: 'work', pinned: false };
+        },
+      },
+      appClient: { delete: async () => { deletes += 1; return true; } },
+    });
+    const read = createAppToolAuthority({
+      binding: { operation: 'turn.app.read', args: { appId: 'app-1' } },
+      ctx, signal: controller.signal, shared,
+    });
+    await read.readApp('app-1');
+    const destroy = createAppToolAuthority({
+      binding: { operation: 'turn.app.delete', args: { appId: 'app-1' } },
+      ctx, signal: controller.signal, shared,
+    });
+    const pending = destroy.deleteApp('app-1');
+    await started;
+    controller.abort();
+    releaseProbe();
+    await expect(pending).rejects.toMatchObject({
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+    expect(deletes).toBe(0);
+  });
+
   test('formats an admitted file read without exposing OPFS', async () => {
     const call = { name: 'app_read_file', args: { appId: 'app-1', path: 'index.html' } };
-    const authority = createAppToolAuthority({ call, ctx: context() });
+    const authority = createAppToolAuthority({
+      binding: { operation: 'turn.app.read-file', args: call.args }, ctx: context(),
+    });
     const result = await executeControllerAppTool('app_read_file', call.args, authority);
     expect(result).toMatchObject({ ok: true });
     expect(result.content).toContain('<untrusted_web_content');
@@ -35,8 +79,8 @@ describe('exact App authority', () => {
 
   test('refuses changed file bytes after admission', async () => {
     const authority = createAppToolAuthority({
-      call: {
-        name: 'app_write_file',
+      binding: {
+        operation: 'turn.app.write-file',
         args: { appId: 'app-1', path: 'safe.bin', contentBase64: 'AQID' },
       },
       ctx: context(),
@@ -50,7 +94,7 @@ describe('exact App authority', () => {
   test('returns only bounded App search metadata to the controller', async () => {
     const call = { name: 'app_search', args: { query: 'work' } };
     const authority = createAppToolAuthority({
-      call,
+      binding: { operation: 'turn.app.search', args: call.args },
       ctx: context({
         appClient: {
           search: async () => [{
@@ -73,18 +117,23 @@ describe('exact App authority', () => {
   test('rechecks existence immediately before destructive deletion', async () => {
     let reads = 0;
     let deleted = false;
-    const call = { name: 'app_delete', args: { appId: 'app-1' } };
-    const authority = createAppToolAuthority({
-      call,
-      ctx: context({
+    const ctx = context({
         appRegistry: {
           get: async () => reads++ === 0 ? { id: 'app-1', name: 'work' } : null,
         },
         appClient: { delete: async () => { deleted = true; } },
-      }),
     });
-    const result = await executeControllerAppTool('app_delete', call.args, authority);
-    expect(result).toMatchObject({ ok: false });
+    const shared: any = {};
+    const read = createAppToolAuthority({
+      binding: { operation: 'turn.app.read', args: { appId: 'app-1' } }, ctx, shared,
+    });
+    await read.readApp('app-1');
+    const destroy = createAppToolAuthority({
+      binding: { operation: 'turn.app.delete', args: { appId: 'app-1' } }, ctx, shared,
+    });
+    await expect(destroy.deleteApp('app-1')).rejects.toMatchObject({
+      message: 'App authority mismatch', outcomeKnown: true,
+    });
     expect(deleted).toBe(false);
   });
 
@@ -93,7 +142,8 @@ describe('exact App authority', () => {
     const leases: any[] = [];
     const call = { name: 'app_code', args: { code: 'return app.observe()', timeoutMs: 5000 } };
     const authority = createAppToolAuthority({
-      call,
+      binding: { operation: 'turn.app.run-code', args: call.args },
+      appProgramSemanticToken: 'app-program-token',
       ctx: context({
         jsOffscreenClient: {
           execHeadless: async (code: string, options: any) => {
@@ -116,6 +166,7 @@ describe('exact App authority', () => {
       timeoutMs: 5000,
       caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
       ownerSessionId: 'session-1', runId: 'run-app-1',
+      appProgramSemanticToken: 'app-program-token',
     });
     expect(leases.map((entry) => entry[0])).toEqual(['register', 'release']);
   });
@@ -123,7 +174,9 @@ describe('exact App authority', () => {
   test('pins runtime action name and parameters to the admitted call', async () => {
     let relayed = false;
     const authority = createAppToolAuthority({
-      call: { name: 'app_act', args: { action: 'move', params: { x: 1 } } },
+      binding: {
+        operation: 'turn.app.act', args: { action: 'move', params: { x: 1 } },
+      },
       ctx: context({
         appAgentCall: async () => { relayed = true; return { ok: true, value: {} }; },
       }),

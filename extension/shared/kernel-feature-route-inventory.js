@@ -35,7 +35,7 @@ export const KERNEL_PAGE_PROGRAM_ROUTE_NAMES = Object.freeze([
 ]);
 
 export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze([
-  ...'pod/cancel-io pod/get-meta pod/git pod/web-fetch sw/web-fetch sw/web-fetch-abort export/artifact import/inspect import/apply apps/delete app/actor-chat app-code/observe app-code/act a2a/call actors/list actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
+  ...'pod/cancel-io pod/get-meta pod/git pod/web-fetch sw/web-fetch sw/web-fetch-abort export/artifact import/inspect import/apply apps/delete app/actor-chat a2a/call actors/list actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
   ...KERNEL_PAGE_PROGRAM_ROUTE_NAMES,
 ]);
 

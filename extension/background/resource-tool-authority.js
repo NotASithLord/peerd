@@ -6,6 +6,10 @@ import {
   resolveTargetTab,
 } from '/peerd-runtime/browser-authority.js';
 import { isPrivateOrLocalHost } from '/shared/private-network.js';
+import { ALLOWED_METHODS, needsWebWriteConfirm } from '/peerd-engine/authority.js';
+import { inspectTabToolCall } from '/peerd-runtime/tools/egress-heuristics.js';
+import { finalWebRequestConfirmation } from '/shared/web-request-confirmation.js';
+import { normalizeApiOrigin } from '/shared/api-origin.js';
 
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_WEB_TEXT_CHARS = 2_000_000;
@@ -68,44 +72,100 @@ const expectedHeaders = (args) => {
   return headers;
 };
 
-/** @param {{call:any,ctx:any,signal?:AbortSignal}} input */
-export const createResourceToolAuthority = ({ call, ctx, signal }) => {
-  const args = call?.args ?? {};
-  const requireTool = (/** @type {string[]} */ names) => {
-    if (!names.includes(call?.name)) throw mismatch();
+/** @param {{binding:any,ctx:any,signal?:AbortSignal,shared?:any}} input */
+export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} }) => {
+  const args = binding.args ?? {};
+  const apiIdentity = ctx?.backing === 'api' ? ctx?.actorInstanceId : null;
+  const apiOwnedOrigin = typeof apiIdentity === 'string'
+    && normalizeApiOrigin(apiIdentity) === apiIdentity ? apiIdentity : null;
+  const requireOwnedApiOrigin = (/** @type {URL} */ parsed) => {
+    if (ctx?.backing !== 'api') return;
+    if (apiOwnedOrigin && parsed.origin === apiOwnedOrigin) return;
+    throw Object.assign(new Error('API actor request is outside its owned origin'), {
+      code: 'api_actor_origin_mismatch', outcomeKnown: true,
+      outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+  };
+  const requireOperation = (/** @type {string} */ operation) => {
+    if (binding.operation !== operation) throw mismatch();
   };
   const ownerSessionId = ctx?.session?.sessionId;
   return Object.freeze({
-    confirmWebWrite: async (/** @type {string} */ url, /** @type {string} */ method) => {
-      requireTool(['fetch_url']);
-      let parsed;
-      try { parsed = new URL(url); } catch { throw mismatch(); }
-      if (url !== args.url || method !== expectedMethod(args)
-          || !['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
-          || typeof ctx?.confirm !== 'function') throw mismatch();
-      return ctx.confirm({
-        tool: 'web:write', kind: 'web_write', origins: [parsed.origin],
-        summary: `Allow a ${method} request to ${parsed.host}? This can send data out of the browser.`,
-        sessionId: ownerSessionId ?? null,
-      }, signal ?? ctx?.abortSignal);
-    },
-    requestWebText: async (/** @type {any} */ request) => {
-      requireTool(['fetch_url']);
+    confirmWebWrite: async (/** @type {any} */ request) => {
+      requireOperation('turn.resource.confirm-web-write');
       let parsed;
       try { parsed = new URL(request?.url); } catch { throw mismatch(); }
+      requireOwnedApiOrigin(parsed);
+      const method = request?.method;
+      const headers = stringHeaders(request?.headers);
+      if (!request || !exactKeys(request, ['url', 'method', 'headers'], ['body'])
+          || request.url !== args.url || method !== expectedMethod(args)
+          || !ALLOWED_METHODS.includes(method) || !needsWebWriteConfirm(method)
+          || request.body !== expectedBody(args)
+          || !headers || !sameClone(headers, expectedHeaders(args))) throw mismatch();
+      if (typeof ctx?.confirm !== 'function') return false;
+      const presentation = finalWebRequestConfirmation({
+        url: request.url, method, headers,
+        ...(request.body === undefined ? {} : { body: request.body }),
+        source: 'web request',
+      });
+      const answer = await ctx.confirm({
+        tool: 'web:write', kind: 'web_write', origins: [...presentation.origins],
+        summary: presentation.summary,
+        sessionId: ownerSessionId ?? null,
+      }, signal ?? ctx?.abortSignal);
+      if (answer === true || answer === 'yes_once' || answer === 'yes_session') {
+        shared.webWriteApproval = Object.freeze({
+          url: request.url, method, headers: Object.freeze({ ...headers }),
+          ...(request.body === undefined ? {} : { body: request.body }),
+        });
+      }
+      return answer;
+    },
+    requestWebText: async (/** @type {any} */ request) => {
+      requireOperation('turn.resource.request-web-text');
+      let parsed;
+      try { parsed = new URL(request?.url); } catch { throw mismatch(); }
+      requireOwnedApiOrigin(parsed);
       if (!request || typeof request !== 'object' || !exactKeys(request,
         ['url', 'method', 'headers'], ['body'])
           || request.url !== args.url || request.method !== expectedMethod(args)
           || !/^https?:$/.test(parsed.protocol)
+          || !ALLOWED_METHODS.includes(request.method)
           || request.body !== expectedBody(args)
           || typeof ctx?.webFetch !== 'function') throw mismatch();
       const headers = stringHeaders(request.headers);
       if (!headers || !sameClone(headers, expectedHeaders(args))) throw mismatch();
+      if (needsWebWriteConfirm(request.method)) {
+        const approval = shared.webWriteApproval;
+        shared.webWriteApproval = null;
+        if (!approval || !sameClone(approval, {
+          url: request.url, method: request.method, headers,
+          ...(request.body === undefined ? {} : { body: request.body }),
+        })) throw mismatch();
+      }
       const controller = new AbortController();
       const abort = () => controller.abort();
       const timer = setTimeout(abort, FETCH_TIMEOUT_MS);
       signal?.addEventListener('abort', abort, { once: true });
       try {
+        if (ctx?.actorType === 'web' && ctx?.backing === 'tab') {
+          const egress = inspectTabToolCall({
+            name: 'fetch_url',
+            args: {
+              url: request.url, method: request.method, headers,
+              ...(request.body === undefined ? {} : { body: request.body }),
+            },
+            currentOrigin: ctx?.activeTab?.origin ?? ctx?.activeTab?.url ?? null,
+          });
+          if (egress.action === 'block') return {
+            ok: false,
+            code: 'browser_egress_tripwire_refused',
+            error: 'web request refused by the host egress tripwire',
+            outcomeKind: 'pre-effect-failure',
+            retryable: false,
+          };
+        }
         let response;
         try {
           response = await ctx.webFetch(request.url, {
@@ -123,6 +183,25 @@ export const createResourceToolAuthority = ({ call, ctx, signal }) => {
           }
           throw cause;
         }
+        if (apiOwnedOrigin) {
+          let finalOrigin = null;
+          try { finalOrigin = originOfUrl(response.url ?? request.url); } catch { /* refuse below */ }
+          if (finalOrigin !== apiOwnedOrigin) {
+            return needsWebWriteConfirm(request.method)
+              ? {
+                  ok: false, reason: 'api_origin_escape',
+                  error: 'API actor response escaped its owned origin',
+                  performed: true, outcomeKnown: false, outcomeKind: 'transport-lost',
+                  retryable: false,
+                }
+              : {
+                  ok: false, reason: 'api_origin_escape',
+                  error: 'API actor response escaped its owned origin',
+                  performed: true, outcomeKnown: true, outcomeKind: 'effect-completed',
+                  retryable: false,
+                };
+          }
+        }
         const body = (await response.text()).slice(0, MAX_WEB_TEXT_CHARS);
         /** @type {Record<string,string>} */
         const responseHeaders = {};
@@ -139,7 +218,7 @@ export const createResourceToolAuthority = ({ call, ctx, signal }) => {
       }
     },
     extractReadableMarkdown: (/** @type {string} */ html, /** @type {string} */ url) => {
-      requireTool(['fetch_url']);
+      requireOperation('turn.resource.extract-markdown');
       if (typeof html !== 'string' || html.length > 16 * 1024 * 1024
           || typeof url !== 'string') throw mismatch();
       const client = ctx?.webOffscreenClient;
@@ -148,7 +227,7 @@ export const createResourceToolAuthority = ({ call, ctx, signal }) => {
         : { readerable: false };
     },
     extractDocument: async (/** @type {any} */ request) => {
-      requireTool(['read_doc']);
+      requireOperation('turn.resource.extract-document');
       if (!request || typeof request !== 'object'
           || !exactKeys(request, ['url', 'engine'], ['format'])
           || request.url !== (typeof args.url === 'string' && args.url ? args.url : null)
@@ -191,11 +270,12 @@ export const createResourceToolAuthority = ({ call, ctx, signal }) => {
       }
     },
     spillResult: async (/** @type {any} */ record) => {
-      requireTool(['fetch_url', 'read_doc']);
+      requireOperation('turn.resource.spill-result');
       if (!record || typeof record !== 'object'
           || !exactKeys(record,
             ['url', 'format', 'text', 'producer', 'fenced', 'originLabel'])
-          || record.producer !== call.name || record.fenced !== true
+          || typeof record.producer !== 'string' || record.producer.length > 128
+          || record.fenced !== true
           || typeof record.url !== 'string' || typeof record.format !== 'string'
           || typeof record.text !== 'string' || typeof record.originLabel !== 'string'
           || record.originLabel !== originOfUrl(record.url)
@@ -207,7 +287,7 @@ export const createResourceToolAuthority = ({ call, ctx, signal }) => {
       return key;
     },
     readResult: async (/** @type {string} */ key) => {
-      requireTool(['read_result']);
+      requireOperation('turn.resource.read-result');
       if (key !== args.key || typeof ownerSessionId !== 'string' || !ownerSessionId
           || typeof ctx?.resultStore?.get !== 'function') throw mismatch();
       const record = await ctx.resultStore.get(key).catch(() => undefined);
@@ -221,4 +301,8 @@ export const createResourceToolAuthority = ({ call, ctx, signal }) => {
 
 export const bindResourceToolAuthority = (
   /** @type {any} */ state, /** @type {any} */ input,
-) => state.authority ??= createResourceToolAuthority(input);
+) => createResourceToolAuthority({
+  ...input,
+  binding: Object.freeze({ operation: input.operation, args: structuredClone(input.args) }),
+  shared: state,
+});

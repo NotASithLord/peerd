@@ -1,7 +1,10 @@
 // @ts-check
 // Offscreen half of the targeted actor MessageChannel transport.
 
-import { ACTOR_CHANNEL_PROTOCOL } from '/shared/actor-channel-protocol.js';
+import {
+  ACTOR_CHANNEL_PROTOCOL,
+  actorRelayRouteClass,
+} from '/shared/actor-channel-protocol.js';
 
 /**
  * @param {Object} deps
@@ -32,6 +35,7 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
   });
   const sendToSW = (/** @type {string} */ type, /** @type {object} */ payload) => new Promise((resolve, reject) => {
     if (!committed || completed) { reject(new Error('actor channel is not active')); return; }
+    if (!actorRelayRouteClass(type)) { reject(new Error('actor relay route is invalid')); return; }
     const requestId = `relay-${++relaySequence}`;
     pendingRelays.set(requestId, { resolve, reject });
     try { post({ type: 'actor/relay', requestId, relayType: type, payload }); }

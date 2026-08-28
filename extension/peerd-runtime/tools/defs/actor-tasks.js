@@ -11,7 +11,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // why: ctx.actorTasks is the SW-bound snapshot fn (scoped to this session),
 // injected outside the base ToolContext; narrow ctx to it at the use site. The
 // snapshot shape mirrors makeAsyncActors' actorTasks (actor/async-actors.js).
-/** @typedef {{ taskId: string, task: string, status: string, lastOutput: string, childSessionId?: string|null, grantedTools?: string[]|null }} ActorTaskSnapshot */
+/** @typedef {{ taskId: string, task: string, status: string, lastOutput: string, childSessionId?: string|null, visibleTools?: string[]|null }} ActorTaskSnapshot */
 /** @typedef {{ actorTasks?: () => ActorTaskSnapshot[]|Promise<ActorTaskSnapshot[]> }} ActorTasksCtx */
 
 /** @type {import('/shared/tool-types.js').Tool} */

@@ -556,41 +556,6 @@ describe('direct actor host', () => {
     expect(host.isRelaySender({})).toBe(false);
   });
 
-  test('bounds a never-settling post-terminal relay drain', async () => {
-    let fireDrain!: () => void;
-    let relayStarted!: () => void;
-    const started = new Promise<void>((resolve) => { relayStarted = resolve; });
-    const aborted: string[] = [];
-    const host = makeDirectActorHost({
-      workerUrl: 'worker.js',
-      relayDrainTimeoutMs: 10,
-      setTimeoutFn: ((callback: () => void) => { fireDrain = callback; return 7; }) as typeof setTimeout,
-      clearTimeoutFn: (() => {}) as typeof clearTimeout,
-      abort: (runId: string) => { aborted.push(runId); },
-      run: async (_job: any, deps: any) => {
-        const relay = deps.sendToSW('actor/tool-prepare', {});
-        deps.onRelayDrain();
-        return relay;
-      },
-    });
-    host.bindRelayRoutes({
-      'actor/tool-prepare': () => {
-        relayStarted();
-        return new Promise(() => {});
-      },
-    });
-
-    const pending = host.sendMessage({ type: 'actor/run', job: { runId: 'relay-stuck' } });
-    await started;
-    fireDrain();
-    expect(await pending).toMatchObject({
-      ok: false, started: true, code: 'actor_relay_drain_timeout',
-      outcomeKnown: false, retryable: false,
-    });
-    expect(aborted).toEqual(['relay-stuck']);
-    expect(host.hasActiveRuns()).toBe(false);
-  });
-
   test('refuses a run until relay routes are bound', async () => {
     let ran = false;
     const host = makeDirectActorHost({

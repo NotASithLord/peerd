@@ -25,8 +25,6 @@ const KERNEL_ROUTE_OVERRIDES = new Set([
   'actors/call',
   'actors/list',
   'app/actor-chat',
-  'app-code/observe',
-  'app-code/act',
   'apps/delete',
   'confirm/answer',
   'contacts/list',

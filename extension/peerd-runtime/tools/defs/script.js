@@ -86,6 +86,14 @@ export const scriptTool = composeTool("script", {
     const custody = Array.isArray(run?.actorDeliveryIds) && run.actorDeliveryIds.length
       ? { actorDeliveryIds: run.actorDeliveryIds } : {};
     if (!run?.ok) {
+      const unknown = run?.outcomeKnown === false
+        ? {
+            outcomeKnown: false,
+            outcomeKind: run?.outcomeKind === 'host-lost'
+              ? 'host-lost' : 'transport-lost',
+            retryable: false,
+          }
+        : {};
       const mirrored = Array.isArray(run?.mirrored) ? run.mirrored : [];
       const dispatched = mirrored.length
         ? `\n[DELEGATIONS dispatched before the failure]\n${renderTraceLines(mirrored).join('\n')}`
@@ -101,10 +109,14 @@ export const scriptTool = composeTool("script", {
         return {
           ok: false,
           error: `script_failed: actor orchestration transport failed${dispatched}\n${fenced}`,
-          ...custody,
+          ...unknown, ...custody,
         };
       }
-      return { ok: false, error: run?.error ?? `script_failed: ${run?.errorName}: ${run?.errorMessage}`, ...custody };
+      return {
+        ok: false,
+        error: run?.error ?? `script_failed: ${run?.errorName}: ${run?.errorMessage}`,
+        ...unknown, ...custody,
+      };
     }
     const result = run.result;
       const importPolicyMessage = moduleImportPolicyMessage(result.errorCode);
@@ -141,7 +153,9 @@ export const scriptTool = composeTool("script", {
       // the peerd:std/peerd:wasi builtins reference matter most here — but script
       // is called repeatedly, so disclose them on the FIRST run and stay silent
       // after, paying the tokens once. (oncePerSession re-arms on SW restart.)
-      if (oncePerSession(sid, 'js-pitfalls')) {
+      if (oncePerSession(
+        sid, 'js-pitfalls', ctx.session?.messages, 'script', JS_PITFALLS_NOTE,
+      )) {
         content += `\n\n${JS_PITFALLS_NOTE}\n\n${SCRIPT_BUILTINS_NOTE}`;
       }
       return { ok: true, content, ...custody };

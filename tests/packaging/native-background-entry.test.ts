@@ -57,6 +57,18 @@ describe('target-specific native background entry', () => {
     expect(storeSource).not.toContain('contributor');
   });
 
+  test('keeps the Store and Preview actor ambient-capability seals identical', () => {
+    const preview = readFileSync(join(EXTENSION, 'offscreen/actor-worker.js'), 'utf8');
+    const store = readFileSync(join(
+      import.meta.dir, '..', '..', 'packaging/templates/actor-worker.store.js',
+    ), 'utf8');
+    const sealBody = (source: string) => source.slice(
+      source.indexOf('const denied ='), source.indexOf('\nvoid (async () =>'),
+    );
+    expect(sealBody(preview)).not.toBe('');
+    expect(sealBody(store)).toBe(sealBody(preview));
+  });
+
   test('keeps Firefox demand-loaded with synchronous guards and exact host owners', async () => {
     const firefox = await collectStaticModuleGraph(
       EXTENSION, join(EXTENSION, FIREFOX_BACKGROUND_ENTRY),

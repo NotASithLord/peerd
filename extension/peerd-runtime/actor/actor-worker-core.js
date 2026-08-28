@@ -59,7 +59,7 @@ export const finalAssistantText = (session) => {
  * the run. Seeded with the child/actor record the SW created (its id/provider/model
  * carry the lineage the SW already stamped).
  *
- * @param {{ sessionId: string, provider?: string, model?: string, depth?: number, messages?: any[] }} seed
+ * @param {{ sessionId: string, provider?: string, model?: string, kind?:'actor'|'spawned', depth?: number, messages?: any[], trimSummary?:any }} seed
  *   `messages` seeds prior history — a BOUND actor is stateful across turns, so the
  *   worker reasons over its accumulated transcript. An ephemeral reasoning child
  *   omits it (fresh each spawn). The array is copied (the worker owns its heap's
@@ -72,9 +72,11 @@ export const makeInMemorySessions = (seed) => {
     sessionId: seed.sessionId,
     provider: seed.provider ?? 'anthropic',
     model: seed.model ?? '',
-    kind: 'spawned',
+    kind: seed.kind === 'actor' ? 'actor' : 'spawned',
     depth: seed.depth ?? 1,
     messages: /** @type {any[]} */ (Array.isArray(seed.messages) ? [...seed.messages] : []),
+    ...(seed.trimSummary && typeof seed.trimSummary === 'object'
+      ? { trimSummary: structuredClone(seed.trimSummary) } : {}),
   });
   const store = {
     get: async (/** @type {string} */ id) => map.get(id),
@@ -98,7 +100,11 @@ export const makeInMemorySessions = (seed) => {
       else s.messages.push({ id: messageId, ...patch });
       return s;
     },
-    setTrimSummary: async () => {},
+    setTrimSummary: async (/** @type {string} */ id, /** @type {any} */ state) => {
+      const s = map.get(id); if (!s) return undefined;
+      s.trimSummary = state && typeof state === 'object' ? structuredClone(state) : null;
+      return s;
+    },
     setCost: async () => {},
   };
   return store;

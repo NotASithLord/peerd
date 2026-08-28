@@ -14,19 +14,15 @@ import {
 export const makeActorsRoutes = (deps) => {
   const {
     sessions, uiPorts, buildToolContext, actorMessaging, scriptRuns,
-    resolveManifestAllow, isOffscreenSender,
+    isOffscreenSender,
   } = deps;
-
-  const ownerAllow = (/** @type {Record<string, any>} */ owner) => owner.kind === 'spawned'
-    ? new Set(Array.isArray(owner.grantedTools) ? owner.grantedTools : [])
-    : resolveManifestAllow(owner.toolManifest);
 
   /**
    * Admit one exact actor-code capability. The route selects the required tool;
    * the worker never sends an operation selector to this authority check.
-   * @param {any} msg @param {any} sender @param {string} requiredTool @param {string} label
+   * @param {any} msg @param {any} sender @param {string} operation @param {string} label
    */
-  const admit = async (msg, sender, requiredTool, label) => {
+  const admit = async (msg, sender, operation, label) => {
     if (!isOffscreenSender(sender)) {
       return { refusal: { ok: false, error: 'actors: unauthorized relay' } };
     }
@@ -50,10 +46,9 @@ export const makeActorsRoutes = (deps) => {
         error: 'actors: only a chat session or a granted spawned actor holds the script delegation surface',
       } };
     }
-    const allow = ownerAllow(owner);
-    if (allow instanceof Set && !allow.has(requiredTool)) {
+    if (scriptRuns.allowsOperation?.(msg.runId, operation) !== true) {
       return { refusal: {
-        ok: false, error: `actors.${label}: '${requiredTool}' is not granted to this session`,
+        ok: false, error: `actors.${label}: operation is not granted to this script run`,
       } };
     }
     if (scriptRuns.admitActorOp?.(msg.runId) !== true) {
@@ -81,7 +76,9 @@ export const makeActorsRoutes = (deps) => {
 
     'actors/list': async (/** @type {any} */ msg = {}, sender = undefined) => {
       try {
-        const admitted = await admit(msg, sender, 'actor_list', 'list');
+        const admitted = await admit(
+          msg, sender, 'turn.introspection.actor-roster', 'list',
+        );
         if (admitted.refusal) return admitted.refusal;
         const context = {
           ...await buildToolContext({
@@ -95,7 +92,7 @@ export const makeActorsRoutes = (deps) => {
           error: 'actors.list: aborted (Stop) before roster dispatch',
         };
         const authority = createIntrospectionToolAuthority({
-          call: { name: 'actor_list', args: {} }, ctx: context,
+          binding: { operation: 'turn.introspection.actor-roster', args: {} }, ctx: context,
         });
         const roster = await authority.readActorRoster();
         void context.audit?.({
@@ -126,7 +123,7 @@ export const makeActorsRoutes = (deps) => {
       };
 
       try {
-        const admitted = await admit(msg, sender, 'message_actor', 'call');
+        const admitted = await admit(msg, sender, 'turn.actor.message', 'call');
         if (admitted.refusal) return admitted.refusal;
         const target = validateActorCodeCall(msg.args);
         const { runSignal } = admitted;

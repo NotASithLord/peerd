@@ -19,7 +19,7 @@
 
 /** @param {{ actorOpLimit?: number, codeOpLimit?: number }} [options] */
 export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actorOpLimit } = {}) => {
-  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }>} */
+  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, operations: Set<string>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }>} */
   const runs = new Map();
   let seq = 0;
 
@@ -42,15 +42,18 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
      * param (design 5 — a dead or foreign run buys nothing).
      * @param {string} runId @param {AbortSignalLike} [outerSignal] @param {string} [owner]
      * @param {Record<string, boolean>} [capabilities]
+     * @param {Iterable<string>} [operations] exact host operations projected
+     *   by the sealed semantic owner for this run
      */
-    register: (runId, outerSignal, owner, capabilities = {}) => {
+    register: (runId, outerSignal, owner, capabilities = {}, operations = []) => {
       const controller = new AbortController();
-      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }} */
+      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, operations: Set<string>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }} */
       const entry = {
         controller,
         ops: [],
         ...(owner ? { owner } : {}),
         capabilities: Object.fromEntries(Object.entries(capabilities).map(([name, on]) => [name, on === true])),
+        operations: new Set([...operations].filter((operation) => typeof operation === 'string')),
         opCounts: {},
         providerCalls: 0,
         providerOutputTokens: 0,
@@ -105,6 +108,15 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
       const entry = runs.get(runId);
       return entry?.controller.signal.aborted !== true
         && entry?.capabilities[capability] === true;
+    },
+
+    /** A code bridge may redeem only an exact operation projected when its
+     * outer semantic call registered the run. @param {string} runId
+     * @param {string} operation */
+    allowsOperation: (runId, operation) => {
+      const entry = runs.get(runId);
+      return entry?.controller.signal.aborted !== true
+        && entry?.operations.has(operation) === true;
     },
 
     /** Atomically admit one code-client op against a per-capability run ceiling.

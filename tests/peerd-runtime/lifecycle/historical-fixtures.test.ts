@@ -321,8 +321,12 @@ describe('tool manifests — culled tool names are kept, not scrubbed', () => {
 // ── 4. old hook + memory records ──────────────────────────────────────────
 
 describe.each(FIXTURES)('$name — hooks and memory docs', ({ data }) => {
-  test('every hook record compiles and keeps its unknown fields on _record', () => {
+  test('declarative hooks compile while legacy executable records fail closed', () => {
     for (const record of data.hooks) {
+      if (record.kind === 'js') {
+        expect(() => compileUserHook(record as any)).toThrow(/executable JS hooks are not supported/);
+        continue;
+      }
       const compiled = compileUserHook(record as any);
       expect(compiled.id).toBe(record.id);
       expect(compiled.enabled).toBe(record.enabled !== false);
@@ -979,9 +983,13 @@ describe('the maximal envelope landing on a store build', () => {
 // ── 9e. hooks + memory carried by the new profiles ────────────────────────
 
 describe.each(NEW_FIXTURES)('$name — hooks and memory docs', ({ data }) => {
-  test('every hook record compiles and keeps its unknown fields on _record', () => {
+  test('declarative hooks compile while legacy executable records fail closed', () => {
     expect(data.hooks.length).toBeGreaterThan(0);
     for (const record of data.hooks) {
+      if (record.kind === 'js') {
+        expect(() => compileUserHook(record as any)).toThrow(/executable JS hooks are not supported/);
+        continue;
+      }
       const compiled = compileUserHook(record as any);
       expect(compiled.id).toBe(record.id);
       expect(compiled.enabled).toBe(record.enabled !== false);

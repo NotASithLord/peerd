@@ -437,7 +437,7 @@ describe('capability-derived actor profiles', () => {
   test('an effective-tools list only narrows a bound manifest', () => {
     const narrowed = actorBlock('notebook', undefined, 'nb-1', 'tools', false, [
       'js_read_file',
-      'message_actor', // not in the notebook manifest: cannot widen authority
+      'message_actor', // not in the notebook manifest: cannot widen its advertised semantic surface
     ]);
     expect(narrowed.includes('tools: js_read_file')).toBe(true);
     expect(narrowed.includes('message_actor')).toBe(false);

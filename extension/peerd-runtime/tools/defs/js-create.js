@@ -72,7 +72,10 @@ export const createNotebookSandbox = async (args, ctx) => {
     // guidance rides ITS prompt (actorBlock), not this orchestrator create-result.
     // The full runtime note is disclosed once per session (schema-diet 6b): a
     // second notebook this session doesn't need it re-stated — a pointer suffices.
-    const note = oncePerSession(sessionId, 'notebook-note')
+    const note = oncePerSession(
+      sessionId, 'notebook-note', ctx.session?.messages,
+      'sandbox_create', NOTEBOOK_NOTE,
+    )
       ? NOTEBOOK_NOTE
       : '(Notebook runtime note shown earlier this session — same rules apply.)';
     return {

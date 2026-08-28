@@ -31,7 +31,7 @@
 // only sideEffect 'mutate_external' is in scope; read/write tools that
 // touch no external origin skip entirely (`origins()` returns []).
 
-import { originOf } from '/peerd-egress/background.js';
+import { originOf } from '/shared/url-origin.js';
 import { DEFAULT_HOOK_MANIFEST } from '/shared/default-hook-manifest.js';
 import { resolveDeclaredToolOrigins } from '../../../tool-origin-policy.js';
 
@@ -49,10 +49,8 @@ import { resolveDeclaredToolOrigins } from '../../../tool-origin-policy.js';
  * @property {readonly string[]} [allowlist]
  */
 
-/** @type {import('../runner.js').Hook} */
-export const egressAllowlistHook = {
-  ...DEFAULT_HOOK_MANIFEST[0],
-  run: (inv) => {
+/** @returns {import('../runner.js').HookDecision} */
+export const checkEgressAllowlist = (/** @type {any} */ inv) => {
     const { args, toolName } = inv;
     const ctx = /** @type {import('/shared/tool-types.js').ToolContext & EgressHookCtx} */ (inv.ctx);
     const tool = ctx.getToolMeta?.(toolName);
@@ -108,5 +106,10 @@ export const egressAllowlistHook = {
       }
     }
     return { action: 'allow', reason: `egress-allowlist: ${origins.length} origin(s) on allowlist` };
-  },
+};
+
+/** @type {import('../runner.js').Hook} */
+export const egressAllowlistHook = {
+  ...DEFAULT_HOOK_MANIFEST[0],
+  run: checkEgressAllowlist,
 };

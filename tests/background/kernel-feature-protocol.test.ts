@@ -239,7 +239,7 @@ describe('sealed kernel feature protocol', () => {
     });
     const other = request({
       route: 'hooks/save', dispatchId: 'dispatch-other-route',
-      message: { markdown: '---\nid: h\nevent: pre-tool-use\nrule:\n  matchArg: url\n  pattern: x\n---' },
+      message: { markdown: '---\nid: h\nevent: pre-tool-use\nrule:\n  matchArg: url\n  contains: x\n---' },
     });
     expect(await host.dispatch(other, options(other))).toMatchObject({ ok: true });
     releaseReads();

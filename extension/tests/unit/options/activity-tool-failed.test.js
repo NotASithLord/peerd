@@ -1,19 +1,13 @@
 // @ts-check
-// Options → Activity: a declined tool call must surface as a "tool failed"
-// row, end-to-end through the REAL dispatcher + REAL audit log.
-//
-// This is the seam the Bun dispatcher tests can't reach: the returned
-// { ok: false } → tool_failed audit branch (dispatcher.js), through the real
-// hash-chained createAuditLog, out the audit/list read, into the ActivityView
-// render (EVENT_META danger row + the Issues filter). Before the 2b fix the
-// dispatcher audited every non-throw as tool_executed, so this row read as a
-// green "tool ran" and the Issues filter hid the user's own failures.
+// Options → Activity: host-stamped semantic verdicts flow through the real
+// hash-chained audit log into the human-readable severity view. The semantic
+// heap never authors the authority claim this UI displays.
 
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
-import { registerTool, clearTools, dispatchToolCall } from '/peerd-runtime/index.js';
+import { semanticCallAuditEntry } from '/background/semantic-call-audit.js';
 import { createAuditLog, idb } from '/peerd-egress/index.js';
-import { ActivityView } from '/options/sections/activity.js';
+import { ActivityView, activityEventMeta } from '/options/sections/activity.js';
 
 /** @param {(msg: any) => Promise<any>} send */
 const mount = (send) => {
@@ -25,57 +19,77 @@ const mount = (send) => {
 
 const settle = () => new Promise((r) => setTimeout(r, 0)).then(() => m.redraw.sync?.() ?? m.redraw());
 
-/** @param {(e: any) => Promise<any>} audit */
-const dispatchCtx = (audit) => /** @type {any} */ ({
-  session: { sessionId: 's1' },
-  tabs: { query: async () => [] },
-  getSecret: async () => null,
-  audit,
-  confirm: async () => 'no_once',
-  kv: { list: async () => ({}) },
-  idb: { getAll: async () => [] },
-  denylist: [],
-  provider: { name: 'anthropic', model: 'claude-sonnet-4-6', hasKey: false },
-  vault: { isLocked: false },
-});
-
-/** @param {Partial<any>} over */
-const makeTool = (over) => /** @type {any} */ ({
-  name: 't', primitive: 'inspect', description: 't', schema: {},
-  sideEffect: 'read', origins: () => [],
-  execute: async () => ({ ok: true, content: 'hello' }),
+/** @param {Partial<any>} [over] */
+const receipt = (over = {}) => ({
+  callId: 'call-1', effectId: 'call-1:1', operation: 'turn.vm.read',
+  outcome: 'observed', outcomeKnown: true, performed: false, retryable: true,
   ...over,
 });
 
-describe('options.activity — a declined tool call shows as failed (end-to-end)', () => {
-  it('renders a danger "tool failed" row from the real audit log', async () => {
+/** @param {string} callId @param {any} result */
+const auditEntry = (callId, result) => semanticCallAuditEntry({
+  sessionId: 's1', callId, label: 'fixture_tool', result,
+});
+
+describe('options.activity — host-derived semantic verdicts', () => {
+  it('uses warning severity for known blocks/refusals and danger only for unknown custody', () => {
+    const cases = [
+      [{ type: 'tool_blocked', details: {} }, 'warn', 'tool blocked'],
+      [{
+        type: 'authority_effect',
+        details: { outcome: 'not-performed', outcomeKnown: true, refused: true },
+      }, 'warn', 'authority effect refused'],
+      [{
+        type: 'authority_effect_failed',
+        details: { outcome: 'not-performed', outcomeKnown: true, refused: true },
+      }, 'warn', 'authority effect refused'],
+      [{
+        type: 'authority_effect_failed',
+        details: { outcome: 'observed', outcomeKnown: true, refused: false },
+      }, 'warn', 'authority effect failed'],
+      [{
+        type: 'authority_effect',
+        details: { outcome: 'performed', outcomeKnown: true, performed: true },
+      }, 'ok', 'authority effect performed'],
+      [{
+        type: 'authority_effect_failed',
+        details: { outcome: 'unknown', outcomeKnown: false },
+      }, 'danger', 'authority effect unverified'],
+    ];
+    for (const [entry, level, label] of cases) {
+      expect(activityEventMeta(/** @type {any} */ (entry))).toEqual({ level, label });
+    }
+  });
+
+  it('renders receipt-owned authority severity from the real audit log', async () => {
     await idb.clear('audit_log');
+    await idb.clear('audit_meta');
     const log = createAuditLog({ idb });
 
-    // Drive a declined confirmation through the REAL dispatcher: the tool
-    // returns { ok: false } (the fetch-url decline shape), and ctx.audit is
-    // the real append — so the tool_failed entry is genuinely hash-chained.
-    clearTools();
-    registerTool(makeTool({
-      execute: async () => ({ ok: false, error: 'declined', content: 'User declined the outbound write.' }),
+    await log.append(auditEntry('semantic-only', { is_error: false }));
+    await log.append(auditEntry('known-read-failure', {
+      is_error: true, authorityReceipts: [receipt()],
     }));
-    // The dispatcher fires ctx.audit fire-and-forget (.catch, not awaited), so
-    // dispatchToolCall resolves BEFORE log.append finishes its async chain-head
-    // read + hash + IDB put. Capture the append promise and await it ourselves,
-    // or list() races an empty log. (Deterministic — no poll/sleep.)
-    /** @type {Promise<any>[]} */
-    const appends = [];
-    await dispatchToolCall({ id: 'x', name: 't', args: {} }, dispatchCtx((e) => {
-      const p = log.append(e);
-      appends.push(p);
-      return p;
+    await log.append(auditEntry('refused-write', {
+      is_error: true,
+      authorityReceipts: [receipt({ refused: true, code: 'declined', outcome: 'not-performed' })],
     }));
-    await Promise.all(appends);
+    await log.append(auditEntry('performed-write', {
+      is_error: false,
+      authorityReceipts: [receipt({ performed: true, retryable: false, outcome: 'performed' })],
+    }));
+    await log.append(auditEntry('known-no-op', {
+      is_error: false, authorityReceipts: [receipt()],
+    }));
+    await log.append(auditEntry('unknown-write', {
+      is_error: true,
+      authorityReceipts: [receipt({ outcomeKnown: false, retryable: false, outcome: 'unknown' })],
+    }));
 
     const entries = await log.list();
-    // The dispatcher wrote tool_failed (not tool_executed) for the {ok:false}.
-    expect(entries.some((/** @type {any} */ e) => e.type === 'tool_failed')).toBe(true);
-    expect(entries.some((/** @type {any} */ e) => e.type === 'tool_executed')).toBe(false);
+    expect(entries.length).toBe(6);
+    expect(entries[0].type).toBe('semantic_report');
+    expect(entries[0].details.outcome).toBe('semantic-success');
 
     const { root, unmount } = mount(async (msg) => (msg.type === 'audit/list'
       ? { ok: true, entries, total: entries.length }
@@ -83,9 +97,17 @@ describe('options.activity — a declined tool call shows as failed (end-to-end)
     try {
       await settle();
       const text = root.textContent ?? '';
-      expect(text.includes('tool failed')).toBe(true);            // the danger label
-      expect(!!root.querySelector('.log-danger')).toBe(true);     // the danger dot
-    } finally { unmount(); clearTools(); }
+      expect(text).toContain('semantic call completed');
+      expect(text).toContain('semantic call failed');
+      expect(text).toContain('host effect performed');
+      expect(text).toContain('semantic call completed; no host effect');
+      expect(text).toContain('semantic call outcome unverified');
+      expect(text.includes('tool ran')).toBe(false);
+      expect(root.querySelectorAll('.log-info').length >= 2).toBe(true);
+      expect(root.querySelectorAll('.log-warn').length >= 2).toBe(true);
+      expect(root.querySelectorAll('.log-ok').length).toBe(1);
+      expect(root.querySelectorAll('.log-danger').length).toBe(1);
+    } finally { unmount(); }
   });
 
   it('explains a browser policy stop without showing its target address', async () => {

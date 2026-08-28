@@ -22,15 +22,11 @@ const projectEngineRecord = (record) => ({
     ? { tags: record.tags.filter((tag) => typeof tag === 'string').slice(0, 64) } : {}),
 });
 
-/** @param {{call:any,ctx:any}} input */
-export const createIntrospectionToolAuthority = ({ call, ctx }) => {
-  const args = call?.args ?? {};
-  const requireTool = (/** @type {string} */ name) => {
-    if (call?.name !== name) throw mismatch();
-  };
-  const requireInspect = (/** @type {string} */ kind) => {
-    requireTool('inspect');
-    if (args?.kind !== kind) throw mismatch();
+/** @param {{binding:any,ctx:any}} input */
+export const createIntrospectionToolAuthority = ({ binding, ctx }) => {
+  const args = binding.args ?? {};
+  const requireOperation = (/** @type {string} */ operation) => {
+    if (binding.operation !== operation) throw mismatch();
   };
   const allowedTabs = async () => {
     if (typeof ctx?.tabs?.query !== 'function') throw mismatch();
@@ -56,7 +52,7 @@ export const createIntrospectionToolAuthority = ({ call, ctx }) => {
   };
   return Object.freeze({
     readActorRoster: async () => {
-      requireTool('actor_list');
+      requireOperation('turn.introspection.actor-roster');
       const sessionId = ctx?.session?.sessionId;
       /** @type {Array<any>} */
       const engines = [];
@@ -114,7 +110,7 @@ export const createIntrospectionToolAuthority = ({ call, ctx }) => {
       };
     },
     readProviderPosture: () => {
-      requireInspect('provider_config');
+      requireOperation('turn.introspection.provider-posture');
       return {
         provider: String(ctx?.provider?.name ?? 'unknown'),
         model: String(ctx?.provider?.model ?? 'unknown'),
@@ -123,26 +119,26 @@ export const createIntrospectionToolAuthority = ({ call, ctx }) => {
       };
     },
     readStorageSnapshot: (/** @type {string|undefined} */ prefix) => {
-      requireInspect('storage');
+      requireOperation('turn.introspection.storage-snapshot');
       const expected = typeof args?.prefix === 'string' ? args.prefix : undefined;
       if (prefix !== expected || typeof ctx?.kv?.list !== 'function') throw mismatch();
       return ctx.kv.list(prefix);
     },
     readAutomatableTabs: async () => {
-      requireInspect('session_access');
+      requireOperation('turn.introspection.automatable-tabs');
       return (await allowedTabs()).tabs;
     },
     readDenylistPatterns: () => {
-      requireInspect('denylist');
+      requireOperation('turn.introspection.denylist-patterns');
       return Array.isArray(ctx?.denylist) ? [...ctx.denylist] : [];
     },
     readAuditEntries: () => {
-      requireInspect('audit_log');
+      requireOperation('turn.introspection.audit-entries');
       if (typeof ctx?.idb?.getAll !== 'function') throw mismatch();
       return ctx.idb.getAll('audit_log');
     },
     readInstalledSkill: (/** @type {string} */ name) => {
-      requireTool('load_skill');
+      requireOperation('turn.introspection.installed-skill');
       if (name !== String(args?.name ?? '').trim()
           || typeof ctx?.skills?.loadBody !== 'function') throw mismatch();
       return ctx.skills.loadBody(name);
@@ -153,4 +149,7 @@ export const createIntrospectionToolAuthority = ({ call, ctx }) => {
 export const bindIntrospectionToolAuthority = (
   /** @type {any} */ state, /** @type {any} */ input,
 ) =>
-  state.authority ??= createIntrospectionToolAuthority(input);
+  createIntrospectionToolAuthority({
+    ...input,
+    binding: Object.freeze({ operation: input.operation, args: structuredClone(input.args) }),
+  });

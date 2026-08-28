@@ -5,9 +5,10 @@
 // pre-tool-use, can BLOCK or MODIFY) a tool call as it flows through the
 // dispatcher. Two events ship in V1 — the two load-bearing ones:
 //
-//   pre-tool-use   runs AFTER the six sync gates and the async
-//                  confirmation step, but BEFORE tool.execute(). A
-//                  pre-hook may deny the call or rewrite its args.
+//   pre-tool-use   runs AFTER the first synchronous gate pass and BEFORE
+//                  confirmation or authority admission. A pre-hook may deny
+//                  the call or rewrite its args; mandatory policy floors run
+//                  again over the snapshotted replacement.
 //   post-tool-use  runs AFTER tool.execute() returns. Observe-only —
 //                  it sees the result but cannot change it (V1).
 //
@@ -19,12 +20,11 @@
 // it's what makes the four required behaviours (block / modify /
 // observe / fail-closed) unit-testable without a browser.
 //
-// FAIL-CLOSED is the whole point. This feature is central to the
-// lethal-trifecta defense: a pre-hook is the last programmable veto
-// before an action runs. So a hook that THROWS, returns garbage, or
-// times out must BLOCK the action — never silently let it through.
-// "Errors fail open" is how exfiltration hooks get bypassed. Every
-// catch below resolves to a deny, not a pass.
+// User hooks are semantic/model guardrails, so they fail closed within that
+// runtime: a pre-hook that throws, returns garbage, or times out blocks the
+// semantic call instead of silently weakening the user's configured rule.
+// Mandatory security floors also run independently at the host's exact-op
+// edge; hooks are not authority against a compromised semantic heap.
 
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
@@ -36,7 +36,7 @@
  * @property {string} toolName
  * @property {Record<string, any>} args   the (possibly already-rewritten) call args
  * @property {ToolResult} [result]    present only for post-tool-use
- * @property {ToolContext} ctx        the live tool context (read-only by convention)
+ * @property {ToolContext} ctx        frozen data-only policy projection
  */
 
 /**

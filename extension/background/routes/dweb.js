@@ -180,7 +180,14 @@ export const makeDwebRoutes = (deps) => {
         }
         return { ok: true, app: record, ...(auditWarning ? { warning: auditWarning } : {}) };
       } catch (e) {
-        if (createdAppId) await appClient.delete(createdAppId).catch(() => {});
+        if (createdAppId) {
+          const removed = await appClient.delete(createdAppId).catch(() => false);
+          if (removed !== true) return {
+            ok: false, error: 'dweb-install-rollback-failed',
+            performed: true, outcomeKnown: false,
+            outcomeKind: 'host-lost', retryable: false,
+          };
+        }
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },

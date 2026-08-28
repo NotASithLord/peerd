@@ -57,6 +57,58 @@ export class AppBinaryFileError extends Error {
   }
 }
 
+/**
+ * @param {unknown} original
+ * @param {PromiseSettledResult<unknown>[]} cleanup
+ */
+const throwAppRollbackResult = (original, cleanup) => {
+  const cleanupFailures = cleanup
+    .filter((result) => result.status === 'rejected')
+    .map((result) => /** @type {PromiseRejectedResult} */ (result).reason);
+  if (!cleanupFailures.length) throw original;
+  // why: once catalog/OPFS/repository creation began, failed rollback proves
+  // durable residue may remain. Report performed custody and forbid retry.
+  const failure = new AggregateError(
+    [original, ...cleanupFailures],
+    `App creation failed and rollback was incomplete: ${String(/** @type {any} */ (original)?.message ?? original)}`,
+  );
+  Object.assign(failure, {
+    performed: true,
+    outcomeKnown: false,
+    outcomeKind: 'host-lost',
+    retryable: false,
+  });
+  throw failure;
+};
+
+/**
+ * A completed rollback proves the attempted mutation left no durable change.
+ * Keep the original failure only as an internal cause; the host-facing message
+ * and custody fields are fixed and cannot inherit storage/backend text.
+ * @param {unknown} cause
+ * @param {string} message
+ */
+const appRollbackCompleted = (cause, message) => Object.assign(
+  new Error(message, { cause }),
+  {
+    performed: false,
+    outcomeKnown: true,
+    outcomeKind: 'pre-effect-failure',
+    retryable: true,
+  },
+);
+
+/** @param {unknown[]} failures @param {string} message */
+const appRollbackIncomplete = (failures, message) => Object.assign(
+  new AggregateError(failures, message),
+  {
+    performed: true,
+    outcomeKnown: false,
+    outcomeKind: 'host-lost',
+    retryable: false,
+  },
+);
+
 /** @param {string} path */
 const validateAppPath = (path) => {
   if (typeof path !== 'string' || !path || path.length > MAX_APP_PATH_CHARS) {
@@ -297,9 +349,11 @@ export const createAppClient = ({
       try {
         await restoreBackups(opfs, backups);
       } catch (rollbackError) {
-        throw new AggregateError([writeError, rollbackError], 'App write and rollback both failed');
+        throw appRollbackIncomplete(
+          [writeError, rollbackError], 'App write and rollback both failed',
+        );
       }
-      throw writeError;
+      throw appRollbackCompleted(writeError, 'App write failed; rollback completed');
     }
     return () => restoreBackups(opfs, backups);
   };
@@ -334,9 +388,11 @@ export const createAppClient = ({
     }
     try { await restoreRecord(id, record); } catch (error) { failures.push(error); }
     if (failures.length) {
-      throw new AggregateError([cause, ...failures], 'App mutation and rollback both failed');
+      throw appRollbackIncomplete(
+        [cause, ...failures], 'App mutation and rollback both failed',
+      );
     }
-    throw cause;
+    throw appRollbackCompleted(cause, 'App mutation failed; rollback completed');
   };
 
   /** @param {{ sessionId?: string, appId?: string }} [opts] @returns {Promise<string>} */
@@ -415,10 +471,12 @@ export const createAppClient = ({
       }
       if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
     } catch (error) {
-      try { await guardedOpfsForApp(record.id).nuke(); } catch { /* best effort before catalog rollback */ }
-      try { await repositories?.destroyApp?.(record.id); } catch { /* best effort repository rollback */ }
-      await registry.delete(record.id);
-      throw error;
+      const cleanup = await Promise.allSettled([
+        guardedOpfsForApp(record.id).nuke(),
+        repositories?.destroyApp ? repositories.destroyApp(record.id) : Promise.resolve(),
+        registry.delete(record.id),
+      ]);
+      throwAppRollbackResult(error, cleanup);
     }
     return record;
   };
@@ -480,9 +538,11 @@ export const createAppClient = ({
       if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
       return { record: updated, repository, contract };
     } catch (error) {
-      await repositories.destroy({ kind: 'app', id: record.id }, { worktree: true }).catch(() => {});
-      await registry.delete(record.id).catch(() => {});
-      throw error;
+      const cleanup = await Promise.allSettled([
+        repositories.destroy({ kind: 'app', id: record.id }, { worktree: true }),
+        registry.delete(record.id),
+      ]);
+      throwAppRollbackResult(error, cleanup);
     }
   };
 
@@ -549,31 +609,78 @@ export const createAppClient = ({
     return updated;
   };
 
+  /** @param {string} id @param {string} path @param {unknown} content */
+  const writeFileUnlocked = async (id, path, content) => {
+    validateAppPath(path);
+    const replacement = { path, ...normalizeFileContent(path, content) };
+    const rec = await registry.get(id);
+    if (!rec) throw new Error(`app not found: ${id}`);
+    if (path === rec.entryFile && replacement.kind === 'binary') {
+      throw new AppFileContentError(`entryFile must be text: ${path}`);
+    }
+    const rollbackBytes = await writeReplacements(guardedOpfsForApp(id), [replacement]);
+    try {
+      const updated = await registry.update(id, {
+        fileKinds: { ...(rec.fileKinds ?? {}), [path]: replacement.kind },
+      });
+      if (!updated) throw new Error(`app not found after write: ${id}`);
+    } catch (error) {
+      return rollbackMutation(error, rollbackBytes, id, rec);
+    }
+    return { bytesWritten: replacement.size, kind: replacement.kind };
+  };
+
   /** Write a single file in the app's OPFS subdir.
    * @param {{ appId?: string, path: string, content: unknown, sessionId?: string, reload?: boolean }} args */
   const writeFile = async ({ appId, path, content, sessionId, reload = true }) => {
     const id = await resolveId({ sessionId, appId });
-    validateAppPath(path);
-    const replacement = { path, ...normalizeFileContent(path, content) };
-    await withMutation(id, async () => {
-      const rec = await registry.get(id);
-      if (!rec) throw new Error(`app not found: ${id}`);
-      if (path === rec.entryFile && replacement.kind === 'binary') {
-        throw new AppFileContentError(`entryFile must be text: ${path}`);
-      }
-      const rollbackBytes = await writeReplacements(guardedOpfsForApp(id), [replacement]);
-      try {
-        const updated = await registry.update(id, {
-          fileKinds: { ...(rec.fileKinds ?? {}), [path]: replacement.kind },
-        });
-        if (!updated) throw new Error(`app not found after write: ${id}`);
-      } catch (error) {
-        return rollbackMutation(error, rollbackBytes, id, rec);
-      }
-    });
+    const result = await withMutation(id, () => writeFileUnlocked(id, path, content));
     if (path === 'peerd.json') await onManifestMutation(id);
     if (reload) tracker.reloadTab(id).catch(() => {});
-    return { bytesWritten: replacement.size, kind: replacement.kind };
+    return result;
+  };
+
+  /**
+   * Compare and write under the App/repository transaction lane.
+   * @param {{appId?:string,path:string,content:string,sessionId?:string,
+   *   expectedExists:boolean,expectedContent:string,signal?:AbortSignal,reload?:boolean}} args
+   */
+  const compareAndWriteFile = async ({
+    appId, path, content, sessionId, expectedExists, expectedContent, signal, reload = true,
+  }) => {
+    const id = await resolveId({ sessionId, appId });
+    const result = await withMutation(id, async () => {
+      validateAppPath(path);
+      let exists = true;
+      let source = '';
+      try {
+        const rec = await registry.get(id);
+        if (!rec) throw new Error(`app not found: ${id}`);
+        const bytes = await guardedOpfsForApp(id).readBytes(path);
+        if (isBinaryAppFile(path, bytes, rec.fileKinds?.[path])) {
+          throw new AppBinaryFileError(path);
+        }
+        source = new TextDecoder().decode(bytes);
+      } catch (cause) {
+        if (/** @type {{name?:string}} */ (cause)?.name !== 'NotFoundError') throw cause;
+        exists = false;
+      }
+      if (exists !== expectedExists || source !== expectedContent) return {
+        ok: false, code: 'edit_conflict', retryable: false,
+        error: 'The file changed after it was read; review the latest contents before writing.',
+        outcomeKind: 'pre-effect-failure',
+      };
+      if (signal?.aborted) return {
+        ok: false, code: 'edit_aborted', retryable: false,
+        error: 'The edit was stopped before writing.', outcomeKind: 'pre-effect-failure',
+      };
+      return { ok: true, value: await writeFileUnlocked(id, path, content) };
+    });
+    if (result.ok) {
+      if (path === 'peerd.json') await onManifestMutation(id);
+      if (reload) tracker.reloadTab(id).catch(() => {});
+    }
+    return result;
   };
 
   /** @param {{ appId?: string, path: string, sessionId?: string }} args */
@@ -641,9 +748,11 @@ export const createAppClient = ({
           for (const [path, bytes] of Object.entries(oldFiles)) await opfs.write(path, bytes);
           await restoreRecord(id, oldRecord);
         } catch (rollbackError) {
-          throw new AggregateError([writeError, rollbackError], 'App replacement and rollback both failed');
+          throw appRollbackIncomplete(
+            [writeError, rollbackError], 'App replacement and rollback both failed',
+          );
         }
-        throw writeError;
+        throw appRollbackCompleted(writeError, 'App replacement failed; rollback completed');
       }
     });
     await onManifestMutation(id);
@@ -930,7 +1039,7 @@ export const createAppClient = ({
   return {
     resolveId,
     create, createFromGit, update,
-    writeFile, readFile, readFileBytes, replaceFiles, listFiles, deleteFile,
+    writeFile, compareAndWriteFile, readFile, readFileBytes, replaceFiles, listFiles, deleteFile,
     replaceVersionedFilesUnlocked,
     snapshotFiles, snapshotFilesBase64,
     open,

@@ -1,6 +1,6 @@
 // @ts-check
 // Pure policy for manifest-defined App actors. The service worker owns IO;
-// this module keeps the authority identity and tab-claim checks testable.
+// this module keeps the owner execution identity and tab-claim checks testable.
 
 /**
  * Serialize only the parsed manifest contract. parseAppManifest already drops
@@ -56,7 +56,7 @@ export const makeAppRole = ({ contract, record, manifestDigest }) => {
 
 /**
  * Derive the host-owned App developer tool manifest from declarative runtime
- * methods, then intersect the caller's authority bound. app_code is useful
+ * methods, then intersect the caller's model-visible surface. app_code is useful
  * only when its full observe/act feedback loop exists.
  * @param {{contract:any,hostTools:string[],ownerAllowed:Set<string>|null}} input
  */
@@ -72,19 +72,27 @@ export const manifestAppActorTools = ({ contract, hostTools, ownerAllowed }) => 
 };
 
 /**
- * Canonical owner-side authority inherited by an App actor. This fingerprint
- * makes a /tools or Plan/Act change a new actor generation even when the
- * package manifest itself did not change.
- * @param {{allow:string[],permissionMode:string,confirmActions:boolean}} input
+ * Canonical owner model surface inherited by an App actor. Permission and
+ * confirmation are read live for every effect, so toggling either must not
+ * discard the actor transcript.
+ * @param {{allow:string[]}} input
  */
-export const canonicalAppOwnerAuthority = ({ allow, permissionMode, confirmActions }) => JSON.stringify({
+export const canonicalAppOwnerAuthority = ({ allow }) => JSON.stringify({
   allow: [...new Set(allow)].sort(),
-  permissionMode,
-  confirmActions: confirmActions === true,
 });
 
 /**
- * A durable actor may be reconnected only when every authority coordinate
+ * Canonical owner model surface inherited by every bound actor kind. `null`
+ * is deliberately distinct from an empty allow-set: full surface and no
+ * surface must never reconnect to the same actor generation.
+ * @param {{allow:Set<string>|string[]|null}} input
+ */
+export const canonicalActorOwnerPosture = ({ allow }) => JSON.stringify({
+  allow: allow === null ? null : [...new Set(allow)].sort(),
+});
+
+/**
+ * A durable actor may be reconnected only when every owner/execution coordinate
  * still matches. A manifest edit intentionally creates a new actor generation.
  * @param {any} session
  * @param {{ownerChatId:string, appId:string, manifestDigest:string,ownerAuthorityDigest:string,publisherSource:string,publisher:string}} expected

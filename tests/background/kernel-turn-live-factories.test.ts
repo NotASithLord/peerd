@@ -6,6 +6,8 @@ import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
 import { createContextSnapshots } from '../../extension/background/context-snapshots.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
+import { canonicalActorOwnerPosture } from '../../extension/background/app-actor-policy.js';
+import { sha256Hex } from '../../extension/shared/util.js';
 
 const event = () => {
   const listeners = new Set<(...args: any[]) => void>();
@@ -121,6 +123,11 @@ const harness = async (
       permissionMode: root.permissionMode, confirmActions: root.confirmActions,
       toolManifest: root.toolManifest, depth: 1,
       actorType: 'web', backing: 'api', instanceId: options.durableApiOrigin,
+      ownerSemanticPostureDigest: await sha256Hex(canonicalActorOwnerPosture({
+        // The durable posture follows the actor's projected model surface,
+        // not unrelated names from the owning chat manifest.
+        allow: [],
+      })),
     })
     : null;
   if (durableApiActor) {
@@ -273,7 +280,7 @@ const harness = async (
       projectTurnTools: async (input: unknown) => {
         const result = projectControllerToolSurface(input);
         if (result.ok !== true) throw new Error(result.code);
-        return result.tools;
+        return result;
       },
     },
     confirmation: { confirm: async () => 'yes_once' },
@@ -545,6 +552,36 @@ describe('kernel live turn factories', () => {
     expect(h.sourceProjections.at(-1)?.projection?.[0]?.url).toBe(tab.url);
   });
 
+  test('re-reads a bound actor permission from its live root owner', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      actorType: 'notebook', instanceId: 'notebook-1', depth: 1,
+    });
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'plan', confirmActions: true,
+    });
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: actor.sessionId, exposure: 'actor',
+      actorType: 'notebook', actorInstanceId: 'notebook-1',
+    });
+    expect(ctx.permission).toEqual({ mode: 'plan', confirmActions: true });
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'act', confirmActions: false,
+    });
+    expect(await ctx.readAuthorityPermission()).toEqual({
+      mode: 'act', confirmActions: false,
+    });
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'plan', confirmActions: true,
+    });
+    expect(await ctx.readAuthorityPermission()).toEqual({
+      mode: 'plan', confirmActions: true,
+    });
+  });
+
   test('restored App network admission waits only for hydrated trackers', async () => {
     let pending!: ReturnType<typeof harness>;
     const stages: string[] = [];
@@ -678,6 +715,94 @@ describe('kernel live turn factories', () => {
     expect(h.cache.get('apiActorBindings')).toContainEqual([
       `${h.root.sessionId}\0${origin}`, h.durableApiActor.sessionId,
     ]);
+  });
+
+  test('remints every bound actor when its owner model-surface posture changes', async () => {
+    const jobs: any[] = [];
+    let h: Awaited<ReturnType<typeof harness>>;
+    let widenDuringRun = false;
+    h = await harness(async (job) => {
+      jobs.push(structuredClone(job));
+      if (widenDuringRun) {
+        widenDuringRun = false;
+        await h.sessions.setToolManifest(h.root.sessionId, {
+          allow: ['message_actor', 'snapshot', 'click'],
+        });
+      }
+      return {
+        ok: true, started: true,
+        newMessages: [{
+          role: 'assistant', content: `generation-${jobs.length}`,
+          id: `posture-${jobs.length}`, when: 2_000 + jobs.length,
+        }],
+      };
+    });
+    await h.sessions.setToolManifest(h.root.sessionId, {
+      allow: ['message_actor', 'snapshot', 'click'],
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const send = (id: string) => ctx.messageActor({
+      to: '9', message: id, senderSessionId: h.root.sessionId,
+      toolUseId: id, awaitReply: true,
+    });
+
+    expect(await send('surface-full')).toMatchObject({ ok: true });
+    expect(jobs[0].tools.map((tool: any) => tool.name)).toContain('click');
+    const fullActorId = jobs[0].actorSessionId;
+
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'plan', confirmActions: true,
+    });
+    expect(await send('live-policy-change')).toMatchObject({ ok: true });
+    expect(jobs[1].actorSessionId).toBe(fullActorId);
+    expect(jobs[1].priorMessages).toContainEqual(expect.objectContaining({
+      id: 'posture-1',
+    }));
+
+    await h.sessions.setToolManifest(h.root.sessionId, {
+      allow: ['message_actor', 'actor_list', 'snapshot', 'click'],
+    });
+    expect(await send('irrelevant-owner-surface-change')).toMatchObject({ ok: true });
+    expect(jobs[2].actorSessionId).toBe(fullActorId);
+    expect(jobs[2].priorMessages).toContainEqual(expect.objectContaining({
+      id: 'posture-2',
+    }));
+
+    await h.sessions.setToolManifest(h.root.sessionId, {
+      allow: ['message_actor', 'snapshot'],
+    });
+    widenDuringRun = true;
+    expect(await send('surface-narrow')).toMatchObject({ ok: true });
+    expect(jobs[3].actorSessionId).not.toBe(fullActorId);
+    expect(jobs[3].tools.map((tool: any) => tool.name)).not.toContain('click');
+    expect(jobs[3].priorMessages).not.toContainEqual(expect.objectContaining({
+      id: 'posture-3',
+    }));
+
+    // The owner widened while the second run was already admitted. That run
+    // stays narrowed; the next address resolution gets a fresh generation.
+    expect(jobs[3].tools.map((tool: any) => tool.name)).not.toContain('click');
+    expect(await send('surface-fresh-wide')).toMatchObject({ ok: true });
+    expect(jobs[4].actorSessionId).not.toBe(jobs[3].actorSessionId);
+    expect(jobs[4].tools.map((tool: any) => tool.name)).toContain('click');
+
+    const otherOwner = await h.sessions.create({
+      provider: 'anthropic', model: 'claude-sonnet-4-6',
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['message_actor', 'snapshot'] },
+    });
+    h.cache.set('currentSessionId', otherOwner.sessionId);
+    const otherCtx: any = await h.factories.buildToolContext({ sessionId: otherOwner.sessionId });
+    expect(await otherCtx.messageActor({
+      to: '9', message: 'other chat', senderSessionId: otherOwner.sessionId,
+      toolUseId: 'other-owner', awaitReply: true,
+    })).toMatchObject({ ok: true });
+    expect(jobs[5].actorSessionId).not.toBe(jobs[4].actorSessionId);
+    expect(jobs[5].priorMessages).not.toContainEqual(expect.objectContaining({
+      id: 'posture-5',
+    }));
+    const crossChatActor = await h.sessions.get(jobs[5].actorSessionId);
+    expect(crossChatActor?.parentSessionId).toBe(otherOwner.sessionId);
   });
 
   test('pins App runtime calls to the exact owner tab', async () => {

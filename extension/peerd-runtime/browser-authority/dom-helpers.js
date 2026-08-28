@@ -230,7 +230,7 @@ const enforceCommittedBrowserTarget = (target) => {
  * yields null, which every caller already surfaces as a refusal.
  *
  * @param {{ tabId?: number }} args
- * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null>, scripting?: any, noteLearnedOrigin?: (origin: string, reason: string) => void, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<{ ok?: boolean, structured?: { reason?: string } }> }} ctx
+ * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, authorityDocumentIdentity?: {origin:string,href:string,documentId:string,timeOrigin:number}, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null>, scripting?: any, noteLearnedOrigin?: (origin: string, reason: string) => void, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<{ ok?: boolean, structured?: { reason?: string } }> }} ctx
  * @param {{ allowRestrictedSource?: boolean }} [options]
  *
  * `judgeLanding` (issue 251) is the origin lock, injected by the SW so this
@@ -355,6 +355,17 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
     // Attributed to the origin that REPORTED it, never to the tab record — the
     // #278 rule, held by construction here rather than by comparison.
     try { ctx.noteLearnedOrigin?.(liveOrigin, 'password-field'); } catch { /* best-effort */ }
+  }
+  if (ctx.authorityDocumentIdentity) {
+    const current = browserDocumentIdentity(tab);
+    const expected = ctx.authorityDocumentIdentity;
+    if (current.origin !== expected.origin || current.href !== expected.href
+        || current.documentId !== expected.documentId
+        || current.timeOrigin !== expected.timeOrigin) {
+      throw new BrowserAutomationPolicyError(unverifiedBrowserTargetVerdict(), {
+        effectCompleted: false,
+      });
+    }
   }
   // The loop just targeted THIS tab by id (navigate/click/type/read/… on a tab
   // the agent opened) — update the "current agent tab" card so it tracks where

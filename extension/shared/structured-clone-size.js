@@ -30,7 +30,10 @@ export const structuredClonePayloadBytes = (
       // SharedArrayBuffer backing store. Accepting a shared-backed view would
       // let the sender mutate a supposedly frozen authority/result snapshot.
       if (!(value.buffer instanceof ArrayBuffer)) return Infinity;
-      return value.byteLength;
+      // why: structured clone transports the whole ordinary backing buffer,
+      // not merely a view's visible window. Charge that allocation so a tiny
+      // subview cannot smuggle a huge clone through a privileged channel cap.
+      return value.buffer.byteLength;
     }
     if (seen.has(value)) return Infinity;
     seen.add(value);
@@ -39,12 +42,16 @@ export const structuredClonePayloadBytes = (
         // JSON/provider consumers materialize holes as nulls. Charge every
         // logical slot so a billion-slot sparse array cannot pass a tiny byte
         // quota and become unbounded work after the structured-clone boundary.
+        if (value.length > maxNodes - nodes) return Infinity;
+        nodes += value.length;
         let total = value.length;
-        for (const [key, descriptor] of Object.entries(
-          Object.getOwnPropertyDescriptors(value),
-        )) {
+        if (Object.getOwnPropertySymbols(value).length > 0) return Infinity;
+        const keys = Object.getOwnPropertyNames(value);
+        if (keys.length > maxNodes - nodes + value.length + 1) return Infinity;
+        for (const key of keys) {
           if (key === 'length') continue;
-          if (!('value' in descriptor)) return Infinity;
+          const descriptor = Object.getOwnPropertyDescriptor(value, key);
+          if (!descriptor || !('value' in descriptor)) return Infinity;
           total += encoder.encode(key).byteLength + size(descriptor.value, depth + 1);
           if (!Number.isFinite(total)) return Infinity;
         }
@@ -52,9 +59,13 @@ export const structuredClonePayloadBytes = (
       }
       const prototype = Object.getPrototypeOf(value);
       if (prototype !== Object.prototype && prototype !== null) return Infinity;
+      if (Object.getOwnPropertySymbols(value).length > 0) return Infinity;
+      const keys = Object.getOwnPropertyNames(value);
+      if (keys.length > maxNodes - nodes) return Infinity;
       let total = 0;
-      for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
-        if (!('value' in descriptor)) return Infinity;
+      for (const key of keys) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !('value' in descriptor)) return Infinity;
         total += encoder.encode(key).byteLength + size(descriptor.value, depth + 1);
         if (!Number.isFinite(total)) return Infinity;
       }

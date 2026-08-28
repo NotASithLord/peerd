@@ -6,7 +6,6 @@
 // no session fails closed (the page surface is never anonymous).
 
 import { describe, test, expect, mock } from 'bun:test';
-import { createPageToolAuthority } from '../../extension/background/page-tool-authority.js';
 import { pageCodeTool, PAGE_CODE_CAPS } from '../../extension/peerd-runtime/tools/defs/page-code.js';
 
 const RESULT = { value: 'ok', consoleOutput: [], durationMs: 5, error: null };
@@ -20,10 +19,27 @@ const ctxWith = (over: object = {}) => {
   return { ctx, execHeadless };
 };
 
-const executePageCode = (args: Record<string, unknown>, ctx: Record<string, unknown>) =>
-  pageCodeTool.execute(args, {
-    pageAuthority: createPageToolAuthority({ call: { name: 'page_code', args }, ctx }),
-  } as any);
+const executePageCode = (args: Record<string, any>, ctx: Record<string, any>) =>
+  pageCodeTool.execute(args, { pageAuthority: {
+    runOwnedPageProgram: async () => {
+      const client = ctx.jsOffscreenClient;
+      if (typeof client?.execHeadless !== 'function') {
+        return { ok: false, error: 'page_code_unavailable' };
+      }
+      const ownerSessionId = ctx.session?.sessionId;
+      if (!ownerSessionId) return { ok: false, error: 'page_code_requires_actor_session' };
+      const runs = ctx.scriptRuns;
+      if (!runs) return { ok: false, error: 'page_code_run_registry_unavailable' };
+      const runId = runs.mintRunId(ownerSessionId);
+      runs.register(runId, ctx.abortSignal, ownerSessionId, { page: true });
+      try {
+        return await client.execHeadless(args.code, {
+          timeoutMs: Math.min(180_000, Math.max(1000, Number(args.timeoutMs) || 60_000)),
+          caps: PAGE_CODE_CAPS, ownerSessionId, runId, signal: ctx.abortSignal,
+        });
+      } finally { runs.release(runId); }
+    },
+  } } as any);
 
 describe('page_code — the code-REPL action tool', () => {
   test('the locked profile is page + compute only (no egress / subagent / opfs)', () => {

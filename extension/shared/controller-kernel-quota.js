@@ -17,11 +17,7 @@ import {
   parseKernelFeatureCall,
 } from './kernel-feature-policy.js';
 import { RUNTIME_DISPATCH_CAPABILITY } from './kernel-runtime-policy.js';
-import { CONTROLLER_AUTHORITY_MANIFEST } from './controller-authority-manifest.js';
-import {
-  parseToolExecutionRequest,
-  toolEffectLossSemantics,
-} from './tool-execution-protocol.js';
+import { exactEffectLossSemantics } from './exact-effect-outcome.js';
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
@@ -38,17 +34,18 @@ const MODEL_STREAM_BYTES = 8 * MIB;
 // event headroom for a maximally fragmented but otherwise valid response.
 const MODEL_STREAM_EVENTS = 131_072;
 const MAX_CONCURRENT_KERNEL_CALLS = 256;
+const MAX_EFFECTS_PER_MODEL_CALL = 256;
 const TURN_IDLE_DEADLINE_MS = 30 * 60_000;
-const DOMAIN_OPERATIONS = Object.freeze({
-  'turn.goal.complete': { authorityClass: 'local', riskClass: 'control' },
-  'turn.actor.spawn-sync': { authorityClass: 'actor', riskClass: 'resource' },
-  'turn.actor.spawn-async': { authorityClass: 'actor', riskClass: 'resource' },
+export const CONTROLLER_DOMAIN_OPERATIONS = Object.freeze({
+  'turn.goal.complete': { authorityClass: 'local', riskClass: 'control', confirmation: 'never', retryClass: 'C' },
+  'turn.actor.spawn-sync': { authorityClass: 'actor', riskClass: 'resource', confirmation: 'permission', retryClass: 'F' },
+  'turn.actor.spawn-async': { authorityClass: 'actor', riskClass: 'resource', confirmation: 'permission', retryClass: 'F' },
   'turn.actor.tasks': { authorityClass: 'actor', riskClass: 'read' },
-  'turn.actor.cancel': { authorityClass: 'actor', riskClass: 'control' },
-  'turn.actor.message': { authorityClass: 'actor', riskClass: 'resource' },
+  'turn.actor.cancel': { authorityClass: 'actor', riskClass: 'control', confirmation: 'permission', retryClass: 'E' },
+  'turn.actor.message': { authorityClass: 'actor', riskClass: 'resource', confirmation: 'permission', retryClass: 'E' },
   'turn.pod.resolve': { authorityClass: 'pod', riskClass: 'read' },
   'turn.pod.read-remote': { authorityClass: 'pod', riskClass: 'read' },
-  'turn.pod.confirm-git': { authorityClass: 'pod', riskClass: 'control' },
+  'turn.pod.confirm-git': { authorityClass: 'pod', riskClass: 'control', confirmation: 'self' },
   'turn.pod.exec': { authorityClass: 'pod', riskClass: 'resource' },
   'turn.pod.status': { authorityClass: 'pod', riskClass: 'read' },
   'turn.pod.cancel': { authorityClass: 'pod', riskClass: 'control' },
@@ -60,15 +57,15 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.repository.read-history': { authorityClass: 'repository', riskClass: 'read' },
   'turn.repository.read-remote': { authorityClass: 'repository', riskClass: 'read' },
   'turn.repository.read-diff': { authorityClass: 'repository', riskClass: 'read' },
-  'turn.repository.confirm-restore': { authorityClass: 'repository', riskClass: 'control' },
+  'turn.repository.confirm-restore': { authorityClass: 'repository', riskClass: 'control', confirmation: 'self' },
   'turn.repository.checkpoint': { authorityClass: 'repository', riskClass: 'commit' },
   'turn.repository.branch': { authorityClass: 'repository', riskClass: 'commit' },
   'turn.repository.checkout': { authorityClass: 'repository', riskClass: 'commit' },
-  'turn.repository.restore': { authorityClass: 'repository', riskClass: 'commit' },
-  'turn.repository.confirm-remote': { authorityClass: 'repository', riskClass: 'control' },
-  'turn.repository.link': { authorityClass: 'repository', riskClass: 'commit' },
-  'turn.repository.fetch': { authorityClass: 'repository', riskClass: 'commit' },
-  'turn.repository.push': { authorityClass: 'repository', riskClass: 'resource' },
+  'turn.repository.restore': { authorityClass: 'repository', riskClass: 'commit', confirmation: 'never' },
+  'turn.repository.confirm-remote': { authorityClass: 'repository', riskClass: 'control', confirmation: 'self' },
+  'turn.repository.link': { authorityClass: 'repository', riskClass: 'commit', confirmation: 'never' },
+  'turn.repository.fetch': { authorityClass: 'repository', riskClass: 'commit', confirmation: 'never' },
+  'turn.repository.push': { authorityClass: 'repository', riskClass: 'resource', confirmation: 'never' },
   'turn.vm.read': { authorityClass: 'vm', riskClass: 'read' },
   'turn.vm.list': { authorityClass: 'vm', riskClass: 'read' },
   'turn.vm.set-default': { authorityClass: 'vm', riskClass: 'control' },
@@ -97,7 +94,7 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.app.run-code': { authorityClass: 'app', riskClass: 'resource' },
   'turn.memory.read-scope': { authorityClass: 'persistence', riskClass: 'read' },
   'turn.memory.read-subtree': { authorityClass: 'persistence', riskClass: 'read' },
-  'turn.memory.write': { authorityClass: 'persistence', riskClass: 'commit' },
+  'turn.memory.write': { authorityClass: 'persistence', riskClass: 'commit', confirmation: 'self', retryClass: 'E' },
   'turn.todo.read': { authorityClass: 'persistence', riskClass: 'read' },
   'turn.todo.replace': { authorityClass: 'persistence', riskClass: 'commit' },
   'turn.page.open-tab': { authorityClass: 'page', riskClass: 'resource' },
@@ -107,29 +104,29 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.page.watch-changes': { authorityClass: 'page', riskClass: 'read' },
   'turn.page.query-dom': { authorityClass: 'page', riskClass: 'read' },
   'turn.page.navigate': { authorityClass: 'page', riskClass: 'resource' },
-  'turn.page.fill': { authorityClass: 'page', riskClass: 'resource' },
-  'turn.page.click': { authorityClass: 'page', riskClass: 'resource' },
-  'turn.page.login': { authorityClass: 'page', riskClass: 'resource' },
-  'turn.page.run-program': { authorityClass: 'page', riskClass: 'resource' },
+  'turn.page.fill': { authorityClass: 'page', riskClass: 'resource', confirmation: 'self' },
+  'turn.page.click': { authorityClass: 'page', riskClass: 'resource', confirmation: 'self' },
+  'turn.page.login': { authorityClass: 'page', riskClass: 'resource', confirmation: 'self' },
+  'turn.page.run-program': { authorityClass: 'page', riskClass: 'resource', confirmation: 'self' },
   'turn.page.capture-foreground': { authorityClass: 'page', riskClass: 'read' },
   'turn.page.capture-owned': { authorityClass: 'page', riskClass: 'read' },
-  'turn.resource.confirm-web-write': { authorityClass: 'resource', riskClass: 'commit' },
-  'turn.resource.request-web-text': { authorityClass: 'resource', riskClass: 'resource' },
+  'turn.resource.confirm-web-write': { authorityClass: 'resource', riskClass: 'control', confirmation: 'self' },
+  'turn.resource.request-web-text': { authorityClass: 'resource', riskClass: 'resource', confirmation: 'never' },
   'turn.resource.extract-markdown': { authorityClass: 'resource', riskClass: 'read' },
   'turn.resource.extract-document': { authorityClass: 'resource', riskClass: 'read' },
-  'turn.resource.spill-result': { authorityClass: 'resource', riskClass: 'control' },
+  'turn.resource.spill-result': { authorityClass: 'resource', riskClass: 'control', confirmation: 'never' },
   'turn.resource.read-result': { authorityClass: 'resource', riskClass: 'read' },
   'turn.site-client.read': { authorityClass: 'siteclient', riskClass: 'read' },
-  'turn.site-client.run': { authorityClass: 'siteclient', riskClass: 'resource' },
-  'turn.site-client.commit': { authorityClass: 'siteclient', riskClass: 'commit' },
-  'turn.site-client.capture-start': { authorityClass: 'siteclient', riskClass: 'resource' },
-  'turn.site-client.capture-stop': { authorityClass: 'siteclient', riskClass: 'resource' },
+  'turn.site-client.run': { authorityClass: 'siteclient', riskClass: 'resource', confirmation: 'never' },
+  'turn.site-client.commit': { authorityClass: 'siteclient', riskClass: 'commit', confirmation: 'self', retryClass: 'E' },
+  'turn.site-client.capture-start': { authorityClass: 'siteclient', riskClass: 'resource', confirmation: 'never' },
+  'turn.site-client.capture-stop': { authorityClass: 'siteclient', riskClass: 'resource', confirmation: 'never' },
   'turn.execution.create-webvm': { authorityClass: 'execution', riskClass: 'commit' },
   'turn.execution.create-notebook': { authorityClass: 'execution', riskClass: 'commit' },
   'turn.execution.create-pod': { authorityClass: 'execution', riskClass: 'commit' },
   'turn.execution.create-app': { authorityClass: 'execution', riskClass: 'commit' },
-  'turn.execution.run-script': { authorityClass: 'execution', riskClass: 'resource' },
-  'turn.execution.spill-script': { authorityClass: 'execution', riskClass: 'control' },
+  'turn.execution.run-script': { authorityClass: 'execution', riskClass: 'resource', confirmation: 'never' },
+  'turn.execution.spill-script': { authorityClass: 'execution', riskClass: 'control', confirmation: 'never' },
   'turn.editing.read-target': { authorityClass: 'editing', riskClass: 'read' },
   'turn.editing.write-target': { authorityClass: 'editing', riskClass: 'commit' },
   'turn.introspection.actor-roster': { authorityClass: 'introspection', riskClass: 'read' },
@@ -140,16 +137,129 @@ const DOMAIN_OPERATIONS = Object.freeze({
   'turn.introspection.audit-entries': { authorityClass: 'introspection', riskClass: 'read' },
   'turn.introspection.installed-skill': { authorityClass: 'introspection', riskClass: 'read' },
   'turn.schedule.read-routines': { authorityClass: 'schedule', riskClass: 'read' },
-  'turn.schedule.arm-confirmed-routine': { authorityClass: 'schedule', riskClass: 'commit' },
-  'turn.schedule.cancel-routine': { authorityClass: 'schedule', riskClass: 'commit' },
+  'turn.schedule.arm-confirmed-routine': { authorityClass: 'schedule', riskClass: 'commit', confirmation: 'self', retryClass: 'E' },
+  'turn.schedule.cancel-routine': { authorityClass: 'schedule', riskClass: 'commit', confirmation: 'permission', retryClass: 'E' },
   'turn.dweb.discover-apps': { authorityClass: 'dweb', riskClass: 'read' },
-  'turn.dweb.publish-confirmed-app': { authorityClass: 'dweb', riskClass: 'commit' },
-  'turn.dweb.install-confirmed-app': { authorityClass: 'dweb', riskClass: 'commit' },
+  'turn.dweb.publish-confirmed-app': { authorityClass: 'dweb', riskClass: 'commit', confirmation: 'self', retryClass: 'E' },
+  'turn.dweb.install-confirmed-app': { authorityClass: 'dweb', riskClass: 'commit', confirmation: 'self', retryClass: 'E' },
   'turn.dweb.read-peers': { authorityClass: 'dweb', riskClass: 'read' },
   'turn.dweb.set-peer-blocked': { authorityClass: 'dweb', riskClass: 'commit' },
   'turn.dweb.set-discovery-enabled': { authorityClass: 'dweb', riskClass: 'commit' },
   'turn.dweb.run-mesh-program': { authorityClass: 'dweb', riskClass: 'resource' },
 });
+
+/** @param {string} operation */
+/**
+ * @param {unknown} operation
+ * @returns {{authorityClass:string,riskClass:string,confirmation?:string,retryClass?:string}|null}
+ */
+export const controllerDomainOperationPolicy = (operation) =>
+  CONTROLLER_DOMAIN_OPERATIONS[/** @type {keyof typeof CONTROLLER_DOMAIN_OPERATIONS} */ (operation)]
+  ?? null;
+
+const PLAN_OPERATION_CARVE_OUTS = Object.freeze(new Set([
+  // Pure URL loads and delegation are the operation-level equivalents of the
+  // public Plan-mode carve-outs. The child receives the same live permission.
+  'turn.page.open-tab', 'turn.page.navigate', 'turn.actor.message',
+  // Goal progress is session-local bookkeeping, not a world mutation. Plan
+  // must be able to maintain its checklist and terminate the bounded run.
+  'turn.goal.complete', 'turn.todo.replace',
+  // These are support effects of model-visible read tools. They do not grant a
+  // browser mutation, filesystem write, or external credential by themselves.
+  'turn.resource.spill-result', 'turn.site-client.run',
+  'turn.site-client.capture-start', 'turn.site-client.capture-stop',
+]));
+
+/** @param {string} operation @param {unknown} mode */
+export const controllerOperationSkipsConfirmationInPermissionMode = (operation, mode) =>
+  mode === 'plan' && PLAN_OPERATION_CARVE_OUTS.has(operation);
+
+export const controllerOperationRequiresConfirmation = (
+  /** @type {string} */ operation,
+  /** @type {{mode?:unknown,confirmActions?:unknown}|null|undefined} */ permission,
+  /** @type {any} */ args = {},
+  /** @type {boolean} */ confirmedIntentRequired = false,
+) => {
+  if (controllerOperationSkipsConfirmationInPermissionMode(operation, permission?.mode)) {
+    return false;
+  }
+  const policy = controllerDomainOperationPolicy(operation);
+  // A headless script is ordinarily ephemeral compute. workspace:true mounts
+  // durable per-session OPFS, so the exact host—not the semantic tool name—
+  // upgrades only that final argument shape to the permission confirmation.
+  const confirmation = operation === 'turn.execution.run-script' && args?.workspace === true
+    ? 'permission' : policy?.confirmation ?? 'permission';
+  return confirmation === 'always'
+    || confirmation === 'permission' && permission?.confirmActions !== false
+    || confirmedIntentRequired;
+};
+
+// why: the semantic heap is not the Plan/Act boundary. A compromised Worker
+// can skip its dispatcher, so the SW independently applies the permission mode
+// to exact operations. No semantic tool name participates in this decision.
+export const controllerOperationAllowedInPermissionMode = (
+  /** @type {string} */ operation,
+  /** @type {unknown} */ mode,
+  /** @type {any} */ args = {},
+) => {
+  const policy = controllerDomainOperationPolicy(operation);
+  if (!policy) return false;
+  if (mode === 'act' || policy.riskClass === 'read'
+      || PLAN_OPERATION_CARVE_OUTS.has(operation)) return true;
+  if (operation === 'turn.resource.request-web-text') {
+    const method = typeof args?.method === 'string' ? args.method.toUpperCase() : 'GET';
+    return method === 'GET' || method === 'HEAD';
+  }
+  return false;
+};
+
+/** @param {string} operation */
+export const controllerDomainOperationPayloadCap = (operation) => {
+  const policy = controllerDomainOperationPolicy(operation);
+  if (policy?.authorityClass === 'resource') return 20 * MIB;
+  if (typeof policy?.authorityClass === 'string'
+      && ['app', 'execution', 'editing', 'siteclient'].includes(policy.authorityClass)) {
+    return 8 * MIB;
+  }
+  return MIB;
+};
+
+// why: model-facing tool growth reuses these fixed authority capabilities.
+// Adding a semantic tool cannot widen the orchestrator; only adding a reviewed
+// host operation changes this list or the native service-worker graph.
+export const ORCHESTRATOR_OPERATION_GRANT = Object.freeze([
+  'turn.goal.complete',
+  'turn.actor.spawn-sync', 'turn.actor.spawn-async', 'turn.actor.tasks',
+  'turn.actor.cancel', 'turn.actor.message',
+  'turn.app.open', 'turn.app.search',
+  'turn.memory.read-scope', 'turn.memory.read-subtree', 'turn.memory.write',
+  'turn.todo.read', 'turn.todo.replace',
+  'turn.page.open-tab', 'turn.page.capture-foreground',
+  'turn.resource.read-result',
+  'turn.execution.create-webvm', 'turn.execution.create-notebook',
+  'turn.execution.create-pod', 'turn.execution.create-app',
+  'turn.execution.run-script', 'turn.execution.spill-script',
+  'turn.introspection.actor-roster', 'turn.introspection.provider-posture',
+  'turn.introspection.storage-snapshot', 'turn.introspection.automatable-tabs',
+  'turn.introspection.denylist-patterns', 'turn.introspection.audit-entries',
+  'turn.introspection.installed-skill',
+  'turn.schedule.read-routines', 'turn.schedule.arm-confirmed-routine',
+  'turn.schedule.cancel-routine',
+]);
+const ORCHESTRATOR_OPERATION_SET = new Set(ORCHESTRATOR_OPERATION_GRANT);
+const REPLAYABLE_CONTROL_OPERATIONS = new Set([
+  'turn.pod.confirm-git', 'turn.repository.confirm-restore',
+  'turn.repository.confirm-remote', 'turn.resource.confirm-web-write',
+]);
+
+// why: `control` is a scheduling class, not a factual effect verdict. Default
+// selection, cancellation, goal completion, and spills mutate durable/live
+// state and make a later whole-turn retry unsafe. Only these exact confirmation
+// observations are intrinsically replayable after settlement.
+export const controllerOperationReplayableAfterSettlement = (/** @type {string} */ operation) => {
+  const policy = controllerDomainOperationPolicy(operation);
+  return policy?.riskClass === 'read' || REPLAYABLE_CONTROL_OPERATIONS.has(operation);
+};
 
 const safeSteps = (/** @type {unknown} */ value) => Number.isSafeInteger(value)
   ? Math.max(1, Math.min(HARD_TURN_STEPS, Number(value))) : HARD_TURN_STEPS;
@@ -241,16 +351,14 @@ export const controllerOperationAllowedAfterCancel = (
   /** @type {string} */ operation,
 ) => capability === 'turn.run'
   && (operation === 'turn.model.cancel-inference' || operation === 'turn.model.cancel-local'
-    || operation === 'turn.tool.settle'
     || operation === 'turn.abort.finalize' || operation === 'turn.finalize');
 
 /**
  * @param {string} capability
  * @param {unknown} outerPayload
- * @param {typeof CONTROLLER_AUTHORITY_MANIFEST} [toolManifest]
  */
 export const createControllerKernelQuota = (
-  capability, outerPayload, toolManifest = CONTROLLER_AUTHORITY_MANIFEST,
+  capability, outerPayload,
 ) => {
   if (capability === KERNEL_FEATURE_DISPATCH_CAPABILITY) {
     return createKernelFeatureEffectQuota(capability, outerPayload);
@@ -285,14 +393,16 @@ export const createControllerKernelQuota = (
   }
   const outer = record(outerPayload);
   const ctx = record(outer?.ctx);
+  const turnGeneration = Number.isSafeInteger(outer?.turnGeneration)
+    ? Number(outer?.turnGeneration) : null;
   const steps = safeSteps(outer?.maxSteps ?? ctx?.maxSteps);
   const toolBudget = 4_096 * steps;
   const streamBudget = MODEL_STREAM_EVENTS * steps;
   /** @type {Map<string, number>} */
   const counts = new Map();
   const custody = makeCustody();
-  /** @type {Map<string, ReturnType<typeof parseToolExecutionRequest>>} */
-  const toolExecutions = new Map();
+  /** @type {Map<string, number>} */
+  const semanticEffectSequences = new Map();
   /** @type {Map<string, { events:number, bytes:number, pending:boolean }>} */
   const models = new Map();
 
@@ -303,7 +413,6 @@ export const createControllerKernelQuota = (
     'turn.session.set-trim': steps,
     'turn.prompt.get': steps + 1,
     'turn.tools.refresh': steps,
-    'turn.audit.append': toolBudget + steps + 8,
     'turn.trim.enrich': steps,
     'turn.model.bind': 1,
     'turn.model.open-inference': 32 * steps,
@@ -316,9 +425,7 @@ export const createControllerKernelQuota = (
     'turn.model.cancel-local': 32 * steps,
     'turn.model.observe-event': streamBudget,
     'turn.model.observe-failover': 8 * steps,
-    'turn.tool.prepare': toolBudget,
-    'turn.tool.settle': toolBudget,
-    ...Object.fromEntries(Object.keys(DOMAIN_OPERATIONS).map((operation) => [
+    ...Object.fromEntries(Object.keys(CONTROLLER_DOMAIN_OPERATIONS).map((operation) => [
       operation, toolBudget,
     ])),
     'turn.event': streamBudget + 2 * toolBudget + 8 * steps + 16,
@@ -338,15 +445,20 @@ export const createControllerKernelQuota = (
     const limit = limits[/** @type {keyof typeof limits} */ (operation)];
     if (used >= limit) return refusal('kernel-operation-budget-exhausted');
     const value = record(record(payload)?.value);
-    const domainPolicy = DOMAIN_OPERATIONS[/** @type {keyof typeof DOMAIN_OPERATIONS} */ (operation)];
+    const domainPolicy = controllerDomainOperationPolicy(operation);
     if (domainPolicy) {
-      const execution = typeof value?.executionId === 'string'
-        ? toolExecutions.get(value.executionId) : null;
-      if (!execution || execution.authorityClass !== domainPolicy.authorityClass
-          || value?.argsDigest !== execution.argsDigest
-          || value?.turnGeneration !== execution.turnGeneration) {
-        return refusal('kernel-domain-authority-invalid');
-      }
+      const effectSequence = Number(value?.effectSequence);
+      const directClaim = ORCHESTRATOR_OPERATION_SET.has(operation)
+        && typeof value?.callId === 'string'
+        && value.callId.length >= 1 && value.callId.length <= 512
+        && typeof value?.effectId === 'string'
+        && value.effectId === `${value.callId}:${effectSequence}`
+        && Number.isSafeInteger(effectSequence)
+        && effectSequence >= 1 && effectSequence <= MAX_EFFECTS_PER_MODEL_CALL
+        && effectSequence === (semanticEffectSequences.get(value.callId) ?? 0) + 1
+        && turnGeneration !== null && value.turnGeneration === turnGeneration;
+      if (!directClaim) return refusal('kernel-domain-authority-invalid');
+      semanticEffectSequences.set(value.callId, effectSequence);
     }
     if (operation === 'turn.model.read-inference'
         || operation === 'turn.model.cancel-inference'
@@ -415,36 +527,28 @@ export const createControllerKernelQuota = (
       const streamId = value?.streamId;
       if (typeof streamId === 'string') models.delete(streamId);
     }
-    if (operation === 'turn.tool.prepare' && reply?.ok === true
-        && typeof replyValue?.requestJson === 'string') {
-      try {
-        const request = parseToolExecutionRequest(
-          JSON.parse(replyValue.requestJson), toolManifest,
-        );
-        if (request) toolExecutions.set(request.executionId, request);
-      } catch { /* malformed preparation remains kernel-owned */ }
-    }
-    const domainPolicy = DOMAIN_OPERATIONS[/** @type {keyof typeof DOMAIN_OPERATIONS} */ (operation)];
     const replayable = operation === 'turn.session.get'
       || operation === 'turn.prompt.get' || operation === 'turn.tools.refresh'
-      || operation === 'turn.tool.prepare'
-      || domainPolicy?.riskClass === 'read' || domainPolicy?.riskClass === 'control';
+      || controllerOperationReplayableAfterSettlement(operation);
     custody.observe(result, replayable);
     return Object.freeze({ ok: true, outcomeKnown: true });
   };
 
   const pendingLoss = (/** @type {string} */ operation, /** @type {unknown} */ payload) => {
-    const domainPolicy = DOMAIN_OPERATIONS[/** @type {keyof typeof DOMAIN_OPERATIONS} */ (operation)];
+    const domainPolicy = controllerDomainOperationPolicy(operation);
     if (domainPolicy) {
       const effect = record(record(payload)?.value);
-      const execution = typeof effect?.executionId === 'string'
-        ? toolExecutions.get(effect.executionId) : null;
-      if (!execution || execution.authorityClass !== domainPolicy.authorityClass
-          || effect?.argsDigest !== execution.argsDigest
-          || effect?.turnGeneration !== execution.turnGeneration) {
-        return unknownPendingLoss();
-      }
-      return toolEffectLossSemantics(domainPolicy.riskClass, 'during');
+      const effectSequence = Number(effect?.effectSequence);
+      const directClaim = ORCHESTRATOR_OPERATION_SET.has(operation)
+        && typeof effect?.callId === 'string'
+        && effect.callId.length >= 1 && effect.callId.length <= 512
+        && typeof effect?.effectId === 'string'
+        && effect.effectId === `${effect.callId}:${effectSequence}`
+        && Number.isSafeInteger(effectSequence)
+        && effectSequence >= 1 && effectSequence <= MAX_EFFECTS_PER_MODEL_CALL
+        && turnGeneration !== null && effect.turnGeneration === turnGeneration;
+      if (!directClaim) return unknownPendingLoss();
+      return exactEffectLossSemantics(domainPolicy.riskClass, 'during');
     }
     return unknownPendingLoss();
   };

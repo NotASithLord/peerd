@@ -1,6 +1,8 @@
 // @ts-check
 
 export { reasoningForTurn, runUserTurn } from './loop/agent-loop.js';
+export { decideAction } from './permissions/policy.js';
+export { dispatchToolCall, semanticHooksFor } from './tools/local-tool-dispatcher.js';
 export { projectControllerToolSurface } from './controller-tool-projection.js';
 export {
   CONTROLLER_LOCAL_TOOL_NAMES,
@@ -85,4 +87,6 @@ export {
 export {
   controllerAuthorityClassForTool,
   controllerHostsTool,
+  controllerOperationsForTools,
+  controllerOperationsForSpawnedTools,
 } from './controller-tool-ownership.js';

@@ -34,6 +34,8 @@ export const createPodSandbox = async (args, ctx) => {
   }, null, 2);
   return {
     ok: true,
-    content: `${summary}\n\n${oncePerSession(sessionId, 'pod-note') ? podNote(record.persistent) : (record.persistent ? '(Pod runtime note shown earlier this session: same rules apply.)' : '(Ephemeral Pod: closing its tab deletes this workspace.)')}`,
+    content: `${summary}\n\n${oncePerSession(
+      sessionId, 'pod-note', ctx.session?.messages, 'sandbox_create', '<pod>',
+    ) ? podNote(record.persistent) : (record.persistent ? '(Pod runtime note shown earlier this session: same rules apply.)' : '(Ephemeral Pod: closing its tab deletes this workspace.)')}`,
   };
 };

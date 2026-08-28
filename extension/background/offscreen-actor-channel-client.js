@@ -5,9 +5,11 @@
 // The service worker instead finds the exact offscreen WindowClient and
 // transfers one standard MessageChannel endpoint directly to that document.
 
-// Kept local so the authority kernel does not link a constants-only module.
-// The offscreen host imports the shared wire constants independently.
-const ACTOR_CHANNEL_PROTOCOL = 1;
+import {
+  ACTOR_CHANNEL_PROTOCOL,
+  actorRelayRouteClass,
+} from '/shared/actor-channel-protocol.js';
+
 const ACTOR_CHANNEL_OFFER = 'peerd/actor-channel';
 
 export { makeSemanticControllerClient } from './offscreen-controller-client.js';
@@ -55,6 +57,9 @@ export const selectExactActorHostClient = (
  * @param {number} [deps.abortTimeoutMs]
  * @param {number} [deps.maxLoopEventsPerRun]
  * @param {number} [deps.maxEffectRelaysPerRun]
+ * @param {number} [deps.maxModelProtocolRelaysPerRun]
+ * @param {number} [deps.maxControlRelaysPerRun]
+ * @param {number} [deps.maxSettledTransientRelays]
  * @param {(job: any) => number} [deps.runTimeoutMsFor]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
@@ -67,7 +72,10 @@ export const makeOffscreenActorChannelClient = ({
   handshakeTimeoutMs = 10_000,
   abortTimeoutMs = 5_000,
   maxLoopEventsPerRun = 256,
-  maxEffectRelaysPerRun = 228,
+  maxEffectRelaysPerRun = Number.POSITIVE_INFINITY,
+  maxModelProtocolRelaysPerRun = Number.POSITIVE_INFINITY,
+  maxControlRelaysPerRun = Number.POSITIVE_INFINITY,
+  maxSettledTransientRelays = 256,
   runTimeoutMsFor = (job) => Number.isFinite(job?.budgetMs) && job.budgetMs > 0
     ? job.budgetMs + abortTimeoutMs
     : 30 * 60_000,
@@ -104,12 +112,35 @@ export const makeOffscreenActorChannelClient = ({
     const { port1, port2 } = createChannel();
     /** @type {Map<string, Promise<any>>} */
     const relayReplies = new Map();
+    /** @type {string[]} */
+    const settledTransientRelayIds = [];
+    const settledTransientRelayLimit = Number.isSafeInteger(maxSettledTransientRelays)
+      ? Math.min(4_096, Math.max(1, maxSettledTransientRelays)) : 256;
     const loopEventLimit = Number.isFinite(maxLoopEventsPerRun) && maxLoopEventsPerRun > 0
       ? Math.floor(maxLoopEventsPerRun) : 256;
-    const effectRelayLimit = Number.isFinite(maxEffectRelaysPerRun) && maxEffectRelaysPerRun > 0
-      ? Math.floor(maxEffectRelaysPerRun) : 228;
+    const semanticStepCap = Number.isSafeInteger(job?.maxSteps)
+      ? Math.min(64, Math.max(1, Number(job.maxSteps))) : 20;
+    const configuredEffectRelayLimit = Number.isFinite(maxEffectRelaysPerRun)
+      && maxEffectRelaysPerRun > 0 ? Math.floor(maxEffectRelaysPerRun) : Number.POSITIVE_INFINITY;
+    // why: one semantic call may legitimately use the exact protocol's full
+    // 256-effect sequence. The transport must not invent a smaller global cap;
+    // this coarse ceiling scales with the already-authorized model step budget.
+    const effectRelayLimit = Math.min(configuredEffectRelayLimit, 256 * semanticStepCap);
+    const configuredModelProtocolLimit = Number.isFinite(maxModelProtocolRelaysPerRun)
+      && maxModelProtocolRelaysPerRun > 0
+      ? Math.floor(maxModelProtocolRelaysPerRun) : Number.POSITIVE_INFINITY;
+    const modelProtocolRelayLimit = Math.min(
+      configuredModelProtocolLimit, 131_072 * semanticStepCap,
+    );
+    const configuredControlRelayLimit = Number.isFinite(maxControlRelaysPerRun)
+      && maxControlRelaysPerRun > 0
+      ? Math.floor(maxControlRelaysPerRun) : Number.POSITIVE_INFINITY;
+    const controlRelayLimit = Math.min(configuredControlRelayLimit, 1_024 * semanticStepCap);
     let loopEvents = 0;
     let effectRelays = 0;
+    let modelProtocolRelays = 0;
+    let controlRelays = 0;
+    let highestRelaySequence = 0;
     let state = /** @type {'offered'|'ready'|'opened'|'accepted'|'committed'|'settled'} */ ('offered');
     let settle = (/** @type {any} */ _value) => {};
     let handshakeTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
@@ -194,11 +225,69 @@ export const makeOffscreenActorChannelClient = ({
       if (message.type !== 'actor/relay' || state !== 'committed'
           || typeof message.requestId !== 'string'
           || typeof message.relayType !== 'string') return;
-      const readOnlyEvent = message.relayType === 'actor/loop-event';
+      const relayClass = actorRelayRouteClass(message.relayType);
+      if (!relayClass) {
+        try {
+          post({
+            type: 'actor/relay-response', requestId: message.requestId,
+            result: {
+              ok: false, code: 'actor_relay_route_invalid',
+              error: 'actor relay route is not part of the sealed protocol',
+              outcomeKnown: true, performed: false, retryable: false,
+            },
+          });
+        } catch { /* run timeout owns settlement */ }
+        return;
+      }
+      const readOnlyEvent = relayClass === 'loop';
+      const modelProtocol = relayClass === 'model';
+      const authorityEffect = relayClass === 'effect'
+        && typeof message.payload?.operation === 'string'
+        && message.payload.operation.startsWith('turn.')
+        && typeof message.payload?.callId === 'string'
+        && typeof message.payload?.effectId === 'string'
+        && Number.isSafeInteger(message.payload?.effectSequence);
+      if (relayClass === 'effect' && !authorityEffect) {
+        try {
+          post({
+            type: 'actor/relay-response', requestId: message.requestId,
+            result: {
+              ok: false, code: 'actor_effect_relay_invalid',
+              error: 'actor effect relay is missing its exact authority binding',
+              outcomeKnown: true, performed: false, retryable: false,
+            },
+          });
+        } catch { /* run timeout owns settlement */ }
+        return;
+      }
       // A duplicate request shares the first dispatch promise. Even though the
       // MessageChannel is private, transport retries must never repeat a tool.
       let pending = relayReplies.get(message.requestId);
       if (!pending) {
+        const sequenceMatch = /^relay-([1-9][0-9]{0,9})$/.exec(message.requestId);
+        const relaySequence = sequenceMatch ? Number(sequenceMatch[1]) : 0;
+        const replayExpired = relaySequence > 0 && relaySequence <= highestRelaySequence;
+        if (!sequenceMatch || replayExpired || relaySequence !== highestRelaySequence + 1) {
+          try {
+            post({
+              type: 'actor/relay-response', requestId: message.requestId,
+              result: {
+                ok: false,
+                code: replayExpired ? 'actor_relay_replay_expired' : 'actor_relay_sequence_invalid',
+                error: replayExpired
+                  ? 'actor relay replay is outside the bounded response window'
+                  : 'actor relay sequence is invalid',
+                outcomeKnown: true, performed: false, retryable: false,
+              },
+            });
+          } catch { /* run timeout owns settlement */ }
+          return;
+        }
+        // why: a single monotonic watermark is the bounded tombstone for every
+        // evicted model/control reply. Old request ids can never dispatch a
+        // second stream read, audit append, or completion after their cached
+        // response leaves the small replay window.
+        highestRelaySequence = relaySequence;
         if (readOnlyEvent && loopEvents >= loopEventLimit) {
           try {
             post({
@@ -208,20 +297,31 @@ export const makeOffscreenActorChannelClient = ({
           } catch { /* run timeout owns settlement */ }
           return;
         }
-        if (!readOnlyEvent && effectRelays >= effectRelayLimit) {
+        const exhausted = authorityEffect
+          ? effectRelays >= effectRelayLimit
+          : modelProtocol
+            ? modelProtocolRelays >= modelProtocolRelayLimit
+            : !readOnlyEvent && controlRelays >= controlRelayLimit;
+        if (exhausted) {
           try {
             post({
               type: 'actor/relay-response', requestId: message.requestId,
               result: {
-                ok: false, code: 'actor_relay_limit',
-                error: 'actor relay budget exhausted', outcomeKnown: true, performed: false,
+                ok: false,
+                code: authorityEffect ? 'actor_effect_relay_limit'
+                  : modelProtocol ? 'actor_model_protocol_relay_limit'
+                    : 'actor_control_relay_limit',
+                error: 'actor relay class budget exhausted',
+                outcomeKnown: true, performed: false,
               },
             });
           } catch { /* run timeout owns settlement */ }
           return;
         }
         if (readOnlyEvent) loopEvents += 1;
-        else effectRelays += 1;
+        else if (authorityEffect) effectRelays += 1;
+        else if (modelProtocol) modelProtocolRelays += 1;
+        else controlRelays += 1;
         pending = Promise.resolve(relay(message.relayType, message.payload ?? {}))
           .catch((cause) => {
             const detail = /** @type {{code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
@@ -237,12 +337,34 @@ export const makeOffscreenActorChannelClient = ({
         relayReplies.set(message.requestId, pending);
       }
       pending.then((reply) => {
-        if (readOnlyEvent && relayReplies.get(message.requestId) === pending) {
-          relayReplies.delete(message.requestId);
+        if (relayReplies.get(message.requestId) === pending) {
+          if (readOnlyEvent) relayReplies.delete(message.requestId);
+          else if (!authorityEffect && !settledTransientRelayIds.includes(message.requestId)) {
+            // why: exact-effect request ids remain replayable for the whole run,
+            // but model pulls and semantic-control chatter are numerous and
+            // side-effect free at this transport layer. Retain only a bounded
+            // recent replay window so a fragmented stream cannot pin one
+            // promise per chunk until the actor finishes.
+            settledTransientRelayIds.push(message.requestId);
+            while (settledTransientRelayIds.length > settledTransientRelayLimit) {
+              const expired = settledTransientRelayIds.shift();
+              if (expired) relayReplies.delete(expired);
+            }
+          }
         }
         if (state !== 'committed') return;
         try { post({ type: 'actor/relay-response', requestId: message.requestId, result: reply }); }
         catch { /* run timeout or restart owns settlement */ }
+        finally {
+          if (authorityEffect && relayReplies.get(message.requestId) === pending) {
+            // why: MessagePort delivery is reliable while this channel is
+            // alive, and the SW exact-effect ledger is the replay authority.
+            // Retaining a potentially 20 MiB read result until call-complete
+            // lets an omitted/refused completion pin gigabytes. Compact to the
+            // monotonic request tombstone immediately after responding.
+            relayReplies.delete(message.requestId);
+          }
+        }
       });
     };
     port1.onmessageerror = () => finish({

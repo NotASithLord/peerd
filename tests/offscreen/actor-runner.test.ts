@@ -1,16 +1,18 @@
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { abortActor, runActor } from '../../extension/offscreen/actor-runner.js';
-import { ACTOR_WORKER_PROTOCOL } from '../../extension/offscreen/actor-worker-protocol.js';
+import {
+  abortActor, actorWorkerMessageFits, runActor,
+} from '../../extension/offscreen/actor-runner.js';
+import {
+  ACTOR_REALM_FACT_KEYS,
+  ACTOR_WORKER_PROTOCOL,
+} from '../../extension/offscreen/actor-worker-protocol.js';
 import { EXECUTION_PROTOCOL } from '../../extension/shared/execution-protocol.js';
 import { projectContributorSettlement } from '../../extension/peerd-runtime/controller-contributor.js';
 
 const REALM = {
   dedicatedWorker: true,
-  window: false,
-  document: false,
-  browser: false,
-  chrome: false,
+  ...Object.fromEntries(ACTOR_REALM_FACT_KEYS.map((key) => [key, false])),
 };
 
 class FakeWorker {
@@ -58,107 +60,56 @@ const answerProbe = (worker: FakeWorker, message: any) => {
   if (message.type !== 'probe') return;
   queueMicrotask(() => worker.emit('message', { data: {
     type: 'probe-response', protocol: ACTOR_WORKER_PROTOCOL,
-    rid: message.rid, canaryAbsent: true,
+    rid: message.rid, canaryAbsent: true, realm: REALM,
+    prototypeFetchBlocked: true, prototypeStorageBlocked: true,
   } }));
 };
 
 describe('actor worker startup proof', () => {
+  test('bounds every Worker message before it can relay to the service worker', () => {
+    expect(actorWorkerMessageFits({ type: 'loop-event', event: { text: 'ok' } })).toBe(true);
+    expect(actorWorkerMessageFits({
+      type: 'loop-event', event: { text: 'x'.repeat(64 * 1024) },
+    })).toBe(false);
+    const sparse: any[] = [];
+    sparse.length = 1_000_000;
+    expect(actorWorkerMessageFits({ type: 'loop-event', event: sparse })).toBe(false);
+    const accessor: Record<string, unknown> = { type: 'loop-event' };
+    Object.defineProperty(accessor, 'event', { get: () => ({ secret: true }) });
+    expect(actorWorkerMessageFits(accessor)).toBe(false);
+    expect(actorWorkerMessageFits({
+      type: 'loop-event', event: new Uint8Array(new SharedArrayBuffer(8)),
+    })).toBe(false);
+  });
+
+  test('retires an actor that sends an invalid message without relaying it', async () => {
+    const worker = new FakeWorker();
+    let relayCount = 0;
+    worker.onPost = (message) => {
+      answerProbe(worker, message);
+      if (message.type === 'run') queueMicrotask(() => {
+        const sparse: any[] = [];
+        sparse.length = 1_000_000;
+        worker.emit('message', { data: { type: 'loop-event', event: sparse } });
+      });
+    };
+    const result = await runActor(job, {
+      workerUrl: '/worker.js',
+      createWorker: () => readyWorker(worker),
+      sendToSW: async () => { relayCount += 1; return { ok: true }; },
+    });
+    expect(result).toMatchObject({
+      ok: false, started: true, code: 'actor_worker_protocol_error',
+    });
+    expect(relayCount).toBe(0);
+    expect(worker.terminated).toBe(true);
+  });
+
   test('the worker forwards the preflight reply into the actor loop', () => {
     const source = readFileSync(
       new URL('../../extension/offscreen/actor-worker-runtime.js', import.meta.url), 'utf8',
     );
     expect(source).toContain('preflightReply: metadata.preflightReply');
-  });
-
-  test('relays tools only through prepare, exact effect, and settle', async () => {
-    const worker = new FakeWorker();
-    worker.onPost = (message) => {
-      answerProbe(worker, message);
-      if (message.type === 'run') queueMicrotask(() => worker.emit('message', { data: {
-        type: 'actor-tool-prepare-request', rid: 'prepare-1',
-        authorityClass: 'actor',
-        call: { id: 'call-1', name: 'actor_tasks', args: {} },
-      } }));
-      if (message.type === 'actor-tool-prepare-response') {
-        queueMicrotask(() => worker.emit('message', { data: {
-          type: 'actor-tasks-read-request', rid: 'read-1', executionId: 'exec-1',
-        } }));
-      }
-      if (message.type === 'actor-tasks-read-response') {
-        queueMicrotask(() => worker.emit('message', { data: {
-          type: 'actor-tool-settle-request', rid: 'settle-1', executionId: 'exec-1',
-          result: { ok: true, content: 'No async actors.' },
-        } }));
-      }
-      if (message.type === 'actor-tool-settle-response') {
-        queueMicrotask(() => worker.emit('message', { data: {
-          type: 'done', result: { ok: true, finalText: 'done', newMessages: [] },
-        } }));
-      }
-    };
-    const relays: string[] = [];
-    const result = await runActor({ ...job, runId: 'exact-tool' }, {
-      workerUrl: '/worker.js',
-      createWorker: () => readyWorker(worker),
-      sendToSW: async (type) => {
-        relays.push(type);
-        if (type === 'actor/tool-prepare') return {
-          ok: true, mode: 'execute', executionId: 'exec-1',
-          toolName: 'actor_tasks', callId: 'call-1', args: {}, projection: {},
-        };
-        if (type === 'actor/tasks-read') return { ok: true, value: [] };
-        if (type === 'actor/tool-settle') return {
-          ok: true, result: { ok: true, content: 'No async actors.' },
-        };
-        return { ok: false, outcomeKnown: true };
-      },
-    });
-    expect(relays).toEqual([
-      'actor/tool-prepare', 'actor/tasks-read', 'actor/tool-settle',
-    ]);
-    expect(relays).not.toContain('actor/tool-dispatch');
-    expect(result).toMatchObject({ ok: true, finalText: 'done', toolCalls: 1 });
-  });
-
-  test('an unknown exact-effect receipt cannot be laundered by worker success', async () => {
-    const worker = new FakeWorker();
-    worker.onPost = (message) => {
-      answerProbe(worker, message);
-      if (message.type === 'run') queueMicrotask(() => worker.emit('message', { data: {
-        type: 'actor-tool-prepare-request', rid: 'prepare-1',
-        authorityClass: 'actor',
-        call: { id: 'call-1', name: 'actor_cancel', args: { taskId: 'task-1' } },
-      } }));
-      if (message.type === 'actor-tool-prepare-response') {
-        queueMicrotask(() => worker.emit('message', { data: {
-          type: 'actor-task-cancel-request', rid: 'cancel-1',
-          executionId: 'exec-1', taskId: 'task-1',
-        } }));
-      }
-      if (message.type === 'actor-task-cancel-response') {
-        queueMicrotask(() => worker.emit('message', { data: {
-          type: 'done', result: { ok: true, finalText: 'claimed success', newMessages: [] },
-        } }));
-      }
-    };
-    const result = await runActor({ ...job, runId: 'unknown-exact-tool' }, {
-      workerUrl: '/worker.js',
-      createWorker: () => readyWorker(worker),
-      sendToSW: async (type) => {
-        if (type === 'actor/tool-prepare') return {
-          ok: true, mode: 'execute', executionId: 'exec-1',
-          toolName: 'actor_cancel', callId: 'call-1',
-          args: { taskId: 'task-1' }, projection: {},
-        };
-        return {
-          ok: false, error: 'response lost', outcomeKnown: false, retryable: false,
-        };
-      },
-    });
-    expect(result).toMatchObject({
-      ok: false, code: 'actor_tool_outcome_unknown',
-      outcomeKnown: false, retryable: false, toolCalls: 1,
-    });
   });
 
   test('posts the run only after realm proof', async () => {

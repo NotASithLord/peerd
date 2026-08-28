@@ -11,51 +11,53 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
   catch { return false; }
 };
 
-/** @param {{call:any,ctx:any}} input */
-export const createPersistenceToolAuthority = ({ call, ctx }) => {
-  const args = call?.args ?? {};
+/** @param {{binding:any,ctx:any}} input */
+export const createPersistenceToolAuthority = ({ binding, ctx }) => {
+  const args = binding.args;
   const sessionId = ctx?.session?.sessionId;
-  const workspace = args.workspace ?? ctx?.activeTab?.origin ?? '';
-  const requireTool = (/** @type {string[]} */ names) => {
-    if (!names.includes(call?.name)) throw mismatch();
+  const requireOperation = (/** @type {string} */ name) => {
+    if (binding.operation !== name) throw mismatch();
   };
-  const todoNames = ['todo_init', 'todo_check', 'todo_add'];
   return Object.freeze({
     readMemoryScope: (/** @type {any} */ scope) => {
-      requireTool(['read_memory']);
-      const expected = { kind: args.scope, workspace };
-      if (!sameClone(scope, expected) || typeof ctx?.memory?.readScope !== 'function') {
+      requireOperation('turn.memory.read-scope');
+      if (!sameClone(scope, args.scope) || typeof ctx?.memory?.readScope !== 'function') {
         throw mismatch();
       }
       return ctx.memory.readScope(scope);
     },
     readMemorySubtree: (/** @type {string} */ requestedWorkspace,
       /** @type {string} */ subpath) => {
-      requireTool(['read_memory']);
-      if (args.scope !== 'subtree' || requestedWorkspace !== workspace
+      requireOperation('turn.memory.read-subtree');
+      if (requestedWorkspace !== args.workspace
           || subpath !== args.subpath || typeof ctx?.memory?.readSubtree !== 'function') {
         throw mismatch();
       }
       return ctx.memory.readSubtree(requestedWorkspace, subpath);
     },
     writeMemory: (/** @type {any} */ scope, /** @type {string} */ body) => {
-      requireTool(['remember']);
-      const expected = { kind: args.scope, workspace, subpath: args.subpath };
-      if (!sameClone(scope, expected) || body !== args.body
+      requireOperation('turn.memory.write');
+      if (!sameClone(scope, args.scope) || body !== args.body
           || typeof ctx?.memory?.writeWithConfirm !== 'function') throw mismatch();
       return ctx.memory.writeWithConfirm({
         scope, body, origin: 'agent',
         confirm: typeof ctx?.confirm === 'function'
-          ? (/** @type {any} */ proposal) => ctx.confirm({
-              tool: 'remember', sideEffect: 'write', kind: 'memory_write', proposal,
+          ? async (/** @type {any} */ proposal) => {
+            const answer = await ctx.confirm({
+              tool: binding.operation, sideEffect: 'write', kind: 'memory_write', proposal,
               summary: `${proposal.op} memory: ${proposal.header} (+${proposal.addedLines}/−${proposal.removedLines})`,
               origins: [], sessionId: sessionId ?? null,
-            }, ctx.abortSignal)
+            }, ctx.abortSignal);
+            const permission = typeof ctx.readAuthorityPermission === 'function'
+              ? await ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+              : ctx.permission;
+            return !ctx.abortSignal?.aborted && permission?.mode === 'act' ? answer : 'no';
+          }
           : undefined,
       });
     },
     readTodos: async () => {
-      requireTool(todoNames);
+      requireOperation('turn.todo.read');
       if (!ctx?.todoStore?.apply) throw mismatch();
       const current = await ctx.todoStore.apply((/** @type {any[]} */ todos) => ({
         ok: true, current: Array.isArray(todos) ? todos : [],
@@ -64,7 +66,7 @@ export const createPersistenceToolAuthority = ({ call, ctx }) => {
       return { todos, version: JSON.stringify(todos) };
     },
     replaceTodos: (/** @type {string} */ version, /** @type {any[]} */ todos) => {
-      requireTool(todoNames);
+      requireOperation('turn.todo.replace');
       if (typeof version !== 'string' || !Array.isArray(todos)
           || !ctx?.todoStore?.apply) throw mismatch();
       return ctx.todoStore.apply((/** @type {any[]} */ current) => {
@@ -80,5 +82,7 @@ export const createPersistenceToolAuthority = ({ call, ctx }) => {
 
 export const bindPersistenceToolAuthority = (
   /** @type {any} */ state, /** @type {any} */ input,
-) =>
-  state.authority ??= createPersistenceToolAuthority(input);
+) => {
+  const binding = Object.freeze({ operation: input.operation, args: structuredClone(input.args) });
+  return createPersistenceToolAuthority({ ...input, binding });
+};

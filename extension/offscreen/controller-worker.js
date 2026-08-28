@@ -6,10 +6,61 @@
 const denied = () => { throw new Error('controller ambient capability denied'); };
 /** @type {string[]} */
 const sealFailures = [];
+const sealedThroughPrototype = (
+  /** @type {any} */ target, /** @type {string} */ name, /** @type {unknown} */ value,
+) => {
+  let own = true;
+  for (let object = target; object; object = Object.getPrototypeOf(object)) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, name);
+    if (!descriptor) { own = false; continue; }
+    if (!own || descriptor.configurable || descriptor.value !== value
+        || descriptor.writable !== false) return false;
+    own = false;
+  }
+  return true;
+};
+const seal = (
+  /** @type {any} */ target, /** @type {string} */ name, /** @type {unknown} */ value,
+) => {
+  for (let object = target; object; object = Object.getPrototypeOf(object)) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, name);
+    if (!descriptor) continue;
+    if (!descriptor.configurable) {
+      if (object !== target || descriptor.value !== value || descriptor.writable !== false) {
+        return false;
+      }
+      continue;
+    }
+    try { delete object[name]; } catch { return false; }
+  }
+  try {
+    Object.defineProperty(target, name, {
+      value, writable: false, configurable: false, enumerable: false,
+    });
+  } catch { return false; }
+  return sealedThroughPrototype(target, name, value);
+};
+const recoveredPrototypeCapabilityBlocked = async (
+  /** @type {any} */ target, /** @type {string} */ name, /** @type {unknown} */ argument,
+) => {
+  for (let object = Object.getPrototypeOf(target); object; object = Object.getPrototypeOf(object)) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, name);
+    if (!descriptor) continue;
+    try {
+      const recovered = typeof descriptor.get === 'function'
+        ? descriptor.get.call(target) : descriptor.value;
+      if (typeof recovered === 'function') {
+        await Promise.resolve(recovered.call(target, argument)).catch(() => {});
+      } else if (recovered && typeof recovered.getDirectory === 'function') {
+        await Promise.resolve(recovered.getDirectory()).catch(() => {});
+      }
+    } catch { /* a throwing recovered primitive is still reachable */ }
+    return false;
+  }
+  return true;
+};
 const denyGlobal = (/** @type {string} */ name) => {
-  try { Object.defineProperty(globalThis, name, { value: denied, configurable: false }); }
-  catch { sealFailures.push(name); return; }
-  if ((/** @type {Record<string, unknown>} */ (globalThis))[name] !== denied) sealFailures.push(name);
+  if (!seal(globalThis, name, denied)) sealFailures.push(name);
 };
 
 for (const name of [
@@ -18,45 +69,42 @@ for (const name of [
   'RTCDataChannel', 'Worker', 'SharedWorker', 'BroadcastChannel', 'indexedDB',
   'caches', 'importScripts',
 ]) denyGlobal(name);
-const denyNavigator = (/** @type {string} */ name, /** @type {unknown} */ value) => {
-  try { Object.defineProperty(navigator, name, { value: undefined, configurable: false }); }
-  catch { sealFailures.push(`navigator.${name}`); return; }
-  if ((/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (navigator)))[name] !== value) sealFailures.push(`navigator.${name}`);
+const denyNavigator = (/** @type {string} */ name) => {
+  if (!seal(navigator, name, undefined)) sealFailures.push(`navigator.${name}`);
 };
-denyNavigator('sendBeacon', undefined);
-for (const name of ['storage', 'serviceWorker', 'locks']) denyNavigator(name, undefined);
+denyNavigator('sendBeacon');
+for (const name of ['storage', 'serviceWorker', 'locks']) denyNavigator(name);
 const globals = /** @type {Record<string, unknown>} */ (globalThis);
 const ABORT_CLEANUP_OPERATIONS = new Set([
   'turn.model.cancel-inference',
   'turn.model.cancel-local',
   'turn.abort.finalize',
   'turn.finalize',
-  'turn.tool.settle',
 ]);
-if (typeof globals.browser !== 'undefined') sealFailures.push('browser');
-if (typeof globals.chrome !== 'undefined') sealFailures.push('chrome');
+if (!seal(globalThis, 'browser', undefined)) sealFailures.push('browser');
+if (!seal(globalThis, 'chrome', undefined)) sealFailures.push('chrome');
 
 const realm = () => ({
   window: typeof globals.window !== 'undefined',
   document: typeof globals.document !== 'undefined',
-  browser: typeof globals.browser !== 'undefined',
-  chrome: typeof globals.chrome !== 'undefined',
-  fetch: globals.fetch !== denied,
-  xhr: globals.XMLHttpRequest !== denied,
-  webSocket: globals.WebSocket !== denied,
-  eventSource: globals.EventSource !== denied,
-  webTransport: globals.WebTransport !== denied,
-  rtc: globals.RTCPeerConnection !== denied,
-  worker: globals.Worker !== denied,
-  sharedWorker: globals.SharedWorker !== denied,
-  broadcastChannel: globals.BroadcastChannel !== denied,
-  indexedDB: globals.indexedDB !== denied,
-  caches: globals.caches !== denied,
-  opfsRoot: navigator.storage !== undefined,
-  serviceWorker: navigator.serviceWorker !== undefined,
-  locks: navigator.locks !== undefined,
-  sendBeacon: navigator.sendBeacon !== undefined,
-  importScripts: globals.importScripts !== denied,
+  browser: !sealedThroughPrototype(globalThis, 'browser', undefined),
+  chrome: !sealedThroughPrototype(globalThis, 'chrome', undefined),
+  fetch: !sealedThroughPrototype(globalThis, 'fetch', denied),
+  xhr: !sealedThroughPrototype(globalThis, 'XMLHttpRequest', denied),
+  webSocket: !sealedThroughPrototype(globalThis, 'WebSocket', denied),
+  eventSource: !sealedThroughPrototype(globalThis, 'EventSource', denied),
+  webTransport: !sealedThroughPrototype(globalThis, 'WebTransport', denied),
+  rtc: !sealedThroughPrototype(globalThis, 'RTCPeerConnection', denied),
+  worker: !sealedThroughPrototype(globalThis, 'Worker', denied),
+  sharedWorker: !sealedThroughPrototype(globalThis, 'SharedWorker', denied),
+  broadcastChannel: !sealedThroughPrototype(globalThis, 'BroadcastChannel', denied),
+  indexedDB: !sealedThroughPrototype(globalThis, 'indexedDB', denied),
+  caches: !sealedThroughPrototype(globalThis, 'caches', denied),
+  opfsRoot: !sealedThroughPrototype(navigator, 'storage', undefined),
+  serviceWorker: !sealedThroughPrototype(navigator, 'serviceWorker', undefined),
+  locks: !sealedThroughPrototype(navigator, 'locks', undefined),
+  sendBeacon: !sealedThroughPrototype(navigator, 'sendBeacon', undefined),
+  importScripts: !sealedThroughPrototype(globalThis, 'importScripts', denied),
 });
 
 const CONTROLLER_RUNTIME_URL = '/offscreen/controller-runtime.js';
@@ -81,6 +129,15 @@ const onBootstrap = async (/** @type {MessageEvent} */ event) => {
     return;
   }
   try {
+    const prototypeFetchBlocked = await recoveredPrototypeCapabilityBlocked(
+      globalThis, 'fetch', 'data:text/plain,controller-seal-probe',
+    );
+    const prototypeStorageBlocked = await recoveredPrototypeCapabilityBlocked(
+      navigator, 'storage', undefined,
+    );
+    if (!prototypeFetchBlocked || !prototypeStorageBlocked) {
+      throw new Error('controller prototype capability remained reachable');
+    }
     // Fixed packaged module, never a host-provided URL. The future controller
     // receives only audited kernel RPC and explicitly cloned directory handles.
     const module = await import(CONTROLLER_RUNTIME_URL);
@@ -161,7 +218,10 @@ const onBootstrap = async (/** @type {MessageEvent} */ event) => {
         });
     };
     port.start();
-    port.postMessage({ type: 'controller-worker/ready', realm: realm() });
+    port.postMessage({
+      type: 'controller-worker/ready', realm: realm(),
+      prototypeFetchBlocked, prototypeStorageBlocked,
+    });
   } catch (cause) {
     port.postMessage({
       type: 'controller-worker/error',

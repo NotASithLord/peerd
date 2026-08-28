@@ -47,7 +47,7 @@ const makeDeps = (over: any = {}) => {
         actors: { tu: {
           sessionId: 'web-a', rootSessionId: 'root-a', name: 'web\u202E actor',
           task: `Inspect\u0000 the page ${'x'.repeat(100)}NEVER-RETURN`,
-          grantedTools: ['read_page'],
+          visibleTools: ['read_page'],
           messages: [{ content: 'private worker transcript', toolUses: [{
             name: 'read_page', input: { secret: 'do-not-return' },
           }] }],

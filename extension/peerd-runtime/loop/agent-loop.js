@@ -1080,6 +1080,12 @@ export async function* runUserTurn(ctx) {
         ...(typeof dispatchResult.actorPerformed === 'boolean'
           ? { actorPerformed: dispatchResult.actorPerformed } : {}),
         ...(dispatchResult.actorAborted === true ? { actorAborted: true } : {}),
+        ...(Array.isArray(dispatchResult.authorityReceipts)
+          ? { authorityReceipts: dispatchResult.authorityReceipts }
+          : {}),
+        ...(typeof dispatchResult.authorityPerformed === 'boolean'
+          ? { authorityPerformed: dispatchResult.authorityPerformed }
+          : {}),
       };
       return { tu, dispatchResult, block };
     };

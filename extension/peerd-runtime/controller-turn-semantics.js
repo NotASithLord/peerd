@@ -1,14 +1,7 @@
 // @ts-check
 
-import {
-  actorAllowedToolsFor,
-  EXPOSURE_ACTOR,
-  mainAgentDescriptors,
-  pinActorCall,
-} from './tools/exposure.js';
 import { applyComposer } from './composer/apply.js';
 import { buildMintInjection, resolveSiteUrl } from './site-clients/core.js';
-import { DWEB_INBOUND_TOOL_NAMES, resolveWebActorSurface } from './actor/capability-manifest.js';
 import {
   confirmActionsFromRecord,
   normalizeConfirmActions,
@@ -18,7 +11,7 @@ import {
 import { createSkillRegistry } from './skills/registry.js';
 import { DOC_TEXT_MAX_CHARS, prepareUserAttachmentsWithDocs } from './loop/attachments.js';
 import { GOAL_MAX_ITERATIONS, makeGoalRunner } from './loop/goal-runner.js';
-import { finalActorTurnReply, finalAssistantText, makeSpawnActor, restrictCtxCapabilities } from './actor/spawn.js';
+import { finalActorTurnReply, finalAssistantText, makeSpawnActor } from './actor/spawn.js';
 import { formatDocBody } from './doc/format.js';
 import { localStoreSource, mergeSources, skillRegistrySource } from './composer/command-sources.js';
 import { makeInitOrchestrator } from './memory/init-orchestrator.js';
@@ -28,9 +21,7 @@ import { makeAutoMemory } from './memory/auto-memory-orchestrator.js';
 import { createSuggestionStore } from './memory/suggestions.js';
 import { makeTrimEnricher } from './loop/summary-enrichment.js';
 import { makeToolsCommand } from './tools/manifest-command.js';
-import { manifestLabel, resolveManifestAllow } from './tools/manifests.js';
 import { limitExceeded, normalizeTally } from './cost/accumulator.js';
-import { filterByRuntimeCapabilities } from './runtime-capabilities.js';
 import { meshCallToOp, shapeMeshResult } from './actor/a2a-api.js';
 import {
   fenceApiActorSummary,
@@ -51,24 +42,17 @@ import { parseAppManifest } from '/peerd-engine/app-manifest.js';
 // remain absent, while each cohesive owner can be reasoned about independently.
 export const createControllerTurnSemantics = () => Object.freeze({
   actor: Object.freeze({
-    DWEB_INBOUND_TOOL_NAMES,
-    EXPOSURE_ACTOR,
-    actorAllowedToolsFor,
     describeLandingStop,
     fenceApiActorSummary,
     fenceWebActorSummary,
     finalActorTurnReply,
     finalAssistantText,
     landingStopCard,
-    mainAgentDescriptors,
     makeSpawnActor,
     meshCallToOp,
     normalizeApiOrigin,
     originPhrase,
     parseSiteHandle,
-    pinActorCall,
-    resolveWebActorSurface,
-    restrictCtxCapabilities,
     safeWebActorSummaryOrigin,
     shapeMeshResult,
     siteHandleFor,
@@ -77,13 +61,10 @@ export const createControllerTurnSemantics = () => Object.freeze({
   policy: Object.freeze({
     PERMISSION_MODES,
     confirmActionsFromRecord,
-    filterByRuntimeCapabilities,
     limitExceeded,
-    manifestLabel,
     normalizeConfirmActions,
     normalizeMode,
     normalizeTally,
-    resolveManifestAllow,
   }),
   site: Object.freeze({
     buildMintInjection,

@@ -11,13 +11,12 @@ import {
   ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
 } from '../../extension/peerd-runtime/actor/actors-api.js';
 import { shapeActorRoster } from '../../extension/peerd-runtime/tools/defs/actor-list.js';
-import { resolveManifestAllow } from '../../extension/peerd-runtime/tools/manifests.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 
 type Owner = {
   sessionId: string;
   kind?: string;
-  grantedTools?: string[];
+  grantedOperations?: string[];
   toolManifest?: unknown;
 };
 
@@ -29,6 +28,7 @@ const makeHarness = ({
   runOwner,
   actorsAllowed = true,
   actorOpAllowed = true,
+  allowedOperations = ['turn.actor.message', 'turn.introspection.actor-roster'],
   messageActor,
   buildToolContext,
   scriptRuns,
@@ -38,6 +38,7 @@ const makeHarness = ({
   runOwner?: string | null;
   actorsAllowed?: boolean;
   actorOpAllowed?: boolean;
+  allowedOperations?: string[];
   messageActor?: (req: any) => Promise<any>;
   buildToolContext?: (args: any) => Promise<any>;
   scriptRuns?: ReturnType<typeof createScriptRunRegistry>;
@@ -71,6 +72,8 @@ const makeHarness = ({
       ownerFor: (runId: string) => runId === 'run-1' ? resolvedRunOwner : null,
       allows: (runId: string, capability: string) => runId === 'run-1'
         && capability === 'actors' && actorsAllowed,
+      allowsOperation: (runId: string, operation: string) => runId === 'run-1'
+        && allowedOperations.includes(operation),
       admitActorOp: (runId: string) => runId === 'run-1' && actorOpAllowed,
       signalFor: (runId: string) => runId === 'run-1' ? runController.signal : null,
       recordOp: (_runId: string, op: any) => {
@@ -79,7 +82,6 @@ const makeHarness = ({
         else mirrored.push(op);
       },
     },
-    resolveManifestAllow,
     isOffscreenSender: (sender: unknown) => sender === OFFSCREEN,
   });
   const callFrom = async (sender: unknown, method: string, args: any = {}) => {
@@ -122,13 +124,14 @@ describe('actors/call — owner and grant walls', () => {
     expect(h.calls[0].req.via).toBe('script');
   });
 
-  test('a chat manifest cannot be bypassed through script', async () => {
+  test('a run without the exact actor operation cannot bypass its outer semantic grant', async () => {
     const h = makeHarness({
       owner: { sessionId: 'chat-1', toolManifest: { allow: ['script'] } },
+      allowedOperations: [],
     });
     const result = await h.call('ask', { to: 'web', goal: 'find it' });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("'message_actor' is not granted");
+    expect(result.error).toContain('operation is not granted');
     expect(h.calls).toEqual([]);
   });
 
@@ -136,7 +139,7 @@ describe('actors/call — owner and grant walls', () => {
     const h = makeHarness({
       owner: {
         sessionId: 'spawn-1', kind: 'spawned',
-        grantedTools: ['script', 'message_actor'],
+        grantedOperations: ['turn.actor.message'],
       },
     });
     expect(await h.call('ask', { to: 'vm-1', goal: 'run tests' }))
@@ -150,17 +153,18 @@ describe('actors/call — owner and grant walls', () => {
 
   test('a spawned actor without message_actor is refused before the sender gate', async () => {
     const h = makeHarness({
-      owner: { sessionId: 'spawn-1', kind: 'spawned', grantedTools: ['script'] },
+      owner: { sessionId: 'spawn-1', kind: 'spawned', grantedOperations: [] },
+      allowedOperations: [],
     });
     const result = await h.call('ask', { to: 'vm-1', goal: 'run tests' });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("'message_actor' is not granted");
+    expect(result.error).toContain('operation is not granted');
     expect(h.calls).toEqual([]);
   });
 
   test('a bound environment actor remains unable to cross-delegate', async () => {
     const h = makeHarness({
-      owner: { sessionId: 'bound-1', kind: 'actor', grantedTools: ['script', 'message_actor'] },
+      owner: { sessionId: 'bound-1', kind: 'actor' },
     });
     const result = await h.call('ask', { to: 'web', goal: 'escape the pin' });
     expect(result.ok).toBe(false);
@@ -224,7 +228,9 @@ describe('actors/call — per-operation authority', () => {
 
   test('the real registry exposes one bounded in-flight row and upserts settlement', async () => {
     const registry = createScriptRunRegistry();
-    registry.register('run-1', undefined, 'chat-1', { actors: true });
+    registry.register('run-1', undefined, 'chat-1', { actors: true }, [
+      'turn.actor.message', 'turn.introspection.actor-roster',
+    ]);
     let settleActor: (value: any) => void = () => {};
     const h = makeHarness({
       scriptRuns: registry,
@@ -281,16 +287,17 @@ describe('actors/call — per-operation authority', () => {
     const refused = makeHarness({
       owner: {
         sessionId: 'spawn-1', kind: 'spawned',
-        grantedTools: ['script', 'message_actor'],
+        grantedOperations: ['turn.actor.message'],
       },
+      allowedOperations: ['turn.actor.message'],
     });
-    expect((await refused.call('list')).error).toContain("'actor_list' is not granted");
+    expect((await refused.call('list')).error).toContain('operation is not granted');
     expect(refused.calls).toEqual([]);
 
     const allowed = makeHarness({
       owner: {
         sessionId: 'spawn-1', kind: 'spawned',
-        grantedTools: ['script', 'message_actor', 'actor_list'],
+        grantedOperations: ['turn.actor.message', 'turn.introspection.actor-roster'],
       },
     });
     expect(await allowed.call('list')).toEqual({ ok: true, value: { refs: [{
@@ -345,7 +352,7 @@ describe('actors/call — per-operation authority', () => {
     const h = makeHarness({
       owner: {
         sessionId: 'spawn-1', kind: 'spawned',
-        grantedTools: ['script', 'message_actor'],
+        grantedOperations: ['turn.actor.message'],
       },
       messageActor: async () => ({ ok: false, error: refusal }),
     });
@@ -357,7 +364,7 @@ describe('actors/call — per-operation authority', () => {
     const h = makeHarness({
       owner: {
         sessionId: 'spawn-1', kind: 'spawned',
-        grantedTools: ['script', 'message_actor'],
+        grantedOperations: ['turn.actor.message'],
       },
       messageActor: (req: any) => new Promise((resolve) => {
         const settle = () => resolve({ ok: false, error: 'the request was aborted before the actor replied' });

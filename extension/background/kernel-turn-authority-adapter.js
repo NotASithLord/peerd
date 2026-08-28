@@ -21,7 +21,6 @@ import {
   createSiteClientStore,
   createSkillStore,
   decideNumericTabAuthority,
-  executePreparedToolCall,
   hasDurableSiteClientState,
   IDENTITY_PROVIDER_TRANSIT_ONLY_CODE,
   isAddressableBrowserTab,
@@ -52,11 +51,9 @@ import {
   makeWebActorRegistry,
   makeWebActorTabBindings,
   numericTabAuthorityRefusal,
-  prepareToolCall,
   resolveRuntimeCapabilities,
   retireStoppedRoamingWebActorDurably,
   retryClassForTool,
-  settleToolCall,
   SessionNotFoundError,
 } from '/peerd-runtime/kernel-turn-authority.js';
 import {
@@ -98,6 +95,7 @@ import { createKernelDwebAgentOwner } from './kernel-dweb-agent-owner.js';
 import { relayAppRuntimeCall } from './app-runtime-deadline.js';
 import {
   appActorSessionMatches,
+  canonicalActorOwnerPosture,
   canonicalAppActorManifest,
   canonicalAppOwnerAuthority,
   makeAppRole,
@@ -105,6 +103,7 @@ import {
   resolveAppTabOwnerClaim,
   validateAppTabClaim,
 } from './app-actor-policy.js';
+
 import { sha256Hex } from '/shared/util.js';
 import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
 import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
@@ -113,8 +112,16 @@ import {
   webActorSourceProjectionRow,
 } from '/shared/web-actor-source-projection.js';
 import { providerEgressPolicy } from './provider-egress-manifest.js';
-import { createPageToolAuthority } from './page-tool-authority.js';
-import { PAGE_PROGRAM_SEMANTIC_TOOL_NAMES } from '/shared/page-program-authority.js';
+import { finalWebRequestConfirmation } from '/shared/web-request-confirmation.js';
+
+// why: silently replacing an unreadable enabled pre-hook policy with an empty
+// list fails open. The sealed semantic realm compiles this sentinel into a
+// deterministic blocking hook while ordinary empty storage remains `[]`.
+const HOOK_RECORDS_UNAVAILABLE = Object.freeze([Object.freeze({
+  id: 'user-hook-records-unavailable', event: 'pre-tool-use',
+  kind: 'unavailable', enabled: true,
+})]);
+const ACTOR_EXPOSURE = 'actor';
 
 const originOf = (/** @type {string} */ value) => {
   try { return new URL(value).origin; }
@@ -133,24 +140,17 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     throw new TypeError('kernel-turn-live-config-invalid');
   }
   const {
-    actorAllowedToolsFor,
     describeLandingStop,
-    DWEB_INBOUND_TOOL_NAMES,
-    EXPOSURE_ACTOR,
     fenceApiActorSummary,
     fenceWebActorSummary,
     finalActorTurnReply,
     finalAssistantText,
     landingStopCard,
-    mainAgentDescriptors,
     makeSpawnActor,
     meshCallToOp,
     normalizeApiOrigin,
     originPhrase,
     parseSiteHandle,
-    pinActorCall,
-    resolveWebActorSurface,
-    restrictCtxCapabilities,
     safeWebActorSummaryOrigin,
     shapeMeshResult,
     siteHandleFor,
@@ -159,13 +159,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
   const {
     PERMISSION_MODES,
     confirmActionsFromRecord,
-    filterByRuntimeCapabilities,
     limitExceeded,
-    manifestLabel,
     normalizeConfirmActions,
     normalizeMode,
     normalizeTally,
-    resolveManifestAllow,
   } = semanticOwners.policy;
   const {
     buildMintInjection,
@@ -194,13 +191,25 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     prepareUserAttachmentsWithDocs,
     skillRegistrySource,
   } = semanticOwners.turn;
-  const projectToolDescriptors = async (/** @type {Record<string,unknown>} */ input) => {
-    const tools = await deps.seams.projectTurnTools(input);
-    if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool.name !== 'string')) {
+  const projectToolSurface = async (/** @type {Record<string,unknown>} */ input) => {
+    const projected = await deps.seams.projectTurnTools(input);
+    if (!projected || !Array.isArray(projected.tools)
+        || !Array.isArray(projected.operations)
+        || projected.tools.some((/** @type {any} */ tool) => !tool || typeof tool.name !== 'string')
+        || projected.operations.some((/** @type {unknown} */ operation) => typeof operation !== 'string')) {
       throw new Error('controller tool projection is invalid');
     }
-    return tools;
+    return Object.freeze({
+      tools: Object.freeze([...projected.tools]),
+      operations: Object.freeze([...projected.operations]),
+      ...(projected.actorSurface === 'tools' || projected.actorSurface === 'code'
+        ? { actorSurface: projected.actorSurface } : {}),
+      ...(typeof projected.actorSurfaceFallback === 'string'
+        ? { actorSurfaceFallback: projected.actorSurfaceFallback } : {}),
+    });
   };
+  const projectToolDescriptors = async (/** @type {Record<string,unknown>} */ input) =>
+    (await projectToolSurface(input)).tools;
   const engine = deps.engine;
   const scriptRuns = deps.scriptRuns;
   const poisonedAppRuntimeTabs = new Set();
@@ -429,14 +438,23 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     return { name, model };
   };
   const resolvePermission = async (/** @type {any} */ session) => {
-    if (session?.sessionId && goalRunner?.isActive(session.sessionId)) {
+    let authoritySession = session;
+    if (session?.sessionId && (session.kind === 'actor' || session.kind === 'spawned')) {
+      const rootSessionId = await rootSessionIdFor(session.sessionId);
+      if (!rootSessionId) return { mode: PERMISSION_MODES.PLAN, confirmActions: true };
+      authoritySession = await live.shared.sessions.get(rootSessionId).catch(() => null);
+      if (!authoritySession || authoritySession.kind !== 'chat') {
+        return { mode: PERMISSION_MODES.PLAN, confirmActions: true };
+      }
+    }
+    if (authoritySession?.sessionId && goalRunner?.isActive(authoritySession.sessionId)) {
       return { mode: PERMISSION_MODES.ACT, confirmActions: false };
     }
     return {
-      mode: normalizeMode(session?.permissionMode
+      mode: normalizeMode(authoritySession?.permissionMode
         ?? await deps.sessionCache.sessionGet('currentPermissionMode')
         ?? PERMISSION_MODES.ACT),
-      confirmActions: normalizeConfirmActions(confirmActionsFromRecord(session)
+      confirmActions: normalizeConfirmActions(confirmActionsFromRecord(authoritySession)
         ?? confirmActionsFromRecord({
           confirmActions: await deps.sessionCache.sessionGet('currentConfirmActions'),
         }) ?? false),
@@ -497,7 +515,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
   let dwebShareReady = null;
   const dwebTransportOn = () => deps.dwebEnabled
     && deps.settingsStore.get().dwebEnabled === true && !deps.vault.isLocked();
-  const shareLocalApp = async (/** @type {string} */ appId) => {
+  const dwebShare = async () => {
     dwebShareReady ??= (async () => {
       const dweb = await deps.getDwebLive?.();
       if (typeof dweb?.withIdentityMutation !== 'function') {
@@ -519,8 +537,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         sendMessage: (message) => deps.browser.runtime.sendMessage(message),
       });
     })();
-    return (await dwebShareReady)(appId, undefined);
+    return dwebShareReady;
   };
+  const prepareLocalAppShare = async (/** @type {string} */ appId) =>
+    (await dwebShare()).prepare(appId);
+  const shareLocalApp = async (/** @type {string} */ appId, /** @type {any} */ prepared) =>
+    (await dwebShare())(appId, undefined, prepared);
   const withDwebPublication = (/** @type {(current:()=>boolean)=>Promise<any>} */ operation) =>
     engine.withDwebPublication(async (/** @type {()=>boolean} */ current) => {
       if (!current() || !dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
@@ -528,6 +550,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       return operation(current);
     });
   const dwebSurface = deps.dwebEnabled ? Object.freeze({
+    prepareShare: prepareLocalAppShare,
     share: shareLocalApp,
     discover: async () => {
       if (!dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
@@ -570,7 +593,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       ?? await deps.sessionCache.sessionGet('currentSessionId');
     const session = sessionId ? await shared.sessions.get(sessionId) : null;
     const permission = await resolvePermission(session);
-    const toolAllow = resolveManifestAllow(session?.toolManifest);
     /** @type {any} */
     let activeTab;
     if (options.activeTabId != null) {
@@ -578,7 +600,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       if (tab) activeTab = {
         id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
       };
-    } else if (options.exposure !== EXPOSURE_ACTOR) {
+    } else if (options.exposure !== ACTOR_EXPOSURE) {
       const [tab] = await deps.browser.tabs.query({ active: true, currentWindow: true });
       if (tab) activeTab = {
         id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
@@ -590,14 +612,22 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     const requestedActorSurface = options.actorSurface
       ?? (actorType === 'app' ? 'code'
         : deps.settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools');
-    const actorSurface = actorType === 'app'
-      ? (requestedActorSurface === 'code' ? 'code' : 'tools')
-      : actorType === 'web' && actorBacking !== 'api'
-        ? resolveWebActorSurface({
-          requested: requestedActorSurface,
-          allowedTools: toolAllow,
+    const actorToolSurface = actorType ? await projectToolSurface({
+      surface: 'actor', actorType, backing: actorBacking,
+      ...(actorType === 'web' && actorBacking !== 'api'
+        ? {
+          requestedActorSurface,
           headlessAvailable: !deps.firefox,
-        }) : undefined;
+        }
+        : actorType === 'app' ? { actorSurface: requestedActorSurface } : {}),
+      toolManifest: session?.toolManifest,
+      runtimeCapabilities,
+      inbound: options.synthetic === true && options.trusted !== true,
+    }) : null;
+    const actorSurface = actorToolSurface?.actorSurface
+      ?? (actorType === 'app'
+        ? (requestedActorSurface === 'code' ? 'code' : 'tools') : undefined);
+    /** @type {any} */
     const ctx = {
       actorIsolation: live.actorIsolation,
       runtimeCapabilities,
@@ -621,8 +651,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
             tabOrigin: safeWebActorSummaryOrigin(activeTab?.url, deps.denylist.patterns()),
           }),
       } : {}),
-      toolAllow,
-      toolManifestLabel: toolAllow ? manifestLabel(session?.toolManifest) : null,
       session: {
         sessionId: sessionId ?? null, depth: session?.depth ?? 0,
         kind: session?.kind ?? 'chat',
@@ -630,6 +658,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         trimCovered: session?.trimSummary?.covered ?? 0,
       },
       permission,
+      readAuthorityPermission: async () => resolvePermission(
+        sessionId ? await shared.sessions.get(sessionId).catch(() => null) : null,
+      ),
       activeTab,
       onToolActivity: shared.pageActivity,
       actorAuthority: Object.freeze({
@@ -776,11 +807,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       vault: { isLocked: deps.vault.isLocked() },
       now: Date.now,
     };
-    if (options.exposure !== EXPOSURE_ACTOR) return ctx;
-    const restricted = /** @type {any} */ (restrictCtxCapabilities(
-      ctx,
-      new Set(actorAllowedToolsFor(actorType, actorBacking, actorSurface)),
-    ));
+    if (options.exposure !== ACTOR_EXPOSURE) return ctx;
+    // Exact actor operations are selected by the host grant and finite binder;
+    // semantic tool names never authorize this in-service-worker context.
+    const restricted = ctx;
     if (actorType === 'web' && actorBacking === 'api') {
       const ownedOrigin = normalizeApiOrigin(options.actorInstanceId);
       restricted.canUseSiteClientOrigin = makeFixedSiteClientOriginGuard(ownedOrigin, {
@@ -924,18 +954,42 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
   const deriveAppOwnerAuthority = async (/** @type {any} */ owner,
     /** @type {any} */ contract) => {
     const permission = await resolvePermission(owner);
+    const surface = await projectToolSurface({
+      surface: 'actor', actorType: 'app', actorSurface: 'code',
+      toolManifest: owner?.toolManifest, runtimeCapabilities, inbound: false,
+    });
     const allow = manifestAppActorTools({
       contract,
-      hostTools: [...actorAllowedToolsFor('app')],
-      ownerAllowed: resolveManifestAllow(owner?.toolManifest),
+      hostTools: surface.tools.map((/** @type {any} */ tool) => tool.name),
+      ownerAllowed: null,
     });
     return {
       permission,
       toolManifest: { allow },
       digest: await sha256Hex(canonicalAppOwnerAuthority({
         allow,
-        permissionMode: permission.mode,
-        confirmActions: permission.confirmActions,
+      })),
+    };
+  };
+  const deriveActorOwnerPosture = async (/** @type {any} */ owner,
+    /** @type {{actorType:string,backing?:string,actorSurface?:string}} */ actor) => {
+    const permission = await resolvePermission(owner);
+    const surface = await projectToolSurface({
+      surface: 'actor', actorType: actor.actorType, backing: actor.backing,
+      ...(actor.actorType === 'web' && actor.backing !== 'api'
+        ? {
+          requestedActorSurface: actor.actorSurface
+            ?? (deps.settingsStore.get().webActorActionSurface === 'code' ? 'code' : 'tools'),
+          headlessAvailable: !deps.firefox,
+        }
+        : actor.actorSurface ? { actorSurface: actor.actorSurface } : {}),
+      toolManifest: owner?.toolManifest, runtimeCapabilities, inbound: false,
+    });
+    const allow = surface.tools.map((/** @type {any} */ tool) => tool.name);
+    return {
+      permission,
+      digest: await sha256Hex(canonicalActorOwnerPosture({
+        allow,
       })),
     };
   };
@@ -945,6 +999,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     if (!owner || owner.archivedAt) throw new Error('actor-owner-unavailable');
     let permission = await resolvePermission(owner);
     let toolManifest = owner.toolManifest;
+    let ownerSemanticPostureDigest;
     let appManifestDigest;
     let appOwnerAuthorityDigest;
     let appRole;
@@ -959,6 +1014,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       appManifestDigest = options.manifestDigest
         ?? await sha256Hex(canonicalAppActorManifest(contract));
       appRole = makeAppRole({ contract, record, manifestDigest: appManifestDigest });
+      ownerSemanticPostureDigest = authority.digest;
+    } else {
+      ownerSemanticPostureDigest = (await deriveActorOwnerPosture(owner, {
+        actorType: entry[1],
+        ...(entry[1] === 'web' ? { backing: record.backing ?? 'tab' } : {}),
+      })).digest;
     }
     const created = await live.shared.sessions.create({
       kind: 'actor', parentSessionId: ownerSessionId,
@@ -967,6 +1028,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       depth: (owner.depth ?? 0) + 1,
       actorType: entry[1], instanceId: record.id,
       ...(toolManifest !== undefined ? { toolManifest } : {}),
+      ownerSemanticPostureDigest,
       ...(entry[1] === 'web' ? { backing: record.backing ?? 'tab' } : {}),
       ...(entry[1] === 'web' && record.ownedOrigin
         ? { originState: {
@@ -1000,6 +1062,31 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     if (!actorSessionId) return;
     live.shared.turnSlots.stop(actorSessionId);
     await live.shared.sessions.archive(actorSessionId).catch(() => {});
+  };
+  const ordinaryActorSessionMatches = async (
+    /** @type {any} */ actor, /** @type {string} */ ownerSessionId,
+    /** @type {string} */ actorType, /** @type {string} */ instanceId,
+    /** @type {string|undefined} */ backing = undefined,
+  ) => {
+    if (!actor || actor.archivedAt || actor.kind !== 'actor'
+        || actor.parentSessionId !== ownerSessionId || actor.actorType !== actorType
+        || actor.instanceId !== instanceId
+        || backing !== undefined && (actor.backing ?? 'tab') !== backing) return false;
+    const owner = await live.shared.sessions.get(ownerSessionId).catch(() => null);
+    if (!owner || owner.archivedAt) return false;
+    return actor.ownerSemanticPostureDigest === (await deriveActorOwnerPosture(owner, {
+      actorType, backing,
+      ...(actor.actorSurface ? { actorSurface: actor.actorSurface } : {}),
+    })).digest;
+  };
+  const retireOrdinaryActorForReplacement = async (
+    /** @type {string|null|undefined} */ actorSessionId,
+  ) => {
+    if (!actorSessionId) return undefined;
+    const tabId = webActorTabBindings.tabFor(actorSessionId);
+    if (typeof tabId === 'number') webActorTabBindings.drop(tabId);
+    await retireStale(actorSessionId);
+    return tabId;
   };
   const resolveAppActorOwner = async (/** @type {string|null|undefined} */ senderSessionId,
     /** @type {any} */ record) => {
@@ -1105,6 +1192,17 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         publisherSource: role.source, publisher: role.publisher,
       });
   };
+  const validateBoundActorGeneration = async (/** @type {any} */ actor) => {
+    if (actor?.actorType === 'dweb') return true;
+    if (actor?.actorType === 'app') return validateGeneration(actor);
+    if (typeof actor?.parentSessionId !== 'string'
+        || typeof actor?.actorType !== 'string'
+        || typeof actor?.instanceId !== 'string') return false;
+    return ordinaryActorSessionMatches(
+      actor, actor.parentSessionId, actor.actorType, actor.instanceId,
+      actor.actorType === 'web' ? actor.backing ?? 'tab' : undefined,
+    );
+  };
   const resolveActor = async (/** @type {string} */ requested,
     /** @type {{senderSessionId?:string|null}} */ options = {}) => {
     await bindingReady;
@@ -1139,15 +1237,28 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     if (!ownerSessionId) return null;
     if (requested === 'web') {
       let actorSessionId = webActorRegistry.resolve(ownerSessionId);
-      const actor = actorSessionId
+      let actor = actorSessionId
         ? await live.shared.sessions.get(actorSessionId).catch(() => null) : null;
-      if (!actor || actor.archivedAt) {
+      let retainedTabId;
+      if (actorSessionId && !await ordinaryActorSessionMatches(
+        actor, ownerSessionId, 'web', 'web', 'tab',
+      )) {
+        webActorRegistry.drop(ownerSessionId);
+        retainedTabId = await retireOrdinaryActorForReplacement(actorSessionId);
+        actorSessionId = null;
+        actor = null;
+        await Promise.all([persistWebActors(), persistWebBindings()]);
+      }
+      if (!actorSessionId) {
         actorSessionId = await mintActor(
           ['web', 'web', null, null], { id: 'web', backing: 'tab' }, ownerSessionId,
         );
         if (!actorSessionId) throw new Error('web-actor-mint-failed');
         webActorRegistry.bind(ownerSessionId, actorSessionId);
-        await persistWebActors();
+        if (typeof retainedTabId === 'number') {
+          webActorTabBindings.bind(retainedTabId, actorSessionId);
+        }
+        await Promise.all([persistWebActors(), persistWebBindings()]);
       }
       const boundActorSessionId = /** @type {string} */ (actorSessionId);
       return { instanceId: 'web', kind: 'web', actorSessionId: boundActorSessionId,
@@ -1176,7 +1287,9 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       let actorSessionId = webActorTabBindings.resolve(tabId);
       if (actorSessionId) {
         const current = await live.shared.sessions.get(actorSessionId).catch(() => null);
-        if (!current || current.originState?.ownedOrigin !== authority.origin) {
+        if (!await ordinaryActorSessionMatches(
+          current, ownerSessionId, 'web', requested, 'tab',
+        ) || current?.originState?.ownedOrigin !== authority.origin) {
           webActorTabBindings.drop(tabId);
           await persistWebBindings();
           if (current) await retireStale(actorSessionId);
@@ -1200,23 +1313,41 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     if (apiOrigin && !isKnownIdpHost(apiOrigin)) {
       const bindings = siteOrigin ? siteActorBindings : apiActorBindings;
       const persist = siteOrigin ? persistSiteActors : persistApiActors;
+      const expectedInstanceId = siteOrigin ? siteHandleFor(apiOrigin) : apiOrigin;
+      const expectedBacking = siteOrigin ? 'tab' : 'api';
       let actorSessionId = bindings.resolve(ownerSessionId, apiOrigin);
-      if (actorSessionId && !await live.shared.sessions.get(actorSessionId).catch(() => null)) {
+      let actor = actorSessionId
+        ? await live.shared.sessions.get(actorSessionId).catch(() => null) : null;
+      let retainedTabId;
+      if (actorSessionId && !await ordinaryActorSessionMatches(
+        actor, ownerSessionId, 'web', expectedInstanceId, expectedBacking,
+      )) {
         bindings.drop(ownerSessionId, apiOrigin);
         await persist();
         originStates.forget(actorSessionId);
+        retainedTabId = await retireOrdinaryActorForReplacement(actorSessionId);
+        await persistWebBindings();
         actorSessionId = null;
+        actor = null;
       }
       if (!actorSessionId) {
         actorSessionId = await live.shared.sessions.findActorSession({
           parentSessionId: ownerSessionId,
-          instanceId: siteOrigin ? siteHandleFor(apiOrigin) : apiOrigin,
+          instanceId: expectedInstanceId,
           actorType: 'web',
           ...(siteOrigin ? {} : { backing: 'api' }),
         });
         if (actorSessionId) {
-          bindings.bind(ownerSessionId, apiOrigin, actorSessionId);
-          await persist();
+          actor = await live.shared.sessions.get(actorSessionId).catch(() => null);
+          if (await ordinaryActorSessionMatches(
+            actor, ownerSessionId, 'web', expectedInstanceId, expectedBacking,
+          )) {
+            bindings.bind(ownerSessionId, apiOrigin, actorSessionId);
+            await persist();
+          } else {
+            await retireOrdinaryActorForReplacement(actorSessionId);
+            actorSessionId = null;
+          }
         }
       }
       if (!actorSessionId) {
@@ -1232,6 +1363,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         );
         if (!actorSessionId) throw new Error('origin-actor-mint-failed');
         bindings.bind(ownerSessionId, apiOrigin, actorSessionId);
+        if (typeof retainedTabId === 'number' && siteOrigin) {
+          webActorTabBindings.bind(retainedTabId, actorSessionId);
+          await persistWebBindings();
+        }
         await persist();
       }
       let tabId = siteOrigin ? webActorTabBindings.tabFor(actorSessionId) : undefined;
@@ -1255,6 +1390,15 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         return actorSessionId ? { instanceId: requested, kind: 'app', actorSessionId } : null;
       }
       let actorSessionId = await entry[2].getActorSession(requested);
+      if (actorSessionId) {
+        const actor = await live.shared.sessions.get(actorSessionId).catch(() => null);
+        if (!await ordinaryActorSessionMatches(
+          actor, ownerSessionId, entry[1], requested,
+        )) {
+          await retireOrdinaryActorForReplacement(actorSessionId);
+          actorSessionId = null;
+        }
+      }
       if (!actorSessionId) {
         actorSessionId = await mintActor(entry, record, ownerSessionId);
         await entry[2].setActorSession(requested, actorSessionId);
@@ -1397,6 +1541,18 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       turnLease?.release?.();
       return { result: 'the actor session no longer exists.', stopped: true };
     }
+    // why: resolution and execution are separate awaits. A /tools or Plan/Act
+    // change in that gap must retire the old model surface before its Worker is
+    // allowed to issue another call; the next address resolution mints a fresh
+    // generation with the current owner posture.
+    if (!await validateBoundActorGeneration(record)) {
+      turnLease?.release?.();
+      await retireStale(actorSessionId);
+      return {
+        result: 'the actor owner policy changed; retry to start a fresh actor generation.',
+        stopped: true, performed: false, outcomeKnown: true,
+      };
+    }
     const { controller, release } = turnLease ?? live.shared.turnSlots.claim(actorSessionId);
     landingStopReports.delete(actorSessionId);
     landingStopCards.delete(actorSessionId);
@@ -1448,20 +1604,26 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       }
       const requestedContributorSurface = deps.settingsStore.get().webActorActionSurface === 'code'
         ? 'code' : 'tools';
-      const actorSurface = latchedActorSurface ?? record.actorSurface
-        ?? (kind === 'web' && record.backing !== 'api'
-          ? resolveWebActorSurface({
-            requested: requestedContributorSurface,
-            allowedTools: resolveManifestAllow(record.toolManifest),
-            headlessAvailable: !deps.firefox,
-          }) : undefined);
+      let toolSurface = null;
+      let actorSurface = latchedActorSurface ?? record.actorSurface;
+      if (!actorSurface && kind === 'web' && record.backing !== 'api') {
+        toolSurface = await projectToolSurface({
+          surface: 'actor', actorType: kind, backing: record.backing,
+          requestedActorSurface: requestedContributorSurface,
+          headlessAvailable: !deps.firefox,
+          toolManifest: record.toolManifest, runtimeCapabilities,
+          inbound: inbound === true,
+        });
+        actorSurface = toolSurface.actorSurface;
+      }
       const contributorStartedAt = Date.now();
       const contributorDecision = kind === 'web' && record.backing === 'tab'
         ? Object.freeze({
           requested: requestedContributorSurface,
           resolved: actorSurface === 'code' ? 'code' : 'tools',
           fallback: requestedContributorSurface === (actorSurface === 'code' ? 'code' : 'tools')
-            ? 'none' : deps.firefox ? 'worker_unavailable' : 'capability_grant_incomplete',
+            ? 'none' : toolSurface?.actorSurfaceFallback
+              ?? (deps.firefox ? 'worker_unavailable' : 'capability_grant_incomplete'),
         }) : null;
       const contributorArm = contributorDecision && deps.contributor?.arm
         ? await deps.contributor.arm().catch(() => ({ enabled: false, generation: null }))
@@ -1509,7 +1671,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         }
         return finalReply;
       };
-      const tools = await projectToolDescriptors({
+      toolSurface ??= await projectToolSurface({
         surface: 'actor', actorType: kind,
         backing: record.backing,
         actorSurface,
@@ -1517,6 +1679,15 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         runtimeCapabilities,
         inbound: inbound === true,
       });
+      const tools = toolSurface.tools;
+      const programSurfaceName = actorSurface === 'code'
+        ? tools.some((tool) => tool.name === 'page_code')
+          ? 'page-program'
+          : tools.some((tool) => tool.name === 'app_code') ? 'app-program' : null
+        : null;
+      const programSurface = programSurfaceName
+        ? await projectToolSurface({ surface: programSurfaceName })
+        : { tools: Object.freeze([]), operations: Object.freeze([]) };
       const systemPrompt = await deps.seams.renderSystemPrompt({
         actorType: kind, backing: record.backing, instanceId, actorSurface,
         schemaReply: deps.settingsStore.get().schemaValidatedReplies === true,
@@ -1542,14 +1713,14 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       if (display) {
         projection.startBound({
           ...display, sessionId: actorSessionId, fromIndex,
-          grantedTools: tools.map((tool) => tool.name),
+          visibleTools: tools.map((tool) => tool.name),
           messages: [], streaming: true, error: null, cost: null,
         });
         post({
           type: 'turn/actor-start', ...display, sessionId: actorSessionId, fromIndex,
           actorProjectionEpoch: projection.epoch(),
           actorProjectionRevision: projection.revision(),
-          grantedTools: tools.map((tool) => tool.name),
+          visibleTools: tools.map((tool) => tool.name),
           messages: [], streaming: true, error: null, cost: null,
         });
       }
@@ -1563,7 +1734,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
               actorProjectionEpoch: projection.epoch(),
               actorProjectionRevision: projection.revision(),
               session: event.session, fromIndex,
-              grantedTools: tools.map((tool) => tool.name),
+              visibleTools: tools.map((tool) => tool.name),
             });
           }
         } else if (event.type === 'error'
@@ -1575,23 +1746,47 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
           });
         }
       } : undefined;
+      const userHookRecords = await deps.kv.get('hooks.user.v1')
+        .then((/** @type {any} */ records) =>
+          Array.isArray(records) ? records : HOOK_RECORDS_UNAVAILABLE)
+        .catch(() => HOOK_RECORDS_UNAVAILABLE);
+      const tabOrigin = kind === 'web' && record.backing !== 'api' && actorTabId != null
+        ? safeWebActorSummaryOrigin(
+          (await deps.browser.tabs.get(actorTabId).catch(() => null))?.url,
+          deps.denylist.patterns(),
+        ) : undefined;
       const job = {
         actorSessionId, message: deliveredMessage, systemPrompt,
         provider: record.provider, model: record.model, depth: record.depth,
         ollamaHost: deps.settingsStore.get().ollamaHost,
-        tools, priorMessages: record.messages ?? [], reasoningEnabled, reasoningEffort,
+        tools,
+        allowedOperations: toolSurface.operations,
+        programTools: programSurface.tools,
+        programOperations: programSurface.operations,
+        priorMessages: record.messages ?? [],
+        ...(record.trimSummary && typeof record.trimSummary === 'object'
+          ? { trimSummary: record.trimSummary } : {}),
+        reasoningEnabled, reasoningEffort,
         contextWindowOverrides: deps.settingsStore.get().contextWindowOverrides,
         pricingOverrides: deps.settingsStore.get().pricingOverrides,
         runtimeCapabilities,
         oneShot: oneShot === true,
-        actorType: kind, backing: record.backing, inbound: inbound === true,
+        actorType: kind, instanceId, backing: record.backing, inbound: inbound === true,
+        semanticPolicy: {
+          exposure: 'actor',
+          permission: await resolvePermission(record),
+          denylist: deps.denylist.patterns(),
+          allowlist: Object.freeze([...HARDCODED_ALLOWLIST, ...userEndpoints]),
+          userHookRecords,
+          backing: record.backing,
+          ...(typeof actorTabId === 'number'
+            ? { activeTab: { id: actorTabId, origin: tabOrigin } }
+            : {}),
+        },
         ...(actorSurface ? { actorSurface } : {}),
         ...(kind === 'web' && record.backing === 'api' ? { origin: instanceId } : {}),
         ...(kind === 'web' && record.backing !== 'api' && actorTabId != null
-          ? { tabOrigin: safeWebActorSummaryOrigin(
-            (await deps.browser.tabs.get(actorTabId).catch(() => null))?.url,
-            deps.denylist.patterns(),
-          ) }
+          ? { tabOrigin }
           : {}),
         ...(preflightReply ? { preflightReply } : {}),
       };
@@ -1782,17 +1977,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         ) : undefined,
       providerEgress: deps.providerEgress,
       sessions: shared.sessions, buildToolContext,
-      prepareToolCall: /** @type {any} */ (prepareToolCall),
-      settleToolCall: /** @type {any} */ (settleToolCall),
-      pinActorCall, restrictCtxCapabilities,
       ownedTabFor: (/** @type {string} */ sessionId) => webActorTabBindings.tabFor(sessionId),
-      EXPOSURE_ACTOR,
+      EXPOSURE_ACTOR: ACTOR_EXPOSURE,
       recordModelCall: contextSnapshots.record,
       broadcastOp: post,
+      appendAudit: deps.auditLog.append,
       isRelaySender: directActorHost?.isRelaySender ?? deps.isOffscreenSender,
-      inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
-      pageProgramToolDescriptors: PAGE_PROGRAM_SEMANTIC_TOOL_NAMES
-        .flatMap((name) => toolDescriptorsByName.get(name) ?? []),
       spendRefusalFor: async (/** @type {string} */ actorSessionId) => {
         const spendLimit = deps.settingsStore.get().spendLimitUsd;
         const over = (/** @type {any} */ record) => record
@@ -1806,6 +1996,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         return over(root)
           ? `actor refused: the session spend limit ($${spendLimit}) is reached` : null;
       },
+      authorityScheduler: deps.authorityScheduler,
     }) : null;
     directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
     live.actorIsolationReady = actorIsolationAvailable(baseActorIsolation) && isolationState
@@ -1917,21 +2108,43 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       log: (cause) => console.error('[actor] mailbox recovery failed', cause),
     });
     void actorRecoveryGate.recover();
+    const spawnToolDescriptors = await projectToolDescriptors({
+      surface: 'main', toolManifest: null,
+      dwebEnabled: false, dwebEngaged: false, goalActive: true,
+      actorIsolation: live.actorIsolation, runtimeCapabilities,
+    });
     const spawnActorCore = makeSpawnActor({
       sessions: shared.sessions, appendAudit: deps.auditLog.append,
-      getToolDescriptors: () => filterByRuntimeCapabilities(
-        mainAgentDescriptors(allToolDescriptors), runtimeCapabilities,
-      ),
+      getToolDescriptors: () => [...spawnToolDescriptors],
       turnSlots: shared.turnSlots,
-      runChildOffscreen: (/** @type {any} */ job, /** @type {any} */ options) => live.runActorIsolated({
-        actorSessionId: job.sessionId, message: job.task,
-        systemPrompt: job.systemPrompt, provider: job.provider, model: job.model,
-        ollamaHost: deps.settingsStore.get().ollamaHost,
-        depth: job.depth, maxSteps: job.maxSteps,
-        maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
-        tools: job.tools ?? [], runtimeCapabilities,
-        pricingOverrides: deps.settingsStore.get().pricingOverrides,
-      }, options),
+      runChildOffscreen: async (/** @type {any} */ job, /** @type {any} */ options) => {
+        const childRecord = await shared.sessions.get(job.sessionId);
+        const userHookRecords = await deps.kv.get('hooks.user.v1')
+          .then((/** @type {any} */ records) =>
+            Array.isArray(records) ? records : HOOK_RECORDS_UNAVAILABLE)
+          .catch(() => HOOK_RECORDS_UNAVAILABLE);
+        const toolSurface = await projectToolSurface({
+          surface: 'selection',
+          toolNames: Array.isArray(job.tools)
+            ? job.tools.map((/** @type {any} */ tool) => tool?.name) : [],
+        });
+        return live.runActorIsolated({
+          actorSessionId: job.sessionId, message: job.task,
+          systemPrompt: job.systemPrompt, provider: job.provider, model: job.model,
+          ollamaHost: deps.settingsStore.get().ollamaHost,
+          depth: job.depth, maxSteps: job.maxSteps,
+          maxOutputTokens: job.maxOutputTokens, budgetMs: job.budgetMs,
+          tools: job.tools ?? [], allowedOperations: toolSurface.operations,
+          runtimeCapabilities,
+          pricingOverrides: deps.settingsStore.get().pricingOverrides,
+          semanticPolicy: {
+            exposure: 'actor', permission: await resolvePermission(childRecord),
+            denylist: deps.denylist.patterns(),
+            allowlist: Object.freeze([...HARDCODED_ALLOWLIST, ...userEndpoints]),
+            userHookRecords,
+          },
+        }, options);
+      },
       renderSystemPromptForChild: (task, effectiveTools) => deps.seams.renderSystemPrompt({
         taskOverride: task, effectiveTools,
         temporalNowMs: Date.now(),
@@ -2089,97 +2302,10 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
       actorRecoveryGate, actorLifecycle: spawnActorCore,
     });
 
-    const pageProgramRoute = (/** @type {{
-     * toolName:string,method:string,tabMode:'adopt'|'owned'|'free',
-     * riskClass:'read'|'resource',invoke:(input:{call:any,ctx:any,signal?:AbortSignal})=>Promise<any>|any,
-     * }} */ {
-      toolName, method, tabMode, riskClass, invoke,
-    }) => async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
-      if (!deps.isOffscreenSender(sender)) {
-        return { ok: false, error: `${method}: unauthorized relay`, outcomeKnown: true };
-      }
-      if (deps.vault.isLocked()) return { ok: false, error: 'locked', outcomeKnown: true };
-      if (!message || typeof message !== 'object' || Array.isArray(message)
-          || !Object.keys(message).every(
-            (key) => ['args', 'ownerSessionId', 'runId'].includes(key),
-          ) || !message.args || typeof message.args !== 'object'
-          || Array.isArray(message.args)) {
-        return { ok: false, error: `${method}: invalid request`, outcomeKnown: true };
-      }
-      const { args, ownerSessionId, runId } = message;
-      if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
-        return { ok: false, error: `${method}: no owner`, outcomeKnown: true };
-      }
-      if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
-          || scriptRuns.allows(runId, 'page') !== true
-          || scriptRuns.admitOp(runId, 'page') !== true) {
-        return {
-          ok: false, error: `${method}: unknown, finished, foreign or over-limit run`,
-          outcomeKnown: true,
-        };
-      }
-      const signal = scriptRuns.signalFor(runId);
-      if (signal?.aborted) return { ok: false, error: `${method}: aborted`, outcomeKnown: true };
-      const owner = await shared.sessions.get(ownerSessionId).catch(() => null);
-      if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web'
-          || owner.backing === 'api') {
-        return { ok: false, error: `${method}: not a tab-backed web actor`, outcomeKnown: true };
-      }
-      let tabId = webActorTabBindings.tabFor(ownerSessionId);
-      if (typeof tabId !== 'number' && tabMode === 'adopt') {
-        const adopted = await adoptWebTab(ownerSessionId, signal ?? undefined).catch(() => null);
-        tabId = adopted?.tabId;
-      }
-      if (signal?.aborted) return { ok: false, error: `${method}: aborted`, outcomeKnown: true };
-      if (typeof tabId !== 'number' && tabMode !== 'free') {
-        return {
-          ok: false,
-          error: `${method}: no page open yet — call page.goto(url) first to open your tab.`,
-          outcomeKnown: true,
-        };
-      }
-      const ctx = await buildToolContext({
-        sessionId: ownerSessionId, activeTabId: tabId, exposure: EXPOSURE_ACTOR,
-        actorType: 'web', actorInstanceId: String(tabId), actorBacking: 'tab',
-        actorSurface: 'tools',
-      });
-      const call = {
-        name: toolName,
-        args: { ...args, ...(typeof tabId === 'number' ? { tabId } : {}) },
-        id: `page-${runId}-${crypto.randomUUID()}`,
-      };
-      let result;
-      try {
-        const descriptor = toolDescriptorsByName.get(toolName);
-        const prepared = /** @type {any} */ (await prepareToolCall(call, ctx, descriptor));
-        if (prepared?.prepared !== true) result = prepared;
-        else {
-          const execution = await executePreparedToolCall(prepared, (request) => invoke({
-            call: { ...call, args: request.args },
-            ctx: request.execCtx,
-            signal: signal ?? undefined,
-          }));
-          result = await settleToolCall(prepared, execution);
-        }
-      } catch (cause) {
-        const replayable = riskClass === 'read';
-        result = {
-          ok: false,
-          error: cause instanceof Error ? cause.message : String(cause),
-          outcomeKnown: replayable || /** @type {any} */ (cause)?.outcomeKnown === true,
-          ...(replayable ? { retryable: true } : { retryable: false }),
-        };
-      }
-      shared.uiPorts.broadcast({
-        type: 'page/op', sessionId: ownerSessionId, tabId, method,
-        ok: result?.ok === true,
-      });
-      return result;
-    };
     const observeAppRuntime = async (/** @type {{sessionId:string,appId:string,signal?:AbortSignal}} */ request) => {
       const startedAt = performance.now();
       const ctx = await buildToolContext({
-        sessionId: request.sessionId, exposure: EXPOSURE_ACTOR, actorType: 'app',
+        sessionId: request.sessionId, exposure: ACTOR_EXPOSURE, actorType: 'app',
         actorInstanceId: request.appId, actorSurface: 'code',
       });
       if (typeof ctx.appAgentCall !== 'function') return {
@@ -2201,7 +2327,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     const actAppRuntime = async (/** @type {{sessionId:string,appId:string,action:string,params:object,signal?:AbortSignal}} */ request) => {
       const startedAt = performance.now();
       const ctx = await buildToolContext({
-        sessionId: request.sessionId, exposure: EXPOSURE_ACTOR, actorType: 'app',
+        sessionId: request.sessionId, exposure: ACTOR_EXPOSURE, actorType: 'app',
         actorInstanceId: request.appId, actorSurface: 'code',
       });
       if (typeof ctx.appAgentCall !== 'function') return {
@@ -2225,7 +2351,7 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     const actorsRoutes = makeActorsRoutes({
       sessions: shared.sessions, uiPorts: shared.uiPorts, buildToolContext,
       actorMessaging, scriptRuns,
-      resolveManifestAllow, isOffscreenSender: deps.isOffscreenSender,
+      isOffscreenSender: deps.isOffscreenSender,
     });
     const appActorChat = makeAppActorChatHandler({
       isTrustedSender: deps.isTrustedSender, appTabTracker: engine.appTabTracker,
@@ -2551,46 +2677,6 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     const relayRoutes = {
       'actors/list': actorsRoutes['actors/list'],
       'actors/call': actorsRoutes['actors/call'],
-      'page-program/navigate': pageProgramRoute({
-        toolName: 'navigate', method: 'goto', tabMode: 'adopt', riskClass: 'resource',
-        invoke: (input) => createPageToolAuthority(input).navigateOwnedTab(),
-      }),
-      'page-program/click': pageProgramRoute({
-        toolName: 'click', method: 'click', tabMode: 'owned', riskClass: 'resource',
-        invoke: (input) => createPageToolAuthority(input).clickOwnedTarget(),
-      }),
-      'page-program/fill': pageProgramRoute({
-        toolName: 'type', method: 'fill', tabMode: 'owned', riskClass: 'resource',
-        invoke: (input) => createPageToolAuthority(input).fillOwnedTarget(),
-      }),
-      'page-program/snapshot': pageProgramRoute({
-        toolName: 'snapshot', method: 'snapshot', tabMode: 'owned', riskClass: 'read',
-        invoke: (input) => createPageToolAuthority(input).captureOwnedAccessibilityTree(),
-      }),
-      'page-program/read': pageProgramRoute({
-        toolName: 'read_page', method: 'content', tabMode: 'owned', riskClass: 'read',
-        invoke: (input) => createPageToolAuthority(input).readOwnedPage(),
-      }),
-      'page-program/read-state': pageProgramRoute({
-        toolName: 'read_state', method: 'readState', tabMode: 'owned', riskClass: 'read',
-        invoke: (input) => createPageToolAuthority(input).readOwnedFrameworkState(),
-      }),
-      'page-program/watch-changes': pageProgramRoute({
-        toolName: 'watch_changes', method: 'watchChanges', tabMode: 'owned', riskClass: 'read',
-        invoke: (input) => createPageToolAuthority(input).drainOwnedDomChanges(),
-      }),
-      'page-program/query-dom': pageProgramRoute({
-        toolName: 'query_dom', method: 'query', tabMode: 'owned', riskClass: 'read',
-        invoke: (input) => createPageToolAuthority(input).queryOwnedDom(),
-      }),
-      'page-program/view': pageProgramRoute({
-        toolName: 'view', method: 'view', tabMode: 'owned', riskClass: 'read',
-        invoke: (input) => createPageToolAuthority(input).captureOwnedTabPixels(),
-      }),
-      'page-program/login': pageProgramRoute({
-        toolName: 'login', method: 'login', tabMode: 'owned', riskClass: 'resource',
-        invoke: (input) => createPageToolAuthority(input).performConfirmedOwnedLogin(),
-      }),
       'site-fetch/call': async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
         if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'site_fetch_unauthorized_relay' };
         if (deps.vault.isLocked()) return { ok: false, error: 'locked' };
@@ -2637,16 +2723,53 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         });
         if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
         const httpMethod = String(method ?? 'GET').toUpperCase();
-        if (needsWebWriteConfirm(httpMethod)) {
+        const mutatesExternal = needsWebWriteConfirm(httpMethod);
+        /** @type {Record<string,string>} */
+        const safeHeaders = {};
+        for (const [name, value] of Object.entries(headers ?? {})) {
+          if (['cookie', 'authorization', 'proxy-authorization', 'dpop']
+            .includes(name.toLowerCase())) continue;
+          if (typeof value === 'string') safeHeaders[name] = value;
+        }
+        let requestBody = body;
+        if (requestBody !== undefined && typeof requestBody !== 'string') {
+          try { requestBody = JSON.stringify(requestBody); }
+          catch { return { ok: false, error: 'site_fetch_bad_body', outcomeKnown: true }; }
+          if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) {
+            safeHeaders['Content-Type'] = 'application/json';
+          }
+        }
+        const liveOwnerPermission = async () => {
+          const currentOwner = await shared.sessions.get(ownerSessionId).catch(() => null);
+          if (!currentOwner || currentOwner.kind !== 'actor'
+              || currentOwner.actorType !== 'web') return null;
+          return resolvePermission(currentOwner);
+        };
+        // why: confirmation is consent, not Plan/Act authorization. Stored
+        // site-client code is allowed to run in Plan for reads, so the final
+        // network edge must independently refuse every write method.
+        if (mutatesExternal
+            && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+          return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
+        }
+        if (mutatesExternal) {
+          const presentation = finalWebRequestConfirmation({
+            url: target.url, method: httpMethod, headers: safeHeaders,
+            ...(typeof requestBody === 'string' ? { body: requestBody } : {}),
+            source: 'site client',
+          });
           const answer = await confirmAction({
-            tool: WEB_WRITE_CONFIRM_KEY, kind: 'web_write', origins: [pin],
-            summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
+            tool: WEB_WRITE_CONFIRM_KEY, kind: 'web_write',
+            origins: [...presentation.origins], summary: presentation.summary,
             sessionId: ownerSessionId,
           }, /** @type {any} */ (signal));
           if (answer !== 'yes_once' && answer !== 'yes_session') {
             return { ok: false, error: 'declined: user declined the site-client write.' };
           }
           if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
+          if ((await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+            return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
+          }
         }
         let scopedFetch;
         if (owner.backing === 'api') {
@@ -2670,22 +2793,12 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
             originLock ? originLock.makeScope(() => tabOrigin) : () => tabOrigin,
           );
         }
-        /** @type {Record<string,string>} */
-        const safeHeaders = {};
-        for (const [name, value] of Object.entries(headers ?? {})) {
-          if (['cookie', 'authorization', 'proxy-authorization', 'dpop']
-            .includes(name.toLowerCase())) continue;
-          if (typeof value === 'string') safeHeaders[name] = value;
-        }
-        let requestBody = body;
-        if (requestBody !== undefined && typeof requestBody !== 'string') {
-          requestBody = JSON.stringify(requestBody);
-          if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) {
-            safeHeaders['Content-Type'] = 'application/json';
-          }
-        }
         if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
         if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
+        if (mutatesExternal
+            && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+          return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
+        }
         try {
           const response = await scopedFetch(target.url, {
             method: httpMethod, headers: safeHeaders,
@@ -2705,12 +2818,29 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
         } catch (cause) {
           const error = /** @type {{reason?:string,message?:string}} */ (cause);
           if (error.reason === 'redirect_blocked') {
-            return { ok: false, error: `redirected: ${target.url} issued a redirect (not followed). Use the final URL.` };
+            return {
+              ok: false,
+              error: `redirected: ${target.url} issued a redirect (not followed). Use the final URL.`,
+              outcomeKnown: true,
+              ...(mutatesExternal ? {
+                performed: true, outcomeKind: 'effect-completed', retryable: false,
+              } : { outcomeKind: 'pre-effect-failure' }),
+            };
           }
           if (error.reason === 'private_network') {
-            return { ok: false, error: `blocked: ${target.url} is a private/loopback host (SSRF defense).` };
+            return {
+              ok: false,
+              error: `blocked: ${target.url} is a private/loopback host (SSRF defense).`,
+              outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+            };
           }
-          return { ok: false, error: error.message ?? 'site_fetch_failed' };
+          return mutatesExternal ? {
+            ok: false, error: error.message ?? 'site_fetch_failed',
+            outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+          } : {
+            ok: false, error: error.message ?? 'site_fetch_failed',
+            outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+          };
         }
       },
       'a2a/call': a2aCall,
@@ -2913,14 +3043,16 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     turnSlots: shared.turnSlots,
     memory: shared.memory, browser: deps.browser,
     skillRegistry, buildToolContext,
-    projectToolDescriptors,
+    // why: the turn authority needs the build-pinned exact-operation subset
+    // beside descriptors. The descriptors-only helper remains for local
+    // catalog consumers that have no authority role.
+    projectToolDescriptors: projectToolSurface,
     settingsStore: deps.settingsStore,
     DWEB_ENABLED: deps.dwebEnabled,
     dwebEngagedSessions,
     markDwebEngaged: (/** @type {string} */ sessionId) => {
       if (sessionId) dwebEngagedSessions.add(sessionId);
     },
-    prepareToolCall, settleToolCall,
     maybeNudgeDebuggerGrant,
     uiConnected, uiPorts: shared.uiPorts, auditLog: deps.auditLog,
     postChatNote: deps.postChatNote,
@@ -2931,6 +3063,11 @@ export const createKernelTurnAuthorityAdapter = (deps, semanticOwners) => {
     getActorIsolation: () => live.actorIsolation,
     waitForActorIsolation: () => live.actorIsolationReady,
     getRuntimeCapabilities: () => runtimeCapabilities,
+    // why: user-hook source is semantic configuration. Send a bounded snapshot
+    // to the sealed realm instead of compiling executable hook functions in SW.
+    getUserHookRecords: () => deps.kv.get('hooks.user.v1'),
+    completeGoalRun: (/** @type {string} */ sessionId, /** @type {string} */ summary) =>
+      goalRunner?.complete(sessionId, summary) ?? false,
     reconcilePrewalk: live.prewalk.reconcile,
     maybePrewalkSwap: live.prewalk.maybeSwap,
     reconcileEngineActor: live.prewalk.reconcileEngineActor,

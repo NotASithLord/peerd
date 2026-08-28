@@ -5,7 +5,10 @@
 // one controller executor. The opaque token is never posted into either
 // untrusted program realm and is retired with the outer page_code execution.
 
-/** @type {Map<string, {worker:Worker,parentExecutionId:string,next:number,pending:Map<string,(value:any)=>void>}>} */
+const MAX_OWNER_REQUESTS = 256;
+const MAX_OWNER_IN_FLIGHT = 32;
+
+/** @type {Map<string, {worker:Worker,parentExecutionId:string,requestNonce:string,next:number,total:number,pending:Map<string,(value:any)=>void>}>} */
 const owners = new Map();
 
 /** @param {Worker} worker @param {string} parentExecutionId */
@@ -15,7 +18,10 @@ export const registerPageProgramSemanticOwner = (worker, parentExecutionId) => {
     throw new TypeError('page program semantic owner is invalid');
   }
   const token = crypto.randomUUID();
-  owners.set(token, { worker, parentExecutionId, next: 0, pending: new Map() });
+  owners.set(token, {
+    worker, parentExecutionId, requestNonce: crypto.randomUUID(),
+    next: 0, total: 0, pending: new Map(),
+  });
   return token;
 };
 
@@ -46,7 +52,23 @@ const request = (
     });
     return;
   }
-  const rid = `page-semantic-${++owner.next}`;
+  if (owner.total >= MAX_OWNER_REQUESTS || owner.pending.size >= MAX_OWNER_IN_FLIGHT) {
+    resolve({
+      ok: false,
+      code: owner.total >= MAX_OWNER_REQUESTS
+        ? 'page_program_request_limit' : 'page_program_inflight_limit',
+      error: owner.total >= MAX_OWNER_REQUESTS
+        ? 'page program request budget exhausted'
+        : 'page program has too many in-flight semantic requests',
+      outcomeKnown: true, performed: false, retryable: false,
+    });
+    return;
+  }
+  owner.total += 1;
+  // why: a late response from a retired outer job must not settle the same
+  // ordinal request in its successor. This nonce is distinct from the private
+  // owner token, so the Worker learns no host rendezvous capability.
+  const rid = `page-semantic-${owner.requestNonce}-${++owner.next}`;
   owner.pending.set(rid, resolve);
   try {
     owner.worker.postMessage({
@@ -87,7 +109,48 @@ export const writePageProgramSiteClient = (token, args) =>
 export const capturePageProgramSite = (token, args) =>
   request(token, 'page-program-site-capture-request', args);
 
+/** @param {string} token @param {Record<string,unknown>} args */
+export const navigatePageProgram = (token, args) =>
+  request(token, 'page-program-navigate-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const clickPageProgram = (token, args) =>
+  request(token, 'page-program-click-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const fillPageProgram = (token, args) =>
+  request(token, 'page-program-fill-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const snapshotPageProgram = (token, args) =>
+  request(token, 'page-program-snapshot-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const readPageProgram = (token, args) =>
+  request(token, 'page-program-read-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const readStatePageProgram = (token, args) =>
+  request(token, 'page-program-read-state-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const watchChangesPageProgram = (token, args) =>
+  request(token, 'page-program-watch-changes-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const queryPageProgram = (token, args) =>
+  request(token, 'page-program-query-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const viewPageProgram = (token, args) =>
+  request(token, 'page-program-view-request', args);
+/** @param {string} token @param {Record<string,unknown>} args */
+export const loginPageProgram = (token, args) =>
+  request(token, 'page-program-login-request', args);
+
 const RESPONSE_TYPES = new Set([
+  'page-program-navigate-response',
+  'page-program-click-response',
+  'page-program-fill-response',
+  'page-program-snapshot-response',
+  'page-program-read-response',
+  'page-program-read-state-response',
+  'page-program-watch-changes-response',
+  'page-program-query-response',
+  'page-program-view-response',
+  'page-program-login-response',
   'page-program-fetch-response',
   'page-program-read-document-response',
   'page-program-read-result-response',

@@ -49,6 +49,33 @@ describe('load_skill dedup', () => {
     expect((b as any).content).toContain(BODY);
   });
 
+  test('fresh actor Workers dedup from transcript and re-page after trim', async () => {
+    const first = await loadSkillTool.execute({ name: 'writer' }, ctxFor({
+      sessionId: 'actor-1', messageCount: 0, trimCovered: 0, messages: [],
+    }));
+    const transcript = [{
+      role: 'user',
+      toolResults: [{
+        content: (first as any).content,
+        meta: { toolName: 'load_skill' },
+      }],
+    }];
+
+    // A bound actor gets a fresh Worker heap on its next turn.
+    _resetOncePerSession();
+    const second = await loadSkillTool.execute({ name: 'writer' }, ctxFor({
+      sessionId: 'actor-1', messageCount: 1, trimCovered: 0, messages: transcript,
+    }));
+    expect((second as any).content).not.toContain(BODY);
+    expect((second as any).content).toContain('already loaded');
+
+    _resetOncePerSession();
+    const repaged = await loadSkillTool.execute({ name: 'writer' }, ctxFor({
+      sessionId: 'actor-1', messageCount: 4, trimCovered: 1, messages: transcript,
+    }));
+    expect((repaged as any).content).toContain(BODY);
+  });
+
   test('missing skills registry still fails closed', async () => {
     const res = await loadSkillTool.execute({ name: 'writer' }, { session: { sessionId: 's1' } } as any);
     expect(res.ok).toBe(false);

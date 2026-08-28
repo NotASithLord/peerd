@@ -35,6 +35,8 @@
  * @property {boolean} [actorOutcomeKnown]         host-stamped outcome certainty
  * @property {boolean} [actorPerformed]            host-stamped execution state
  * @property {boolean} [actorAborted]              host-stamped user cancellation state
+ * @property {any[]} [authorityReceipts]           host-stamped exact authority receipts
+ * @property {boolean} [authorityPerformed]        whether any exact host effect performed
  */
 
 /**

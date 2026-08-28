@@ -22,9 +22,59 @@ const context = (overrides: Record<string, any> = {}) => ({
 });
 
 describe('exact WebVM authority', () => {
+  test('Stop during the fresh destroy probe prevents tab and registry deletion', async () => {
+    let releaseProbe!: () => void;
+    let probeStarted!: () => void;
+    const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    const started = new Promise<void>((resolve) => { probeStarted = resolve; });
+    const controller = new AbortController();
+    const shared: any = {};
+    let reads = 0;
+    let closes = 0;
+    let deletes = 0;
+    const ctx = context({
+      actorType: 'webvm', actorInstanceId: 'vm-1',
+      vmRegistry: {
+        get: async () => {
+          reads += 1;
+          if (reads === 2) {
+            probeStarted();
+            await probeGate;
+          }
+          return { id: 'vm-1', name: 'work', pinned: false, diskOverlayKey: 'disk-1' };
+        },
+        delete: async () => { deletes += 1; },
+      },
+      vmTabTracker: { closeTab: async () => { closes += 1; } },
+    });
+    const read = createVmToolAuthority({
+      binding: { operation: 'turn.vm.read', args: { vmId: 'vm-1' } },
+      ctx, signal: controller.signal, shared,
+    });
+    await read.readVm('vm-1');
+    const destroy = createVmToolAuthority({
+      binding: { operation: 'turn.vm.destroy', args: { vmId: 'vm-1' } },
+      ctx, signal: controller.signal, shared,
+    });
+    const pending = destroy.destroyVm('vm-1');
+    await started;
+    controller.abort();
+    releaseProbe();
+    await expect(pending).rejects.toMatchObject({
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+    expect(closes).toBe(0);
+    expect(deletes).toBe(0);
+  });
+
   test('runs admitted command semantics without exposing the VM client', async () => {
     const call = { name: 'vm_boot', args: { cmd: 'echo ok', vm: 'work', timeoutMs: 2000 } };
-    const authority = createVmToolAuthority({ call, ctx: context() });
+    const authority = {
+      readVm: async () => ({ id: 'vm-1', name: 'work', pinned: false }),
+      listVms: async () => [{ id: 'vm-1', name: 'work' }],
+      setDefaultVm: async () => undefined,
+      runVm: async () => ({ stdout: 'ok\n', exitCode: 0, durationMs: 2 }),
+    };
     const result = await executeControllerVmTool('vm_boot', call.args, authority);
     expect(result).toMatchObject({ ok: true });
     expect(result.content).toContain('$ echo ok');
@@ -32,7 +82,11 @@ describe('exact WebVM authority', () => {
 
   test('refuses a changed command after admission', async () => {
     const authority = createVmToolAuthority({
-      call: { name: 'vm_boot', args: { cmd: 'echo safe' } }, ctx: context(),
+      binding: {
+        operation: 'turn.vm.run',
+        args: { command: 'echo safe', timeoutMs: 60_000, vmId: undefined },
+      },
+      ctx: context(),
     });
     let failure: any;
     try { await authority.runVm('echo changed', 60_000, undefined); }
@@ -47,7 +101,9 @@ describe('exact WebVM authority', () => {
       args: { url: 'https://example.com/a.bin', path: '/tmp/a.bin' },
     };
     const authority = createVmToolAuthority({
-      call,
+      binding: {
+        operation: 'turn.vm.import-file', args: { url: call.args.url, path: call.args.path },
+      },
       ctx: context({
         vm: { writeFile: async (_path: string, bytes: Uint8Array) => { written = bytes; } },
       }),
@@ -61,22 +117,23 @@ describe('exact WebVM authority', () => {
   test('rechecks pin state immediately before destructive deletion', async () => {
     let reads = 0;
     let deleted = false;
-    const authority = createVmToolAuthority({
-      call: { name: 'vm_delete', args: { vmId: 'vm-1' } },
-      ctx: context({
+    const ctx = context({
         vmRegistry: {
           get: async () => ({
             id: 'vm-1', name: 'work', pinned: reads++ > 0, diskOverlayKey: 'disk-1',
           }),
           delete: async () => { deleted = true; },
         },
-      }),
+      });
+    const shared: any = {};
+    const read = createVmToolAuthority({
+      binding: { operation: 'turn.vm.read', args: { vmId: 'vm-1' } }, ctx, shared,
     });
-    const result = await executeControllerVmTool(
-      'vm_delete', { vmId: 'vm-1' }, authority,
-    );
-    expect(result).toMatchObject({ ok: false });
-    expect((result as { error?: string }).error).toContain('VM authority mismatch');
+    await read.readVm('vm-1');
+    const destroy = createVmToolAuthority({
+      binding: { operation: 'turn.vm.destroy', args: { vmId: 'vm-1' } }, ctx, shared,
+    });
+    await expect(destroy.destroyVm('vm-1')).rejects.toThrow('VM authority mismatch');
     expect(deleted).toBe(false);
   });
 });

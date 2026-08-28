@@ -31,9 +31,14 @@ const makeCtx = (over: any = {}) => {
 };
 
 const executeA2A = (args: any, ctx: any) => a2aRunTool.execute(args, {
-  dwebAuthority: createDwebToolAuthority({
-    call: { name: 'a2a_run', args }, ctx, signal: ctx.abortSignal,
-  }),
+  dwebAuthority: {
+    runMeshProgram: (code: string, timeoutMs: number) => createDwebToolAuthority({
+      binding: {
+        operation: 'turn.dweb.run-mesh-program', args: { code, timeoutMs },
+      },
+      ctx, signal: ctx.abortSignal,
+    }).runMeshProgram(code, timeoutMs),
+  },
 } as any);
 
 describe('a2a_run — Stop plumbing (#153)', () => {
@@ -85,5 +90,27 @@ describe('a2a_run — Stop plumbing (#153)', () => {
     controller.abort();                          // fires AFTER the run settled
     await new Promise((r) => setTimeout(r, 5));
     expect(seen.aborts).toEqual([]);
+  });
+
+  test('a lost mesh mutation acknowledgement remains unknown and nonretryable', async () => {
+    const { ctx } = makeCtx({
+      jsOffscreenClient: {
+        execHeadless: async () => ({
+          value: undefined, durationMs: 1,
+          error: 'nested host operation outcome unknown',
+          outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+          codeTrace: [{
+            seq: 1, bridge: 'mesh', method: 'cast', outcome: 'error', ms: 1,
+          }],
+        }),
+      },
+    });
+    const result: any = await executeA2A({
+      code: 'await mesh.cast("did:key:zPeer", "mutate");',
+    }, ctx);
+    expect(result).toMatchObject({
+      ok: false, error: 'a2a_nested_host_outcome_unknown',
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
   });
 });

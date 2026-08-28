@@ -229,12 +229,13 @@ export const actorTierGate = (tool, args, ctx) => {
 };
 
 /**
- * Exposure — enforces the main-agent tool boundary at DISPATCH, not just
+ * Exposure — enforces the main-agent semantic surface at DISPATCH, not just
  * in the advertised descriptor list. The low-level DOM/page tools
  * (snapshot, click, type, page_code, …) are hidden from the main agent and
  * belong to the web actor. mainAgentDescriptors() keeps them out of the
  * model's tool list, but that's advisory — a prompt-injected model can
- * still EMIT a hidden tool name. This gate makes the boundary real: a
+ * still EMIT a hidden tool name. This semantic gate refuses it before tool
+ * execution: a
  * context marked `exposure: 'main'` (set only on the main turn) is refused
  * any hidden tool. Actors and spawned leave `exposure` unset — the actor
  * legitimately holds these tools, narrowed by its kind's allow-list (spawn.js).
@@ -242,12 +243,14 @@ export const actorTierGate = (tool, args, ctx) => {
  * SECOND check: the per-session tool manifest (tools/manifests.js).
  * ctx.toolAllow is the session's RESOLVED allow-set (null = no manifest =
  * everything). Descriptor filtering keeps excluded tools out of the
- * model's advertised list, but that's advisory too — this refusal makes
- * the manifest real at dispatch. Unlike the main-only hidden-tool check it
+ * model's advertised list; this refusal makes the semantic policy effective
+ * for honest runtime dispatch. Unlike the main-only hidden-tool check it
  * applies to EVERY context that carries it, main turn AND children: spawn.js
  * inherits the manifest into child session records, so a child's
- * effective set can intersect with, but never escalate past, its
- * parent's manifest.
+ * effective advertised set remains narrowed from its parent's manifest.
+ * The SW hard boundary remains exact operation grants plus live checks; this
+ * name policy is not an authority guarantee against a compromised semantic
+ * heap, and equivalent tools may intentionally share operations.
  *
  * @param {Tool} tool @param {any} args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'>}

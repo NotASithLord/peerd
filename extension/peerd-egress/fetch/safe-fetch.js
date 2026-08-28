@@ -30,6 +30,9 @@
 //     emulated socket layer, which we route through webFetch when the VM
 //     has network enabled (off by default per DECISIONS.md)
 //
+import { originOf } from '/shared/url-origin.js';
+export { originOf } from '/shared/url-origin.js';
+
 // What is on the allowlist:
 //   - The "hardcoded" set (Anthropic, OpenAI, Ollama loopback) — these
 //     are non-negotiable in code; turning them off requires editing this
@@ -56,14 +59,6 @@ export { HARDCODED_ALLOWLIST } from './allowlist.js';
  * @param {string | URL | Request} resource
  * @returns {string}
  */
-export const originOf = (resource) => {
-  const urlString = resource instanceof Request ? resource.url
-    : resource instanceof URL ? resource.toString()
-    : resource;
-  const u = new URL(urlString);
-  return `${u.protocol}//${u.host}`;
-};
-
 /**
  * @param {string} origin
  * @param {readonly string[]} allowlist

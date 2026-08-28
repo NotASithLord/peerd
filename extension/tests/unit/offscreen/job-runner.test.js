@@ -9,11 +9,72 @@
 import { describe, it, expect } from '../../framework.js';
 import { runJob, abortJob } from '/offscreen/job-runner.js';
 import {
+  registerAppProgramSemanticOwner,
+  releaseAppProgramSemanticOwner,
+  settleAppProgramSemanticResponse,
+} from '/offscreen/app-program-semantic-owner.js';
+import {
+  registerPageProgramSemanticOwner,
+  releasePageProgramSemanticOwner,
+  settlePageProgramSemanticResponse,
+} from '/offscreen/page-program-semantic-owner.js';
+import {
   MODULE_SYNTAX_ERROR_CODE,
   REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE,
   UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
 } from '/peerd-engine/index.js';
 import { ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS } from '/peerd-runtime/index.js';
+
+const deferred = () => {
+  /** @type {(value?: unknown) => void} */
+  let resolve = () => {};
+  const promise = new Promise((settle) => { resolve = settle; });
+  return { promise, resolve: /** @type {(value?: unknown) => void} */ (resolve) };
+};
+
+const runOwnedAppJob = async (
+  /** @type {Parameters<typeof runJob>[0]} */ job,
+  /** @type {Parameters<typeof runJob>[1]} */ deps,
+  /** @type {(message:Record<string,any>) => unknown | Promise<unknown>} */ dispatch,
+) => {
+  let token = '';
+  const owner = /** @type {Worker} */ (/** @type {unknown} */ ({
+    postMessage(/** @type {Record<string,any>} */ message) {
+      void Promise.resolve(dispatch(message)).then((result) => {
+        settleAppProgramSemanticResponse(token, {
+          type: message.type.replace('-request', '-response'),
+          rid: message.rid,
+          result,
+        });
+      });
+    },
+  }));
+  token = registerAppProgramSemanticOwner(owner, 'outer-app-call');
+  try { return await runJob({ ...job, appProgramSemanticToken: token }, deps); }
+  finally { releaseAppProgramSemanticOwner(token); }
+};
+
+const runOwnedPageJob = async (
+  /** @type {Parameters<typeof runJob>[0]} */ job,
+  /** @type {Parameters<typeof runJob>[1]} */ deps,
+  /** @type {(message:Record<string,any>) => unknown | Promise<unknown>} */ dispatch,
+) => {
+  let token = '';
+  const owner = /** @type {Worker} */ (/** @type {unknown} */ ({
+    postMessage(/** @type {Record<string,any>} */ message) {
+      void Promise.resolve(dispatch(message)).then((result) => {
+        settlePageProgramSemanticResponse(token, {
+          type: message.type.replace('-request', '-response'),
+          rid: message.rid,
+          result,
+        });
+      });
+    },
+  }));
+  token = registerPageProgramSemanticOwner(owner, 'outer-page-call');
+  try { return await runJob({ ...job, pageProgramSemanticToken: token }, deps); }
+  finally { releasePageProgramSemanticOwner(token); }
+};
 
 describe('offscreen job-runner (real sealed worker)', () => {
   it('runs code headless and returns its value + console output', async () => {
@@ -146,20 +207,22 @@ throw new Error('unrelated failure');`,
     /** @type {(() => void) | undefined} */
     let bothStarted;
     const started = new Promise((resolve) => { bothStarted = () => resolve(undefined); });
-    const sendToSW = async (/** @type {string} */ type) => {
-      if (type === 'page-program/snapshot' || type === 'site-fetch/call') {
+    const waitForRelay = async (/** @type {'page'|'site'} */ kind) => {
         relays += 1;
         if (relays === 2) bothStarted?.();
         await barrier;
-        return type === 'page-program/snapshot'
-          ? { ok: true, value: 'snapshot' }
+        return kind === 'page'
+          ? { ok: true, structured: { value: 'snapshot' } }
           : { ok: true, value: { status: 200, body: 'ok', json: null } };
-      }
+    };
+    const sendToSW = async (/** @type {string} */ type) => {
+      if (type === 'site-fetch/call') return waitForRelay('site');
       return { ok: true };
     };
-    const pageRun = runJob(
+    const pageRun = runOwnedPageJob(
       { code: 'return await page.snapshot();', caps: { page: true }, ownerSessionId: 'web-1', runId: 'page-relay-1', timeoutMs: 5000 },
       { sendToSW },
+      () => waitForRelay('page'),
     );
     const siteRun = runJob(
       { code: 'return await site.fetch("/x");', siteFetch: 'https://site.example', ownerSessionId: 'api-1', runId: 'site-relay-1', timeoutMs: 5000 },
@@ -199,60 +262,60 @@ throw new Error('unrelated failure');`,
     const policy = {
       reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
     };
-    const result = await runJob(
+    const result = await runOwnedPageJob(
       {
         code: 'try { await page.click("#open"); } catch {} return "handled";',
         caps: { page: true }, ownerSessionId: 'web-policy', runId: 'page-policy-failure',
       },
-      {
-        sendToSW: async () => ({ ok: false, error: 'click failed', browserPolicies: [policy] }),
-      },
+      { sendToSW: async () => { throw new Error('direct page relay must stay deleted'); } },
+      () => ({ ok: false, error: 'click failed', browserPolicies: [policy] }),
     );
     expect(result.error).toBe(null);
     expect(result.value).toBe('handled');
     expect(result.browserPolicies).toEqual([policy]);
   });
 
-  it('exposes only the exact App client and relays owner/run identity from trusted job params', async () => {
-    /** @type {Array<{type:string,payload:{method?:string,ownerSessionId?:string,runId?:string}}>} */
+  it('exposes only the exact App client through its parent-bound semantic owner', async () => {
+    /** @type {Array<Record<string,any>>} */
     const calls = [];
-    const result = await runJob(
+    const result = await runOwnedAppJob(
       {
         code: 'const before = await app.observe(); await app.act("move", { x: 1 }); await app.wait(1); return before;',
         caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
         ownerSessionId: 'app-actor-1', runId: 'app-run-1',
       },
-      {
-        sendToSW: async (/** @type {string} */ type, /** @type {{ownerSessionId?:string,runId?:string}} */ payload) => {
-          calls.push({ type, payload });
-          if (type === 'app-code/observe') return { ok: true, value: { screen: 'game' } };
-          return { ok: true, value: { accepted: true } };
-        },
+      { sendToSW: async () => { throw new Error('direct App relay must stay deleted'); } },
+      (message) => {
+        calls.push(message);
+        return message.type === 'app-program-observe-request'
+          ? { ok: true, structured: { value: { screen: 'game' } } }
+          : { ok: true, structured: { value: { accepted: true } } };
       },
     );
     expect(result.error).toBe(null);
     expect(result.value).toEqual({ screen: 'game' });
     expect(result.usedApp).toBe(true);
-    expect(calls.map((call) => call.type)).toEqual(['app-code/observe', 'app-code/act']);
-    expect(calls.every((call) => call.payload.ownerSessionId === 'app-actor-1')).toBe(true);
-    expect(calls.every((call) => call.payload.runId === 'app-run-1')).toBe(true);
+    expect(calls.map((call) => call.type)).toEqual([
+      'app-program-observe-request', 'app-program-act-request',
+    ]);
+    expect(calls.every((call) => call.parentExecutionId === 'outer-app-call')).toBe(true);
+    expect(calls[1].args).toEqual({ action: 'move', params: { x: 1 } });
     const codeTrace = /** @type {Array<{bridge:string,method:string}>} */ (result.codeTrace ?? []);
     expect(codeTrace.map((entry) => `${entry.bridge}.${entry.method}`))
       .toEqual(['app.observe', 'app.act']);
   });
 
   it('host-custodies an ambiguous App action even when worker code catches the rejection', async () => {
-    const result = await runJob(
+    const result = await runOwnedAppJob(
       {
         code: 'try { await app.act("start-game"); } catch {} return "caught";',
         caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
         ownerSessionId: 'app-actor-unknown', runId: 'app-run-unknown',
       },
-      {
-        sendToSW: async () => ({
-          ok: false, error: 'ack lost', outcomeKnown: false, outcomeKind: 'transport-lost',
-        }),
-      },
+      { sendToSW: async () => { throw new Error('direct App relay must stay deleted'); } },
+      () => ({
+        ok: false, error: 'ack lost', outcomeKnown: false, outcomeKind: 'transport-lost',
+      }),
     );
     expect(result.value).toBe('caught');
     expect(result.appOutcomeUnknown).toBe(true);
@@ -260,19 +323,158 @@ throw new Error('unrelated failure');`,
     expect(String(result.error)).toContain('app action outcome unknown');
   });
 
+  it('drains a fire-and-forget App action before returning the outer job', async () => {
+    const started = deferred();
+    const release = deferred();
+    let settled = false;
+    const pending = runOwnedAppJob(
+      {
+        code: 'void app.act("move", { x: 1 }); return "done";',
+        caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
+        ownerSessionId: 'app-actor-fire', runId: 'app-run-fire', timeoutMs: 5000,
+      },
+      { sendToSW: async () => { throw new Error('direct App relay must stay deleted'); } },
+      async () => {
+        started.resolve();
+        await release.promise;
+        return { ok: true, structured: { value: { accepted: true } } };
+      },
+    ).then((value) => { settled = true; return value; });
+    await started.promise;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    release.resolve();
+    const result = await pending;
+    expect(result.value).toBe('done');
+    expect(result.error).toBe(null);
+    expect(result.usedApp).toBe(true);
+  });
+
+  it('keeps fire-and-forget App ambiguity sticky after worker success', async () => {
+    const result = await runOwnedAppJob(
+      {
+        code: 'void app.act("move", { x: 1 }).catch(() => {}); return "done";',
+        caps: { app: true, page: false, egress: false, subagent: false, opfs: false },
+        ownerSessionId: 'app-actor-fire-unknown', runId: 'app-run-fire-unknown',
+      },
+      { sendToSW: async () => { throw new Error('direct App relay must stay deleted'); } },
+      () => ({
+        ok: false, error: 'late acknowledgement lost',
+        outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+      }),
+    );
+    expect(result.value).toBe('done');
+    expect(result.outcomeKnown).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(String(result.error)).toContain('app action outcome unknown');
+  });
+
+  it('drains fire-and-forget page and site writes before clean completion', async () => {
+    const pageStarted = deferred();
+    const pageRelease = deferred();
+    let pageSettled = false;
+    const pageRun = runOwnedPageJob(
+      {
+        code: 'void page.click("#save"); return "page-done";',
+        caps: { page: true }, ownerSessionId: 'web-fire', runId: 'page-fire', timeoutMs: 5000,
+      },
+      { sendToSW: async () => { throw new Error('direct page relay must stay deleted'); } },
+      async () => {
+        pageStarted.resolve();
+        await pageRelease.promise;
+        return { ok: true, structured: { value: { clicked: true } } };
+      },
+    ).then((value) => { pageSettled = true; return value; });
+
+    const siteStarted = deferred();
+    const siteRelease = deferred();
+    let siteSettled = false;
+    const siteRun = runJob(
+      {
+        code: 'void site.fetch("/write", { method: "POST", body: "x" }); return "site-done";',
+        siteFetch: 'https://site.example', ownerSessionId: 'api-fire', runId: 'site-fire', timeoutMs: 5000,
+      },
+      { sendToSW: async (type) => {
+        if (type !== 'site-fetch/call') throw new Error('unexpected relay');
+        siteStarted.resolve();
+        await siteRelease.promise;
+        return { ok: true, value: { status: 204, body: '', json: null } };
+      } },
+    ).then((value) => { siteSettled = true; return value; });
+
+    await Promise.all([pageStarted.promise, siteStarted.promise]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pageSettled).toBe(false);
+    expect(siteSettled).toBe(false);
+    pageRelease.resolve();
+    siteRelease.resolve();
+    const [pageResult, siteResult] = await Promise.all([pageRun, siteRun]);
+    expect(pageResult.value).toBe('page-done');
+    expect(pageResult.error).toBe(null);
+    expect(siteResult.value).toBe('site-done');
+    expect(siteResult.error).toBe(null);
+  });
+
+  it('Stop cannot settle ahead of an admitted fire-and-forget site write', async () => {
+    const started = deferred();
+    const release = deferred();
+    let settled = false;
+    const pending = runJob(
+      {
+        code: 'void site.fetch("/write", { method: "POST", body: "x" }); await new Promise(() => {});',
+        siteFetch: 'https://site.example', ownerSessionId: 'api-stop', runId: 'site-stop', timeoutMs: 5000,
+      },
+      { sendToSW: async () => {
+        started.resolve();
+        await release.promise;
+        return { ok: true, value: { status: 204, body: '', json: null } };
+      } },
+    ).then((value) => { settled = true; return value; });
+    await started.promise;
+    abortJob('site-stop', 'api-stop');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    release.resolve();
+    const result = await pending;
+    expect(String(result.error)).toContain('job aborted (Stop)');
+    expect(result.outcomeKnown === false).toBe(false);
+  });
+
+  it('returns bounded unknown custody when a stopped host relay never settles', async () => {
+    const started = deferred();
+    const startedAt = performance.now();
+    const pending = runJob(
+      {
+        code: 'void site.fetch("/write", { method: "POST", body: "x" }); await new Promise(() => {});',
+        siteFetch: 'https://site.example', ownerSessionId: 'api-stuck', runId: 'site-stuck', timeoutMs: 5000,
+      },
+      { sendToSW: async () => {
+        started.resolve();
+        await new Promise(() => {});
+        return { ok: true };
+      } },
+    );
+    await started.promise;
+    abortJob('site-stuck', 'api-stuck');
+    const result = await pending;
+    expect(performance.now() - startedAt < 1200).toBe(true);
+    expect(result.outcomeKnown).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(String(result.error)).toContain('nested host operation outcome unknown');
+  });
+
   it('terminates a page job when an inner host policy ends the actor turn', async () => {
-    const result = await runJob(
+    const result = await runOwnedPageJob(
       {
         code: 'await page.snapshot(); return "must not continue";',
         caps: { page: true }, ownerSessionId: 'web-auth-wait', runId: 'page-auth-wait',
       },
-      {
-        sendToSW: async () => ({
-          ok: false, error: 'auth_waiting_for_user', endTurn: true,
-          endTurnContent: 'Finish signing in in the open tab.',
-          endTurnOutcomeKind: 'pre-effect-failure',
-        }),
-      },
+      { sendToSW: async () => { throw new Error('direct page relay must stay deleted'); } },
+      () => ({
+        ok: false, error: 'auth_waiting_for_user', endTurn: true,
+        endTurnContent: 'Finish signing in in the open tab.',
+        endTurnOutcomeKind: 'pre-effect-failure',
+      }),
     );
     expect(result.endTurn).toBe(true);
     expect(result.endTurnContent).toBe('Finish signing in in the open tab.');
@@ -289,18 +491,17 @@ throw new Error('unrelated failure');`,
     let bothAborting;
     const aborting = new Promise((resolve) => { bothAborting = () => resolve(undefined); });
     const deps = {
-      sendToSW: async (/** @type {string} */ type) => type === 'page-program/snapshot'
-        ? { ok: true, value: 'snapshot' }
-        : { ok: true, value: { status: 200, body: 'ok', json: null } },
+      sendToSW: async () => ({ ok: true, value: { status: 200, body: 'ok', json: null } }),
       abortRun: async () => {
         aborts += 1;
         if (aborts === 2) bothAborting?.();
         await abortBarrier;
       },
     };
-    const pageRun = runJob(
+    const pageRun = runOwnedPageJob(
       { code: 'return await page.snapshot();', caps: { page: true }, ownerSessionId: 'web-finalize', runId: 'page-finalize' },
       deps,
+      () => ({ ok: true, structured: { value: 'snapshot' } }),
     );
     const siteRun = runJob(
       { code: 'return await site.fetch("/x");', siteFetch: 'https://site.example', ownerSessionId: 'api-finalize', runId: 'site-finalize' },
@@ -548,7 +749,9 @@ throw new Error('unrelated failure');`,
     await new Promise((res) => setTimeout(res, 400));
     abortJob('a2a-abort-1', 'dweb-sess-1');
     const r = await pending;
-    expect(r.error).toContain('aborted');
+    expect(String(r.error)).toContain('nested host operation outcome unknown');
+    expect(r.outcomeKnown).toBe(false);
+    expect(r.retryable).toBe(false);
   });
 
   // design 7.3 — headless peerd.distributed.* must fail FAST. The runner forces
@@ -883,7 +1086,9 @@ throw new Error('unrelated failure');`,
     await new Promise((res) => setTimeout(res, 400));
     abortJob('run-p-abort', 'chat-1');
     const r = await pending;
-    expect(r.error).toContain('aborted');
+    expect(String(r.error)).toContain('nested host operation outcome unknown');
+    expect(r.outcomeKnown).toBe(false);
+    expect(r.retryable).toBe(false);
     expect(r.usedProvider).toBe(true);   // the attempt is visible (fencing stays conservative)
     expect(r.providerCalls).toBe(0);     // aborted before any usage came back → nothing counted as spent
   });
@@ -906,7 +1111,9 @@ throw new Error('unrelated failure');`,
     await new Promise((res) => setTimeout(res, 400));
     abortJob('run-abort');
     const r = await pending;
-    expect(r.error).toContain('aborted');
+    expect(String(r.error)).toContain('nested host operation outcome unknown');
+    expect(r.outcomeKnown).toBe(false);
+    expect(r.retryable).toBe(false);
     expect(r.usedActors).toBe(true);
     expect(/** @type {any[]} */ (r.actorsTrace).length).toBe(1);   // the in-flight ask is on the record
   });

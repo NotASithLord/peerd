@@ -31,6 +31,9 @@ export const executeControllerExecutionTool = async (
     session: {
       sessionId: projection.sessionId,
       kind: projection.sessionKind,
+      messages: projection.messages,
+      messageCount: projection.messageCount,
+      trimCovered: projection.trimCovered,
     },
   }));
 };

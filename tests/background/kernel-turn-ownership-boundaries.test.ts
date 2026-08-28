@@ -123,6 +123,30 @@ describe('kernel turn ownership boundaries', () => {
         || forbiddenPrefixes.some((prefix) => module.startsWith(prefix)))).toEqual([]);
   });
 
+  it('keeps the dynamically imported actor semantic roots outside host authority graphs', async () => {
+    const forbiddenPrefixes = [
+      'background/',
+      'peerd-egress/vault/',
+      'peerd-egress/storage/',
+      'peerd-egress/credentials/',
+      'peerd-egress/dpop/',
+    ];
+    const forbiddenModules = new Set([
+      'shared/browser-api.js',
+      'peerd-provider/background.js',
+      'peerd-engine/background.js',
+    ]);
+    for (const entry of [
+      'offscreen/actor-worker-runtime.js',
+      'peerd-runtime/controller-contributor.js',
+    ]) {
+      const modules = await modulesFor(entry);
+      expect(modules.size, `${entry} must exercise its real static graph`).toBeGreaterThan(1);
+      expect([...modules].filter((module) => forbiddenModules.has(module)
+        || forbiddenPrefixes.some((prefix) => module.startsWith(prefix))), entry).toEqual([]);
+    }
+  });
+
   it('keeps the authority adapter free of feature catalogs and semantic owners', async () => {
     const modules = await modulesFor('background/kernel-turn-authority-adapter.js');
     const forbiddenPrefixes = [
@@ -218,7 +242,7 @@ describe('kernel turn ownership boundaries', () => {
       expect([...modules].filter((module) => actorSemanticModules.has(module))).toEqual([]);
     }
 
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       expect(modules.has('peerd-runtime/controller-actor-tools.js')).toBe(true);
       for (const module of actorSemanticModules) expect(modules.has(module)).toBe(true);
@@ -277,7 +301,7 @@ describe('kernel turn ownership boundaries', () => {
       expect([...modules].filter((module) => podSemanticModules.has(module))).toEqual([]);
     }
 
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of podSemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -322,7 +346,7 @@ describe('kernel turn ownership boundaries', () => {
       expect([...modules].filter((module) => repositorySemanticModules.has(module))).toEqual([]);
     }
 
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of repositorySemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -346,7 +370,7 @@ describe('kernel turn ownership boundaries', () => {
       expect([...modules].filter((module) => vmSemanticModules.has(module))).toEqual([]);
     }
 
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of vmSemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -369,7 +393,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => notebookSemanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of notebookSemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -399,7 +423,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => appSemanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of appSemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -429,7 +453,7 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/tools/defs/remember.js',
       'peerd-runtime/tools/defs/todo.js',
     ]) expect(legacyOwner.has(module), `legacy owner imports ${module}`).toBe(false);
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of persistenceSemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -460,7 +484,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => pageSemanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of pageSemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -481,7 +505,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => resourceSemanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of resourceSemanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -503,7 +527,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of semanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -525,7 +549,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of semanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -547,7 +571,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of semanticModules) expect(modules.has(module)).toBe(true);
     }
@@ -572,7 +596,7 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
     }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker.js']) {
+    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of semanticModules) expect(modules.has(module)).toBe(true);
     }

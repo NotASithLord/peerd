@@ -41,6 +41,9 @@ export const parseHookDocument = (text) => {
     throw new TypeError('parseHookMarkdown: frontmatter must set at least `id` and `event`');
   }
   const codeMatch = /```(?:js|javascript)\n([\s\S]*?)```/.exec(markdownBody);
+  if (!meta.rule || codeMatch) {
+    throw new TypeError('parseHookMarkdown: executable JS hooks are not supported; add a declarative `rule` block');
+  }
   /** @type {UserHookRecord} */
   const record = {
     id: meta.id,
@@ -49,12 +52,8 @@ export const parseHookDocument = (text) => {
     order: typeof meta.order === 'number' ? meta.order : undefined,
     match: typeof meta.match === 'string' ? meta.match : undefined,
     doc: markdownBody.replace(/```[\s\S]*?```/g, '').trim(),
-    kind: meta.rule ? 'declarative' : 'js',
+    kind: 'declarative',
   };
-  if (meta.rule) record.rule = meta.rule;
-  else {
-    record.trusted = meta.trusted === true;
-    record.body = codeMatch ? codeMatch[1].trim() : '';
-  }
+  record.rule = meta.rule;
   return record;
 };

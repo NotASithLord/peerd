@@ -7,16 +7,29 @@
 //
 // Pure shell — every IO injected — so it is unit-testable without a browser.
 
+import { normalizeExactEffectOutcome } from '/shared/exact-effect-outcome.js';
 import {
-  CONTROLLER_AUTHORITY_MANIFEST,
-  controllerAuthorityClassAllowed,
-} from '/shared/controller-authority-manifest.js';
+  authorityReceiptsForCall,
+  HOST_CONFIRMATION_DECLINED,
+  HOST_EFFECT_OUTCOME,
+  hostEffectValueIsRefusal,
+  safeHostEffectFailure,
+  safeHostPolicyAttribution,
+  stampAuthorityToolResult,
+  stampAuthorityToolResultBlock,
+} from './host-effect-verdict.js';
+import { semanticCallAuditEntry } from './semantic-call-audit.js';
+import {
+  ORCHESTRATOR_OPERATION_GRANT,
+  controllerDomainOperationPayloadCap,
+  controllerDomainOperationPolicy,
+  controllerOperationAllowedInPermissionMode,
+  controllerOperationRequiresConfirmation,
+} from '/shared/controller-kernel-quota.js';
+import { canonicalCloneDigest } from '/shared/canonical-clone-digest.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
-import {
-  normalizeHostEffectOutcome,
-  stampHostEffectVerdict,
-} from '/shared/tool-execution-protocol.js';
-import { HOST_EFFECT_OUTCOME } from './host-effect-verdict.js';
+import { ACTOR_LOOP_EVENT_BYTES } from '/shared/actor-channel-protocol.js';
+import { normalizeApiOrigin } from '/shared/api-origin.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
 import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
 import { bindVmToolAuthority } from './vm-tool-authority.js';
@@ -31,9 +44,129 @@ import { bindEditingToolAuthority } from './editing-tool-authority.js';
 import { bindIntrospectionToolAuthority } from './introspection-tool-authority.js';
 import { bindScheduleToolAuthority } from './schedule-tool-authority.js';
 import { bindDwebToolAuthority } from './dweb-tool-authority.js';
+import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
+import { authorityEffectResourceKey } from './authority-effect-resource.js';
 import {
-  isPageProgramSemanticTool,
+  APP_PROGRAM_EXACT_OPERATIONS,
+  PAGE_PROGRAM_EXACT_OPERATIONS,
 } from '/shared/page-program-authority.js';
+import { authorityEffectConfirmationPresentation } from '/shared/authority-confirmation-presentation.js';
+
+const PAGE_PROGRAM_EXACT_OPERATION_SET = new Set(PAGE_PROGRAM_EXACT_OPERATIONS);
+const APP_PROGRAM_EXACT_OPERATION_SET = new Set(APP_PROGRAM_EXACT_OPERATIONS);
+
+const ACTOR_OPERATION_GRANTS = Object.freeze({
+  webvm: Object.freeze([
+    'turn.vm.read', 'turn.vm.list', 'turn.vm.set-default', 'turn.vm.run',
+    'turn.vm.import-file', 'turn.vm.write-text-file', 'turn.vm.destroy',
+  ]),
+  notebook: Object.freeze([
+    'turn.notebook.read', 'turn.notebook.list', 'turn.notebook.set-default',
+    'turn.notebook.run', 'turn.notebook.write-file', 'turn.notebook.read-file',
+    'turn.notebook.destroy', 'turn.repository.read-status',
+    'turn.repository.read-history', 'turn.repository.read-remote',
+    'turn.repository.read-diff', 'turn.repository.confirm-restore',
+    'turn.repository.checkpoint', 'turn.repository.branch',
+    'turn.repository.checkout', 'turn.repository.restore',
+    'turn.repository.confirm-remote', 'turn.repository.link',
+    'turn.repository.fetch', 'turn.repository.push',
+    'turn.editing.read-target', 'turn.editing.write-target',
+  ]),
+  pod: Object.freeze([
+    'turn.pod.resolve', 'turn.pod.read-remote', 'turn.pod.confirm-git',
+    'turn.pod.exec', 'turn.pod.status', 'turn.pod.cancel', 'turn.pod.read-file',
+    'turn.pod.write-file', 'turn.repository.read-pod',
+    'turn.repository.destroy-pod', 'turn.repository.read-status',
+    'turn.repository.read-history', 'turn.repository.read-remote',
+    'turn.repository.read-diff', 'turn.repository.confirm-restore',
+    'turn.repository.checkpoint', 'turn.repository.branch',
+    'turn.repository.checkout', 'turn.repository.restore',
+    'turn.repository.confirm-remote', 'turn.repository.link',
+    'turn.repository.fetch', 'turn.repository.push',
+  ]),
+  app: Object.freeze([
+    'turn.app.update', 'turn.app.read', 'turn.app.delete', 'turn.app.write-file',
+    'turn.app.read-file', 'turn.app.list-files', 'turn.app.delete-file',
+    'turn.app.observe', 'turn.app.act', 'turn.app.run-code',
+    'turn.repository.read-status', 'turn.repository.read-history',
+    'turn.repository.read-remote', 'turn.repository.read-diff',
+    'turn.repository.confirm-restore', 'turn.repository.checkpoint',
+    'turn.repository.branch', 'turn.repository.checkout',
+    'turn.repository.restore', 'turn.repository.confirm-remote',
+    'turn.repository.link', 'turn.repository.fetch', 'turn.repository.push',
+    'turn.editing.read-target', 'turn.editing.write-target',
+  ]),
+  web: Object.freeze([
+    'turn.page.read', 'turn.page.snapshot', 'turn.page.read-state',
+    'turn.page.watch-changes', 'turn.page.query-dom', 'turn.page.navigate',
+    'turn.page.fill', 'turn.page.click', 'turn.page.login',
+    'turn.page.run-program', 'turn.page.capture-owned',
+    'turn.resource.confirm-web-write', 'turn.resource.request-web-text',
+    'turn.resource.extract-markdown', 'turn.resource.extract-document',
+    'turn.resource.spill-result', 'turn.resource.read-result',
+    'turn.site-client.read', 'turn.site-client.run', 'turn.site-client.commit',
+    'turn.site-client.capture-start', 'turn.site-client.capture-stop',
+  ]),
+  api: Object.freeze([
+    'turn.resource.confirm-web-write', 'turn.resource.request-web-text',
+    'turn.resource.extract-markdown',
+    'turn.resource.spill-result', 'turn.resource.read-result',
+    'turn.site-client.read', 'turn.site-client.run', 'turn.site-client.commit',
+  ]),
+  dweb: Object.freeze([
+    'turn.dweb.discover-apps', 'turn.dweb.publish-confirmed-app',
+    'turn.dweb.install-confirmed-app', 'turn.dweb.read-peers',
+    'turn.dweb.set-peer-blocked', 'turn.dweb.set-discovery-enabled',
+    'turn.dweb.run-mesh-program',
+  ]),
+  inboundDweb: Object.freeze([
+    'turn.dweb.discover-apps', 'turn.dweb.read-peers',
+  ]),
+});
+
+const canonicalActorBacking = (/** @type {any} */ record) =>
+  record?.kind === 'actor' && record.actorType === 'web' && record.backing == null
+    ? 'tab' : record?.backing;
+
+const knownBoundActorIdentity = (/** @type {any} */ record) => {
+  if (record?.kind !== 'actor' || typeof record.instanceId !== 'string' || !record.instanceId) {
+    return false;
+  }
+  if (record.actorType === 'web') {
+    const backing = canonicalActorBacking(record);
+    if (backing === 'api') return normalizeApiOrigin(record.instanceId) === record.instanceId;
+    return backing === 'tab';
+  }
+  return ['webvm', 'notebook', 'pod', 'app', 'dweb'].includes(record.actorType)
+    && record.backing == null;
+};
+
+export const actorOperationGrant = (
+  /** @type {any} */ record,
+  /** @type {boolean} */ inbound,
+) => inbound
+  ? record?.kind === 'actor' && record.actorType === 'dweb'
+    ? ACTOR_OPERATION_GRANTS.inboundDweb : Object.freeze([])
+  : record?.kind === 'spawned'
+    ? Array.isArray(record.grantedOperations)
+      ? Object.freeze(record.grantedOperations.filter((/** @type {unknown} */ operation) =>
+        typeof operation === 'string' && controllerDomainOperationPolicy(operation)))
+      : Object.freeze([])
+    : record?.kind === 'actor' && record.actorType === 'web'
+      ? canonicalActorBacking(record) === 'api' ? ACTOR_OPERATION_GRANTS.api
+        : canonicalActorBacking(record) === 'tab' ? ACTOR_OPERATION_GRANTS.web : Object.freeze([])
+      : record?.kind === 'actor'
+        ? ACTOR_OPERATION_GRANTS[/** @type {keyof typeof ACTOR_OPERATION_GRANTS} */ (record.actorType)]
+          ?? Object.freeze([])
+        : Object.freeze([]);
+
+const canonicalExactOperations = (/** @type {unknown} */ value) => {
+  if (!Array.isArray(value) || value.length > 256) return null;
+  const operations = value.filter((operation) =>
+    typeof operation === 'string' && controllerDomainOperationPolicy(operation));
+  return operations.length === value.length && new Set(operations).size === operations.length
+    ? Object.freeze(operations) : null;
+};
 
 const exactKeys = (
   /** @type {unknown} */ value, /** @type {readonly string[]} */ required,
@@ -45,6 +178,9 @@ const exactKeys = (
   return required.every((key) => Object.hasOwn(record, key))
     && Object.keys(record).every((key) => allowed.has(key));
 };
+
+const ACTOR_AUTHORITY_RESULT_CAP = 20 * 1024 * 1024;
+const ACTOR_SEMANTIC_TOOL_RESULT_CAP = 2 * 1024 * 1024;
 
 /** @returns {boolean} */
 const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
@@ -104,9 +240,6 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * }} deps.providerEgress
  * @param {{ get: (id: string) => Promise<any> }} deps.sessions
  * @param {(opts: object) => Promise<object>} deps.buildToolContext
- * @param {(call: object, ctx: object, descriptor?:object) => Promise<any>} [deps.prepareToolCall]
- * @param {(prepared: object, execution: object) => Promise<any>} [deps.settleToolCall]
- * @param {(call: any, actorType: string|undefined, instanceId: string|undefined) => void} deps.pinActorCall
  * @param {(ctx: any, allowedNames: Set<string>) => any} [deps.restrictCtxCapabilities]  phase 4:
  *   strip an actor ctx down to the capabilities its GRANTED tools need (capability-by-need),
  *   the analog of the actor's kind-scoped strip. Required to run tool-bearing spawned offscreen.
@@ -114,7 +247,7 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  *   tab-backed WEB actor's currently-owned tab id (phase 3) — read per dispatch so a
  *   mid-turn navigate that adopts a tab (0→1) is seen by the NEXT tool call. undefined
  *   for engine/API actors (no tab) and the 0-tab web state.
- * @param {string} deps.EXPOSURE_ACTOR
+ * @param {string} [deps.EXPOSURE_ACTOR]
  * @param {() => number} [deps.now]
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
  *   inspector's capture hook — fed every delegated model call with the runMeta-derived
@@ -123,6 +256,9 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  *   ACTOR tool dispatch on the UI ports ('actor/op' — bounded name/ok only).
  *   The isolated heap emits no turn/tool-use, so this is how the eval harness's OM2W
  *   recorder (and any activity view) sees what an actor did. Optional; defaults to a no-op.
+ * @param {(entry:Record<string,unknown>)=>Promise<void>|void} [deps.appendAudit]
+ *   append-only host audit. Actor semantic events are reduced to a closed schema
+ *   and stamped with the live run/session identity before this is called.
  * @param {(sender: unknown) => boolean} [deps.isRelaySender]  is this message from the
  *   exact actor host? The three relay routes below refuse anything else. REQUIRED in
  *   production and fail-CLOSED by omission (an unwired client refuses every relay), because
@@ -137,39 +273,34 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  *   fail-OPEN by omission (an unwired client behaves as before) — the cap is a coarse
  *   safety lever, and refusing every actor call because a dep is missing would break
  *   the lane outright.
- * @param {readonly string[]} [deps.inboundDwebToolNames] positive inbound grant,
- *   supplied from the runtime capability manifest; omission fails closed.
- * @param {readonly object[]} [deps.pageProgramToolDescriptors] authority-only
- *   policy projections for the fixed page-code semantic helpers.
  * @param {number} [deps.maxModelRelaysPerRun]
  * @param {number} [deps.maxToolRelaysPerRun]
  * @param {number} [deps.maxLoopEventsPerRun]
  * @param {number} [deps.settlementCleanupMs]
+ * @param {ReturnType<typeof createAuthorityEffectScheduler>} [deps.authorityScheduler]
  */
 export const makeOffscreenActorClient = ({
   ensureHost, ensureOffscreen, sendMessage, runOnChannel, providerEgress,
-  sessions, buildToolContext, prepareToolCall, settleToolCall,
-  pinActorCall, restrictCtxCapabilities, ownedTabFor, EXPOSURE_ACTOR,
+  sessions, buildToolContext, ownedTabFor, EXPOSURE_ACTOR = 'actor',
   now = Date.now,
   recordModelCall = () => {},
   broadcastOp = (/** @type {any} */ _msg) => {},
+  appendAudit = async () => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
   spendRefusalFor = undefined,
   isRelaySender, isOffscreenSender,
-  inboundDwebToolNames = [],
-  pageProgramToolDescriptors = [],
-  maxModelRelaysPerRun = 100,
-  maxToolRelaysPerRun = 128,
+  maxModelRelaysPerRun = Number.POSITIVE_INFINITY,
+  maxToolRelaysPerRun = Number.POSITIVE_INFINITY,
   maxLoopEventsPerRun = 256,
   settlementCleanupMs = 250,
+  authorityScheduler = createAuthorityEffectScheduler(),
 }) => {
   const ensureActorHost = ensureHost ?? ensureOffscreen ?? (async () => {});
   const relaySenderAllowed = isRelaySender ?? isOffscreenSender ?? (() => false);
-  const inboundDwebTools = new Set(inboundDwebToolNames);
   const modelRelayLimit = Number.isFinite(maxModelRelaysPerRun) && maxModelRelaysPerRun > 0
-    ? Math.floor(maxModelRelaysPerRun) : 100;
+    ? Math.floor(maxModelRelaysPerRun) : Number.POSITIVE_INFINITY;
   const toolRelayLimit = Number.isFinite(maxToolRelaysPerRun) && maxToolRelaysPerRun > 0
-    ? Math.floor(maxToolRelaysPerRun) : 128;
+    ? Math.floor(maxToolRelaysPerRun) : Number.POSITIVE_INFINITY;
   const loopEventLimit = Number.isFinite(maxLoopEventsPerRun) && maxLoopEventsPerRun > 0
     ? Math.floor(maxLoopEventsPerRun) : 256;
   const cleanupFuseMs = Number.isFinite(settlementCleanupMs) && settlementCleanupMs > 0
@@ -188,7 +319,7 @@ export const makeOffscreenActorClient = ({
     });
   let seq = 0;
   /**
-   * @type {Map<string, { runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, pageProgramToolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> }>} Firefox relay grants:
+   * @type {Map<string, any>} Firefox relay grants:
    * token → the identity of the run it was minted for.
    *
    * why a grant and not the message's own `actorSessionId`/`runId`: Firefox binds
@@ -222,7 +353,7 @@ export const makeOffscreenActorClient = ({
    * session (and a human label for WHOSE call this is) is stashed at run() time. */
   const runMeta = new Map();
   /**
-   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], priorMessages?: any[], reasoningEnabled?: boolean, reasoningEffort?: string, contextWindowOverrides?:Record<string,number>, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
+   * @param {{ actorSessionId: string, message: string, systemPrompt: string, provider: string, model: string, probeOnly?: boolean, depth?: number, maxSteps?: number, maxOutputTokens?: number, tools?: any[], allowedOperations?: string[], programTools?: any[], programOperations?: string[], priorMessages?: any[], reasoningEnabled?: boolean, reasoningEffort?: string, contextWindowOverrides?:Record<string,number>, budgetMs?: number, oneShot?: boolean, actorType?: string, backing?: string, actorSurface?: 'tools'|'code', tabOrigin?: string, origin?: string, inbound?: boolean }} job
    * @param {{ signal?: AbortSignal, onEvent?: (ev: object) => void }} [opts]
    */
   const run = async (job, { signal, onEvent } = {}) => {
@@ -231,6 +362,69 @@ export const makeOffscreenActorClient = ({
     // before actor/run exists cannot cancel the Worker that actor/run then creates.
     if (signal?.aborted) {
       return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
+    }
+    const actorRecord = await sessions.get(job.actorSessionId).catch(() => null);
+    if (!actorRecord || actorRecord.kind !== 'actor' && actorRecord.kind !== 'spawned') {
+      return {
+        ok: false, started: false, phase: 'admission', code: 'actor_identity_invalid',
+        error: 'actor run has no authoritative session binding', outcomeKnown: true,
+      };
+    }
+    if (actorRecord.kind === 'actor'
+        && (job.actorType !== actorRecord.actorType
+          || (job.backing ?? canonicalActorBacking(actorRecord))
+            !== canonicalActorBacking(actorRecord))) {
+      return {
+        ok: false, started: false, phase: 'admission', code: 'actor_identity_mismatch',
+        error: 'actor run identity does not match its session binding', outcomeKnown: true,
+      };
+    }
+    const validateSpawnedGrant = async (/** @type {any} */ child) => {
+      const childOperations = canonicalExactOperations(child.grantedOperations);
+      if (!childOperations || !child.parentSessionId) return [];
+      const seen = new Set([child.sessionId]);
+      let current = child;
+      let ceiling = new Set(childOperations);
+      let delegationTrusted = child.spawnedTrusted === true;
+      for (let hop = 0; hop < 32; hop += 1) {
+        const parentId = current.parentSessionId;
+        if (typeof parentId !== 'string' || !parentId || seen.has(parentId)) return [];
+        seen.add(parentId);
+        const parent = await sessions.get(parentId).catch(() => null);
+        if (!parent) return [];
+        const parentOperations = parent.kind === 'spawned'
+          ? canonicalExactOperations(parent.grantedOperations)
+          : parent.kind === 'chat' ? ORCHESTRATOR_OPERATION_GRANT : null;
+        if (!parentOperations || [...ceiling].some((operation) =>
+          !parentOperations.includes(operation))) return [];
+        if (parent.kind !== 'spawned') {
+          return Object.freeze([...ceiling].filter((operation) => delegationTrusted
+            || !['turn.actor.spawn-sync', 'turn.actor.spawn-async', 'turn.actor.message']
+              .includes(operation)));
+        }
+        delegationTrusted = delegationTrusted && parent.spawnedTrusted === true;
+        ceiling = new Set([...ceiling].filter((operation) => parentOperations.includes(operation)));
+        current = parent;
+      }
+      return [];
+    };
+    const authorityCeiling = actorRecord.kind === 'spawned'
+      ? await validateSpawnedGrant(actorRecord)
+      : actorOperationGrant(actorRecord, job.inbound === true);
+    const projectedOperations = Array.isArray(job.allowedOperations)
+      ? job.allowedOperations : [];
+    const grantedOperations = [...new Set(projectedOperations)].filter((operation) =>
+      typeof operation === 'string' && authorityCeiling.includes(operation));
+    const programOperations = job.actorSurface === 'code'
+      ? [...new Set(Array.isArray(job.programOperations) ? job.programOperations : [])]
+        .filter((operation) => typeof operation === 'string'
+          && authorityCeiling.includes(operation))
+      : [];
+    if (actorRecord.kind === 'actor' && !knownBoundActorIdentity(actorRecord)) {
+      return {
+        ok: false, started: false, phase: 'admission', code: 'actor_identity_invalid',
+        error: 'actor run has an unknown authority identity', outcomeKnown: true,
+      };
     }
     try {
       await ensureActorHost();
@@ -253,14 +447,21 @@ export const makeOffscreenActorClient = ({
     // monotonic: the runner/Worker may echo it but can never widen its tool grant
     // or rebuild a trusted ctx. Unknown inbound actor kinds get no tools.
     const inbound = job.inbound === true;
-    const tools = inbound
-      ? (job.actorType === 'dweb' && Array.isArray(job.tools)
-        ? job.tools.filter((tool) => inboundDwebTools.has(tool?.name))
-        : [])
-      : job.tools;
-    const allowedTools = inbound
-      ? new Set((tools ?? []).map((tool) => tool?.name).filter((name) => typeof name === 'string'))
+    const tools = job.tools;
+    const turnGeneration = `${runId}:1`;
+    const initialOwnedTabId = actorRecord.kind === 'actor'
+      && actorRecord.actorType === 'web'
+      && canonicalActorBacking(actorRecord) === 'tab'
+      && typeof ownedTabFor === 'function'
+      ? ownedTabFor(job.actorSessionId) : undefined;
+    const authorityPageResourceKey = actorRecord.kind === 'actor'
+      && actorRecord.actorType === 'web'
+      && canonicalActorBacking(actorRecord) === 'tab'
+      ? Number.isInteger(initialOwnedTabId)
+        ? `page:tab:${initialOwnedTabId}` : `page:actor:${job.actorSessionId}`
       : null;
+    const semanticStepCap = Number.isSafeInteger(job.maxSteps)
+      ? Math.min(64, Math.max(1, Number(job.maxSteps))) : 20;
     const requestedMaxOutputTokens = job.maxOutputTokens;
     const grant = {
       runId, actorSessionId: job.actorSessionId,
@@ -269,14 +470,26 @@ export const makeOffscreenActorClient = ({
         && Number.isFinite(requestedMaxOutputTokens) && requestedMaxOutputTokens > 0
         ? Math.floor(requestedMaxOutputTokens) : undefined,
       providerOwner: Object.freeze({ runId }),
-      inbound, allowedTools, relaySignal: relayController.signal,
+      inbound, relaySignal: relayController.signal, turnGeneration,
+      actorRecord, allowedOperations: new Set(grantedOperations),
+      authorityPageResourceKey,
+      effectRelayLimit: Math.min(toolRelayLimit, 256 * semanticStepCap),
+      modelRelayLimit: Math.min(modelRelayLimit, 32 * semanticStepCap),
       modelRelays: 0, toolRelays: 0, loopEvents: 0,
+      programOperations: new Set(
+        programOperations,
+      ),
       modelActive: false, modelStreamId: null, contextRead: false,
-      actorExecutions: new Map(),
-      toolDescriptors: new Map((tools ?? []).map((tool) => [tool?.name, tool])),
-      pageProgramToolDescriptors: new Map(pageProgramToolDescriptors
-        .filter((tool) => isPageProgramSemanticTool(/** @type {any} */ (tool)?.name))
-        .map((tool) => [/** @type {any} */ (tool).name, tool])),
+      semanticEffectIds: new Set(), semanticEffectSequences: new Map(),
+      semanticCallState: new Map(), effectReceipts: new Map(),
+      claimedEffectsByCall: new Map(),
+      closingCalls: new Set(), completedCalls: new Set(),
+      finalizing: false,
+      pendingClaimsByCall: new Map(),
+      nestedCallIds: new Set(),
+      openEffects: new Map(),
+      activeSafeDispatches: new Set(), activeDispatches: new Set(),
+      dispatchesByCall: new Map(),
       ...(job.actorSurface === 'code' || job.actorSurface === 'tools'
         ? { actorSurface: job.actorSurface }
         : {}),
@@ -292,7 +505,6 @@ export const makeOffscreenActorClient = ({
     const abortRelays = () => {
       // Stop/host loss closes new exact effects synchronously. Settlement may
       // still join or retry its frozen result, but no effect can enter behind it.
-      for (const entry of grant.actorExecutions.values()) entry.effectsOpen = false;
       abortedRuns.add(runId);   // cover an inference open that has not reached the route yet
       relayController.abort();
       void providerEgress?.closeOwner(grant.providerOwner).catch(() => {});
@@ -306,7 +518,7 @@ export const makeOffscreenActorClient = ({
     try {
       const result = runOnChannel
         ? await runOnChannel(
-          { ...job, inbound, tools, runId },
+          { ...job, inbound, tools, runId, turnGeneration, recordKind: actorRecord.kind },
           {
             signal,
             relay: (type, payload) => {
@@ -316,7 +528,85 @@ export const makeOffscreenActorClient = ({
             },
           },
         )
-        : await sendMessage({ type: 'actor/run', job: { ...job, inbound, tools, runId, relayToken } });
+        : await sendMessage({
+          type: 'actor/run', job: {
+            ...job, inbound, tools, runId, turnGeneration,
+            recordKind: actorRecord.kind, relayToken,
+          },
+        });
+      // why: Worker completion is not semantic-call completion. Close new
+      // claims first, then drain every claim/effect the host already admitted
+      // before trusting or persisting Worker-authored transcript blocks.
+      grant.finalizing = true;
+      let custodyDrained = false;
+      const drainCustody = (async () => {
+        while (true) {
+          const claims = [...grant.pendingClaimsByCall.values()]
+            .flatMap((pending) => [...pending]);
+          if (claims.length === 0) break;
+          await Promise.allSettled(claims);
+        }
+        while (grant.activeDispatches.size > 0) {
+          await Promise.allSettled([...grant.activeDispatches]);
+        }
+        custodyDrained = true;
+      })();
+      await boundedCleanup(drainCustody);
+      const openSemanticCustody = !custodyDrained
+        || grant.pendingClaimsByCall.size > 0 || grant.activeDispatches.size > 0
+        || grant.openEffects.size > 0 || grant.semanticCallState.size > 0;
+      if (openSemanticCustody) {
+        return {
+          ok: false,
+          code: 'actor_semantic_completion_missing',
+          error: 'actor authority work ended without a completed semantic result',
+          outcomeKnown: false, retryable: false,
+          authorityPerformed: [...grant.effectReceipts.values()]
+            .some((receipt) => receipt.performed === true),
+          finalText: '', newMessages: [],
+        };
+      }
+      const receiptCallIds = new Set([...grant.effectReceipts.values()]
+        .map((receipt) => receipt.callId)
+        .filter((callId) => typeof callId === 'string' && !grant.nestedCallIds.has(callId)));
+      const issuedCalls = new Map();
+      const durableResultCounts = new Map();
+      let invalidCallLedger = false;
+      for (const message of Array.isArray(result?.newMessages) ? result.newMessages : []) {
+        for (const call of Array.isArray(message?.toolUses) ? message.toolUses : []) {
+          if (typeof call?.id !== 'string' || !call.id
+              || typeof call?.name !== 'string' || !call.name
+              || issuedCalls.has(call.id)) {
+            invalidCallLedger = true;
+            continue;
+          }
+          issuedCalls.set(call.id, call.name);
+        }
+        for (const block of Array.isArray(message?.toolResults) ? message.toolResults : []) {
+          if (typeof block?.tool_use_id !== 'string' || !block.tool_use_id) {
+            invalidCallLedger = true;
+            continue;
+          }
+          durableResultCounts.set(
+            block.tool_use_id, (durableResultCounts.get(block.tool_use_id) ?? 0) + 1,
+          );
+        }
+      }
+      if (invalidCallLedger
+          || [...durableResultCounts].some(([callId, count]) =>
+            count !== 1 || !issuedCalls.has(callId))
+          || [...receiptCallIds].some((callId) =>
+            durableResultCounts.get(callId) !== 1 || !issuedCalls.has(callId))) {
+        return {
+          ok: false,
+          code: 'actor_semantic_result_ledger_invalid',
+          error: 'actor semantic results do not uniquely match model-issued calls',
+          outcomeKnown: false, retryable: false,
+          authorityPerformed: [...grant.effectReceipts.values()]
+            .some((receipt) => receipt.performed === true),
+          finalText: '', newMessages: [],
+        };
+      }
       // Stop / cancel cascade: `signal.aborted` HERE is the authoritative proof a Stop
       // hit THIS run — and the one place it's reliably observable. The worker unwinds an
       // abort several ways (a rejected relay, a stream error, or the
@@ -325,6 +615,48 @@ export const makeOffscreenActorClient = ({
       // cancellations; unknown custody stays terminal. The caller then renders the actor
       // card 'cancelled' (not a blank 'ok'/'failed') and spawn.js records stopReason
       // 'aborted'. A run that produced text just before Stop (raced) keeps its result.
+      if (result && Array.isArray(result.newMessages)) {
+        // why: the isolated heap owns semantic transcript shaping, but authority
+        // receipts are host facts. Strip any worker claim and re-stamp every
+        // persisted tool block from this run's exact receipt ledger before the
+        // session store ever sees it.
+        result.newMessages = result.newMessages.map((/** @type {any} */ message) => {
+          if (!message || typeof message !== 'object' || Array.isArray(message)
+              || !Array.isArray(message.toolResults)) return message;
+          return {
+            ...message,
+            toolResults: message.toolResults.map((/** @type {any} */ block) => {
+              if (!block || typeof block !== 'object' || Array.isArray(block)) return block;
+              const receipts = authorityReceiptsForCall(
+                grant.effectReceipts, block.tool_use_id,
+              );
+              return stampAuthorityToolResultBlock(receipts, block);
+            }),
+          };
+        });
+        for (const message of result.newMessages) {
+          for (const block of Array.isArray(message?.toolResults) ? message.toolResults : []) {
+            const callId = block?.tool_use_id;
+            if (typeof callId !== 'string') continue;
+            await Promise.resolve(appendAudit(semanticCallAuditEntry({
+              sessionId: grant.actorSessionId,
+              callId,
+              label: issuedCalls.get(callId),
+              result: block,
+            }))).catch(() => {});
+          }
+        }
+      }
+      if ([...grant.effectReceipts.values()].some((receipt) => receipt.outcomeKnown === false)) {
+        result.ok = false;
+        result.code = 'actor_authority_outcome_unknown';
+        result.error = 'An accepted authority operation ended without a known host outcome.';
+        result.outcomeKnown = false;
+        result.retryable = false;
+        result.authorityPerformed = [...grant.effectReceipts.values()]
+          .some((receipt) => receipt.performed === true);
+        result.finalText = '';
+      }
       if (signal?.aborted && result && !result.finalText && result.outcomeKnown !== false) {
         result.aborted = true;
       }
@@ -344,26 +676,23 @@ export const makeOffscreenActorClient = ({
           await boundedCleanup(Promise.resolve().then(() =>
             providerEgress.closeOwner(grant.providerOwner)));
         }
-        if (typeof settleToolCall === 'function') {
-          await Promise.allSettled([...grant.actorExecutions.values()].map(async (entry) => {
-            if (entry.open !== true) return;
-            const cleanupResult = entry.hasSettlementResult === true
-              ? entry.settlementResult
-              : {
-                ok: false,
-                error: 'actor semantic execution host was lost before settlement',
-                code: 'actor-tool-host-lost',
-                outcomeKnown: entry.effectEntered !== true,
-                retryable: entry.effectEntered !== true,
-                outcomeKind: entry.effectEntered === true ? 'host-lost' : 'pre-effect-failure',
-              };
-            // why: cleanup joins or starts the one durable attempt but cannot let a
-            // user hook pin provider custody and a live relay grant forever.
-            await boundedCleanup(settleActorExecution(grant, entry, cleanupResult));
-          }));
-        }
+        const custodySettled = Promise.allSettled([...grant.activeDispatches]).finally(() => {
+          grant.semanticEffectIds.clear();
+          grant.semanticCallState.clear();
+          grant.effectReceipts.clear();
+          grant.claimedEffectsByCall.clear();
+          grant.closingCalls.clear();
+          grant.completedCalls.clear();
+          grant.pendingClaimsByCall.clear();
+          grant.nestedCallIds.clear();
+          grant.dispatchesByCall.clear();
+        });
+        // why: the caller must not be held forever by an unabortable host API,
+        // but its custody remains live until the API settles. Retiring relay
+        // admission now and clearing only in this promise keeps a late
+        // irreversible result auditable instead of forgetting it at 250 ms.
+        await boundedCleanup(custodySettled);
       } finally {
-        grant.actorExecutions.clear();
         // Retiring the grant is what makes it a liveness check: every relay for
         // this run is refused from here on, so a late/replayed one can't dispatch.
         if (!runOnChannel) grants.delete(relayToken);
@@ -380,7 +709,7 @@ export const makeOffscreenActorClient = ({
    * token. Every route treats a missing or retired grant as a hard refusal.
    * @param {{ relayToken?: unknown }} [msg]
    * @param {unknown} [sender]  the second argument makeDispatcher hands a handler
-   * @returns {{ runId: string, actorSessionId: string, provider: string, model: string, maxOutputTokens?: number, providerOwner: object, inbound: boolean, allowedTools: Set<string> | null, toolDescriptors:Map<string,any>, pageProgramToolDescriptors:Map<string,any>, actorSurface?: 'tools'|'code', relaySignal: AbortSignal, modelRelays: number, toolRelays: number, loopEvents: number, modelActive: boolean, modelStreamId: string | null, contextRead:boolean, actorExecutions:Map<string,any> } | null}
+   * @returns {any}
    */
   const grantFor = (msg, sender, boundGrant = null) => {
     if (boundGrant) return boundGrant;
@@ -390,483 +719,614 @@ export const makeOffscreenActorClient = ({
     return grants.get(token) ?? null;
   };
 
-  /** Build the exact live actor context from SW-owned run and session custody. */
-  const contextForTool = async (
+  const runIsLive = (/** @type {any} */ grant) => !!grant
+    && !grant.relaySignal.aborted && !abortedRuns.has(grant.runId);
+  const fixedOperation = (/** @type {string} */ routeOperation) =>
+    routeOperation.startsWith('turn.')
+      ? routeOperation : `turn.${routeOperation.replace('/', '.')}`;
+  const durableAuthorityTarget = async (
     /** @type {any} */ grant,
-    /** @type {any} */ call,
-    /** @type {{pageProgram?:boolean}} */ options = {},
+    /** @type {string} */ operation,
+    /** @type {unknown} */ args,
   ) => {
-    const { actorSessionId } = grant;
-    if (grant.inbound && (typeof call?.name !== 'string'
-        || !grant.allowedTools?.has(call.name))) {
-      return { ok: false, error: `tool_not_available_to_inbound_actor: ${call?.name}` };
-    }
-    const rec = await sessions.get(actorSessionId);
-    if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-    if (!rec) return { ok: false, error: 'actor/tool-prepare: unknown session' };
-    if (rec.kind === 'spawned') {
-      if (!restrictCtxCapabilities) {
-        return { ok: false, error: 'actor/tool-prepare: actor offscreen not wired' };
-      }
-      const persistedGrants = new Set(Array.isArray(rec.grantedTools) ? rec.grantedTools : []);
-      const granted = grant.inbound
-        ? new Set([...persistedGrants].filter((name) => grant.allowedTools?.has(name)))
-        : persistedGrants;
-      if (typeof call?.name !== 'string' || !granted.has(call.name)) {
-        return { ok: false, error: `tool_not_available_to_actor: ${call?.name}` };
-      }
-      const base = await buildToolContext({
-        sessionId: actorSessionId,
-        lifecycleTurnId: grant.runId,
-        lifecycleUserInitiated: !grant.inbound,
-        ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
-      });
-      if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-      const audit = (/** @type {any} */ entry) => /** @type {any} */ (base).audit?.({
-        ...entry,
-        details: {
-          ...(entry?.details ?? {}), parentSessionId: rec.parentSessionId,
-          actorSessionId, depth: rec.depth,
-        },
-      });
-      return { ok: true, actorSessionId, rec, ctx: restrictCtxCapabilities({
-        ...base, audit, abortSignal: grant.relaySignal,
-        ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
-      }, granted) };
-    }
-    if (rec.kind !== 'actor') {
-      return { ok: false, error: 'actor/tool-prepare: not an actor or actor session' };
-    }
-    const activeTabId = rec.actorType === 'web' && rec.backing !== 'api' && ownedTabFor
-      ? ownedTabFor(actorSessionId) : undefined;
-    if (grant.inbound && !restrictCtxCapabilities) {
-      return { ok: false, error: 'actor/tool-prepare: inbound capability filter not wired' };
-    }
-    const base = await buildToolContext({
-      exposure: EXPOSURE_ACTOR, sessionId: actorSessionId, activeTabId,
-      actorInstanceId: rec.instanceId, actorType: rec.actorType, actorBacking: rec.backing,
-      lifecycleTurnId: grant.runId,
+    const record = grant.actorRecord;
+    const backing = record.kind === 'actor' ? canonicalActorBacking(record) : null;
+    const ownedTabId = record.kind === 'actor' && record.actorType === 'web'
+      && backing === 'tab' && typeof ownedTabFor === 'function'
+      ? ownedTabFor(grant.actorSessionId) : undefined;
+    const identity = record.kind === 'actor'
+      ? `${record.actorType}:${grant.actorSessionId}:${record.instanceId ?? 'missing'}:${backing ?? 'missing'}`
+      : `spawned:${record.sessionId ?? grant.actorSessionId}`;
+    const hostTarget = ownedTabId === undefined ? identity : `${identity}:tab:${ownedTabId}`;
+    return `${operation}:${hostTarget}:${await canonicalCloneDigest(args ?? {}, {
+      maxBytes: controllerDomainOperationPayloadCap(operation),
+    })}`;
+  };
+  const contextForOperation = async (
+    /** @type {any} */ grant,
+    /** @type {string} */ operation,
+  ) => {
+    const record = await sessions.get(grant.actorSessionId).catch(() => null);
+    if (!runIsLive(grant) || !record || record.kind !== grant.actorRecord.kind) return null;
+    if (record.kind === 'actor') {
+      if (record.actorType !== grant.actorRecord.actorType
+          || canonicalActorBacking(record) !== canonicalActorBacking(grant.actorRecord)
+          || record.instanceId !== grant.actorRecord.instanceId) return null;
+    } else if (!sameClone(record.grantedOperations, grant.actorRecord.grantedOperations)) return null;
+    if (!actorOperationGrant(record, grant.inbound).includes(operation)) return null;
+    const activeTabId = record.kind === 'actor' && record.actorType === 'web'
+      && canonicalActorBacking(record) === 'tab' && ownedTabFor
+      ? ownedTabFor(grant.actorSessionId) : undefined;
+    const base = await buildToolContext(record.kind === 'actor' ? {
+      exposure: EXPOSURE_ACTOR, sessionId: grant.actorSessionId, activeTabId,
+      actorInstanceId: record.instanceId, actorType: record.actorType,
+      actorBacking: canonicalActorBacking(record), lifecycleTurnId: grant.runId,
       lifecycleUserInitiated: !grant.inbound,
-      ...(options.pageProgram === true
-        ? { actorSurface: 'tools' }
-        : grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
+      ...(grant.actorSurface ? { actorSurface: grant.actorSurface } : {}),
+      ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
+    } : {
+      sessionId: grant.actorSessionId, lifecycleTurnId: grant.runId,
+      lifecycleUserInitiated: !grant.inbound,
       ...(grant.inbound ? { synthetic: true, trusted: false } : {}),
     });
-    if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-    const stamped = {
+    return runIsLive(grant) ? {
       ...base, abortSignal: grant.relaySignal,
+      ...(grant.authorityPageResourceKey
+        ? { authorityPageResourceKey: grant.authorityPageResourceKey } : {}),
+      // why: nested script capabilities must derive from the same immutable
+      // run grant as their outer exact operation. Absence is never permission.
+      operationGrant: Object.freeze(new Set(grant.allowedOperations)),
       ...(grant.inbound ? { synthetic: true, trusted: false, inbound: true } : {}),
-    };
-    const ctx = grant.inbound
-      ? /** @type {Function} */ (restrictCtxCapabilities)(stamped, grant.allowedTools)
-      : stamped;
-    pinActorCall(call, rec.actorType, rec.instanceId);
-    return { ok: true, actorSessionId, rec, ctx };
+    } : null;
   };
-
+  const claimSemanticEffect = async (
+    /** @type {any} */ grant,
+    /** @type {any} */ msg,
+    /** @type {string} */ domain,
+    /** @type {string[]} */ fields,
+    /** @type {string[]} */ optionalFields = [],
+    /** @type {string[]} */ transportFields = [],
+  ) => {
+    const payloadBytes = structuredClonePayloadBytes(msg, {
+      maxDepth: 32, maxNodes: 250_000,
+    });
+    const operation = msg?.operation;
+    const policy = typeof operation === 'string'
+      ? controllerDomainOperationPolicy(operation) : null;
+    if (!grant || !policy || !Number.isFinite(payloadBytes)
+        || payloadBytes > controllerDomainOperationPayloadCap(operation)
+        || policy.authorityClass !== domain
+        || !exactKeys(msg, [
+          'operation', 'callId', 'effectId', 'effectSequence', 'turnGeneration', ...fields,
+        ], ['relayToken', 'parentCallId', ...optionalFields, ...transportFields])
+        || typeof msg.callId !== 'string' || typeof msg.effectId !== 'string'
+        || !Number.isSafeInteger(msg.effectSequence)
+        || msg.effectSequence < 1 || msg.effectSequence > 256
+        || msg.effectId !== `${msg.callId}:${msg.effectSequence}`
+        || msg.turnGeneration !== grant.turnGeneration
+        || grant.closingCalls.has(msg.callId) || grant.completedCalls.has(msg.callId)
+        || grant.finalizing === true
+        || grant.semanticEffectIds.has(msg.effectId)
+        || msg.effectSequence !== (grant.semanticEffectSequences.get(msg.callId) ?? 0) + 1
+        || grant.toolRelays >= grant.effectRelayLimit || !runIsLive(grant)) return null;
+    const nestedOperation = grant.programOperations.has(operation);
+    const hasParent = typeof msg.parentCallId === 'string';
+    if (nestedOperation !== hasParent
+        || !nestedOperation && !grant.allowedOperations.has(operation)) return null;
+    const parentEffect = typeof msg.parentCallId === 'string'
+      ? grant.openEffects.get(msg.parentCallId) ?? null : null;
+    const expectedParentOperation = PAGE_PROGRAM_EXACT_OPERATION_SET.has(operation)
+      ? 'turn.page.run-program'
+      : APP_PROGRAM_EXACT_OPERATION_SET.has(operation)
+        ? 'turn.app.run-code' : null;
+    if (typeof msg.parentCallId === 'string'
+        && (!expectedParentOperation || !parentEffect
+          || parentEffect.operation !== expectedParentOperation)) return null;
+    if (typeof msg.parentCallId === 'string') grant.nestedCallIds.add(msg.callId);
+    // why: reserve the exact sequence before the first asynchronous authority
+    // lookup. Two MessageChannel requests can carry different transport IDs but
+    // the same semantic effect ID; delaying this reservation let both pass and
+    // execute an irreversible operation twice.
+    grant.semanticEffectIds.add(msg.effectId);
+    grant.semanticEffectSequences.set(msg.callId, msg.effectSequence);
+    const claimed = grant.claimedEffectsByCall.get(msg.callId) ?? new Map();
+    claimed.set(msg.effectId, operation);
+    grant.claimedEffectsByCall.set(msg.callId, claimed);
+    let state = grant.semanticCallState.get(msg.callId);
+    if (!state) {
+      state = { domainState: {} };
+      grant.semanticCallState.set(msg.callId, state);
+    }
+    /** @type {(value?: unknown) => void} */
+    let resolveClaim = () => {};
+    const claimDrain = new Promise((resolve) => { resolveClaim = resolve; });
+    const pendingClaims = grant.pendingClaimsByCall.get(msg.callId) ?? new Set();
+    pendingClaims.add(claimDrain);
+    grant.pendingClaimsByCall.set(msg.callId, pendingClaims);
+    let handedToDispatch = false;
+    const releaseClaim = () => {
+      pendingClaims.delete(claimDrain);
+      if (pendingClaims.size === 0) grant.pendingClaimsByCall.delete(msg.callId);
+      resolveClaim();
+    };
+    const refuseReservedClaim = () => {
+      if (grant.effectReceipts.has(msg.effectId)) return;
+      grant.effectReceipts.set(msg.effectId, Object.freeze({
+        callId: msg.callId, effectId: msg.effectId, operation,
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+        retryable: false, code: 'authority_claim_refused',
+        error: 'exact authority claim was refused before host dispatch',
+      }));
+    };
+    try {
+      const ctx = await contextForOperation(grant, operation);
+      if (!ctx || !runIsLive(grant) || grant.finalizing === true
+          || grant.closingCalls.has(msg.callId) || grant.completedCalls.has(msg.callId)) return null;
+      const args = /** @type {Readonly<Record<string, any>>} */ (Object.freeze(
+        Object.fromEntries([...fields, ...optionalFields]
+          .filter((key) => Object.hasOwn(msg, key)).map((key) => [key, msg[key]])),
+      ));
+      let authority;
+      const input = {
+        operation, args, ctx, signal: grant.relaySignal,
+        ...(domain === 'page' && transportFields.includes('pageProgramSemanticToken')
+          ? { pageProgramSemanticToken: msg.pageProgramSemanticToken }
+          : {}),
+        ...(domain === 'app' && transportFields.includes('appProgramSemanticToken')
+          ? { appProgramSemanticToken: msg.appProgramSemanticToken }
+          : {}),
+      };
+      if (domain === 'repository') authority = bindRepositoryToolAuthority(state.domainState, input);
+      else if (domain === 'vm') authority = bindVmToolAuthority(state.domainState, input);
+      else if (domain === 'notebook') authority = bindNotebookToolAuthority(state.domainState, input);
+      else if (domain === 'app') authority = bindAppToolAuthority(state.domainState, input);
+      else if (domain === 'persistence') authority = bindPersistenceToolAuthority(state.domainState, input);
+      else if (domain === 'page') authority = bindPageToolAuthority(state.domainState, input);
+      else if (domain === 'resource') authority = bindResourceToolAuthority(state.domainState, input);
+      else if (domain === 'siteclient') authority = bindSiteClientToolAuthority(state.domainState, input);
+      else if (domain === 'execution') authority = bindExecutionToolAuthority(state.domainState, input);
+      else if (domain === 'editing') authority = bindEditingToolAuthority(state.domainState, input);
+      else if (domain === 'introspection') authority = bindIntrospectionToolAuthority(state.domainState, input);
+      else if (domain === 'schedule') authority = bindScheduleToolAuthority(state.domainState, input);
+      else if (domain === 'dweb') authority = bindDwebToolAuthority(state.domainState, input);
+      else if (domain === 'pod' || domain === 'actor') authority = Object.freeze({});
+      else return null;
+      if (grant.closingCalls.has(msg.callId) || grant.completedCalls.has(msg.callId)
+          || !runIsLive(grant)) return null;
+      grant.toolRelays += 1;
+      handedToDispatch = true;
+      return /** @type {any} */ ({
+        grant, ctx, operation, args, authority, domainState: state.domainState, releaseClaim,
+        effect: { callId: msg.callId, effectId: msg.effectId, parentEffect },
+      });
+    } finally {
+      if (!handedToDispatch) {
+        refuseReservedClaim();
+        releaseClaim();
+      }
+    }
+  };
   const domainEntry = (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
     /** @type {string} */ domain,
     /** @type {string[]} */ fields,
-  ) => {
-    const entry = grant?.actorExecutions.get(msg.executionId);
-    return entryEffectsAllowed(grant, entry)
-      && exactKeys(msg, ['executionId', ...fields])
-      && entry.authorityClass === domain ? entry : null;
-  };
-
-  const entryEffectsAllowed = (/** @type {any} */ grant, /** @type {any} */ entry) => {
-    if (!grant || grant.relaySignal.aborted || entry?.open !== true
-        || entry.effectsOpen !== true) return false;
-    const seen = new Set();
-    let current = entry;
-    while (typeof current.parentExecutionId === 'string') {
-      if (seen.has(current.executionId)) return false;
-      seen.add(current.executionId);
-      current = grant.actorExecutions.get(current.parentExecutionId);
-      if (!current || current.open !== true || current.effectsOpen !== true) return false;
-    }
-    return true;
-  };
-
-  const closeEntryEffects = (
-    /** @type {any} */ grant,
-    /** @type {any} */ entry,
-    /** @type {Set<string>} */ seen = new Set(),
-  ) => {
-    if (!entry || seen.has(entry.executionId)) return;
-    seen.add(entry.executionId);
-    entry.effectsOpen = false;
-    for (const childId of entry.childExecutionIds ?? []) {
-      closeEntryEffects(grant, grant.actorExecutions.get(childId), seen);
-    }
-  };
-  const propagateSettledCustody = (/** @type {any} */ grant, /** @type {any} */ entry) => {
-    const effectEntered = entry.effectEntered === true;
-    const unknown = entry.unknownIrreversible === true || entry.effectPending > 0
-      || entry.pendingIrreversible > 0;
-    const settledIrreversible = entry.settledIrreversible === true;
-    const effectVerdictObserved = entry.effectVerdictObserved === true;
-    const seen = new Set([entry.executionId]);
-    let parentId = entry.parentExecutionId;
-    while (typeof parentId === 'string') {
-      const parent = grant.actorExecutions.get(parentId);
-      if (!parent || seen.has(parent.executionId)) return;
-      seen.add(parent.executionId);
-      if (effectEntered) parent.effectEntered = true;
-      if (unknown) parent.unknownIrreversible = true;
-      if (settledIrreversible) parent.settledIrreversible = true;
-      if (effectVerdictObserved) parent.effectVerdictObserved = true;
-      parentId = parent.parentExecutionId;
-    }
-  };
-  const repositoryEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'repository', fields);
-    if (!entry) return null;
-    bindRepositoryToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
-    });
-    return entry;
-  };
-  const vmEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'vm', fields);
-    if (!entry) return null;
-    bindVmToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-    });
-    return entry;
-  };
-  const notebookEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'notebook', fields);
-    if (!entry) return null;
-    bindNotebookToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
-    });
-    return entry;
-  };
-  const appEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'app', fields);
-    if (!entry) return null;
-    bindAppToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
-    });
-    return entry;
-  };
-  const persistenceEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'persistence', fields);
-    if (!entry) return null;
-    bindPersistenceToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-    });
-    return entry;
-  };
-  const pageEntry = (
+    /** @type {string[]} */ optionalFields = [],
+    /** @type {string[]} */ transportFields = [],
+  ) => claimSemanticEffect(grant, msg, domain, fields, optionalFields, transportFields);
+  const entryForDomain = (/** @type {string} */ domain) => (
     /** @type {any} */ grant,
     /** @type {any} */ msg,
     /** @type {string[]} */ fields = [],
+    /** @type {string[]} */ optional = [],
+    /** @type {string[]} */ transport = [],
+  ) => domainEntry(grant, msg, domain, fields, optional, transport);
+  const repositoryEntry = entryForDomain('repository');
+  const vmEntry = entryForDomain('vm');
+  const notebookEntry = entryForDomain('notebook');
+  const appEntry = entryForDomain('app');
+  const persistenceEntry = entryForDomain('persistence');
+  const pageEntry = entryForDomain('page');
+  const resourceEntry = entryForDomain('resource');
+  const siteClientEntry = entryForDomain('siteclient');
+  const executionEntry = entryForDomain('execution');
+  const editingEntry = entryForDomain('editing');
+  const introspectionEntry = entryForDomain('introspection');
+  const scheduleEntry = entryForDomain('schedule');
+  const dwebEntry = entryForDomain('dweb');
+  const receiptFor = (
+    /** @type {any} */ entry,
+    /** @type {string} */ outcome,
+    /** @type {boolean} */ outcomeKnown,
+    /** @type {boolean} */ performed,
+    /** @type {boolean} */ retryable,
+    /** @type {string|null} */ target,
+  ) => Object.freeze({
+    effectId: entry.effect.effectId, operation: entry.operation,
+    outcome, outcomeKnown, performed, retryable,
+    ...(target ? { target } : {}),
+  });
+  const appendAuthorityAudit = async (
+    /** @type {any} */ entry,
+    /** @type {any} */ receipt,
+    /** @type {boolean} */ failed,
   ) => {
-    const entry = domainEntry(grant, msg, 'page', fields);
-    if (!entry) return null;
-    bindPageToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
-      ...(typeof msg.pageProgramSemanticToken === 'string'
-        ? { pageProgramSemanticToken: msg.pageProgramSemanticToken }
-        : {}),
-    });
-    return entry;
+    const append = entry.ctx?.appendAudit ?? entry.ctx?.audit;
+    if (typeof append !== 'function') return;
+    await append({
+      type: failed || receipt.outcomeKnown !== true
+        ? 'authority_effect_failed' : 'authority_effect',
+      sessionId: entry.grant.actorSessionId,
+      details: {
+        operation: entry.operation, outcome: receipt.outcome,
+        outcomeKnown: receipt.outcomeKnown === true,
+        performed: receipt.performed === true,
+        refused: receipt.refused === true,
+        retryable: receipt.retryable === true,
+        ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
+        ...(typeof receipt.ugcZone === 'string' ? { ugcZone: receipt.ugcZone } : {}),
+        target: receipt.target, runId: entry.grant.runId,
+        actorSessionId: entry.grant.actorSessionId,
+      },
+    }).catch(() => {});
   };
-  const resourceEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
+  const recordAuthorityReceipt = (
+    /** @type {any} */ entry,
+    /** @type {any} */ receipt,
   ) => {
-    const entry = domainEntry(grant, msg, 'resource', fields);
-    if (!entry) return null;
-    bindResourceToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
+    entry.grant.effectReceipts.set(entry.effect.effectId, {
+      ...receipt, callId: entry.effect.callId,
     });
-    return entry;
+    if (entry.effect.parentEffect) {
+      entry.grant.effectReceipts.set(
+        `${entry.effect.effectId}@${entry.effect.parentEffect.callId}`,
+        { ...receipt, callId: entry.effect.parentEffect.callId },
+      );
+    }
   };
-  const siteClientEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
+  const performSemanticEffect = async (
+    /** @type {any} */ entry,
+    /** @type {string|null} */ target,
+    /** @type {()=>Promise<any>|any} */ execute,
+    /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome,
+    /** @type {any} */ tracking = null,
+    /** @type {string|null} */ schedulerTarget = target,
+    /** @type {{confirmed:boolean,confirmedIntentRequired:boolean}|null} */ dispatchAdmission = null,
   ) => {
-    const entry = domainEntry(grant, msg, 'siteclient', fields);
-    if (!entry) return null;
-    bindSiteClientToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
-    });
-    return entry;
+    const policy = controllerDomainOperationPolicy(entry.operation);
+    const replayable = policy?.riskClass === 'read';
+    if (!replayable && (typeof effectOutcome?.fulfilled !== 'function'
+        || typeof effectOutcome?.rejected !== 'function')) {
+      return {
+        ok: false, error: 'domain effect verdict contract is unavailable',
+        outcomeKnown: true, retryable: false,
+      };
+    }
+    try {
+      const parentLease = entry.effect.parentEffect?.lease ?? null;
+      const value = await authorityScheduler.run({
+        read: policy?.riskClass === 'read',
+        target: schedulerTarget ?? entry.operation, parentLease,
+        // why: the outer page program is a semantic host/drain scope, not the
+        // page mutation itself. Each nested exact op acquires its own SW-derived
+        // resource lane, preventing A→B/B→A lock cycles while still serializing
+        // same-resource mutations.
+        scopeOnly: entry.operation === 'turn.page.run-program',
+        signal: entry.grant.relaySignal,
+      }, async (lease) => {
+        if (!runIsLive(entry.grant) || entry.grant.closingCalls.has(entry.effect.callId)
+            || entry.grant.completedCalls.has(entry.effect.callId)) {
+          throw Object.assign(new Error('actor authority stopped before host dispatch'), {
+            outcomeKnown: true, retryable: false,
+          });
+        }
+        if (dispatchAdmission) {
+          const livePermission = typeof entry.ctx?.readAuthorityPermission === 'function'
+            ? await entry.ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+            : entry.ctx?.permission;
+          if (!controllerOperationAllowedInPermissionMode(
+            entry.operation, livePermission?.mode, entry.args,
+          )) throw Object.assign(
+            new Error('permission changed while the authority effect was queued'),
+            { code: 'plan_mode_refused', outcomeKnown: true, retryable: false },
+          );
+          const confirmationRequired = controllerOperationRequiresConfirmation(
+            entry.operation, livePermission, entry.args,
+            dispatchAdmission.confirmedIntentRequired,
+          );
+          if (confirmationRequired && dispatchAdmission.confirmed !== true) {
+            throw Object.assign(
+              new Error('confirmation policy changed while the authority effect was queued'),
+              { code: 'confirmation_required', outcomeKnown: true, retryable: true },
+            );
+          }
+          if (!runIsLive(entry.grant) || entry.grant.closingCalls.has(entry.effect.callId)
+              || entry.grant.completedCalls.has(entry.effect.callId)) {
+            throw Object.assign(new Error('actor authority stopped before host dispatch'), {
+              outcomeKnown: true, retryable: false,
+            });
+          }
+        }
+        entry.grant.openEffects.set(entry.effect.effectId, {
+          callId: entry.effect.callId, operation: entry.operation, lease,
+        });
+        try { return await execute(); }
+        finally { entry.grant.openEffects.delete(entry.effect.effectId); }
+      });
+      const verdict = typeof effectOutcome?.fulfilled === 'function'
+        ? normalizeExactEffectOutcome(effectOutcome.fulfilled(value)) : 'not-performed';
+      const confirmationStage = effectOutcome === HOST_EFFECT_OUTCOME.confirmation;
+      const policyAttribution = safeHostPolicyAttribution(value);
+      const confirmationDeclined = confirmationStage && verdict === 'not-performed';
+      const refusal = confirmationDeclined
+        || verdict === 'not-performed' && hostEffectValueIsRefusal(value);
+      const refusalFailure = confirmationDeclined
+        ? HOST_CONFIRMATION_DECLINED : safeHostEffectFailure(value);
+      const performed = !confirmationStage && (verdict === 'performed'
+        || verdict === 'unknown' && value?.performed === true);
+      const receiptOutcome = confirmationStage && verdict === 'performed'
+        ? 'observed' : replayable && effectOutcome === null ? 'observed' : verdict;
+      const receipt = receiptFor(
+        entry, receiptOutcome, verdict !== 'unknown',
+        performed,
+        refusal && safeHostEffectFailure(value).retryable, target,
+      );
+      const stampedReceipt = Object.freeze({
+        ...receipt,
+        ...(refusal ? { refused: true, ...refusalFailure } : {}),
+        ...policyAttribution,
+      });
+      recordAuthorityReceipt(entry, stampedReceipt);
+      if (tracking && typeof entry.ctx?.lifecycle?.settleTracking === 'function') {
+        await entry.ctx.lifecycle.settleTracking(tracking, {
+          ok: verdict === 'performed' || verdict === 'not-performed' && !refusal,
+          outcomeKind: verdict === 'performed' ? 'effect-completed'
+            : verdict === 'unknown' ? 'host-lost'
+              : refusal ? 'pre-effect-failure' : undefined,
+        }).catch(() => null);
+      }
+      await appendAuthorityAudit(entry, stampedReceipt, false);
+      const resultBytes = structuredClonePayloadBytes(value, {
+        maxDepth: 32, maxNodes: 250_000,
+      });
+      if (!Number.isFinite(resultBytes) || resultBytes > ACTOR_AUTHORITY_RESULT_CAP) {
+        return {
+          ok: false, error: 'authority result exceeds its fixed byte cap',
+          outcomeKnown: true, retryable: false, authorityReceipt: stampedReceipt,
+        };
+      }
+      return verdict === 'unknown'
+        ? { ok: false, error: 'authority effect outcome is unknown', outcomeKnown: false, retryable: false, authorityReceipt: stampedReceipt }
+        : { ok: true, value: { authorityValue: value, authorityReceipt: stampedReceipt }, outcomeKnown: true };
+    } catch (cause) {
+      const verdict = typeof effectOutcome?.rejected === 'function'
+        ? normalizeExactEffectOutcome(effectOutcome.rejected(cause)) : 'not-performed';
+      const outcomeKnown = replayable || verdict !== 'unknown';
+      const detail = /** @type {{retryable?:boolean}} */ (cause);
+      const failure = safeHostEffectFailure(cause);
+      const performed = verdict === 'performed'
+        || verdict === 'unknown'
+          && /** @type {{performed?:unknown}} */ (cause)?.performed === true;
+      const safeError = verdict === 'not-performed'
+        ? failure.error ?? failure.code ?? 'Authority operation was refused before execution.'
+        : verdict === 'performed'
+          ? 'Authority operation failed after an effect was performed.'
+          : 'Authority operation outcome is unknown.';
+      const receiptOutcome = replayable && effectOutcome === null && verdict !== 'unknown'
+        ? 'observed' : verdict;
+      const receipt = receiptFor(
+        entry, receiptOutcome, outcomeKnown, performed,
+        verdict === 'not-performed' && detail?.retryable !== false, target,
+      );
+      const stampedReceipt = verdict === 'not-performed'
+        ? Object.freeze({ ...receipt, refused: true, ...failure }) : receipt;
+      recordAuthorityReceipt(entry, stampedReceipt);
+      if (tracking && typeof entry.ctx?.lifecycle?.settleTracking === 'function') {
+        await entry.ctx.lifecycle.settleTracking(tracking, {
+          ok: verdict === 'performed', error: safeError,
+          outcomeKind: verdict === 'performed' ? 'effect-completed'
+            : verdict === 'unknown' ? 'host-lost' : 'pre-effect-failure',
+        }).catch(() => null);
+      }
+      await appendAuthorityAudit(entry, stampedReceipt, true);
+      return {
+        ok: false, error: safeError,
+        outcomeKnown, retryable: stampedReceipt.retryable, authorityReceipt: stampedReceipt,
+      };
+    }
   };
-  const executionEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
+  const beginAuthorityTracking = async (
+    /** @type {any} */ entry,
+    /** @type {string} */ target,
+    /** @type {boolean} */ confirmed,
+    /** @type {any} */ confirmedIntent,
   ) => {
-    const entry = domainEntry(grant, msg, 'execution', fields);
-    if (!entry) return null;
-    bindExecutionToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
+    const policy = controllerDomainOperationPolicy(entry.operation);
+    if (typeof entry.ctx?.lifecycle?.beginTracking !== 'function') return {
+      refuse: { error: 'authority lifecycle is unavailable' },
+    };
+    const tool = Object.freeze({
+      name: entry.operation, primitive: 'authority', retryClass: policy?.retryClass ?? 'E',
+      sideEffect: policy?.riskClass === 'resource' ? 'mutate_external' : 'write',
     });
-    return entry;
+    const begun = await entry.ctx.lifecycle.beginTracking({
+      callId: entry.effect.effectId, tool,
+      sessionId: entry.grant.actorSessionId,
+      ownerSessionId: entry.ctx.lifecycleOwnerSessionId ?? entry.grant.actorSessionId,
+      target, args: entry.args, confirmed, confirmedIntent,
+      turnId: entry.grant.runId, userInitiated: !entry.grant.inbound,
+    });
+    return begun?.refuse ? { refuse: begun.refuse } : { tracking: begun?.handle ?? null };
   };
-  const editingEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
+  const prepareAuthorityEffect = async (
+    /** @type {any} */ entry,
+    /** @type {string} */ target,
   ) => {
-    const entry = domainEntry(grant, msg, 'editing', fields);
-    if (!entry) return null;
-    bindEditingToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
+    const policy = controllerDomainOperationPolicy(entry.operation);
+    const livePermission = typeof entry.ctx?.readAuthorityPermission === 'function'
+      ? await entry.ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+      : entry.ctx?.permission;
+    if (!controllerOperationAllowedInPermissionMode(
+      entry.operation, livePermission?.mode, entry.args,
+    )) {
+      return { refuse: await performSemanticEffect(
+        entry, target,
+        () => ({
+          ok: false, code: 'plan_mode_refused',
+          error: 'plan mode is read-only for this authority operation', retryable: false,
+        }),
+        HOST_EFFECT_OUTCOME.okResult,
+      ) };
+    }
+    const tool = Object.freeze({
+      name: entry.operation, primitive: 'authority', retryClass: policy?.retryClass ?? 'E',
+      sideEffect: policy?.riskClass === 'resource' ? 'mutate_external' : 'write',
     });
-    return entry;
+    const confirmedIntent = await Promise.resolve(
+      entry.ctx.lifecycle?.requiresIntentConfirmation?.({
+        tool, sessionId: entry.grant.actorSessionId,
+        ownerSessionId: entry.ctx.lifecycleOwnerSessionId ?? entry.grant.actorSessionId,
+        target, args: entry.args, userInitiated: !entry.grant.inbound,
+      }),
+    ).catch(() => false);
+    const mustConfirm = controllerOperationRequiresConfirmation(
+      entry.operation, livePermission, entry.args, confirmedIntent?.required === true,
+    );
+    let confirmed = false;
+    if (mustConfirm) {
+      if (typeof entry.ctx.confirm !== 'function') return { refuse: await performSemanticEffect(
+        entry, target, () => ({ ok: false, error: 'confirmation_unavailable', retryable: false }),
+        HOST_EFFECT_OUTCOME.okResult,
+      ) };
+      const presentation = authorityEffectConfirmationPresentation(
+        entry.operation, entry.args, target,
+      );
+      if (!presentation) return { refuse: await performSemanticEffect(
+        entry, target, () => ({
+          ok: false, code: 'confirmation_presentation_unavailable',
+          error: 'authority confirmation target cannot be presented safely', retryable: false,
+        }), HOST_EFFECT_OUTCOME.okResult,
+      ) };
+      const answer = await entry.ctx.confirm({
+        tool: entry.operation,
+        sideEffect: policy?.riskClass === 'resource' ? 'mutate_external' : 'write',
+        origins: [...presentation.origins], sessionId: entry.grant.actorSessionId,
+        ...(confirmedIntent?.required === true ? { lifecycleTarget: target } : {}),
+        oneShot: confirmedIntent?.required === true ? true : undefined,
+        summary: presentation.summary,
+      }, entry.grant.relaySignal).catch(() => false);
+      if (!runIsLive(entry.grant)) return { refuse: await performSemanticEffect(
+        entry, target, () => ({ ok: false, error: 'authority_effect_aborted' }),
+        HOST_EFFECT_OUTCOME.okResult,
+      ) };
+      confirmed = answer === true || answer === 'yes_once' || answer === 'yes_session';
+      if (!confirmed) return { refuse: await performSemanticEffect(
+        entry, target, () => ({ ok: false, error: 'declined', retryable: false }), HOST_EFFECT_OUTCOME.okResult,
+      ) };
+    }
+    const dispatchPermission = typeof entry.ctx?.readAuthorityPermission === 'function'
+      ? await entry.ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+      : entry.ctx?.permission;
+    if (!controllerOperationAllowedInPermissionMode(
+      entry.operation, dispatchPermission?.mode, entry.args,
+    )) return { refuse: await performSemanticEffect(
+      entry, target, () => ({
+        ok: false, code: 'plan_mode_refused',
+        error: 'permission changed before authority dispatch', retryable: false,
+      }), HOST_EFFECT_OUTCOME.okResult,
+    ) };
+    const begun = await beginAuthorityTracking(entry, target, confirmed, confirmedIntent);
+    if (begun?.refuse) return { refuse: await performSemanticEffect(
+      entry, target, () => ({ ok: false, error: begun.refuse.error ?? 'lifecycle_refused' }),
+      HOST_EFFECT_OUTCOME.okResult,
+    ) };
+    if (!runIsLive(entry.grant)) return { refuse: await performSemanticEffect(
+      entry, target, () => ({ ok: false, error: 'authority_effect_aborted' }),
+      HOST_EFFECT_OUTCOME.okResult, begun?.tracking,
+    ) };
+    return {
+      tracking: begun?.tracking ?? null,
+      dispatchAdmission: {
+        confirmed, confirmedIntentRequired: confirmedIntent?.required === true,
+      },
+    };
   };
-  const introspectionEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'introspection', fields);
-    if (!entry) return null;
-    bindIntrospectionToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-    });
-    return entry;
-  };
-  const scheduleEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'schedule', fields);
-    if (!entry) return null;
-    bindScheduleToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
-    });
-    return entry;
-  };
-  const dwebEntry = (
-    /** @type {any} */ grant,
-    /** @type {any} */ msg,
-    /** @type {string[]} */ fields,
-  ) => {
-    const entry = domainEntry(grant, msg, 'dweb', fields);
-    if (!entry) return null;
-    bindDwebToolAuthority(entry.domainState, {
-      call: entry.call, ctx: entry.prepared.ctx,
-      signal: /** @type {any} */ (grant).relaySignal,
-    });
-    return entry;
-  };
-
   const runDomainEffect = async (
+    /** @type {any} */ entry,
+    /** @type {string} */ routeOperation,
+    /** @type {'read'|'control'|'commit'|'resource'} */ _riskClass,
+    /** @type {()=>Promise<any>|any} */ execute,
+    /** @type {boolean} */ _recordEffectVerdict = false,
+    /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome = null,
+  ) => {
+    const operation = fixedOperation(routeOperation);
+    if (!entry || entry.operation !== operation) {
+      entry?.releaseClaim?.();
+      return { ok: false, error: `${operation}: authority mismatch`, outcomeKnown: true };
+    }
+    const policy = controllerDomainOperationPolicy(operation);
+    const pending = (async () => {
+      if (!runIsLive(entry.grant)) return {
+        ok: false, error: `${operation}: authority retired`, outcomeKnown: true,
+      };
+      let target;
+      try { target = await durableAuthorityTarget(entry.grant, operation, entry.args); }
+      catch {
+        return {
+          ok: false, error: `${operation}: authority arguments are invalid`,
+          outcomeKnown: true, retryable: true,
+        };
+      }
+      const schedulerTarget = authorityEffectResourceKey(operation, entry.args, entry.ctx);
+      if (policy?.riskClass === 'read') {
+        return performSemanticEffect(entry, target, execute, effectOutcome, null, schedulerTarget);
+      }
+      const prepared = await prepareAuthorityEffect(entry, target);
+      if (prepared.refuse) return prepared.refuse;
+      if (!runIsLive(entry.grant)) return performSemanticEffect(
+        entry, target, () => ({ ok: false, error: 'authority_effect_aborted' }),
+        HOST_EFFECT_OUTCOME.okResult, prepared.tracking,
+      );
+      return performSemanticEffect(
+        entry, target, execute, effectOutcome, prepared.tracking, schedulerTarget,
+        prepared.dispatchAdmission,
+      );
+    })();
+    entry.grant.activeDispatches.add(pending);
+    const callDispatches = entry.grant.dispatchesByCall.get(entry.effect.callId) ?? new Set();
+    callDispatches.add(pending);
+    entry.grant.dispatchesByCall.set(entry.effect.callId, callDispatches);
+    if (policy?.riskClass === 'read') entry.grant.activeSafeDispatches.add(pending);
+    // The route is now represented in the per-call dispatch drain; release the
+    // earlier claim reservation only after that hand-off is complete.
+    entry.releaseClaim?.();
+    try { return await pending; }
+    finally {
+      entry.grant.activeDispatches.delete(pending);
+      entry.grant.activeSafeDispatches.delete(pending);
+      callDispatches.delete(pending);
+      if (callDispatches.size === 0) entry.grant.dispatchesByCall.delete(entry.effect.callId);
+    }
+  };
+  const runDirectActorEffect = async (
     /** @type {any} */ entry,
     /** @type {string} */ operation,
     /** @type {'read'|'control'|'commit'|'resource'} */ riskClass,
     /** @type {()=>Promise<any>|any} */ execute,
-    /** @type {boolean} */ recordEffectVerdict = false,
     /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome = null,
-  ) => {
-    if (entry.domainCalls.has(operation)) {
-      return { ok: false, error: `${operation}: authority already used`, outcomeKnown: true };
-    }
-    const replayable = riskClass === 'read' || riskClass === 'control';
-    if ((!replayable || recordEffectVerdict)
-        && (typeof effectOutcome?.fulfilled !== 'function'
-          || typeof effectOutcome?.rejected !== 'function')) {
-      return {
-        ok: false, error: `${operation}: effect verdict contract unavailable`,
-        outcomeKnown: true, retryable: false,
-      };
-    }
-    entry.domainCalls.add(operation);
-    if (!replayable || recordEffectVerdict) entry.effectVerdictObserved = true;
-    entry.effectEntered = true;
-    entry.effectPending += 1;
-    if (!replayable) entry.pendingIrreversible += 1;
-    try {
-      const value = await execute();
-      if (!replayable || recordEffectVerdict) {
-        const verdict = normalizeHostEffectOutcome(effectOutcome?.fulfilled?.(value));
-        if (verdict === 'performed') entry.settledIrreversible = true;
-        else if (verdict === 'unknown') entry.unknownIrreversible = true;
-      }
-      return { ok: true, value, outcomeKnown: true };
-    }
-    catch (cause) {
-      const detail = /** @type {{message?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-      const verdict = replayable && !recordEffectVerdict ? 'not-performed'
-        : normalizeHostEffectOutcome(effectOutcome?.rejected?.(cause));
-      if (verdict === 'performed') entry.settledIrreversible = true;
-      const outcomeKnown = replayable || verdict !== 'unknown';
-      if (!outcomeKnown) entry.unknownIrreversible = true;
-      return {
-        ok: false, error: detail?.message ?? String(cause), outcomeKnown,
-        retryable: verdict === 'not-performed' && detail?.retryable !== false,
-      };
-    } finally {
-      entry.effectPending = Math.max(0, entry.effectPending - 1);
-      if (!replayable) {
-        entry.pendingIrreversible = Math.max(0, entry.pendingIrreversible - 1);
-      }
-    }
-  };
-
-  const runDirectActorEffect = async (
-    /** @type {any} */ entry,
-    /** @type {string} */ operation,
-    /** @type {'read'|'control'|'commit'} */ riskClass,
-    /** @type {()=>Promise<any>|any} */ execute,
-    /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome = null,
-  ) => {
-    const result = await runDomainEffect(
-      entry, operation, riskClass, execute, false, effectOutcome,
-    );
-    return result.ok === true ? { ok: true, value: result.value } : result;
-  };
-
-  const settleActorExecution = (
+  ) => runDomainEffect(entry, operation, riskClass, execute, false, effectOutcome);
+  const stampActorCallResult = (
     /** @type {any} */ grant,
-    /** @type {any} */ entry,
-    /** @type {unknown} */ result,
+    /** @type {string} */ callId,
+    /** @type {unknown} */ value,
   ) => {
-    // Settlement freezes the result and synchronously closes every effect route.
-    // Durable persistence may retry, but authority can never reopen around it.
-    closeEntryEffects(grant, entry);
-    if (entry.settling) return entry.settling;
-    if (entry.hasReportedSettlementResult !== true) {
-      entry.reportedSettlementResult = structuredClone(result);
-      entry.hasReportedSettlementResult = true;
-      const liveChildren = [...entry.childExecutionIds]
-        .map((id) => grant.actorExecutions.get(id))
-        .filter((child) => child?.open === true);
-      const pending = entry.effectPending > 0;
-      const alreadyUnknown = entry.unknownIrreversible === true;
-      const descendantEffect = liveChildren.some((child) =>
-        child.effectEntered === true || child.effectPending > 0
-        || child.unknownIrreversible === true);
-      if (pending || descendantEffect) entry.unknownIrreversible = true;
-      const effectStateKnown = entry.unknownIrreversible !== true
-        && !pending && liveChildren.length === 0;
-      let effectiveResult = entry.reportedSettlementResult;
-      if (!effectStateKnown) {
-        const effectWasAlreadyUnknown = alreadyUnknown
-          && !pending && liveChildren.length === 0;
-        effectiveResult = {
-          ok: false,
-          error: effectWasAlreadyUnknown
-            ? 'Tool outcome unknown. Check authority state before retrying.'
-            : 'Tool execution settled while exact authority remained active.',
-          code: effectWasAlreadyUnknown
-            ? 'tool-outcome-unknown' : 'actor-tool-effect-pending',
-          outcomeKnown: false,
-          retryable: false,
-          outcomeKind: 'host-lost',
-        };
-      } else if (entry.effectVerdictObserved === true
-          || effectiveResult && typeof effectiveResult === 'object'
-          && !Array.isArray(effectiveResult)
-          && (Object.hasOwn(effectiveResult, 'performed')
-            || Object.hasOwn(effectiveResult, 'effectEntered')
-            || /** @type {any} */ (effectiveResult).outcomeKind === 'effect-completed')) {
-        // why: the isolated semantic heap may shape content, but only the SW
-        // observed whether an exact irreversible/resource operation completed.
-        effectiveResult = stampHostEffectVerdict(effectiveResult, {
-          effectEntered: entry.effectEntered === true,
-          performed: entry.settledIrreversible === true,
-          invalidCode: 'actor-tool-result-invalid-after-effect',
-          invalidError: entry.settledIrreversible === true
-            ? 'Actor semantic result was invalid after an irreversible effect completed.'
-            : 'Actor semantic result was invalid.',
-        });
-      }
-      entry.settlementResult = structuredClone(effectiveResult);
-      entry.hasSettlementResult = true;
-    }
-    const pending = (async () => {
-      try {
-        const settled = await /** @type {Function} */ (settleToolCall)(
-          entry.prepared, { result: entry.settlementResult },
-        );
-        // A child may be unlinked after durable settlement, but its custody
-        // facts remain part of the parent page_code execution forever.
-        propagateSettledCustody(grant, entry);
-        entry.open = false;
-        grant.actorExecutions.delete(entry.executionId);
-        if (typeof entry.parentExecutionId === 'string') {
-          grant.actorExecutions.get(entry.parentExecutionId)
-            ?.childExecutionIds?.delete(entry.executionId);
-        }
-        return { ok: true, result: settled };
-      } catch (cause) {
-        return {
-          ok: false, error: cause instanceof Error ? cause.message : String(cause),
-          outcomeKnown: entry.effectEntered !== true,
-          retryable: entry.effectEntered !== true,
-        };
-      } finally {
-        entry.settling = null;
-      }
-    })();
-    entry.settling = pending;
-    return pending;
+    const base = value && typeof value === 'object' && !Array.isArray(value)
+      ? /** @type {Record<string,any>} */ (value) : { ok: true, value };
+    const receipts = authorityReceiptsForCall(grant.effectReceipts, callId);
+    return stampAuthorityToolResult(receipts, base);
   };
 
-  const preparationStillLive = (
-    /** @type {any} */ grant,
-    /** @type {boolean} */ nested,
-    /** @type {string|undefined} */ parentExecutionId,
-    /** @type {any} */ parent,
-  ) => !grant.relaySignal.aborted && (!nested
-    || (grant.actorExecutions.get(parentExecutionId) === parent
-      && entryEffectsAllowed(grant, parent)));
-
-  const retirePreparedWithoutAuthority = (/** @type {any} */ prepared) => {
-    if (prepared?.prepared !== true || typeof settleToolCall !== 'function') return;
-    const result = {
-      ok: false,
-      error: 'actor tool preparation lost its live authority before execution',
-      code: 'actor-tool-prepare-aborted',
-      outcomeKnown: true,
-      retryable: true,
-      outcomeKind: 'pre-effect-failure',
-    };
-    void boundedCleanup(Promise.resolve().then(() =>
-      settleToolCall(prepared, { result })));
-  };
-
-  const routes = {
+  const routes = /** @type {Record<string, (...args: any[]) => any>} */ ({
     /**
      * @param {{relayToken?:string,providerId?:string,modelId?:string,nativeBody?:object}} [msg]
      * @param {unknown} [sender]
@@ -882,7 +1342,7 @@ export const makeOffscreenActorClient = ({
         ok: false, error: 'actor/model-open-inference: another inference is active',
         code: 'actor_model_relay_busy', outcomeKnown: true, performed: false,
       };
-      if (grant.modelRelays >= modelRelayLimit) return {
+      if (grant.modelRelays >= grant.modelRelayLimit) return {
         ok: false, error: 'actor/model-open-inference: relay budget exhausted',
         code: 'actor_model_relay_limit', outcomeKnown: true, performed: false,
       };
@@ -1028,7 +1488,7 @@ export const makeOffscreenActorClient = ({
           || abortedRuns.has(grant?.runId)) {
         return { ok: false, error: 'actor/model-open-local: unauthorized relay' };
       }
-      if (grant.modelActive || grant.modelRelays >= modelRelayLimit
+      if (grant.modelActive || grant.modelRelays >= grant.modelRelayLimit
           || !Number.isSafeInteger(grant.maxOutputTokens)
           || /** @type {number} */ (grant.maxOutputTokens) < 1) {
         return {
@@ -1126,315 +1586,150 @@ export const makeOffscreenActorClient = ({
         permitsProvider: (/** @type {string} */ providerId) => providerId === grant.provider,
       });
     },
-    /** Admit one controller-owned tool without executing its semantics in the SW. */
-    'actor/tool-prepare': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
-    ) => {
+    'actor/spawn-sync': async (msg = {}, sender = undefined, boundGrant = null) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const call = msg.call;
-      const domain = msg.authorityClass;
-      const pageProgramParentExecutionId = msg.pageProgramParentExecutionId;
-      const nestedPageProgram = typeof pageProgramParentExecutionId === 'string'
-        && pageProgramParentExecutionId.length > 0;
-      const parent = nestedPageProgram
-        ? grant?.actorExecutions.get(pageProgramParentExecutionId) : null;
-      if (!grant || !exactKeys(
-        msg, ['call', 'authorityClass'], ['relayToken', 'pageProgramParentExecutionId'],
-      )
-          || !controllerAuthorityClassAllowed(domain)
-          || typeof prepareToolCall !== 'function'
-          || typeof settleToolCall !== 'function'
-          || (nestedPageProgram && (!entryEffectsAllowed(grant, parent)
-            || parent.toolName !== 'page_code' || parent.authorityClass !== 'page'
-            || !isPageProgramSemanticTool(call?.name)))) {
-        return { ok: false, error: 'actor/tool-prepare: unauthorized semantic owner' };
-      }
-      if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
-      if (grant.toolRelays >= toolRelayLimit) return {
-        ok: false, error: 'actor/tool-prepare: relay budget exhausted',
-        code: 'actor_tool_relay_limit', outcomeKnown: true, performed: false,
-      };
-      grant.toolRelays += 1;
-      const admittedContext = await contextForTool(grant, call, {
-        pageProgram: nestedPageProgram,
-      });
-      if (admittedContext.ok !== true) return admittedContext;
-      if (!preparationStillLive(
-        grant, nestedPageProgram, pageProgramParentExecutionId, parent,
-      )) {
-        return { ok: false, error: grant.relaySignal.aborted
-          ? 'aborted' : 'actor/tool-prepare: parent authority retired' };
-      }
-      const descriptor = nestedPageProgram
-        ? grant.pageProgramToolDescriptors.get(call?.name)
-        : grant.toolDescriptors.get(call?.name);
-      if (nestedPageProgram && !descriptor) {
-        return { ok: false, error: 'actor/tool-prepare: authority policy is unavailable' };
-      }
-      const prepared = await prepareToolCall(
-        call, admittedContext.ctx, descriptor,
-      );
-      if (!preparationStillLive(
-        grant, nestedPageProgram, pageProgramParentExecutionId, parent,
-      )) {
-        retirePreparedWithoutAuthority(prepared);
-        return { ok: false, error: grant.relaySignal.aborted
-          ? 'aborted' : 'actor/tool-prepare: parent authority retired' };
-      }
-      if (prepared?.prepared !== true) return { ok: true, mode: 'result', result: prepared };
-      const policy = CONTROLLER_AUTHORITY_MANIFEST.tools[domain];
-      if (!policy || structuredClonePayloadBytes(prepared.args) > policy.argumentBytes) {
-        retirePreparedWithoutAuthority(prepared);
-        return { ok: false, error: 'actor/tool-prepare: semantic arguments exceed authority limits' };
-      }
-      let authorityCall;
-      try {
-        // why: the model-issued call remains the admission proof, while exact
-        // authority compares against the post-hook args sent to the isolated
-        // semantic executor.
-        authorityCall = Object.freeze({
-          ...call, args: structuredClone(prepared.args),
-        });
-      } catch {
-        retirePreparedWithoutAuthority(prepared);
-        return { ok: false, error: 'actor/tool-prepare: semantic arguments are not cloneable' };
-      }
-      const executionId = `ae-${now().toString(36)}-${++seq}`;
-      grant.actorExecutions.set(executionId, {
-        executionId,
-        open: true, effectsOpen: true, settling: null,
-        hasReportedSettlementResult: false, reportedSettlementResult: undefined,
-        hasSettlementResult: false, settlementResult: undefined,
-        effectEntered: false, effectPending: 0, pendingIrreversible: 0,
-        settledIrreversible: false, unknownIrreversible: false,
-        effectVerdictObserved: false,
-        parentExecutionId: nestedPageProgram ? pageProgramParentExecutionId : null,
-        childExecutionIds: new Set(),
-        domainCalls: new Set(), domainState: {}, prepared,
-        call: authorityCall, toolName: call.name, authorityClass: domain,
-      });
-      if (nestedPageProgram) parent.childExecutionIds.add(executionId);
-      const projection = domain === 'actor' ? {
-        sessionId: admittedContext.ctx.session?.sessionId,
-        sessionDepth: admittedContext.ctx.session?.depth ?? 0,
-        sessionKind: admittedContext.ctx.session?.kind ?? 'spawned',
-        inbound: admittedContext.ctx.inbound === true,
-      } : domain === 'repository' ? {
-        actorType: admittedContext.ctx.actorType,
-        actorInstanceId: admittedContext.ctx.actorInstanceId,
-      } : domain === 'persistence' ? {
-        sessionId: admittedContext.ctx.session?.sessionId,
-        activeTabOrigin: admittedContext.ctx.activeTab?.origin,
-        goalActive: !!admittedContext.ctx.todoStore,
-      } : domain === 'resource' ? {
-        sessionId: admittedContext.ctx.session?.sessionId,
-        runtimeCapabilities: admittedContext.ctx.runtimeCapabilities,
-      } : domain === 'execution' ? {
-        sessionId: admittedContext.ctx.session?.sessionId,
-        sessionKind: admittedContext.ctx.session?.kind ?? 'spawned',
-      } : call.name === 'load_skill' ? {
-        sessionId: admittedContext.ctx.session?.sessionId,
-        messageCount: admittedContext.ctx.session?.messageCount ?? 0,
-        trimCovered: admittedContext.ctx.session?.trimCovered ?? 0,
-      } : domain === 'dweb' ? {
-        sessionId: admittedContext.ctx.session?.sessionId,
-        dwebAvailable: admittedContext.ctx.dweb != null,
-      } : { sessionId: admittedContext.ctx.session?.sessionId };
-      return {
-        ok: true, mode: 'execute', executionId,
-        callId: typeof call.id === 'string' && call.id ? call.id : executionId,
-        toolName: call.name, args: authorityCall.args,
-        projection,
-      };
-    },
-    'actor/spawn-sync': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = grant?.actorExecutions.get(msg.executionId);
-      const args = entry?.call?.args;
-      const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
-      const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
-      const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
-      if (!entryEffectsAllowed(grant, entry)
-          || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
-        'relayToken', 'tools', 'maxSteps', 'maxDepth',
-      ])
-          || entry.toolName !== 'actor_create'
-          || args?.sync !== true || msg.task !== args?.task
-          || msg.allowRecursion !== (args?.allowRecursion === true)
-          || JSON.stringify(msg.tools) !== JSON.stringify(expectedTools)
-          || msg.maxSteps !== expectedMaxSteps || msg.maxDepth !== expectedMaxDepth
-          || entry.domainCalls.size > 0 || typeof msg.task !== 'string'
+      const fields = ['task', 'allowRecursion',
+        'grantedOperations',
+        ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
+      const entry = await domainEntry(grant, msg, 'actor', fields);
+      if (!entry || entry.operation !== 'turn.actor.spawn-sync'
+          || typeof msg.task !== 'string' || !msg.task
           || typeof msg.allowRecursion !== 'boolean'
-          || (msg.tools !== undefined && (!Array.isArray(msg.tools)
-            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string')))
-          || (msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps))
-          || (msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth))) {
+          || msg.tools !== undefined && (!Array.isArray(msg.tools)
+            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'))
+          || !Array.isArray(msg.grantedOperations)
+          || msg.grantedOperations.length > 256
+          || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
+            || !grant.allowedOperations.has(operation))
+          || msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps)
+          || msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth)) {
         return { ok: false, error: 'actor/spawn-sync: authority mismatch', outcomeKnown: true };
       }
-      const ctx = entry.prepared.ctx;
-      if (typeof ctx?.actorAuthority?.spawnSync !== 'function') {
-        entry.domainCalls.add('actor/spawn-sync');
-        entry.effectEntered = true;
-        entry.effectVerdictObserved = true;
-        return { ok: true, value: { refused: true, result: 'actor_orchestrator_unavailable' } };
-      }
-      return runDirectActorEffect(entry, 'actor/spawn-sync', 'commit', () =>
-        ctx.actorAuthority.spawnSync({
+      const spawn = entry.ctx?.actorAuthority?.spawnSync;
+      return runDirectActorEffect(entry, 'turn.actor.spawn-sync', 'resource', () =>
+        typeof spawn === 'function' ? spawn({
           task: msg.task,
           ...(msg.tools === undefined ? {} : { tools: msg.tools }),
           ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
           ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
           allowRecursion: msg.allowRecursion,
-          parentSessionId: ctx.session?.sessionId,
-          parentDepth: ctx.session?.depth ?? 0,
-          parentInbound: ctx.inbound === false ? false : true,
-          parentToolUseId: entry.call?.id,
-        }), HOST_EFFECT_OUTCOME.actorResult);
+          grantedOperations: [...new Set(msg.grantedOperations)],
+          parentSessionId: entry.ctx.session?.sessionId,
+          parentDepth: entry.ctx.session?.depth ?? 0,
+          parentInbound: entry.ctx.inbound === false ? false : true,
+          parentToolUseId: entry.effect.callId,
+        }) : { refused: true, result: 'actor_orchestrator_unavailable' },
+      HOST_EFFECT_OUTCOME.actorSpawn);
     },
-    'actor/spawn-async': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
-    ) => {
+    'actor/spawn-async': async (msg = {}, sender = undefined, boundGrant = null) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = grant?.actorExecutions.get(msg.executionId);
-      const args = entry?.call?.args;
-      const expectedTools = Array.isArray(args?.tools) ? args.tools : undefined;
-      const expectedMaxSteps = Number.isFinite(args?.maxSteps) ? args.maxSteps : undefined;
-      const expectedMaxDepth = Number.isFinite(args?.maxDepth) ? args.maxDepth : undefined;
-      if (!entryEffectsAllowed(grant, entry)
-          || !exactKeys(msg, ['executionId', 'task', 'allowRecursion'], [
-        'relayToken', 'tools', 'maxSteps', 'maxDepth',
-      ])
-          || entry.toolName !== 'actor_create'
-          || args?.sync === true || msg.task !== args?.task
-          || msg.allowRecursion !== (args?.allowRecursion === true)
-          || JSON.stringify(msg.tools) !== JSON.stringify(expectedTools)
-          || msg.maxSteps !== expectedMaxSteps || msg.maxDepth !== expectedMaxDepth
-          || entry.domainCalls.size > 0 || typeof msg.task !== 'string'
+      const fields = ['task', 'allowRecursion',
+        'grantedOperations',
+        ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
+      const entry = await domainEntry(grant, msg, 'actor', fields);
+      if (!entry || entry.operation !== 'turn.actor.spawn-async'
+          || typeof msg.task !== 'string' || !msg.task
           || typeof msg.allowRecursion !== 'boolean'
-          || (msg.tools !== undefined && (!Array.isArray(msg.tools)
-            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string')))
-          || (msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps))
-          || (msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth))) {
+          || msg.tools !== undefined && (!Array.isArray(msg.tools)
+            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'))
+          || !Array.isArray(msg.grantedOperations)
+          || msg.grantedOperations.length > 256
+          || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
+            || !grant.allowedOperations.has(operation))
+          || msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps)
+          || msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth)) {
         return { ok: false, error: 'actor/spawn-async: authority mismatch', outcomeKnown: true };
       }
-      const ctx = entry.prepared.ctx;
-      if (typeof ctx?.actorAuthority?.spawnAsync !== 'function') {
-        entry.domainCalls.add('actor/spawn-async');
-        entry.effectEntered = true;
-        entry.effectVerdictObserved = true;
-        return { ok: true, value: { ok: false, error: 'async_actor_unavailable' } };
-      }
-      return runDirectActorEffect(entry, 'actor/spawn-async', 'commit', () =>
-        ctx.actorAuthority.spawnAsync({
+      const spawn = entry.ctx?.actorAuthority?.spawnAsync;
+      return runDirectActorEffect(entry, 'turn.actor.spawn-async', 'resource', () =>
+        typeof spawn === 'function' ? spawn({
           task: msg.task,
           ...(msg.tools === undefined ? {} : { tools: msg.tools }),
           ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
           ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
           allowRecursion: msg.allowRecursion,
-          parentSessionId: ctx.session?.sessionId,
-          parentDepth: ctx.session?.depth ?? 0,
-          parentInbound: ctx.inbound === false ? false : true,
-          parentToolUseId: entry.call?.id,
-        }), HOST_EFFECT_OUTCOME.actorResult);
+          grantedOperations: [...new Set(msg.grantedOperations)],
+          parentSessionId: entry.ctx.session?.sessionId,
+          parentDepth: entry.ctx.session?.depth ?? 0,
+          parentInbound: entry.ctx.inbound === false ? false : true,
+          parentToolUseId: entry.effect.callId,
+        }) : { ok: false, error: 'async_actor_unavailable' },
+      HOST_EFFECT_OUTCOME.actorSpawn);
     },
-    'actor/tasks-read': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = grant?.actorExecutions.get(msg.executionId);
-      if (!entryEffectsAllowed(grant, entry) || !exactKeys(msg, ['executionId'])
-          || entry.toolName !== 'actor_tasks'
-          || entry.domainCalls.size > 0) {
+    'actor/tasks-read': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const entry = await domainEntry(
+        grantFor(msg, sender, boundGrant), msg, 'actor', [],
+      );
+      if (!entry || entry.operation !== 'turn.actor.tasks') {
         return { ok: false, error: 'actor/tasks-read: authority mismatch', outcomeKnown: true };
       }
-      const read = entry.prepared.ctx?.actorAuthority?.listTasks;
-      return runDirectActorEffect(entry, 'actor/tasks-read', 'read', () =>
+      const read = entry.ctx?.actorAuthority?.listTasks;
+      return runDirectActorEffect(entry, 'turn.actor.tasks', 'read', () =>
         typeof read === 'function' ? read() : []);
     },
-    'actor/task-cancel': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = grant?.actorExecutions.get(msg.executionId);
-      if (!entryEffectsAllowed(grant, entry) || !exactKeys(msg, ['executionId', 'taskId'])
-          || entry.toolName !== 'actor_cancel'
-          || entry.domainCalls.size > 0 || typeof msg.taskId !== 'string' || !msg.taskId
-          || msg.taskId !== entry.call?.args?.taskId) {
+    'actor/task-cancel': async (msg = {}, sender = undefined, boundGrant = null) => {
+      const entry = await domainEntry(
+        grantFor(msg, sender, boundGrant), msg, 'actor', ['taskId'],
+      );
+      if (!entry || entry.operation !== 'turn.actor.cancel'
+          || typeof msg.taskId !== 'string' || !msg.taskId) {
         return { ok: false, error: 'actor/task-cancel: authority mismatch', outcomeKnown: true };
       }
-      const cancel = entry.prepared.ctx?.actorAuthority?.cancelTask;
-      return runDirectActorEffect(entry, 'actor/task-cancel', 'control', () =>
+      const cancel = entry.ctx?.actorAuthority?.cancelTask;
+      return runDirectActorEffect(entry, 'turn.actor.cancel', 'control', () =>
         typeof cancel === 'function'
-          ? cancel(msg.taskId) : { ok: false, error: 'async_actor_unavailable' });
+          ? cancel(msg.taskId) : { ok: false, error: 'async_actor_unavailable' },
+      HOST_EFFECT_OUTCOME.actorCancel);
     },
-    'actor/message-deliver': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
-    ) => {
+    'actor/message-deliver': async (msg = {}, sender = undefined, boundGrant = null) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = grant?.actorExecutions.get(msg.executionId);
-      const args = entry?.call?.args;
-      const sessionKind = entry?.prepared?.ctx?.session?.kind;
-      if (!entryEffectsAllowed(grant, entry) || !exactKeys(msg, [
-        'executionId', 'to', 'message', 'oneShot', 'awaitReply',
-        'degradeToAsync', 'awaitCapMs',
-      ])
-          || entry.toolName !== 'message_actor'
-          || entry.domainCalls.size > 0 || typeof msg.to !== 'string'
-          || msg.to !== args?.to || msg.message !== args?.message
-          || msg.oneShot !== (args?.oneShot === true)
-          || msg.awaitReply !== (sessionKind === 'spawned' || args?.await === true)
-          || msg.degradeToAsync !== (args?.await === true && sessionKind !== 'spawned')
+      const entry = await domainEntry(grant, msg, 'actor', [
+        'to', 'message', 'oneShot', 'awaitReply', 'degradeToAsync', 'awaitCapMs',
+      ]);
+      if (!entry || entry.operation !== 'turn.actor.message'
+          || typeof msg.to !== 'string' || !msg.to
           || typeof msg.message !== 'string' || typeof msg.oneShot !== 'boolean'
           || typeof msg.awaitReply !== 'boolean' || typeof msg.degradeToAsync !== 'boolean'
           || !Number.isSafeInteger(msg.awaitCapMs) || msg.awaitCapMs < 1
           || msg.awaitCapMs > 3 * 60_000) {
         return { ok: false, error: 'actor/message-deliver: authority mismatch', outcomeKnown: true };
       }
-      const ctx = entry.prepared.ctx;
-      if (typeof ctx?.actorAuthority?.deliverMessage !== 'function') {
-        entry.domainCalls.add('actor/message-deliver');
-        entry.effectEntered = true;
-        entry.effectVerdictObserved = true;
-        return { ok: true, value: { ok: false, error: 'message_actor is not enabled' } };
-      }
-      return runDirectActorEffect(entry, 'actor/message-deliver', 'commit', () =>
-        ctx.actorAuthority.deliverMessage({
+      const deliver = entry.ctx?.actorAuthority?.deliverMessage;
+      return runDirectActorEffect(entry, 'turn.actor.message', 'resource', () =>
+        typeof deliver === 'function' ? deliver({
           to: msg.to, message: msg.message, oneShot: msg.oneShot,
-          senderSessionId: ctx.session?.sessionId,
-          inbound: ctx.inbound === true,
-          toolUseId: entry.call?.id,
-          awaitReply: msg.awaitReply,
-          awaitSignal: /** @type {any} */ (grant).relaySignal,
-          degradeToAsync: msg.degradeToAsync,
-          awaitCapMs: msg.awaitCapMs,
-        }), HOST_EFFECT_OUTCOME.actorResult);
+          senderSessionId: entry.ctx.session?.sessionId,
+          inbound: entry.ctx.inbound === true,
+          toolUseId: entry.effect.callId,
+          awaitReply: msg.awaitReply, awaitSignal: grant.relaySignal,
+          degradeToAsync: msg.degradeToAsync, awaitCapMs: msg.awaitCapMs,
+        }) : { ok: false, error: 'message_actor is not enabled' },
+      HOST_EFFECT_OUTCOME.actorMessage);
     },
     'pod/resolve': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['podId']);
-      if (!entry || msg.podId !== entry.call?.args?.podId) {
+      const entry = await domainEntry(grant, msg, 'pod', [
+        'podId', ...(typeof msg.command === 'string' ? ['command'] : []),
+      ]);
+      const boundPodId = entry?.ctx?.actorType === 'pod'
+        ? entry.ctx.actorInstanceId : null;
+      if (!entry || boundPodId && msg.podId !== undefined && msg.podId !== boundPodId
+          || !boundPodId && msg.podId !== entry.args?.podId) {
         return { ok: false, error: 'pod/resolve: authority mismatch', outcomeKnown: true };
       }
-      const resolve = entry.prepared.ctx?.podClient?.resolveId;
+      const resolve = entry.ctx?.podClient?.resolveId;
       if (typeof resolve !== 'function') {
         return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
       }
-      const result = await runDomainEffect(entry, 'pod/resolve', 'read', () => resolve({
-        sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
-      }));
+      const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/resolve', 'read', () => resolve({
+        sessionId: entry.ctx.session?.sessionId, podId: boundPodId ?? msg.podId,
+      })));
       if (result.ok === true && typeof result.value === 'string') {
         entry.domainState.podId = result.value;
+        if (typeof msg.command === 'string') entry.domainState.command = msg.command;
       }
       return result;
     },
@@ -1443,16 +1738,16 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['podId']);
-      const intent = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '')[0] : null;
+      const entry = await domainEntry(grant, msg, 'pod', ['podId']);
+      const intent = entry ? podGitRemoteIntents(entry.domainState.command ?? '')[0] : null;
       if (!entry || typeof msg.podId !== 'string' || msg.podId !== entry.domainState.podId
           || !intent || intent.url) {
         return { ok: false, error: 'pod/read-remote: authority mismatch', outcomeKnown: true };
       }
-      const readRemote = entry.prepared.ctx?.repositories?.getRemote;
-      const result = await runDomainEffect(entry, 'pod/read-remote', 'read', () =>
+      const readRemote = entry.ctx?.repositories?.getRemote;
+      const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/read-remote', 'read', () =>
         typeof readRemote === 'function'
-          ? readRemote({ kind: 'pod', id: msg.podId }) : null);
+          ? readRemote({ kind: 'pod', id: msg.podId }) : null));
       if (result.ok === true) entry.domainState.remote = result.value;
       return result;
     },
@@ -1461,8 +1756,8 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['op']);
-      const intents = entry ? podGitRemoteIntents(entry.call?.args?.command ?? '') : [];
+      const entry = await domainEntry(grant, msg, 'pod', ['op']);
+      const intents = entry ? podGitRemoteIntents(entry.domainState.command ?? '') : [];
       const intent = intents.length === 1 ? intents[0] : null;
       const target = intent?.url ?? entry?.domainState?.remote?.url;
       if (!entry || typeof entry.domainState.podId !== 'string'
@@ -1472,19 +1767,20 @@ export const makeOffscreenActorClient = ({
       let origin;
       try { origin = new URL(target).origin; }
       catch { return { ok: false, error: 'pod/confirm-git: invalid remote', outcomeKnown: true }; }
-      const confirm = entry.prepared.ctx?.confirm;
+      const confirm = entry.ctx?.confirm;
       if (typeof confirm !== 'function') {
         return { ok: true, value: false, outcomeKnown: true };
       }
-      const result = await runDomainEffect(entry, 'pod/confirm-git', 'control', () => confirm({
+      const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/confirm-git', 'control', () => confirm({
         tool: 'pod_exec', kind: `git_${intent.op}`,
         sideEffect: intent.op === 'push' ? 'mutate_external' : 'write',
         origins: [origin],
         summary: intent.op === 'push'
           ? `Allow this one Pod job to push code and commit history to ${target}?`
           : `Allow this one Pod job to ${intent.op} ${target} through peerd's audited Git transport?`,
-      }));
-      if (result.ok === true && [true, 'yes_once', 'yes_session'].includes(result.value)) {
+      }, entry.grant.relaySignal), false, HOST_EFFECT_OUTCOME.confirmation));
+      if (result.ok === true && runIsLive(entry.grant)
+          && [true, 'yes_once', 'yes_session'].includes(result.value)) {
         entry.domainState.remoteGitGrant = { op: intent.op, url: target };
       }
       return result;
@@ -1494,10 +1790,10 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', [
+      const entry = await domainEntry(grant, msg, 'pod', [
         'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
       ]);
-      const args = entry?.call?.args;
+      const args = entry?.args;
       let program;
       let intents;
       try {
@@ -1516,7 +1812,8 @@ export const makeOffscreenActorClient = ({
           || !sameClone(msg.remoteGitGrant, expectedGrant)) {
         return { ok: false, error: 'pod/exec: authority mismatch', outcomeKnown: true };
       }
-      const execute = entry.prepared.ctx?.podClient?.exec;
+      if (expectedGrant) entry.domainState.remoteGitGrant = null;
+      const execute = entry.ctx?.podClient?.exec;
       if (typeof execute !== 'function') {
         return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
       }
@@ -1526,28 +1823,31 @@ export const makeOffscreenActorClient = ({
         background: expectedBackground,
         remoteGitGrant: expectedGrant,
         signal: expectedBackground ? undefined : /** @type {any} */ (grant).relaySignal,
-      }), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+      }), false, HOST_EFFECT_OUTCOME.podExecution);
     },
     'pod/status': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', [
+      const entry = await domainEntry(grant, msg, 'pod', [
         'podId', 'jobId', 'stream', 'offset', 'limit',
       ]);
-      const args = entry?.call?.args;
+      const args = entry?.args;
+      const boundPodId = entry?.ctx?.actorType === 'pod'
+        ? entry.ctx.actorInstanceId : null;
       if (!entry || msg.podId !== args?.podId || msg.jobId !== args?.jobId
           || msg.stream !== args?.stream || msg.offset !== args?.offset
-          || msg.limit !== args?.limit) {
+          || msg.limit !== args?.limit
+          || boundPodId && msg.podId !== boundPodId) {
         return { ok: false, error: 'pod/status: authority mismatch', outcomeKnown: true };
       }
-      const status = entry.prepared.ctx?.podClient?.status;
+      const status = entry.ctx?.podClient?.status;
       if (typeof status !== 'function') {
         return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
       }
       return runDomainEffect(entry, 'pod/status', 'read', () => status({
-        sessionId: entry.prepared.ctx.session?.sessionId,
+        sessionId: entry.ctx.session?.sessionId,
         podId: msg.podId, jobId: msg.jobId, stream: msg.stream,
         offset: msg.offset, limit: msg.limit,
       }));
@@ -1557,37 +1857,41 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['podId', 'jobId']);
-      const args = entry?.call?.args;
+      const entry = await domainEntry(grant, msg, 'pod', ['podId', 'jobId']);
+      const args = entry?.args;
+      const boundPodId = entry?.ctx?.actorType === 'pod'
+        ? entry.ctx.actorInstanceId : null;
       if (!entry || typeof msg.jobId !== 'string' || msg.jobId !== args?.jobId
-          || msg.podId !== args?.podId) {
+          || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
         return { ok: false, error: 'pod/cancel: authority mismatch', outcomeKnown: true };
       }
-      const cancel = entry.prepared.ctx?.podClient?.cancel;
+      const cancel = entry.ctx?.podClient?.cancel;
       if (typeof cancel !== 'function') {
         return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
       }
       return runDomainEffect(entry, 'pod/cancel', 'control', () => cancel(msg.jobId, {
-        sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
-      }));
+        sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
+      }), false, HOST_EFFECT_OUTCOME.podCancel);
     },
     'pod/read-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', ['podId', 'path']);
-      const args = entry?.call?.args;
+      const entry = await domainEntry(grant, msg, 'pod', ['podId', 'path']);
+      const args = entry?.args;
+      const boundPodId = entry?.ctx?.actorType === 'pod'
+        ? entry.ctx.actorInstanceId : null;
       if (!entry || typeof msg.path !== 'string' || msg.path !== args?.path
-          || msg.podId !== args?.podId) {
+          || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
         return { ok: false, error: 'pod/read-file: authority mismatch', outcomeKnown: true };
       }
-      const readFile = entry.prepared.ctx?.podClient?.readFile;
+      const readFile = entry.ctx?.podClient?.readFile;
       if (typeof readFile !== 'function') {
         return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
       }
       return runDomainEffect(entry, 'pod/read-file', 'read', () => readFile(msg.path, {
-        sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
+        sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
       }));
     },
     'pod/write-file': async (
@@ -1595,570 +1899,581 @@ export const makeOffscreenActorClient = ({
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = domainEntry(grant, msg, 'pod', [
+      const entry = await domainEntry(grant, msg, 'pod', [
         'podId', 'path', 'content',
       ]);
-      const args = entry?.call?.args;
+      const args = entry?.args;
+      const boundPodId = entry?.ctx?.actorType === 'pod'
+        ? entry.ctx.actorInstanceId : null;
       if (!entry || typeof msg.path !== 'string' || typeof msg.content !== 'string'
           || msg.path !== args?.path || msg.content !== args?.content
-          || msg.podId !== args?.podId) {
+          || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
         return { ok: false, error: 'pod/write-file: authority mismatch', outcomeKnown: true };
       }
-      const writeFile = entry.prepared.ctx?.podClient?.writeFile;
+      const writeFile = entry.ctx?.podClient?.writeFile;
       if (typeof writeFile !== 'function') {
         return { ok: false, error: 'pod_unavailable', outcomeKnown: true };
       }
       return runDomainEffect(entry, 'pod/write-file', 'commit', () => writeFile(
         msg.path, msg.content, {
-          sessionId: entry.prepared.ctx.session?.sessionId, podId: msg.podId,
+          sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
         },
-      ), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+      ), false, HOST_EFFECT_OUTCOME.podMutation);
     },
     'repository/read-pod': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['podId']);
+      const entry = await repositoryEntry(grant, msg, ['podId']);
       if (!entry) return { ok: false, error: 'repository/read-pod: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-pod', 'read', () =>
-        entry.domainState.authority.readPod(msg.podId));
+        entry.authority.readPod(msg.podId));
     },
     'repository/destroy-pod': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['podId']);
+      const entry = await repositoryEntry(grant, msg, ['podId']);
       if (!entry) return { ok: false, error: 'repository/destroy-pod: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/destroy-pod', 'commit', () =>
-        entry.domainState.authority.destroyPod(msg.podId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.destroyPod(msg.podId), false, HOST_EFFECT_OUTCOME.podMutation);
     },
     'repository/read-status': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, []);
+      const entry = await repositoryEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'repository/read-status: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-status', 'read', () =>
-        entry.domainState.authority.readStatus());
+        entry.authority.readStatus());
     },
     'repository/read-history': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['depth']);
+      const entry = await repositoryEntry(grant, msg, ['depth']);
       if (!entry) return { ok: false, error: 'repository/read-history: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-history', 'read', () =>
-        entry.domainState.authority.readHistory(msg.depth));
+        entry.authority.readHistory(msg.depth));
     },
     'repository/read-remote': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, []);
+      const entry = await repositoryEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'repository/read-remote: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-remote', 'read', () =>
-        entry.domainState.authority.readRemote());
+        entry.authority.readRemote());
     },
     'repository/read-diff': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['from', 'to']);
+      const entry = await repositoryEntry(grant, msg, ['from', 'to']);
       if (!entry) return { ok: false, error: 'repository/read-diff: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/read-diff', 'read', () =>
-        entry.domainState.authority.readDiff(msg.from, msg.to));
+        entry.authority.readDiff(msg.from, msg.to));
     },
     'repository/confirm-restore': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['to']);
+      const entry = await repositoryEntry(grant, msg, ['to']);
       if (!entry) return { ok: false, error: 'repository/confirm-restore: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/confirm-restore', 'control', () =>
-        entry.domainState.authority.confirmRestore(msg.to));
+        entry.authority.confirmRestore(msg.to), false, HOST_EFFECT_OUTCOME.confirmation);
     },
     'repository/checkpoint': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['message']);
+      const entry = await repositoryEntry(grant, msg, ['message']);
       if (!entry) return { ok: false, error: 'repository/checkpoint: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/checkpoint', 'commit', () =>
-        entry.domainState.authority.checkpoint(msg.message), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.checkpoint(msg.message), false,
+        HOST_EFFECT_OUTCOME.repositoryCheckpoint);
     },
     'repository/branch': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['name']);
+      const entry = await repositoryEntry(grant, msg, ['name']);
       if (!entry) return { ok: false, error: 'repository/branch: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/branch', 'commit', () =>
-        entry.domainState.authority.branch(msg.name), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.branch(msg.name), false, HOST_EFFECT_OUTCOME.repositoryMutation);
     },
     'repository/checkout': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['name']);
+      const entry = await repositoryEntry(grant, msg, ['name']);
       if (!entry) return { ok: false, error: 'repository/checkout: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/checkout', 'commit', () =>
-        entry.domainState.authority.checkout(msg.name), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.checkout(msg.name), false, HOST_EFFECT_OUTCOME.repositoryMutation);
     },
     'repository/restore': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['to']);
+      const entry = await repositoryEntry(grant, msg, ['to']);
       if (!entry) return { ok: false, error: 'repository/restore: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/restore', 'commit', () =>
-        entry.domainState.authority.restore(msg.to), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.restore(msg.to), false, HOST_EFFECT_OUTCOME.repositoryRestore);
     },
     'repository/confirm-remote': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, [
-        'op', 'target', 'branch',
-      ]);
+      const entry = await repositoryEntry(
+        grant, msg, ['op', 'target', 'branch'], ['url'],
+      );
       if (!entry) return { ok: false, error: 'repository/confirm-remote: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/confirm-remote', 'control', () =>
-        entry.domainState.authority.confirmRemote(msg.op, msg.target, msg.branch));
+        entry.authority.confirmRemote(msg.op, msg.target, msg.branch), false,
+      HOST_EFFECT_OUTCOME.confirmation);
     },
     'repository/link': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['url']);
+      const entry = await repositoryEntry(grant, msg, ['url']);
       if (!entry) return { ok: false, error: 'repository/link: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/link', 'commit', () =>
-        entry.domainState.authority.link(msg.url), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.link(msg.url), false, HOST_EFFECT_OUTCOME.repositoryMutation);
     },
     'repository/fetch': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['target']);
+      const entry = await repositoryEntry(grant, msg, ['target']);
       if (!entry) return { ok: false, error: 'repository/fetch: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/fetch', 'commit', () =>
-        entry.domainState.authority.fetch(msg.target), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.fetch(msg.target), false, HOST_EFFECT_OUTCOME.repositoryMutation);
     },
     'repository/push': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = repositoryEntry(grant, msg, ['target', 'branch']);
+      const entry = await repositoryEntry(grant, msg, ['target', 'branch']);
       if (!entry) return { ok: false, error: 'repository/push: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'repository/push', 'resource', () =>
-        entry.domainState.authority.push(msg.target, msg.branch), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.push(msg.target, msg.branch), false, HOST_EFFECT_OUTCOME.partialMutation);
     },
     'vm/read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vmId']);
+      const entry = await vmEntry(grant, msg, ['vmId']);
       if (!entry) return { ok: false, error: 'vm/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/read', 'read', () =>
-        entry.domainState.authority.readVm(msg.vmId));
+        entry.authority.readVm(msg.vmId));
     },
     'vm/list': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, []);
+      const entry = await vmEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'vm/list: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/list', 'read', () =>
-        entry.domainState.authority.listVms());
+        entry.authority.listVms());
     },
     'vm/set-default': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vmId']);
+      const entry = await vmEntry(grant, msg, ['vmId']);
       if (!entry) return { ok: false, error: 'vm/set-default: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/set-default', 'control', () =>
-        entry.domainState.authority.setDefaultVm(msg.vmId));
+        entry.authority.setDefaultVm(msg.vmId), false, HOST_EFFECT_OUTCOME.defaultSelection);
     },
     'vm/run': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['command', 'timeoutMs', 'vmId']);
+      const entry = await vmEntry(grant, msg, ['command', 'timeoutMs', 'vmId']);
       if (!entry) return { ok: false, error: 'vm/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/run', 'resource', () =>
-        entry.domainState.authority.runVm(msg.command, msg.timeoutMs, msg.vmId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.runVm(msg.command, msg.timeoutMs, msg.vmId), false, HOST_EFFECT_OUTCOME.vmExecution);
     },
     'vm/import-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['url', 'path', 'maxBytes']);
+      const entry = await vmEntry(grant, msg, ['url', 'path', 'maxBytes']);
       if (!entry) return { ok: false, error: 'vm/import-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/import-file', 'resource', () =>
-        entry.domainState.authority.importFile(msg.url, msg.path, msg.maxBytes), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.importFile(msg.url, msg.path, msg.maxBytes), false, HOST_EFFECT_OUTCOME.vmMutation);
     },
     'vm/write-text-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['path', 'content']);
+      const entry = await vmEntry(grant, msg, ['path', 'content']);
       if (!entry) return { ok: false, error: 'vm/write-text-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/write-text-file', 'commit', () =>
-        entry.domainState.authority.writeTextFile(msg.path, msg.content), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.writeTextFile(msg.path, msg.content), false, HOST_EFFECT_OUTCOME.vmMutation);
     },
     'vm/destroy': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = vmEntry(grant, msg, ['vmId']);
+      const entry = await vmEntry(grant, msg, ['vmId']);
       if (!entry) return { ok: false, error: 'vm/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'vm/destroy', 'commit', () =>
-        entry.domainState.authority.destroyVm(msg.vmId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.destroyVm(msg.vmId), false, HOST_EFFECT_OUTCOME.vmMutation);
     },
     'notebook/read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(
+      const entry = await notebookEntry(
         grant, msg, ['notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/read', 'read', () =>
-        entry.domainState.authority.readNotebook(msg.notebookId));
+        entry.authority.readNotebook(msg.notebookId));
     },
     'notebook/list': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(grant, msg, []);
+      const entry = await notebookEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'notebook/list: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/list', 'read', () =>
-        entry.domainState.authority.listNotebooks());
+        entry.authority.listNotebooks());
     },
     'notebook/set-default': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(grant, msg, ['notebookId']);
+      const entry = await notebookEntry(grant, msg, ['notebookId']);
       if (!entry) return { ok: false, error: 'notebook/set-default: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/set-default', 'control', () =>
-        entry.domainState.authority.setDefaultNotebook(msg.notebookId));
+        entry.authority.setDefaultNotebook(msg.notebookId), false,
+        HOST_EFFECT_OUTCOME.defaultSelection);
     },
     'notebook/run': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(
+      const entry = await notebookEntry(
         grant, msg, ['code', 'timeoutMs', 'notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/run', 'resource', () =>
-        entry.domainState.authority.runNotebook(msg.code, msg.timeoutMs, msg.notebookId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.runNotebook(msg.code, msg.timeoutMs, msg.notebookId), false, HOST_EFFECT_OUTCOME.notebookRun);
     },
     'notebook/write-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(
+      const entry = await notebookEntry(
         grant, msg, ['path', 'content', 'notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/write-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/write-file', 'commit', () =>
-        entry.domainState.authority.writeFile(msg.path, msg.content, msg.notebookId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.writeFile(msg.path, msg.content, msg.notebookId), false, HOST_EFFECT_OUTCOME.notebookMutation);
     },
     'notebook/read-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(
+      const entry = await notebookEntry(
         grant, msg, ['path', 'notebookId'],
       );
       if (!entry) return { ok: false, error: 'notebook/read-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/read-file', 'read', () =>
-        entry.domainState.authority.readFile(msg.path, msg.notebookId));
+        entry.authority.readFile(msg.path, msg.notebookId));
     },
     'notebook/destroy': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = notebookEntry(grant, msg, ['notebookId']);
+      const entry = await notebookEntry(grant, msg, ['notebookId']);
       if (!entry) return { ok: false, error: 'notebook/destroy: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'notebook/destroy', 'commit', () =>
-        entry.domainState.authority.destroyNotebook(msg.notebookId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.destroyNotebook(msg.notebookId), false, HOST_EFFECT_OUTCOME.notebookMutation);
     },
     'app/update': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, [
+      const entry = await appEntry(grant, msg, [
         'appId', 'name', 'html', 'tags', 'entryFile',
       ]);
       if (!entry) return { ok: false, error: 'app/update: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/update', 'commit', () =>
-        entry.domainState.authority.updateApp(
+        entry.authority.updateApp(
           msg.appId, msg.name, msg.html, msg.tags, msg.entryFile,
-        ), false, HOST_EFFECT_OUTCOME.valueResult);
+        ), false, HOST_EFFECT_OUTCOME.appUpdate);
     },
     'app/open': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['appId']);
+      const entry = await appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/open: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/open', 'resource', () =>
-        entry.domainState.authority.openApp(msg.appId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.openApp(msg.appId), false, HOST_EFFECT_OUTCOME.appOpen);
     },
     'app/search': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['query']);
+      const entry = await appEntry(grant, msg, ['query']);
       if (!entry) return { ok: false, error: 'app/search: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/search', 'read', () =>
-        entry.domainState.authority.searchApps(msg.query));
+        entry.authority.searchApps(msg.query));
     },
     'app/read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['appId']);
+      const entry = await appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/read', 'read', () =>
-        entry.domainState.authority.readApp(msg.appId));
+        entry.authority.readApp(msg.appId));
     },
     'app/delete': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['appId']);
+      const entry = await appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/delete: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/delete', 'commit', () =>
-        entry.domainState.authority.deleteApp(msg.appId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.deleteApp(msg.appId), false, HOST_EFFECT_OUTCOME.appDelete);
     },
     'app/write-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(
+      const entry = await appEntry(
         grant, msg, ['appId', 'path', 'content'],
       );
       if (!entry) return { ok: false, error: 'app/write-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/write-file', 'commit', () =>
-        entry.domainState.authority.writeFile(msg.appId, msg.path, msg.content), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.writeFile(msg.appId, msg.path, msg.content), false, HOST_EFFECT_OUTCOME.appMutation);
     },
     'app/read-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['appId', 'path']);
+      const entry = await appEntry(grant, msg, ['appId', 'path']);
       if (!entry) return { ok: false, error: 'app/read-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/read-file', 'read', () =>
-        entry.domainState.authority.readFile(msg.appId, msg.path));
+        entry.authority.readFile(msg.appId, msg.path));
     },
     'app/list-files': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['appId']);
+      const entry = await appEntry(grant, msg, ['appId']);
       if (!entry) return { ok: false, error: 'app/list-files: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/list-files', 'read', () =>
-        entry.domainState.authority.listFiles(msg.appId));
+        entry.authority.listFiles(msg.appId));
     },
     'app/delete-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['appId', 'path']);
+      const entry = await appEntry(grant, msg, ['appId', 'path']);
       if (!entry) return { ok: false, error: 'app/delete-file: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/delete-file', 'commit', () =>
-        entry.domainState.authority.deleteFile(msg.appId, msg.path), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.deleteFile(msg.appId, msg.path), false, HOST_EFFECT_OUTCOME.appMutation);
     },
     'app/observe': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, []);
+      const entry = await appEntry(grant, msg, []);
       if (!entry) return { ok: false, error: 'app/observe: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/observe', 'read', () =>
-        entry.domainState.authority.observeRuntime());
+        entry.authority.observeRuntime());
     },
     'app/act': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['action', 'params']);
+      const entry = await appEntry(grant, msg, ['action', 'params']);
       if (!entry) return { ok: false, error: 'app/act: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'app/act', 'resource', () =>
-        entry.domainState.authority.actRuntime(msg.action, msg.params), false, HOST_EFFECT_OUTCOME.runResult);
+        entry.authority.actRuntime(msg.action, msg.params), false, HOST_EFFECT_OUTCOME.appAction);
     },
     'app/run-code': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = appEntry(grant, msg, ['code', 'timeoutMs']);
-      if (!entry) return { ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true };
+      const entry = await appEntry(
+        grant, msg, ['code', 'timeoutMs'], [], ['appProgramSemanticToken'],
+      );
+      if (!entry || typeof msg.appProgramSemanticToken !== 'string'
+          || msg.appProgramSemanticToken.length < 8
+          || msg.appProgramSemanticToken.length > 128) {
+        return { ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true };
+      }
       return runDomainEffect(entry, 'app/run-code', 'resource', () =>
-        entry.domainState.authority.runCode(msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.runResult);
+        entry.authority.runCode(msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.programRun);
     },
     'memory/read-scope': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = persistenceEntry(grant, msg, ['scope']);
+      const entry = await persistenceEntry(grant, msg, ['scope']);
       if (!entry) return { ok: false, error: 'memory/read-scope: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'memory/read-scope', 'read', () =>
-        entry.domainState.authority.readMemoryScope(msg.scope));
+        entry.authority.readMemoryScope(msg.scope));
     },
     'memory/read-subtree': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = persistenceEntry(
+      const entry = await persistenceEntry(
         grant, msg, ['workspace', 'subpath'],
       );
       if (!entry) return { ok: false, error: 'memory/read-subtree: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'memory/read-subtree', 'read', () =>
-        entry.domainState.authority.readMemorySubtree(msg.workspace, msg.subpath));
+        entry.authority.readMemorySubtree(msg.workspace, msg.subpath));
     },
     'memory/write': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = persistenceEntry(grant, msg, ['scope', 'body']);
+      const entry = await persistenceEntry(grant, msg, ['scope', 'body']);
       if (!entry) return { ok: false, error: 'memory/write: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'memory/write', 'commit', () =>
-        entry.domainState.authority.writeMemory(msg.scope, msg.body), false, HOST_EFFECT_OUTCOME.memoryResult);
+        entry.authority.writeMemory(msg.scope, msg.body), false, HOST_EFFECT_OUTCOME.memoryResult);
     },
     'todo/read': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = persistenceEntry(
+      const entry = await persistenceEntry(
         grant, msg, [],
       );
       if (!entry) return { ok: false, error: 'todo/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'todo/read', 'read', () =>
-        entry.domainState.authority.readTodos());
+        entry.authority.readTodos());
     },
     'todo/replace': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = persistenceEntry(
+      const entry = await persistenceEntry(
         grant, msg, ['version', 'todos'],
       );
       if (!entry) return { ok: false, error: 'todo/replace: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'todo/replace', 'commit', () =>
-        entry.domainState.authority.replaceTodos(msg.version, msg.todos), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.replaceTodos(msg.version, msg.todos), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'page/open-tab': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/open-tab: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/open-tab', 'resource', () =>
-        entry.domainState.authority.openProtectedBackgroundTab(), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.openProtectedBackgroundTab(), false, HOST_EFFECT_OUTCOME.pageMutation);
     },
     'page/read': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/read', 'read', () =>
-        entry.domainState.authority.readOwnedPage());
+        entry.authority.readOwnedPage());
     },
     'page/snapshot': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/snapshot: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/snapshot', 'read', () =>
-        entry.domainState.authority.captureOwnedAccessibilityTree());
+        entry.authority.captureOwnedAccessibilityTree());
     },
     'page/read-state': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/read-state: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/read-state', 'read', () =>
-        entry.domainState.authority.readOwnedFrameworkState());
+        entry.authority.readOwnedFrameworkState());
     },
     'page/watch-changes': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/watch-changes: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/watch-changes', 'read', () =>
-        entry.domainState.authority.drainOwnedDomChanges());
+        entry.authority.drainOwnedDomChanges());
     },
     'page/query-dom': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/query-dom: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/query-dom', 'read', () =>
-        entry.domainState.authority.queryOwnedDom());
+        entry.authority.queryOwnedDom());
     },
     'page/navigate': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/navigate: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/navigate', 'resource', () =>
-        entry.domainState.authority.navigateOwnedTab(), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.navigateOwnedTab(), false, HOST_EFFECT_OUTCOME.pageMutation);
     },
     'page/fill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/fill: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/fill', 'resource', () =>
-        entry.domainState.authority.fillOwnedTarget(), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.fillOwnedTarget(), false, HOST_EFFECT_OUTCOME.pageMutation);
     },
     'page/click': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/click: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/click', 'resource', () =>
-        entry.domainState.authority.clickOwnedTarget(), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.clickOwnedTarget(), false, HOST_EFFECT_OUTCOME.pageMutation);
     },
     'page/login': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/login: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/login', 'resource', () =>
-        entry.domainState.authority.performConfirmedOwnedLogin(), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.performConfirmedOwnedLogin(), false, HOST_EFFECT_OUTCOME.pageMutation);
     },
     'page/run-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(
-        grantFor(msg, sender, boundGrant), msg, ['pageProgramSemanticToken'],
+      const entry = await pageEntry(
+        grantFor(msg, sender, boundGrant), msg, ['args'], [], ['pageProgramSemanticToken'],
       );
       if (!entry || typeof msg.pageProgramSemanticToken !== 'string'
           || msg.pageProgramSemanticToken.length < 8
@@ -2166,300 +2481,343 @@ export const makeOffscreenActorClient = ({
         return { ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true };
       }
       return runDomainEffect(entry, 'page/run-program', 'resource', () =>
-        entry.domainState.authority.runOwnedPageProgram(), false, HOST_EFFECT_OUTCOME.runResult);
+        entry.authority.runOwnedPageProgram(), false, HOST_EFFECT_OUTCOME.programRun);
     },
     'page/capture-foreground': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/capture-foreground: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/capture-foreground', 'read', () =>
-        entry.domainState.authority.captureForegroundPixels());
+        entry.authority.captureForegroundPixels());
     },
     'page/capture-owned': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = pageEntry(grantFor(msg, sender, boundGrant), msg);
+      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
       if (!entry) return { ok: false, error: 'page/capture-owned: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'page/capture-owned', 'read', () =>
-        entry.domainState.authority.captureOwnedTabPixels());
+        entry.authority.captureOwnedTabPixels());
     },
     'resource/confirm-web-write': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = resourceEntry(
-        grantFor(msg, sender, boundGrant), msg, ['url', 'method'],
+      const entry = await resourceEntry(
+        grantFor(msg, sender, boundGrant), msg, ['url', 'method', 'headers', 'body'],
       );
       if (!entry) return { ok: false, error: 'resource/confirm-web-write: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'resource/confirm-web-write', 'control', () =>
-        entry.domainState.authority.confirmWebWrite(msg.url, msg.method), true, HOST_EFFECT_OUTCOME.confirmation);
+        entry.authority.confirmWebWrite({
+          url: msg.url, method: msg.method, headers: msg.headers, body: msg.body,
+        }), true, HOST_EFFECT_OUTCOME.confirmation);
     },
     'resource/request-web-text': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = resourceEntry(
+      const entry = await resourceEntry(
         grantFor(msg, sender, boundGrant), msg, ['url', 'method', 'headers', 'body'],
       );
       if (!entry) return { ok: false, error: 'resource/request-web-text: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'resource/request-web-text', 'resource', () =>
-        entry.domainState.authority.requestWebText({
+        entry.authority.requestWebText({
           url: msg.url, method: msg.method, headers: msg.headers, body: msg.body,
-        }), false, HOST_EFFECT_OUTCOME.okResult);
+        }), false, HOST_EFFECT_OUTCOME.webRequest);
     },
     'resource/extract-markdown': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = resourceEntry(
+      const entry = await resourceEntry(
         grantFor(msg, sender, boundGrant), msg, ['html', 'url'],
       );
       if (!entry) return { ok: false, error: 'resource/extract-markdown: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'resource/extract-markdown', 'read', () =>
-        entry.domainState.authority.extractReadableMarkdown(msg.html, msg.url));
+        entry.authority.extractReadableMarkdown(msg.html, msg.url));
     },
     'resource/extract-document': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = resourceEntry(
+      const entry = await resourceEntry(
         grantFor(msg, sender, boundGrant), msg, ['url', 'format', 'engine'],
       );
       if (!entry) return { ok: false, error: 'resource/extract-document: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'resource/extract-document', 'read', () =>
-        entry.domainState.authority.extractDocument({
+        entry.authority.extractDocument({
           url: msg.url, format: msg.format, engine: msg.engine,
         }));
     },
     'resource/spill-result': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = resourceEntry(grantFor(msg, sender, boundGrant), msg, [
+      const entry = await resourceEntry(grantFor(msg, sender, boundGrant), msg, [
         'url', 'format', 'text', 'producer', 'fenced', 'originLabel',
       ]);
       if (!entry) return { ok: false, error: 'resource/spill-result: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'resource/spill-result', 'control', () =>
-        entry.domainState.authority.spillResult({
+        entry.authority.spillResult({
           url: msg.url, format: msg.format, text: msg.text,
           producer: msg.producer, fenced: msg.fenced, originLabel: msg.originLabel,
-        }));
+        }), false, HOST_EFFECT_OUTCOME.spill);
     },
     'resource/read-result': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = resourceEntry(grantFor(msg, sender, boundGrant), msg, ['key']);
+      const entry = await resourceEntry(grantFor(msg, sender, boundGrant), msg, ['key']);
       if (!entry) return { ok: false, error: 'resource/read-result: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'resource/read-result', 'read', () =>
-        entry.domainState.authority.readResult(msg.key));
+        entry.authority.readResult(msg.key));
     },
     'site-client/read': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, ['origin']);
+      const entry = await siteClientEntry(grantFor(msg, sender, boundGrant), msg, ['origin']);
       if (!entry) return { ok: false, error: 'site-client/read: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/read', 'read', () =>
-        entry.domainState.authority.readStoredClient(msg.origin));
+        entry.authority.readStoredClient(msg.origin));
     },
     'site-client/run': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = siteClientEntry(
+      const entry = await siteClientEntry(
         grantFor(msg, sender, boundGrant), msg, ['origin', 'code', 'timeoutMs'],
       );
       if (!entry) return { ok: false, error: 'site-client/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/run', 'resource', () =>
-        entry.domainState.authority.runStoredClient(msg.origin, msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.runStoredClient(msg.origin, msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.siteClientRun);
     },
     'site-client/commit': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, ['origin']);
+      const entry = await siteClientEntry(
+        grantFor(msg, sender, boundGrant), msg, ['origin'],
+        ['summary', 'endpoints', 'auth', 'deriver', 'body'],
+      );
       if (!entry) return { ok: false, error: 'site-client/commit: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/commit', 'commit', () =>
-        entry.domainState.authority.commitConfirmedClient(msg.origin), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.commitConfirmedClient(msg.origin), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'site-client/capture-start': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'site-client/capture-start: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/capture-start', 'resource', () =>
-        entry.domainState.authority.startOwnedCapture(), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.startOwnedCapture(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'site-client/capture-stop': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await siteClientEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'site-client/capture-stop: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/capture-stop', 'resource', () =>
-        entry.domainState.authority.stopOwnedCapture(), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.stopOwnedCapture(), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-webvm': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      const entry = await executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-webvm: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-webvm', 'commit', () =>
-        entry.domainState.authority.createWebVm(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.createWebVm(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-notebook': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      const entry = await executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-notebook: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-notebook', 'commit', () =>
-        entry.domainState.authority.createNotebook(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.createNotebook(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-pod': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      const entry = await executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-pod: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-pod', 'commit', () =>
-        entry.domainState.authority.createPod(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.createPod(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/create-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
+      const entry = await executionEntry(grantFor(msg, sender, boundGrant), msg, ['plan']);
       if (!entry) return { ok: false, error: 'execution/create-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/create-app', 'commit', () =>
-        entry.domainState.authority.createApp(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.createApp(msg.plan), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'execution/run-script': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = executionEntry(grantFor(msg, sender, boundGrant), msg, [
+      const entry = await executionEntry(grantFor(msg, sender, boundGrant), msg, [
         'code', 'actors', 'provider', 'workspace', 'timeoutMs',
       ]);
       if (!entry) return { ok: false, error: 'execution/run-script: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/run-script', 'resource', () =>
-        entry.domainState.authority.runHeadlessScript({
+        entry.authority.runHeadlessScript({
           code: msg.code, actors: msg.actors, provider: msg.provider,
           workspace: msg.workspace, timeoutMs: msg.timeoutMs,
-        }), false, HOST_EFFECT_OUTCOME.okResult);
+        }), false, HOST_EFFECT_OUTCOME.scriptRun);
     },
     'execution/spill-script': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = executionEntry(
+      const entry = await executionEntry(
         grantFor(msg, sender, boundGrant), msg, ['text', 'fenced', 'originLabel'],
       );
       if (!entry) return { ok: false, error: 'execution/spill-script: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'execution/spill-script', 'control', () =>
-        entry.domainState.authority.spillScriptValue({
+        entry.authority.spillScriptValue({
           text: msg.text, fenced: msg.fenced, originLabel: msg.originLabel,
-        }));
+        }), false, HOST_EFFECT_OUTCOME.spill);
     },
     'editing/read-target': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = editingEntry(
+      const entry = await editingEntry(
         grantFor(msg, sender, boundGrant), msg, ['kind', 'targetId', 'path'],
       );
       if (!entry) return { ok: false, error: 'editing/read-target: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'editing/read-target', 'read', () =>
-        entry.domainState.authority.readEditTarget({
+        entry.authority.readEditTarget({
           kind: msg.kind, targetId: msg.targetId, path: msg.path,
         }));
     },
     'editing/write-target': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = editingEntry(grantFor(msg, sender, boundGrant), msg, [
+      const entry = await editingEntry(grantFor(msg, sender, boundGrant), msg, [
         'kind', 'targetId', 'path', 'content',
       ]);
       if (!entry) return { ok: false, error: 'editing/write-target: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'editing/write-target', 'commit', () =>
-        entry.domainState.authority.writeEditTarget({
+        entry.authority.writeEditTarget({
           kind: msg.kind, targetId: msg.targetId, path: msg.path, content: msg.content,
         }), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'introspection/actor-roster': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/actor-roster: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/actor-roster', 'read', () =>
-        entry.domainState.authority.readActorRoster());
+        entry.authority.readActorRoster());
     },
     'introspection/provider-posture': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/provider-posture: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/provider-posture', 'read', () =>
-        entry.domainState.authority.readProviderPosture());
+        entry.authority.readProviderPosture());
     },
     'introspection/storage-snapshot': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['prefix']);
+      const entry = await introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['prefix']);
       if (!entry) return { ok: false, error: 'introspection/storage-snapshot: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/storage-snapshot', 'read', () =>
-        entry.domainState.authority.readStorageSnapshot(msg.prefix));
+        entry.authority.readStorageSnapshot(msg.prefix));
     },
     'introspection/automatable-tabs': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/automatable-tabs: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/automatable-tabs', 'read', () =>
-        entry.domainState.authority.readAutomatableTabs());
+        entry.authority.readAutomatableTabs());
     },
     'introspection/denylist-patterns': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/denylist-patterns: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/denylist-patterns', 'read', () =>
-        entry.domainState.authority.readDenylistPatterns());
+        entry.authority.readDenylistPatterns());
     },
     'introspection/audit-entries': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await introspectionEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'introspection/audit-entries: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/audit-entries', 'read', () =>
-        entry.domainState.authority.readAuditEntries());
+        entry.authority.readAuditEntries());
     },
     'introspection/installed-skill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['name']);
+      const entry = await introspectionEntry(grantFor(msg, sender, boundGrant), msg, ['name']);
       if (!entry) return { ok: false, error: 'introspection/installed-skill: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'introspection/installed-skill', 'read', () =>
-        entry.domainState.authority.readInstalledSkill(msg.name));
+        entry.authority.readInstalledSkill(msg.name));
     },
     'schedule/read-routines': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await scheduleEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'schedule/read-routines: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'schedule/read-routines', 'read', () =>
-        entry.domainState.authority.readRoutines());
+        entry.authority.readRoutines());
     },
     'schedule/arm-confirmed-routine': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = scheduleEntry(
+      const entry = await scheduleEntry(
         grantFor(msg, sender, boundGrant), msg,
         ['prompt', 'every', 'dailyAt', 'mode'],
       );
       if (!entry) return { ok: false, error: 'schedule/arm-confirmed-routine: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'schedule/arm-confirmed-routine', 'commit', () =>
-        entry.domainState.authority.armConfirmedRoutine({
+        entry.authority.armConfirmedRoutine({
           prompt: msg.prompt, every: msg.every, dailyAt: msg.dailyAt, mode: msg.mode,
         }), false, HOST_EFFECT_OUTCOME.okResult);
     },
     'schedule/cancel-routine': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['id']);
+      const entry = await scheduleEntry(grantFor(msg, sender, boundGrant), msg, ['id']);
       if (!entry) return { ok: false, error: 'schedule/cancel-routine: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'schedule/cancel-routine', 'commit', () =>
-        entry.domainState.authority.cancelRoutine(msg.id), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.cancelRoutine(msg.id), false, HOST_EFFECT_OUTCOME.scheduleCancel);
     },
     'dweb/discover-apps': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'dweb/discover-apps: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/discover-apps', 'read', () =>
-        entry.domainState.authority.discoverApps());
+        entry.authority.discoverApps());
     },
     'dweb/publish-confirmed-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['appId']);
+      const entry = await dwebEntry(grantFor(msg, sender, boundGrant), msg, ['appId']);
       if (!entry) return { ok: false, error: 'dweb/publish-confirmed-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/publish-confirmed-app', 'commit', () =>
-        entry.domainState.authority.publishConfirmedApp(msg.appId), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.publishConfirmedApp(msg.appId), false, HOST_EFFECT_OUTCOME.dwebPublish);
     },
     'dweb/install-confirmed-app': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['uri', 'name']);
+      const entry = await dwebEntry(grantFor(msg, sender, boundGrant), msg, ['uri', 'name']);
       if (!entry) return { ok: false, error: 'dweb/install-confirmed-app: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/install-confirmed-app', 'commit', () =>
-        entry.domainState.authority.installConfirmedApp(msg.uri, msg.name), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.installConfirmedApp(msg.uri, msg.name), false, HOST_EFFECT_OUTCOME.dwebInstall);
     },
     'dweb/read-peers': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
+      const entry = await dwebEntry(grantFor(msg, sender, boundGrant), msg, []);
       if (!entry) return { ok: false, error: 'dweb/read-peers: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/read-peers', 'read', () =>
-        entry.domainState.authority.readPeers());
+        entry.authority.readPeers());
     },
     'dweb/set-peer-blocked': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(
+      const entry = await dwebEntry(
         grantFor(msg, sender, boundGrant), msg, ['did', 'block', 'reason'],
       );
       if (!entry) return { ok: false, error: 'dweb/set-peer-blocked: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/set-peer-blocked', 'commit', () =>
-        entry.domainState.authority.setPeerBlocked(msg.did, msg.block, msg.reason), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.setPeerBlocked(msg.did, msg.block, msg.reason), false, HOST_EFFECT_OUTCOME.dwebPolicyMutation);
     },
     'dweb/set-discovery-enabled': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(grantFor(msg, sender, boundGrant), msg, ['enabled']);
+      const entry = await dwebEntry(grantFor(msg, sender, boundGrant), msg, ['enabled']);
       if (!entry) return { ok: false, error: 'dweb/set-discovery-enabled: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/set-discovery-enabled', 'commit', () =>
-        entry.domainState.authority.setDiscoveryEnabled(msg.enabled), false, HOST_EFFECT_OUTCOME.fulfilledResult);
+        entry.authority.setDiscoveryEnabled(msg.enabled), false, HOST_EFFECT_OUTCOME.dwebPolicyMutation);
     },
     'dweb/run-mesh-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = dwebEntry(
+      const entry = await dwebEntry(
         grantFor(msg, sender, boundGrant), msg, ['code', 'timeoutMs'],
       );
       if (!entry) return { ok: false, error: 'dweb/run-mesh-program: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'dweb/run-mesh-program', 'resource', () =>
-        entry.domainState.authority.runMeshProgram(msg.code, msg.timeoutMs), false, HOST_EFFECT_OUTCOME.okResult);
+        entry.authority.runMeshProgram(msg.code, msg.timeoutMs), false,
+        HOST_EFFECT_OUTCOME.meshProgramRun);
     },
-    'actor/tool-settle': async (
+    'actor/call-complete': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
-      const entry = grant?.actorExecutions.get(msg.executionId);
-      const policy = entry
-        ? CONTROLLER_AUTHORITY_MANIFEST.tools[entry.authorityClass] : null;
-      if (!grant || !exactKeys(msg, ['executionId', 'result'])
-          || !entry || entry.open !== true || !policy
-          || structuredClonePayloadBytes(msg.result) > policy.resultBytes
-          || typeof settleToolCall !== 'function') {
-        return { ok: false, error: 'actor/tool-settle: authority mismatch', outcomeKnown: true };
+      if (!grant || !exactKeys(msg, ['callId', 'turnGeneration', 'result'])
+          || typeof msg.callId !== 'string' || !msg.callId
+          || msg.turnGeneration !== grant.turnGeneration
+          || !grant.semanticCallState.has(msg.callId)
+          || grant.closingCalls.has(msg.callId) || grant.finalizing === true
+          || grant.completedCalls.has(msg.callId)) {
+        return { ok: false, error: 'actor/call-complete: authority mismatch', outcomeKnown: true };
       }
-      if (entry.hasReportedSettlementResult === true
-          && !sameClone(entry.reportedSettlementResult, msg.result)) {
-        return { ok: false, error: 'actor/tool-settle: result mismatch', outcomeKnown: true };
+      grant.closingCalls.add(msg.callId);
+      await Promise.allSettled([...(grant.pendingClaimsByCall.get(msg.callId) ?? [])]);
+      await Promise.allSettled([...(grant.dispatchesByCall.get(msg.callId) ?? [])]);
+      const claimed = grant.claimedEffectsByCall.get(msg.callId) ?? new Map();
+      for (const [effectId, operation] of claimed) {
+        if (grant.effectReceipts.has(effectId)) continue;
+        grant.effectReceipts.set(effectId, Object.freeze({
+          callId: msg.callId, effectId, operation,
+          outcome: 'unknown', outcomeKnown: false, performed: false, retryable: false,
+          code: 'authority_receipt_missing',
+          error: 'An accepted authority claim ended without a host outcome receipt.',
+        }));
       }
-      return settleActorExecution(grant, entry, msg.result);
+      grant.completedCalls.add(msg.callId);
+      // why: domain binders may retain multi-megabyte snapshots while a call is
+      // open. Completion has drained every accepted claim/dispatch; receipts
+      // and the completed-call tombstone are sufficient for custody and replay.
+      grant.semanticCallState.delete(msg.callId);
+      if (!runIsLive(grant)) return {
+        ok: false, error: 'actor/call-complete: authority retired',
+        outcomeKnown: false, retryable: false,
+      };
+      const resultBytes = structuredClonePayloadBytes(msg.result, {
+        maxDepth: 32, maxNodes: 250_000,
+      });
+      // why: the isolated heap is not trusted to choose what the SW retains or
+      // appends to a session. Preserve already-recorded host receipts, but
+      // replace an unsafe semantic payload with one bounded terminal failure.
+      const semanticResult = Number.isFinite(resultBytes)
+        && resultBytes <= ACTOR_SEMANTIC_TOOL_RESULT_CAP
+        ? msg.result : {
+          ok: false,
+          code: 'actor_semantic_result_invalid',
+          error: 'actor semantic result exceeds its fixed structured-clone limit',
+          outcomeKnown: true,
+          retryable: false,
+        };
+      const result = stampActorCallResult(grant, msg.callId, semanticResult);
+      return {
+        ok: true, result,
+        performed: result.authorityPerformed === true,
+        outcomeKnown: result.outcomeKnown !== false,
+      };
     },
     /**
      * @param {{ relayToken?: string, event?: object }} [msg]
@@ -2472,12 +2830,21 @@ export const makeOffscreenActorClient = ({
       const grant = grantFor(msg, sender, boundGrant);
       if (!grant) return { ok: false, error: 'actor/loop-event: unauthorized relay' };
       if (grant.relaySignal.aborted) return { ok: false, error: 'aborted' };
+      const eventBytes = structuredClonePayloadBytes(msg.event, {
+        maxDepth: 16, maxNodes: 4_096,
+      });
+      if (!Number.isFinite(eventBytes) || eventBytes > ACTOR_LOOP_EVENT_BYTES) return {
+        ok: false,
+        code: 'actor_loop_event_invalid',
+        error: 'actor loop event exceeds its structured-clone boundary',
+        outcomeKnown: true,
+      };
       if (grant.loopEvents >= loopEventLimit) return { ok: true, coalesced: true };
       grant.loopEvents += 1;
       try { if (msg.event) runOnEvent.get(grant.runId)?.(msg.event); } catch { /* never break the relay */ }
       return { ok: true };
     },
-  };
+  });
 
   return { run, routes };
 };

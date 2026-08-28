@@ -30,7 +30,7 @@ const harness = (overrides: Record<string, any> = {}) => {
     rootSessionIds: () => ['root'], activeActorCount: () => 1,
     snapshot: () => ({ actors: { t1: {
       sessionId: 'actor', rootSessionId: 'root', parentSessionId: 'root',
-      kind: 'actor', name: 'Worker', running: true, grantedTools: ['read'],
+      kind: 'actor', name: 'Worker', running: true, visibleTools: ['read'],
     } }, spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {} }),
   };
   const turnSlots = overrides.turnSlots ?? {

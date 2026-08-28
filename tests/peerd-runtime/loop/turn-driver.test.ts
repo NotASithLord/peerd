@@ -193,11 +193,14 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
         primitive: name === 'message_actor' ? 'actor' : 'host', sideEffect: 'read',
       }))
       : [];
-  const projectToolDescriptors = async (input: any) => descriptorInventory.filter((descriptor) => {
-    if (input.runtimeCapabilities && ['script', 'read_doc'].includes(descriptor.name)) return false;
-    if (input.actorIsolation?.status !== 'available'
-        && ['message_actor', 'actor_create'].includes(descriptor.name)) return false;
-    return true;
+  const projectToolDescriptors = async (input: any) => ({
+    tools: descriptorInventory.filter((descriptor) => {
+      if (input.runtimeCapabilities && ['script', 'read_doc'].includes(descriptor.name)) return false;
+      if (input.actorIsolation?.status !== 'available'
+          && ['message_actor', 'actor_create'].includes(descriptor.name)) return false;
+      return true;
+    }),
+    operations: [],
   });
   const callModel = async function* (args: any) {
     modelCalls.push(args);

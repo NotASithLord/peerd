@@ -68,7 +68,7 @@ const stripSessionHeaders = (headers) => {
 /** @type {import('/shared/tool-types.js').Tool} */
 export const fetchUrlTool = composeTool("fetch_url", {
   execute: async (args, ctx) => {
-    const authority = /** @type {{confirmWebWrite?:(url:string,method:string)=>Promise<string>,requestWebText?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<{ok?:boolean,status:number,body:string,headers:Record<string,string>,finalUrl:string,reason?:string,error?:string}>,extractReadableMarkdown?:(html:string,url:string)=>Promise<{readerable:boolean,markdown?:string,title?:string|null}>,spillResult?:(record:Record<string,unknown>)=>Promise<string|null>}|undefined} */ (
+    const authority = /** @type {{confirmWebWrite?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<string|boolean>,requestWebText?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<{ok?:boolean,status:number,body:string,headers:Record<string,string>,finalUrl:string,reason?:string,error?:string}>,extractReadableMarkdown?:(html:string,url:string)=>Promise<{readerable:boolean,markdown?:string,title?:string|null}>,spillResult?:(record:Record<string,unknown>)=>Promise<string|null>}|undefined} */ (
       /** @type {any} */ (ctx).resourceAuthority);
     if (!authority?.requestWebText) {
       return { ok: false, error: 'web_resource_authority_unavailable' };
@@ -80,6 +80,12 @@ export const fetchUrlTool = composeTool("fetch_url", {
     if (!/^https?:$/.test(parsed.protocol)) return { ok: false, error: `unsupported_scheme: ${parsed.protocol}` };
 
     const method = (args.method ?? 'GET').toUpperCase();
+    let body = args.body;
+    const headers = stripSessionHeaders(/** @type {Record<string, unknown>} */ (args.headers ?? {}));
+    if (body !== undefined && typeof body !== 'string') {
+      body = JSON.stringify(body);
+      if (!headers['Content-Type'] && !headers['content-type']) headers['Content-Type'] = 'application/json';
+    }
     // Anti-exfiltration: a non-GET can transmit in-context data to an arbitrary
     // host. Confirm by default (the shared 'web:write' key + needsWebWriteConfirm
     // predicate cover call_api + the WebVM bridge too, so one approval governs
@@ -87,15 +93,10 @@ export const fetchUrlTool = composeTool("fetch_url", {
     // GET reads are never gated.
     if (needsWebWriteConfirm(method)) {
       if (!authority.confirmWebWrite) return { ok: false, error: 'declined', content: 'No confirmation channel available for an outbound write.' };
-      const ans = await authority.confirmWebWrite(args.url, method);
-      if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined', content: 'User declined the outbound write.' };
-    }
-
-    let body = args.body;
-    const headers = stripSessionHeaders(/** @type {Record<string, unknown>} */ (args.headers ?? {}));
-    if (body !== undefined && typeof body !== 'string') {
-      body = JSON.stringify(body);
-      if (!headers['Content-Type'] && !headers['content-type']) headers['Content-Type'] = 'application/json';
+      const ans = await authority.confirmWebWrite({
+        url: args.url, method, headers, body: /** @type {string | undefined} */ (body),
+      });
+      if (ans !== true && ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined', content: 'User declined the outbound write.' };
     }
 
     try {

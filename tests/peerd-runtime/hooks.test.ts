@@ -210,7 +210,7 @@ describe('registry', () => {
     const kv = makeKv();
     const record = {
       id: 'no-evil', event: 'pre-tool-use' as const, kind: 'declarative' as const,
-      rule: { matchArg: 'url', pattern: 'evil\\.com', onMatch: 'block' as const, reason: 'blocked evil.com' },
+      rule: { matchArg: 'url', contains: 'evil.com', onMatch: 'block' as const, reason: 'blocked evil.com' },
     };
     await saveUserHook({ kv }, record);
     // installed into the live registry...
@@ -225,16 +225,93 @@ describe('registry', () => {
     expect(kv._store.get(HOOKS_STORAGE_KEY)).toEqual([]);
   });
 
+  test('saveUserHook rejects built-in IDs before persistence', async () => {
+    const kv = makeKv();
+    kv._store.set(HOOKS_STORAGE_KEY, [{
+      id: 'existing', event: 'pre-tool-use', kind: 'declarative',
+      rule: { matchArg: 'url', contains: 'existing' },
+    }]);
+    await expect(saveUserHook({ kv }, {
+      id: 'egress-allowlist', event: 'pre-tool-use', kind: 'declarative',
+      rule: { matchArg: 'url', contains: 'safe' },
+    })).rejects.toThrow(/reserved for a built-in hook/);
+    expect(kv._store.get(HOOKS_STORAGE_KEY)).toEqual([{
+      id: 'existing', event: 'pre-tool-use', kind: 'declarative',
+      rule: { matchArg: 'url', contains: 'existing' },
+    }]);
+    expect(exportHooks()).toEqual([]);
+  });
+
   test('loadUserHooks compiles stored records and skips malformed ones', async () => {
     const kv = makeKv();
     kv._store.set(HOOKS_STORAGE_KEY, [
-      { id: 'good', event: 'pre-tool-use', kind: 'declarative', rule: { matchArg: 'url', pattern: 'x' } },
+      { id: 'good', event: 'pre-tool-use', kind: 'declarative', rule: { matchArg: 'url', contains: 'x' } },
       { id: 'bad', event: 'pre-tool-use', kind: 'declarative' }, // missing rule
     ]);
     const { loaded, skipped } = await loadUserHooks({ kv, warn: () => {} });
     expect(loaded).toBe(1);
     expect(skipped).toBe(1);
     expect(listHooks().map((h) => h.id)).toContain('good');
+  });
+
+  test('loadUserHooks visibly retires legacy JS and blocks an enabled pre-hook', async () => {
+    const legacy = {
+      id: 'legacy-veto', event: 'pre-tool-use', enabled: true,
+      match: 'fetch_url', kind: 'js', body: 'return { action: "allow" };',
+    } as any;
+    const result = await loadUserHooks({
+      kv: { get: async () => [legacy] }, warn: () => {},
+    });
+    expect(result).toEqual({ loaded: 0, skipped: 1 });
+    const visible = listHooks().find((hook: any) => hook.id === 'legacy-veto') as any;
+    expect(visible).toMatchObject({
+      enabled: true, unsupported: true,
+      unsupportedReason: expect.stringContaining('retired'),
+    });
+    expect(await visible.run({ toolName: 'fetch_url', args: {}, ctx: {} }))
+      .toMatchObject({ action: 'block', reason: expect.stringContaining('declarative') });
+    expect(exportHooks()).toContainEqual(legacy);
+  });
+
+  test('loadUserHooks visibly retires a legacy regex rule and fails closed', async () => {
+    const legacy = {
+      id: 'legacy-regex', event: 'pre-tool-use', enabled: true,
+      match: 'fetch_url', kind: 'declarative',
+      rule: { matchArg: 'url', pattern: '(a+)+$' },
+    } as any;
+    const result = await loadUserHooks({
+      kv: { get: async () => [legacy] }, warn: () => {},
+    });
+    expect(result).toEqual({ loaded: 0, skipped: 1 });
+    const visible = listHooks().find((hook: any) => hook.id === 'legacy-regex') as any;
+    expect(visible).toMatchObject({
+      enabled: true, unsupported: true,
+      unsupportedReason: expect.stringContaining('Regex hook rules were retired'),
+    });
+    expect(await visible.run({ toolName: 'fetch_url', args: {}, ctx: {} }))
+      .toMatchObject({ action: 'block', reason: expect.stringContaining('contains') });
+    expect(exportHooks()).toContainEqual(legacy);
+  });
+
+  test('loadUserHooks visibly retires and fail-closes a stored built-in ID collision', async () => {
+    const kv = makeKv();
+    const collision = {
+      id: 'egress-allowlist', event: 'pre-tool-use', enabled: true,
+      kind: 'declarative', rule: { matchArg: 'url', contains: 'secret' },
+    } as any;
+    kv._store.set(HOOKS_STORAGE_KEY, [collision]);
+    registerHook({ id: 'egress-allowlist', event: 'pre-tool-use', run: () => undefined });
+    expect(await loadUserHooks({ kv, warn: () => {} }))
+      .toEqual({ loaded: 0, skipped: 1 });
+    const collisions = listHooks().filter((hook) => hook.id === 'egress-allowlist') as any[];
+    expect(collisions).toHaveLength(2);
+    const retired = collisions.find((hook) => hook.unsupported === true);
+    expect(retired?.unsupportedReason).toContain('reserved for a built-in hook');
+    expect(await retired.run({ toolName: 'fetch_url', args: {}, ctx: {} }))
+      .toMatchObject({ action: 'block', reason: expect.stringContaining('Rename') });
+    await removeHook({ kv }, 'egress-allowlist');
+    expect(kv._store.get(HOOKS_STORAGE_KEY)).toEqual([]);
+    expect(listHooks().filter((hook) => hook.id === 'egress-allowlist')).toHaveLength(1);
   });
 });
 
@@ -244,7 +321,7 @@ describe('compileUserHook (declarative)', () => {
   test('declarative rule blocks on a matching arg', async () => {
     const hook = compileUserHook({
       id: 'block-evil', event: 'pre-tool-use', kind: 'declarative',
-      rule: { matchArg: 'url', pattern: 'evil\\.com', onMatch: 'block', reason: 'no evil' },
+      rule: { matchArg: 'url', contains: 'evil.com', onMatch: 'block', reason: 'no evil' },
     });
     const blocked = await hook.run({ event: 'pre-tool-use', toolName: 'fetch', args: { url: 'https://evil.com/x' }, ctx } as any);
     expect(blocked).toMatchObject({ action: 'block', reason: 'no evil' });
@@ -252,35 +329,34 @@ describe('compileUserHook (declarative)', () => {
     expect(ok).toMatchObject({ action: 'allow' });
   });
 
-  test('a bad regexp source throws at compile (registry then skips it)', () => {
+  test('rejects legacy regex rules instead of executing them', () => {
     expect(() => compileUserHook({
       id: 'bad-re', event: 'pre-tool-use', kind: 'declarative',
       rule: { matchArg: 'url', pattern: '([' },
-    })).toThrow();
+    } as any)).toThrow(/matchArg \+ contains/);
+  });
+
+  test('rejects every code-owned hook ID', () => {
+    for (const id of ['egress-allowlist', 'egress-tripwire']) {
+      expect(() => compileUserHook({
+        id, event: 'pre-tool-use', kind: 'declarative',
+        rule: { matchArg: 'url', contains: 'safe' },
+      })).toThrow(/reserved for a built-in hook/);
+    }
   });
 });
 
-describe('compileUserHook (js) — trust gate', () => {
-  test('kind:js requires trusted:true (fail-closed on un-opted user code)', () => {
+describe('compileUserHook (legacy executable kinds)', () => {
+  test('rejects JS source even when a legacy record claims trust', () => {
     expect(() => compileUserHook({
-      id: 'untrusted', event: 'pre-tool-use', kind: 'js', body: 'return undefined;',
-    })).toThrow(/trusted/);
-  });
-
-  test('a trusted js body compiles and runs', async () => {
-    const hook = compileUserHook({
-      id: 'len-guard', event: 'pre-tool-use', kind: 'js', trusted: true,
-      body: 'if ((inv.args.text ?? "").length > 5) return { action: "block", reason: "too long" }; return { action: "allow" };',
-    });
-    expect(await hook.run({ event: 'pre-tool-use', toolName: 'type', args: { text: 'short' }, ctx } as any))
-      .toMatchObject({ action: 'allow' });
-    expect(await hook.run({ event: 'pre-tool-use', toolName: 'type', args: { text: 'much longer' }, ctx } as any))
-      .toMatchObject({ action: 'block' });
+      id: 'legacy-js', event: 'pre-tool-use', kind: 'js', trusted: true,
+      body: 'return { action: "allow" };',
+    } as any)).toThrow(/executable JS hooks are not supported/);
   });
 });
 
 describe('parseHookMarkdown', () => {
-  test('parses frontmatter + js body into a record', () => {
+  test('rejects frontmatter + JS bodies instead of dynamically compiling them', () => {
     const md = [
       '---',
       'id: block-secrets',
@@ -295,10 +371,7 @@ describe('parseHookMarkdown', () => {
       'if (/sk-[A-Za-z0-9]{20,}/.test(inv.args.text ?? "")) return { action: "block", reason: "secret" };',
       '```',
     ].join('\n');
-    const rec = parseHookMarkdown(md);
-    expect(rec).toMatchObject({ id: 'block-secrets', event: 'pre-tool-use', match: 'type', order: 50, kind: 'js', trusted: true });
-    expect(rec.body).toContain('action');
-    expect(rec.doc).toBe('Block typing anything that looks like a secret.');
+    expect(() => parseHookMarkdown(md)).toThrow(/executable JS hooks are not supported/);
   });
 
   test('parses a declarative rule block from frontmatter', () => {
@@ -308,14 +381,14 @@ describe('parseHookMarkdown', () => {
       'event: pre-tool-use',
       'rule:',
       '  matchArg: url',
-      '  pattern: evil',
+      '  contains: evil',
       '  onMatch: block',
       '---',
       'Declarative deny.',
     ].join('\n');
     const rec = parseHookMarkdown(md);
     expect(rec.kind).toBe('declarative');
-    expect(rec.rule).toEqual({ matchArg: 'url', pattern: 'evil', onMatch: 'block' });
+    expect(rec.rule).toEqual({ matchArg: 'url', contains: 'evil', onMatch: 'block' });
   });
 });
 

@@ -53,6 +53,9 @@ export const clickTool = definePageAuthorityHandler({
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
     if (!tab?.id) return { ok: false, error: 'no_target_tab', outcomeKind: 'pre-effect-failure' };
+    if (ctx.abortSignal?.aborted) return {
+      ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+    };
 
     // why: domRefs/debuggerPool are SW-injected onto ctx but absent from the
     // ToolContext typedef; scripting is typed opaquely — narrow all three.
@@ -86,12 +89,18 @@ export const clickTool = definePageAuthorityHandler({
           return { ok: false, error: 'matched_count_mismatch', matchedCount: 1, expectedCount, outcomeKind: 'pre-effect-failure' };
         }
         try {
+          const permissionRefusal = await ctx.assertPageMutationPermission?.();
+          if (permissionRefusal) return permissionRefusal;
+          if (ctx.abortSignal?.aborted) return {
+            ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+          };
           const r = await debuggerPool.clickBackendNode(
             tab.id, entry.backendDOMNodeId, browserDocumentIdentity(tab));
           if (!r.ok) return formSubmissionRefusalFrom(r) ?? browserDocumentRefusalFrom(r) ?? {
             ok: false,
             error: r.error ?? 'ref_click_failed',
-            ...(r.outcomeKind ? { outcomeKind: r.outcomeKind } : {}),
+            outcomeKind: r.outcomeKind ?? 'host-lost',
+            ...(r.outcomeKind ? {} : { outcomeKnown: false, retryable: false }),
           };
           return {
             ok: true,
@@ -109,7 +118,8 @@ export const clickTool = definePageAuthorityHandler({
           return {
             ok: false,
             error: `ref_click_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
-            ...(outcomeKind ? { outcomeKind } : {}),
+            outcomeKind: outcomeKind ?? 'host-lost',
+            ...(outcomeKind ? {} : { outcomeKnown: false, retryable: false }),
           };
         }
       }
@@ -117,6 +127,11 @@ export const clickTool = definePageAuthorityHandler({
       if (entry.walkId != null) {
         let scriptResult;
         try {
+          const permissionRefusal = await ctx.assertPageMutationPermission?.();
+          if (permissionRefusal) return permissionRefusal;
+          if (ctx.abortSignal?.aborted) return {
+            ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+          };
           const results = await scripting.executeScript({
             target: scriptingTarget(tab),
             func: clickInjected,
@@ -124,9 +139,9 @@ export const clickTool = definePageAuthorityHandler({
           });
           scriptResult = results[0]?.result;
         } catch (e) {
-          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
+          return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
         }
-        if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
+        if (!scriptResult) return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
         if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
           ?? { ok: false, error: scriptResult.error ?? 'ref_click_failed' };
         return {
@@ -164,6 +179,11 @@ export const clickTool = definePageAuthorityHandler({
 
     let scriptResult;
     try {
+      const permissionRefusal = await ctx.assertPageMutationPermission?.();
+      if (permissionRefusal) return permissionRefusal;
+      if (ctx.abortSignal?.aborted) return {
+        ok: false, error: 'page_action_aborted', outcomeKind: 'pre-effect-failure', retryable: false,
+      };
       const results = await scripting.executeScript({
         target: scriptingTarget(tab),
         func: clickInjected,
@@ -171,11 +191,11 @@ export const clickTool = definePageAuthorityHandler({
       });
       scriptResult = results[0]?.result;
     } catch (e) {
-      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKind: 'pre-effect-failure' };
+      return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
     }
 
     if (!scriptResult) {
-      return { ok: false, error: 'script_returned_nothing' };
+      return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
     }
     if (!scriptResult.ok) {
       return formSubmissionRefusalFrom(scriptResult)
