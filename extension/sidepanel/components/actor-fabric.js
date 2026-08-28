@@ -133,7 +133,7 @@ const renderDetail = (node, detailId, settled) => m('.actor-fabric-detail', {
 export const ActorFabric = {
   /** @param {{ state: ActorFabricState }} vnode */
   oninit(vnode) {
-    vnode.state.expanded = true;
+    vnode.state.expanded = false;
     vnode.state.hadLiveNodes = false;
     vnode.state.settled = false;
     vnode.state.rootSessionId = '';
@@ -162,7 +162,7 @@ export const ActorFabric = {
     if (ui.rootSessionId !== rootSessionId) {
       if (ui.expiryTimer) clearTimeout(ui.expiryTimer);
       ui.rootSessionId = rootSessionId;
-      ui.expanded = true;
+      ui.expanded = false;
       ui.hadLiveNodes = false;
       ui.settled = false;
       ui.selectedId = '';
@@ -181,10 +181,7 @@ export const ActorFabric = {
     if (liveFabric.activeActors > 0) {
       if (ui.expiryTimer) { clearTimeout(ui.expiryTimer); ui.expiryTimer = null; }
       const startingBatch = !ui.hadLiveNodes || ui.settled;
-      if (startingBatch) {
-        ui.expanded = true;
-        ui.selectedId = '';
-      }
+      if (startingBatch) ui.selectedId = '';
       ui.hadLiveNodes = true;
       ui.settled = false;
       ui.lastFabric = startingBatch ? liveFabric : mergeReceipt(ui.lastFabric, liveFabric);
