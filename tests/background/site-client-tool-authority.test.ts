@@ -118,6 +118,58 @@ describe('exact site-client capture authority', () => {
     });
   });
 
+  test.each(['authorization-lost', 'record-run-revokes'] as const)(
+    'post-dispatch host loss outranks later %s custody checks',
+    async (race) => {
+      let authorizationReads = 0;
+      let authorized = true;
+      let recordRuns = 0;
+      const ctx: any = {
+        session: { sessionId: 'actor-web-1' },
+        authorizeSiteClientOrigin: async () => {
+          authorizationReads += 1;
+          return authorized;
+        },
+        siteClients: {
+          get: async () => ({ body: 'return { fetch: async () => ({ ok: true }) };' }),
+          recordRun: async () => {
+            recordRuns += 1;
+            if (race === 'record-run-revokes') authorized = false;
+          },
+        },
+        jsOffscreenClient: {
+          execHeadless: async () => {
+            if (race === 'authorization-lost') authorized = false;
+            throw Object.assign(new Error('sealed host disappeared'), {
+              executionDispatched: true,
+              outcomeKnown: false,
+              outcomeKind: 'transport-lost',
+            });
+          },
+        },
+        scriptRuns: {
+          mintRunId: () => 'site-run-lost', register: () => {}, release: () => {},
+        },
+      };
+      const authority = createSiteClientToolAuthority({
+        binding: { operation: 'turn.site-client.run', args: {
+          origin: 'https://example.com', code: 'return client.fetch()', timeoutMs: 1_000,
+        } },
+        ctx,
+      });
+      await expect(authority.runStoredClient(
+        'https://example.com', 'return client.fetch()', 1_000,
+      )).rejects.toMatchObject({
+        performed: true, executionDispatched: true,
+        outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+      });
+      // Only the two admission reads may run. Neither a later revocation nor
+      // bookkeeping failure may rewrite already-dispatched custody as refusal.
+      expect(authorizationReads).toBe(2);
+      expect(recordRuns).toBe(0);
+    },
+  );
+
   test.each(['start', 'stop'] as const)(
     'Stop while resolving the owned tab prevents capture %s',
     async (action) => {

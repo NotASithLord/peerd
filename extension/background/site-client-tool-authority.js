@@ -131,11 +131,6 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
           timeoutMs, siteFetch: origin, ownerSessionId, runId, signal: abortSignal,
         });
       } catch (cause) {
-        if (!await authorized(origin)) return refusal();
-        if (!abortSignal?.aborted) {
-          await ctx.siteClients.recordRun(origin, { ok: false }).catch(() => {});
-          if (!await authorized(origin)) return refusal();
-        }
         const custody = /** @type {{executionDispatched?:boolean,outcomeKnown?:boolean,outcomeKind?:string}} */ (cause);
         if (custody?.executionDispatched === true || custody?.outcomeKnown === false
             || custody?.outcomeKind === 'transport-lost') {
@@ -144,12 +139,18 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
           // verdict so neither the model nor lifecycle recovery may retry it.
           const failure = cause instanceof Error ? cause : new Error(String(cause));
           Object.assign(failure, {
+            performed: true,
             executionDispatched: true,
             outcomeKnown: false,
             outcomeKind: 'transport-lost',
             retryable: false,
           });
           throw failure;
+        }
+        if (!await authorized(origin)) return refusal();
+        if (!abortSignal?.aborted) {
+          await ctx.siteClients.recordRun(origin, { ok: false }).catch(() => {});
+          if (!await authorized(origin)) return refusal();
         }
         const error = /** @type {{name?:string,message?:string}} */ (cause);
         return abortSignal?.aborted
