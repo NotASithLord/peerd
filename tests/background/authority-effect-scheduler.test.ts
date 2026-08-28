@@ -14,6 +14,15 @@ const pageKey = (sessionId: string, tabId: number | null, pinned: string) =>
     activeTab: tabId === null ? null : { id: tabId }, session: { sessionId },
   });
 
+const siteClientKey = (sessionId: string, tabId: number | null, pinned: string,
+  backing: 'tab' | 'api', origin = 'https://example.test') =>
+  authorityEffectResourceKey('turn.site-client.run', { origin }, {
+    actorType: 'web', actorBacking: backing,
+    actorInstanceId: backing === 'api' ? origin : 'web',
+    authorityPageResourceKey: pinned,
+    activeTab: tabId === null ? null : { id: tabId }, session: { sessionId },
+  });
+
 describe('authority effect scheduler', () => {
   test('admits a read wave before queued writers and preserves writer FIFO', async () => {
     const scheduler = createAuthorityEffectScheduler();
@@ -70,6 +79,69 @@ describe('authority effect scheduler', () => {
     firstGate.resolve();
     await Promise.all([first, sameTab]);
     expect(entered).toEqual(['first', 'other-tab', 'same-tab']);
+  });
+
+  test('serializes tab-backed site-client runs with page mutation on that tab only', async () => {
+    const scheduler = createAuthorityEffectScheduler();
+    const pageGate = deferred();
+    const pageEntered = deferred();
+    const entered: string[] = [];
+    const page = scheduler.run({
+      read: false, target: pageKey('actor-a', 7, 'page:tab:7'),
+    }, async () => {
+      entered.push('page');
+      pageEntered.resolve();
+      await pageGate.promise;
+    });
+    await pageEntered.promise;
+    const sameTabClient = scheduler.run({
+      read: false,
+      target: siteClientKey('actor-b', 7, 'page:tab:7', 'tab'),
+    }, () => { entered.push('same-tab-client'); });
+    const otherTabClient = scheduler.run({
+      read: false,
+      target: siteClientKey('actor-c', 8, 'page:tab:8', 'tab'),
+    }, () => { entered.push('other-tab-client'); });
+    const apiClient = scheduler.run({
+      read: false,
+      target: siteClientKey('actor-api', null, '', 'api'),
+    }, () => { entered.push('api-client'); });
+    await Promise.all([otherTabClient, apiClient]);
+    expect(entered).toEqual(['page', 'other-tab-client', 'api-client']);
+    pageGate.resolve();
+    await Promise.all([page, sameTabClient]);
+    expect(entered).toEqual([
+      'page', 'other-tab-client', 'api-client', 'same-tab-client',
+    ]);
+  });
+
+  test('serializes API Web actors by origin while unrelated origins overlap', async () => {
+    const scheduler = createAuthorityEffectScheduler();
+    const firstGate = deferred();
+    const firstEntered = deferred();
+    const entered: string[] = [];
+    const first = scheduler.run({
+      read: false,
+      target: siteClientKey('api-a', null, '', 'api', 'https://example.test'),
+    }, async () => {
+      entered.push('first-origin');
+      firstEntered.resolve();
+      await firstGate.promise;
+    });
+    await firstEntered.promise;
+    const sameOrigin = scheduler.run({
+      read: false,
+      target: siteClientKey('api-b', null, '', 'api', 'https://example.test'),
+    }, () => { entered.push('same-origin'); });
+    const otherOrigin = scheduler.run({
+      read: false,
+      target: siteClientKey('api-c', null, '', 'api', 'https://other.test'),
+    }, () => { entered.push('other-origin'); });
+    await otherOrigin;
+    expect(entered).toEqual(['first-origin', 'other-origin']);
+    firstGate.resolve();
+    await Promise.all([first, sameOrigin]);
+    expect(entered).toEqual(['first-origin', 'other-origin', 'same-origin']);
   });
 
   test('keeps a zero-tab actor on one lane through first-tab adoption', async () => {

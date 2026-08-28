@@ -35,6 +35,11 @@ export const authorityEffectResourceKey = (
     case 'siteclient': {
       if (operation === 'turn.site-client.capture-start'
           || operation === 'turn.site-client.capture-stop') return pageResource(ctx);
+      // A stored client run in a tab-backed Web actor can mutate the same site
+      // as page click/fill/program operations. Keep both on the host-pinned
+      // page lane; API actors have no page and remain origin-serialized.
+      if (operation === 'turn.site-client.run' && ctx?.actorType === 'web'
+          && ctx?.actorBacking !== 'api') return pageResource(ctx);
       let origin = '';
       try { origin = new URL(text(args?.origin)).origin; } catch { /* exact binder refuses it */ }
       return `siteclient:${origin || actorInstance || session(ctx)}`;
