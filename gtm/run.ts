@@ -14,7 +14,7 @@
 //
 // Strategy + etiquette: gtm/README.md. Seeds: gtm/seeds.ts (edit them!).
 
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { collectBluesky } from './collect/bluesky.ts';
 import { collectGithub } from './collect/github.ts';
 import { collectHn } from './collect/hn.ts';
@@ -46,9 +46,8 @@ const collect = async (): Promise<void> => {
     const collector = COLLECTORS[source.trim()];
     if (!collector) throw new Error(`unknown source "${source}" (expected: ${Object.keys(COLLECTORS).join(', ')})`);
     const cachePath = `${dataDir}/${source.trim()}.json`;
-    // why attempt-then-handle (not existsSync): the cache probe is a fast
-    // skip, but the WRITE is exclusive ('wx') unless --fresh, so a cache
-    // appearing between probe and write is refused instead of clobbered.
+    // why attempt-then-handle: the cache probe is only a fast skip. The
+    // atomic publish below decides which concurrent crawl keeps its result.
     const fresh = hasFlag('fresh');
     if (!fresh && await stat(cachePath).then(() => true, () => false)) {
       console.error(`${source}: cached at ${cachePath} (use --fresh to recrawl)`);
@@ -56,12 +55,21 @@ const collect = async (): Promise<void> => {
     }
     console.error(`${source}: collecting…`);
     const graph = await collector();
+    const temporaryPath = `${cachePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
-      await writeFile(cachePath, JSON.stringify(serializeGraph(graph)), { flag: fresh ? 'w' : 'wx' });
+      await writeFile(temporaryPath, JSON.stringify(serializeGraph(graph)), { flag: 'wx' });
+      // why link when not fresh: link publishes the complete file and fails
+      // if another process won. Rename atomically replaces a fresh cache.
+      if (fresh) await rename(temporaryPath, cachePath);
+      else await link(temporaryPath, cachePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       console.error(`${source}: cache appeared mid-crawl; kept the existing ${cachePath}`);
       continue;
+    } finally {
+      await unlink(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
     }
     console.error(`${source}: ${graph.nodes.size} nodes, ${graph.edges.size} edges → ${cachePath}`);
   }
@@ -93,7 +101,7 @@ const analyze = async (): Promise<void> => {
   await writeFile(`${outDir}/graph.gexf`, toGexf(merged, scores));
   await writeFile(`${outDir}/nodes.csv`, toNodesCsv(merged, scores));
   await writeFile(`${outDir}/outreach.md`, toOutreachMarkdown(ranked, top));
-  console.error(`wrote gtm/out/graph.gexf, nodes.csv, outreach.md (top ${top} of ${ranked.length} people)`);
+  console.error(`wrote gtm/out/graph.gexf, nodes.csv, outreach.md (top ${top} of ${ranked.length} accounts)`);
 };
 
 const command = process.argv[2];

@@ -19,16 +19,18 @@ export interface BlueskyCollectOptions {
   /** discovered actors whose follow lists we then crawl */
   followCrawlCap?: number;
   followCapPerActor?: number;
+  minimumIntervalMs?: number;
   fetchImpl?: typeof fetch;
   log?: (message: string) => void;
 }
 
 interface BskyActor { did: string; handle: string; }
-interface FollowPage { cursor?: string; followers?: BskyActor[]; follows?: BskyActor[]; }
+interface FollowPage { cursor?: string; subject?: BskyActor; followers?: BskyActor[]; follows?: BskyActor[]; }
+interface CollectedPage { actors: BskyActor[]; subject?: BskyActor; }
 
 const appView = 'https://public.api.bsky.app/xrpc';
 
-const actorId = (actor: BskyActor): string => `bsky:${actor.handle}`;
+const actorId = (actor: BskyActor): string => `bsky:${actor.did || actor.handle}`;
 
 export const collectBluesky = async (
   seedActors: string[],
@@ -36,63 +38,83 @@ export const collectBluesky = async (
     neighborhoodCap = 3000,
     followCrawlCap = 1000,
     followCapPerActor = 300,
+    minimumIntervalMs = 100,
     fetchImpl,
     log = console.error,
   }: BlueskyCollectOptions = {},
 ): Promise<Graph> => {
   const graph = createGraph();
-  const request: FetchJsonOptions = { fetchImpl };
+  const request: FetchJsonOptions = { fetchImpl, minimumIntervalMs };
 
   const ensureActor = (actor: BskyActor): string => {
     const id = actorId(actor);
+    const existing = graph.nodes.get(id);
+    const url = `https://bsky.app/profile/${actor.handle}`;
     addNode(graph, {
       id,
       label: actor.handle,
       kind: 'bluesky',
       person: true,
-      url: `https://bsky.app/profile/${actor.handle}`,
+      url,
     });
+    if (existing && actor.did) graph.nodes.set(id, { ...existing, label: actor.handle, url });
     return id;
   };
 
-  const page = async (endpoint: string, actor: string, cap: number): Promise<BskyActor[]> => {
+  const page = async (endpoint: string, actor: string, cap: number): Promise<CollectedPage> => {
     const collected: BskyActor[] = [];
+    let subject: BskyActor | undefined;
     let cursor: string | undefined;
     while (collected.length < cap) {
       const url = `${appView}/${endpoint}?actor=${encodeURIComponent(actor)}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
       const data = await fetchJson<FollowPage>(url, request);
+      subject ??= data.subject;
       const batch = data.followers ?? data.follows ?? [];
       collected.push(...batch);
       cursor = data.cursor;
       if (!cursor || batch.length === 0) break;
     }
-    return collected.slice(0, cap);
+    return { actors: collected.slice(0, cap), subject };
   };
 
-  const discovered = new Set<string>(); // handles seen anywhere near the seeds
+  const discovered = new Map<string, BskyActor>();
+  const discoveryCount = new Map<string, number>();
+  const rememberActor = (actor: BskyActor): string => {
+    const id = ensureActor(actor);
+    discovered.set(id, actor);
+    discoveryCount.set(id, (discoveryCount.get(id) ?? 0) + 1);
+    return id;
+  };
 
   for (const seed of seedActors) {
     log(`  neighborhood of @${seed}…`);
-    const seedId = ensureActor({ did: '', handle: seed });
-    discovered.add(seed);
-    for (const follower of await page('app.bsky.graph.getFollowers', seed, neighborhoodCap)) {
-      addEdge(graph, ensureActor(follower), seedId);
-      discovered.add(follower.handle);
+    const followers = await page('app.bsky.graph.getFollowers', seed, neighborhoodCap);
+    const follows = await page('app.bsky.graph.getFollows', seed, neighborhoodCap);
+    const subject = follows.subject ?? followers.subject ?? await fetchJson<BskyActor>(
+      `${appView}/app.bsky.actor.getProfile?actor=${encodeURIComponent(seed)}`,
+      request,
+    );
+    const seedId = rememberActor(subject);
+    for (const follower of followers.actors) {
+      addEdge(graph, rememberActor(follower), seedId);
     }
-    for (const followed of await page('app.bsky.graph.getFollows', seed, neighborhoodCap)) {
-      addEdge(graph, seedId, ensureActor(followed));
-      discovered.add(followed.handle);
+    for (const followed of follows.actors) {
+      addEdge(graph, seedId, rememberActor(followed));
     }
   }
 
-  const crawlOrder = [...discovered].sort().slice(0, followCrawlCap);
+  const crawlOrder = [...discovered.entries()]
+    .sort((a, b) => (discoveryCount.get(b[0]) ?? 0) - (discoveryCount.get(a[0]) ?? 0)
+      || a[0].localeCompare(b[0]))
+    .slice(0, followCrawlCap);
   log(`  in-community follow lists for ${crawlOrder.length} actors…`);
   let crawled = 0;
-  for (const handle of crawlOrder) {
-    for (const followed of await page('app.bsky.graph.getFollows', handle, followCapPerActor)) {
-      if (graph.nodes.has(actorId(followed))) {
-        addEdge(graph, `bsky:${handle}`, actorId(followed));
-      }
+  for (const [, actor] of crawlOrder) {
+    const follows = await page('app.bsky.graph.getFollows', actor.did || actor.handle, followCapPerActor);
+    if (follows.subject) ensureActor(follows.subject);
+    for (const followed of follows.actors) {
+      const followedId = actorId(followed);
+      if (graph.nodes.has(followedId)) addEdge(graph, actorId(actor), followedId);
     }
     if (++crawled % 100 === 0) log(`    ${crawled}/${crawlOrder.length}`);
   }

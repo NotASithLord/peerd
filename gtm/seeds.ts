@@ -7,7 +7,7 @@
 // peerd's four adjacent communities; prune or extend before a real run.
 
 export interface Seeds {
-  /** owner/name - stargazers + their in-community follow graph */
+  /** owner/name - contributors + their in-community follow graph */
   githubRepos: string[];
   /** Bluesky handles - followers/follows neighborhoods via the public AppView */
   blueskyActors: string[];

@@ -7,7 +7,7 @@
 //
 // why these algorithms: the Figma playbook is "find the influential
 // nodes, reach out personally". Influence is not one number -
-//   - PageRank      → who the community endorses (follows/stars flow in)
+//   - PageRank      → who the community endorses (follows flow in)
 //   - betweenness   → who BRIDGES sub-communities (the best evangelists:
 //                     one post reaches audiences that don't overlap)
 //   - in-degree     → raw in-community reach (sanity anchor)
@@ -17,7 +17,7 @@
 export type NodeKind = 'github' | 'bluesky' | 'hn' | 'repo' | 'story';
 
 export interface GraphNode {
-  /** Globally unique, source-prefixed: "github:alice", "repo:owner/name", "bsky:alice.dev" */
+  /** Globally unique, source-prefixed: "github:alice", "repo:owner/name", "bsky:did:plc:..." */
   id: string;
   label: string;
   kind: NodeKind;
@@ -27,8 +27,8 @@ export interface GraphNode {
   meta?: Record<string, string | number>;
 }
 
-/** Directed endorsement: source → target means "source endorses target"
- * (follows them, starred their repo, engaged with their story). */
+/** Directed signal: source → target records a follow, contribution, or
+ * story engagement. */
 export interface GraphEdge {
   source: string;
   target: string;
@@ -46,8 +46,8 @@ export const createGraph = (): Graph => ({ nodes: new Map(), edges: new Map() })
 
 export const addNode = (graph: Graph, node: GraphNode): void => {
   const existing = graph.nodes.get(node.id);
-  // why merge-not-replace: the same person can arrive from two collectors
-  // (or two seed repos); keep the richest record we have seen.
+  // why merge-not-replace: the same account can arrive from two seeds.
+  // Keep the richest record we have seen.
   if (existing) {
     graph.nodes.set(node.id, {
       ...existing,
@@ -161,14 +161,15 @@ export const pageRank = (
 
 export interface BetweennessOptions {
   /** Run Brandes from at most this many deterministic pivots and scale up.
-   * why: exact Brandes is O(V·E); on a 50k-node crawl that is minutes we
-   * don't need - sampled betweenness preserves the RANKING we act on. */
+   * why: sampled betweenness preserves the ranking we act on. */
   maxPivots?: number;
+  /** Limit the approximate node and edge visits across all pivots. */
+  maxOperations?: number;
 }
 
 export const betweenness = (
   graph: Graph,
-  { maxPivots = 2000 }: BetweennessOptions = {},
+  { maxPivots = 128, maxOperations = 25_000_000 }: BetweennessOptions = {},
 ): Map<string, number> => {
   const ids = sortedNodeIds(graph);
   const n = ids.length;
@@ -190,7 +191,11 @@ export const betweenness = (
     neighbors[t].push(s);
   }
 
-  const pivotCount = Math.min(maxPivots, n);
+  // why use both limits: a pivot cap alone still permits extreme work on
+  // dense crawls. One graph pass is the minimum useful approximation.
+  const workPerPivot = n + seen.size;
+  const operationPivots = Math.max(1, Math.floor(maxOperations / workPerPivot));
+  const pivotCount = Math.max(1, Math.min(maxPivots, operationPivots, n));
   const stride = n / pivotCount;
   const centrality = new Float64Array(n);
 
@@ -354,8 +359,12 @@ export const toGexf = (graph: Graph, scores: NodeScores): string => {
   return lines.join('\n');
 };
 
-const escapeCsv = (value: string): string =>
-  /[",\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+const escapeCsv = (value: string): string => {
+  // why prefix an apostrophe: spreadsheets can execute untrusted cells as
+  // formulas. The apostrophe forces text after the CSV parser removes quotes.
+  const safe = /^[\t\r\n ]*[=+\-@]/.test(value) ? `'${value}` : value;
+  return /[",\r\n]/.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe;
+};
 
 export const toNodesCsv = (graph: Graph, scores: NodeScores): string => {
   const lines = ['id,label,kind,person,pagerank,betweenness,indegree,community,url'];

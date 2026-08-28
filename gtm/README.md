@@ -19,16 +19,16 @@ The playbook has four steps; only the data sources needed updating:
    lived on Twitter. In 2026, Twitter/X's API is paywalled and scraping
    it violates ToS - and peerd's communities don't live there anyway.
    The public, ToS-clean graphs that matter for a dev tool like peerd:
-   - **GitHub** - the strongest endorsement graph for developer tools.
-     Stars say "I care about this space"; follows say "I listen to this
+   - **GitHub** - the strongest participation graph for developer tools.
+     Contributions say "I build in this space"; follows say "I listen to this
      person."
    - **Bluesky** - a genuinely open follow graph (free, unauthenticated
      AppView API), and the network where the local-first / dweb crowd -
      the `peerd-distributed` audience - actually hangs out.
    - **Hacker News** - no follow graph, but topic engagement: who writes
      and who discusses "browser agent", "local-first", "BYOK" stories.
-2. **Build the graph.** Every star, follow, and comment becomes a
-   directed *endorsement* edge. The crawl is seeded from communities
+2. **Build the graph.** Every contribution, follow, and comment becomes a
+   directed signal edge. The crawl is seeded from communities
    adjacent to peerd (see `seeds.ts` - editing that file IS the
    strategy) and - the important trick - follow edges are kept
    **in-community only**: someone with 300 followers *inside this graph*
@@ -84,6 +84,10 @@ Crawl caps, retry/backoff, and rate-limit handling live in
 editing loop bodies. The pure scoring core (`gtm/lib/graph.ts`,
 `gtm/lib/rank.ts`) is tested from `tests/gtm/` and rides the repo's
 strict typecheck.
+
+IDs are source-specific accounts. The toolkit does not infer that GitHub,
+Bluesky, and Hacker News accounts belong to one human. Deduplicate the
+worksheet before outreach.
 
 ## Outreach etiquette (the part that makes it work)
 

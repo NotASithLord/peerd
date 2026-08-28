@@ -16,7 +16,7 @@ const person = (graph: Graph, id: string): void =>
   addNode(graph, { id, label: id, kind: 'github', person: true, url: `https://x/${id}` });
 
 /** Two clusters joined only through `bridge`, plus a repo node the
- * a-cluster stars. Each cluster is internally connected by a ring so no
+ * a-cluster signals. Each cluster is internally connected by a ring so no
  * cluster member is an accidental cut vertex, and `bridge` attaches to
  * TWO nodes per side so no attachment point shares its betweenness. The
  * expected winners are unambiguous: `hub` collects endorsements
@@ -118,6 +118,12 @@ describe('centrality', () => {
     expect(topTwo).toContain('bridge');
   });
 
+  test('betweenness limits pivot work by graph size', () => {
+    const graph = fixture();
+    expect([...betweenness(graph, { maxPivots: 100, maxOperations: 1 })])
+      .toEqual([...betweenness(graph, { maxPivots: 1 })]);
+  });
+
   test('inDegree counts weighted endorsements', () => {
     const graph = fixture();
     expect(inDegree(graph).get('hub')).toBe(4);
@@ -135,7 +141,7 @@ describe('centrality', () => {
 });
 
 describe('outreach ranking', () => {
-  test('ranks people only, surfaces the bridge, and rates hub above its endorsers', () => {
+  test('ranks human accounts only, surfaces the bridge, and rates hub above its endorsers', () => {
     const graph = fixture();
     const ranked = rankOutreach(graph, computeScores(graph));
     expect(ranked.every((candidate) => !candidate.id.startsWith('repo:'))).toBe(true);
@@ -152,6 +158,24 @@ describe('outreach ranking', () => {
     const graph = fixture();
     const ranked = rankOutreach(graph, computeScores(graph));
     expect(ranked.find((candidate) => candidate.id === 'bridge')!.communitiesTouched).toBeGreaterThan(1);
+  });
+
+  test('gives equal percentile ranks to tied scores', () => {
+    const graph = createGraph();
+    for (const id of ['a', 'b', 'c']) person(graph, id);
+    const scores = {
+      pageRank: new Map([['a', 1], ['b', 1], ['c', 2]]),
+      betweenness: new Map([['a', 0], ['b', 0], ['c', 0]]),
+      inDegree: new Map([['a', 0], ['b', 0], ['c', 0]]),
+      community: new Map([['a', 0], ['b', 0], ['c', 0]]),
+    };
+    const ranked = rankOutreach(graph, scores);
+    const a = ranked.find((candidate) => candidate.id === 'a')!;
+    const b = ranked.find((candidate) => candidate.id === 'b')!;
+    expect(a.pageRankPercentile).toBe(0.25);
+    expect(b.pageRankPercentile).toBe(0.25);
+    expect(a.score).toBe(b.score);
+    expect(ranked.map((candidate) => candidate.betweennessPercentile)).toEqual([0.5, 0.5, 0.5]);
   });
 
   test('markdown worksheet renders every top candidate and community coverage', () => {
@@ -181,5 +205,13 @@ describe('exports', () => {
     addNode(graph, { id: 'story:1', label: 'Ask HN: agents, but local?', kind: 'story', person: false });
     const csv = toNodesCsv(graph, computeScores(graph));
     expect(csv).toContain('"Ask HN: agents, but local?"');
+  });
+
+  test('CSV forces untrusted formulas to plain text', () => {
+    const graph = createGraph();
+    addNode(graph, { id: 'hn:unsafe', label: ' =2+3', kind: 'hn', person: true });
+    const csv = toNodesCsv(graph, computeScores(graph));
+    expect(csv).toContain(",' =2+3,");
+    expect(csv).not.toContain(', =2+3,');
   });
 });

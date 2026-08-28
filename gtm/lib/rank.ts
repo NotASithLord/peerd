@@ -34,10 +34,18 @@ export interface OutreachCandidate {
 }
 
 const percentileRanks = (ids: string[], values: Map<string, number>): Map<string, number> => {
-  const sorted = [...ids].sort((a, b) => (values.get(a) ?? 0) - (values.get(b) ?? 0));
+  const valueOf = (id: string): number => values.get(id) ?? 0;
+  const sorted = [...ids].sort((a, b) => valueOf(a) - valueOf(b) || a.localeCompare(b));
   const result = new Map<string, number>();
   const denominator = Math.max(1, sorted.length - 1);
-  sorted.forEach((id, i) => result.set(id, i / denominator));
+  let start = 0;
+  while (start < sorted.length) {
+    let end = start + 1;
+    while (end < sorted.length && valueOf(sorted[end]) === valueOf(sorted[start])) end++;
+    const percentile = ((start + end - 1) / 2) / denominator;
+    for (const id of sorted.slice(start, end)) result.set(id, percentile);
+    start = end;
+  }
   return result;
 };
 
@@ -47,7 +55,7 @@ export const rankOutreach = (
   weights: RankWeights = DEFAULT_WEIGHTS,
 ): OutreachCandidate[] => {
   // why person-only here (not before scoring): repos/stories must stay in
-  // the graph while scoring - stars flowing through a repo node are the
+  // the graph while scoring - contributions flowing through a repo node are the
   // endorsement signal - but they are never outreach targets themselves.
   const personIds = [...graph.nodes.values()].filter((node) => node.person).map((node) => node.id);
 
@@ -104,8 +112,8 @@ export const toOutreachMarkdown = (candidates: OutreachCandidate[], top = 150): 
   const lines = [
     '# peerd - outreach worksheet',
     '',
-    `Top ${picked.length} of ${candidates.length} people, scored by weighted PageRank / betweenness / in-degree percentiles.`,
-    'Work the list personally: one human, one specific message, no blasts.',
+    `Top ${picked.length} of ${candidates.length} accounts, scored by weighted PageRank / betweenness / in-degree percentiles.`,
+    'Deduplicate identities first. Contact each human once, with one specific message.',
     '',
     '| # | who | where | score | why | link |',
     '|---|-----|-------|-------|-----|------|',

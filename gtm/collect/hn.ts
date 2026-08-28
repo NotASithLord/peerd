@@ -15,6 +15,7 @@ export interface HnCollectOptions {
   commenterCapPerStory?: number;
   /** ignore stories below this score - low-engagement stories add noise */
   minStoryPoints?: number;
+  minimumIntervalMs?: number;
   fetchImpl?: typeof fetch;
   log?: (message: string) => void;
 }
@@ -39,12 +40,13 @@ export const collectHn = async (
     storiesPerQuery = 30,
     commenterCapPerStory = 200,
     minStoryPoints = 20,
+    minimumIntervalMs = 100,
     fetchImpl,
     log = console.error,
   }: HnCollectOptions = {},
 ): Promise<Graph> => {
   const graph = createGraph();
-  const request: FetchJsonOptions = { fetchImpl };
+  const request: FetchJsonOptions = { fetchImpl, minimumIntervalMs };
   const seenStories = new Set<string>();
 
   for (const query of queries) {
@@ -69,14 +71,16 @@ export const collectHn = async (
       addNode(graph, userNode(hit.author));
 
       const item = await fetchJson<AlgoliaItem>(`${api}/items/${hit.objectID}`, request);
-      let commenters = 0;
+      const commenters = new Set<string>();
       const walk = (children: AlgoliaItem[] | undefined): void => {
         if (!children) return;
         for (const child of children) {
-          if (commenters >= commenterCapPerStory) return;
+          if (commenters.size >= commenterCapPerStory) return;
           if (child.author && child.author !== hit.author) {
-            commenters++;
-            addNode(graph, userNode(child.author));
+            if (!commenters.has(child.author)) {
+              commenters.add(child.author);
+              addNode(graph, userNode(child.author));
+            }
             addEdge(graph, `hn:${child.author}`, storyId);
             addEdge(graph, `hn:${child.author}`, `hn:${hit.author}`);
           }
