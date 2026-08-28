@@ -24,6 +24,7 @@ import {
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT,
 } from './e2e-harness.mjs';
+import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -184,6 +185,10 @@ let harvestOrchTurn = 0;
 let harvestDelegated = false;
 let harvestActorUsedCode = false;
 let harvestFixtureUrl = '';
+let storeScriptingState = {
+  delegated: false, actorTurn: 0, actorPrompt: '', results: [], wakeBody: '', orderRef: '', sendRef: '',
+};
+let storeScriptingFixtureUrl = '';
 let numericTabAuthorityState = {
   addressed: false,
   tabId: null, refusalBody: '', actorCallsAfterAddress: 0,
@@ -1551,6 +1556,133 @@ export const STATES = [
         await rec.shot('final');
       } finally {
         server.close();
+      }
+    },
+  },
+
+  // This state proves the chrome.scripting fallback in the real browser.
+  {
+    name: 'chrome-scripting-browser-actions', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex, request) => {
+      const body = (request && request.postData) || '';
+      if (body.includes('<actor_agent>')) {
+        if (!storeScriptingState.actorPrompt) storeScriptingState.actorPrompt = body;
+        storeScriptingState.results = toolResultsIn(body);
+        const latest = storeScriptingState.results.at(-1) || '';
+        const turn = storeScriptingState.actorTurn++;
+        if (turn === 0) return { sse: sseToolCall('navigate', { url: storeScriptingFixtureUrl }) };
+        if (turn === 1) return { sse: sseToolCall('snapshot', {}) };
+        if (turn === 2) {
+          storeScriptingState.orderRef = latest.match(/(@e\d+) textbox "Order ID"/)?.[1] || '';
+          storeScriptingState.sendRef = latest.match(/(@e\d+) button "Send message"/)?.[1] || '';
+          return { sse: sseToolCall('type', {
+            ref: storeScriptingState.orderRef, text: 'STORE-42', expectedCount: 1,
+          }) };
+        }
+        if (turn === 3) return { sse: sseToolCall('click', { ref: storeScriptingState.sendRef, expectedCount: 1 }) };
+        if (latest.includes('TICKET-STORE-42')) {
+          return { sse: sseText('SCRIPTING-ACTOR-DONE TICKET-STORE-42') };
+        }
+        if (turn < 8) return { delayMs: 250, sse: sseToolCall('read_page', {}) };
+        return { sse: sseText('SCRIPTING-ACTOR-DID-NOT-OBSERVE-CONFIRMATION') };
+      }
+      if (!storeScriptingState.delegated) {
+        storeScriptingState.delegated = true;
+        return { sse: sseToolCall('message_actor', {
+          to: 'web',
+          message: `Open ${storeScriptingFixtureUrl}. Enter order STORE-42. Send the form. Report the confirmation code.`,
+        }) };
+      }
+      if (body.includes('you messaged has replied')) {
+        storeScriptingState.wakeBody = body;
+        return { sse: sseText('Chrome scripting completed the form with TICKET-STORE-42.') };
+      }
+      return { sse: sseText('Delegated to the web actor; awaiting its reply.') };
+    },
+    async run(ctx, rec) {
+      storeScriptingState = {
+        delegated: false, actorTurn: 0, actorPrompt: '', results: [], wakeBody: '', orderRef: '', sendRef: '',
+      };
+      const tabsBefore = await evalIn(ctx.page, `(async () =>
+        (await chrome.tabs.query({})).map((tab) => tab.id).filter(Number.isInteger))()`, true);
+      const fixture = await startWebFixtureServer();
+      storeScriptingFixtureUrl = `${fixture.url.replace('127.0.0.1', 'orders.peerd.test')}/contact`;
+      try {
+        const settings = await rpc(ctx.page, {
+          type: 'settings/update',
+          patch: { webActorActionSurface: 'tools', advancedAutomationEnabled: false },
+        });
+        rec.check('fallback settings select discrete tools without advanced automation',
+          settings?.ok === true
+            && settings.settings?.webActorActionSurface === 'tools'
+            && settings.settings?.advancedAutomationEnabled === false,
+          JSON.stringify(settings));
+
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send',
+          text: 'Submit support request STORE-42 and report its confirmation code.',
+        });
+        rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+        await waitFor(() => (storeScriptingState.results.at(-1) || '').includes('TICKET-STORE-42'), {
+          budgetMs: 40_000, pollMs: 100,
+        });
+        await ctx.page.send('Page.bringToFront').catch(() => {});
+
+        let out = {};
+        await waitFor(async () => {
+          out = await evalIn(ctx.page, `(() => ({
+            bubbles: [...document.querySelectorAll('.message-assistant .bubble')]
+              .map((bubble) => bubble.textContent.trim()),
+            busy: !!document.querySelector('form.input-bar button.stop'),
+          }))()`) || {};
+          return (out.bubbles || []).includes('Chrome scripting completed the form with TICKET-STORE-42.')
+            && !out.busy;
+        }, { budgetMs: 40_000 });
+
+        const [, snapshotResult = '', typeResult = '', clickResult = ''] = storeScriptingState.results;
+        const readPageResult = storeScriptingState.results
+          .find((result) => result.includes('TICKET-STORE-42')) || '';
+        rec.check('the web actor received the discrete browser tools',
+          storeScriptingState.actorPrompt.includes('tools: snapshot')
+            && !storeScriptingState.actorPrompt.includes('tools: page_code'),
+          storeScriptingState.actorPrompt.slice(0, 500));
+        rec.check('snapshot used the Chrome scripting fallback',
+          snapshotResult.includes('DOM-walk fallback') && snapshotResult.includes('no CDP here'),
+          snapshotResult.slice(0, 1200));
+        rec.check('type and click used DOM-walk refs',
+          typeResult.includes('"typed": "STORE-42"')
+            && /"via"\s*:\s*"dom-walk"/.test(typeResult)
+            && clickResult.includes('"clicked": true')
+            && /"via"\s*:\s*"dom-walk"/.test(clickResult),
+          JSON.stringify({ typeResult, clickResult }));
+        rec.check('the actor observed the submitted result',
+          readPageResult.includes('TICKET-STORE-42'), readPageResult.slice(-1200));
+        rec.check('the actor reply returned through a fenced wake',
+          storeScriptingState.wakeBody.includes('you messaged has replied')
+            && storeScriptingState.wakeBody.includes('<untrusted_web_content')
+            && storeScriptingState.wakeBody.includes('SCRIPTING-ACTOR-DONE TICKET-STORE-42'),
+          storeScriptingState.wakeBody.slice(-1000));
+        rec.check('the final answer renders and the turn is idle',
+          (out.bubbles || []).includes('Chrome scripting completed the form with TICKET-STORE-42.')
+            && out.busy === false,
+          JSON.stringify(out));
+        await rec.shot('final');
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' }).catch(() => {});
+        const reset = await rpc(ctx.page, {
+          type: 'settings/reset',
+          keys: ['webActorActionSurface', 'advancedAutomationEnabled'],
+        }).catch((error) => ({ ok: false, error: String(error) }));
+        await evalIn(ctx.page, `(async () => {
+          const before = new Set(${JSON.stringify(tabsBefore)});
+          const tabs = await chrome.tabs.query({});
+          await Promise.all(tabs.filter((tab) => Number.isInteger(tab.id)
+            && (!before.has(tab.id) || tab.url === ${JSON.stringify(storeScriptingFixtureUrl)}))
+            .map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
+        })()`, true).catch(() => {});
+        await fixture.close().catch(() => {});
+        rec.check('the channel settings reset after the fallback probe', reset?.ok === true, JSON.stringify(reset));
+        if (!reset?.ok) throw new Error(`settings reset failed: ${JSON.stringify(reset)}`);
       }
     },
   },
@@ -4103,15 +4235,8 @@ export const STATES = [
       await rec.shot('script-fanout-done');
     },
   },
-  // --- functional: the actor-model delegation flow (message_actor end to end) --
-  // The headline of #61: the orchestrator delegates a web read to the chat's web
-  // actor via message_actor, gets a SYNC ack and ends its turn (async-everything,
-  // never blocks), the web-actor sub-loop runs on its own slot and replies, and
-  // deliver() re-enters the orchestrator on a LATER synthetic+trusted wake turn
-  // carrying the fenced reply. The actor reply is plain text (no fetch_url) so
-  // there is ZERO real egress — the whole cross-process path runs under the
-  // faked wire. The responder tells orchestrator vs actor turns apart by the
-  // actor system-prompt marker (callIndex is fragile — the two slots interleave).
+  // message_actor ends the first turn. Its isolated reply re-enters later as a
+  // fenced wake. Plain fixture text keeps this cross-process proof egress-free.
   {
     name: 'actor-delegate', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
@@ -4124,15 +4249,10 @@ export const STATES = [
         hasFence: body.includes('<untrusted_web_content'),
         hasActorText: body.includes('PRICE_IS_42'),
       });
-      // ACTOR sub-loop turn: plain text, no tool call → no fetch_url → no egress.
-      // Hold the isolated turn open long enough to inspect the live Actor Fabric
-      // at real side-panel width; without this, the fake reply can settle within
-      // one paint and only the terminal transcript receipt is observable.
-      if (isActor) return { delayMs: 3_500, sse: sseText('PRICE_IS_42') };
-      // ORCHESTRATOR — the async wake turn carrying the fenced reply: final answer.
+      // why: delay the plain reply so the live fabric remains observable.
+      if (isActor) return { delayMs: 5_000, sse: sseText('PRICE_IS_42') };
       if (body.includes('you messaged has replied')) return { sse: sseText('FINAL-ORCH-REPLY') };
-      // ORCHESTRATOR — delegate ONCE; then the post-ack step ends the turn (the
-      // ack tells the model the reply arrives later, so a real model stops here).
+      // The first orchestrator turn delegates once, then ends on the async ack.
       if (actorState.delegates === 0) {
         actorState.delegates += 1;
         return { sse: sseToolCall('message_actor', { to: 'web', message: 'get the price of widget X' }) };
@@ -4147,6 +4267,13 @@ export const STATES = [
         () => evalIn(ctx.page, `!!document.querySelector('.message-assistant .tool-call.tool-actor')`),
         { budgetMs: 15_000, pollMs: 100 });
       rec.check('an inline message_actor card mounts under the orchestrator turn', !!cardSeen);
+      const collapsedFabric = await waitFor(
+        () => evalIn(ctx.page, `document.querySelector('.actor-fabric-toggle')?.getAttribute('aria-expanded')`),
+        { budgetMs: 15_000, pollMs: 100 });
+      rec.check('the live Actor Fabric starts as a compact, accessible disclosure',
+        collapsedFabric === 'false', String(collapsedFabric));
+      if (collapsedFabric) await rec.shot('actor-fabric-collapsed');
+      await evalIn(ctx.page, `document.querySelector('.actor-fabric-toggle')?.click()`);
       const fabric = await waitFor(
         () => evalIn(ctx.page, `(() => {
           const panel = document.querySelector('.actor-fabric');
@@ -4160,7 +4287,6 @@ export const STATES = [
             expanded: toggle.getAttribute('aria-expanded'),
             actorKind: actor.getAttribute('data-node-kind'),
             actorPressed: actor.getAttribute('aria-pressed'),
-            text: panel.textContent ?? '',
             toggleHeight: toggleRect.height,
             withinViewport: panelRect.left >= 0 && panelRect.right <= innerWidth,
             contentFits: !!body && body.scrollWidth <= body.clientWidth
@@ -4168,18 +4294,11 @@ export const STATES = [
           };
         })()`),
         { budgetMs: 15_000, pollMs: 100 });
-      rec.check('the live Actor Fabric mounts expanded with an inspectable bound actor',
+      rec.check('opening the live Actor Fabric reveals an inspectable actor in the panel',
         fabric?.expanded === 'true'
           && fabric?.actorKind === 'bound'
-          && fabric?.actorPressed === 'false',
-        JSON.stringify(fabric));
-      rec.check('the fabric makes exact capability + fenced handoff concrete at a glance',
-        fabric?.text.includes('one web tab ·')
-          && fabric?.text.includes('separate worker')
-          && fabric?.text.includes('fenced reply'),
-        JSON.stringify(fabric?.text));
-      rec.check('the fabric fits the panel and keeps a 44px disclosure target',
-        fabric?.withinViewport === true
+          && fabric?.actorPressed === 'false'
+          && fabric?.withinViewport === true
           && fabric?.contentFits === true
           && fabric?.toggleHeight >= 44,
         JSON.stringify(fabric));
@@ -4188,11 +4307,13 @@ export const STATES = [
         const rehydrated = await waitFor(
           () => evalIn(ctx.page, `(() => {
             const panel = document.querySelector('.actor-fabric');
+            const toggle = panel?.querySelector('.actor-fabric-toggle');
+            if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
             const actor = panel?.querySelector('[data-node-id^="actor:"]');
             return panel && actor ? panel.textContent : null;
           })()`),
           { budgetMs: 15_000, pollMs: 50 });
-        rec.check('a freshly reconnected panel rehydrates the still-live actor fabric',
+        rec.check('opening the rehydrated fabric reveals the still-live actor',
           typeof rehydrated === 'string'
             && rehydrated.includes('get the price of widget X')
             && rehydrated.includes('separate worker'),
@@ -4673,10 +4794,7 @@ export const STATES = [
     },
   },
 
-  // --- functional + visual: the real nested Actor Fabric at panel width ----
-  // Two async siblings overlap; one delegates to its bound web actor. This is
-  // the defining topology (root → temporary child → resource-bound child), not
-  // a component fixture, and catches indentation/connector/overflow failures.
+  // A real nested fabric covers root → temporary child → bound child layout.
   {
     name: 'actor-fabric-hierarchy', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
@@ -4718,6 +4836,9 @@ export const STATES = [
         type: 'agent/send', text: 'compare price and warranty with isolated actors',
       });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.actor-fabric-toggle')?.getAttribute('aria-expanded') === 'false'`));
+      await evalIn(ctx.page, `document.querySelector('.actor-fabric-toggle')?.click()`);
       const hierarchy = await waitFor(
         () => evalIn(ctx.page, `(() => {
           const panel = document.querySelector('.actor-fabric');

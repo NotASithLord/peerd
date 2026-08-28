@@ -22,7 +22,26 @@ const mount = (messages, attrs = {}) => {
   return { root, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
-describe('sidepanel.message-list aborted cards', () => {
+describe('sidepanel.message-list updates and aborted cards', () => {
+  it('follows updates, respects scroll-up, and follows a new chat', async () => {
+    const messages = Array.from({ length: 10 }, (_, index) => ({ role: 'user', id: `u${index}`, content: 'line' }));
+    const attrs = { sessionId: 'scroll-test' };
+    const { root, unmount } = mount(messages, attrs);
+    try {
+      await flush();
+      const list = /** @type {HTMLElement} */ (root.querySelector('.message-list'));
+      list.style.cssText = 'display:block;height:100px;overflow-y:auto';
+      list.scrollTop = list.scrollHeight; list.dispatchEvent(new Event('scroll'));
+      messages.push(...messages.map((message) => ({ ...message, id: `more-${message.id}` }))); m.redraw.sync();
+      expect(list.scrollHeight - list.scrollTop - list.clientHeight).toBeLessThan(2);
+      list.scrollTop = 0; list.dispatchEvent(new Event('scroll'));
+      messages.push({ role: 'user', id: 'detached', content: 'stay here' }); m.redraw.sync();
+      expect(list.scrollTop).toBe(0);
+      attrs.sessionId = 'next-chat'; m.redraw.sync();
+      expect(list.scrollHeight - list.scrollTop - list.clientHeight).toBeLessThan(2);
+    } finally { unmount(); }
+  });
+
   it('an aborted turn shows "cancelled" tool cards, not a perpetual "running…"', async () => {
     const { root, unmount } = mount([{
       role: 'assistant', id: 'a1', content: '', stopReason: 'aborted',
