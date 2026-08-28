@@ -118,13 +118,14 @@ describe('observing a limit', () => {
 });
 
 describe('the wait, and the per-origin lane', () => {
-  test('a reservation waits out the deadline and reports how long', async () => {
+  test('a read waits out the deadline but does not stamp the write interval', async () => {
     const { s, c } = store();
     await s.observe({ origin: ORIGIN, responseAtMs: c.at(), status: 429, retryAfter: '5' });
     const before = c.at();
-    const clearance = await s.reserve(ORIGIN, { isWrite: true });
+    const clearance = await s.reserve(ORIGIN, { isWrite: false });
     expect(clearance.outcome).toBe('waited');
     expect(c.at() - before).toBeGreaterThanOrEqual(5_000);
+    expect((await s.reserve(ORIGIN, { isWrite: true })).outcome).toBe('go');
   });
 
   test('a wait past the inline ceiling is a handoff, and nothing is sent', async () => {
@@ -193,24 +194,23 @@ describe('the wait, and the per-origin lane', () => {
     expect(['waited', 'go']).toContain(after.outcome);
   });
 
-  test('the UI notice fires once per sleep, carrying the deadline the panel ticks from', async () => {
+  test('the UI notice fires once and its callback cannot stop the wait', async () => {
     const { s, c } = store();
     await s.observe({ origin: ORIGIN, responseAtMs: c.at(), status: 429, retryAfter: '5' });
     const seen: any[] = [];
-    await s.reserve(ORIGIN, { isWrite: true, onWait: (info) => seen.push(info) });
+    await s.reserve(ORIGIN, { isWrite: true, onWait: (info) => { seen.push(info); throw new Error('panel failed'); } });
     expect(seen).toHaveLength(1);
     expect(seen[0].origin).toBe(ORIGIN);
     expect(seen[0].untilMs).toBeGreaterThan(c.at() - 5_500);
     expect(seen[0].reason).toBe('server-deadline');
   });
 
-  test('a notice callback that throws never changes the decision', async () => {
-    const { s, c } = store();
-    await s.observe({ origin: ORIGIN, responseAtMs: c.at(), status: 429, retryAfter: '5' });
-    const clearance = await s.reserve(ORIGIN, {
-      isWrite: true, onWait: () => { throw new Error('panel exploded'); },
-    });
-    expect(clearance.outcome).toBe('waited');
+  test('a write reservation does not return before its stamp is saved', async () => {
+    const { s, kv, c } = store();
+    await s.observe({ origin: ORIGIN, responseAtMs: c.at(), status: 429, retryAfter: '1' });
+    kv.set = async () => { throw new Error('save failed'); };
+    await expect(s.reserve(ORIGIN, { isWrite: true })).rejects.toThrow('save failed');
+    expect(s.hydrationStatus().ok).toBe(false);
   });
 });
 

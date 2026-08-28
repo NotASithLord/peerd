@@ -193,9 +193,7 @@ export const createOriginPacingStore = ({
   const hydrationStatus = () => Object.freeze({ ready, ok: ready && !loadFailed });
 
   /**
-   * Persist the whole blob behind the write chain. The snapshot is taken
-   * SYNCHRONOUSLY so two mutations in one tick cannot save each other's
-   * half-state.
+   * Persist a synchronous snapshot so adjacent mutations cannot mix state.
    * @returns {Promise<void>}
    */
   const persist = () => {
@@ -203,11 +201,12 @@ export const createOriginPacingStore = ({
     const entries = Object.create(null);
     for (const [origin, rule] of rules) entries[origin] = rule;
     const snapshot = { schema: PACING_SCHEMA, entries };
-    writeChain = writeChain
-      .then(() => kv.set(PACING_KEY, snapshot))
-      .then(() => undefined)
-      .catch((e) => report('save failed - this change is heap-only until the next write', e));
-    return writeChain;
+    const pending = writeChain.then(() => kv.set(PACING_KEY, snapshot)).then(() => undefined);
+    writeChain = pending.catch((e) => {
+      loadFailed = true;
+      report('save failed; browser writes fail closed until the state is cleared', e);
+    });
+    return pending;
   };
 
   /**
@@ -367,10 +366,10 @@ export const createOriginPacingStore = ({
           };
         }
         if (verdict.action === 'go') {
-          const stamped = currentRule(origin, at);
+          const stamped = isWrite ? currentRule(origin, at) : null;
           if (stamped) {
             const next = noteActionAt(stamped, at, K);
-            if (next !== stamped) { rules.set(origin, next); persist(); }
+            if (next !== stamped) { rules.set(origin, next); await persist(); }
           }
           return {
             outcome: waitedMs > 0 ? 'waited' : 'go',

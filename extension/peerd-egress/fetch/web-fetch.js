@@ -360,9 +360,8 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     const urlString = resource instanceof Request ? resource.url
       : resource instanceof URL ? resource.toString()
       : resource;
-    // why on the audit: the code-mode bridge now sends full HTTP, so the log
-    // must distinguish a GET read from a POST write (a wider surface to see).
-    const method = (init && typeof init.method === 'string' ? init.method : 'GET').toUpperCase();
+    // why: pacing and audit must use the method that fetch sends.
+    const method = (typeof init?.method === 'string' ? init.method : resource instanceof Request ? resource.method : 'GET').toUpperCase();
     let u;
     try { u = new URL(urlString); }
     catch {
@@ -423,15 +422,13 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     }
     const res = await _fetch(resource, { ...init, redirect: 'manual' });
     if (pace && paceKey) {
-      // Observe BEFORE the redirect refusal below, so a 3xx that also carries a
-      // Retry-After still teaches the rule. Fire-and-forget: an observation
-      // that fails must never turn a completed request into an error.
-      pace.observe({
+      // Await the trusted observation before a response leaves this boundary.
+      await pace.observe({
         origin: paceKey,
         responseAtMs: Date.now(),
         status: res.status,
         retryAfter: res.headers?.get?.('retry-after') ?? null,
-      }).catch(() => {});
+      });
     }
     if (isRedirect(res)) {
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'redirect_blocked', status: res.status } }).catch(() => {});
