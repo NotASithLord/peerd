@@ -14,8 +14,7 @@
 //
 // Strategy + etiquette: gtm/README.md. Seeds: gtm/seeds.ts (edit them!).
 
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { collectBluesky } from './collect/bluesky.ts';
 import { collectGithub } from './collect/github.ts';
 import { collectHn } from './collect/hn.ts';
@@ -47,13 +46,23 @@ const collect = async (): Promise<void> => {
     const collector = COLLECTORS[source.trim()];
     if (!collector) throw new Error(`unknown source "${source}" (expected: ${Object.keys(COLLECTORS).join(', ')})`);
     const cachePath = `${dataDir}/${source.trim()}.json`;
-    if (existsSync(cachePath) && !hasFlag('fresh')) {
+    // why attempt-then-handle (not existsSync): the cache probe is a fast
+    // skip, but the WRITE is exclusive ('wx') unless --fresh, so a cache
+    // appearing between probe and write is refused instead of clobbered.
+    const fresh = hasFlag('fresh');
+    if (!fresh && await stat(cachePath).then(() => true, () => false)) {
       console.error(`${source}: cached at ${cachePath} (use --fresh to recrawl)`);
       continue;
     }
     console.error(`${source}: collecting…`);
     const graph = await collector();
-    await writeFile(cachePath, JSON.stringify(serializeGraph(graph)));
+    try {
+      await writeFile(cachePath, JSON.stringify(serializeGraph(graph)), { flag: fresh ? 'w' : 'wx' });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      console.error(`${source}: cache appeared mid-crawl; kept the existing ${cachePath}`);
+      continue;
+    }
     console.error(`${source}: ${graph.nodes.size} nodes, ${graph.edges.size} edges → ${cachePath}`);
   }
 };
@@ -61,11 +70,11 @@ const collect = async (): Promise<void> => {
 const analyze = async (): Promise<void> => {
   const merged = createGraph();
   let sources = 0;
-  if (existsSync(dataDir)) {
-    for (const file of (await readdir(dataDir)).filter((f) => f.endsWith('.json')).sort()) {
-      mergeGraphs(merged, deserializeGraph(JSON.parse(await readFile(`${dataDir}/${file}`, 'utf8'))));
-      sources++;
-    }
+  // attempt-then-handle: a missing data dir is just "nothing collected yet"
+  const files = await readdir(dataDir).catch(() => [] as string[]);
+  for (const file of files.filter((f) => f.endsWith('.json')).sort()) {
+    mergeGraphs(merged, deserializeGraph(JSON.parse(await readFile(`${dataDir}/${file}`, 'utf8'))));
+    sources++;
   }
   if (sources === 0) {
     console.error('no collected data in gtm/data/ - run `bun gtm/run.ts collect` first');
