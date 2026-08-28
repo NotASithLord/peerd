@@ -29,9 +29,9 @@ Each maps to one letter and color in the brand wordmark:
 
 | Letter | Color | Module | Role |
 |---|---|---|---|
-| `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM keyed; Ollama and the on-device WebGPU runner keyless — `registry.js` is the live list) |
+| `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM keyed; Ollama and the on-device WebGPU runner keyless - `registry.js` is the live list) |
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
-| `e` | amber   | `peerd-engine/`       | Execution instances — Sandboxes. FOUR kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Pods, Apps (opaque-origin iframe). A fifth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab — the agent's own quick compute, and the only kind with no registry because it persists no instances. Also here: browser-native Git (`repository/`, exported from `index.js`). The sandbox is the isolate; a tab is one way to host it (taxonomy in `registry-factory.js`). |
+| `e` | amber   | `peerd-engine/`       | Execution instances - Sandboxes. FOUR kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Pods, Apps (opaque-origin iframe). A fifth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab - the agent's own quick compute, and the only kind with no registry because it persists no instances. Also here: browser-native Git (`repository/`, exported from `index.js`). The sandbox is the isolate; a tab is one way to host it (taxonomy in `registry-factory.js`). |
 | `r` | green   | `peerd-runtime/`      | Agent loop, tools + per-environment actors (`message_actor`), sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Chrome preview only until Firefox has a mesh host. |
 
@@ -39,10 +39,10 @@ The extension *chassis* lives outside these modules: `background/`,
 `offscreen/`, `sidepanel/`, `home/`, `options/`, `engine-tabs/`,
 `permissions/`, `eval/`, `shared/`, `tests/`, `vendor/`, `icons/`. Each
 tab-hosted `peerd-engine` execution kind owns a dedicated page under
-`engine-tabs/` (`vm-tab/`, `notebook-tab/`, `pod-tab/`, `app-tab/`) — grouped so the
+`engine-tabs/` (`vm-tab/`, `notebook-tab/`, `pod-tab/`, `app-tab/`) - grouped so the
 four engine host surfaces sit together; `permissions/` hosts user-gesture surfaces such as
 the mic-permission grant page; `eval/` is the live end-to-end eval
-harness. (There is no `content/` directory — DOM work happens via
+harness. (There is no `content/` directory - DOM work happens via
 injected functions, not a persistent content script.) Outside
 `extension/`, the repo also carries `signaling-node/` (the dweb
 rendezvous server shells sharing the pure signaling reducer). The
@@ -265,15 +265,15 @@ exists today:
    Everything depends on this; build it first.
 3. **`peerd-provider`** — Anthropic + OpenRouter adapters. Schema
    conversions, streaming, error handling.
-4. **`peerd-engine`** — Sandboxes: five execution kinds (taxonomy in
-   `registry-factory.js`). Four are hosted in their own visible tab —
+4. **`peerd-engine`** - Sandboxes: five execution kinds (taxonomy in
+   `registry-factory.js`). Four are hosted in their own visible tab -
    WebVM (CheerpX), Notebook (sealed JS worker + OPFS), Pod, App
-   (opaque-origin iframe) — each with a registry in `peerd-engine`, a
+   (opaque-origin iframe) - each with a registry in `peerd-engine`, a
    runtime in its tab page under `engine-tabs/` (`vm-tab/`,
    `notebook-tab/`, `pod-tab/`, `app-tab/`), and a tab tracker + RPC
    client in `background/`. The fifth, the **headless worker** (`script`),
    runs the Notebook's sealed worker in the offscreen document with no tab
-   (`offscreen/job-runner.js`) — the agent's own quick compute, same
+   (`offscreen/job-runner.js`) - the agent's own quick compute, same
    substrate as a Notebook, different host.
 5. **`peerd-runtime`** — agent loop, tool dispatcher, and the tool
    inventory. Registered tools are assembled from `BUILTIN_TOOLS`, clock,
@@ -380,10 +380,10 @@ gotchas to know going in:
 - Voice — local transcription via Moonshine (WASM, SRI-pinned model
   download, OPFS-cached) with a Web Speech API fallback. Hosted in the
   offscreen doc (`peerd-runtime/voice/`).
-- Sandboxes — five execution kinds (taxonomy in the `peerd-engine/` code).
+- Sandboxes - five execution kinds (taxonomy in the `peerd-engine/` code).
   Four run in their
-  own browser tab — WebVM (CheerpX), Notebook (sealed JS worker + OPFS),
-  Pod, App (opaque-origin iframe) — each with its own registry + tab
+  own browser tab - WebVM (CheerpX), Notebook (sealed JS worker + OPFS),
+  Pod, App (opaque-origin iframe) - each with its own registry + tab
   tracker + RPC client. The fifth, the headless worker (`script`), is the
   same sealed worker run offscreen with no tab, for the agent's own quick
   compute (code mode).
@@ -422,7 +422,7 @@ gotchas to know going in:
   dwapp bridge (it builds p2p dwapps that users and agents both use).
   Chrome-preview only until Firefox has a mesh host. Other artifacts prune the
   module and CI verifies the package boundary. See the `peerd-distributed/` code.
-- The **dweb actor** — one more bound-actor kind (`actorType:'dweb'`; the live
+- The **dweb actor** - one more bound-actor kind (`actorType:'dweb'`; the live
   set is `ACTOR_CAPABILITY_MANIFESTS`, not a number to memorize) and the
   first DAEMON actor: an opt-in (`dwebAgentEnabled`, Chrome-preview-only, default
   off), persistent, GLOBAL singleton addressable as `message_actor("dweb",…)`.
