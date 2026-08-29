@@ -207,7 +207,9 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
 
   test('app carries the relocated build mechanics', () => {
     const block = actorBlock('app');
-    expect(block.includes('MITHRIL')).toBe(true);
+    expect(block.includes('Prefer native HTML/CSS/JS')).toBe(true);
+    expect(block.includes('./mithril.js')).toBe(true);
+    expect(block.includes('USE MITHRIL')).toBe(false);
     expect(block.includes('CHUNK')).toBe(true);
     expect(block.includes('app_write_file')).toBe(true);
   });
@@ -217,7 +219,9 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
       .filter((name) => name !== 'app_observe' && name !== 'app_act');
     const block = actorBlock('app', undefined, 'app-1', 'tools', false, [...tools]);
     expect(block.includes(`tools: ${tools.join(', ')}`)).toBe(true);
-    expect(block.includes('MITHRIL')).toBe(true);
+    expect(block.includes('Prefer native HTML/CSS/JS')).toBe(true);
+    expect(block.includes('./mithril.js')).toBe(true);
+    expect(block.includes('USE MITHRIL')).toBe(false);
     expect(block.includes('app_observe')).toBe(false);
   });
 
