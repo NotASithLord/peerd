@@ -29,4 +29,26 @@ describe('schedule_create cancellation', () => {
     expect(await pending).toMatchObject({ ok: false, error: 'schedule_aborted' });
     expect(additions).toBe(0);
   });
+
+  test('Stop while scheduleAdd waits cannot report a routine as armed', async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<any>();
+    let seenSignal: AbortSignal | undefined;
+    const pending = scheduleCreateTool.execute({ prompt: 'check releases', every: '1h' }, {
+      abortSignal: controller.signal,
+      permission: { confirmActions: true },
+      scheduleAdd: async (request: any) => {
+        seenSignal = request.signal;
+        started.resolve();
+        return await release.promise;
+      },
+    } as any);
+    await started.promise;
+    controller.abort();
+    release.resolve({ ok: true, routine: {} });
+
+    expect(seenSignal).toBe(controller.signal);
+    expect(await pending).toMatchObject({ ok: false, error: 'schedule_aborted' });
+  });
 });
