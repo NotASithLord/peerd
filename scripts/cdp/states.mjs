@@ -5098,6 +5098,8 @@ export const STATES = [
         if (actorAppState.appCalls === 4) {
           const probe = JSON.stringify(actorAppProbeUrl);
           const secureProbe = JSON.stringify(actorAppProbeUrl.replace(/^http:/, 'https:'));
+          const socketProbe = JSON.stringify(actorAppProbeUrl.replace(/^http:/, 'ws:'));
+          const udpProbe = JSON.stringify(`https://127.0.0.1:${actorAppStunPort}`);
           const blobPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('blob'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {}<\/script>`;
           const blobPayloadLiteral = JSON.stringify(blobPayload).replace(/</g, '\\u003c');
           const dataPayload = `<script>try { const p = new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:${actorAppStunPort}'}]}); p.createDataChannel('data'); p.createOffer().then(o => p.setLocalDescription(o)); } catch (_) {} setTimeout(() => { location.href = URL.createObjectURL(new Blob([${blobPayloadLiteral}], {type:'text/html'})); }, 250);<\/script>`;
@@ -5125,12 +5127,64 @@ Promise.resolve().then(async () => {
   }
   if (window.name === 'peerd-binary-probed') return;
   window.name = 'peerd-binary-probed';
-  fetch(${probe} + '/fetch').catch(() => {});
-  try {
-    new Worker(URL.createObjectURL(new Blob([
+  const egressAttempts = [];
+  const attemptEgress = (name, operation) => {
+    egressAttempts.push(name);
+    try {
+      const result = operation();
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+    } catch (_) {}
+  };
+  attemptEgress('fetch-no-cors-post', () => fetch(${probe} + '/fetch', {
+    method: 'POST', mode: 'no-cors', keepalive: true, body: 'exfiltration-probe',
+  }));
+  attemptEgress('XMLHttpRequest', () => {
+    const request = new XMLHttpRequest();
+    request.open('POST', ${probe} + '/xhr');
+    request.send('exfiltration-probe');
+  });
+  attemptEgress('WebSocket', () => {
+    const socket = new WebSocket(${socketProbe} + '/websocket');
+    socket.addEventListener('open', () => socket.close(), { once: true });
+    return socket;
+  });
+  attemptEgress('EventSource', () => {
+    const source = new EventSource(${probe} + '/event-source');
+    setTimeout(() => source.close(), 500);
+    return source;
+  });
+  attemptEgress('sendBeacon', () => navigator.sendBeacon(
+    ${probe} + '/beacon', 'exfiltration-probe',
+  ));
+  attemptEgress('WebTransport', () => {
+    if (typeof WebTransport !== 'function') return undefined;
+    const transport = new WebTransport(${udpProbe} + '/webtransport');
+    transport.closed.catch(() => {});
+    return transport;
+  });
+  attemptEgress('link-ping', () => {
+    const link = document.createElement('a');
+    link.href = '#ping-target';
+    link.ping = ${probe} + '/ping';
+    document.body.appendChild(link);
+    link.click();
+  });
+  attemptEgress('Worker-fetch', () => {
+    const worker = new Worker(URL.createObjectURL(new Blob([
       'fetch(' + JSON.stringify(${probe} + '/worker') + ').catch(() => {})',
     ], { type: 'application/javascript' })));
-  } catch (_) {}
+    setTimeout(() => worker.terminate(), 500);
+    return worker;
+  });
+  attemptEgress('SharedWorker-fetch', () => {
+    if (typeof SharedWorker !== 'function') return undefined;
+    const worker = new SharedWorker(URL.createObjectURL(new Blob([
+      'fetch(' + JSON.stringify(${probe} + '/shared-worker') + ').catch(() => {})',
+    ], { type: 'application/javascript' })));
+    setTimeout(() => worker.port.close(), 500);
+    return worker;
+  });
+  parent.postMessage({ type: 'e2e-egress-attempts', attempts: egressAttempts }, '*');
   setTimeout(() => { location.href = ${probe} + '/navigate'; }, 50);
   setTimeout(() => { location.assign(${secureProbe} + '/assign'); }, 80);
   setTimeout(() => { location.replace(${probe} + '/replace'); }, 110);
@@ -5174,7 +5228,7 @@ Promise.resolve().then(async () => {
       /** @type {string[]} */
       const probeHits = [];
       let probeConnections = 0;
-      let stunHits = 0;
+      let probeDatagrams = 0;
       const server = createServer((req, res) => {
         probeHits.push(req.url ?? '');
         res.writeHead(204); res.end();
@@ -5184,10 +5238,10 @@ Promise.resolve().then(async () => {
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = /** @type {{ port: number }} */ (server.address()).port;
       actorAppProbeUrl = `http://127.0.0.1:${port}`;
-      const stunServer = createSocket('udp4');
-      stunServer.on('message', () => { stunHits += 1; });
-      await new Promise((resolve) => stunServer.bind(0, '127.0.0.1', resolve));
-      actorAppStunPort = /** @type {{ port: number }} */ (stunServer.address()).port;
+      const udpServer = createSocket('udp4');
+      udpServer.on('message', () => { probeDatagrams += 1; });
+      await new Promise((resolve) => udpServer.bind(0, '127.0.0.1', resolve));
+      actorAppStunPort = /** @type {{ port: number }} */ (udpServer.address()).port;
       let appPage = null;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'spawn an actor to build a lava lamp app' });
@@ -5235,6 +5289,7 @@ Promise.resolve().then(async () => {
           if (window === top) {
             globalThis.__e2eBinaryProofs = [];
             globalThis.__e2eBinaryErrors = [];
+            globalThis.__e2eEgressAttempts = [];
             globalThis.__e2eAppPolicies = [];
             globalThis.__e2eParentPolicies = [];
             addEventListener('message', (event) => {
@@ -5244,6 +5299,9 @@ Promise.resolve().then(async () => {
                 globalThis.__e2eBinaryProofs.push({ ...event.data, receivedAt: performance.now() });
               }
               if (event.data?.type === 'e2e-binary-error') globalThis.__e2eBinaryErrors.push(event.data.error);
+              if (event.data?.type === 'e2e-egress-attempts') {
+                globalThis.__e2eEgressAttempts.push(...(event.data.attempts ?? []));
+              }
               if (event.data?.type === 'app-policy-blocked') globalThis.__e2eAppPolicies.push(event.data.directive);
             });
             addEventListener('securitypolicyviolation', (event) => {
@@ -5274,9 +5332,16 @@ Promise.resolve().then(async () => {
         rec.check('the App binary API reported no runtime errors',
           (await evalIn(appPage, `(globalThis.__e2eBinaryErrors ?? []).length`)) === 0,
           JSON.stringify(await evalIn(appPage, `globalThis.__e2eBinaryErrors ?? []`)));
-        rec.check('fetch, resources, Worker, forms, meta refresh, and HTTP(S) navigation made zero network connections',
-          probeHits.length === 0 && probeConnections === 0,
-          JSON.stringify({ hits: probeHits, connections: probeConnections, policies: await evalIn(appPage, `globalThis.__e2eAppPolicies ?? []`) }));
+        const expectedEgressAttempts = [
+          'fetch-no-cors-post', 'XMLHttpRequest', 'WebSocket', 'EventSource',
+          'sendBeacon', 'WebTransport', 'link-ping', 'Worker-fetch', 'SharedWorker-fetch',
+        ];
+        const egressAttempts = await evalIn(appPage, `globalThis.__e2eEgressAttempts ?? []`);
+        rec.check('the raw App network API matrix ran and made zero HTTP(S)/WebSocket connections',
+          expectedEgressAttempts.every((name) => egressAttempts.includes(name))
+            && probeHits.length === 0 && probeConnections === 0,
+          JSON.stringify({ attempts: egressAttempts, hits: probeHits, connections: probeConnections,
+            policies: await evalIn(appPage, `globalThis.__e2eAppPolicies ?? []`) }));
         rec.check('the trusted parent CSP blocked cross-origin frame navigation before fetch',
           (await evalIn(appPage, `globalThis.__e2eParentPolicies ?? []`))
             .some((policy) => policy.directive === 'frame-src'),
@@ -5288,7 +5353,8 @@ Promise.resolve().then(async () => {
             && globalThis.__e2eBinaryProofs?.some((proof) => proof.receivedAt > blockedAt);
         })()`) === true);
         rec.check('the WebRTC fail-closed preflight allowed App delivery', !!rendered);
-        rec.check('data: and blob: replacement realms cannot emit WebRTC STUN traffic', stunHits === 0, `udpHits=${stunHits}`);
+        rec.check('App, data:, and blob: realms emit no WebRTC or WebTransport datagrams',
+          probeDatagrams === 0, `udpHits=${probeDatagrams}`);
         await evalIn(appPage, `document.getElementById('mode-toggle')?.click()`);
         const editorState = await waitFor(() => evalIn(appPage, `(() => {
           const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
@@ -5371,7 +5437,7 @@ Promise.resolve().then(async () => {
       } finally {
         try { appPage?.close(); } catch { /* */ }
         await new Promise((resolve) => server.close(resolve));
-        stunServer.close();
+        udpServer.close();
         actorAppProbeUrl = '';
         actorAppStunPort = 0;
       }

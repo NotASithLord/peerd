@@ -77,6 +77,7 @@ export const DENYLIST_ALLOW_RULE_ID = 2;
 // floor for every live App tab. It deliberately matches only remote schemes,
 // so the chrome-extension:// host and runner continue to load.
 export const APP_EGRESS_RULE_ID = 3;
+export const APP_EGRESS_REGEX = '^(?:https?|wss?)://';
 
 // Private-network navigation is a separate policy from the user's sensitive-
 // site denylist. These rules are always present for driven tabs, even when the
@@ -312,8 +313,9 @@ export const buildIdpAllowRule = ({
 };
 
 /**
- * Block every HTTP(S) request made in a live App tab. App code has no ambient
- * network capability; its only external edge is the trusted parent bridge.
+ * Block every HTTP(S) or WebSocket request made in a live App tab. App code
+ * has no ambient network capability; its only external edge is the trusted
+ * parent bridge.
  * @param {Object} input
  * @param {readonly number[]} input.tabIds
  * @param {number} [input.ruleId]
@@ -330,7 +332,7 @@ export const buildAppEgressBlockRule = ({
     priority: 3,
     action: { type: 'block' },
     condition: {
-      regexFilter: '^https?://',
+      regexFilter: APP_EGRESS_REGEX,
       tabIds: tabs,
       resourceTypes: [...resourceTypes],
     },
