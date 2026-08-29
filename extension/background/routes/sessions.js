@@ -38,30 +38,13 @@ export const makeSessionRoutes = (deps) => {
   return {
     // --- agent ---
     'agent/stop': async () => {
-      // Idempotent — silent if there's nothing in flight. Scoped to the
-      // CURRENT chat: Stop must never reach across conversations and kill
-      // a turn streaming elsewhere (turn slots are per-session).
+      // Stop only the current chat. Other chats have separate turn slots.
       const sessionId = await sessionCache.sessionGet('currentSessionId');
-      // Stop ends the whole goal run (not just the in-flight turn) so it can't
-      // auto-continue after the abort. Awaited: haltGoalRun durably removes the
-      // run's persisted record, so a Stop can't be undone by a resume() on the
-      // next unlock even if the SW is torn down right after this handler returns.
-      if (sessionId && haltGoalRun) await haltGoalRun(/** @type {any} */ (sessionId));
       if (sessionId && turnSlots.stop(sessionId)) {
         auditLog.append({ type: 'session_ended', details: { reason: 'user_stop' } })
           .catch(() => {});
       }
-      // DESIGN-17 P1 — CASCADE the stop to this chat's in-flight ACTORS. They
-      // run on their OWN turn slots (an actor is a separate session), so the line
-      // above only aborted the orchestrator; without this, delegated VM/App/Notebook
-      // work keeps mutating to completion after the user hit Stop — sharper now that
-      // goal mode can autonomously drive actors. stopActorsFor bumps a per-
-      // sender Stop generation (so an actor turn still QUEUED behind another on the
-      // same slot skips when drained) AND returns the RUNNING actor sessions to
-      // abort. Aborting a slot lands at its loop's next checkpoint (interruptible per
-      // the spec); the aborted turn settles through the normal path, delivering a
-      // "stopped before a reply" note and clearing its durable mailbox entry — so a
-      // redrain can't resurrect it.
+      // Actors use separate slots. Stop them and invalidate queued actor turns.
       if (sessionId && actorMessaging?.stopActorsFor) {
         for (const actorSessionId of actorMessaging.stopActorsFor(/** @type {any} */ (sessionId))) {
           if (turnSlots.stop(actorSessionId)) {
@@ -69,17 +52,19 @@ export const makeSessionRoutes = (deps) => {
           }
         }
       }
-      // PR #134 phase 5 — cascade the Stop through the ACTOR subtree too.
-      // Children run under their own turn slots now (spawn.js claims one per
-      // child), so the line above never reached them; without this, spawned
-      // work — including grandchildren, since one Stop must end the whole
-      // delegation graph — kept running after the user hit Stop. stopSubtree
-      // walks the live-children registry transitively and aborts each slot.
-      // (Actor turns those children had in flight are already covered: the
-      // actor bookkeeping is keyed by the lineage ROOT, i.e. this chat.)
+      // Spawned descendants also use separate slots.
       if (sessionId && actorLifecycle?.stopSubtree) {
         for (const childSessionId of actorLifecycle.stopSubtree(/** @type {any} */ (sessionId))) {
           auditLog.append({ type: 'actor_stopped', details: { childSessionId, reason: 'user_stop_cascade' } }).catch(() => {});
+        }
+      }
+      // Stop the live work even if the durable goal removal fails. Report that
+      // failure because a stale record can resume after the next worker start.
+      if (sessionId && haltGoalRun) {
+        try { await haltGoalRun(/** @type {any} */ (sessionId)); }
+        catch {
+          postChatNote('Goal Stop was not saved. Retry before you close peerd.');
+          return { ok: false, error: 'goal-stop-persistence-failed' };
         }
       }
       return { ok: true };
