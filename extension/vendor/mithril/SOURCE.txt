@@ -1,33 +1,38 @@
-Mithril.js — vendored canonical ESM build
-===========================================
+Mithril.js - vendored tailored ESM build
+==========================================
 
 Upstream:   https://mithril.js.org/
 Version:    2.3.8
 Source URL: https://unpkg.com/mithril@2.3.8/mithril.js  (UMD)
-Reviewed:   2026-06-09
+Reviewed:   2026-08-29
 License:    MIT
 
 Upstream UMD SHA-256:
   6c080d9a4b6289e32534bc2a0bab94cc864c5206f106bae4f8de96f4900b9960
 
-Vendored canonical SHA-256 (mithril.js as committed):
-  6114f196bbfb7b857660860c69820d79123ca9a79929b2f149f4935e79ccc5ef
+Vendored tailored SHA-256 (mithril.js as committed):
+  cccca61e4bafda5e4f49d5265f8ccafdc14b21a21f76796e18bef9728510a021
 
 Notable changes since 2.2.2 (previous vendored version)
 -------------------------------------------------------
 - m.jsonp removed upstream — the API and its script-injection code no
   longer exist in the build at all (we already forbade it; see below).
-- Internal Promise polyfill removed — request/redraw now use the native
-  global Promise. Smaller build; assumes a modern browser, which our
-  MV3 target already guarantees.
+- Internal Promise polyfill removed upstream. The build assumes a modern
+  browser, which our MV3 target already guarantees.
 - m.domFor added — new public API for iterating the DOM nodes a vnode
   rendered. Not used by us; not forbidden.
 
-Conversion
-----------
-The upstream ships UMD. We convert to ESM at vendor time by stripping the
-IIFE wrapper and the module/window export tail, then appending
-`export default m;`. The body is otherwise byte-identical to upstream.
+Tailoring
+---------
+`packaging/vendor-mithril.ts` fetches the exact upstream UMD, verifies its
+SHA-256 and wrapper, then performs two narrow transformations:
+
+1. Remove the UMD wrapper/export and append `export default m;`.
+2. Remove the hash-pinned XHR request block and its `m.request` export.
+
+The request block is bounded by unique exact anchors and has its own SHA-256
+in the script. Any upstream drift fails closed for review. Every remaining
+upstream body byte is preserved.
 
 Classic App projection
 ----------------------
@@ -39,29 +44,32 @@ fails closed if an upstream update changes the conversion shape. Apps keep the
 same `<script src="./mithril.js"></script>` contract without a duplicate vendor
 body on disk.
 
-Forbidden APIs (enforced by ESLint, see .eslintrc.cjs)
-------------------------------------------------------
+Forbidden APIs (enforced by ESLint, see eslint.config.js)
+---------------------------------------------------------
 The following Mithril APIs are forbidden in this project. Importing or
 referencing them is a lint error.
 
-  m.request    — bypasses our safeFetch egress allowlist (§4.5)
+  m.request    — absent from the tailored build; it bypasses our safeFetch
+                 egress allowlist and credential boundary
   m.jsonp      — same reason; would also load remote scripts. As of 2.3.x
                  this API is gone from upstream entirely; the ESLint rule
                  is kept as a tripwire in case a future bump reintroduces it.
   m.mount(document.body, ...)
                — mount only against named container elements; see §13.2
 
-Why we don't fork
------------------
-Stripping unused Mithril methods would save ~1-2KB but means owning a
-diverged copy. The ESLint rules above make unused APIs unreachable in
-practice; that is sufficient. See §13.3 of docs/design-v1.md.
+Why the tailored build stays narrow
+------------------------------------
+`m.request` is not merely unused: trusted extension IO must cross safeFetch,
+while sandboxed Apps have no ambient network. Keeping an XHR path would expose
+an API that has no valid peerd use. No other Mithril API is stripped. Peerd
+owns the reproducible deletion recipe, not a rewritten renderer or router.
 
 Update procedure
 ----------------
-1. Curl new UMD from unpkg.com/mithril@X.Y.Z/mithril.js
-2. Strip the leading `;(function() {` wrapper and trailing UMD export/IIFE
-   closure, then append `export default m;` followed by a newline.
-3. Read the diff against upstream UMD; verify it is what you expect.
-4. Record the new SHA-256 and date here.
-5. Re-run the test suite against a representative side-panel build.
+1. Audit the new upstream release and update the version, upstream SHA-256,
+   and request-block SHA-256 in `packaging/vendor-mithril.ts`.
+2. Run `bun packaging/vendor-mithril.ts --write`.
+3. Read the generated diff and verify only the reviewed request subsystem and
+   UMD wrapper/export are absent.
+4. Record the new tailored SHA-256 and review date here.
+5. Regenerate `vendor.lock.json`, then run the vendor and UI test suites.
