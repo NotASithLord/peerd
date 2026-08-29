@@ -39,6 +39,24 @@ describe('Mithril App classic projection', () => {
     expect(typeof windowObject.m).toBe('function');
   });
 
+  test('omits the forbidden XHR request subsystem and public API', () => {
+    expect(esmSource).not.toContain('XMLHttpRequest');
+    expect(esmSource).not.toContain('m.request =');
+    expect(esmSource).not.toContain('request.request');
+    const windowObject: Record<string, unknown> = {};
+    runInNewContext(classicSource, { window: windowObject });
+    expect(Object.hasOwn(windowObject.m as object, 'request')).toBe(false);
+  });
+
+  test('preserves the rendering and routing surface', () => {
+    const windowObject: Record<string, unknown> = {};
+    runInNewContext(classicSource, { window: windowObject });
+    const mithril = windowObject.m as Record<string, unknown>;
+    for (const name of ['mount', 'route', 'render', 'redraw', 'fragment', 'trust']) {
+      expect(typeof mithril[name]).toBe('function');
+    }
+  });
+
   test('still contains the Mithril core (sanity)', () => {
     expect(classicSource.includes('function Vnode(')).toBe(true);
   });
