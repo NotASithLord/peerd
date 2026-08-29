@@ -8219,7 +8219,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     // session/reset (New chat) must stop the abandoned session's live turn AND
     // cascade to its in-flight actors — same primitives agent/stop uses — so
     // background web/VM/App work doesn't keep running on the orphaned session.
-    turnSlots, actorMessaging,
+    turnSlots, actorMessaging, actorLifecycle,
     // Session teardown drops the durable script workspace subtree.
     nukeSessionWorkspace,
     // …and the session's lifecycle state (§2.5 cancellation dominance).
