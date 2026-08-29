@@ -22,6 +22,7 @@ import { loadDweb } from '/shared/dweb-loader.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { createAppDataClient } from './app-data-client.js';
+import { mithrilClassicSource } from './mithril-classic-source.js';
 
 const appId = location.hash.slice(1).split(/[?&]/)[0];
 const hashParams = new URLSearchParams(location.hash.slice(1).split('?')[1] ?? '');
@@ -290,27 +291,29 @@ const readForRender = async () => {
   return { textFiles, binaryAssets };
 };
 
-// Built-in libraries available to every app without a download. Apps run
-// in a sandboxed iframe (opaque origin, no ES-module resolution), so we
-// hand them classic/global builds: referencing `<script src="./<name>">`
-// inlines the vendored source at compose time. Lazily fetched + cached.
-/** @type {Record<string, string>} */
+// Built-in libraries available to every app without a download. Apps run in
+// a sandboxed iframe (opaque origin, no ES-module resolution), so the one
+// canonical vendored source is projected to a classic script before compose.
+// Lazily fetched + cached; compose omits it from rendered output unless referenced.
+/** @type {Record<string, {path:string, toClassic:(source:string)=>string}>} */
 const BUILTIN_LIBS = {
-  'mithril.js': '/vendor/mithril/mithril.global.js',
+  'mithril.js': { path: '/vendor/mithril/mithril.js', toClassic: mithrilClassicSource },
 };
 /** @type {Record<string, string>} */
 const builtinCache = {};
 /** @param {string} name */
 const loadBuiltinLib = async (name) => {
   if (builtinCache[name] != null) return builtinCache[name];
+  const spec = BUILTIN_LIBS[name];
+  if (!spec) throw new TypeError(`unknown-builtin-library:${name}`);
   // why: fetches our OWN bundled asset via a chrome-extension:// URL
   // (runtime.getURL), not a network egress. The egress allowlist
   // intentionally wouldn't admit our own extension origin, so safeFetch
   // isn't the right tool here (same case as peerd-runtime/loop/system-prompt.js).
   // eslint-disable-next-line no-restricted-globals
-  const res = await fetch(browser.runtime.getURL(BUILTIN_LIBS[name]));
+  const res = await fetch(browser.runtime.getURL(spec.path));
   if (!res.ok) throw new Error(`builtin ${name}: HTTP ${res.status}`);
-  builtinCache[name] = await res.text();
+  builtinCache[name] = spec.toClassic(await res.text());
   return builtinCache[name];
 };
 
