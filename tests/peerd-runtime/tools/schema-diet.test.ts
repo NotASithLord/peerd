@@ -70,6 +70,9 @@ describe('schema diet — descriptor sizes dropped, no capability lost', () => {
     }
     expect(sandboxCreateTool.description).toContain('NO ambient network');
     expect(APP_RUNTIME_NOTE).toContain('NO ambient network');
+    expect(APP_RUNTIME_NOTE).toContain('Prefer native HTML/CSS/JS');
+    expect(APP_RUNTIME_NOTE).toContain('./mithril.js');
+    expect(APP_RUNTIME_NOTE).not.toContain('USE MITHRIL');
     expect(APP_RUNTIME_NOTE).toContain('consent-gated parent dweb bridge');
   });
 
