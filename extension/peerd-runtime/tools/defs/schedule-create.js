@@ -63,7 +63,7 @@ export const scheduleCreateTool = {
   origins: () => [],
 
   execute: async (args, ctx) => {
-    const scheduleAdd = /** @type {((req: any) => { ok: boolean, error?: string, routine?: any }) | undefined} */ (
+    const scheduleAdd = /** @type {((req: any) => Promise<{ ok: boolean, error?: string, routine?: any }>) | undefined} */ (
       /** @type {{ scheduleAdd?: unknown }} */ (ctx).scheduleAdd);
     if (typeof scheduleAdd !== 'function') {
       return { ok: false, error: 'schedule_unavailable', content: 'Background scheduling is not available in this context.' };
@@ -119,7 +119,11 @@ export const scheduleCreateTool = {
       every: args.every,
       dailyAt: args.dailyAt,
       mode: args.mode,
+      signal: ctx.abortSignal,
     });
+    if (aborted()) {
+      return { ok: false, error: 'schedule_aborted', content: 'The routine was not armed because the run was stopped.' };
+    }
     if (!res?.ok) {
       const why = res?.error === 'invalid-schedule'
         ? 'Could not parse the cadence. Use `every` like "30m"/"6h"/"1d", or `dailyAt` like "08:00".'

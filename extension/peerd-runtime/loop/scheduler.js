@@ -1,39 +1,16 @@
 // @ts-check
 // peerd-runtime/loop/scheduler — the background Routine runner.
 //
-// A Routine is a standing task that fires unattended on a cadence (see
-// loop/schedule.js for the "when"). This is the imperative shell around that
-// math: it holds the live routines, mirrors them durably to storage.local, and
-// on each WAKE decides which are due and fires them. It is the time-triggered
-// sibling of loop/goal-runner.js and copies that file's durability contract —
-// an in-memory map authoritative within one SW lifetime, mirrored to a kv key,
-// rehydrated by load() on boot — because an MV3 service worker is evicted after
-// ~30s idle and a routine must outlive that.
+// A Routine is an unattended standing task. This shell holds live routines,
+// mirrors them to storage.local, and fires due work. load() restores state after
+// MV3 service-worker eviction. loop/schedule.js owns the schedule math.
 //
-// The "run it as soon as peerd is back on" requirement is met by making tick()
-// a CATCH-UP pass: it fires every routine whose nextRunAt has already passed,
-// regardless of HOW MANY cadence slots elapsed while the browser was off or the
-// SW was dead (a routine advances to the next FUTURE slot, so a long downtime
-// collapses to a single catch-up run, never a burst). The SW calls tick() from
-// three wakes — a chrome.alarms fire, the cold-boot path, and vault unlock — so
-// whichever happens first drives the due work.
+// tick() collapses any missed cadence slots into one catch-up run. It advances
+// and persists nextRunAt before it fires. This gives at-most-once delivery. A
+// crash after that write can skip one run, but it cannot repeat a side effect.
 //
-// DELIVERY SEMANTICS (honest): at-most-once. tick() advances nextRunAt and
-// AWAITS the durable write BEFORE firing, so a crash after the write can't
-// re-fire the slot (no double-fire — important, a firing has side effects). The
-// residual risk is the narrow window where the SW dies AFTER the write commits
-// but BEFORE fireRoutine does durable work — that one firing is skipped, not
-// double-run. We prefer a missed run to a duplicated side effect.
-//
-// Vault-locked case: a firing needs the model key, so tick() REFUSES to fire
-// while the vault is locked — it leaves due routines untouched and arms the
-// alarm for a modest BACKOFF (not the past due time, which would wake-storm the
-// SW ~1/min) so the unlock re-tick drains them promptly and the fallback wake is
-// cheap. Same shape as goal-runner's paused/resume.
-//
-// Functional-core / imperative-shell: fireRoutine, kv, now, setAlarm, isLocked,
-// isRunning and onEvent are all INJECTED, so the control logic is otherwise pure
-// and unit-testable with fakes (scheduler.test.ts).
+// A locked vault leaves due routines unchanged and uses a backoff alarm. Unlock
+// triggers another tick. All IO is injected for focused tests.
 
 import { uuidv7 } from '/shared/util.js';
 import {
@@ -110,23 +87,26 @@ export const makeScheduler = ({
   /** @type {Set<string>} */
   const firing = new Set();
 
-  // tick() serialization. A tick requested while one is running sets a re-tick
-  // request; the running tick re-runs once it settles (instead of the request
-  // being DROPPED — the old bug: an unlock re-tick landing during a locked-path
-  // tick's await would be lost).
+  // A concurrent wake requests one more pass instead of losing the wake.
   let ticking = false;
   let retickRequested = false;
 
   const snapshot = () => [...routines.values()];
 
-  /** Await the durable mirror write (at-most-once needs this awaited before firing). */
-  const persist = async () => {
-    if (!kv) return;
-    /** @type {Record<string, Routine>} */
-    const out = {};
-    for (const [id, r] of routines) out[id] = r;
-    try { await kv.set(SCHEDULE_ROUTINES_KEY, out); }
-    catch { /* best-effort — a lost write just means a routine may re-run once or not resume */ }
+  // why one lane: an older write must not overwrite newer state.
+  /** @type {Promise<void>} */ let persistenceTail = Promise.resolve();
+  /** @type {Promise<number>|null} */ let hydrationPromise = null;
+  const persist = () => {
+    if (!kv) return Promise.resolve();
+    const write = persistenceTail.then(async () => {
+      await hydrate();
+      /** @type {Record<string, Routine>} */
+      const out = {};
+      for (const [id, r] of routines) out[id] = { ...r };
+      await kv.set(SCHEDULE_ROUTINES_KEY, out);
+    });
+    persistenceTail = write.catch(() => {});
+    return write;
   };
 
   // Arm the single alarm for the soonest enabled routine (or clear it). When
@@ -138,6 +118,36 @@ export const makeScheduler = ({
     catch (e) { console.error('[schedule] setAlarm threw', e); }
   };
 
+  const hydrate = () => {
+    if (hydrationPromise) return hydrationPromise;
+    const attempt = (async () => {
+      const stored = await kv?.get(SCHEDULE_ROUTINES_KEY);
+      let loaded = 0;
+      if (stored && typeof stored === 'object') for (const [id, raw] of Object.entries(stored)) {
+        if (!id || routines.has(id)) continue;
+        const rec = /** @type {any} */ (raw);
+        if (!rec || typeof rec.prompt !== 'string' || !rec.schedule) continue;
+        routines.set(id, {
+          id,
+          prompt: rec.prompt,
+          schedule: rec.schedule,
+          mode: rec.mode === 'turn' ? 'turn' : 'goal',
+          enabled: rec.enabled !== false,
+          createdAt: Number(rec.createdAt) || now(),
+          nextRunAt: Number(rec.nextRunAt) || now(),
+          lastRunAt: rec.lastRunAt == null ? null : Number(rec.lastRunAt),
+          lastSessionId: typeof rec.lastSessionId === 'string' ? rec.lastSessionId : null,
+          runCount: Number(rec.runCount) || 0,
+        });
+        loaded += 1;
+      }
+      reschedule();
+      return loaded;
+    })();
+    hydrationPromise = attempt.catch((error) => { hydrationPromise = null; throw error; });
+    return hydrationPromise;
+  };
+
   const emit = (/** @type {string} */ type, /** @type {object} */ extra = {}) => {
     try { onEvent({ type, ...extra }); } catch { /* port closed */ }
   };
@@ -145,17 +155,17 @@ export const makeScheduler = ({
   /** @returns {Routine[]} */
   const list = () => snapshot().map((r) => ({ ...r }));
 
-  /**
-   * Register a new routine. Normalizes the spec through parseSchedule and
-   * enforces the count cap. Returns the created routine or an error object.
-   * @param {{ prompt: string, every?: string, dailyAt?: string, mode?: string }} req
-   * @returns {{ ok: true, routine: Routine } | { ok: false, error: string }}
+  /** Register a validated routine after durable hydration.
+   * @param {{ prompt: string, every?: string, dailyAt?: string, mode?: string, signal?: AbortSignal }} req
+   * @returns {Promise<{ ok: true, routine: Routine } | { ok: false, error: string }>}
    */
-  const add = ({ prompt, every, dailyAt, mode } = /** @type {any} */ ({})) => {
+  const add = async ({ prompt, every, dailyAt, mode, signal } = /** @type {any} */ ({})) => {
     if (typeof prompt !== 'string' || !prompt.trim()) return { ok: false, error: 'prompt-required' };
-    if (routines.size >= MAX_ROUTINES) return { ok: false, error: 'too-many-routines' };
     const schedule = parseSchedule({ every, dailyAt });
     if (!schedule) return { ok: false, error: 'invalid-schedule' };
+    if (kv) await hydrate();
+    if (signal?.aborted) return { ok: false, error: 'schedule-aborted' };
+    if (routines.size >= MAX_ROUTINES) return { ok: false, error: 'too-many-routines' };
     const at = now();
     /** @type {Routine} */
     const routine = {
@@ -170,10 +180,9 @@ export const makeScheduler = ({
       lastSessionId: null,
       runCount: 0,
     };
+    if (signal?.aborted) return { ok: false, error: 'schedule-aborted' };
     routines.set(routine.id, routine);
-    // Fire-and-forget the mirror write on the mutation paths (add/remove/
-    // setEnabled) — only the FIRING path needs the awaited write for at-most-once.
-    void persist();
+    void persist(); // Only the firing path must wait for its durable write.
     reschedule();
     emit('schedule/changed', { routines: list() });
     return { ok: true, routine };
@@ -198,26 +207,16 @@ export const makeScheduler = ({
     return true;
   };
 
-  /**
-   * The wake pass: fire due routines (capped, skipping still-running ones),
-   * advance each to its next FUTURE slot, then re-arm. Deferred while the vault
-   * is locked. Serialized; a concurrent request re-runs once rather than being
-   * dropped.
+  /** Fire due routines, or defer them while the vault is locked.
    * @returns {Promise<{ fired: number, deferred: number, skipped: number }>}
    */
   const tick = async () => {
     if (ticking) { retickRequested = true; return { fired: 0, deferred: 0, skipped: 0 }; }
     ticking = true;
-    // Consume a re-tick requested while we were awaiting, so a wake that landed
-    // mid-tick (e.g. an unlock re-tick during a locked-path pass) is honored in
-    // this same call rather than dropped.
+    // Consume a wake that arrived while this tick awaited IO.
     const consumeRetick = () => { const r = retickRequested; retickRequested = false; return r; };
     const totals = { fired: 0, deferred: 0, skipped: 0 };
-    // Cap firings across the WHOLE tick() call, not per re-tick pass. A concurrent
-    // wake landing during a pass's `await persist()` sets retickRequested, and a
-    // per-pass counter would reset to 0 on the next pass — letting one tick() call
-    // stampede past MAX_FIRINGS_PER_TICK. Hoisting the counter binds the cap to the
-    // whole call; leftovers drain on the next (re-armed, past-due) wake.
+    // The cap covers all re-tick passes in this call.
     let firedThisTick = 0;
     try {
       do {
@@ -233,19 +232,32 @@ export const makeScheduler = ({
         for (const routine of due) {
           if (firedThisTick >= MAX_FIRINGS_PER_TICK) break;  // throttle the herd
           if (firing.has(routine.id)) continue;
+          const running = isRunning(routine);
+          if (routines.get(routine.id) !== routine || !routine.enabled) continue;
           // Skip a routine whose previous firing is still running — advance it a
           // slot so it retries next cadence instead of piling up concurrent runs.
-          if (isRunning(routine)) {
+          if (running) {
             routine.nextRunAt = computeNextRun(routine.schedule, at, routine.createdAt);
+            void persist();
             totals.skipped += 1;
             continue;
           }
-          // Advance + AWAIT the durable write BEFORE firing → no double-fire on a
-          // crash after commit (at-most-once; see the file header).
-          routine.nextRunAt = computeNextRun(routine.schedule, at, routine.createdAt);
+          // Persist the advance before the side effect for at-most-once delivery.
+          const previous = { nextRunAt: routine.nextRunAt, lastRunAt: routine.lastRunAt, runCount: routine.runCount };
+          const attemptedNextRunAt = computeNextRun(routine.schedule, at, routine.createdAt);
+          routine.nextRunAt = attemptedNextRunAt;
           routine.lastRunAt = at;
           routine.runCount += 1;
-          await persist();
+          try { await persist(); } catch (error) {
+            const attemptUnchanged = routines.get(routine.id) === routine
+              && routine.nextRunAt === attemptedNextRunAt
+              && routine.lastRunAt === at
+              && routine.runCount === previous.runCount + 1;
+            if (attemptUnchanged) { Object.assign(routine, previous); void persist(); }
+            reschedule();
+            throw error;
+          }
+          if (routines.get(routine.id) !== routine || !routine.enabled) continue;
           firing.add(routine.id);
           emit('schedule/firing', { id: routine.id, prompt: routine.prompt });
           Promise.resolve()
@@ -269,37 +281,16 @@ export const makeScheduler = ({
     }
   };
 
-  /**
-   * Rehydrate routines from the durable mirror on SW boot. A no-op without kv or
-   * with nothing stored. Does NOT fire — the caller ticks() after. Idempotent.
+  /** Rehydrate routines without firing them.
    * @returns {Promise<{ loaded: number }>}
    */
   const load = async () => {
     if (!kv) return { loaded: 0 };
-    let stored;
-    try { stored = await kv.get(SCHEDULE_ROUTINES_KEY); } catch { return { loaded: 0 }; }
-    if (!stored || typeof stored !== 'object') return { loaded: 0 };
-    let loaded = 0;
-    for (const [id, raw] of Object.entries(stored)) {
-      if (!id || routines.has(id)) continue;
-      const rec = /** @type {any} */ (raw);
-      if (!rec || typeof rec.prompt !== 'string' || !rec.schedule) continue;
-      routines.set(id, {
-        id,
-        prompt: rec.prompt,
-        schedule: rec.schedule,
-        mode: rec.mode === 'turn' ? 'turn' : 'goal',
-        enabled: rec.enabled !== false,
-        createdAt: Number(rec.createdAt) || now(),
-        nextRunAt: Number(rec.nextRunAt) || now(),
-        lastRunAt: rec.lastRunAt == null ? null : Number(rec.lastRunAt),
-        lastSessionId: typeof rec.lastSessionId === 'string' ? rec.lastSessionId : null,
-        runCount: Number(rec.runCount) || 0,
-      });
-      loaded += 1;
+    if (hydrationPromise) {
+      try { await hydrationPromise; } catch { /* retry on the next call */ }
+      return { loaded: 0 };
     }
-    reschedule();
-    return { loaded };
+    try { return { loaded: await hydrate() }; } catch { return { loaded: 0 }; }
   };
 
   return Object.freeze({
