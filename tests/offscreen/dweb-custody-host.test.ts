@@ -262,22 +262,23 @@ describe('dweb custody receipt host', () => {
   test('read-only timeouts cannot exhaust receipt capacity', async () => {
     const host = makeDwebCustodyHost({
       authorityId: 'authority:read-capacity', operationTimeoutMs: 5, maxReceipts: 4,
+      fingerprintOperation: async (operation, args) => `${operation}:${args.index}`,
       readState: () => ({}),
       runOperation: async () => new Promise(() => {}),
     });
     const connected = port();
     host.attach(connected.value);
     for (let index = 0; index < 5; index += 1) {
+      const requestId = `request:read:${index}`;
       connected.receive({
-        type: 'custody/request', requestId: `request:read:${index}`,
+        type: 'custody/request', requestId,
         operationId: `operation:read:${index}`, operation: 'export', args: { index },
       });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(connected.sent.find((message) => message.requestId === 'request:read:4'))
-      .toMatchObject({
+      expect(await waitForPacket(connected.sent, requestId)).toMatchObject({
+        requestId, operationId: `operation:read:${index}`,
         ok: false, error: 'identity-custody-operation-timeout', outcomeKnown: true,
       });
+    }
   });
 
   test('recovery is bound to the exact unknown adoption receipt and arguments', async () => {

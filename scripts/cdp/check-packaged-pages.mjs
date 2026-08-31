@@ -2,8 +2,9 @@
 // Behavioral packaged-page BOOT check — the runtime backstop to the static
 // check:imports, and the broad net that catches the WHOLE "works in dev, blank
 // in a packaged install" class. It packages each channel, loads the PRUNED tree
-// headless via launchPeerd(extensionDir) (not extension/), and boots EVERY
-// shipped page, asserting it referenced nothing it didn't ship.
+// headless via launchPeerd(extensionDir) (not extension/), boots every
+// user-openable shipped page, and exercises the singleton offscreen page through
+// its real repository-host path, asserting each referenced nothing it didn't ship.
 //
 // The class-killer signal is a failed SAME-ORIGIN (chrome-extension://) resource
 // load: Chrome emits NO console error for a missing subresource (CSS/font/wasm/
@@ -14,9 +15,9 @@
 //
 //   - #app pages (home/options/sidepanel): ALSO assert Mithril mounts + zero
 //     uncaught exceptions (clean UI pages — strict).
-//   - other pages (engine tabs, offscreen, mic, dwapps): assert load + zero
+//   - other pages (engine tabs, mic, dwapps): assert load + zero
 //     missing same-origin resource; exceptions are NOTED, not failed (booting a
-//     page out of its normal context — e.g. the offscreen doc — can throw on a
+//     page out of its normal context — e.g. an unbound engine tab — can throw on a
 //     healthy build, so the reliable signal there is the resource miss).
 //
 // Per-channel page sets fall out for free: walk() lists only files present in the
@@ -35,6 +36,13 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const version = String(JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version);
 const SETTLE_MS = 2000;   // let late dynamic-import / asset loadingFailed events land
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const closeProbePage = async (page) => {
+  if (!page) return;
+  try {
+    if (typeof page.closeTarget === 'function') await page.closeTarget();
+    else page.close();
+  } catch { /* the target may already have retired */ }
+};
 
 const walk = (dir, out = []) => {
   for (const name of readdirSync(dir)) {
@@ -79,7 +87,7 @@ const exceptions = (events) => (events || []).filter((e) => /^EXC |^ERR /.test(e
 // reachable module fixture is fetched and its canary executes in the sealed
 // worker. Store then receives the same fetch capability deliberately and must
 // still refuse every adversarial source before a request or worker exists.
-const packagedRemoteImportProbe = async (remoteUrl, channel) => {
+const packagedRemoteImportProbe = async (remoteUrl, channel, notebookId) => {
   const [{ buildWorkerSource }, { makeFetchRemote }, { REMOTE_MODULE_IMPORTS_ENABLED }] = await Promise.all([
     import('/engine-tabs/notebook-tab/worker-source.js'),
     import('/peerd-engine/index.js'),
@@ -97,6 +105,8 @@ const packagedRemoteImportProbe = async (remoteUrl, channel) => {
       return makeFetchRemote((request) => chrome.runtime.sendMessage({
         type: 'sw/web-fetch',
         ...request,
+        abortToken: crypto.randomUUID(),
+        notebookId,
       }))(url);
     },
     readFile: async () => { throw new Error('unexpected local module read'); },
@@ -108,7 +118,7 @@ const packagedRemoteImportProbe = async (remoteUrl, channel) => {
     let computedRefusal = null;
     try {
       await buildWorkerSource(`const url = ${JSON.stringify(remoteUrl)}; return import(url);`, {
-        notebookId: 'packaged-policy-preview-computed',
+        notebookId,
         resolverDeps: makeDeps(),
       });
     } catch (error) {
@@ -119,7 +129,7 @@ const packagedRemoteImportProbe = async (remoteUrl, channel) => {
     const escapedRemoteUrl = remoteUrl.replace(/^h/, '\\x68');
     const built = await buildWorkerSource(
       `import { value } from '${escapedRemoteUrl}'; return value;`,
-      { notebookId: 'packaged-policy-preview', resolverDeps: makeDeps() },
+      { notebookId, resolverDeps: makeDeps() },
     );
     const workerUrl = URL.createObjectURL(new Blob([built.source], {
       type: 'application/javascript',
@@ -165,7 +175,7 @@ const packagedRemoteImportProbe = async (remoteUrl, channel) => {
   for (const [name, source] of cases) {
     try {
       await buildWorkerSource(source, {
-        notebookId: `packaged-policy-${name}`,
+        notebookId,
         resolverDeps: makeDeps(),
       });
       refusals.push({ name, code: null });
@@ -179,10 +189,7 @@ const packagedRemoteImportProbe = async (remoteUrl, channel) => {
 // Exact packaged regression for the operation-lazy repository split. It must
 // cross SW -> authenticated offscreen loader -> dynamic isomorphic-git -> OPFS
 // and return without putting the vendor back in the cold worker graph.
-const packagedRepositoryProbe = async () => {
-  // Repository/App data is a post-vault capability. Exercise it from the same
-  // unlocked posture a real user has after first-run instead of weakening the
-  // lease coordinator merely to make a locked smoke profile convenient.
+const preparePackagedVault = async () => {
   const vaultState = await chrome.runtime.sendMessage({ type: 'state/get' });
   if (!vaultState?.vault?.initialized) {
     const initialized = await chrome.runtime.sendMessage({
@@ -195,6 +202,10 @@ const packagedRepositoryProbe = async () => {
     });
     if (!unlocked?.ok) return { ok: false, phase: 'vault-unlock', unlocked };
   }
+  return { ok: true };
+};
+
+const packagedAppImportProbe = async () => {
   const { buildAppExport } = await import('/peerd-engine/index.js');
   const envelope = await buildAppExport({
     record: { name: 'Packaged Git Probe', entryFile: 'index.html', tags: ['ci-probe'] },
@@ -205,7 +216,10 @@ const packagedRepositoryProbe = async () => {
   });
   const imported = await chrome.runtime.sendMessage({ type: 'import/apply', envelope });
   if (!imported?.ok || imported.kind !== 'app') return { ok: false, phase: 'import', imported };
-  const appId = imported.id;
+  return { ok: true, appId: imported.id };
+};
+
+const packagedRepositoryProbe = async (appId) => {
   try {
     const status = await chrome.runtime.sendMessage({ type: 'apps/repository/status', appId });
     const branch = await chrome.runtime.sendMessage({
@@ -232,17 +246,38 @@ for (const channel of ['preview', 'store']) {
     // side panel as part of setup, so a packaged side-panel break throws here.
     ctx = await launchPeerd({ extensionDir: root });
 
+    // All three behavioral probes are post-vault capabilities. Establish that
+    // posture through the real Options owner before asking an engine page or
+    // Home to load their demand-owned runtimes.
+    let vaultPage = null;
+    try {
+      vaultPage = await openExtPage(ctx, 'options/options.html');
+      const prepared = await evalIn(vaultPage, `(${preparePackagedVault.toString()})()`, true);
+      if (!prepared?.ok) {
+        failed = true;
+        log(`  ✗ [${channel}] packaged vault preparation: ${JSON.stringify(prepared)}`);
+      }
+    } catch (error) {
+      failed = true;
+      log(`  ✗ [${channel}] packaged vault preparation failed: ${error?.message ?? error}`);
+    } finally {
+      await closeProbePage(vaultPage);
+    }
+
     // Browser-level package policy proof. CDP fulfills one HTTPS module URL at
     // the wire, so the fixture is deterministic and no public network is used.
     // Preview must execute it; Store must not request it.
     const remoteUrl = 'https://remote-module.test/store-policy-canary.js';
+    const policyNotebookId = 'packaged-policy-probe';
     let policyPage = null;
     const fixtureRequestsBefore = ctx.remoteModuleRequestCount();
     try {
-      policyPage = await openExtPage(ctx, 'home/home.html');
+      policyPage = await openExtPage(
+        ctx, `engine-tabs/notebook-tab/index.html#${encodeURIComponent(policyNotebookId)}`,
+      );
       const probe = await evalIn(
         policyPage,
-        `(${packagedRemoteImportProbe.toString()})(${JSON.stringify(remoteUrl)}, ${JSON.stringify(channel)})`,
+        `(${packagedRemoteImportProbe.toString()})(${JSON.stringify(remoteUrl)}, ${JSON.stringify(channel)}, ${JSON.stringify(policyNotebookId)})`,
         true,
       );
       const fixtureRequests = ctx.remoteModuleRequestCount() - fixtureRequestsBefore;
@@ -279,25 +314,58 @@ for (const channel of ['preview', 'store']) {
       const fixtureRequests = ctx.remoteModuleRequestCount() - fixtureRequestsBefore;
       log(`  ✗ [${channel}] packaged remote-import policy probe failed after ${fixtureRequests} fixture request(s): ${error?.message ?? error}`);
     } finally {
-      try { policyPage?.close(); } catch { /* */ }
+      await closeProbePage(policyPage);
     }
 
+    let importPage = null;
+    let repositoryPage = null;
     try {
-      const repository = await evalIn(ctx.page, `(${packagedRepositoryProbe.toString()})()`, true);
-      if (!repository?.ok) {
+      // Exact route provenance is part of the product boundary: artifact import
+      // belongs to Options, while repository management and deletion belong to
+      // the human Home surface. The smoke must use those real owners.
+      importPage = await openExtPage(ctx, 'options/options.html');
+      const imported = await evalIn(
+        importPage, `(${packagedAppImportProbe.toString()})()`, true,
+      );
+      if (!imported?.ok) {
         failed = true;
-        log(`  ✗ [${channel}] packaged lazy repository probe: ${JSON.stringify(repository)}`);
-      } else log(`  ✓ [${channel}] packaged lazy repository + binary OPFS probe`);
+        log(`  ✗ [${channel}] packaged app import probe: ${JSON.stringify(imported)}`);
+      } else {
+        repositoryPage = await openExtPage(ctx, 'home/home.html');
+        const repository = await evalIn(
+          repositoryPage,
+          `(${packagedRepositoryProbe.toString()})(${JSON.stringify(imported.appId)})`,
+          true,
+        );
+        if (!repository?.ok) {
+          failed = true;
+          log(`  ✗ [${channel}] packaged lazy repository probe: ${JSON.stringify(repository)}`);
+        } else log(`  ✓ [${channel}] packaged lazy repository + binary OPFS probe`);
+      }
     } catch (error) {
       failed = true;
       log(`  ✗ [${channel}] packaged lazy repository probe failed: ${error?.message ?? error}`);
+    } finally {
+      await closeProbePage(importPage);
+      await closeProbePage(repositoryPage);
     }
 
     for (const page of pages) {
+      if (page === 'offscreen/offscreen.html') {
+        // It is a singleton lease host, not a user-openable page. The remote
+        // module and repository probes above exercise the real packaged host;
+        // opening a second tab copy would create an impossible competing host.
+        log(`  ✓ [${channel}] ${page} exercised through its singleton host`);
+        continue;
+      }
       const app = isAppPage(root, page);
       let p = null; let mounted = true; let openErr = null;
+      const launchSidepanel = page === 'sidepanel/sidepanel.html';
       try {
-        p = await openExtPage(ctx, page);
+        // launchPeerd already opened and mounted the real side panel. Opening a
+        // second copy races the single named UI port and tests an impossible
+        // product posture, so validate the existing surface in place.
+        p = launchSidepanel ? ctx.page : await openExtPage(ctx, page);
         const ready = app
           ? appReadyProbe(page)
           : `document.readyState === 'complete'`;
@@ -309,7 +377,7 @@ for (const channel of ['preview', 'store']) {
       } catch (e) { openErr = e?.message ?? String(e); }
       const netFails = p ? sameOriginNetFails(p.events) : [];
       const excs = p ? exceptions(p.events) : [];
-      try { p?.close(); } catch { /* */ }
+      if (!launchSidepanel) await closeProbePage(p);
       // Hard fail: an open failure, a missing same-origin resource (ANY page), a
       // non-mounting #app page, or an uncaught exception on an #app page.
       const hardFail = !!openErr || netFails.length > 0 || (app && (!mounted || excs.length > 0));

@@ -588,6 +588,8 @@ describe('sealed kernel feature protocol', () => {
       let controller: any;
       let effectSettled!: () => void;
       const settled = new Promise<void>((resolve) => { effectSettled = resolve; });
+      let nextTimer = 0;
+      const timers = new Map<number, () => void>();
       const control = createKernelFeatureControl({
         call: (capability, payload, callOptions) => controller.call(capability, payload, callOptions),
         handleEffect: async () => ({ ok: true, outcomeKnown: true, value: {} }),
@@ -608,6 +610,14 @@ describe('sealed kernel feature protocol', () => {
         buildDigest: BUILD_DIGEST,
         authorizeCall: control.authorize,
         handleKernelCall: control.handleKernelCall,
+        setTimeoutFn: ((callback: () => void) => {
+          const timer = ++nextTimer;
+          timers.set(timer, callback);
+          return timer;
+        }) as unknown as typeof setTimeout,
+        clearTimeoutFn: ((timer: number) => {
+          timers.delete(timer);
+        }) as unknown as typeof clearTimeout,
         findHost: async () => ({ postMessage: (offer: any, transfer: Transferable[]) => {
           host = bindControllerChannel({
             port: transfer[0] as MessagePort,
@@ -620,9 +630,13 @@ describe('sealed kernel feature protocol', () => {
         } }),
       });
       const result = control.dispatch(
-        'administrative', testCase.route, testCase.message, { timeoutMs: 20 },
+        'administrative', testCase.route, testCase.message, { timeoutMs: 10_000 },
       );
       await settled;
+      expect(timers.size).toBe(1);
+      const timeout = [...timers.values()][0];
+      expect(timeout).toBeDefined();
+      timeout?.();
       await expect(result).resolves.toMatchObject({
         ok: false, code: 'controller-call-timeout',
         outcomeKnown: true, retryable: testCase.retryable,
