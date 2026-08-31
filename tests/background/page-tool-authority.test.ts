@@ -280,6 +280,57 @@ describe('exact page authority', () => {
     });
   });
 
+  test('drains every exact child when one policy notice arrives before its siblings settle', async () => {
+    const outcomes = createKernelBrowserChildOutcomes({});
+    const page = pageContext();
+    const execute = page.ctx.scripting.executeScript;
+    page.ctx.scripting.executeScript = async (request: any) => {
+      const result = await execute(request);
+      if (Array.isArray(request.args) && request.args.length === 5) {
+        const first = outcomes.begin(7, 8, Symbol('first-live-child'));
+        outcomes.recordBlocked({
+          sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+          guarded: true, outcome: 'not_run', flowToken: first,
+        });
+        outcomes.settle(7, 8, first);
+        const second = outcomes.begin(7, 9, Symbol('second-live-child'));
+        setTimeout(() => {
+          outcomes.recordFailed({
+            sourceTabId: 7, tabId: 9, reason: 'child_guard_failed',
+            child: 'left_blank', guarded: false, flowToken: second,
+          });
+          outcomes.settle(7, 9, second);
+        }, 5);
+      }
+      return result;
+    };
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+      ctx: {
+        ...page.ctx,
+        reserveBrowserChildPolicyAction: outcomes.reserveAction,
+        consumeBrowserChildPolicyAction: outcomes.consumeAction,
+        waitForBrowserChildPolicyAction: outcomes.waitAction,
+        releaseBrowserChildPolicyAction: outcomes.releaseAction,
+        consumeBrowserChildPolicyNotice: outcomes.consume,
+      },
+    });
+    await expect(authority.clickOwnedTarget()).resolves.toMatchObject({
+      ok: true,
+      structured: { browserPolicies: [
+        {
+          reason: 'protected_child_navigation', outcome: 'not_run',
+          child: 'closed', retryable: false,
+        },
+        {
+          reason: 'child_navigation_failed', outcome: 'unverified',
+          child: 'left_blank', retryable: false,
+        },
+      ] },
+    });
+    expect(outcomes.consume(7)).toEqual([]);
+  });
+
   test('an ordinary click never enters the terminal child wait', async () => {
     const outcomes = createKernelBrowserChildOutcomes({});
     const waits: Array<[number, boolean]> = [];
