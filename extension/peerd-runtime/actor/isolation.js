@@ -87,7 +87,7 @@ export const actorIsolationRefusal = (capability, effects = {}) => ({
 });
 
 /**
- * Refuse a spawned/review actor before its parent session is read or a child
+ * Refuse a spawned actor before its parent session is read or a child
  * session is created. This is the central backstop for non-tool callers too.
  * @param {ActorIsolationCapability} capability
  * @param {number} [parentDepth]

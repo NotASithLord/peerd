@@ -135,7 +135,7 @@ states both plainly rather than counting them as defenses.
   Any remote module restricts the whole run to compute only. Runtime network
   and file access, agents, model calls, browser and site access, and dweb are
   disabled by both worker shims and host relay checks. A remote module cannot
-  import a local toolbox module. Returned values,
+  import a local workspace module. Returned values,
   console output, and errors are fenced as untrusted. Optional pins verify the
   bytes for reproducibility but do not make the code trusted. The
   sealed worker protects the extension process. It does not make remote code a
