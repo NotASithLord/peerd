@@ -172,6 +172,23 @@ describe('page_exec — outer tool', () => {
     expect(errOf(r).includes('debugger_detached')).toBe(true);
   });
 
+  it('marks a lost debugger result as unknown after dispatch', async () => {
+    const ctx = mockCtx(OK_RESULT, {
+      debuggerPool: {
+        evaluate: async () => {
+          const error = Object.assign(new Error('page script timed out'), {
+            outcomeKind: /** @type {const} */ ('host-lost'),
+          });
+          throw error;
+        },
+      },
+    });
+    const r = await pageExecTool.execute({ expression: 'x' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(errOf(r).startsWith('page_exec_outcome_unknown')).toBe(true);
+    expect(/** @type {any} */ (r).outcomeKind).toBe('host-lost');
+  });
+
   it('discards all page output when the checked document changed', async () => {
     const ctx = mockCtx(OK_RESULT, {
       debuggerPool: {
