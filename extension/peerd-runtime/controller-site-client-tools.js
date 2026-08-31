@@ -8,16 +8,14 @@ import { siteClientReadTool } from './tools/defs/site-client-read.js';
 import { siteClientWriteTool } from './tools/defs/site-client-write.js';
 import { siteCaptureTool } from './tools/defs/site-capture.js';
 
-export const CONTROLLER_SITE_CLIENT_TOOL_NAMES = Object.freeze([
-  'site_client_run', 'site_client_read', 'site_client_write', 'site_capture',
-]);
-
 const tools = Object.freeze({
   site_client_run: siteClientRunTool,
   site_client_read: siteClientReadTool,
   site_client_write: siteClientWriteTool,
   site_capture: siteCaptureTool,
 });
+
+export const CONTROLLER_SITE_CLIENT_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsSiteClientTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

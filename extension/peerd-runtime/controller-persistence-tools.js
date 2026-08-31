@@ -6,10 +6,6 @@ import { readMemoryTool } from './tools/defs/read-memory.js';
 import { rememberTool } from './tools/defs/remember.js';
 import { todoAddTool, todoCheckTool, todoInitTool } from './tools/defs/todo.js';
 
-export const CONTROLLER_PERSISTENCE_TOOL_NAMES = Object.freeze([
-  'read_memory', 'remember', 'todo_init', 'todo_check', 'todo_add',
-]);
-
 const tools = Object.freeze({
   read_memory: readMemoryTool,
   remember: rememberTool,
@@ -17,6 +13,8 @@ const tools = Object.freeze({
   todo_check: todoCheckTool,
   todo_add: todoAddTool,
 });
+
+export const CONTROLLER_PERSISTENCE_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsPersistenceTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

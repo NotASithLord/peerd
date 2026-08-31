@@ -9,16 +9,14 @@ import { jsWriteFileTool } from './tools/defs/js-write-file.js';
 import { jsReadFileTool } from './tools/defs/js-read-file.js';
 import { jsDeleteTool } from './tools/defs/js-delete.js';
 
-export const CONTROLLER_NOTEBOOK_TOOL_NAMES = Object.freeze([
-  'js_notebook', 'js_write_file', 'js_read_file', 'js_delete',
-]);
-
 const tools = Object.freeze({
   js_notebook: jsNotebookTool,
   js_write_file: jsWriteFileTool,
   js_read_file: jsReadFileTool,
   js_delete: jsDeleteTool,
 });
+
+export const CONTROLLER_NOTEBOOK_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsNotebookTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

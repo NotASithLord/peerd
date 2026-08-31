@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // read_state: read the React/Vue component state behind an element.
 //
 // For framework apps the rendered DOM is a lossy projection of the real
@@ -36,8 +35,8 @@ import {
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const readStateTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const readStateTool = Object.freeze({
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);

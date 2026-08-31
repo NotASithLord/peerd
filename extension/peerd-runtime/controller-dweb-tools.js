@@ -11,12 +11,6 @@ import { dwebBlockTool } from './tools/defs/dweb-block.js';
 import { dwebDiscoveryTool } from './tools/defs/dweb-discovery.js';
 import { a2aRunTool } from './tools/defs/a2a-run.js';
 
-export const CONTROLLER_DWEB_TOOL_NAMES = Object.freeze([
-  'dweb_discover', 'dweb_share', 'dweb_install', 'dweb_peers',
-  'dweb_block', 'dweb_discovery',
-  'a2a_run',
-]);
-
 const tools = Object.freeze({
   dweb_discover: dwebDiscoverTool,
   dweb_share: dwebShareTool,
@@ -26,6 +20,8 @@ const tools = Object.freeze({
   dweb_discovery: dwebDiscoveryTool,
   a2a_run: a2aRunTool,
 });
+
+export const CONTROLLER_DWEB_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsDwebTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

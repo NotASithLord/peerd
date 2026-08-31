@@ -1,5 +1,3 @@
-import { definePageAuthorityHandler } from './handler.js';
-
 // watch_changes: start/poll a persistent DOM-mutation watcher on a tab.
 //
 // The per-action `result` (in click/type) captures a ~400ms window around
@@ -22,8 +20,8 @@ import {
   wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const watchChangesTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const watchChangesTool = Object.freeze({
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);

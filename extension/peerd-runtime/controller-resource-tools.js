@@ -7,15 +7,13 @@ import { fetchUrlTool } from './tools/defs/fetch-url.js';
 import { readDocTool } from './tools/defs/read-doc.js';
 import { readResultTool } from './tools/defs/read-result.js';
 
-export const CONTROLLER_RESOURCE_TOOL_NAMES = Object.freeze([
-  'read_doc', 'fetch_url', 'read_result',
-]);
-
 const tools = Object.freeze({
   read_doc: readDocTool,
   fetch_url: fetchUrlTool,
   read_result: readResultTool,
 });
+
+export const CONTROLLER_RESOURCE_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsResourceTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

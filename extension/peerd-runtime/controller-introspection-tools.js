@@ -7,15 +7,13 @@ import { actorListTool } from './tools/defs/actor-list.js';
 import { inspectTool } from './tools/defs/inspect.js';
 import { loadSkillTool } from './skills/load-skill-tool.js';
 
-export const CONTROLLER_INTROSPECTION_TOOL_NAMES = Object.freeze([
-  'actor_list', 'inspect', 'load_skill',
-]);
-
 const tools = Object.freeze({
   actor_list: actorListTool,
   inspect: inspectTool,
   load_skill: loadSkillTool,
 });
+
+export const CONTROLLER_INTROSPECTION_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsIntrospectionTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

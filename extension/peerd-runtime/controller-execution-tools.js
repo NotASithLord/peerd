@@ -6,11 +6,9 @@
 import { sandboxCreateTool } from './tools/defs/sandbox-create.js';
 import { scriptTool } from './tools/defs/script.js';
 
-export const CONTROLLER_EXECUTION_TOOL_NAMES = Object.freeze([
-  'sandbox_create', 'script',
-]);
-
 const tools = Object.freeze({ sandbox_create: sandboxCreateTool, script: scriptTool });
+
+export const CONTROLLER_EXECUTION_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsExecutionTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

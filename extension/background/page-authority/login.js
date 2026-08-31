@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // login: INITIATE a user-gesture login (passkey/WebAuthn or "Sign in with <known
 // IdP>") on the current page. Tier 0 of the credential roadmap: it holds NO secret,
 // stores NOTHING, and NEVER fills a password. The authentication factor always
@@ -78,8 +77,8 @@ const afterLoginBindingUnknown = (
  * @typedef {{ domRefs?: DomRefs }} DomCtxExtras
  */
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const loginTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const loginTool = Object.freeze({
 
   execute: async (args, ctx) => {
     // 1) Resolve the tab through the DOM chokepoint (runs the origin lock /

@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // read_page: read the DOM of the target tab.
 //
 // Returns a structured snapshot wrapped in <untrusted_web_content>:
@@ -29,8 +28,8 @@ import {
 // Content mode shares fetch_url's body budget: one read costs like one fetch.
 const CONTENT_BODY_CHARS = 16_000;
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const readPageTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const readPageTool = Object.freeze({
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);

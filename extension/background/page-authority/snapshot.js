@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // snapshot: read a tab as an ACCESSIBILITY-TREE snapshot with element refs.
 //
 // The a11y-tree-+-refs paradigm (DOM nav Phase 1). Where read_page hands
@@ -40,8 +39,8 @@ import {
  * @property {(tabId: number, ref: string) => ({ backendDOMNodeId: number|null, walkId?: number|null, role: string, name: string }) | null} [resolve]
  */
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const snapshotTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const snapshotTool = Object.freeze({
 
   execute: async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);

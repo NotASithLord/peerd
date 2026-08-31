@@ -9,16 +9,14 @@ import { vmImportTool } from './tools/defs/vm-import.js';
 import { vmWriteFileTool } from './tools/defs/vm-write-file.js';
 import { vmDeleteTool } from './tools/defs/vm-delete.js';
 
-export const CONTROLLER_VM_TOOL_NAMES = Object.freeze([
-  'vm_boot', 'vm_import', 'vm_write_file', 'vm_delete',
-]);
-
 const tools = Object.freeze({
   vm_boot: vmBootTool,
   vm_import: vmImportTool,
   vm_write_file: vmWriteFileTool,
   vm_delete: vmDeleteTool,
 });
+
+export const CONTROLLER_VM_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsVmTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

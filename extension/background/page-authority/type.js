@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // type: set the value of an input/textarea and dispatch the events a
 // well-behaved page expects (focus, input, change). For
 // contenteditable elements, replaces innerText.
@@ -37,8 +36,8 @@ import {
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const typeTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const typeTool = Object.freeze({
 
   execute: async (args, ctx) => {
     if (typeof args?.text !== 'string') {

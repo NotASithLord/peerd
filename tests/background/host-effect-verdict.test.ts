@@ -1,15 +1,67 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  actorRecoveryCustody,
   HOST_EFFECT_OUTCOME,
   hostEffectValueIsRefusal,
+  lifecycleRecoveryAttribution,
+  lifecycleRewrite,
+  recoveryCustody,
+  safeLifecycleDiagnostic,
   stampAuthorityToolResult,
   stampAuthorityToolResultBlock,
+  strongestLifecycleRewrite,
 } from '../../extension/background/host-effect-verdict.js';
 import {
   controllerOperationReplayableAfterSettlement, controllerOperationRequiresConfirmation,
 } from '../../extension/shared/controller-kernel-quota.js';
 
 describe('exact host effect verdicts', () => {
+  test('canonicalizes lifecycle recovery verdicts for both authority transports', () => {
+    expect(lifecycleRewrite(null)).toBeNull();
+    expect(lifecycleRewrite({
+      error: 'forged', recovery: { category: 'test', state: 'settled' },
+    })).toBeNull();
+
+    const unknown = lifecycleRewrite({
+      error: `unknown\u0000${'x'.repeat(3_000)}`,
+      recovery: {
+        category: 'verify_before_retry', state: 'outcome_unknown',
+        autoRetry: false,
+      },
+    })!;
+    const cancelled = lifecycleRewrite({
+      error: 'cancelled', recovery: { category: 'stop', state: 'cancelled' },
+    })!;
+    expect(Object.isFrozen(unknown)).toBe(true);
+    expect(Object.isFrozen(unknown.recovery)).toBe(true);
+    expect(unknown.error).toHaveLength(2_048);
+    expect(lifecycleRecoveryAttribution(unknown)).toEqual({
+      recoveryCategory: 'verify_before_retry', recoveryState: 'outcome_unknown',
+    });
+    expect(recoveryCustody(unknown)).toEqual({ outcomeKnown: false, retryable: false });
+    expect(recoveryCustody(cancelled)).toEqual({ outcomeKnown: true, retryable: false });
+    expect(safeLifecycleDiagnostic(new Error('\u0000 host\n lost ')))
+      .toBe('host  lost');
+
+    expect(actorRecoveryCustody(unknown, {
+      actorCorrelationId: 'correlation-1',
+      actorDeliveryIds: ['delivery-1', 'delivery-1', '', 42],
+    })).toEqual({
+      actorCorrelationId: 'correlation-1', actorDeliveryIds: ['delivery-1'],
+      actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+    });
+    expect(actorRecoveryCustody(cancelled, {})).toEqual({});
+
+    const failed = lifecycleRewrite({
+      error: 'failed', recovery: { category: 'security', state: 'failed' },
+    })!;
+    expect(strongestLifecycleRewrite([
+      { rewrite: failed }, { rewrite: cancelled }, { rewrite: unknown },
+    ])?.rewrite).toBe(unknown);
+    expect(strongestLifecycleRewrite([])).toBeNull();
+  });
+
   test.each([
     [{ restored: false, checkpointOid: null }, 'not-performed'],
     [{ restored: false, checkpointOid: 'safe-1' }, 'performed'],

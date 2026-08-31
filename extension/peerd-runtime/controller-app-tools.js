@@ -16,12 +16,6 @@ import { appObserveTool } from './tools/defs/app-observe.js';
 import { appActTool } from './tools/defs/app-act.js';
 import { appCodeTool } from './tools/defs/app-code.js';
 
-export const CONTROLLER_APP_TOOL_NAMES = Object.freeze([
-  'app_update', 'app_open', 'app_search', 'app_delete',
-  'app_write_file', 'app_read_file', 'app_list_files', 'app_delete_file',
-  'app_observe', 'app_act', 'app_code',
-]);
-
 const tools = Object.freeze({
   app_update: appUpdateTool,
   app_open: appOpenTool,
@@ -35,6 +29,8 @@ const tools = Object.freeze({
   app_act: appActTool,
   app_code: appCodeTool,
 });
+
+export const CONTROLLER_APP_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsAppTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

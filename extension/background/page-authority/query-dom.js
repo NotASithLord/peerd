@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // query_dom: selector-based DOM probe.
 //
 // read_page is comprehensive but expensive: it walks the body, returns
@@ -31,8 +30,8 @@ import {
   wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const queryDomTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const queryDomTool = Object.freeze({
 
   execute: async (args, ctx) => {
     if (!args?.selector || typeof args.selector !== 'string') {
