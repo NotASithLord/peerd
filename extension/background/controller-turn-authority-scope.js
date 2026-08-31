@@ -56,7 +56,8 @@ const CLASS_KEYS = Object.freeze({
     'docOffscreenClient', 'resultStore', 'webFetch', 'webOffscreenClient',
   ]),
   siteclient: Object.freeze([
-    'session', 'activeTab', 'actorType', 'permission', 'readAuthorityPermission', 'confirm',
+    'session', 'activeTab', 'actorType', 'backing',
+    'permission', 'readAuthorityPermission', 'confirm',
     ...BROWSER_TARGET_KEYS,
     'authorizeSiteClientOrigin', 'jsOffscreenClient', 'scriptRuns', 'siteCapture',
     'siteClients',
