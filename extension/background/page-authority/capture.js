@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // capture: screenshot of the active tab.
 //
 // chrome.tabs.captureVisibleTab requires either the activeTab grant
@@ -23,8 +22,8 @@ import {
   resolveTargetTab,
 } from '/peerd-runtime/browser-authority.js';
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const captureTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const captureTool = Object.freeze({
   execute: async (args, ctx) => {
     /** @type {Map<number, { tabId?: number, token?: string }>} */
     const guardLeases = new Map();

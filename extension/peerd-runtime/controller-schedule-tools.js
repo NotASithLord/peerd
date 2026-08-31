@@ -8,15 +8,13 @@ import { scheduleCreateTool } from './tools/defs/schedule-create.js';
 import { scheduleListTool } from './tools/defs/schedule-list.js';
 import { scheduleCancelTool } from './tools/defs/schedule-cancel.js';
 
-export const CONTROLLER_SCHEDULE_TOOL_NAMES = Object.freeze([
-  'schedule_create', 'schedule_list', 'schedule_cancel',
-]);
-
 const tools = Object.freeze({
   schedule_create: scheduleCreateTool,
   schedule_list: scheduleListTool,
   schedule_cancel: scheduleCancelTool,
 });
+
+export const CONTROLLER_SCHEDULE_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsScheduleTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

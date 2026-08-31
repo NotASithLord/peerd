@@ -9,16 +9,14 @@ import { repositoryHistoryTool } from './tools/defs/app-history.js';
 import { repositoryVersionTool } from './tools/defs/app-version.js';
 import { repositoryRemoteTool } from './tools/defs/app-remote.js';
 
-export const CONTROLLER_REPOSITORY_TOOL_NAMES = Object.freeze([
-  'pod_destroy', 'repo_history', 'repo_version', 'repo_remote',
-]);
-
 const tools = Object.freeze({
   pod_destroy: podDestroyTool,
   repo_history: repositoryHistoryTool,
   repo_version: repositoryVersionTool,
   repo_remote: repositoryRemoteTool,
 });
+
+export const CONTROLLER_REPOSITORY_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsRepositoryTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

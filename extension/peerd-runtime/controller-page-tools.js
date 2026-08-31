@@ -17,12 +17,6 @@ import { pageCodeTool } from './tools/defs/page-code.js';
 import { captureTool } from './tools/web/screenshot.js';
 import { viewTool } from './tools/web/view.js';
 
-export const CONTROLLER_PAGE_TOOL_NAMES = Object.freeze([
-  'open_tab', 'read_page', 'snapshot', 'read_state', 'watch_changes',
-  'query_dom', 'navigate', 'type', 'click', 'login', 'page_code', 'capture',
-  'view',
-]);
-
 const tools = Object.freeze({
   open_tab: openTabTool,
   read_page: readPageTool,
@@ -38,6 +32,8 @@ const tools = Object.freeze({
   capture: captureTool,
   view: viewTool,
 });
+
+export const CONTROLLER_PAGE_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsPageTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

@@ -9,14 +9,20 @@
 
 import { normalizeExactEffectOutcome } from '/shared/exact-effect-outcome.js';
 import {
+  actorRecoveryCustody,
   authorityReceiptsForCall,
   HOST_CONFIRMATION_DECLINED,
   HOST_EFFECT_OUTCOME,
   hostEffectValueIsRefusal,
+  lifecycleRecoveryAttribution,
+  lifecycleRewrite,
+  recoveryCustody,
+  safeLifecycleDiagnostic as safeDiagnostic,
   safeHostEffectFailure,
   safeHostPolicyAttribution,
   stampAuthorityToolResult,
   stampAuthorityToolResultBlock,
+  strongestLifecycleRewrite,
 } from './host-effect-verdict.js';
 import { semanticCallAuditEntry } from './semantic-call-audit.js';
 import {
@@ -186,89 +192,6 @@ const ACTOR_SEMANTIC_TOOL_RESULT_CAP = 2 * 1024 * 1024;
 /** @param {unknown} value @returns {value is Record<string, any>} */
 const isRecord = (value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
-
-const safeDiagnostic = (/** @type {unknown} */ cause) => {
-  const text = cause instanceof Error ? cause.message : String(cause);
-  return text.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240)
-    || 'unknown lifecycle failure';
-};
-
-const lifecycleRewrite = (/** @type {unknown} */ value) => {
-  if (!isRecord(value) || typeof value.error !== 'string' || !isRecord(value.recovery)) {
-    return null;
-  }
-  const state = value.recovery.state;
-  if (typeof value.recovery.category !== 'string'
-      || typeof state !== 'string'
-      || !['failed', 'cancelled', 'interrupted', 'outcome_unknown'].includes(state)) return null;
-  return Object.freeze({
-    error: value.error.slice(0, 2_048),
-    recovery: Object.freeze({ ...value.recovery }),
-  });
-};
-
-const lifecycleRecoveryAttribution = (/** @type {any} */ rewrite) => rewrite ? {
-  recoveryCategory: typeof rewrite.recovery?.category === 'string'
-    ? rewrite.recovery.category : 'unknown',
-  recoveryState: typeof rewrite.recovery?.state === 'string'
-    ? rewrite.recovery.state : 'unknown',
-} : {};
-
-const recoveryCustody = (/** @type {any} */ rewrite) => ({
-  outcomeKnown: rewrite?.recovery?.state !== 'outcome_unknown',
-  retryable: false,
-});
-
-const actorRecoveryCustody = (
-  /** @type {any} */ rewrite,
-  /** @type {Record<string, any>} */ source,
-) => {
-  const hasActorCustody = typeof source.actorCorrelationId === 'string'
-    || typeof source.actorDeliveryId === 'string'
-    || Array.isArray(source.actorDeliveryIds)
-    || typeof source.actorTerminal === 'boolean'
-    || typeof source.actorOutcomeKnown === 'boolean'
-    || typeof source.actorPerformed === 'boolean'
-    || typeof source.actorAborted === 'boolean';
-  if (!hasActorCustody) return {};
-  const actorDeliveryIds = Array.isArray(source.actorDeliveryIds)
-    ? [...new Set(source.actorDeliveryIds.filter(
-      (/** @type {unknown} */ id) => typeof id === 'string' && id.length > 0))]
-    : [];
-  const identity = {
-    ...(typeof source.actorCorrelationId === 'string'
-      ? { actorCorrelationId: source.actorCorrelationId } : {}),
-    ...(typeof source.actorDeliveryId === 'string'
-      ? { actorDeliveryId: source.actorDeliveryId } : {}),
-    ...(actorDeliveryIds.length > 0 ? { actorDeliveryIds } : {}),
-  };
-  switch (rewrite?.recovery?.state) {
-  case 'outcome_unknown':
-    return {
-      ...identity, actorTerminal: true, actorOutcomeKnown: false,
-      actorPerformed: true, actorAborted: false,
-    };
-  case 'interrupted':
-    return {
-      ...identity, actorTerminal: true, actorOutcomeKnown: true,
-      actorPerformed: false, actorAborted: false,
-    };
-  case 'cancelled':
-    return {
-      ...identity, actorTerminal: true, actorOutcomeKnown: true,
-      actorPerformed: false, actorAborted: true,
-    };
-  default:
-    return identity;
-  }
-};
-
-const strongestLifecycleRewrite = (/** @type {any[]} */ entries) =>
-  entries.find((entry) => entry.rewrite.recovery?.state === 'outcome_unknown')
-  ?? entries.find((entry) => entry.rewrite.recovery?.state === 'interrupted')
-  ?? entries.find((entry) => entry.rewrite.recovery?.state === 'cancelled')
-  ?? entries[0]
-  ?? null;
 
 /** @returns {boolean} */
 const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {

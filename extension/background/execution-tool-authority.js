@@ -4,8 +4,9 @@
 // why: the controller decides what a sandbox/script means; this adapter alone
 // may create engine records, open engine tabs, mount session storage, mint run
 // grants, or place spill bytes in the session-owned result store.
-import { ENGINE_TAB_GROUP_TITLE } from '/shared/engine-tab-group.js';
 import { normalizeGitRemote } from '/peerd-engine/authority.js';
+
+const ENGINE_TAB_GROUP_TITLE = 'peerd';
 
 const mismatch = () => Object.assign(new Error('execution authority mismatch'), {
   outcomeKnown: true, retryable: false,

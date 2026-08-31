@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // navigate: change the URL of the target tab and wait for load.
 //
 // V1 semantics:
@@ -53,8 +52,8 @@ const DOCUMENT_READY_WAIT_MS = 2_000;
  * @returns {void}
  */
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const navigateTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const navigateTool = Object.freeze({
 
   execute: async (args, ctx) => {
     // why: classify before tab resolution because resolution can probe the

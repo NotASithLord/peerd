@@ -11,10 +11,6 @@ import { podCancelTool } from './tools/defs/pod-cancel.js';
 import { podReadTool } from './tools/defs/pod-read.js';
 import { podWriteTool } from './tools/defs/pod-write.js';
 
-export const CONTROLLER_POD_TOOL_NAMES = Object.freeze([
-  'pod_exec', 'pod_status', 'pod_cancel', 'pod_read', 'pod_write',
-]);
-
 const tools = Object.freeze({
   pod_exec: podExecTool,
   pod_status: podStatusTool,
@@ -22,6 +18,8 @@ const tools = Object.freeze({
   pod_read: podReadTool,
   pod_write: podWriteTool,
 });
+
+export const CONTROLLER_POD_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsPodTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

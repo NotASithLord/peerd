@@ -9,16 +9,14 @@ import { actorTasksTool } from './tools/defs/actor-tasks.js';
 import { actorCancelTool } from './tools/defs/actor-cancel.js';
 import { messageActorTool } from './tools/defs/message-actor.js';
 
-export const CONTROLLER_ACTOR_TOOL_NAMES = Object.freeze([
-  'actor_create', 'actor_tasks', 'actor_cancel', 'message_actor',
-]);
-
 const tools = Object.freeze({
   actor_create: actorCreateTool,
   actor_tasks: actorTasksTool,
   actor_cancel: actorCancelTool,
   message_actor: messageActorTool,
 });
+
+export const CONTROLLER_ACTOR_TOOL_NAMES = Object.freeze(Object.keys(tools));
 
 export const controllerHostsActorTool = (/** @type {unknown} */ name) =>
   typeof name === 'string' && Object.hasOwn(tools, name);

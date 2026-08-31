@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // open_tab: open a new browser tab, optionally pre-loaded with a URL.
 //
 // This is mutate_external in spirit (it changes user-visible browser
@@ -38,8 +37,8 @@ const NAV_TIMEOUT_MS = 30_000;
  * @property {string} [url]
  */
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const openTabTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const openTabTool = Object.freeze({
 
   execute: async (args, ctx) => {
     // why background, always: a tab peerd opens no longer steals the user away

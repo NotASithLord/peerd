@@ -1,6 +1,5 @@
 // @ts-check
 
-import { definePageAuthorityHandler } from './handler.js';
 // view: SEE the visible region of the active tab as an image.
 //
 // The DOM tools (snapshot/read_page/query_dom) read a page's accessibility tree
@@ -44,8 +43,8 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 /** @param {string} b64 */
 const base64Bytes = (b64) => Math.floor((String(b64).length * 3) / 4);
 
-/** @type {import('/shared/tool-types.js').Tool} */
-export const viewTool = definePageAuthorityHandler({
+/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
+export const viewTool = Object.freeze({
   execute: async (args, ctx) => {
     try {
       // Resolve + denylist-validate the REAL target (the pinned tab, or args.tabId).
