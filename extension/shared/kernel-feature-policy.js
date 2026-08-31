@@ -20,17 +20,6 @@ const OWNER_ID = 'peerd-authority-kernel';
 const DISPATCH_ID = /^[A-Za-z0-9._-]{8,512}$/;
 export const KERNEL_FEATURE_DISPATCH_CAPABILITY = 'feature.dispatch';
 
-export const KERNEL_FEATURE_ROOT_CAPABILITIES = Object.freeze({
-  production: Object.freeze(['turn.run', 'runtime.dispatch']),
-  semantic: Object.freeze(['semantic.dispatch', 'turn.run']),
-  executable: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY, 'runtime.dispatch']),
-  support: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
-  administrative: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
-  repository: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
-  local: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
-  dweb: Object.freeze([KERNEL_FEATURE_DISPATCH_CAPABILITY]),
-});
-
 const READ_ROUTES = new Set([
   'app/editor/read', 'app/editor/list', 'lifecycle/assert-opfs-writable',
   'vm/get-meta', 'site-client/list', 'denylist/list', 'commands/list',
