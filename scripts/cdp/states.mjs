@@ -27,7 +27,8 @@ import {
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
-  NETWORK_GUARD_CONTROLLER_PORT, SITE_CLIENT_FIXTURE_TLS_PORT,
+  NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
+  NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
 } from './e2e-harness.mjs';
 
 // A compact transcript probe shared by the functional states.
@@ -529,7 +530,7 @@ export const STATES = [
       });
       const controllerServer = createServer((req, res) => {
         controllerRequests += 1;
-        const requestUrl = new URL(req.url ?? '/', 'http://orders.peerd.test');
+        const requestUrl = new URL(req.url ?? '/', `http://${NETWORK_GUARD_OWNED_HOST}`);
         if (requestUrl.pathname === '/sensitive-child') {
           sensitiveChildRequests += 1;
           res.end('<!doctype html><title>sensitive-child-leaked</title>');
@@ -691,7 +692,20 @@ export const STATES = [
           .listen(NETWORK_GUARD_CONTROLLER_PORT, '127.0.0.1', resolve)),
       ]);
       const probePort = /** @type {{ port: number }} */ (probeServer.address()).port;
-      networkGuardFixtureUrl = `http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}/`;
+      networkGuardFixtureUrl = `http://${NETWORK_GUARD_OWNED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}/`;
+      const initialWorkerDomains = await evalIn(ctx.page, `(async () => {
+        const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
+        const rules = await chrome.declarativeNetRequest.getSessionRules();
+        const workerRule = rules.find((rule) =>
+          policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+        return [...(workerRule?.condition?.initiatorDomains ?? [])].sort();
+      })()`, true);
+      const guardedWorkerDomains = [...new Set([
+        ...initialWorkerDomains, NETWORK_GUARD_OWNED_HOST,
+      ])].sort();
+      const retainedWorkerDomains = [...new Set([
+        ...guardedWorkerDomains, NETWORK_GUARD_UNRELATED_HOST,
+      ])].sort();
       const resetProbe = async () => {
         await sleep(100);
         probeConnections = 0;
@@ -853,7 +867,7 @@ export const STATES = [
         await resetProbe();
         const activeBeforeOrdinary = await evalIn(ctx.page,
           'chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => tabs[0]?.id)', true);
-        const ordinaryUrl = `http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}/ordinary-quarantine`;
+        const ordinaryUrl = `http://${NETWORK_GUARD_UNRELATED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}/ordinary-quarantine`;
         const ordinaryStartedAt = Date.now();
         const ordinaryTab = await evalIn(ctx.page,
           `chrome.tabs.create({ url: ${JSON.stringify(ordinaryUrl)}, active: false })`, true);
@@ -938,7 +952,9 @@ export const STATES = [
                 };
                 const publicRoute = (path, crossOrigin = false) => {
                   const url = new URL(path, crossOrigin
-                    ? publicBase.replace('orders.peerd.test', 'acct.peerd.test')
+                    ? publicBase.replace(
+                      ${JSON.stringify(NETWORK_GUARD_OWNED_HOST)},
+                      ${JSON.stringify(NETWORK_GUARD_UNRELATED_HOST)})
                     : publicBase);
                   url.searchParams.set('probePort', String(privatePort));
                   return url.href;
@@ -1072,7 +1088,7 @@ export const STATES = [
         rec.check('the worker fetch floor is no-tab and limited to a visited page domain',
           workerRuleShape.length > 0 && workerRuleShape.every((rule) =>
             JSON.stringify(rule.condition?.tabIds) === JSON.stringify([-1])
-              && JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['orders.peerd.test'])),
+              && JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(guardedWorkerDomains)),
           JSON.stringify(workerRuleShape));
         const initiatorOutcomes = await evalIn(ctx.page, `Promise.all([
           chrome.declarativeNetRequest.testMatchOutcome({
@@ -1083,7 +1099,7 @@ export const STATES = [
           chrome.declarativeNetRequest.testMatchOutcome({
             url: ${JSON.stringify(`http://127.0.0.1:${probePort}/probe?vector=dnr-miss`)},
             type: 'xmlhttprequest', tabId: -1,
-            initiator: ${JSON.stringify(new URL(networkGuardFixtureUrl.replace('orders.peerd.test', 'acct.peerd.test')).origin)},
+            initiator: ${JSON.stringify(`http://${NETWORK_GUARD_UNRELATED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}`)},
           }),
           chrome.declarativeNetRequest.testMatchOutcome({
             url: ${JSON.stringify(`ws://127.0.0.1:${probePort}/probe?vector=dnr-socket-match`)},
@@ -1319,7 +1335,8 @@ export const STATES = [
           ctx.modelCallCount() > 0,
           JSON.stringify({ modelCalls: ctx.modelCallCount() }));
 
-        const unrelatedUrl = networkGuardFixtureUrl.replace('orders.peerd.test', 'acct.peerd.test');
+        const unrelatedUrl = networkGuardFixtureUrl.replace(
+          NETWORK_GUARD_OWNED_HOST, NETWORK_GUARD_UNRELATED_HOST);
         const unrelatedTab = await evalIn(ctx.page,
           `chrome.tabs.create({ url: ${JSON.stringify(unrelatedUrl)}, active: false })`, true);
         await waitFor(async () => {
@@ -1351,7 +1368,8 @@ export const STATES = [
           const workerRules = rules.filter((rule) => policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
           return workerRules.length > 0
             && workerRules.every((rule) =>
-              JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['acct.peerd.test', 'orders.peerd.test']));
+              JSON.stringify(rule.condition?.initiatorDomains)
+                === JSON.stringify(${JSON.stringify(retainedWorkerDomains)}));
         })()`, true), { budgetMs: 5_000, pollMs: 25 });
         rec.check('navigation retains prior worker domains and adds the committed domain',
           retainedScope === true, JSON.stringify({ retainedScope }));
@@ -1386,10 +1404,16 @@ export const STATES = [
         const releasedScope = await waitFor(() => evalIn(ctx.page, `(async () => {
           const policy = await import(chrome.runtime.getURL('peerd-egress/index.js'));
           const rules = await chrome.declarativeNetRequest.getSessionRules();
-          return rules.every((rule) =>
-            !policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+          const workerRules = rules.filter((rule) =>
+            policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.includes(rule.id));
+          const expected = ${JSON.stringify(initialWorkerDomains)};
+          return expected.length === 0
+            ? workerRules.length === 0
+            : workerRules.length === policy.PRIVATE_NETWORK_INITIATOR_RULE_IDS.length
+              && workerRules.every((rule) =>
+                JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(expected));
         })()`, true), { budgetMs: 5_000, pollMs: 25 });
-        rec.check('closing custody removes every visited worker-domain rule',
+        rec.check('closing test custody restores the prior worker-domain rules',
           releasedScope === true, JSON.stringify({ releasedScope }));
 
         await resetProbe();
