@@ -110,6 +110,49 @@ describe('kernel browser child outcomes', () => {
     expect(owner.releaseAction(7, action)).toBe(true);
   });
 
+  test('a fully settled pre-reservation generation cannot be rebound to a later action', async () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const child = owner.begin(7, 8, Symbol('settled-before-reservation'));
+    owner.settle(7, 8, child);
+
+    const action = owner.reserveAction(7)!;
+    owner.begin(7, 8, child);
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: child,
+    });
+    owner.settle(7, 8, child);
+
+    expect(owner.consumeAction(7, action)).toEqual([]);
+    expect(owner.consume(7)).toEqual([{
+      reason: 'protected_child_navigation', outcome: 'not_run',
+      child: 'closed', retryable: false,
+    }]);
+    expect(await owner.waitAction(7, action, 0)).toBe(false);
+    expect(owner.releaseAction(7, action)).toBe(true);
+  });
+
+  test('generation replacement and tab release retire the bounded tombstone', () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const stale = owner.begin(7, 8, Symbol('stale-generation'));
+    owner.settle(7, 8, stale);
+    const action = owner.reserveAction(7)!;
+    const current = owner.begin(7, 8, Symbol('replacement-generation'));
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: current,
+    });
+    owner.settle(7, 8, current);
+    expect(owner.consumeAction(7, action)).toHaveLength(1);
+    owner.release(8);
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'late', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: current,
+    });
+    expect(owner.consumeAction(7, action)).toEqual([]);
+    expect(owner.releaseAction(7, action)).toBe(true);
+  });
+
   test('terminal action custody waits for every child even after an early notice', async () => {
     const owner = createKernelBrowserChildOutcomes({});
     const action = owner.reserveAction(7)!;
