@@ -141,6 +141,8 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(source).toContain('makeSystemReadRoutes');
     expect(source).toContain('applyStoreBootPosture');
     expect(source).toContain('makeWriteGuard');
+    expect(source).toContain("['ralph.plan.v1', 'ralph.loop.v1']");
+    expect(source).toContain('Promise.resolve(kv.delete(deadKey)).catch(() => {})');
     expect(source).toContain("import browser from '/shared/browser-api.js'");
     expect(source).toContain('makeKernelGenerationLifecycle');
     expect(source).toContain('createKernelIdentity');

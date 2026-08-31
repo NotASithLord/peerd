@@ -54,7 +54,7 @@ export const defaults = {
   voiceSilenceMs: { store: 1500, preview: 1500 },
   voiceOnboardingDismissed: { store: false, preview: false },
 
-  // OCR for scanned PDFs (read_pdf's heavy path). Opt-in on BOTH channels for
+  // OCR for scanned PDFs (read_doc's heavy path). Opt-in on BOTH channels for
   // the same reason as voice: enabling triggers a multi-MB engine download.
   // The default reader (pdf.js text layer) needs no download and is always on;
   // this flag only governs the on-device OCR engine for image-only PDFs.

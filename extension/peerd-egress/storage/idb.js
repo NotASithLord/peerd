@@ -4,6 +4,26 @@ const DB_NAME = 'peerd';
 const DB_VERSION = 14;
 const OPEN_TIMEOUT_MS = 8_000;
 const TX_TIMEOUT_MS = 15_000;
+const RETIRED_DATABASE_NAMES = Object.freeze(['peerd-toolbox', 'peerd-run-cache']);
+
+/**
+ * Remove exact databases owned only by retired product surfaces. Failure is
+ * intentionally non-fatal: an old extension page may still hold a connection
+ * during update, and the next service-worker boot retries the same two names.
+ * @param {IDBFactory | undefined} [idbFactory]
+ * @returns {Promise<void>}
+ */
+export const cleanupRetiredDatabases = async (idbFactory = globalThis.indexedDB) => {
+  if (!idbFactory || typeof idbFactory.deleteDatabase !== 'function') return;
+  await Promise.all(RETIRED_DATABASE_NAMES.map((name) =>
+    new Promise((resolve) => {
+      const settle = () => resolve(undefined);
+      try {
+        const request = idbFactory.deleteDatabase(name);
+        request.onsuccess = request.onerror = request.onblocked = settle;
+      } catch { settle(); }
+    })));
+};
 
 /** @param {IDBTransaction} tx @param {Function} resolve @param {Function} reject */
 const guardTransaction = (tx, resolve, reject) => {
@@ -27,7 +47,12 @@ const guardTransaction = (tx, resolve, reject) => {
 /** @returns {Promise<IDBDatabase>} */
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null;
+let retiredDatabaseCleanupStarted = false;
 export const openDB = () => {
+  if (!retiredDatabaseCleanupStarted) {
+    retiredDatabaseCleanupStarted = true;
+    void cleanupRetiredDatabases().catch(() => {});
+  }
   if (dbPromise) return dbPromise;
   const opening = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);

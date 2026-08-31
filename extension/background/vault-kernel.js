@@ -187,6 +187,12 @@ const {
 const writeGuard = makeWriteGuard();
 const kv = writeGuard.wrapKv(rawKv);
 const idb = writeGuard.wrapIdb(rawIdb);
+// why: direct upgrades can skip the old build that first removed Ralph. Keep
+// its two exact orphaned records from surviving indefinitely; failure retries
+// on the next kernel boot and never delays listener registration or readiness.
+for (const deadKey of ['ralph.plan.v1', 'ralph.loop.v1']) {
+  void Promise.resolve(kv.delete(deadKey)).catch(() => {});
+}
 let autoLockMs = DEFAULT_AUTO_LOCK_MS;
 const settingsStore = makeSettingsStore({
   kv, key: 'settings.v1', defaults: CHANNEL_DEFAULTS,

@@ -127,17 +127,17 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 405, graphBytes: 3_993_319 }),
-  target: Object.freeze({ modules: 408, graphBytes: 4_082_892 }),
+  shared: Object.freeze({ modules: 405, graphBytes: 3_994_641 }),
+  target: Object.freeze({ modules: 408, graphBytes: 4_084_214 }),
   exclusive: Object.freeze({ modules: 4, graphBytes: 89_773 }),
   entryBytesCeiling: 236,
   directImportsCeiling: 3,
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 87, graphBytes: 641_867, entryBytes: 239, directImports: 3,
+  modules: 87, graphBytes: 643_293, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 89, graphBytes: 649_964, entryBytes: 250, directImports: 2,
+  modules: 89, graphBytes: 651_390, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -159,7 +159,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // deleted.
   // Browser-child generations, runtime-capability-hosts and the semantic hook
   // manifest are fixed custody/policy inputs, not feature ownership.
-  kernel: Object.freeze({ modules: 405, graphBytes: 3_993_319, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 405, graphBytes: 3_994_641, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
