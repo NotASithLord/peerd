@@ -9,6 +9,7 @@ import {
   safeHostPolicyAttribution,
   stampAuthorityToolResultBlock,
 } from '../../extension/background/host-effect-verdict.js';
+import { createKernelBrowserChildOutcomes } from '../../extension/background/kernel-browser-child-outcomes.js';
 
 describe('exact page authority', () => {
   const pageContext = (over: Record<string, any> = {}) => {
@@ -241,6 +242,101 @@ describe('exact page authority', () => {
     });
     await expect(authority.clickOwnedTarget()).resolves.toMatchObject({ ok: true });
     expect({ prompts, actions: page.actionCalls() }).toEqual({ prompts: 0, actions: 1 });
+  });
+
+  test('returns a child policy that begins after the physical click settles', async () => {
+    const outcomes = createKernelBrowserChildOutcomes({});
+    const page = pageContext();
+    const execute = page.ctx.scripting.executeScript;
+    page.ctx.scripting.executeScript = async (request: any) => {
+      const result = await execute(request);
+      if (Array.isArray(request.args) && request.args.length === 5) setTimeout(() => {
+        const child = outcomes.begin(7, 8, Symbol('delayed-live-child'));
+        outcomes.recordBlocked({
+          sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+          guarded: true, outcome: 'not_run', flowToken: child,
+        });
+        outcomes.settle(7, 8, child);
+      }, 5);
+      return result;
+    };
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+      ctx: {
+        ...page.ctx,
+        reserveBrowserChildPolicyAction: outcomes.reserveAction,
+        consumeBrowserChildPolicyAction: outcomes.consumeAction,
+        waitForBrowserChildPolicyAction: outcomes.waitAction,
+        releaseBrowserChildPolicyAction: outcomes.releaseAction,
+        consumeBrowserChildPolicyNotice: outcomes.consume,
+      },
+    });
+    await expect(authority.clickOwnedTarget()).resolves.toMatchObject({
+      ok: true,
+      structured: { browserPolicy: {
+        reason: 'protected_child_navigation', outcome: 'not_run',
+        child: 'closed', retryable: false,
+      } },
+    });
+  });
+
+  test('an ordinary click never enters the terminal child wait', async () => {
+    const outcomes = createKernelBrowserChildOutcomes({});
+    const waits: Array<[number, boolean]> = [];
+    const page = pageContext();
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+      ctx: {
+        ...page.ctx,
+        reserveBrowserChildPolicyAction: outcomes.reserveAction,
+        consumeBrowserChildPolicyAction: outcomes.consumeAction,
+        waitForBrowserChildPolicyAction: async (
+          tabId: number, token: symbol, timeoutMs: number, terminal = false,
+          signal?: AbortSignal,
+        ) => {
+          waits.push([timeoutMs, terminal]);
+          return outcomes.waitAction(tabId, token, 0, terminal, signal);
+        },
+        releaseBrowserChildPolicyAction: outcomes.releaseAction,
+        consumeBrowserChildPolicyNotice: outcomes.consume,
+      },
+    });
+    await expect(authority.clickOwnedTarget()).resolves.toMatchObject({ ok: true });
+    expect(waits).toEqual([[175, false]]);
+  });
+
+  test('Stop during child onset wait retires the action generation', async () => {
+    const outcomes = createKernelBrowserChildOutcomes({});
+    const controller = new AbortController();
+    let reserved: symbol | null = null;
+    let waiting!: () => void;
+    const waitStarted = new Promise<void>((resolve) => { waiting = resolve; });
+    const page = pageContext();
+    const authority = createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+      ctx: {
+        ...page.ctx,
+        reserveBrowserChildPolicyAction: (tabId: number) => {
+          reserved = outcomes.reserveAction(tabId);
+          return reserved;
+        },
+        consumeBrowserChildPolicyAction: outcomes.consumeAction,
+        waitForBrowserChildPolicyAction: async (...args: any[]) => {
+          waiting();
+          return outcomes.waitAction(args[0], args[1], args[2], args[3], args[4]);
+        },
+        releaseBrowserChildPolicyAction: outcomes.releaseAction,
+        consumeBrowserChildPolicyNotice: outcomes.consume,
+      },
+      signal: controller.signal,
+    });
+    const pending = authority.clickOwnedTarget();
+    await waitStarted;
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(reserved).not.toBeNull();
+    expect(outcomes.consumeAction(7, reserved!)).toEqual([]);
+    expect(typeof outcomes.reserveAction(7)).toBe('symbol');
   });
 
   test('the host refuses a raw exact cross-origin exfiltration navigation', async () => {

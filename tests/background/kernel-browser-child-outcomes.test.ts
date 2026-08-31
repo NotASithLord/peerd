@@ -42,6 +42,62 @@ describe('kernel browser child outcomes', () => {
     expect(blanks).toEqual([9]);
   });
 
+  test('reserves an action before a delayed child event and waits only for that generation', async () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const action = owner.reserveAction(7);
+    expect(typeof action).toBe('symbol');
+    const onset = owner.waitAction(7, action!, 50);
+    await Promise.resolve();
+    const child = owner.begin(7, 8, Symbol('delayed-child'));
+    expect(await onset).toBe(true);
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: child,
+    });
+    owner.settle(7, 8, child);
+    expect(await owner.waitAction(7, action!, 50, true)).toBe(true);
+    expect(owner.consumeAction(7, action!)).toEqual([{
+      reason: 'protected_child_navigation', outcome: 'not_run',
+      child: 'closed', retryable: false,
+    }]);
+    expect(owner.releaseAction(7, action!)).toBe(true);
+  });
+
+  test('an action with no child takes only its onset path and leaves no synthetic receipt', async () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const action = owner.reserveAction(7)!;
+    expect(await owner.waitAction(7, action, 1)).toBe(false);
+    expect(await owner.waitAction(7, action, 5, true)).toBe(false);
+    expect(owner.consumeAction(7, action)).toEqual([]);
+    expect(owner.releaseAction(7, action)).toBe(true);
+  });
+
+  test('Stop releases an exact action without fabricating a browser outcome', async () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const action = owner.reserveAction(7)!;
+    const controller = new AbortController();
+    const waiting = owner.waitAction(7, action, 5_000, false, controller.signal);
+    controller.abort();
+    expect(await waiting).toBe(false);
+    expect(owner.consumeAction(7, action)).toEqual([]);
+    owner.releaseAction(7, action);
+    expect(typeof owner.reserveAction(7)).toBe('symbol');
+  });
+
+  test('a retired action generation cannot write into its successor', () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const first = owner.reserveAction(7)!;
+    const oldChild = owner.begin(7, 8, Symbol('old-child'));
+    owner.releaseAction(7, first);
+    const next = owner.reserveAction(7)!;
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'late-old-flow', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: oldChild,
+    });
+    expect(owner.consumeAction(7, next)).toEqual([]);
+    owner.releaseAction(7, next);
+  });
+
   test('wakes only the exact source and records Firefox request blocks', async () => {
     const owner = createKernelBrowserChildOutcomes({});
     const exact = owner.wait(3, 50);

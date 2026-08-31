@@ -22,12 +22,14 @@ export const NATIVE_CHROME_BUNDLE_RATCHETS = Object.freeze({
     // remain outside this closure. Exact achieved bytes, no headroom.
     // runtime-capability-hosts and semantic-hook-manifest are fixed
     // authority/policy inputs, not controller feature ownership.
-    bytes: 1_338_125,
+    // Source-action child generations are fixed browser custody, not a
+    // semantic feature surface.
+    bytes: 1_341_782,
     inputs: 407,
     inputSha256: '2c7b87adaa4ba1661ca204a8fc45a27f307d30d251de583face4a8db369900a7',
   }),
   'background/vault-kernel-preview.js': Object.freeze({
-    bytes: 1_418_810,
+    bytes: 1_422_463,
     inputs: 413,
     inputSha256: '6dcec480aa1084691ca98971a01c62005a6fbe55d130c413f601a83a6f7a8644',
   }),

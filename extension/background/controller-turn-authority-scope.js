@@ -43,6 +43,8 @@ const CLASS_KEYS = Object.freeze({
     'armBrowserChildQuarantine', 'browserChildQuarantineRequired',
     'cdpUnavailableReason', 'consumeBrowserChildPolicyNotice', 'debuggerPool', 'domRefs',
     'hasPendingBrowserChildPolicy', 'hintPullIn', 'jsOffscreenClient', 'onToolActivity',
+    'reserveBrowserChildPolicyAction', 'consumeBrowserChildPolicyAction',
+    'waitForBrowserChildPolicyAction', 'releaseBrowserChildPolicyAction',
     'releaseBrowserNetworkGuardLease', 'repinActiveTab', 'resultStore', 'scriptRuns',
     'siteCapture', 'updateBrowserNetworkGuardOrigin', 'waitForBrowserChildPolicyNotice',
     'webOffscreenClient', 'authorizeSignInOrigin', 'authorizeSignInExcursion',

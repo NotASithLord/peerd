@@ -103,14 +103,18 @@ const stripAuthorityVerdict = (/** @type {Record<string,any>} */ value) => {
 
 const aggregateAuthorityReceipts = (/** @type {any[]} */ receipts) => {
   // why: optimistic exact operations can return a retryable, proven no-effect
-  // conflict and then succeed later in the same semantic call. A later
-  // performed receipt for that same operation handles the earlier attempt;
-  // non-retryable policy/consent refusals never disappear.
+  // conflict and then succeed later in the same semantic call. Only the same
+  // durable target proves that the later attempt superseded the refusal: the
+  // target binds operation, authority scope, and canonical args. Operation
+  // equality alone would let a different page click hide a discarded failure.
+  // Targetless and non-retryable refusals therefore never disappear.
   const refusals = receipts.filter((receipt, index) => receipt.outcome === 'not-performed'
     && (receipt.refused === true || typeof receipt.code === 'string'
       || typeof receipt.error === 'string')
-    && !(receipt.retryable === true && receipts.slice(index + 1).some((later) =>
-      later.operation === receipt.operation && later.performed === true)));
+    && !(receipt.retryable === true && typeof receipt.target === 'string'
+      && receipt.target.length > 0 && receipts.slice(index + 1).some((later) =>
+      later.operation === receipt.operation && later.target === receipt.target
+        && later.performed === true)));
   return {
     performed: receipts.some((receipt) => receipt.performed === true),
     unknown: receipts.some((receipt) => receipt.outcomeKnown === false),

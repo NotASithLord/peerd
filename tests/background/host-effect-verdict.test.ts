@@ -142,6 +142,59 @@ describe('exact host effect verdicts', () => {
     });
   });
 
+  test('a later page click cannot erase a retryable refusal for a different target', () => {
+    const refused = {
+      effectId: 'page-call:1', operation: 'turn.page.click',
+      target: 'turn.page.click:web:tab-7:selector-a-digest',
+      outcome: 'not-performed', outcomeKnown: true, performed: false,
+      refused: true, retryable: true, code: 'no_match', error: 'no_match',
+    };
+    const performed = {
+      effectId: 'page-call:2', operation: 'turn.page.click',
+      target: 'turn.page.click:web:tab-7:selector-b-digest',
+      outcome: 'performed', outcomeKnown: true, performed: true, retryable: false,
+    };
+    expect(stampAuthorityToolResult([refused, performed], { ok: true })).toMatchObject({
+      ok: false, authorityPerformed: true, outcomeKnown: true,
+      retryable: false, code: 'no_match',
+      error: 'Authority host performed only part of the requested effects; do not retry the whole call.',
+    });
+  });
+
+  test('the same durable target can supersede an optimistic retry refusal', () => {
+    const target = 'turn.repository.checkpoint:app:app-1:no-tab:args-digest';
+    const refused = {
+      effectId: 'retry-call:1', operation: 'turn.repository.checkpoint', target,
+      outcome: 'not-performed', outcomeKnown: true, performed: false,
+      refused: true, retryable: true, code: 'optimistic_conflict',
+      error: 'optimistic_conflict',
+    };
+    const performed = {
+      effectId: 'retry-call:2', operation: 'turn.repository.checkpoint', target,
+      outcome: 'performed', outcomeKnown: true, performed: true, retryable: false,
+    };
+    expect(stampAuthorityToolResult([refused, performed], { ok: true })).toMatchObject({
+      ok: true, authorityPerformed: true, outcomeKnown: true, retryable: false,
+    });
+  });
+
+  test('a targetless retryable refusal is never erased', () => {
+    const refused = {
+      effectId: 'targetless-call:1', operation: 'turn.page.click',
+      outcome: 'not-performed', outcomeKnown: true, performed: false,
+      refused: true, retryable: true, code: 'no_match', error: 'no_match',
+    };
+    const performed = {
+      effectId: 'targetless-call:2', operation: 'turn.page.click',
+      outcome: 'performed', outcomeKnown: true, performed: true, retryable: false,
+    };
+    expect(stampAuthorityToolResult([refused, performed], { ok: true })).toMatchObject({
+      ok: false, authorityPerformed: true, outcomeKnown: true,
+      retryable: false, code: 'no_match',
+      error: 'Authority host performed only part of the requested effects; do not retry the whole call.',
+    });
+  });
+
   test('a reviewed refusal preserves its bounded model recovery guidance', () => {
     const receipt = {
       effectId: 'call-3:1', operation: 'turn.actor.message',

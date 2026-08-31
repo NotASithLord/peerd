@@ -693,6 +693,10 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     consumeBrowserChildPolicyNotice: browserChildOutcomes.consume,
     waitForBrowserChildPolicyNotice: browserChildOutcomes.wait,
     hasPendingBrowserChildPolicy: browserChildOutcomes.has,
+    reserveBrowserChildPolicyAction: browserChildOutcomes.reserveAction,
+    consumeBrowserChildPolicyAction: browserChildOutcomes.consumeAction,
+    waitForBrowserChildPolicyAction: browserChildOutcomes.waitAction,
+    releaseBrowserChildPolicyAction: browserChildOutcomes.releaseAction,
     childGuard: () => childGuard,
     contributor: targetContributor ? Object.freeze({
       arm: () => targetContributor.arm(),

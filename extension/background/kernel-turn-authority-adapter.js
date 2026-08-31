@@ -895,6 +895,10 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       consumeBrowserChildPolicyNotice: deps.consumeBrowserChildPolicyNotice,
       waitForBrowserChildPolicyNotice: deps.waitForBrowserChildPolicyNotice,
       hasPendingBrowserChildPolicy: deps.hasPendingBrowserChildPolicy,
+      reserveBrowserChildPolicyAction: deps.reserveBrowserChildPolicyAction,
+      consumeBrowserChildPolicyAction: deps.consumeBrowserChildPolicyAction,
+      waitForBrowserChildPolicyAction: deps.waitForBrowserChildPolicyAction,
+      releaseBrowserChildPolicyAction: deps.releaseBrowserChildPolicyAction,
       noteTab: (/** @type {number} */ tabId, /** @type {any} */ info,
         /** @type {any} */ noteOptions = {}) => live.tabAffordances.noteAgentTab(
         tabId,
