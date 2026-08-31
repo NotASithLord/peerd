@@ -48,9 +48,6 @@ describe('target-exact kernel Port owners', () => {
       sidepanel: 'vault-ui-ports', home: 'vault-ui-ports', eval: 'vault-ui-ports',
       'feature-lease-keepalive': 'kernel-feature-host',
     });
-    expect(store.readiness).toEqual({
-      sidepanel: true, home: true, eval: true, 'feature-lease-keepalive': true,
-    });
     expect(store.failClosedPorts).toEqual({
       'private-transfer': 'window-client-transfer-owned-on-chrome',
       'dweb-custody': 'dweb-not-packaged-for-target',
@@ -58,7 +55,6 @@ describe('target-exact kernel Port owners', () => {
     expect(createVaultKernelAssemblyReport({
       identity: IDENTITY,
       portOwners: store.owners,
-      portReadiness: store.readiness,
       failClosedPorts: store.failClosedPorts,
     }).incompletePorts).toEqual([]);
 
@@ -69,7 +65,6 @@ describe('target-exact kernel Port owners', () => {
     expect(createVaultKernelAssemblyReport({
       identity: IDENTITY, selfHostedChrome: true, dweb: true,
       portOwners: preview.owners,
-      portReadiness: preview.readiness,
       failClosedPorts: preview.failClosedPorts,
     }).incompletePorts).toEqual([]);
 
@@ -85,7 +80,6 @@ describe('target-exact kernel Port owners', () => {
     expect(createVaultKernelAssemblyReport({
       identity: IDENTITY, firefox: true,
       portOwners: firefox.owners,
-      portReadiness: firefox.readiness,
       failClosedPorts: firefox.failClosedPorts,
     }).incompletePorts).toEqual([]);
   });

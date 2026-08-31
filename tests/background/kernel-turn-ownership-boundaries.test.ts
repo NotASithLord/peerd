@@ -236,7 +236,7 @@ describe('kernel turn ownership boundaries', () => {
   });
 
   it('keeps tool inventory and exposure projection in the sealed controller', async () => {
-    const authorityModules = await modulesFor('background/kernel-turn-live-factories.js');
+    const authorityModules = await modulesFor('background/kernel-turn-authority-adapter.js');
     for (const module of [
       'peerd-runtime/controller-tool-projection.js',
       'peerd-runtime/tools/metadata/authority.js',
@@ -262,7 +262,7 @@ describe('kernel turn ownership boundaries', () => {
   });
 
   it('keeps provider selection, pricing, and model inventory out of the live turn authority graph', async () => {
-    const authorityModules = await modulesFor('background/kernel-turn-live-factories.js');
+    const authorityModules = await modulesFor('background/kernel-turn-authority-adapter.js');
     for (const module of [
       'peerd-provider/metadata.js',
       'peerd-provider/pricing.js',
@@ -369,7 +369,7 @@ describe('kernel turn ownership boundaries', () => {
   });
 
   it('renders volatile temporal and foreground context only in the sealed controller', async () => {
-    const authorityModules = await modulesFor('background/kernel-turn-live-factories.js');
+    const authorityModules = await modulesFor('background/kernel-turn-authority-adapter.js');
     for (const module of [
       'peerd-runtime/clock/context.js',
       'peerd-runtime/loop/system-prompt.js',
@@ -500,20 +500,20 @@ describe('kernel turn ownership boundaries', () => {
     ]);
     for (const entry of [
       'background/vault-kernel.js',
-      'background/kernel-turn-live-factories.js',
+      'background/kernel-turn-authority-adapter.js',
       'background/controller-turn-bridge.js',
       'background/offscreen-actor-client.js',
     ]) {
       const modules = await modulesFor(entry);
       expect([...modules].filter((module) => persistenceSemanticModules.has(module))).toEqual([]);
     }
-    const legacyOwner = await modulesFor('background/kernel-turn-live-factories.js');
+    const authorityOwner = await modulesFor('background/kernel-turn-authority-adapter.js');
     for (const module of [
       'peerd-runtime/controller-persistence-tools.js',
       'peerd-runtime/tools/defs/read-memory.js',
       'peerd-runtime/tools/defs/remember.js',
       'peerd-runtime/tools/defs/todo.js',
-    ]) expect(legacyOwner.has(module), `legacy owner imports ${module}`).toBe(false);
+    ]) expect(authorityOwner.has(module), `authority owner imports ${module}`).toBe(false);
     for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
       const modules = await modulesFor(entry);
       for (const module of persistenceSemanticModules) expect(modules.has(module)).toBe(true);
@@ -603,7 +603,7 @@ describe('kernel turn ownership boundaries', () => {
     ]);
     for (const entry of [
       'background/vault-kernel.js',
-      'background/kernel-turn-live-factories.js',
+      'background/kernel-turn-authority-adapter.js',
       'background/controller-turn-bridge.js',
       'background/offscreen-actor-client.js',
     ]) {
@@ -625,7 +625,7 @@ describe('kernel turn ownership boundaries', () => {
     ]);
     for (const entry of [
       'background/vault-kernel.js',
-      'background/kernel-turn-live-factories.js',
+      'background/kernel-turn-authority-adapter.js',
       'background/controller-turn-bridge.js',
       'background/offscreen-actor-client.js',
     ]) {
@@ -650,7 +650,7 @@ describe('kernel turn ownership boundaries', () => {
     ]);
     for (const entry of [
       'background/vault-kernel.js',
-      'background/kernel-turn-live-factories.js',
+      'background/kernel-turn-authority-adapter.js',
       'background/controller-turn-bridge.js',
       'background/offscreen-actor-client.js',
     ]) {
@@ -670,7 +670,7 @@ describe('kernel turn ownership boundaries', () => {
     ]);
     for (const entry of [
       'background/vault-kernel.js',
-      'background/kernel-turn-live-factories.js',
+      'background/kernel-turn-authority-adapter.js',
       'background/controller-turn-bridge.js',
     ]) {
       const modules = await modulesFor(entry);
@@ -698,22 +698,15 @@ describe('kernel turn ownership boundaries', () => {
     ]) expect(existsSync(join(EXTENSION_ROOT, removed))).toBe(false);
   });
 
-  it('composes one direct authority adapter path without generic dispatch or fallback', async () => {
+  it('uses the authority adapter directly without a composition alias', async () => {
     const source = readFileSync(
-      join(EXTENSION_ROOT, 'background/kernel-turn-live-factories.js'),
+      join(EXTENSION_ROOT, 'background/kernel-turn-authority-adapter.js'),
       'utf8',
     );
-    const imports = [...source.matchAll(/from\s+['"]([^'"]+)['"]/g)]
-      .map((match) => match[1]);
-    expect(imports).toEqual(['./kernel-turn-authority-adapter.js']);
-    expect(source.match(/createKernelTurnAuthorityAdapter\(deps\)/g)).toHaveLength(1);
+    expect(source).toContain('export const createKernelTurnAuthorityAdapter = (deps) => {');
     expect(source).not.toContain('createControllerTurnSemantics');
     expect(source).not.toContain('semanticOwners');
-    expect(source).not.toContain('import(');
-    expect(source).not.toMatch(/\b(?:dispatch|fallback|legacy)\b/i);
-    expect(source).not.toMatch(/\b(operation|action)\s*,\s*payload\b/);
-    const modules = await modulesFor('background/kernel-turn-live-factories.js');
-    expect(modules.has('background/kernel-turn-authority-adapter.js')).toBe(true);
+    const modules = await modulesFor('background/kernel-turn-authority-adapter.js');
     expect(modules.has('peerd-runtime/controller-turn-semantics.js')).toBe(false);
   });
 });

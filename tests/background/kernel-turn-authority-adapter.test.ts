@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, test } from 'bun:test';
-import { createKernelTurnLiveFactories } from '../../extension/background/kernel-turn-live-factories.js';
+import { createKernelTurnAuthorityAdapter } from '../../extension/background/kernel-turn-authority-adapter.js';
 import {
   actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
 } from '../../extension/background/kernel-turn-authority-adapter.js';
@@ -382,7 +382,7 @@ const harness = async (
       };
     },
   };
-  const factories = createKernelTurnLiveFactories(dependencies);
+  const factories = createKernelTurnAuthorityAdapter(dependencies);
   const shared: any = {
     sessions,
     memory: { list: async () => [], get: async () => null, search: async () => [] },
@@ -435,7 +435,7 @@ const dependencies = () => ({
   }),
 });
 
-describe('kernel live turn factories', () => {
+describe('kernel turn authority adapter', () => {
   test.each([
     [
       'success',
@@ -601,7 +601,7 @@ describe('kernel live turn factories', () => {
   });
 
   test('constructs the complete production factory surface without host effects', () => {
-    const factories = createKernelTurnLiveFactories(dependencies());
+    const factories = createKernelTurnAuthorityAdapter(dependencies());
     expect(Object.keys(factories).sort()).toEqual([
       'buildToolContext', 'composeAuthority', 'goalMaxIterations', 'makeActorRuntime', 'makeDriver',
       'makeDriverDeps', 'makeGoals', 'makeRouteDeps',
@@ -740,7 +740,7 @@ describe('kernel live turn factories', () => {
   });
 
   test('rejects a partial production graph before creating state', () => {
-    expect(() => createKernelTurnLiveFactories({})).toThrow(
+    expect(() => createKernelTurnAuthorityAdapter({})).toThrow(
       'kernel-turn-live-config-invalid',
     );
   });

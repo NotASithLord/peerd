@@ -532,7 +532,7 @@ describe('sw/web-fetch', () => {
       scriptRuns: {
         ownerFor: () => 'owner-1',
         allows: () => true,
-        admitOp: () => { admissions += 1; return true; },
+        admitCodeOp: () => { admissions += 1; return true; },
         signalFor: () => controller.signal,
       },
     }));
@@ -558,7 +558,7 @@ describe('sw/web-fetch', () => {
       scriptRuns: {
         ownerFor: () => 'owner-1',
         allows: (_runId: string, cap: string) => cap === 'egress',
-        admitOp: () => true,
+        admitCodeOp: () => true,
         signalFor: () => controller.signal,
       },
     }));
@@ -587,7 +587,7 @@ describe('sw/web-fetch', () => {
       isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
       scriptRuns: {
         ownerFor: () => 'owner-1', allows: () => true,
-        admitOp: () => { admissions += 1; return true; },
+        admitCodeOp: () => { admissions += 1; return true; },
         signalFor: () => controller.signal,
       },
     }));
@@ -610,7 +610,7 @@ describe('sw/web-fetch', () => {
       vmHttpFetch: async () => { fetched = true; return { ok: true }; },
       isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
       scriptRuns: {
-        ownerFor: () => 'owner-1', allows: () => true, admitOp: () => true,
+        ownerFor: () => 'owner-1', allows: () => true, admitCodeOp: () => true,
         signalFor: () => new AbortController().signal,
       },
     }));

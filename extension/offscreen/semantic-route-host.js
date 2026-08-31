@@ -3,7 +3,7 @@
 // imports: the first semantic call loads only its reviewed cluster, while every
 // cluster remains explicit in packaging and controller build identity.
 
-import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../shared/semantic-host-route-manifest.js';
+import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../shared/semantic-host-route-manifest.js';
 import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 import { createSemanticDispatchRuntime } from './semantic-dispatch-runtime.js';
 
@@ -38,7 +38,7 @@ const contributor = routeHandler(contributorRoutes, 'dispatchContributorSemantic
 const providers = routeHandler(providerRoutes, 'dispatchProviderSemanticRoute');
 const memory = routeHandler(memoryRoutes, 'dispatchMemorySemanticRoute');
 const runtime = createSemanticDispatchRuntime({
-  classifications: SEMANTIC_HOST_ROUTE_CLASSIFICATIONS,
+  manifest: SEMANTIC_HOST_ROUTE_MANIFEST,
   handlers: {
     'actors/overview': actor('actors/overview'),
     'actors/count': actor('actors/count'),

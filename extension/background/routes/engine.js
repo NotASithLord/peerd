@@ -417,7 +417,7 @@ export const makeEngineRoutes = (deps) => {
           || !isOffscreenSender?.(sender)
           || scriptRuns?.ownerFor(runId) !== ownerSessionId
           || scriptRuns?.allows(runId, 'egress') !== true
-          || scriptRuns?.admitOp(runId, 'egress') !== true) {
+          || scriptRuns?.admitCodeOp(runId, 'egress') !== true) {
           return { ok: false, error: 'web_fetch_unknown_finished_foreign_or_over_limit_run' };
         }
         sourceSignal = scriptRuns.signalFor(runId);

@@ -1,7 +1,7 @@
 // @ts-check
 
 import { SEMANTIC_DISPATCH_PROTOCOL } from '../shared/semantic-dispatch-contract.js';
-import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../shared/semantic-host-route-manifest.js';
+import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../shared/semantic-host-route-manifest.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../shared/bounded-module-load.js';
 
 const READS = new Set([
@@ -37,7 +37,7 @@ export const createKernelSemanticControl = ({
   const grants = new WeakMap();
   const directRoutes = Object.freeze({ ...localRoutes });
   const ownedRoutes = routes ?? [...new Set([
-    ...SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.filter((row) =>
+    ...SEMANTIC_HOST_ROUTE_MANIFEST.filter((row) =>
       !row.route.startsWith('contributor/')).map((row) => row.route),
     ...Object.keys(directRoutes),
   ])];

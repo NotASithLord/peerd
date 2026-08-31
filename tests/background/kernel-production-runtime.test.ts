@@ -41,7 +41,6 @@ describe('kernel production runtime', () => {
     expect(kernel).toContain('const createKernelDemandPlane = await runtimeModules.demandPlane();');
     expect(kernel).toContain('loadProductionRuntimeModule(), runtimeModules.turnFactories(),');
     expect(production).not.toContain('createKernelDemandPlane');
-    expect(production).not.toContain("import('./kernel-turn-live-factories.js')");
     expect(production).toContain('deps.createTurnFactories({ ...deps, engine: sharedEngine })');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('background/kernel-demand-plane.js');
   });

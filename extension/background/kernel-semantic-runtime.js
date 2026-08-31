@@ -3,7 +3,7 @@
 import { createKernelSemanticAuthority } from './kernel-semantic-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
 import { createKernelSemanticControl } from './kernel-semantic-control.js';
-import { createKernelSkillsAuthority } from './kernel-skills-authority.js';
+import { createKernelSkillPersistence } from './kernel-skill-persistence.js';
 import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { makeContactsRoutes } from './routes/contacts.js';
 import { mergeContacts } from '/peerd-runtime/contacts/aggregate.js';
@@ -27,7 +27,7 @@ export const createKernelSemanticRuntime = (deps) => {
       || typeof gateway.bindCompose !== 'function' || typeof gateway.bindFeature !== 'function') {
     throw new TypeError('kernel-semantic-controller-gateway-invalid');
   }
-  const skills = createKernelSkillsAuthority({
+  const skills = createKernelSkillPersistence({
     idbFactory: deps.idbFactory,
     canWrite: () => deps.canWrite('skills'),
     audit: deps.auditLog.append,

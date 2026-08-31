@@ -20,8 +20,8 @@ export const firefoxKernelRuntimeModules = Object.freeze({
     './kernel-support-control.js'
   )).createKernelSupportControl,
   turnFactories: async () => (await import(
-    './kernel-turn-live-factories.js'
-  )).createKernelTurnLiveFactories,
+    './kernel-turn-authority-adapter.js'
+  )).createKernelTurnAuthorityAdapter,
   directActorHost: async () => import('./direct-actor-host.js'),
   artifactCodec: async () => import('/peerd-engine/export.js'),
 });

@@ -4,7 +4,7 @@ import {
   createKernelSemanticRuntime,
   KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES,
 } from '../../extension/background/kernel-semantic-runtime.js';
-import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
+import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../../extension/shared/semantic-host-route-manifest.js';
 import { createKernelControllerGateway } from '../../extension/background/kernel-controller-gateway.js';
 import { createPreviewContributorRoutes } from '../../extension/background/kernel-contributor-owner.js';
 import { dispatchSemanticRoute } from '../../extension/offscreen/semantic-route-host.js';
@@ -87,7 +87,7 @@ const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
 
 describe('kernel semantic runtime', () => {
   test('direct and host ownership have no overlap', () => {
-    const host = new Set(SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.map((row) => row.route));
+    const host = new Set(SEMANTIC_HOST_ROUTE_MANIFEST.map((row) => row.route));
     expect(KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES.filter((route) => host.has(route))).toEqual([]);
   });
 
