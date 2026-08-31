@@ -697,6 +697,9 @@ export const STATES = [
         probeConnections = 0;
         probeRequests = [];
       };
+      let ordersWorkerMonitor = null;
+      let releaseMonitorHold = null;
+      let diagnosticWorkerRuleInstalled = false;
       try {
         const fixtureTab = await evalIn(ctx.page, `(async () => {
           const tab = await chrome.tabs.create({ active: false });
@@ -1179,13 +1182,23 @@ export const STATES = [
         // debugger target list; otherwise a one-time target snapshot races Chrome's
         // service-worker startup and makes the Network gate intermittently blind.
         const monitorToken = await wakeWorkerForMonitor(drivenTab.id);
-        const ordersWorkerMonitor = await attachWorkerMonitor(new URL(networkGuardFixtureUrl).origin);
-        const monitorHoldReleased = typeof monitorToken === 'string'
-          && await releaseWorkerMonitorHold(drivenTab.id, monitorToken);
+        const monitorWakeAcknowledged = typeof monitorToken === 'string';
+        if (monitorWakeAcknowledged) {
+          releaseMonitorHold = () => releaseWorkerMonitorHold(drivenTab.id, monitorToken);
+        }
+        let monitorHoldReleased = false;
+        try {
+          ordersWorkerMonitor = monitorWakeAcknowledged
+            ? await attachWorkerMonitor(new URL(networkGuardFixtureUrl).origin) : null;
+        } finally {
+          monitorHoldReleased = releaseMonitorHold
+            ? await releaseMonitorHold().catch(() => false) : false;
+          if (monitorHoldReleased) releaseMonitorHold = null;
+        }
         rec.check('Chrome exposes the fixture service worker to the network test',
-          typeof monitorToken === 'string' && ordersWorkerMonitor !== null && monitorHoldReleased === true,
+          monitorWakeAcknowledged && ordersWorkerMonitor !== null && monitorHoldReleased,
           JSON.stringify({
-            monitorWakeAcknowledged: typeof monitorToken === 'string',
+            monitorWakeAcknowledged,
             monitored: ordersWorkerMonitor !== null,
             monitorHoldReleased,
           }));
@@ -1265,6 +1278,7 @@ export const STATES = [
             },
           }],
         })`, true);
+        diagnosticWorkerRuleInstalled = true;
         await resetProbe();
         const unscopedWorker = await triggerWorker(drivenTab.id, 'unscoped-diagnostic');
         const unscopedAttempted = await waitFor(() => controllerAttempts
@@ -1291,6 +1305,7 @@ export const STATES = [
         await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
           removeRuleIds: [4999],
         })`, true);
+        diagnosticWorkerRuleInstalled = false;
         if (!unscopedReached) {
           await waitFor(() => probeRequests
             .some((request) => request.includes('worker-websocket-unscoped-diagnostic')), {
@@ -1386,8 +1401,17 @@ export const STATES = [
             && probeRequests.some((request) => request.includes('worker-websocket-released')),
           JSON.stringify({ releasedWorker, probeConnections, probeRequests }));
         await evalIn(ctx.page, `chrome.tabs.remove(${oldOriginTab.id})`, true).catch(() => {});
-        ordersWorkerMonitor?.connection.close();
       } finally {
+        if (releaseMonitorHold) {
+          await releaseMonitorHold().catch(() => false);
+          releaseMonitorHold = null;
+        }
+        if (diagnosticWorkerRuleInstalled) {
+          await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
+            removeRuleIds: [4999],
+          })`, true).catch(() => {});
+        }
+        ordersWorkerMonitor?.connection.close();
         probeServer.closeAllConnections?.();
         controllerServer.closeAllConnections?.();
         probeServer.close();
