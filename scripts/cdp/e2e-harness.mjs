@@ -40,6 +40,8 @@ const EXT = resolve(ROOT, 'extension');
 
 export const PASSPHRASE = 'correct-horse-battery-staple';
 export const NETWORK_GUARD_CONTROLLER_PORT = 18_763;
+export const NETWORK_GUARD_OWNED_HOST = 'guard.peerd.test';
+export const NETWORK_GUARD_UNRELATED_HOST = 'unguarded.peerd.test';
 export const SITE_CLIENT_FIXTURE_TLS_PORT = 18_764;
 export const READY_BUDGET_MS = 30_000; // extension load + SW boot + page mount
 const VAULT_READY_BUDGET_MS = 120_000; // production Argon2 under loaded CI/browser hosts
@@ -567,7 +569,8 @@ export async function launchPeerd({
       'MAP orders.peerd.test 127.0.0.1',
       'MAP acme.peerd.test 127.0.0.1',
       'MAP acct.peerd.test 127.0.0.1',
-      'MAP guard.peerd.test 127.0.0.1',
+      `MAP ${NETWORK_GUARD_OWNED_HOST} 127.0.0.1`,
+      `MAP ${NETWORK_GUARD_UNRELATED_HOST} 127.0.0.1`,
       'MAP chase.com 127.0.0.1',
       `MAP ${GIT_FIXTURE_HOST}:443 127.0.0.1:${SITE_CLIENT_FIXTURE_TLS_PORT}`,
     ].join(', ')}`,
@@ -581,7 +584,10 @@ export async function launchPeerd({
     ].join(',')}`,
     '--disable-web-security',
     '--ip-address-space-overrides=127.0.0.0/8=public',
-    `--unsafely-treat-insecure-origin-as-secure=http://orders.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT},http://acct.peerd.test:${NETWORK_GUARD_CONTROLLER_PORT}`,
+    `--unsafely-treat-insecure-origin-as-secure=${[
+      `http://${NETWORK_GUARD_OWNED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}`,
+      `http://${NETWORK_GUARD_UNRELATED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}`,
+    ].join(',')}`,
     '--disable-gpu', '--no-sandbox',
     '--enable-unsafe-extension-debugging',
     `--ignore-certificate-errors-spki-list=${[
