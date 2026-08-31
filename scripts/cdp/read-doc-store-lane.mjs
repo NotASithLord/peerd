@@ -130,8 +130,6 @@ const nextPageOffsetIn = (text) => Number(text.match(
 
 const makeResponder = () => {
   let releaseFirstActor;
-  let reachFirstActor;
-  const firstActorReached = new Promise((resolve) => { reachFirstActor = resolve; });
   const firstActorRelease = new Promise((resolve) => { releaseFirstActor = resolve; });
   const state = {
     phase: 'primary',
@@ -146,6 +144,7 @@ const makeResponder = () => {
     actorBodies: [],
     toolResults: [],
     readResultPages: 0,
+    firstActorReached: false,
     failure: null,
   };
 
@@ -160,7 +159,7 @@ const makeResponder = () => {
         state.primaryActorCalls += 1;
         const latest = results.at(-1) ?? '';
         if (results.length === 0) {
-          reachFirstActor();
+          state.firstActorReached = true;
           await firstActorRelease;
           return { sse: sseToolCall('read_doc', {
             url: FIXTURE_URL, engine: 'pdfjs', maxChars: 800,
@@ -230,7 +229,7 @@ const makeResponder = () => {
   };
 
   return {
-    responder, state, firstActorReached,
+    responder, state,
     releaseFirstActor: () => releaseFirstActor(),
   };
 };
@@ -314,7 +313,7 @@ const runOne = async (treePath, iteration) => {
       budgetMs: 5_000, pollMs: 25,
     });
     assert(firstSessionId, 'first turn did not create its owner session');
-    assert(await waitFor(() => scripted.firstActorReached.then(() => true), {
+    assert(await waitFor(() => scripted.state.firstActorReached, {
       budgetMs: 30_000, pollMs: 25,
     }), 'delegated Web actor never reached the fake model wire');
 
