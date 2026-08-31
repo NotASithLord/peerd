@@ -22,13 +22,27 @@ const baseDeps = (over = {}) => ({
   ...over,
 });
 
+const makeCommittedAsyncActors = (over: any = {}) => {
+  let actors: ReturnType<typeof makeAsyncActors>;
+  const reenter = over.reenter ?? (async () => {});
+  actors = makeAsyncActors(baseDeps({
+    ...over,
+    reenter: (opts: any) => {
+      const running = reenter(opts);
+      actors.acknowledgeDelivery(opts.actorReply.actorDeliveryId);
+      return running;
+    },
+  }));
+  return actors;
+};
+
 describe('makeAsyncActors', () => {
   test('spawn returns a handle immediately, result re-enters as a synthetic wake', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async () => ({ result: 'BROMANTANE FACTS', sessionId: 'c1' }),
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
 
     const handle = await as.spawnActorAsync({
       task: 'research bromantane', parentSessionId: 'parent', parentToolUseId: 'spawn-tool-1',
@@ -46,6 +60,7 @@ describe('makeAsyncActors', () => {
       kind: 'spawned', instanceId: 'spawned', parentToolUseId: 'spawn-tool-1',
       parentToolUseIds: ['spawn-tool-1'],
     });
+    expect(typeof reenters[0].actorReply.actorDeliveryId).toBe('string');
     expect(reenters[0].userText).toContain('BROMANTANE FACTS');
     expect(reenters[0].userText).toContain('[UNTRUSTED]'); // child result is wrapped
   });
@@ -55,10 +70,10 @@ describe('makeAsyncActors', () => {
   // just stopped, so a reintegration wake would restart it seconds after Stop.
   test('a Stop-aborted child does not wake the parent (dropped like a cancel)', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async () => ({ result: 'partial', sessionId: 'c1', stopped: true }),
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
     await as.spawnActorAsync({ task: 'long', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(0); // no synthetic wake after a user Stop
@@ -66,13 +81,13 @@ describe('makeAsyncActors', () => {
 
   test('a post-start Worker failure wakes the parent with unknown-outcome guidance', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async () => ({
         result: 'The actor worker crashed. Its outcome is unknown and must not be retried automatically.',
         sessionId: 'c1', stopped: true, executionFailed: true, outcomeKnown: false,
       }),
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
     await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(1);
@@ -87,10 +102,10 @@ describe('makeAsyncActors', () => {
     const failure = Object.assign(new Error('transcript write failed'), {
       executionFailed: true, performed: true, outcomeKnown: false, retryable: false,
     });
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async () => { throw failure; },
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
     await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(1);
@@ -101,13 +116,13 @@ describe('makeAsyncActors', () => {
 
   test('a graceful pre-tool failure is not described as an unknown outcome', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async () => ({
         result: 'The actor model request was not run.', sessionId: 'c1',
         stopped: true, executionFailed: true, outcomeKnown: true,
       }),
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
     await as.spawnActorAsync({ task: 'write once', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(1);
@@ -119,10 +134,10 @@ describe('makeAsyncActors', () => {
   // wants the partial, so a timed-out child DOES reintegrate.
   test('a timed-out child still wakes the parent with its partial', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async () => ({ result: 'partial', sessionId: 'c1', timedOut: true }),
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
     await as.spawnActorAsync({ task: 'slow', parentSessionId: 'parent' });
     await flush();
     expect(reenters).toHaveLength(1);
@@ -133,10 +148,10 @@ describe('makeAsyncActors', () => {
   // never goes stale. Spawn makes the task appear; settle flips it done.
   test('onTasksChanged fires on spawn and on settle (feeds the live status bar)', async () => {
     const calls: string[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async () => ({ result: 'ok', sessionId: 'c1' }),
       onTasksChanged: (sid: string) => { calls.push(sid); },
-    }));
+    });
     await as.spawnActorAsync({ task: 'T', parentSessionId: 'parent' });
     await flush();
     // Pushes for the active parent only, and more than once: spawn (task
@@ -149,12 +164,12 @@ describe('makeAsyncActors', () => {
 
   test('task snapshots gain the child id + server-resolved grants when the actor starts', async () => {
     let finish!: (value: any) => void;
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: async (req: any) => {
         req.onEvent({ type: 'actor-start', sessionId: 'c1', grantedTools: ['script', 'message_actor'] });
         return new Promise((resolve) => { finish = resolve; });
       },
-    }));
+    });
     await as.spawnActorAsync({ task: 'T', parentSessionId: 'parent' });
     const live = as.actorTasks('parent')[0];
     expect(live).toMatchObject({
@@ -169,13 +184,13 @@ describe('makeAsyncActors', () => {
   test('a re-spawning wake turn is bounded by the rate cap (runaway guard)', async () => {
     let childRuns = 0;
     let as: any;
-    as = makeAsyncActors(baseDeps({
+    as = makeCommittedAsyncActors({
       caps: { rateCap: 5, rateWindowMs: 60_000, outstanding: 4 },
       // child "fails" fast (the live case: interrupted/empty) so the model retries
       spawnActor: async () => { childRuns += 1; return { result: 'failed', interrupted: true }; },
       // the model reacting to the wake by RE-SPAWNING — the loop engine
       reenter: async ({ sessionId }: any) => { await as.spawnActorAsync({ task: 'retry', parentSessionId: sessionId }); },
-    }));
+    });
 
     await as.spawnActorAsync({ task: 'start', parentSessionId: 'parent' });
     await flush(); await flush(); await flush();
@@ -192,13 +207,13 @@ describe('makeAsyncActors', () => {
 
   test('outstanding cap refuses a 5th concurrent child (separate from the rate cap)', async () => {
     // children never settle → they stay "running" and fill the outstanding cap
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       caps: { outstanding: 4, rateCap: 100 },
       spawnActor: (req: any) => {
         req.onEvent({ type: 'actor-start', sessionId: `child-${req.task}`, grantedTools: [] });
         return new Promise(() => {});
       }, // never resolves after allocation
-    }));
+    });
     for (let i = 0; i < 4; i++) {
       expect((await as.spawnActorAsync({ task: `t${i}`, parentSessionId: 'parent' })).ok).toBe(true);
     }
@@ -211,10 +226,10 @@ describe('makeAsyncActors', () => {
     const reenters: any[] = [];
     const slots = makeTurnSlots();
     const live = slots.claim('parent'); // a parent turn is in flight → wakes queue
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       turnSlots: slots,
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
 
     await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent', parentToolUseId: 'spawn-a' });
     await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent', parentToolUseId: 'spawn-b' });
@@ -234,6 +249,118 @@ describe('makeAsyncActors', () => {
     expect(reenters).toHaveLength(1);
   });
 
+  test('a failed uncommitted wake retries the same batch before a later child', async () => {
+    const reenters: any[] = [];
+    const scheduled: Array<() => void> = [];
+    let as: ReturnType<typeof makeAsyncActors>;
+    as = makeAsyncActors(baseDeps({
+      schedule: (fn: () => void) => { scheduled.push(fn); },
+      reenter: async (opts: any) => {
+        reenters.push(opts);
+        if (reenters.length > 1) as.acknowledgeDelivery(opts.actorReply.actorDeliveryId);
+        return { ok: false };
+      },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(scheduled).toHaveLength(1);
+
+    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(scheduled).toHaveLength(1);
+
+    scheduled.shift()?.();
+    await flush();
+    expect(reenters).toHaveLength(3);
+    expect(reenters[1].userText).toBe(reenters[0].userText);
+    expect(reenters[1].actorReply).toEqual(reenters[0].actorReply);
+    expect(reenters[2].userText).toContain('R:B');
+    expect(reenters[2].userText).not.toContain('R:A');
+    expect(reenters[2].actorReply.actorDeliveryId)
+      .not.toBe(reenters[0].actorReply.actorDeliveryId);
+  });
+
+  test('a committed batch stays delivered when reentry throws later', async () => {
+    const scheduled: Array<() => void> = [];
+    let as: ReturnType<typeof makeAsyncActors>;
+    as = makeAsyncActors(baseDeps({
+      schedule: (fn: () => void) => { scheduled.push(fn); },
+      reenter: async (opts: any) => {
+        as.acknowledgeDelivery(opts.actorReply.actorDeliveryId);
+        throw new Error('post-commit failure');
+      },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await flush();
+    expect(scheduled).toHaveLength(0);
+    expect(as.actorTasks('parent')[0].status).toBe('delivered');
+  });
+
+  test('a committed coalesced batch excludes a child that finishes later', async () => {
+    const slots = makeTurnSlots();
+    const live = slots.claim('parent');
+    const reenters: any[] = [];
+    const finishes: Array<() => void> = [];
+    let as: ReturnType<typeof makeAsyncActors>;
+    as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      reenter: (opts: any) => {
+        reenters.push(opts);
+        return new Promise<void>((resolve) => { finishes.push(resolve); });
+      },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
+    await flush();
+    live.release();
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('R:A');
+    expect(reenters[0].userText).toContain('R:B');
+
+    await as.spawnActorAsync({ task: 'C', parentSessionId: 'parent' });
+    await flush();
+    as.acknowledgeDelivery(reenters[0].actorReply.actorDeliveryId);
+    finishes.shift()?.();
+    await flush();
+    expect(reenters).toHaveLength(2);
+    expect(reenters[1].userText).toContain('R:C');
+    expect(reenters[1].userText).not.toContain('R:A');
+    expect(reenters[1].actorReply.actorDeliveryId)
+      .not.toBe(reenters[0].actorReply.actorDeliveryId);
+
+    as.acknowledgeDelivery(reenters[1].actorReply.actorDeliveryId);
+    finishes.shift()?.();
+    await flush();
+  });
+
+  test('Stop cancels a frozen batch before its delayed retry', async () => {
+    const slots = makeTurnSlots();
+    const reenters: any[] = [];
+    const scheduled: Array<() => void> = [];
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      schedule: (fn: () => void) => { scheduled.push(fn); },
+      reenter: async (opts: any) => { reenters.push(opts); return { ok: false }; },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(scheduled).toHaveLength(1);
+
+    slots.stop('parent');
+    scheduled.shift()?.();
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
+  });
+
   test('claims the idle parent before setup so a human turn cannot be stolen', async () => {
     const slots = makeTurnSlots();
     let resolveActive: ((id: string) => void) | undefined;
@@ -241,7 +368,7 @@ describe('makeAsyncActors', () => {
     let finishReentry: (() => void) | undefined;
     const heldReentry = new Promise<void>((resolve) => { finishReentry = resolve; });
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       turnSlots: slots,
       getActiveSessionId: () => active,
       reenter: async (opts: any) => {
@@ -252,7 +379,7 @@ describe('makeAsyncActors', () => {
         await heldReentry;
         lease.release();
       },
-    }));
+    });
 
     await as.spawnActorAsync({
       task: 'A', parentSessionId: 'parent', parentToolUseId: 'spawn-a',
@@ -276,10 +403,10 @@ describe('makeAsyncActors', () => {
     const slots = makeTurnSlots({ forceReleaseMs: 1 });
     const liveParent = slots.claim('parent');
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       turnSlots: slots,
       reenter: async (opts: any) => { reenters.push(opts); },
-    }));
+    });
 
     await as.spawnActorAsync({
       task: 'done just before Stop', parentSessionId: 'parent', parentToolUseId: 'spawn-a',
@@ -302,7 +429,7 @@ describe('makeAsyncActors', () => {
     let childLease: ReturnType<typeof slots.claim> | undefined;
     let publishStart!: () => void;
     let finishChild!: (value: any) => void;
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       turnSlots: slots,
       stopSubtree: (sessionId: string) => { stoppedSubtrees.push(sessionId); return [sessionId]; },
       spawnActor: (req: any) => new Promise((resolve) => {
@@ -313,7 +440,7 @@ describe('makeAsyncActors', () => {
         finishChild = resolve;
       }),
       reenter: async (opts: any) => { reenters.push(opts); },
-    }));
+    });
 
     const spawning = as.spawnActorAsync({ task: 'delayed allocation', parentSessionId: 'parent' });
     await Promise.resolve();
@@ -337,11 +464,11 @@ describe('makeAsyncActors', () => {
     const reenters: any[] = [];
     let locked = true;
     let notified = 0;
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       isVaultLocked: () => locked,
       reenter: async (o: any) => { reenters.push(o); },
       notify: () => { notified += 1; },
-    }));
+    });
 
     await as.spawnActorAsync({ task: 'X', parentSessionId: 'parent' });
     await flush();
@@ -357,13 +484,13 @@ describe('makeAsyncActors', () => {
 
   test('cancel drops the result (no wake) and frees the slot', async () => {
     const reenters: any[] = [];
-    const as = makeAsyncActors(baseDeps({
+    const as = makeCommittedAsyncActors({
       spawnActor: (req: any) => {
         req.onEvent({ type: 'actor-start', sessionId: 'child-cancel', grantedTools: [] });
         return new Promise(() => {});
       }, // never settles on its own
       reenter: async (o: any) => { reenters.push(o); },
-    }));
+    });
     const h = await as.spawnActorAsync({ task: 'cancel me', parentSessionId: 'parent' });
     const c = as.actorCancel('parent', h.taskId);
     expect(c.ok).toBe(true);

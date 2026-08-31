@@ -109,6 +109,23 @@ describe('agent loop — runUserTurn', () => {
     expect(audited[0].sessionId).toBe(session.sessionId);
   });
 
+  it('uses the actor delivery id for a retry-safe synthetic message', async () => {
+    const { sessions, ctx } = buildCtx({
+      synthetic: true,
+      actorReply: {
+        kind: 'spawned', instanceId: 'spawned', failed: false,
+        actorDeliveryId: 'delivery-stable',
+      },
+    });
+    const session = await sessions.create();
+    ctx.sessionId = session.sessionId;
+
+    await drain(runUserTurn(asRunCtx(ctx)));
+
+    const stored = present(await sessions.get(session.sessionId));
+    expect(stored.messages[0].id).toBe('delivery-stable');
+  });
+
   it('auto-continues a thinking-only max_tokens truncation via a hidden user nudge', async () => {
     // The field 'silent timeout': adaptive thinking burns the whole
     // output ceiling, the step ends at max_tokens with NO text and NO

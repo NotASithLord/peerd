@@ -32,7 +32,7 @@
  * @param {(sessionId: string) => string[]} [deps.stopSubtree]
  *   Transitively stop a cancelled child's OWN descendants (spawn.js
  *   stopSubtree) — a cancel must end the whole subtree, like Stop does.
- * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, actorReply?: { kind: string, instanceId: string, failed: boolean, outcomeKnown?: boolean, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }, turnLease?: { controller: AbortController, release: () => void } }) => Promise<unknown>} deps.reenter
+ * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, actorReply?: { kind: string, instanceId: string, failed: boolean, outcomeKnown?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }, turnLease?: { controller: AbortController, release: () => void } }) => Promise<unknown>} deps.reenter
  *   Re-enter a session with a (synthetic) turn — the SW's runAgentTurn.
  * @param {() => Promise<string|null>} deps.getActiveSessionId
  * @param {() => boolean} deps.isVaultLocked
@@ -43,13 +43,16 @@
  *   Fired on every task status transition (spawn/settle/cancel/deliver) so a UI
  *   can mirror the live task list. No-op by default (tests omit it).
  * @param {() => number} [deps.now]
- * @param {{ outstanding?: number, lifetime?: number, resultChars?: number, ringLines?: number, rateCap?: number, rateWindowMs?: number }} [deps.caps]
+ * @param {(fn: () => void, delayMs: number) => unknown} [deps.schedule]
+ * @param {() => string} [deps.makeDeliveryId]
+ * @param {{ outstanding?: number, lifetime?: number, resultChars?: number, ringLines?: number, rateCap?: number, rateWindowMs?: number, retryMs?: number }} [deps.caps]
  * @param {(...args: unknown[]) => void} [deps.log]  injected logger (console in the SW, silent in tests)
  */
 export const makeAsyncActors = (deps) => {
   const {
     spawnActor, turnSlots, reenter, getActiveSessionId, isVaultLocked,
     wrapUntrusted, forwardEvent, notify, stopSubtree, now = Date.now, caps = {},
+    schedule = (fn, delayMs) => setTimeout(fn, delayMs), makeDeliveryId = () => globalThis.crypto.randomUUID(),
     // Mirror the live task list to a UI on each status transition. No-op in
     // tests / headless contexts that don't render it.
     onTasksChanged = () => {},
@@ -71,7 +74,7 @@ export const makeAsyncActors = (deps) => {
    * @typedef {Object} ChildEntry
    * @property {string} taskId
    * @property {string} task
-   * @property {'running' | 'done' | 'cancelled'} status
+   * @property {'running' | 'done' | 'delivering' | 'delivered' | 'cancelled'} status
    * @property {string} result
    * @property {boolean} exceeded
    * @property {boolean} interrupted
@@ -81,7 +84,6 @@ export const makeAsyncActors = (deps) => {
    * @property {boolean} outcomeKnown false when effects may have landed before failure
    * @property {string | null} childSessionId
    * @property {string[] | null} grantedTools  server-resolved grant set once the child starts
-   * @property {boolean} reintegrated
    * @property {string[]} ring
    * @property {string | null} parentToolUseId the actor_create call that launched it
    * @property {number} parentStopGeneration  Stop epoch captured at launch
@@ -89,6 +91,8 @@ export const makeAsyncActors = (deps) => {
 
   /** @type {Map<string, Map<string, ChildEntry>>} parentSessionId -> Map<taskId, entry>. In-memory: in-session durability only. */
   const children = new Map();
+  /** @type {Map<string, { id: string, generation: number, children: ChildEntry[], retryScheduled: boolean, envelope: any }>} */
+  const deliveryBatches = new Map();
   /** @type {Map<string, number[]>} parentSessionId -> recent spawn timestamps (the rate-based runaway guard). */
   const recentSpawns = new Map();
   let seq = 0;
@@ -108,7 +112,7 @@ export const makeAsyncActors = (deps) => {
     return [...kids.values()].map((c) => ({
       taskId: c.taskId,
       task: c.task.slice(0, 80),
-      status: c.reintegrated ? 'delivered' : c.status,
+      status: c.status === 'delivering' ? 'done' : c.status,
       lastOutput: c.ring.join('').slice(-500),
       childSessionId: c.childSessionId,
       grantedTools: c.grantedTools,
@@ -127,7 +131,7 @@ export const makeAsyncActors = (deps) => {
   const actorCancel = (parentSessionId, taskId) => {
     const entry = children.get(parentSessionId)?.get(taskId ?? '');
     if (!entry) return { ok: false, error: 'no_such_task' };
-    if (entry.status !== 'running') return { ok: false, error: `task already ${entry.reintegrated ? 'delivered' : entry.status}` };
+    if (entry.status !== 'running') return { ok: false, error: `task already ${entry.status}` };
     entry.status = 'cancelled';
     if (entry.childSessionId) {
       stopSubtree?.(entry.childSessionId);
@@ -137,9 +141,7 @@ export const makeAsyncActors = (deps) => {
     return { ok: true, content: `actor ${taskId} cancelled — its work is being stopped and its result will not come back` };
   };
 
-  // Coalesce all of a parent's finished-but-unreintegrated children into ONE
-  // synthetic wake turn. Idempotent (flips `reintegrated` before re-entry) and
-  // vault-aware (defers while locked, re-drains on unlock).
+  // Freeze each batch until the post-commit hook acknowledges it; retry the same id after failure.
   /**
    * @param {string} parentSessionId
    * @param {{ controller: AbortController, release: () => void } | undefined} [turnLease]
@@ -147,99 +149,88 @@ export const makeAsyncActors = (deps) => {
   const drainReintegration = async (parentSessionId, turnLease = undefined) => {
     const kids = children.get(parentSessionId);
     if (!kids) return;
-    const waiting = [...kids.values()].filter((c) => c.status === 'done' && !c.reintegrated);
-    if (waiting.length === 0) return;
-
-    // Stop is a mailbox boundary, not merely an AbortSignal for work that is
-    // still running. A child may have finished just before Stop while its wake
-    // sat behind the parent's live turn (or while the vault was locked). Drop
-    // every result launched in an older parent epoch so it cannot start a fresh
-    // synthetic turn after the user explicitly stopped that task.
     const parentStopGeneration = turnSlots.generation?.(parentSessionId) ?? 0;
+    let batch = deliveryBatches.get(parentSessionId);
+    if (batch && batch.generation !== parentStopGeneration) {
+      for (const child of batch.children) child.status = 'cancelled';
+      deliveryBatches.delete(parentSessionId);
+      batch = undefined;
+      onTasksChanged(parentSessionId);
+    }
+    const waiting = [...kids.values()].filter((c) => c.status === 'done');
     const stale = waiting.filter((c) => c.parentStopGeneration !== parentStopGeneration);
     for (const child of stale) child.status = 'cancelled';
     const finished = waiting.filter((c) => c.parentStopGeneration === parentStopGeneration);
     if (stale.length > 0) onTasksChanged(parentSessionId);
-    if (finished.length === 0) return;
+    if (!batch && finished.length === 0) return;
 
-    // Vault-locked: the model key is gated — cannot run the wake turn. Hold the
-    // results, notify generically, re-drain on unlock (onVaultUnlock).
-    if (isVaultLocked()) { notify(finished.length); return; }
+    if (isVaultLocked()) { notify(batch?.children.length ?? finished.length); return; }
+    if (batch?.retryScheduled) return;
+    if (!batch) {
+      const blocks = finished.map((c) => {
+        let body = c.result || '(actor returned no text)';
+        if (body.length > RESULT_CHARS) {
+          body = `${body.slice(0, RESULT_CHARS)}\n…[truncated - open the actor card in the side panel for the full transcript]`;
+        }
+        // why: child output can include page data. Fence it and use the ISO
+        // timestamp shape that wrapUntrusted writes verbatim.
+        const wrapped = wrapUntrusted({ origin: 'spawned', tool: 'actor_create', body, retrievedAt: new Date(now()).toISOString() });
+        const outcomeUnknown = c.executionFailed && c.outcomeKnown === false;
+        const flag = outcomeUnknown
+          ? ' (execution failed after work began; outcome unknown; do not retry automatically)'
+          : c.executionFailed ? ' (failed before target work ran)'
+          : c.interrupted ? ' (interrupted before finishing, partial)'
+          : c.timedOut ? ' (hit its wall-clock timeout, partial)'
+          : c.stopped ? ' (stopped before finishing, partial)'
+          : c.exceeded ? ' (hit its step cap, may be incomplete)' : '';
+        return `Actor "${c.task.slice(0, 80)}"${flag}:\n${wrapped}`;
+      });
+      const hasUnknownOutcome = finished.some((entry) => entry.executionFailed && entry.outcomeKnown === false);
+      const hasKnownFailure = finished.some((entry) => entry.executionFailed && entry.outcomeKnown !== false);
+      const lead = finished.length === 1
+        ? (hasUnknownOutcome
+          ? 'An actor you started earlier stopped after execution began. Its outcome is unknown. Do not retry automatically. Here is the failure:'
+          : hasKnownFailure ? 'An actor you started earlier failed before target work ran. Here is the failure:'
+          : 'An actor you started earlier has finished. Here is its result:')
+        : (hasUnknownOutcome
+          ? `${finished.length} spawned actors completed or failed. Review each result and do not automatically retry an unknown outcome:`
+          : hasKnownFailure ? `${finished.length} spawned actors completed or failed before target work ran. Review each result:`
+          : `${finished.length} actors you started earlier have finished. Here are their results:`);
+      const parentToolUseIds = [...new Set(finished.flatMap((child) => child.parentToolUseId ? [child.parentToolUseId] : []))];
+      const correlationComplete = finished.every((child) => !!child.parentToolUseId);
+      const id = makeDeliveryId();
+      batch = {
+        id, generation: parentStopGeneration, children: finished, retryScheduled: false,
+        envelope: {
+          userText: `${lead}\n\n${blocks.join('\n\n')}`, sessionId: parentSessionId, synthetic: true,
+          actorReply: {
+            kind: 'spawned', instanceId: 'spawned', actorDeliveryId: id, failed: hasUnknownOutcome || hasKnownFailure,
+            ...(hasUnknownOutcome ? { outcomeKnown: false } : {}),
+            ...(parentToolUseIds.length === 1 ? { parentToolUseId: parentToolUseIds[0] } : {}),
+            ...(parentToolUseIds.length > 0 ? { parentToolUseIds } : {}),
+            ...(correlationComplete ? {} : { correlationComplete: false }),
+          },
+        },
+      };
+      for (const child of finished) child.status = 'delivering';
+      deliveryBatches.set(parentSessionId, batch);
+      onTasksChanged(parentSessionId);
+      Promise.resolve(getActiveSessionId())
+        .then((active) => { if (active !== parentSessionId) notify(finished.length); })
+        .catch(() => {});
+    }
 
-    // Idempotency: flip BEFORE re-entry so a redelivered drain is a no-op.
-    finished.forEach((c) => { c.reintegrated = true; });
-    onTasksChanged(parentSessionId); // delivered → drop off the live bar
-
-    const blocks = finished.map((c) => {
-      let body = c.result || '(actor returned no text)';
-      if (body.length > RESULT_CHARS) {
-        body = `${body.slice(0, RESULT_CHARS)}\n…[truncated — open the actor card in the side panel for the full transcript]`;
+    try { await reenter({ ...batch.envelope, ...(turnLease ? { turnLease } : {}) }); }
+    catch { /* commit acknowledgement, not the turn outcome, decides delivery */ }
+    if (deliveryBatches.get(parentSessionId) !== batch) return;
+    batch.retryScheduled = true;
+    schedule(() => {
+      if (deliveryBatches.get(parentSessionId) === batch) {
+        batch.retryScheduled = false; queueReintegration(parentSessionId);
       }
-      // why UNTRUSTED: the child's result is model-authored from a fresh context
-      // over possibly page-derived bytes. Only the one-line framing is trusted.
-      // why toISOString: wrapUntrusted stamps retrieved_at="…" verbatim and
-      // expects an ISO string; passing the raw epoch from now() (a number) put
-      // a bare millisecond count in the wrapper. Keep the injected `now` for
-      // determinism, formatted correctly.
-      const wrapped = wrapUntrusted({ origin: 'spawned', tool: 'actor_create', body, retrievedAt: new Date(now()).toISOString() });
-      const outcomeUnknown = c.executionFailed && c.outcomeKnown === false;
-      const flag = outcomeUnknown
-        ? ' (execution failed after work began; outcome unknown; do not retry automatically)'
-        : c.executionFailed ? ' (failed before target work ran)'
-        : c.interrupted ? ' (interrupted before finishing, partial)'
-        : c.timedOut ? ' (hit its wall-clock timeout, partial)'
-        : c.stopped ? ' (stopped before finishing, partial)'
-        : c.exceeded ? ' (hit its step cap, may be incomplete)' : '';
-      return `Actor "${c.task.slice(0, 80)}"${flag}:\n${wrapped}`;
-    });
-    const hasUnknownOutcome = finished.some((entry) => entry.executionFailed && entry.outcomeKnown === false);
-    const hasKnownFailure = finished.some((entry) => entry.executionFailed && entry.outcomeKnown !== false);
-    const lead = finished.length === 1
-      ? hasUnknownOutcome
-        ? 'An actor you started earlier stopped after execution began. Its outcome is unknown. Do not retry automatically. Here is the failure:'
-        : hasKnownFailure
-          ? 'An actor you started earlier failed before target work ran. Here is the failure:'
-        : 'An actor you started earlier has finished. Here is its result:'
-      : hasUnknownOutcome
-        ? `${finished.length} spawned actors completed or failed. Review each result and do not automatically retry an unknown outcome:`
-        : hasKnownFailure
-          ? `${finished.length} spawned actors completed or failed before target work ran. Review each result:`
-        : `${finished.length} actors you started earlier have finished. Here are their results:`;
-    const wakeText = `${lead}\n\n${blocks.join('\n\n')}`;
-
-    const parentToolUseIds = [...new Set(finished.flatMap((child) =>
-      typeof child.parentToolUseId === 'string' && child.parentToolUseId
-        ? [child.parentToolUseId]
-        : []))];
-    const correlationComplete = finished.every((child) =>
-      typeof child.parentToolUseId === 'string' && child.parentToolUseId.length > 0);
-
-    // Passive surfacing is informational and must not sit between the claimed
-    // idle slot and re-entry. Start it independently: otherwise its storage read
-    // creates a gap in which a human turn can claim the session, only for this
-    // older synthetic wake to claim again and steer-abort the user.
-    Promise.resolve(getActiveSessionId())
-      .then((active) => { if (active !== parentSessionId) notify(finished.length); })
-      .catch(() => {});
-
-    await reenter({
-      userText: wakeText, sessionId: parentSessionId, synthetic: true,
-      actorReply: {
-        kind: 'spawned', instanceId: 'spawned',
-        failed: hasUnknownOutcome || hasKnownFailure,
-        ...(hasUnknownOutcome ? { outcomeKnown: false } : {}),
-        ...(parentToolUseIds.length === 1 ? { parentToolUseId: parentToolUseIds[0] } : {}),
-        ...(parentToolUseIds.length > 0 ? { parentToolUseIds } : {}),
-        ...(correlationComplete ? {} : { correlationComplete: false }),
-      },
-      ...(turnLease ? { turnLease } : {}),
-    });
+    }, caps.retryMs ?? 1_000);
   };
 
-  // Claim the parent synchronously at dequeue, then thread that exact lease
-  // into the turn driver. This is the actor-mailbox analogue of an Erlang
-  // process taking one message from its mailbox: one receiver owns the next
-  // turn, and later arrivals queue instead of stealing it.
   const queueReintegration = (/** @type {string} */ parentSessionId) => {
     const start = (/** @type {{ controller: AbortController, release: () => void } | undefined} */ turnLease) => {
       Promise.resolve(drainReintegration(parentSessionId, turnLease))
@@ -251,6 +242,17 @@ export const makeAsyncActors = (deps) => {
     } else {
       turnSlots.runWhenIdle(parentSessionId, () => start(undefined));
     }
+  };
+
+  const acknowledgeDelivery = (/** @type {string} */ id) => {
+    const match = [...deliveryBatches].find(([, candidate]) => candidate.id === id);
+    if (!match) return false;
+    const [parentSessionId, batch] = match;
+    for (const child of batch.children) child.status = 'delivered';
+    deliveryBatches.delete(parentSessionId);
+    onTasksChanged(parentSessionId);
+    if ([...(children.get(parentSessionId)?.values() ?? [])].some((child) => child.status === 'done')) queueReintegration(parentSessionId);
+    return true;
   };
 
   // The non-blocking spawn. Registers the child, waits only for its durable
@@ -289,7 +291,7 @@ export const makeAsyncActors = (deps) => {
       taskId, task: String(req.task ?? ''), status: 'running', result: '',
       exceeded: false, interrupted: false, timedOut: false, stopped: false,
       executionFailed: false, outcomeKnown: true,
-      childSessionId: null, reintegrated: false, ring: [],
+      childSessionId: null, ring: [],
       parentToolUseId: typeof req.parentToolUseId === 'string' ? req.parentToolUseId : null,
       parentStopGeneration: turnSlots.generation?.(parentSessionId) ?? 0,
       grantedTools: null,
@@ -407,14 +409,11 @@ export const makeAsyncActors = (deps) => {
     };
   };
 
-  // On vault unlock, re-drain any parent with finished-but-undelivered children.
   const onVaultUnlock = () => {
     for (const [parentSessionId, kids] of children) {
-      if ([...kids.values()].some((c) => c.status === 'done' && !c.reintegrated)) {
-        queueReintegration(parentSessionId);
-      }
+      if ([...kids.values()].some((c) => c.status === 'done' || c.status === 'delivering')) queueReintegration(parentSessionId);
     }
   };
 
-  return { spawnActorAsync, drainReintegration, actorTasks, actorCancel, onVaultUnlock };
+  return { spawnActorAsync, drainReintegration, acknowledgeDelivery, actorTasks, actorCancel, onVaultUnlock };
 };

@@ -360,7 +360,7 @@ export async function* runUserTurn(ctx) {
       // chat renders it as its own attributed bubble instead of hiding it
       // with the other synthetic plumbing turns (resume/truncation nudges).
       ...(actorReply ? { actorReply } : {}),
-      id: uuidv7(now),
+      id: synthetic && typeof actorReply?.actorDeliveryId === 'string' ? actorReply.actorDeliveryId : uuidv7(now),
       when: now(),
     };
     session = await sessions.appendMessage(sessionId, userMsg);
