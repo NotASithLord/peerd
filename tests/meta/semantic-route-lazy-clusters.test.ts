@@ -11,12 +11,7 @@ import {
   SEMANTIC_HOST_BUILD_ENTRIES,
   SEMANTIC_HOST_CLUSTER_ENTRIES,
 } from '../../packaging/semantic-host-entries.ts';
-import {
-  SEMANTIC_ROUTE_CLASSIFICATIONS,
-  SEMANTIC_ROUTE_CUTOVER,
-} from '../../packaging/semantic-route-classification.ts';
-import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
-import { SEMANTIC_CUTOVER_SUMMARY } from '../../extension/background/vault-kernel-assembly.js';
+import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../../extension/shared/semantic-host-route-manifest.js';
 
 const modulesFor = async (entry: string) => {
   const absolute = join(EXTENSION_DIR, entry);
@@ -32,19 +27,18 @@ describe('digest-bound lazy semantic route clusters', () => {
     expect(modules.has('peerd-provider/background.js')).toBe(false);
     expect([...modules].some((file) => file.startsWith('offscreen/semantic-routes/')))
       .toBe(false);
-    expect(modules.has('shared/semantic-route-inventory.generated.js')).toBe(false);
-    expect(modules.has('shared/semantic-route-classification.js')).toBe(false);
   });
 
-  test('compact host admission is exactly the migrated non-kernel ledger', () => {
-    const expected = SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) =>
-      row.state === 'migrated' && row.placement !== 'kernel');
-    expect(JSON.parse(JSON.stringify(SEMANTIC_HOST_ROUTE_CLASSIFICATIONS)))
-      .toEqual(expected);
+  test('compact host admission has one exact row per executable host route', () => {
+    const routes = SEMANTIC_HOST_ROUTE_MANIFEST.map((row) => row.route);
+    expect(routes).toHaveLength(18);
+    expect(new Set(routes).size).toBe(routes.length);
+    expect(SEMANTIC_HOST_ROUTE_MANIFEST.every((row) =>
+      Object.keys(row).sort().join(',') === 'channels,route,source')).toBe(true);
   });
 
   test('the Store host projects out Preview-only semantic routes', () => {
-    const storeRows = SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.filter(
+    const storeRows = SEMANTIC_HOST_ROUTE_MANIFEST.filter(
       (row) => row.channels.includes('store'),
     );
     expect(storeRows.some((row) => row.route.startsWith('contributor/'))).toBe(false);
@@ -53,36 +47,7 @@ describe('digest-bound lazy semantic route clusters', () => {
       join(process.cwd(), 'packaging/templates/semantic-route-host.store.js'), 'utf8',
     );
     expect(template).toContain("row.channels.includes('store')");
-    expect(template).toContain('classifications: storeClassifications');
-  });
-
-  test('cold summary is an exact projection of the full route ledger', () => {
-    const kernel = SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'kernel');
-    const split = SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split');
-    const migrated = SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.state === 'migrated');
-    const executable = migrated.map((row) => row.route);
-    expect(JSON.parse(JSON.stringify(SEMANTIC_CUTOVER_SUMMARY))).toEqual({
-      schema: 2,
-      total: SEMANTIC_ROUTE_CLASSIFICATIONS.length,
-      kernel: kernel.length,
-      split: split.length,
-      migrated: migrated.length,
-      unmigrated: SEMANTIC_ROUTE_CLASSIFICATIONS.length - migrated.length,
-      executable: executable.length,
-      unavailable: SEMANTIC_ROUTE_CLASSIFICATIONS.length - executable.length,
-      ready: SEMANTIC_ROUTE_CUTOVER.ready,
-    });
-    expect(new Set(executable).size).toBe(executable.length);
-    for (const route of executable) {
-      const row = SEMANTIC_ROUTE_CLASSIFICATIONS.find((entry) => entry.route === route);
-      expect(row, route).toMatchObject({ route, state: 'migrated' });
-      if (row?.placement === 'split') {
-        expect(SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.some((entry) => entry.route === route), route)
-          .toBe(true);
-      } else {
-        expect(row?.placement, route).toBe('kernel');
-      }
-    }
+    expect(template).toContain('manifest: storeManifest');
   });
 
   test('each literal cluster reaches only its own route family', async () => {

@@ -96,12 +96,12 @@ describe('createScriptRunRegistry', () => {
   test('every code relay gets the same atomic capability/operation wall', () => {
     const r = createScriptRunRegistry({ codeOpLimit: 2 });
     r.register('page-run', undefined, 'web-1', { page: true });
-    expect(r.admitOp('page-run', 'site')).toBe(false);
-    expect(r.admitOp('page-run', 'page')).toBe(true);
-    expect(r.admitOp('page-run', 'page')).toBe(true);
-    expect(r.admitOp('page-run', 'page')).toBe(false);
+    expect(r.admitCodeOp('page-run', 'site')).toBe(false);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(true);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(true);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(false);
     r.abort('page-run');
-    expect(r.admitOp('page-run', 'page')).toBe(false);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(false);
   });
 });
 

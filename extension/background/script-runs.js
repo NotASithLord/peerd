@@ -122,7 +122,7 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
     /** Atomically admit one code-client op against a per-capability run ceiling.
      * Counting happens before any await, so Promise.all cannot oversubscribe it.
      * @param {string} runId @param {string} capability @param {number} [limit] */
-    admitOp: (runId, capability, limit = codeOpLimit) => {
+    admitCodeOp: (runId, capability, limit = codeOpLimit) => {
       const entry = runs.get(runId);
       if (!entry || entry.controller.signal.aborted
         || entry.capabilities[capability] !== true

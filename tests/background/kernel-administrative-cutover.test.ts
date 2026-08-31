@@ -480,7 +480,7 @@ describe('sealed administrative root cutover', () => {
       root, join(root, 'offscreen/kernel-administrative-host.js'),
     );
     const kernelGraph = await collectStaticModuleGraph(
-      root, join(root, 'background/kernel-skills-authority.js'),
+      root, join(root, 'background/kernel-skill-persistence.js'),
     );
     const controlGraph = await collectStaticModuleGraph(
       root, join(root, 'background/kernel-administrative-control.js'),

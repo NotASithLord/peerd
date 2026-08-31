@@ -1,7 +1,7 @@
 // @ts-check
-// Compact executable admission table for the sealed semantic host. The full
-// 161-route ownership ledger stays in the authority/build graph; a meta-test
-// proves this projection equals exactly its migrated, non-kernel rows.
+// Compact executable admission table for the sealed semantic host. Kernel
+// routes live with their concrete owners; only routes listed here may cross
+// into the sealed host.
 
 const channels = Object.freeze(['store', 'preview']);
 const preview = Object.freeze(['preview']);
@@ -11,11 +11,9 @@ const row = (/** @type {string} */ route,
   route,
   channels: routeChannels,
   source,
-  placement: /** @type {const} */ ('split'),
-  state: /** @type {const} */ ('migrated'),
 });
 
-export const SEMANTIC_HOST_ROUTE_CLASSIFICATIONS = Object.freeze([
+export const SEMANTIC_HOST_ROUTE_MANIFEST = Object.freeze([
   row('actors/count'),
   row('actors/overview'),
   row('app/get-meta', 'extension/background/routes/engine.js'),

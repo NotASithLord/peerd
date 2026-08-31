@@ -229,7 +229,7 @@ describe('installed Firefox production cutover lane', () => {
       /complete live kernel assembly/);
     rejects((report) => { report.observations.cutover.ports.push({}); },
       /complete live kernel assembly/);
-    rejects((report) => { report.observations.cutover.semantic.unavailable = 1; },
+    rejects((report) => { report.observations.cutover.ready = false; },
       /complete live kernel assembly/);
     rejects((report) => { report.observations.screenshot.sha256 = ''; },
       /screenshot binding/);

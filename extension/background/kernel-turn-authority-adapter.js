@@ -2879,7 +2879,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         if (typeof message.runId !== 'string'
             || scriptRuns.ownerFor(message.runId) !== message.ownerSessionId
             || scriptRuns.allows(message.runId, 'a2a') !== true
-            || scriptRuns.admitOp(message.runId, 'a2a') !== true) {
+            || scriptRuns.admitCodeOp(message.runId, 'a2a') !== true) {
           return { ok: false, error: 'a2a: unknown, finished, foreign, or over-limit run' };
         }
         const signal = scriptRuns.signalFor(message.runId);
@@ -2998,7 +2998,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         }
         if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
             || scriptRuns.allows(runId, 'site') !== true
-            || scriptRuns.admitOp(runId, 'site') !== true) {
+            || scriptRuns.admitCodeOp(runId, 'site') !== true) {
           return { ok: false, error: 'site_fetch_unknown_finished_foreign_or_over_limit_run' };
         }
         const signal = scriptRuns.signalFor(runId);

@@ -115,14 +115,13 @@ describe('thin vault-kernel Port assembly', () => {
   });
 });
 
-describe('executable vault-kernel cutover report', () => {
-  test('reports update-event readiness only for the target that attaches that listener', () => {
+describe('executable vault-kernel assembly report', () => {
+  test('derives event readiness from listeners attached to the live registry', () => {
     const source = readFileSync(join(
       import.meta.dir, '..', '..', 'extension', 'background', 'vault-kernel.js',
     ), 'utf8');
-    expect(source).toContain(
-      "'runtime.onUpdateAvailable': kernelSelfHostedChrome && !!kernelUpdateCustody",
-    );
+    expect(source).toContain('eventOwners: kernelEvents.owners()');
+    expect(source).not.toContain('eventReadiness');
   });
   test('inventories all events and Ports but defaults every executable owner fail-closed', () => {
     const store = createVaultKernelAssemblyReport({ identity: IDENTITY });
@@ -130,94 +129,57 @@ describe('executable vault-kernel cutover report', () => {
       .toEqual(KERNEL_COLD_EVENTS.map((entry) => entry.key));
     expect(store.ports.map((entry) => entry.name))
       .toEqual(KERNEL_PORT_CLASSES.map((entry) => entry.name));
-    expect(store.counts).toEqual({
-      eventInventory: 16,
-      requiredEvents: 13,
-      ownedRequiredEvents: 0,
-      portInventory: 6,
-      requiredPorts: 4,
-      ownedRequiredPorts: 0,
-    });
     expect(store.missingRequiredEvents).toHaveLength(13);
-    expect(store.events.filter((entry) => entry.owner === 'kernel-front-door')
-      .map((entry) => entry.key)).toEqual([
-      'windows.onFocusChanged', 'action.onClicked', 'commands.onCommand',
-    ]);
     expect(store.incompletePorts).toEqual([
       'sidepanel', 'home', 'eval', 'feature-lease-keepalive',
     ]);
-    expect(store.cutoverReady).toBe(false);
+    expect(store.ready).toBe(false);
 
     const partial = createVaultKernelAssemblyReport({
       identity: IDENTITY,
       eventOwners: { 'runtime.onMessage': 'kernel-message-router' },
-      eventReadiness: { 'runtime.onMessage': false },
       portOwners: {}, failClosedPorts: {},
     });
     expect(partial.events.find((entry) => entry.key === 'runtime.onMessage'))
-      .toMatchObject({ status: 'partial', owner: 'kernel-message-router' });
-    expect(partial.missingRequiredEvents).toContain('runtime.onMessage');
+      .toMatchObject({ status: 'owned', owner: 'kernel-message-router' });
+    expect(partial.missingRequiredEvents).not.toContain('runtime.onMessage');
 
     const firefox = createVaultKernelAssemblyReport({ identity: IDENTITY, firefox: true });
     const preview = createVaultKernelAssemblyReport({
       identity: IDENTITY, selfHostedChrome: true,
     });
-    expect(firefox.counts.requiredEvents).toBe(15);
-    expect(firefox.counts.ownedRequiredEvents).toBe(0);
-    expect(firefox.counts.requiredPorts).toBe(4);
-    expect(firefox.counts.ownedRequiredPorts).toBe(0);
     expect(firefox.incompletePorts).toEqual([
       'private-transfer', 'sidepanel', 'home', 'eval',
     ]);
     expect(firefox.missingRequiredEvents).toContain('webRequest.onBeforeRequest');
-    expect(preview.counts.requiredPorts).toBe(5);
     expect(preview.incompletePorts).toEqual([
       'sidepanel', 'home', 'eval', 'feature-lease-keepalive', 'dweb-custody',
     ]);
-    expect(preview.counts.requiredEvents).toBe(14);
-    expect(preview.counts.ownedRequiredEvents).toBe(0);
     expect(preview.missingRequiredEvents).toContain('runtime.onUpdateAvailable');
-    expect(firefox.cutoverReady).toBe(false);
-    expect(preview.cutoverReady).toBe(false);
+    expect(firefox.ready).toBe(false);
+    expect(preview.ready).toBe(false);
   });
 
   test('becomes ready only with every target event and every Port owned', () => {
     const eventOwners = Object.fromEntries(
       KERNEL_COLD_EVENTS.map((entry) => [entry.key, `owner:${entry.key}`]),
     );
-    const eventReadiness = Object.fromEntries(
-      KERNEL_COLD_EVENTS.map((entry) => [entry.key, true]),
-    );
     const portOwners = Object.fromEntries(
       KERNEL_PORT_CLASSES.map((entry) => [entry.name, `owner:${entry.name}`]),
     );
     const complete = createVaultKernelAssemblyReport({
       identity: IDENTITY, firefox: true, selfHostedChrome: true,
-      eventOwners, eventReadiness, portOwners, failClosedPorts: {},
-      portReadiness: Object.fromEntries(
-        KERNEL_PORT_CLASSES.map((entry) => [entry.name, true]),
-      ),
+      eventOwners, portOwners, failClosedPorts: {},
     });
-    expect(complete.counts).toEqual({
-      eventInventory: 16,
-      requiredEvents: 16,
-      ownedRequiredEvents: 16,
-      portInventory: 6,
-      requiredPorts: 4,
-      ownedRequiredPorts: 4,
-    });
-    expect(complete.cutoverReady).toBe(true);
+    expect(complete.ready).toBe(true);
     expect(() => createVaultKernelAssemblyReport({
       identity: IDENTITY,
       portOwners: { sidepanel: 'owner:sidepanel' },
       failClosedPorts: { sidepanel: 'still-fail-closed' },
     })).toThrow('vault-kernel-port-owner-overlap');
     expect(() => createVaultKernelAssemblyReport({
-      identity: IDENTITY, eventReadiness: { invented: true },
-    } as any)).toThrow('vault-kernel-event-readiness-invalid');
-    expect(() => createVaultKernelAssemblyReport({
-      identity: IDENTITY, portReadiness: { invented: true },
-    } as any)).toThrow('vault-kernel-port-readiness-invalid');
+      identity: IDENTITY, eventOwners: { invented: 'owner:invented' },
+    } as any)).toThrow('vault-kernel-event-owners-invalid');
   });
 
   test('requires only the Port classes physically present in each target', () => {
@@ -242,8 +204,6 @@ test('native entry uses one identity and target-exact kernel custody', async () 
   expect(source).toContain("'runtime.onMessage', browser.runtime.onMessage");
   expect(source).toContain("'runtime.onConnect', browser.runtime.onConnect");
   expect(source).toContain('eventOwners: kernelEvents.owners()');
-  expect(source).toContain('SEMANTIC_CUTOVER_SUMMARY.ready');
-  expect(source).toContain('semantic: SEMANTIC_CUTOVER_SUMMARY');
   expect(source).toContain('attachKernelFrontDoor');
   expect(source).toContain('const kernelEvents = coldReceipts');
   expect(source).toContain('createKernelColdReceipts');
@@ -269,7 +229,6 @@ test('native entry uses one identity and target-exact kernel custody', async () 
   expect(modules).toContain('background/kernel-cold-receipts.js');
   expect(modules).not.toContain('background/kernel-recovery-registry.js');
   expect(modules).not.toContain('background/cold-listener-fan-in.js');
-  expect(modules).not.toContain('background/cold-kernel-capture.js');
   expect(modules).not.toContain('background/kernel-port-router.js');
   expect(modules).toContain('background/kernel-port-owners.js');
   expect(modules).toContain('background/kernel-front-door.js');

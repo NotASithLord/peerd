@@ -40,7 +40,7 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'background/kernel-turn-production-runtime.js',
   'background/kernel-rich-runtime.js',
   'background/kernel-production-runtime.js',
-  'background/kernel-turn-live-factories.js',
+  'background/kernel-turn-authority-adapter.js',
   'background/kernel-local-control.js',
   'background/kernel-executable-live.js',
   'background/kernel-executable-transfer-live.js',

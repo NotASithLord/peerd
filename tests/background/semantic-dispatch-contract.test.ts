@@ -1,26 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  compileSemanticRouteClassification,
+  compileSemanticHostRouteManifest,
   parseSemanticDispatchRequest,
-  semanticDispatchCutoverReport,
 } from '../../extension/shared/semantic-dispatch-contract.js';
-import {
-  SEMANTIC_ROUTE_CLASSIFICATION,
-  SEMANTIC_ROUTE_CLASSIFICATIONS,
-  SEMANTIC_ROUTE_CUTOVER,
-} from '../../packaging/semantic-route-classification.ts';
-import { SEMANTIC_ROUTE_INVENTORY } from '../../extension/shared/semantic-route-inventory.js';
 import { createSemanticDispatchRuntime } from '../../extension/offscreen/semantic-dispatch-runtime.js';
-import { createSemanticDemandQuota } from '../../extension/shared/semantic-demand-policy.js';
-import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../../extension/shared/semantic-host-route-manifest.js';
+import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../../extension/shared/semantic-host-route-manifest.js';
 
 const AUTHORITY = Object.freeze({
   ownerId: 'root:test', sessionId: 'session:test', instanceId: null,
   origin: null, target: null, replayClass: 'E',
 });
-const classification = (route: string, placement: 'kernel' | 'semantic-host' | 'split',
-  state: 'migrated' | 'unmigrated' = 'migrated') => ({
-  route, channels: ['store', 'preview'], source: 'test-fixture.js', placement, state,
+const manifestRow = (route: string) => ({
+  route, channels: ['store', 'preview'], source: 'test-fixture.js',
 });
 const request = (route = 'test/semantic', message: Record<string, unknown> = {}) => ({
   protocol: 1 as const, route, message: { type: route, ...message },
@@ -34,72 +25,26 @@ const DIRECT_KERNEL_ROUTES = [
   'contacts/list', 'memory/export', 'skills/list', 'skills/remove', 'skills/setEnabled',
 ];
 
-describe('semantic route inventory', () => {
-  test('pins cardinality, channel variance, ownership, and the complete cutover', () => {
-    expect(SEMANTIC_ROUTE_INVENTORY).toHaveLength(157);
-    expect(SEMANTIC_ROUTE_INVENTORY.filter((row) => row.channels.length === 1)
-      .map((row) => row.route)).toEqual([
-      'contributor/disable', 'contributor/enable',
-      'contributor/feedback', 'contributor/status',
-    ]);
-    expect(SEMANTIC_ROUTE_CLASSIFICATION.size).toBe(157);
-    expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'kernel'))
-      .toHaveLength(139);
-    expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.placement === 'split'))
-      .toHaveLength(18);
-    expect(SEMANTIC_ROUTE_CLASSIFICATIONS.filter((row) => row.state === 'migrated')
-      .map((row) => row.route)).toEqual(
-        SEMANTIC_ROUTE_INVENTORY.map((row) => row.route),
-      );
-    expect(SEMANTIC_ROUTE_CUTOVER).toMatchObject({
-      ready: true, expected: 157, classified: 157, missing: [], extra: [],
-    });
-    expect(SEMANTIC_ROUTE_CUTOVER.unmigrated).toEqual([]);
-  });
-
-  test('does not let a candidate table hide missing, extra, or unmigrated routes', () => {
-    const table = compileSemanticRouteClassification([
-      classification('test/one', 'split'),
-      classification('test/extra', 'split'),
-      classification('test/two', 'kernel', 'unmigrated'),
-    ]);
-    expect(semanticDispatchCutoverReport(table, [
-      { route: 'test/one' }, { route: 'test/two' }, { route: 'test/missing' },
-    ])).toEqual({
-      ready: false, expected: 3, classified: 3,
-      missing: ['test/missing'], extra: ['test/extra'], unmigrated: ['test/two'],
-    });
-  });
-
-  test('direct authority routes have no semantic-host or reverse-call edge', () => {
-    const reverseOperations = [
-      'semantic.contacts.list-saved', 'semantic.contacts.list-apps',
-      'semantic.contacts.list-audit', 'semantic.contacts.upsert', 'semantic.contacts.remove',
-      'semantic.memory.export', 'semantic.skills.list', 'semantic.skills.set-enabled',
-      'semantic.skills.remove',
-    ];
+describe('semantic host manifest', () => {
+  test('contains only the exact executable host routes', () => {
+    const compiled = compileSemanticHostRouteManifest(SEMANTIC_HOST_ROUTE_MANIFEST);
+    expect(compiled.size).toBe(SEMANTIC_HOST_ROUTE_MANIFEST.length);
+    expect(SEMANTIC_HOST_ROUTE_MANIFEST.filter((row) => row.channels.includes('store')))
+      .toHaveLength(15);
     for (const route of DIRECT_KERNEL_ROUTES) {
-      expect(SEMANTIC_ROUTE_CLASSIFICATION.get(route)).toMatchObject({ placement: 'kernel' });
-      expect(SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.some((row) => row.route === route)).toBe(false);
-      const quota = createSemanticDemandQuota(request(route));
-      expect(quota.pendingCap).toBe(0);
-      for (const operation of reverseOperations) {
-        expect(quota.admit(operation, {})).toMatchObject({
-          ok: false, code: 'kernel-operation-denied',
-        });
-      }
+      expect(compiled.has(route)).toBe(false);
     }
   });
 
-  test('rejects duplicate, malformed, and silently extended classification rows', () => {
-    expect(() => compileSemanticRouteClassification([
-      classification('test/one', 'split'), classification('test/one', 'split'),
+  test('rejects duplicate, malformed, and silently extended manifest rows', () => {
+    expect(() => compileSemanticHostRouteManifest([
+      manifestRow('test/one'), manifestRow('test/one'),
     ])).toThrow('semantic-route-name-invalid-or-duplicate');
-    expect(() => compileSemanticRouteClassification([{
-      ...classification('test/one', 'split'), surprise: true,
+    expect(() => compileSemanticHostRouteManifest([{
+      ...manifestRow('test/one'), surprise: true,
     }])).toThrow('semantic-route-row-shape-invalid');
-    expect(() => compileSemanticRouteClassification([
-      { ...classification('test/one', 'split'), channels: ['store', 'store'] },
+    expect(() => compileSemanticHostRouteManifest([
+      { ...manifestRow('test/one'), channels: ['store', 'store'] },
     ])).toThrow('semantic-route-row-value-invalid');
   });
 });
@@ -109,7 +54,7 @@ describe('semantic.dispatch protocol and host registry', () => {
     const calls: any[] = [];
     const kernelCall = async (operation: string, payload: unknown) => ({ operation, payload });
     const runtime = createSemanticDispatchRuntime({
-      classifications: [classification('test/semantic', 'split')],
+      manifest: [manifestRow('test/semantic')],
       handlers: {
         'test/semantic': async (message, context) => {
           calls.push({ message, context });
@@ -133,7 +78,7 @@ describe('semantic.dispatch protocol and host registry', () => {
   test('fails closed before execution for malformed, mismatched, oversized, and polluted requests', async () => {
     let calls = 0;
     const runtime = createSemanticDispatchRuntime({
-      classifications: [classification('test/semantic', 'semantic-host')],
+      manifest: [manifestRow('test/semantic')],
       handlers: { 'test/semantic': async () => { calls += 1; return { ok: true }; } },
     });
     const polluted = Object.create({ route: 'test/semantic' });
@@ -152,39 +97,22 @@ describe('semantic.dispatch protocol and host registry', () => {
     expect(calls).toBe(0);
   });
 
-  test('refuses unknown, unmigrated, and kernel-owned routes before a handler', async () => {
-    const migrated = createSemanticDispatchRuntime({
-      classifications: [classification('test/semantic', 'semantic-host')],
+  test('refuses an unknown route before a handler', async () => {
+    const runtime = createSemanticDispatchRuntime({
+      manifest: [manifestRow('test/semantic')],
       handlers: { 'test/semantic': async () => ({ ok: true }) },
     });
-    await expect(migrated.dispatch(request('test/unknown'), options())).resolves.toEqual({
+    await expect(runtime.dispatch(request('test/unknown'), options())).resolves.toEqual({
       ok: false, code: 'semantic-dispatch-route-unknown', outcomeKnown: true,
-    });
-    const unmigrated = createSemanticDispatchRuntime({
-      classifications: [classification('test/unmigrated', 'split', 'unmigrated')],
-      handlers: {},
-    });
-    await expect(unmigrated.dispatch(request('test/unmigrated'), options())).resolves.toEqual({
-      ok: false, code: 'semantic-dispatch-route-unmigrated', outcomeKnown: true,
-    });
-    const kernel = createSemanticDispatchRuntime({
-      classifications: [classification('test/kernel', 'kernel')], handlers: {},
-    });
-    await expect(kernel.dispatch(request('test/kernel'), options())).resolves.toEqual({
-      ok: false, code: 'semantic-dispatch-route-kernel-owned', outcomeKnown: true,
     });
   });
 
-  test('construction refuses registrations that are unknown, kernel-owned, or incomplete', () => {
+  test('construction refuses registrations that are unknown or incomplete', () => {
     expect(() => createSemanticDispatchRuntime({
-      classifications: [classification('test/kernel', 'kernel')],
-      handlers: { 'test/kernel': async () => ({ ok: true }) },
-    })).toThrow('semantic-handler-route-not-admitted:test/kernel');
-    expect(() => createSemanticDispatchRuntime({
-      classifications: [classification('test/semantic', 'split')], handlers: {},
+      manifest: [manifestRow('test/semantic')], handlers: {},
     })).toThrow('semantic-handler-missing:test/semantic');
     expect(() => createSemanticDispatchRuntime({
-      classifications: [classification('test/semantic', 'split')],
+      manifest: [manifestRow('test/semantic')],
       handlers: { 'test/unknown': async () => ({ ok: true }) },
     })).toThrow('semantic-handler-route-not-admitted:test/unknown');
   });
@@ -192,7 +120,7 @@ describe('semantic.dispatch protocol and host registry', () => {
   test('invalid authority, signal, pre-abort, and expired deadline are known-safe', async () => {
     let calls = 0;
     const runtime = createSemanticDispatchRuntime({
-      classifications: [classification('test/semantic', 'split')],
+      manifest: [manifestRow('test/semantic')],
       handlers: { 'test/semantic': async () => { calls += 1; return { ok: true }; } },
       now: () => 100,
     });
@@ -215,7 +143,7 @@ describe('semantic.dispatch protocol and host registry', () => {
       async () => ({ ok: true, huge: 'x'.repeat(300_000) }),
     ]) {
       const runtime = createSemanticDispatchRuntime({
-        classifications: [classification('test/semantic', 'split')],
+        manifest: [manifestRow('test/semantic')],
         handlers: { 'test/semantic': handler },
       });
       const result = await runtime.dispatch(request(), options());

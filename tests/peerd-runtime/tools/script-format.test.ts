@@ -299,7 +299,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       },
       ownerFor: (runId: string) => live.get(runId)?.owner,
       allows: (runId: string, cap: string) => live.get(runId)?.caps[cap] === true,
-      admitOp: () => true,
+      admitCodeOp: () => true,
       signalFor: (runId: string) => live.get(runId)?.signal,
       abort: () => {},
       release: (runId: string) => { live.delete(runId); },

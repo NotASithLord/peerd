@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { useFakeIndexedDB } from '../setup.ts';
-import { createKernelSkillsAuthority } from '../../extension/background/kernel-skills-authority.js';
+import { createKernelSkillPersistence } from '../../extension/background/kernel-skill-persistence.js';
 import { createSkillStore } from '../../extension/peerd-runtime/skills/store.js';
 import { createSkillRegistry } from '../../extension/peerd-runtime/skills/registry.js';
 import { makeSkillsRoutes } from '../../extension/background/routes/skills.js';
@@ -54,7 +54,7 @@ const makeLanes = async () => {
   });
   const kernelAudit: any[] = [];
   const kernelPushes: number[] = [];
-  const kernel = createKernelSkillsAuthority({
+  const kernel = createKernelSkillPersistence({
     idbFactory: factory,
     audit: async (entry: any) => { kernelAudit.push(entry); },
     pushState: () => { kernelPushes.push(1); },
@@ -67,7 +67,7 @@ const makeLanes = async () => {
   };
 };
 
-describe('kernel skills metadata authority', () => {
+describe('kernel skill persistence', () => {
   test('list matches the legacy reply, sorted, metadata only', async () => {
     const lanes = await makeLanes();
     await lanes.install('zeta');
@@ -125,7 +125,7 @@ describe('kernel skills metadata authority', () => {
   test('the schema write gate refuses mutations but never reads', async () => {
     const lanes = await makeLanes();
     await lanes.install('alpha');
-    const guarded = createKernelSkillsAuthority({
+    const guarded = createKernelSkillPersistence({
       idbFactory: indexedDB,
       canWrite: () => { throw new Error('profile schema is newer than this build'); },
     });

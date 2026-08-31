@@ -275,7 +275,7 @@ describe('cold entry graphs', () => {
     expect(kernelSource).toContain('const createKernelDemandPlane = await runtimeModules.demandPlane();');
     expect(measured.modulesSet.has('background/kernel-chrome-runtime-modules.js')).toBe(true);
     expect(measured.modulesSet.has('background/kernel-demand-plane.js')).toBe(true);
-    expect(measured.modulesSet.has('background/kernel-turn-live-factories.js')).toBe(true);
+    expect(measured.modulesSet.has('background/kernel-turn-authority-adapter.js')).toBe(true);
     expect(kernelSource).not.toContain('createDeferredRepositoryClient');
     expect(measured.modulesSet.has('background/kernel-demand-support.js')).toBe(true);
     expect(readFileSync(

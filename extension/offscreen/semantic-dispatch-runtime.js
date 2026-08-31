@@ -1,7 +1,7 @@
 // @ts-check
 
 import {
-  compileSemanticRouteClassification,
+  compileSemanticHostRouteManifest,
   parseSemanticDispatchAuthority,
   parseSemanticDispatchRequest,
   semanticDispatchResultFits,
@@ -22,29 +22,26 @@ const refusal = (/** @type {string} */ code) => Object.freeze({
 
 /**
  * @param {Object} options
- * @param {unknown} options.classifications
+ * @param {unknown} options.manifest
  * @param {Record<string, SemanticRouteHandler>|Map<string, SemanticRouteHandler>} options.handlers
  * @param {() => number} [options.now]
  */
-export const createSemanticDispatchRuntime = ({ classifications, handlers, now = Date.now }) => {
-  const table = compileSemanticRouteClassification(classifications);
+export const createSemanticDispatchRuntime = ({ manifest, handlers, now = Date.now }) => {
+  const table = compileSemanticHostRouteManifest(manifest);
   const entries = handlers instanceof Map ? [...handlers.entries()] : Object.entries(handlers ?? {});
   /** @type {Map<string, SemanticRouteHandler>} */
   const registry = new Map();
   for (const [route, handler] of entries) {
     if (registry.has(route)) throw new TypeError('semantic-handler-duplicate');
     const row = table.get(route);
-    if (!row || row.state !== 'migrated'
-        || (row.placement !== 'semantic-host' && row.placement !== 'split')) {
+    if (!row) {
       throw new TypeError(`semantic-handler-route-not-admitted:${route}`);
     }
     if (typeof handler !== 'function') throw new TypeError(`semantic-handler-invalid:${route}`);
     registry.set(route, handler);
   }
-  for (const row of table.values()) {
-    if (row.state === 'migrated'
-        && (row.placement === 'semantic-host' || row.placement === 'split')
-        && !registry.has(row.route)) throw new TypeError(`semantic-handler-missing:${row.route}`);
+  for (const row of table.values()) if (!registry.has(row.route)) {
+    throw new TypeError(`semantic-handler-missing:${row.route}`);
   }
 
   return Object.freeze({
@@ -64,8 +61,6 @@ export const createSemanticDispatchRuntime = ({ classifications, handlers, now =
       }
       const row = table.get(request.route);
       if (!row) return refusal('semantic-dispatch-route-unknown');
-      if (row.state !== 'migrated') return refusal('semantic-dispatch-route-unmigrated');
-      if (row.placement === 'kernel') return refusal('semantic-dispatch-route-kernel-owned');
       const handler = registry.get(request.route);
       if (!handler) return refusal('semantic-dispatch-handler-unavailable');
       if (options.signal.aborted) return refusal('semantic-dispatch-aborted');

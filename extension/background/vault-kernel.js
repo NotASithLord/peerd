@@ -81,10 +81,7 @@ import { createKernelVoiceCustody } from './kernel-voice-custody.js';
 import { createContextSnapshots } from '../shared/model-context-snapshot.js';
 import { resolveRuntimeCapabilities } from '../shared/runtime-capability-hosts.js';
 import { createScriptRunRegistry } from './script-runs.js';
-import {
-  createVaultKernelAssemblyReport,
-  SEMANTIC_CUTOVER_SUMMARY,
-} from './vault-kernel-assembly.js';
+import { createVaultKernelAssemblyReport } from './vault-kernel-assembly.js';
 import {
   makeKernelRouteProvenance,
   makeVaultKernelMessageHandler,
@@ -619,12 +616,12 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
   const createKernelDemandPlane = await runtimeModules.demandPlane();
   demandPlane = createKernelDemandPlane({
     createProductionRuntime: async (/** @type {any} */ deps) => {
-      const [createKernelProductionRuntime, createKernelTurnLiveFactories] = await Promise.all([
+      const [createKernelProductionRuntime, createKernelTurnAuthorityAdapter] = await Promise.all([
         loadProductionRuntimeModule(), runtimeModules.turnFactories(),
       ]);
       return createKernelProductionRuntime({
         ...deps,
-        createTurnFactories: createKernelTurnLiveFactories,
+        createTurnFactories: createKernelTurnAuthorityAdapter,
       });
     },
     browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts,
@@ -918,24 +915,9 @@ const assemblyReport = () => Object.freeze({
     selfHostedChrome: kernelSelfHostedChrome,
     dweb: DWEB_ENABLED,
     eventOwners: kernelEvents.owners(),
-    eventReadiness: {
-      ...browserEventOwners.readiness,
-      ...(kernelFirefox && !childGuard.ready()
-        ? { 'webRequest.onBeforeRequest': false } : {}),
-      'runtime.onMessage': SEMANTIC_CUTOVER_SUMMARY.ready,
-      'runtime.onConnect': true,
-      'runtime.onInstalled': true,
-      'runtime.onUpdateAvailable': kernelSelfHostedChrome && !!kernelUpdateCustody,
-      'storage.session.onChanged': !!firefoxActorLifetime,
-      'windows.onFocusChanged': true,
-      'action.onClicked': true,
-      'commands.onCommand': true,
-    },
     portOwners: portOwners.owners,
-    portReadiness: portOwners.readiness,
     failClosedPorts: portOwners.failClosedPorts,
   }),
-  semantic: SEMANTIC_CUTOVER_SUMMARY,
 });
 
 const transferAuthorization = Symbol('kernel-private-transfer');

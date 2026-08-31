@@ -140,8 +140,6 @@ export const createKernelPortOwners = ({
   const handlers = {};
   /** @type {Record<string,string>} */
   const owners = {};
-  /** @type {Record<string,boolean>} */
-  const readiness = {};
   /** @type {Record<string,string>} */
   const failClosedPorts = {};
   for (const { name, reason } of KERNEL_PORT_CLASSES) {
@@ -151,7 +149,6 @@ export const createKernelPortOwners = ({
         /** @type {(port:any,context:any)=>unknown} */ (attachers[name]),
       );
       owners[name] = OWNER_NAMES[name];
-      readiness[name] = true;
     } else {
       failClosedPorts[name] = CLOSED_REASONS[name]
         ?? reason
@@ -161,7 +158,6 @@ export const createKernelPortOwners = ({
   return Object.freeze({
     handlers: Object.freeze(handlers),
     owners: Object.freeze(owners),
-    readiness: Object.freeze(readiness),
     failClosedPorts: Object.freeze(failClosedPorts),
     required: Object.freeze(required),
   });

@@ -162,16 +162,16 @@ describe('packaged first-install passkey lane', () => {
       /eager cold offscreen host/);
     rejects((report) => { report.observations.semanticHost.offscreenContexts = []; },
       /lazy semantic host/);
-    rejects((report) => { report.observations.cutover.cutoverReady = false; },
+    rejects((report) => { report.observations.cutover.ready = false; },
       /complete live kernel assembly/);
-    rejects((report) => { report.observations.cutover.counts.requiredEvents -= 1; },
+    rejects((report) => { report.observations.cutover.missingRequiredEvents.push('runtime.onMessage'); },
       /complete live kernel assembly/);
     rejects((report) => { report.observations.cutover.events.pop(); },
       /complete live kernel assembly/);
     rejects((report) => {
       report.observations.cutover.events[0].key = 'runtime.onInvented';
     }, /complete live kernel assembly/);
-    rejects((report) => { report.observations.cutover.semantic.total = 159; },
+    rejects((report) => { report.observations.cutover.events[0].owner = null; },
       /complete live kernel assembly/);
     rejects((report) => { report.observations.coldRecycle.recycledUi.appShell = false; },
       /cold recycle continuity/);

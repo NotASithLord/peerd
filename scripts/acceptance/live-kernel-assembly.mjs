@@ -1,6 +1,7 @@
-// Exact acceptance contract for a production native-kernel assembly report.
-// This is intentionally consumed by every installed-artifact lane: a boolean
-// `cutoverReady` without the complete reviewed inventories is not evidence.
+// Exact acceptance contract for the live native-kernel assembly. The report
+// proves concrete listener and Port ownership; the controller build identity
+// binds the compact semantic-host manifest without duplicating a route ledger
+// in the service worker.
 
 import {
   coldEventKeysFor,
@@ -9,16 +10,19 @@ import {
   KERNEL_PORT_CLASSES,
 } from '../../extension/background/cold-kernel-inventory.js';
 import {
-  SEMANTIC_ROUTE_INVENTORY,
-} from '../../extension/shared/semantic-route-inventory.js';
-import {
-  SEMANTIC_ROUTE_CLASSIFICATIONS,
-} from '../../packaging/semantic-route-classification.ts';
+  SEMANTIC_HOST_ROUTE_MANIFEST,
+} from '../../extension/shared/semantic-host-route-manifest.js';
 
 export const LIVE_KERNEL_TARGETS = Object.freeze({
-  'store-chrome': Object.freeze({ firefox: false, selfHostedChrome: false, dweb: false }),
-  'preview-chrome': Object.freeze({ firefox: false, selfHostedChrome: true, dweb: true }),
-  'store-firefox': Object.freeze({ firefox: true, selfHostedChrome: false, dweb: false }),
+  'store-chrome': Object.freeze({
+    firefox: false, selfHostedChrome: false, dweb: false, channel: 'store',
+  }),
+  'preview-chrome': Object.freeze({
+    firefox: false, selfHostedChrome: true, dweb: true, channel: 'preview',
+  }),
+  'store-firefox': Object.freeze({
+    firefox: true, selfHostedChrome: false, dweb: false, channel: 'store',
+  }),
 });
 
 const fail = (detail) => {
@@ -30,26 +34,32 @@ const exactKeys = (value, keys) => record(value)
 const exactArray = (actual, expected) => Array.isArray(actual)
   && JSON.stringify(actual) === JSON.stringify(expected);
 
+const semanticHostRoutesFor = (channel) => {
+  const rows = SEMANTIC_HOST_ROUTE_MANIFEST.filter((row) => row.channels.includes(channel));
+  const routes = rows.map((row) => row.route);
+  if (routes.length === 0 || new Set(routes).size !== routes.length
+      || rows.some((row) => !exactKeys(row, ['channels', 'route', 'source'])
+        || typeof row.route !== 'string' || row.route.length === 0
+        || typeof row.source !== 'string' || row.source.length === 0
+        || !Array.isArray(row.channels) || row.channels.length === 0)) {
+    fail('compact semantic host admission is invalid');
+  }
+  return Object.freeze(routes);
+};
+
 export const liveKernelAssemblyProfile = (targetName) => {
   const target = LIVE_KERNEL_TARGETS[targetName];
   if (!target) fail('unknown target');
-  const requiredEvents = coldEventKeysFor(target);
-  const requiredPorts = coldPortNamesFor({ firefox: target.firefox, dweb: target.dweb });
-  const semanticPlacements = Object.freeze({
-    kernel: SEMANTIC_ROUTE_CLASSIFICATIONS.filter((entry) => entry.placement === 'kernel').length,
-    split: SEMANTIC_ROUTE_CLASSIFICATIONS.filter((entry) => entry.placement === 'split').length,
-  });
   return Object.freeze({
     targetName,
     target,
-    semanticRoutes: SEMANTIC_ROUTE_INVENTORY.length,
-    semanticPlacements,
-    eventInventory: KERNEL_COLD_EVENTS.length,
+    semanticHostRoutes: semanticHostRoutesFor(target.channel),
     eventKeys: Object.freeze(KERNEL_COLD_EVENTS.map((entry) => entry.key)),
-    requiredEvents: Object.freeze(requiredEvents),
-    portInventory: KERNEL_PORT_CLASSES.length,
+    requiredEvents: Object.freeze(coldEventKeysFor(target)),
     portNames: Object.freeze(KERNEL_PORT_CLASSES.map((entry) => entry.name)),
-    requiredPorts: Object.freeze(requiredPorts),
+    requiredPorts: Object.freeze(coldPortNamesFor({
+      firefox: target.firefox, dweb: target.dweb,
+    })),
   });
 };
 
@@ -60,8 +70,8 @@ export const liveKernelAssemblyProfile = (targetName) => {
 export const assertLiveKernelAssembly = (candidate, targetName) => {
   const profile = liveKernelAssemblyProfile(targetName);
   if (!exactKeys(candidate, [
-    'identity', 'target', 'events', 'ports', 'counts',
-    'missingRequiredEvents', 'incompletePorts', 'cutoverReady', 'semantic',
+    'identity', 'target', 'events', 'ports',
+    'missingRequiredEvents', 'incompletePorts', 'ready',
   ])) fail('top-level shape is not exact');
   const assembly = /** @type {any} */ (candidate);
 
@@ -82,18 +92,6 @@ export const assertLiveKernelAssembly = (candidate, targetName) => {
       || assembly.target.selfHostedChrome !== profile.target.selfHostedChrome) {
     fail('target posture is invalid');
   }
-  if (!exactKeys(assembly.counts, [
-    'eventInventory', 'requiredEvents', 'ownedRequiredEvents',
-    'portInventory', 'requiredPorts', 'ownedRequiredPorts',
-  ])
-      || assembly.counts.eventInventory !== profile.eventInventory
-      || assembly.counts.requiredEvents !== profile.requiredEvents.length
-      || assembly.counts.ownedRequiredEvents !== profile.requiredEvents.length
-      || assembly.counts.portInventory !== profile.portInventory
-      || assembly.counts.requiredPorts !== profile.requiredPorts.length
-      || assembly.counts.ownedRequiredPorts !== profile.requiredPorts.length) {
-    fail('inventory counts are invalid');
-  }
 
   if (!Array.isArray(assembly.events)
       || !exactArray(assembly.events.map((entry) => entry?.key), profile.eventKeys)) {
@@ -108,7 +106,7 @@ export const assertLiveKernelAssembly = (candidate, targetName) => {
       && entry.owner.length >= 3 && entry.owner.length <= 128;
     if (!exactKeys(entry, ['key', 'placement', 'required', 'status', 'owner'])
         || entry.placement !== inventory.placement || entry.required !== required
-        || !['missing', 'partial', 'owned'].includes(entry.status)
+        || !['missing', 'owned'].includes(entry.status)
         || (entry.status === 'missing' ? entry.owner !== null : !hasOwner)
         || (required && entry.status !== 'owned')) {
       fail(`event inventory row is invalid: ${inventory.key}`);
@@ -131,34 +129,18 @@ export const assertLiveKernelAssembly = (candidate, targetName) => {
       : entry?.reason === (Object.hasOwn(inventory, 'reason') ? inventory.reason : null);
     if (!exactKeys(entry, ['name', 'cold', 'required', 'status', 'owner', 'reason'])
         || entry.cold !== inventory.cold || entry.required !== required
-        || !['missing', 'partial', 'owned', 'fail-closed'].includes(entry.status)
+        || !['missing', 'owned', 'fail-closed'].includes(entry.status)
         || (entry.status === 'missing' || entry.status === 'fail-closed'
           ? entry.owner !== null : !hasOwner)
-        || !validReason
-        || (required && entry.status !== 'owned')) {
+        || !validReason || (required && entry.status !== 'owned')) {
       fail(`port inventory row is invalid: ${inventory.name}`);
     }
   }
 
-  if (assembly.cutoverReady !== true
+  if (assembly.ready !== true
       || !exactArray(assembly.missingRequiredEvents, [])
       || !exactArray(assembly.incompletePorts, [])) {
     fail('readiness or missing-owner projection is invalid');
-  }
-  if (!exactKeys(assembly.semantic, [
-    'schema', 'total', 'kernel', 'split', 'migrated', 'unmigrated',
-    'executable', 'unavailable', 'ready',
-  ])
-      || assembly.semantic.schema !== 2
-      || assembly.semantic.total !== profile.semanticRoutes
-      || assembly.semantic.kernel !== profile.semanticPlacements.kernel
-      || assembly.semantic.split !== profile.semanticPlacements.split
-      || assembly.semantic.migrated !== profile.semanticRoutes
-      || assembly.semantic.unmigrated !== 0
-      || assembly.semantic.executable !== profile.semanticRoutes
-      || assembly.semantic.unavailable !== 0
-      || assembly.semantic.ready !== true) {
-    fail('semantic route ledger is incomplete or inconsistent');
   }
   return assembly;
 };
@@ -194,27 +176,8 @@ export const completeLiveKernelAssemblyFixture = (targetName) => {
       owner: requiredPorts.has(entry.name) ? `owner:${entry.name}` : null,
       reason: 'reason' in entry ? entry.reason : null,
     })),
-    counts: {
-      eventInventory: profile.eventInventory,
-      requiredEvents: profile.requiredEvents.length,
-      ownedRequiredEvents: profile.requiredEvents.length,
-      portInventory: profile.portInventory,
-      requiredPorts: profile.requiredPorts.length,
-      ownedRequiredPorts: profile.requiredPorts.length,
-    },
     missingRequiredEvents: [],
     incompletePorts: [],
-    cutoverReady: true,
-    semantic: {
-      schema: 2,
-      total: profile.semanticRoutes,
-      kernel: profile.semanticPlacements.kernel,
-      split: profile.semanticPlacements.split,
-      migrated: profile.semanticRoutes,
-      unmigrated: 0,
-      executable: profile.semanticRoutes,
-      unavailable: 0,
-      ready: true,
-    },
+    ready: true,
   };
 };

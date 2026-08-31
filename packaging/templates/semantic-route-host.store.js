@@ -2,7 +2,7 @@
 // Store semantic dispatcher. Contributor Metrics is absent from this target;
 // its route cluster is neither imported nor represented by a fallback handler.
 
-import { SEMANTIC_HOST_ROUTE_CLASSIFICATIONS } from '../shared/semantic-host-route-manifest.js';
+import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../shared/semantic-host-route-manifest.js';
 import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 import { createSemanticDispatchRuntime } from './semantic-dispatch-runtime.js';
 
@@ -34,11 +34,11 @@ const apps = routeHandler(appRoutes, 'dispatchAppSemanticRoute');
 const contacts = routeHandler(contactRoutes, 'dispatchContactSemanticRoute');
 const providers = routeHandler(providerRoutes, 'dispatchProviderSemanticRoute');
 const memory = routeHandler(memoryRoutes, 'dispatchMemorySemanticRoute');
-const storeClassifications = SEMANTIC_HOST_ROUTE_CLASSIFICATIONS.filter(
+const storeManifest = SEMANTIC_HOST_ROUTE_MANIFEST.filter(
   (row) => row.channels.includes('store'),
 );
 const runtime = createSemanticDispatchRuntime({
-  classifications: storeClassifications,
+  manifest: storeManifest,
   handlers: {
     'actors/overview': actor('actors/overview'),
     'actors/count': actor('actors/count'),

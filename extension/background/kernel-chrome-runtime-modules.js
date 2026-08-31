@@ -5,7 +5,7 @@ import { createKernelDemandPlane } from './kernel-demand-plane.js';
 import { createKernelProductionRuntime } from './kernel-production-runtime.js';
 import { createKernelSessionAuthority } from './kernel-session-authority.js';
 import { createKernelSupportControl } from './kernel-support-control.js';
-import { createKernelTurnLiveFactories } from './kernel-turn-live-factories.js';
+import { createKernelTurnAuthorityAdapter } from './kernel-turn-authority-adapter.js';
 
 // why: Chrome MV3 rejects import() in a service worker. The package already
 // bundled these exact modules into one file, so the authored Chrome entry must
@@ -16,5 +16,5 @@ export const chromeKernelRuntimeModules = Object.freeze({
   productionRuntime: async () => createKernelProductionRuntime,
   sessionAuthority: async () => createKernelSessionAuthority,
   supportControl: async () => createKernelSupportControl,
-  turnFactories: async () => createKernelTurnLiveFactories,
+  turnFactories: async () => createKernelTurnAuthorityAdapter,
 });

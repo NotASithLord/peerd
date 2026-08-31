@@ -96,7 +96,7 @@ describe('target-specific native background entry', () => {
       expect(firefox.has(path), leaf).toBe(false);
     }
     expect(chrome.has(join(EXTENSION, 'background/offscreen-controller-client.js'))).toBe(true);
-    expect(chrome.has(join(EXTENSION, 'background/kernel-turn-live-factories.js'))).toBe(true);
+    expect(chrome.has(join(EXTENSION, 'background/kernel-turn-authority-adapter.js'))).toBe(true);
     expect(chrome.has(join(EXTENSION, 'background/direct-controller-client.js'))).toBe(false);
     expect(chrome.has(join(EXTENSION, 'background/firefox-storage-keepalive.js'))).toBe(false);
     expect(chrome.has(join(EXTENSION, 'background/repository-local-client.js'))).toBe(false);
@@ -113,7 +113,7 @@ describe('target-specific native background entry', () => {
       join(EXTENSION, 'background/kernel-firefox-runtime-modules.js'), 'utf8',
     );
     expect(firefoxModules).toContain("'./kernel-demand-plane.js'");
-    expect(firefoxModules).toContain("'./kernel-turn-live-factories.js'");
+    expect(firefoxModules).toContain("'./kernel-turn-authority-adapter.js'");
     const kernel = readFileSync(join(EXTENSION, 'background', 'vault-kernel.js'), 'utf8');
     expect(kernel).not.toContain('import(');
     expect(kernel).toContain('makeFirefoxGuard?.connectDirectController');
