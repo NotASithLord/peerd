@@ -7,6 +7,8 @@ export const createKernelBrowserChildOutcomes = ({ audit = () => {}, noteBlank =
   /** @type {Map<number,any[]>} */ const notices = new Map();
   /** @type {Map<number,Set<()=>void>>} */ const waiters = new Map();
   /** @type {Map<number,Map<number,{token:symbol,count:number,guarded:boolean,actionToken:symbol|undefined}>>} */ const pending = new Map();
+  /** @type {Map<number,{token:symbol,sourceTabId:number,actionToken:symbol|undefined}>} */
+  const generations = new Map();
   /** @type {Map<number,symbol>} */ const currentTokens = new Map();
   /** @type {Map<number,symbol>} */ const reportedTokens = new Map();
   /** @type {Map<number,{token:symbol,observed:boolean,notices:any[],waiters:Set<()=>void>}>} */
@@ -201,23 +203,32 @@ export const createKernelBrowserChildOutcomes = ({ audit = () => {}, noteBlank =
       currentTokens.set(childTabId, token);
       const children = pending.get(sourceTabId) ?? new Map();
       const current = children.get(childTabId);
+      const generation = generations.get(childTabId);
       const action = actions.get(sourceTabId);
-      const sameGeneration = current?.token === token;
+      const sameGeneration = current?.token === token
+        || (generation?.token === token && generation.sourceTabId === sourceTabId);
       // why: duplicate browser events for one child generation must preserve
       // the generation's original action membership, including no membership.
       // Otherwise a late duplicate could retask a pre-reservation child to the
       // next page action.
-      const actionToken = sameGeneration ? current.actionToken : action?.token;
+      const actionToken = sameGeneration
+        ? current ? current.actionToken : generation?.actionToken
+        : action?.token;
       if (!sameGeneration && action && actionToken === action.token) {
         action.observed = true;
         wakeAction(sourceTabId);
       }
       children.set(childTabId, {
         token,
-        count: sameGeneration ? current.count + 1 : 1,
-        guarded: sameGeneration && current.guarded === true,
+        count: current?.token === token ? current.count + 1 : 1,
+        guarded: current?.token === token && current.guarded === true,
         actionToken,
       });
+      // why: a fully settled browser generation can still emit duplicate
+      // target events. Retain only the current generation for each numeric
+      // child id so it cannot be rebound to a later action; replacement or
+      // tab release bounds and retires this tombstone.
+      generations.set(childTabId, { token, sourceTabId, actionToken });
       pending.set(sourceTabId, children);
       return token;
     },
@@ -320,6 +331,10 @@ export const createKernelBrowserChildOutcomes = ({ audit = () => {}, noteBlank =
       const ownToken = currentTokens.get(tabId);
       if (ownToken && reportedTokens.get(tabId) === ownToken) reportedTokens.delete(tabId);
       currentTokens.delete(tabId);
+      generations.delete(tabId);
+      for (const [childTabId, generation] of generations) {
+        if (generation.sourceTabId === tabId) generations.delete(childTabId);
+      }
       for (const [sourceTabId, children] of pending) {
         const flow = children.get(tabId);
         if (flow) {
