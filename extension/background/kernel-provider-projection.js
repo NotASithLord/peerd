@@ -4,6 +4,7 @@
 // semantics are projected by the sealed controller.
 
 import { PROVIDER_EGRESS_MANIFEST } from './provider-egress-manifest.js';
+import { validKernelProviderView } from '../shared/kernel-state-contract.js';
 
 const MAX_SETTLED_VIEWS = 8;
 
@@ -152,6 +153,12 @@ export const createKernelProviderProjection = ({
     // it avoids filling the controller's bounded host lane with duplicate reads.
     const operation = projectionTail.catch(() => {}).then(() => projectSemantic(snapshot))
       .then((value) => {
+        // why: a controller lifetime refusal is a resolved protocol result, not
+        // an exception. It must remain retryable instead of poisoning the
+        // settled UI-state cache with a value that is not a provider view.
+        if (!validKernelProviderView(value?.providers, value?.composer)) {
+          throw new TypeError('kernel-provider-semantic-projection-invalid');
+        }
         if (revision === authorityRevision && !authorityLocked && snapshot.locked === false) {
           rememberSettled(key, value);
         }

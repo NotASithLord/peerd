@@ -195,12 +195,13 @@ const currentSessionId = async (page) => {
   return sessionId;
 };
 
-const durableTurn = async (page, sessionId, prompt) => {
-  const result = await rpc(page, { type: 'session/get', sessionId });
-  if (result?.ok !== true || !Array.isArray(result?.session?.messages)) {
-    throw new Error(`session/get failed for fault evidence: ${JSON.stringify(result)}`);
-  }
-  const messages = result.session.messages;
+/**
+ * @param {Array<Record<string, any>>} messages
+ * @param {string} prompt
+ * @param {string|null} [assistantId]
+ * @returns {{ user: Record<string, any>, assistant: Record<string, any> }|null}
+ */
+export const selectDurableTurn = (messages, prompt, assistantId = null) => {
   let userIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role === 'user' && messages[index]?.content === prompt) {
@@ -208,14 +209,26 @@ const durableTurn = async (page, sessionId, prompt) => {
       break;
     }
   }
-  if (userIndex < 0) throw new Error(`durable user turn missing: ${prompt}`);
-  const assistant = messages.slice(userIndex + 1).filter(
-    (message) => message?.role === 'assistant',
-  ).at(-1);
-  if (!assistant) throw new Error(`durable assistant settlement missing: ${prompt}`);
+  if (userIndex < 0) return null;
+  const tail = messages.slice(userIndex + 1);
+  const assistant = assistantId === null
+    ? tail.filter((message) => message?.role === 'assistant').at(-1)
+    : tail.find((message) => message?.role === 'assistant' && message?.id === assistantId);
+  return assistant ? { user: messages[userIndex], assistant } : null;
+};
+
+const durableTurn = async (page, sessionId, prompt, assistantId = null) => {
+  const result = await rpc(page, { type: 'session/get', sessionId });
+  if (result?.ok !== true || !Array.isArray(result?.session?.messages)) {
+    throw new Error(`session/get failed for fault evidence: ${JSON.stringify(result)}`);
+  }
+  const messages = result.session.messages;
+  const selected = selectDurableTurn(messages, prompt, assistantId);
+  if (!selected) throw new Error(`durable assistant settlement missing: ${prompt}`);
+  const { user, assistant } = selected;
   return {
     sessionId,
-    userMessageId: messages[userIndex].id,
+    userMessageId: user.id,
     assistant: {
       id: assistant.id,
       content: assistant.content ?? '',
@@ -500,7 +513,7 @@ export async function runControllerFaultEvidence({
       ctx.page, sessionId, POST_EFFECT_WAKE_TEXT,
     );
     const postEffectFaultLifecycleAfterWake = await durableTurn(
-      ctx.page, sessionId, POST_EFFECT_FAULT_TEXT,
+      ctx.page, sessionId, POST_EFFECT_FAULT_TEXT, postEffectLifecycle.assistant.id,
     );
 
     const postRun = {

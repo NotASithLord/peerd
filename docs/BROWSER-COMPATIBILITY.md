@@ -20,7 +20,7 @@ extension.
 | WebVM and threaded WebAssembly | WebVM can boot in a cross-origin-isolated extension page | WebVM cannot boot from an extension page; WebAssembly that needs shared memory/threads is unavailable. Non-threaded WASI in Notebooks and Pods is unaffected | Blocked upstream |
 | Pod JavaScript | `js` runs Web-standard JavaScript in a sealed module Worker | `js` is refused; the shell, OPFS, Git, HTTP bridge, and WASI remain available | Platform behavior under review plus a Peerd guard |
 | Apps | Opaque-origin manifest-sandbox runner is available | Unavailable in the current Peerd Firefox package | Upstream fixed for Firefox 154; Peerd adoption pending |
-| Headless/offscreen services | Headless `script`/`page_code`, site-client and A2A code runners, PDF/document conversion, rich HTML extraction, voice/local-model hosts, and per-actor Worker heaps are available | Those offscreen-hosted tools are absent or fall back; notably, bound actors fall back to the service-worker heap and lose the dedicated memory boundary | Peerd architecture gap; upstream API request is WONTFIX |
+| Headless/offscreen services | Headless `script`/`page_code`, site-client and A2A code runners, PDF/document conversion, rich HTML extraction, voice/local-model hosts, and per-actor Worker heaps are available | The sealed controller and per-actor Workers run from the event page and preserve their separate keyless heaps; voice has a background-page host. Sealed jobs, document/PDF conversion, rich HTML extraction, local WebGPU, and dweb/A2A hosts remain unavailable, so their dependent tools are not exposed | Isolation parity is implemented; hosted capability gaps remain |
 | Advanced tab automation | Preview/dev builds can use CDP; the store build uses the scripting fallback | Uses the scripting fallback: core read/navigate/click/type work, but cross-frame accessibility snapshots, exact-tab vision, network capture, and some hardened-site flows are unavailable | Accepted fallback around a missing API |
 
 The side panel/sidebar naming difference is not a capability loss. Minor UI
@@ -84,18 +84,24 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
 
 ### FF-OFFSCREEN: Firefox uses event pages instead of `chrome.offscreen`
 
-- **Peerd impact:** the headless tools and document/media/model hosts listed in
-  the table are unavailable or degraded. More importantly, actor turns can fall
-  back to the service-worker realm; the exact security consequence is documented
-  as [residual risk R1](security/THREAT-MODEL.md#8-known-residual-risks).
+- **Peerd impact:** Firefox has no offscreen document, so sealed jobs,
+  document/PDF conversion, rich HTML extraction, local WebGPU, and dweb/A2A
+  hosts remain unavailable. The runtime capability projection removes dependent
+  tools instead of routing them through a weaker host. This does not move
+  reasoning into the privileged background heap: the orchestrator and every
+  actor run in separate keyless dedicated Workers.
 - **Upstream:** [Mozilla Bug 1807830](https://bugzilla.mozilla.org/show_bug.cgi?id=1807830)
   is `RESOLVED WONTFIX`; Mozilla's stated replacement is the DOM-capable MV3
   event page. The cross-browser API discussion remains in
   [WECG issue 170](https://github.com/w3c/webextensions/issues/170).
-- **Peerd status:** Firefox uses its event-page controller path.
-- **Exit check:** a Firefox event-page or equivalent host provides the same
-  lifecycle, cancellation, keyless Worker boundary, and document/media
-  capabilities, with Firefox browser tests covering both success and recovery.
+- **Peerd status:** Firefox uses a sealed event-page controller and actor host.
+  A run-scoped acknowledged `storage.session` heartbeat keeps the event page
+  alive only while actor work is active; loss pauses work and recovery refuses
+  uncertain replay. Voice uses its dedicated background-page host. There is no
+  service-worker-heap reasoning fallback.
+- **Exit check:** new Firefox hosts add the currently unavailable sealed-job,
+  document/media, rich-HTML, local-model, or dweb capabilities without weakening
+  the existing Worker isolation, lifecycle, cancellation, and recovery proofs.
 
 ### FF-DEBUGGER: no compatible `chrome.debugger` extension API
 
