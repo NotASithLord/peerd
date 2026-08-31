@@ -5945,7 +5945,7 @@ const actorMailbox = {
 };
 
 onSessionMessageAppended = async (_sessionId, message) => {
-  const deliveryIds = actorDeliveryIdsFromMessage(message);
+  const deliveryIds = actorDeliveryIdsFromMessage(message).filter((id) => !asyncActorsOrchestrator.acknowledgeDelivery(id));
   await Promise.all(deliveryIds.map((id) => actorMailbox.remove(id)));
 };
 
