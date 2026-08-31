@@ -1146,7 +1146,13 @@ export async function openExtPage(ctx, path) {
   // wasm/dynamic-import 404), which surface only as Network events, never console.
   await page.send('Network.enable');
   await page.send('Page.navigate', { url });
-  return page;
+  return Object.assign(page, {
+    targetId: created.id,
+    closeTarget: async () => {
+      try { await page.send('Page.close'); }
+      finally { page.close(); }
+    },
+  });
 }
 
 // ---- check reporting --------------------------------------------------------
