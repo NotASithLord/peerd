@@ -1651,6 +1651,10 @@ describe('controller turn finite tool protocol', () => {
         calls.quarantine += 1;
         return { ok: true };
       },
+      reserveBrowserChildPolicyAction: () => Symbol('page-action'),
+      consumeBrowserChildPolicyAction: () => [],
+      waitForBrowserChildPolicyAction: async () => false,
+      releaseBrowserChildPolicyAction: () => true,
       domRefs: {
         resolve: () => {
           calls.ref += 1;
@@ -1690,6 +1694,8 @@ describe('controller turn finite tool protocol', () => {
       'authorizeSignInExcursion', 'revokeSignInExcursion',
       'ensureBrowserNetworkGuard', 'updateBrowserNetworkGuardOrigin',
       'acquireBrowserNetworkGuardLease', 'releaseBrowserNetworkGuardLease',
+      'reserveBrowserChildPolicyAction', 'consumeBrowserChildPolicyAction',
+      'waitForBrowserChildPolicyAction', 'releaseBrowserChildPolicyAction',
     ]) expect(pageScope?.[key]).toBe(host[key]);
     const page = bindPageToolAuthority({}, {
       operation: 'turn.page.click', args: { tabId: 7, ref: 'ref-1' },

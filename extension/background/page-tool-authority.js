@@ -220,32 +220,68 @@ export const createPageToolAuthority = ({
         }
       : preflight.refuse;
     if (stopped()) return stoppedResult();
+    /** @type {symbol|null} */ let childActionToken = null;
+    /** @type {number|null} */ let childActionTabId = null;
+    const exactChildAction = typeof ctx?.reserveBrowserChildPolicyAction === 'function'
+      && typeof ctx?.consumeBrowserChildPolicyAction === 'function'
+      && typeof ctx?.waitForBrowserChildPolicyAction === 'function'
+      && typeof ctx?.releaseBrowserChildPolicyAction === 'function';
+    const releaseChildAction = () => {
+      if (childActionToken && childActionTabId !== null) {
+        ctx.releaseBrowserChildPolicyAction(childActionTabId, childActionToken);
+        childActionToken = null;
+      }
+    };
     if (operation === 'turn.page.click' || operation === 'turn.page.fill') {
       const tab = preflight.tab ?? await resolveTargetTab(args, ctx);
       if (!tab?.id || boundWebActor && tab.id !== ownedTabId) throw mismatch();
-      const arm = ctx?.armBrowserChildQuarantine;
-      if (typeof arm !== 'function') {
-        if (ctx?.browserChildQuarantineRequired === true) return {
-          ok: false, code: 'browser-child-quarantine-unavailable',
-          error: 'browser_child_quarantine_unavailable',
-          outcomeKind: 'pre-effect-failure', retryable: true,
-        };
-      } else {
-        const armed = await arm(tab.id);
-        if (stopped()) return stoppedResult();
-        if (armed?.ok !== true) return {
-          ok: false, code: armed?.code ?? 'browser-child-quarantine-unavailable',
-          error: armed?.error ?? 'browser_child_quarantine_unavailable',
+      if (exactChildAction) {
+        childActionToken = ctx.reserveBrowserChildPolicyAction(tab.id);
+        childActionTabId = tab.id;
+        if (!childActionToken) return {
+          ok: false, code: 'browser-child-action-busy',
+          error: 'browser_child_action_busy',
           outcomeKind: 'pre-effect-failure', retryable: true,
         };
       }
+      const arm = ctx?.armBrowserChildQuarantine;
+      if (typeof arm !== 'function') {
+        if (ctx?.browserChildQuarantineRequired === true) {
+          releaseChildAction();
+          return {
+            ok: false, code: 'browser-child-quarantine-unavailable',
+            error: 'browser_child_quarantine_unavailable',
+            outcomeKind: 'pre-effect-failure', retryable: true,
+          };
+        }
+      } else {
+        const armed = await arm(tab.id);
+        if (stopped()) {
+          releaseChildAction();
+          return stoppedResult();
+        }
+        if (armed?.ok !== true) {
+          releaseChildAction();
+          return {
+            ok: false, code: armed?.code ?? 'browser-child-quarantine-unavailable',
+            error: armed?.error ?? 'browser_child_quarantine_unavailable',
+            outcomeKind: 'pre-effect-failure', retryable: true,
+          };
+        }
+      }
     }
     const permissionRefusal = await pageMutationPermissionRefusal(operation);
-    if (permissionRefusal) return permissionRefusal;
+    if (permissionRefusal) {
+      releaseChildAction();
+      return permissionRefusal;
+    }
     let activityTab = preflight.tab;
     if (!activityTab && operation !== 'turn.page.open-tab') {
       activityTab = await resolveTargetTab(args, ctx).catch(() => null);
-      if (stopped()) return stoppedResult();
+      if (stopped()) {
+        releaseChildAction();
+        return stoppedResult();
+      }
     }
     const tabId = activityTab?.id
       ?? (Number.isInteger(args.tabId) ? args.tabId : ctx?.activeTab?.id);
@@ -301,14 +337,35 @@ export const createPageToolAuthority = ({
       });
       if (childCapable && consumeChildNotices) {
         const embedded = normalizeBrowserChildPolicyNotices(result?.browserChildPolicyNotices);
-        let notices = normalizeBrowserChildPolicyNotices(consumeChildNotices(tabId));
+        const currentActionToken = childActionToken;
+        const consumeCurrentAction = currentActionToken && childActionTabId === tabId
+          ? () => ctx.consumeBrowserChildPolicyAction(tabId, currentActionToken) : null;
+        let notices = normalizeBrowserChildPolicyNotices(
+          consumeCurrentAction ? consumeCurrentAction() : consumeChildNotices(tabId),
+        );
         if (notices.length === 0 && embedded.length === 0) {
           await new Promise((resolve) => setTimeout(resolve, 0));
-          if (typeof ctx?.waitForBrowserChildPolicyNotice === 'function') {
+          if (consumeCurrentAction) {
+            // why: the reservation was minted before the page effect. A child
+            // event first proves this exact action has a child; only then can
+            // that action enter the longer terminal custody wait. An ordinary
+            // click pays only the short event-onset window.
+            const observed = await ctx.waitForBrowserChildPolicyAction(
+              tabId, currentActionToken, 175, false, abortSignal,
+            );
+            if (observed && !stopped()) {
+              await ctx.waitForBrowserChildPolicyAction(
+                tabId, currentActionToken, 5_000, true, abortSignal,
+              );
+            }
+          } else if (typeof ctx?.waitForBrowserChildPolicyNotice === 'function') {
             await ctx.waitForBrowserChildPolicyNotice(tabId, 175);
           }
-          notices = normalizeBrowserChildPolicyNotices(consumeChildNotices(tabId));
-          if (notices.length === 0 && ctx?.hasPendingBrowserChildPolicy?.(tabId)) {
+          notices = normalizeBrowserChildPolicyNotices(
+            consumeCurrentAction ? consumeCurrentAction() : consumeChildNotices(tabId),
+          );
+          if (!consumeCurrentAction && notices.length === 0
+              && ctx?.hasPendingBrowserChildPolicy?.(tabId)) {
             await ctx.waitForBrowserChildPolicyNotice?.(tabId, 5_000, true);
             notices = normalizeBrowserChildPolicyNotices(consumeChildNotices(tabId));
           }
@@ -323,6 +380,7 @@ export const createPageToolAuthority = ({
         authorityPolicy: Object.freeze({ ugcZone: preflight.ugcRuleId }),
       };
     } finally {
+      releaseChildAction();
       if (typeof tabId === 'number' && activity?.end) {
         void Promise.resolve(activity.end(tabId)).catch(() => {});
       }
