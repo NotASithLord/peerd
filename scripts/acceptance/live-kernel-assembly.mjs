@@ -25,6 +25,40 @@ export const LIVE_KERNEL_TARGETS = Object.freeze({
   }),
 });
 
+// Independent acceptance truth: owner labels are evidence only when the live
+// artifact reports the exact reviewed owner for that browser surface.
+const EVENT_OWNERS = Object.freeze({
+  'runtime.onMessage': 'vault-kernel-message-router',
+  'runtime.onConnect': 'kernel-port-router',
+  'runtime.onStartup': 'kernel-lifecycle',
+  'runtime.onInstalled': 'kernel-vault-posture-install',
+  'runtime.onUpdateAvailable': 'kernel-lifecycle',
+  'alarms.onAlarm': 'kernel-lifecycle',
+  'storage.session.onChanged': 'kernel-firefox-actor-lifetime',
+  'tabs.onCreated': 'kernel-tab-custody',
+  'tabs.onUpdated': 'kernel-tab-custody',
+  'tabs.onRemoved': 'kernel-tab-custody',
+  'tabs.onActivated': 'kernel-tab-custody',
+  'windows.onFocusChanged': 'kernel-front-door',
+  'webNavigation.onCreatedNavigationTarget': 'kernel-tab-custody',
+  'webRequest.onBeforeRequest': 'kernel-tab-custody',
+  'action.onClicked': 'kernel-front-door',
+  'commands.onCommand': 'kernel-front-door',
+});
+const PORT_OWNERS = Object.freeze({
+  'private-transfer': 'kernel-private-transfer',
+  sidepanel: 'vault-ui-ports',
+  home: 'vault-ui-ports',
+  eval: 'vault-ui-ports',
+  'feature-lease-keepalive': 'kernel-feature-host',
+  'dweb-custody': 'kernel-dweb-custody',
+});
+const CLOSED_PORT_REASONS = Object.freeze({
+  'private-transfer': 'window-client-transfer-owned-on-chrome',
+  'feature-lease-keepalive': 'firefox-background-owns-feature-lifetime',
+  'dweb-custody': 'dweb-not-packaged-for-target',
+});
+
 const fail = (detail) => {
   throw new Error(`complete live kernel assembly: ${detail}`);
 };
@@ -102,13 +136,11 @@ export const assertLiveKernelAssembly = (candidate, targetName) => {
     const entry = assembly.events[index];
     const inventory = KERNEL_COLD_EVENTS[index];
     const required = requiredEvents.has(inventory.key);
-    const hasOwner = typeof entry?.owner === 'string'
-      && entry.owner.length >= 3 && entry.owner.length <= 128;
+    const expectedOwner = required ? EVENT_OWNERS[inventory.key] : null;
     if (!exactKeys(entry, ['key', 'placement', 'required', 'status', 'owner'])
         || entry.placement !== inventory.placement || entry.required !== required
-        || !['missing', 'owned'].includes(entry.status)
-        || (entry.status === 'missing' ? entry.owner !== null : !hasOwner)
-        || (required && entry.status !== 'owned')) {
+        || entry.status !== (required ? 'owned' : 'missing')
+        || entry.owner !== expectedOwner) {
       fail(`event inventory row is invalid: ${inventory.key}`);
     }
   }
@@ -122,17 +154,14 @@ export const assertLiveKernelAssembly = (candidate, targetName) => {
     const entry = assembly.ports[index];
     const inventory = KERNEL_PORT_CLASSES[index];
     const required = requiredPorts.has(inventory.name);
-    const hasOwner = typeof entry?.owner === 'string'
-      && entry.owner.length >= 3 && entry.owner.length <= 128;
-    const validReason = entry?.status === 'fail-closed'
-      ? typeof entry.reason === 'string' && entry.reason.length >= 3 && entry.reason.length <= 128
-      : entry?.reason === (Object.hasOwn(inventory, 'reason') ? inventory.reason : null);
+    const expectedOwner = required ? PORT_OWNERS[inventory.name] : null;
+    const expectedReason = required
+      ? Object.hasOwn(inventory, 'reason') ? inventory.reason : null
+      : CLOSED_PORT_REASONS[inventory.name];
     if (!exactKeys(entry, ['name', 'cold', 'required', 'status', 'owner', 'reason'])
         || entry.cold !== inventory.cold || entry.required !== required
-        || !['missing', 'owned', 'fail-closed'].includes(entry.status)
-        || (entry.status === 'missing' || entry.status === 'fail-closed'
-          ? entry.owner !== null : !hasOwner)
-        || !validReason || (required && entry.status !== 'owned')) {
+        || entry.status !== (required ? 'owned' : 'fail-closed')
+        || entry.owner !== expectedOwner || entry.reason !== expectedReason) {
       fail(`port inventory row is invalid: ${inventory.name}`);
     }
   }
@@ -166,15 +195,17 @@ export const completeLiveKernelAssemblyFixture = (targetName) => {
       placement: entry.placement,
       required: requiredEvents.has(entry.key),
       status: requiredEvents.has(entry.key) ? 'owned' : 'missing',
-      owner: requiredEvents.has(entry.key) ? `owner:${entry.key}` : null,
+      owner: requiredEvents.has(entry.key) ? EVENT_OWNERS[entry.key] : null,
     })),
     ports: KERNEL_PORT_CLASSES.map((entry) => ({
       name: entry.name,
       cold: entry.cold,
       required: requiredPorts.has(entry.name),
-      status: requiredPorts.has(entry.name) ? 'owned' : 'missing',
-      owner: requiredPorts.has(entry.name) ? `owner:${entry.name}` : null,
-      reason: 'reason' in entry ? entry.reason : null,
+      status: requiredPorts.has(entry.name) ? 'owned' : 'fail-closed',
+      owner: requiredPorts.has(entry.name) ? PORT_OWNERS[entry.name] : null,
+      reason: requiredPorts.has(entry.name)
+        ? 'reason' in entry ? entry.reason : null
+        : CLOSED_PORT_REASONS[entry.name],
     })),
     missingRequiredEvents: [],
     incompletePorts: [],
