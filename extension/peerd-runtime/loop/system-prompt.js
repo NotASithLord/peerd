@@ -145,7 +145,7 @@ const loadDwebBlock = async () => {
  *   emit the strict JSON envelope instead of a free-form report. Stamped by the SW
  *   from the SAME setting that arms the validator — the two halves are one switch.
  * @param {string[]} [ctx.effectiveTools]
- *   The already-gated provider tool names for an ephemeral actor/reviewer. Bound
+ *   The already-gated provider tool names for an ephemeral actor. Bound
  *   actors derive their advertised surface from actorCapabilityManifest; when this
  *   list is also present it can only narrow that manifest, never widen it.
  * @param {boolean} [ctx.inbound]
