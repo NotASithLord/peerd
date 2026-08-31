@@ -295,6 +295,11 @@ export const scenario: Scenario = {
         'exact-source startup child rule copy',
         'redirect fail-closed',
       ]),
+      coverage: 'partial',
+      residuals: [
+        'Chrome service-worker-created WebSockets bypass DNR, including an unscoped diagnostic rule',
+        'Chrome can establish a TCP connection/preconnect for a blocked direct top-level private navigation while sending no HTTP request',
+      ],
       verifiedBy: 'scripts/cdp/states.mjs (browser network floor); scripts/firefox/run-runtime-tests.mjs (Firefox private-network and child navigation probes)',
     };
   },

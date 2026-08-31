@@ -897,6 +897,8 @@ export const STATES = [
               target: { tabId: ${drivenTab.id} },
               world: 'MAIN',
               func: (kind, privateTarget, publicBase, privatePort, marker) => {
+                const recordAttempt = () => navigator.sendBeacon(
+                  '/attempt?vector=' + encodeURIComponent(kind));
                 const mark = (node) => {
                   node.dataset.peerdNetworkProbe = marker;
                   return node;
@@ -916,19 +918,25 @@ export const STATES = [
                   url.searchParams.set('probePort', String(privatePort));
                   return url.href;
                 };
-                if (kind === 'fetch') fetch(privateTarget).catch(() => {});
+                if (kind === 'fetch') {
+                  recordAttempt();
+                  fetch(privateTarget).catch(() => {});
+                }
                 if (kind === 'websocket') {
+                  recordAttempt();
                   const socket = new WebSocket(privateTarget);
                   socket.addEventListener('error', () => {}, { once: true });
                   globalThis.__peerdNetworkProbeSockets ??= new Map();
                   globalThis.__peerdNetworkProbeSockets.set(marker, socket);
                 }
                 if (kind === 'image') {
+                  recordAttempt();
                   const image = mark(new Image());
                   image.src = privateTarget;
                   document.body.append(image);
                 }
                 if (kind === 'form') {
+                  recordAttempt();
                   const name = 'private-probe-frame-' + marker;
                   frame('about:blank', name);
                   const form = mark(document.createElement('form'));
@@ -939,22 +947,36 @@ export const STATES = [
                   form.submit();
                 }
                 if (['redirect', 'meta', 'script'].includes(kind)) {
+                  recordAttempt();
                   frame(publicRoute(kind));
                 }
                 if (kind === 'popup') {
+                  recordAttempt();
                   const link = mark(document.createElement('a'));
                   link.href = privateTarget;
                   link.target = '_blank';
                   document.body.append(link);
                   link.click();
                 }
-                if (kind === 'cross-frame-popup') frame(publicRoute(kind, true));
-                if (kind === 'cross-frame-blank') frame(publicRoute(kind, true));
-                if (kind === 'location') location.href = privateTarget;
+                if (kind === 'cross-frame-popup') {
+                  recordAttempt();
+                  frame(publicRoute(kind, true));
+                }
+                if (kind === 'cross-frame-blank') {
+                  recordAttempt();
+                  frame(publicRoute(kind, true));
+                }
+                if (kind === 'location') {
+                  recordAttempt();
+                  location.href = privateTarget;
+                }
               },
               args: [${JSON.stringify(vector)}, ${JSON.stringify(target)},
                 ${JSON.stringify(networkGuardFixtureUrl)}, ${privatePort}, ${JSON.stringify(marker)}],
             }))()`, true);
+            await waitFor(() => controllerAttempts.has(vector), {
+              budgetMs: 2_000, pollMs: 25,
+            });
             await sleep(800);
             return {
               connections,
@@ -991,10 +1013,8 @@ export const STATES = [
           'popup', 'cross-frame-popup', 'cross-frame-blank', 'location',
         ]) {
           const observed = await runVector(vector);
-          if (vector === 'cross-frame-popup') {
-            rec.check(`${vector} reaches its cross-origin action`, observed.attempted === true,
-              JSON.stringify(observed));
-          }
+          rec.check(`${vector} probe executed`, observed.attempted === true,
+            JSON.stringify(observed));
           if (vector === 'location') {
             rec.check('location sends no private HTTP request', observed.requests.length === 0,
               JSON.stringify(observed));
