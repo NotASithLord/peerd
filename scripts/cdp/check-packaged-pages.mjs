@@ -17,7 +17,7 @@
 //     uncaught exceptions (clean UI pages — strict).
 //   - other pages (engine tabs, mic, dwapps): assert load + zero
 //     missing same-origin resource; exceptions are NOTED, not failed (booting a
-//     page out of its normal context — e.g. an unbound engine tab — can throw on a
+//     page out of its normal context, such as an unbound engine tab, can throw on a
 //     healthy build, so the reliable signal there is the resource miss).
 //
 // Per-channel page sets fall out for free: walk() lists only files present in the
