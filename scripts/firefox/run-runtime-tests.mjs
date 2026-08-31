@@ -2556,12 +2556,11 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
       const done = arguments[arguments.length - 1];
       const send = (message) => browser.runtime.sendMessage(message);
       (async () => {
-        const [listed, audit, heartbeat, mailbox, state] = await Promise.all([
+        const [listed, audit, heartbeat, mailbox] = await Promise.all([
           send({ type: 'session/list' }),
           send({ type: 'audit/list', limit: 500 }),
           browser.storage.session.get(heartbeatKey),
           browser.storage.session.get('actorMailbox'),
-          send({ type: 'state/get' }),
         ]);
         let bundle = null;
         let toolResult = null;
@@ -2573,14 +2572,21 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
             .find((result) => result.tool_use_id === rootToolUseId);
           if (settled) { bundle = debug.bundle; toolResult = settled; break; }
         }
-        if (!bundle) return null;
+        if (!bundle || !toolResult) return null;
+        // The closed-UI interval may discard Firefox's event page. Establish
+        // the terminal demand-plane result before reading state so an early
+        // cold-host refusal cannot be mistaken for a missing durable pause.
+        const state = await send({ type: 'state/get' });
+        const actorExecution = state?.ok === true
+          ? state.state?.capabilities?.actorExecution ?? null : null;
+        if (!actorExecution) return null;
         return {
           bundle,
-          toolResult: toolResult ?? null,
+          toolResult,
           audit: audit?.entries ?? [],
           heartbeat: heartbeat?.[heartbeatKey] ?? null,
           mailboxKeys: Object.keys(mailbox?.actorMailbox ?? {}),
-          actorExecution: state?.state?.capabilities?.actorExecution ?? null,
+          actorExecution,
         };
       })().then(done, (error) => done({ error: error?.message || String(error) }));
     `, ['firefox-keepalive-loss-actor-tool', LIFETIME_HEARTBEAT_KEY]), {

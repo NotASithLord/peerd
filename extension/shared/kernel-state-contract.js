@@ -80,22 +80,23 @@ const validSession = (value) => {
   return s.provider == null || typeof s.provider === 'string' && s.provider.length <= 64;
 };
 
-/** @param {unknown} value */
-const validProviders = (value) => record(value)
-  && typeof value.current === 'string' && value.current.length <= 64
-  && typeof value.model === 'string' && value.model.length <= 256
-  && typeof value.hasKey === 'boolean'
-  && (value.defaultRunnerModel === undefined
-    || typeof value.defaultRunnerModel === 'string' && value.defaultRunnerModel.length <= 256);
-
-/** @param {unknown} value */
-const validComposer = (value) => record(value)
-  && typeof value.provider === 'string' && value.provider.length <= 64
-  && typeof value.model === 'string' && value.model.length <= 256
+/** @param {unknown} providers @param {unknown} composer */
+export const validKernelProviderView = (providers, composer) => record(providers)
+  && typeof providers.current === 'string' && providers.current.length <= 64
+  && typeof providers.model === 'string' && providers.model.length <= 256
+  && typeof providers.hasKey === 'boolean'
+  && (providers.defaultRunnerModel === undefined
+    || typeof providers.defaultRunnerModel === 'string'
+      && providers.defaultRunnerModel.length <= 256)
+  && record(composer)
+  && typeof composer.provider === 'string' && composer.provider.length <= 64
+  && typeof composer.model === 'string' && composer.model.length <= 256
   && ['keyless', 'credentialReady', 'localReady', 'canSend']
-    .every((key) => typeof value[key] === 'boolean')
-  && (value.reason === null || typeof value.reason === 'string' && value.reason.length <= 128)
-  && (value.warning == null || typeof value.warning === 'string' && value.warning.length <= 128);
+    .every((key) => typeof composer[key] === 'boolean')
+  && (composer.reason === null
+    || typeof composer.reason === 'string' && composer.reason.length <= 128)
+  && (composer.warning == null
+    || typeof composer.warning === 'string' && composer.warning.length <= 128);
 
 /** @param {unknown} value */
 const validProfile = (value) => record(value)
@@ -154,8 +155,8 @@ export const validateKernelStateProjection = (value) => {
     return invalid('hydration-invalid');
   if (!validKernelVault(s.vault)) return invalid('vault-invalid');
   if (!validKernelSettings(s.settings)) return invalid('settings-invalid');
-  if (!validSession(s.session) || !validProviders(s.providers)
-      || !validComposer(s.composer)) return invalid('ui-base-invalid');
+  if (!validSession(s.session)
+      || !validKernelProviderView(s.providers, s.composer)) return invalid('ui-base-invalid');
   if (s.vault.locked) {
     if (own(s, 'profile') || s.session.sessionId !== null
         || s.composer.canSend || s.composer.reason !== 'vault-locked')

@@ -71,6 +71,11 @@ describe('vault shell application load', () => {
               reason: 'controller-not-ready', retryable: true,
             },
           },
+          actors: {},
+          actorProjectionEpoch: null,
+          actorProjectionRevision: 0,
+          spawned: { byToolUse: {}, sessions: {} },
+          asyncTasks: {},
           projection: {
             schema: KERNEL_STATE_SCHEMA,
             provenance: KERNEL_STATE_PROVENANCE,

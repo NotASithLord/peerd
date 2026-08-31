@@ -35,14 +35,16 @@ from dangerous capability in three ways:
    Chrome hosts it from an offscreen document. Firefox hosts it from the
    extension background page. Actor work fails closed if the boundary cannot be
    proved.
-2. Policy. Every tool call is checked at dispatch against a fixed set of gates.
+2. Policy. Every tool call is checked inside the sealed controller against a
+   fixed set of semantic gates, and every privileged effect is independently
+   admitted by the service worker's finite run-bound authority policy.
 3. Chokepoints. All outbound network traffic and all signing pass through a single
    audited path.
 
 Injected text can influence a reasoning context, but the actor loop does not
 receive live vault or provider-egress functions. Tool and model calls still pass
-through service-worker policy. An isolated host also keeps the reasoning out of
-the service-worker heap.
+through privileged authority policy. An isolated host also keeps the reasoning
+out of the privileged background heap.
 
 ---
 
@@ -53,8 +55,9 @@ between them.
 
 | Surface | What runs there | Holds the key |
 |---|---|---|
-| Privileged background (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, and actor relays. Firefox also starts actor workers here | Yes. Actor loops run in separate dedicated worker heaps |
-| Offscreen document (`offscreen/`, Chrome) | Hosts isolated actor workers, headless `script`, voice, and the dweb base network | No. Actor worker heaps are keyless |
+| Privileged background (`background/`) | Authority kernel: vault and credential egress, browser/storage/engine custody, confirmation, audit, replay classification, sessions/lifecycle, finite controller effect handlers, and actor relays. Firefox starts controller and actor Workers from this page without running their reasoning in its privileged heap | Yes. Controller and actor loops run in separate keyless Worker heaps |
+| Sealed controller Worker | Orchestrator loop, tool metadata and projection, semantic dispatch and gates, provider/model shaping, and result semantics. Chrome hosts it through the offscreen document; Firefox hosts it from the extension background page | No |
+| Offscreen document (`offscreen/`, Chrome) | A thin host supervisor for the sealed controller and isolated actor Workers, plus headless `script`, voice, and the dweb base network | No. Hosted Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
 | Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
@@ -79,9 +82,9 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 | Actor | Trusted with | Not permitted to |
 |---|---|---|
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
-| The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
+| The orchestrator (main agent loop, in the sealed controller Worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold credentials or browser/storage authority, call an environment's low-level tools, read raw page bytes, or run untrusted code directly |
 | A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset and its own heap | Escalate past its grant or hold the key. Every tool call is re-checked in the privileged background |
+| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset and its own heap | Escalate past its grant or hold the key. Every privileged effect is independently admitted against the run grant in the privileged background |
 | The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, with its own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
 
@@ -94,9 +97,10 @@ holds both untrusted input and dangerous capability. Enforcement lives in
   `background/offscreen-actor-client.js`). A versioned readiness and realm probe
   must pass before work starts. Missing or failed isolation refuses the actor
   turn before any target action.
-- B2. An actor loop and the network or the key. Model and tool calls leave the
-  worker only through privileged, gated relays. The host adds live provider
-  functions only at the model-call boundary and re-checks every tool call. On
+- B2. An actor loop and the network or the key. Model egress and tool effects
+  leave the worker only through privileged, gated relays. The host adds live
+  provider functions only at the model-call boundary and independently admits
+  each exact tool effect against the run grant. On
   Chrome, the service worker transfers a standard MessageChannel endpoint to the
   exact offscreen WindowClient. The job and relays never use extension-wide
   runtime messaging. Firefox binds the same relays to its private in-process host.

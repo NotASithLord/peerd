@@ -14,7 +14,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXTENSION_DIR, REPO_ROOT, parseArgs } from './lib.ts';
-import { writeControllerBuildIdentity } from './controller-build-identity.ts';
+import {
+  CONTROLLER_BUILD_STAMP_MODULES,
+  writeControllerBuildIdentity,
+} from './controller-build-identity.ts';
 
 const run = (label: string, cmd: string, args: string[]) => {
   console.log(`\n── preflight: ${label} ──`);
@@ -23,6 +26,16 @@ const run = (label: string, cmd: string, args: string[]) => {
 
 type SyncRunner = typeof execFileSync;
 type IdentityStamper = typeof writeControllerBuildIdentity;
+
+export const PREFLIGHT_GENERATED_FILES = Object.freeze([
+  'extension/manifest.json', 'extension/shared/channel-config.js',
+  ...CONTROLLER_BUILD_STAMP_MODULES.map((name) => `extension/shared/${name}`),
+  'badges/tscheck.json',
+  // The supply-chain badges ride gen:dev too: pure reads of package.json,
+  // vendor.lock.json and the workflows, so they drift exactly like a manifest.
+  'badges/vendor-integrity.json', 'badges/actions-pinned.json',
+  'badges/no-build.json',
+]);
 
 export const regenerateDevIdentity = async (
   generate: () => void = () => run(
@@ -66,14 +79,9 @@ const main = async () => {
   // badge changes whenever the tscheck coverage denominator moves (it did when
   // the web-shell template joined the scan), and preflight passing while CI fails on badge
   // drift is exactly the out-of-sync trap this mirror exists to prevent.
-  const genFiles = [
-    'extension/manifest.json', 'extension/shared/channel-config.js',
-    'extension/shared/build-config.js', 'badges/tscheck.json',
-    // The supply-chain badges ride gen:dev too: pure reads of package.json,
-    // vendor.lock.json and the workflows, so they drift exactly like a manifest.
-    'badges/vendor-integrity.json', 'badges/actions-pinned.json',
-    'badges/no-build.json',
-  ].map((p) => join(REPO_ROOT, p));
+  // why derive both identity leaves from the stamper: preflight must restore
+  // every file it mutates, and drift in either copy must fail the same gate.
+  const genFiles = PREFLIGHT_GENERATED_FILES.map((p) => join(REPO_ROOT, p));
   const before = genFiles.map((f) => readFileSync(f));
   await regenerateDevIdentity();
   const drift = generatedFilesDifferFromHead(REPO_ROOT, genFiles);
@@ -83,7 +91,7 @@ const main = async () => {
   if (drift) {
     console.error(
       '\npreflight FAILED: a generated file (extension/manifest.json, '
-      + 'shared/channel-config.js, shared/build-config.js, or badges/tscheck.json) differs from '
+      + 'shared/channel-config.js, a controller identity leaf, or badges/tscheck.json) differs from '
       + '`bun run gen:dev` output vs HEAD. Run `bun run gen:dev` and commit '
       + 'the regenerated files (sources: manifests/*.json, '
       + 'packaging/default-settings.mjs, the // @ts-check coverage scan).',

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import {
-  assertControllerFaultReport, CONTROLLER_FAULT_BUDGETS,
+  assertControllerFaultReport, CONTROLLER_FAULT_BUDGETS, selectDurableTurn,
 } from '../../scripts/cdp/controller-recycle-fault.mjs';
 
 const digest = 'a'.repeat(64);
@@ -85,6 +85,22 @@ const report = () => {
 };
 
 describe('packaged Chrome controller physical fault contract', () => {
+  test('re-reads the original fault settlement by message identity after a later wake', () => {
+    const messages = [
+      { id: 'user-fault', role: 'user', content: 'fault turn' },
+      { id: 'tool-call', role: 'assistant', content: '', toolUses: [{ id: 'tool-1' }] },
+      { id: 'tool-result', role: 'user', content: '', toolResults: [{ tool_use_id: 'tool-1' }] },
+      { id: 'assistant-fault', role: 'assistant', error: 'unknown' },
+      { id: 'user-wake', role: 'user', content: 'wake turn' },
+      { id: 'assistant-wake', role: 'assistant', content: 'wake ok' },
+    ];
+
+    expect(selectDurableTurn(messages, 'fault turn', 'assistant-fault')).toEqual({
+      user: messages[0], assistant: messages[3],
+    });
+    expect(selectDurableTurn(messages, 'fault turn', 'missing')).toBeNull();
+  });
+
   test('requires pre-effect and post-effect host loss with explicit non-replaying recovery', () => {
     expect(assertControllerFaultReport(report())).toBeTruthy();
     for (const mutate of [

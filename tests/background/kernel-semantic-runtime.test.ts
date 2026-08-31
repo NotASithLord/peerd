@@ -366,12 +366,14 @@ describe('kernel semantic runtime', () => {
 
     await expect(runtime.routes['provider/status']({ provider: 'anthropic' }))
       .resolves.toEqual({ ok: true });
-    await expect(runtime.routes['actors/count']()).resolves.toEqual({ ok: true });
+    await expect(runtime.routes['actors/count']())
+      .resolves.toEqual({ ok: true, activeActors: 2 });
     await expect(runtime.routes['actor-isolation/retry']()).resolves.toEqual({ ok: true });
     expect(creates).toBe(1);
-    expect(semanticCalls).toBe(2);
-    expect(semanticPayloads.at(-1).message.kernelContext)
-      .toEqual({ activeActors: 2 });
+    expect(semanticCalls).toBe(1);
+    expect(semanticPayloads).toHaveLength(1);
+    expect(semanticPayloads[0].route).toBe('provider/status');
+    expect(semanticPayloads[0].message.kernelContext).toBeUndefined();
     expect(authority.authorizeSemanticCall).toBeFunction();
     expect(authority.handleSemanticKernelCall).toBeFunction();
     expect(authority.authorizeTurnCall).toBeFunction();

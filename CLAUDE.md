@@ -419,7 +419,7 @@ gotchas to know going in:
   permits pure URL loads only, never clicks (enforced in `gates.js`).
 - The feature buildout — memory, edit + checkpoints, Plan/Act,
   composer (slash commands + @-refs), goal mode (autonomous loop), cost
-  telemetry, skills, review actor, and hooks — all integrated.
+  telemetry, skills, and hooks — all integrated.
   (do/get/check was CULLED: the web actor drives pages directly, so one
   delegation reaches the page instead of two.) Per-feature
   detail lives in the code under `peerd-runtime/`.

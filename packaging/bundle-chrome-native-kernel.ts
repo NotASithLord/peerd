@@ -20,14 +20,16 @@ export const NATIVE_CHROME_BUNDLE_RATCHETS = Object.freeze({
     // Exact controller/actor lifecycle settlement, isolation admission and
     // stale-generation recovery remain fixed authority work. Tool semantics
     // remain outside this closure. Exact achieved bytes, no headroom.
-    bytes: 1_330_688,
-    inputs: 405,
-    inputSha256: 'dca3599f9d85831d377b1d0660386ded50dcc59b35599fd7534e6acf89205949',
+    // runtime-capability-hosts and semantic-hook-manifest are fixed
+    // authority/policy inputs, not controller feature ownership.
+    bytes: 1_338_125,
+    inputs: 407,
+    inputSha256: '2c7b87adaa4ba1661ca204a8fc45a27f307d30d251de583face4a8db369900a7',
   }),
   'background/vault-kernel-preview.js': Object.freeze({
-    bytes: 1_411_335,
-    inputs: 411,
-    inputSha256: 'ec980822145adf06bb9d4fe427e966bcc6fbd79a36fa611ec7aa6a96c9fa5dec',
+    bytes: 1_418_810,
+    inputs: 413,
+    inputSha256: '6dcec480aa1084691ca98971a01c62005a6fbe55d130c413f601a83a6f7a8644',
   }),
 });
 

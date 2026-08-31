@@ -291,6 +291,45 @@ describe('cold kernel provider/composer projection', () => {
     });
   });
 
+  test('resolved controller refusals are not cached or published and a valid retry succeeds', async () => {
+    let projectCalls = 0;
+    const lane = makeProjection({
+      projectSemantic: async (snapshot: any) => {
+        projectCalls += 1;
+        if (projectCalls === 1) return {
+          ok: false,
+          code: 'kernel-feature-local-owner-unavailable',
+          outcomeKnown: true,
+        };
+        return controllerLocalRoutes['models/state-projection'](snapshot);
+      },
+    });
+    lane.projection.observeLocked(false);
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(1);
+    expect(lane.pushes).toEqual([]);
+    expect(await lane.projection.peek()).toBeNull();
+    await flush();
+    expect(projectCalls).toBe(2);
+    expect(lane.pushes).toEqual(['state']);
+    expect(await lane.projection.peek()).toMatchObject({
+      providers: { current: 'anthropic' },
+    });
+  });
+
+  test('direct projections reject a resolved refusal', async () => {
+    const lane = makeProjection({
+      projectSemantic: async () => ({
+        ok: false,
+        code: 'kernel-feature-local-owner-unavailable',
+        outcomeKnown: true,
+      }),
+    });
+    await expect(lane.projection.view()).rejects
+      .toThrow('kernel-provider-semantic-projection-invalid');
+  });
+
   test('settled projection cache stays bounded and does not reuse another session snapshot', async () => {
     let projectCalls = 0;
     const lane = makeProjection({

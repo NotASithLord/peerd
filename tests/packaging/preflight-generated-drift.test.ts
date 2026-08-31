@@ -1,11 +1,21 @@
 import { describe, expect, test } from 'bun:test';
 import {
   generatedFilesDifferFromHead,
+  PREFLIGHT_GENERATED_FILES,
   regenerateDevIdentity,
 } from '../../packaging/preflight.ts';
+import {
+  CONTROLLER_BUILD_STAMP_MODULES,
+} from '../../packaging/controller-build-identity.ts';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 describe('preflight generated-file drift batching', () => {
+  test('tracks every controller identity leaf that regeneration mutates', () => {
+    for (const name of CONTROLLER_BUILD_STAMP_MODULES) {
+      expect(PREFLIGHT_GENERATED_FILES).toContain(`extension/shared/${name}`);
+    }
+  });
+
   test('checks every generated path in one Git process', () => {
     const calls: any[][] = [];
     const runner = ((...args: any[]) => { calls.push(args); return Buffer.alloc(0); }) as any;
