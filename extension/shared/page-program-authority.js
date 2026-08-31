@@ -47,9 +47,3 @@ export const PAGE_PROGRAM_EXACT_OPERATIONS = Object.freeze([
   'turn.site-client.read', 'turn.site-client.commit',
   'turn.site-client.capture-start', 'turn.site-client.capture-stop',
 ]);
-
-const names = new Set(PAGE_PROGRAM_SEMANTIC_TOOL_NAMES);
-
-/** @param {unknown} name */
-export const isPageProgramSemanticTool = (name) =>
-  typeof name === 'string' && names.has(name);

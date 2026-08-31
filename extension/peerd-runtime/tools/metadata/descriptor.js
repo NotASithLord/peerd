@@ -1,6 +1,5 @@
 // @ts-check
 
-import { retryClassForTool } from '../../lifecycle/tool-retry-class.js';
 import { resolveToolOrigins } from '../../tool-origin-policy.js';
 
 /**
@@ -51,10 +50,3 @@ export const projectToolAuthority = (descriptor) => Object.freeze({
   ...(descriptor.retryClass === undefined ? {} : { retryClass: descriptor.retryClass }),
   ...(descriptor.dweb === undefined ? {} : { dweb: descriptor.dweb }),
 });
-
-/** @param {ToolDescriptor} descriptor @param {any} args @param {any} ctx */
-export const resolveDescriptorOrigins = (descriptor, args, ctx) =>
-  descriptor.origins(args, ctx) ?? [];
-
-/** @param {ToolDescriptor | null | undefined} descriptor */
-export const retryClassForDescriptor = (descriptor) => retryClassForTool(descriptor);

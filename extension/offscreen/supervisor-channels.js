@@ -418,10 +418,3 @@ export const createServiceWorkerChannels = ({
   };
   return Object.freeze({ onMessage, actorPorts, vaultAuthorityWorkers });
 };
-
-export const registerServiceWorkerChannels = (/** @type {Parameters<typeof createServiceWorkerChannels>[0]} */ deps) => {
-  const channels = createServiceWorkerChannels(deps);
-  navigator.serviceWorker?.addEventListener('message', channels.onMessage);
-  navigator.serviceWorker?.startMessages?.();
-  return channels;
-};
