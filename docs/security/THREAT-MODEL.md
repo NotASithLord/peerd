@@ -354,7 +354,7 @@ with the real-realm proof in
 `extension/tests/unit/red-team/sandbox-escape.test.js`.
 
 <a id="inv-7"></a>
-### INV-7. No egress to private, loopback, link-local, or metadata hosts
+### INV-7. Peerd-controlled and browser-enforceable channels refuse private targets
 `webFetch` refuses a host classified as private, loopback, link-local, `.local`, or
 metadata by `isPrivateOrLocalHost`, across decimal, hex, octal, and short-form IPv4 and
 IPv4-mapped and NAT64 IPv6 encodings — plus the RFC 6598 shared/CGNAT (`100.64.0.0/10`),
