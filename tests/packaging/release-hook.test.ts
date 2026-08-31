@@ -107,6 +107,21 @@ describe('release feed publication hook', () => {
     expect(firefoxGate).toBeLessThan(credentials);
   });
 
+  test('the physical Store document lane gates CI and the local release before credentials', () => {
+    const chrome = workflow.slice(
+      workflow.indexOf('\n  e2e:'),
+      workflow.indexOf('\n  visual:'),
+    );
+    expect(chrome).toContain('bun run test:e2e:read-doc');
+    const localRelease = readFileSync(
+      join(import.meta.dir, '..', '..', 'packaging', 'release.ts'),
+      'utf8',
+    );
+    const documentGate = localRelease.indexOf('scripts/cdp/read-doc-store-lane.mjs');
+    expect(documentGate).toBeGreaterThan(0);
+    expect(documentGate).toBeLessThan(localRelease.indexOf("step('signing credentials')"));
+  });
+
   test('dispatches the exact released tag from an isolated post-release job', () => {
     const notify = workflow.slice(workflow.indexOf('\n  notify-site:'));
     expect(notify).toContain('needs: release');

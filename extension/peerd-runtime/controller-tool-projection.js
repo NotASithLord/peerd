@@ -171,6 +171,20 @@ export const projectControllerToolSurface = (value) => {
     }
     projected = filterByRuntimeCapabilities(projected, input.runtimeCapabilities);
   }
+  if ((input.surface === 'main' || input.surface === 'spawn')
+      && projected.some((tool) => tool.name === 'script')
+      && !projected.some((tool) => tool.name === 'read_result')) {
+    // why: script may spill an oversized value and then emits a trusted
+    // read_result instruction. Close that local dependency after manifest and
+    // runtime filtering, so the pager appears iff script really survived. The
+    // host validates both projected names/operations; this never widens past
+    // the controller-produced run ceiling or exposes ambient storage access.
+    const pager = filterByRuntimeCapabilities(
+      mainAgentDescriptors(descriptors).filter((tool) => tool.name === 'read_result'),
+      input.runtimeCapabilities,
+    )[0];
+    if (pager) projected = [...projected, pager];
+  }
   const tools = Object.freeze(projected.map(projectToolAuthority));
   return {
     ok: true,

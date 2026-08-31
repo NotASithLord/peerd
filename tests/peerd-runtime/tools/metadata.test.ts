@@ -254,6 +254,19 @@ describe('controller tool projection', () => {
     expect(new Set(recursive.operations)).toEqual(new Set([
       'turn.schedule.read-routines', 'turn.actor.spawn-sync', 'turn.actor.spawn-async',
     ]));
+
+    const scriptOnly: any = projectControllerToolSurface({
+      surface: 'spawn', toolManifest: { allow: ['script'] },
+      toolNames: ['script', 'read_result'], allowRecursion: false,
+      runtimeCapabilities: null,
+    });
+    expect(scriptOnly.tools.map((tool: any) => tool.name))
+      .toEqual(['script', 'read_result']);
+    expect(new Set(scriptOnly.operations)).toEqual(new Set([
+      'turn.resource.read-result',
+      'turn.execution.run-script',
+      'turn.execution.spill-script',
+    ]));
   });
 
   test('page-program projection and privileged parent admission share one exact operation set', () => {

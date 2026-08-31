@@ -6,6 +6,7 @@ import {
   CONTROLLER_OPERATION_GRANTS,
   CONTROLLER_OWNED_TOOL_NAMES,
   controllerAuthorityClassForTool,
+  controllerOperationsForSpawnedTools,
   controllerOperationsForTools,
   controllerToolNamesForSpawnedTools,
 } from '../../extension/peerd-runtime/controller-tool-ownership.js';
@@ -153,11 +154,21 @@ describe('controller tool ownership', () => {
   });
 
   test('narrows spawned child names in the controller before projecting operations', () => {
-    const visible = ['script', 'read_page', 'actor_create', 'complete_goal'];
-    expect(controllerToolNamesForSpawnedTools(visible, undefined, false)).toEqual(['script']);
+    const visible = ['script', 'read_result', 'read_page', 'actor_create', 'complete_goal'];
+    expect(controllerToolNamesForSpawnedTools(visible, undefined, false))
+      .toEqual(['script', 'read_result']);
     expect(controllerToolNamesForSpawnedTools(visible, undefined, true))
-      .toEqual(['script', 'actor_create']);
+      .toEqual(['script', 'read_result', 'actor_create']);
     expect(controllerToolNamesForSpawnedTools(visible, ['read_page', 'script'], true))
-      .toEqual(['script']);
+      .toEqual(['script', 'read_result']);
+    expect(controllerOperationsForSpawnedTools(visible, ['script'], false)).toEqual([
+      'turn.execution.run-script',
+      'turn.execution.spill-script',
+      'turn.resource.read-result',
+    ]);
+    // A malformed parent surface never causes the controller to invent a tool
+    // outside the host-validated ceiling; script is suppressed instead.
+    expect(controllerToolNamesForSpawnedTools(['script'], ['script'], false)).toEqual([]);
+    expect(controllerOperationsForSpawnedTools(['script'], ['script'], false)).toEqual([]);
   });
 });

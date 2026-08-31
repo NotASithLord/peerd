@@ -433,6 +433,12 @@ jobs:
         # A virtual CTAP2.1 authenticator exercises WebAuthn PRF through the
         # real side panel and MV3 worker, including the post-credential commit.
         run: bun run test:e2e:passkey
+      - name: Run packaged Store document extraction and paging regression
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        # Exact Store package, real born-digital PDF, sealed read_doc execution,
+        # spill paging, and cross-session read_result refusal.
+        run: bun run test:e2e:read-doc
       - name: Run packaged Preview dweb renderer/SW lifecycle regression
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}

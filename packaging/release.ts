@@ -112,6 +112,8 @@ const main = async () => {
   // any irreversible release action is reached.
   step('installed Chrome Store first-install/controller/Git/recycle');
   run('bun', ['scripts/cdp/run-passkey-signup.mjs']);
+  step('installed Chrome Store document extraction/paging isolation');
+  run('bun', ['scripts/cdp/read-doc-store-lane.mjs']);
   step('installed Chrome Preview dweb/SW/renderer continuity');
   run('bun', ['scripts/cdp/feature-lease-dweb-lifecycle.mjs']);
   step('installed Chrome Preview Charon two-profile private/Quick Match/co-op');
