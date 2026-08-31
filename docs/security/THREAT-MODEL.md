@@ -372,8 +372,9 @@ requests that the browser attributes to no tab when their initiator domain
 matches a public domain visited by the driven tab. This covers page service-worker fetches and
 Firefox worker WebSockets without applying a browser-wide rule. Chrome DNR does
 not intercept WebSockets created inside a page service worker, even with a
-matching unscoped block rule. The live regression test keeps that residual
-visible. The scope follows browser DNR
+matching unscoped block rule. That is an accepted platform limitation, not an
+enforced product invariant; the live regression test records it without gating
+on the browser changing behavior. The scope follows browser DNR
 domain matching, so it ignores scheme and port and can include subdomains. A
 user-owned tab with the same matching domain can therefore lose private-network
 service-worker fetch access while peerd drives that domain. peerd does not prompt, unregister
@@ -403,7 +404,10 @@ for an autonomous child if the browser lost its session rules while peerd's
 later registry restore still identifies the source as driven. A page-initiated
 cross-origin redirect can also begin before the browser reports the new committed
 URL and adds its no-tab domain scope. DNS resolution and rebinding remain
-outside this client-side lexical boundary. With native local-network checks
+outside this client-side lexical boundary. An isolated live Chrome probe also
+shows that a blocked direct top-level private navigation sends no HTTP bytes but
+can still open a TCP connection/preconnect to the target. The browser floor is
+therefore not an absolute zero-transport or port-oracle defense. With native local-network checks
 disabled, Chrome can also start an inherited about:blank child's immediate
 private request before the extension receives enough child identity to close it.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,

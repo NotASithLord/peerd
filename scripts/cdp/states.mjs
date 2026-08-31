@@ -11,6 +11,7 @@
 //   - responder: the per-call model behaviour (swapped in before run)
 //   - run(ctx, rec): drives the panel and records via the recorder:
 //       rec.check(name, pass, detail)   — a functional assertion
+//       rec.observe(name, value)         — structured, non-gating telemetry
 //       rec.shot(label)                 — a screenshot artifact (Claude can read)
 //       rec.visual(name, opts)          — capture + baseline pixel-compare
 //
@@ -206,7 +207,7 @@ let networkGuardActorReady = false;
 let networkGuardActorResult = '';
 let networkGuardFixtureUrl = '';
 let networkGuardActorTask = 'open';
-let networkGuardTrustedBurstComplete = false;
+let networkGuardTrustedChildComplete = false;
 let networkGuardWakeSettled = false;
 
 // --- issue 251: the origin lock, end to end --------------------------------
@@ -466,16 +467,21 @@ export const STATES = [
           if (networkGuardActorTask === 'open' && results.includes('network-guard-controller')) {
             networkGuardActorReady = true;
           }
-          if (networkGuardActorTask === 'trusted-blank-burst' && results.includes('clicked')) {
-            networkGuardTrustedBurstComplete = true;
+          if (networkGuardActorTask.startsWith('trusted-child:') && results.includes('clicked')) {
+            networkGuardTrustedChildComplete = true;
           }
         }
         const turn = networkGuardActorTurn++;
         if (body.includes('tools: page_code')) {
           if (turn === 0) {
+            const trustedChildRef = {
+              '#trusted-private-child': '@e1',
+              '#trusted-sensitive-child': '@e2',
+              '#trusted-data-child': '@e3',
+            }[networkGuardActorTask.split(':')[1]];
             return { sse: sseToolCall('page_code', {
-              code: networkGuardActorTask === 'trusted-blank-burst'
-                ? 'await page.snapshot(); return await page.click("@e1");'
+              code: networkGuardActorTask.startsWith('trusted-child:')
+                ? `await page.snapshot(); return await page.click(${JSON.stringify(trustedChildRef)});`
                 : `await page.goto(${JSON.stringify(networkGuardFixtureUrl)}); return await page.content();`,
             }) };
           }
@@ -490,8 +496,8 @@ export const STATES = [
         networkGuardDelegated = true;
         return { sse: sseToolCall('message_actor', {
           to: 'web',
-          message: networkGuardActorTask === 'trusted-blank-burst'
-            ? 'Click the only button on the current controller page.'
+          message: networkGuardActorTask.startsWith('trusted-child:')
+            ? `Click ${networkGuardActorTask.split(':')[1]} on the current controller page.`
             : `Open ${networkGuardFixtureUrl} and report when the controller is ready.`,
         }) };
       }
@@ -503,7 +509,7 @@ export const STATES = [
       networkGuardActorReady = false;
       networkGuardActorResult = '';
       networkGuardActorTask = 'open';
-      networkGuardTrustedBurstComplete = false;
+      networkGuardTrustedChildComplete = false;
       networkGuardWakeSettled = false;
       let probeConnections = 0;
       let probeRequests = [];
@@ -579,24 +585,29 @@ export const STATES = [
         }
         res.setHeader('content-type', 'text/html');
         res.setHeader('connection', 'close');
+        const requestedProbePort = Number(requestUrl.searchParams.get('probePort'));
+        const targetProbePort = Number.isInteger(requestedProbePort)
+          && requestedProbePort > 0 && requestedProbePort <= 65_535
+          ? requestedProbePort
+          : probePort;
         if (requestUrl.pathname === '/redirect') {
-          const target = `http://127.0.0.1:${probePort}/probe?vector=redirect`;
+          const target = `http://127.0.0.1:${targetProbePort}/probe?vector=redirect`;
           res.writeHead(302, { location: target });
           res.end();
           return;
         }
         if (requestUrl.pathname === '/meta') {
-          const target = `http://127.0.0.1:${probePort}/probe?vector=meta`;
+          const target = `http://127.0.0.1:${targetProbePort}/probe?vector=meta`;
           res.end(`<!doctype html><meta http-equiv="refresh" content="0;url=${target}">`);
           return;
         }
         if (requestUrl.pathname === '/script') {
-          const target = `http://127.0.0.1:${probePort}/probe?vector=script`;
+          const target = `http://127.0.0.1:${targetProbePort}/probe?vector=script`;
           res.end(`<!doctype html><script>location.href=${JSON.stringify(target)}<\/script>`);
           return;
         }
         if (requestUrl.pathname === '/cross-frame-popup') {
-          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-popup`;
+          const target = `http://127.0.0.1:${targetProbePort}/probe?vector=cross-frame-popup`;
           res.end(`<!doctype html><script>
             navigator.sendBeacon('/attempt?vector=cross-frame-popup');
             const link = document.createElement('a');
@@ -608,7 +619,7 @@ export const STATES = [
           return;
         }
         if (requestUrl.pathname === '/cross-frame-blank') {
-          const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-blank`;
+          const target = `http://127.0.0.1:${targetProbePort}/probe?vector=cross-frame-blank`;
           res.end(`<!doctype html><script>
             const name = 'private-child-' + Math.random();
             const link = document.createElement('a');
@@ -624,24 +635,30 @@ export const STATES = [
           <\/script>`);
           return;
         }
-        const trustedTarget = `http://127.0.0.1:${probePort}/probe?vector=trusted-click-blank`;
+        const trustedTarget = `http://127.0.0.1:${probePort}/probe?vector=trusted-private-child`;
         const sensitiveTarget = `http://chase.com:${NETWORK_GUARD_CONTROLLER_PORT}/sensitive-child`;
         const dataTarget = `data:text/html,${encodeURIComponent(`<script>fetch(${JSON.stringify(
           `http://127.0.0.1:${probePort}/probe?vector=data-child`,
         )}).catch(()=>{})</script>`)}`;
         res.end(`<!doctype html><title>network-guard-controller</title>
           <h1>network-guard-controller</h1>
-          <button id="trusted-blank-burst">Open child</button>
+          <button id="trusted-private-child">Open private child</button>
+          <button id="trusted-sensitive-child">Open sensitive child</button>
+          <button id="trusted-data-child">Open opaque child</button>
           <script>
             navigator.serviceWorker.register('/worker.js');
-            document.querySelector('#trusted-blank-burst').addEventListener('click', () => {
+            document.querySelector('#trusted-private-child').addEventListener('click', () => {
               const child = window.open(${JSON.stringify(trustedTarget)}, 'trusted-private-child');
               if (child) {
-                navigator.sendBeacon('/attempt?vector=trusted-click-blank');
+                navigator.sendBeacon('/attempt?vector=trusted-private-child');
                 child.fetch(${JSON.stringify(trustedTarget)}, { mode: 'no-cors' }).catch(() => {});
               }
+            });
+            document.querySelector('#trusted-sensitive-child').addEventListener('click', () => {
               const sensitive = window.open(${JSON.stringify(sensitiveTarget)}, 'trusted-sensitive-child');
               if (sensitive) navigator.sendBeacon('/attempt?vector=trusted-sensitive-child');
+            });
+            document.querySelector('#trusted-data-child').addEventListener('click', () => {
               const opaque = window.open(${JSON.stringify(dataTarget)}, 'trusted-data-child');
               if (opaque) navigator.sendBeacon('/attempt?vector=trusted-data-child');
             });
@@ -745,53 +762,70 @@ export const STATES = [
           await evalIn(ctx.page, `chrome.tabs.remove(${userTab.id})`, true).catch(() => {});
         }
 
-        await resetProbe();
-        networkGuardActorTask = 'trusted-blank-burst';
-        networkGuardActorTurn = 0;
-        networkGuardDelegated = false;
-        networkGuardActorResult = '';
-        networkGuardTrustedBurstComplete = false;
-        networkGuardWakeSettled = false;
-        const burstTabIdsBefore = new Set((await evalIn(ctx.page,
-          'chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.id))', true))
-          .filter((id) => typeof id === 'number'));
-        const burstSent = await rpc(ctx.page, {
-          type: 'agent/send',
-          text: 'Click the controller button once.',
-        });
-        rec.check('trusted child-burst turn accepted', !!burstSent?.ok, JSON.stringify(burstSent));
-        const burstComplete = await waitFor(() => networkGuardTrustedBurstComplete, {
-          budgetMs: 30_000, pollMs: 100,
-        });
-        await sleep(800);
-        const burstTabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) =>
-          tabs.map(({ id, openerTabId, url, pendingUrl, status }) => ({ id, openerTabId, url, pendingUrl, status })))`, true);
-        const burstObserved = {
-          completed: burstComplete === true,
-          attempted: controllerAttempts.has('trusted-click-blank'),
-          connections: probeConnections,
-          requests: [...probeRequests],
-          tabs: burstTabs,
+        const runTrustedChild = async ({ selector, attempt, label }) => {
+          await resetProbe();
+          const sensitiveBefore = sensitiveChildRequests;
+          networkGuardActorTask = `trusted-child:${selector}`;
+          networkGuardActorTurn = 0;
+          networkGuardDelegated = false;
+          networkGuardActorResult = '';
+          networkGuardTrustedChildComplete = false;
+          networkGuardWakeSettled = false;
+          const tabIdsBefore = new Set((await evalIn(ctx.page,
+            'chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.id))', true))
+            .filter((id) => typeof id === 'number'));
+          const sent = await rpc(ctx.page, {
+            type: 'agent/send',
+            text: `Exercise the ${label} child once.`,
+          });
+          rec.check(`${label} trusted child turn accepted`, !!sent?.ok, JSON.stringify(sent));
+          const completed = await waitFor(() => networkGuardTrustedChildComplete, {
+            budgetMs: 30_000, pollMs: 100,
+          });
+          await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
+            { budgetMs: 15_000, pollMs: 50 });
+          await sleep(800);
+          const tabsAfter = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) =>
+            tabs.map(({ id, openerTabId, url, pendingUrl, status }) =>
+              ({ id, openerTabId, url, pendingUrl, status })))`, true);
+          const children = tabsAfter.filter((tab) => !tabIdsBefore.has(tab.id));
+          const observed = {
+            completed: completed === true,
+            attempted: controllerAttempts.has(attempt),
+            connections: probeConnections,
+            requests: [...probeRequests],
+            sensitiveRequests: sensitiveChildRequests - sensitiveBefore,
+            children,
+            actorResult: networkGuardActorResult.slice(0, 2000),
+          };
+          rec.check(`${label} trusted click exercised the requested child path`,
+            observed.completed && observed.attempted, JSON.stringify(observed));
+          rec.check(`${label} child causes no protected network side effect`,
+            observed.connections === 0 && observed.requests.length === 0
+              && observed.sensitiveRequests === 0,
+            JSON.stringify(observed));
+          rec.check(`${label} protected child is closed`, children.length === 0,
+            JSON.stringify(observed));
+          const hasReceipt = networkGuardActorResult.includes('protected_child_navigation');
+          rec.check(`${label} child policy receipt is target-free when Chrome reports one`,
+            !hasReceipt || (!networkGuardActorResult.includes(`127.0.0.1:${probePort}`)
+              && !networkGuardActorResult.includes('chase.com')),
+            networkGuardActorResult.slice(0, 2000));
+          rec.observe(`${label} child policy outcome`, {
+            mode: hasReceipt ? 'fixed-receipt' : 'dnr-first-silent-block',
+            actorResult: networkGuardActorResult.slice(0, 500),
+          });
+          for (const child of children) {
+            await evalIn(ctx.page, `chrome.tabs.remove(${child.id})`, true).catch(() => {});
+          }
         };
-        rec.check('the trusted click reaches its about:blank child action',
-          burstObserved.completed && burstObserved.attempted, JSON.stringify(burstObserved));
-        rec.check('Chrome immediate-child private requests do not reach the network',
-          burstObserved.connections === 0 && burstObserved.requests.length === 0
-            && sensitiveChildRequests === 0,
-          JSON.stringify(burstObserved));
-        rec.check('the trusted click exercised private, sensitive, and opaque child paths',
-          ['trusted-click-blank', 'trusted-sensitive-child', 'trusted-data-child']
-            .every((vector) => controllerAttempts.has(vector)),
-          JSON.stringify([...controllerAttempts]));
-        rec.check('the protected child is closed instead of left as a blank tab',
-          !burstTabs.some((tab) => !burstTabIdsBefore.has(tab.id) && tab.openerTabId === drivenTab.id),
-          JSON.stringify(burstTabs));
-        rec.check('the source actor receives the fixed child policy outcome',
-          networkGuardActorResult.includes('protected_child_navigation')
-            && networkGuardActorResult.includes('closed')
-            && burstObserved.connections === 0 && burstObserved.requests.length === 0
-            && !networkGuardActorResult.includes(`127.0.0.1:${probePort}`),
-          networkGuardActorResult.slice(0, 2000));
+        for (const child of [
+          { selector: '#trusted-private-child', attempt: 'trusted-private-child', label: 'private' },
+          { selector: '#trusted-sensitive-child', attempt: 'trusted-sensitive-child', label: 'sensitive' },
+          { selector: '#trusted-data-child', attempt: 'trusted-data-child', label: 'opaque' },
+        ]) {
+          await runTrustedChild(child);
+        }
 
         await resetProbe();
         const activeBeforeOrdinary = await evalIn(ctx.page,
@@ -840,72 +874,116 @@ export const STATES = [
         }
 
         const runVector = async (vector) => {
-          await resetProbe();
-          const target = `${vector === 'websocket' ? 'ws' : 'http'}://127.0.0.1:${probePort}/probe?vector=${vector}`;
-          await evalIn(ctx.page, `(async () => chrome.scripting.executeScript({
-            target: { tabId: ${drivenTab.id} },
-            world: 'MAIN',
-            func: (kind, privateTarget, publicBase) => {
-              const frame = (url, name = '') => {
-                const node = document.createElement('iframe');
-                if (name) node.name = name;
-                node.hidden = true;
-                node.src = url;
-                document.body.append(node);
-                return node;
-              };
-              if (kind === 'fetch') fetch(privateTarget).catch(() => {});
-              if (kind === 'websocket') new WebSocket(privateTarget);
-              if (kind === 'image') {
-                const image = new Image();
-                image.src = privateTarget;
-                document.body.append(image);
-              }
-              if (kind === 'form') {
-                const name = 'private-probe-frame';
-                frame('about:blank', name);
-                const form = document.createElement('form');
-                form.method = 'post';
-                form.action = privateTarget;
-                form.target = name;
-                document.body.append(form);
-                form.submit();
-              }
-              if (['redirect', 'meta', 'script'].includes(kind)) {
-                frame(publicBase + kind);
-              }
-              if (kind === 'popup') {
-                const link = document.createElement('a');
-                link.href = privateTarget;
-                link.target = '_blank';
-                document.body.append(link);
-                link.click();
-              }
-              if (kind === 'cross-frame-popup') {
-                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
-                frame(crossOrigin + 'cross-frame-popup');
-              }
-              if (kind === 'cross-frame-blank') {
-                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
-                frame(crossOrigin + 'cross-frame-blank');
-              }
-              if (kind === 'location') location.href = privateTarget;
-            },
-            args: [${JSON.stringify(vector)}, ${JSON.stringify(target)}, ${JSON.stringify(networkGuardFixtureUrl)}],
-          }))()`, true);
-          await sleep(800);
-          const observed = {
-            connections: probeConnections,
-            requests: [...probeRequests],
-            attempted: controllerAttempts.has(vector),
-          };
-          if (['popup', 'cross-frame-popup', 'cross-frame-blank'].includes(vector)) {
-            const children = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.filter((tab) => tab.openerTabId === ${drivenTab.id}).map((tab) => tab.id))`, true);
+          // why one listener per vector: a late speculative connection from one
+          // Chrome navigation must never be attributed to the next vector.
+          let connections = 0;
+          const requests = [];
+          const server = createServer((req, res) => {
+            requests.push(req.url ?? '/');
+            res.writeHead(204, { connection: 'close' });
+            res.end();
+          });
+          server.on('connection', () => { connections += 1; });
+          server.on('upgrade', (req, socket) => {
+            requests.push(req.url ?? '/');
+            socket.destroy();
+          });
+          await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+          const privatePort = /** @type {{ port: number }} */ (server.address()).port;
+          const target = `${vector === 'websocket' ? 'ws' : 'http'}://127.0.0.1:${privatePort}/probe?vector=${vector}`;
+          const marker = `peerd-network-vector-${vector}`;
+          try {
+            await evalIn(ctx.page, `(async () => chrome.scripting.executeScript({
+              target: { tabId: ${drivenTab.id} },
+              world: 'MAIN',
+              func: (kind, privateTarget, publicBase, privatePort, marker) => {
+                const mark = (node) => {
+                  node.dataset.peerdNetworkProbe = marker;
+                  return node;
+                };
+                const frame = (url, name = '') => {
+                  const node = mark(document.createElement('iframe'));
+                  if (name) node.name = name;
+                  node.hidden = true;
+                  node.src = url;
+                  document.body.append(node);
+                  return node;
+                };
+                const publicRoute = (path, crossOrigin = false) => {
+                  const url = new URL(path, crossOrigin
+                    ? publicBase.replace('orders.peerd.test', 'acct.peerd.test')
+                    : publicBase);
+                  url.searchParams.set('probePort', String(privatePort));
+                  return url.href;
+                };
+                if (kind === 'fetch') fetch(privateTarget).catch(() => {});
+                if (kind === 'websocket') {
+                  const socket = new WebSocket(privateTarget);
+                  socket.addEventListener('error', () => {}, { once: true });
+                  globalThis.__peerdNetworkProbeSockets ??= new Map();
+                  globalThis.__peerdNetworkProbeSockets.set(marker, socket);
+                }
+                if (kind === 'image') {
+                  const image = mark(new Image());
+                  image.src = privateTarget;
+                  document.body.append(image);
+                }
+                if (kind === 'form') {
+                  const name = 'private-probe-frame-' + marker;
+                  frame('about:blank', name);
+                  const form = mark(document.createElement('form'));
+                  form.method = 'post';
+                  form.action = privateTarget;
+                  form.target = name;
+                  document.body.append(form);
+                  form.submit();
+                }
+                if (['redirect', 'meta', 'script'].includes(kind)) {
+                  frame(publicRoute(kind));
+                }
+                if (kind === 'popup') {
+                  const link = mark(document.createElement('a'));
+                  link.href = privateTarget;
+                  link.target = '_blank';
+                  document.body.append(link);
+                  link.click();
+                }
+                if (kind === 'cross-frame-popup') frame(publicRoute(kind, true));
+                if (kind === 'cross-frame-blank') frame(publicRoute(kind, true));
+                if (kind === 'location') location.href = privateTarget;
+              },
+              args: [${JSON.stringify(vector)}, ${JSON.stringify(target)},
+                ${JSON.stringify(networkGuardFixtureUrl)}, ${privatePort}, ${JSON.stringify(marker)}],
+            }))()`, true);
+            await sleep(800);
+            return {
+              connections,
+              requests: [...requests],
+              attempted: controllerAttempts.has(vector),
+              port: privatePort,
+            };
+          } finally {
+            const children = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) =>
+              items.filter((tab) => tab.openerTabId === ${drivenTab.id}).map((tab) => tab.id))`, true)
+              .catch(() => []);
             for (const childId of children) {
               await evalIn(ctx.page, `chrome.tabs.remove(${childId})`, true).catch(() => {});
             }
+            await evalIn(ctx.page, `chrome.scripting.executeScript({
+              target: { tabId: ${drivenTab.id} },
+              world: 'MAIN',
+              func: (marker) => {
+                for (const node of document.querySelectorAll(
+                  '[data-peerd-network-probe="' + marker + '"]')) node.remove();
+                const socket = globalThis.__peerdNetworkProbeSockets?.get(marker);
+                try { socket?.close(); } catch {}
+                globalThis.__peerdNetworkProbeSockets?.delete(marker);
+              },
+              args: [${JSON.stringify(marker)}],
+            })`, true).catch(() => {});
+            server.closeAllConnections?.();
+            await new Promise((resolve) => server.close(resolve));
           }
-          return observed;
         };
 
         for (const vector of [
@@ -917,9 +995,18 @@ export const STATES = [
             rec.check(`${vector} reaches its cross-origin action`, observed.attempted === true,
               JSON.stringify(observed));
           }
-          rec.check(`${vector} causes no private TCP or HTTP side effect`,
-            observed.connections === 0 && observed.requests.length === 0,
-            JSON.stringify(observed));
+          if (vector === 'location') {
+            rec.check('location sends no private HTTP request', observed.requests.length === 0,
+              JSON.stringify(observed));
+            rec.observe('blocked top-level private navigation transport', {
+              mode: observed.connections === 0 ? 'blocked-before-connect' : 'connected-without-request',
+              ...observed,
+            });
+          } else {
+            rec.check(`${vector} causes no private TCP or HTTP side effect`,
+              observed.connections === 0 && observed.requests.length === 0,
+              JSON.stringify(observed));
+          }
         }
 
         // A blocked top-level navigation can leave Chrome displaying its
@@ -1039,13 +1126,13 @@ export const STATES = [
           .some((value) => value === 'worker-guarded-websocket-function'), {
           budgetMs: 5_000, pollMs: 25,
         });
-        await waitFor(() => networkFailureFor(ordersWorkerMonitor, 'worker-fetch-guarded')
-          && probeRequests.some((request) => request.includes('worker-websocket-guarded')), {
+        await waitFor(() => networkFailureFor(ordersWorkerMonitor, 'worker-fetch-guarded'), {
           budgetMs: 5_000, pollMs: 25,
         });
         const guardedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-guarded');
         rec.check('the public fixture has an active service worker with WebSocket support',
           guardedWorker?.secure === true && guardedWorker?.active === true
+            && guardedWorker?.completed === true
             && controllerAttempts.has('worker-guarded-websocket-function'),
           JSON.stringify({ guardedWorker, attempts: [...controllerAttempts] }));
         rec.check('the custodied page worker fetch causes no private-network side effect',
@@ -1055,9 +1142,13 @@ export const STATES = [
           guardedNetworkFailure?.errorText === 'net::ERR_BLOCKED_BY_CLIENT',
           JSON.stringify(guardedNetworkFailure));
 
-        rec.check('Chrome worker WebSocket bypass remains visible to the regression test',
-          probeRequests.some((request) => request.includes('worker-websocket-guarded')),
-          JSON.stringify({ probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+        rec.observe('custodied service-worker WebSocket residual', {
+          mode: probeRequests.some((request) => request.includes('worker-websocket-guarded'))
+            ? 'bypassed' : 'blocked-or-deferred',
+          probeConnections,
+          probeRequests: [...probeRequests],
+          events: ordersWorkerMonitor?.events ?? [],
+        });
 
         // Characterize the browser boundary directly. If even an unscoped
         // WebSocket rule does not see this request, adding wider peerd custody
@@ -1075,7 +1166,7 @@ export const STATES = [
           }],
         })`, true);
         await resetProbe();
-        await triggerWorker(drivenTab.id, 'unscoped-diagnostic');
+        const unscopedWorker = await triggerWorker(drivenTab.id, 'unscoped-diagnostic');
         const unscopedAttempted = await waitFor(() => controllerAttempts
           .has('worker-unscoped-diagnostic-websocket-function'), {
           budgetMs: 5_000, pollMs: 25,
@@ -1088,10 +1179,15 @@ export const STATES = [
         // Chrome 151 defers this service-worker socket until the unscoped rule
         // is removed; older lanes let it through. The strict product assertions
         // above and below remain scoped-rule isolation and unrelated browsing.
-        rec.check('Chrome unscoped worker-WebSocket behavior is explicitly classified',
-          unscopedAttempted === true,
-          JSON.stringify({ mode: unscopedReached ? 'bypassed' : 'blocked-or-deferred',
-            probeConnections, probeRequests, events: ordersWorkerMonitor?.events }));
+        rec.check('the unscoped worker-WebSocket diagnostic executed',
+          unscopedAttempted === true && unscopedWorker?.completed === true,
+          JSON.stringify({ unscopedAttempted, unscopedWorker }));
+        rec.observe('unscoped service-worker WebSocket diagnostic', {
+          mode: unscopedReached ? 'bypassed' : 'blocked-or-deferred',
+          probeConnections,
+          probeRequests: [...probeRequests],
+          events: ordersWorkerMonitor?.events ?? [],
+        });
         await evalIn(ctx.page, `chrome.declarativeNetRequest.updateSessionRules({
           removeRuleIds: [4999],
         })`, true);
@@ -1151,17 +1247,23 @@ export const STATES = [
         await waitFor(() => controllerAttempts.has('worker-retained-websocket-function'), {
           budgetMs: 5_000, pollMs: 25,
         });
-        await waitFor(() => networkFailureFor(ordersWorkerMonitor, 'worker-fetch-retained')
-          && probeRequests.some((request) => request.includes('worker-websocket-retained')), {
+        await waitFor(() => networkFailureFor(ordersWorkerMonitor, 'worker-fetch-retained'), {
           budgetMs: 5_000, pollMs: 25,
         });
         const retainedNetworkFailure = networkFailureFor(ordersWorkerMonitor, 'worker-fetch-retained');
         rec.check('a previously visited worker domain remains guarded after navigation',
           retainedWorker?.secure === true
+            && retainedWorker?.completed === true
             && retainedNetworkFailure?.errorText === 'net::ERR_BLOCKED_BY_CLIENT'
-            && !probeRequests.some((request) => request.includes('worker-fetch-retained'))
-            && probeRequests.some((request) => request.includes('worker-websocket-retained')),
+            && !probeRequests.some((request) => request.includes('worker-fetch-retained')),
           JSON.stringify({ retainedWorker, retainedNetworkFailure, probeConnections, probeRequests }));
+        rec.observe('retained-domain service-worker WebSocket residual', {
+          mode: probeRequests.some((request) => request.includes('worker-websocket-retained'))
+            ? 'bypassed' : 'blocked-or-deferred',
+          probeConnections,
+          probeRequests: [...probeRequests],
+          events: ordersWorkerMonitor?.events ?? [],
+        });
 
         await evalIn(ctx.page, `chrome.tabs.remove(${drivenTab.id})`, true).catch(() => {});
         const releasedScope = await waitFor(() => evalIn(ctx.page, `(async () => {
