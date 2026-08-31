@@ -34,6 +34,7 @@
     "test:e2e:error": "bun scripts/cdp/run-e2e-verify.mjs --only=error",
     "test:e2e:passkey": "bun scripts/cdp/run-passkey-signup.mjs",
     "test:e2e:controller-faults": "bun scripts/cdp/controller-recycle-fault.mjs",
+    "test:e2e:read-doc": "bun scripts/cdp/read-doc-store-lane.mjs",
     "test:e2e:dweb-lifecycle": "bun scripts/cdp/feature-lease-dweb-lifecycle.mjs",
     "test:e2e:charon": "bun scripts/cdp/charon-dwapp-two-profile.mjs",
     "bench:vault-kernel": "bun scripts/cdp/bench-vault-kernel-passkey.mjs",
