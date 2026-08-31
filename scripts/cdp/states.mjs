@@ -561,8 +561,28 @@ export const STATES = [
           });
           res.end(`self.addEventListener('install', () => self.skipWaiting());
             self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+            const monitorReleases = new Map();
             self.addEventListener('message', (event) => {
-              const { fetchUrl, socketUrl, token } = event.data || {};
+              const { fetchUrl, socketUrl, token, monitorToken, monitorReleaseToken } = event.data || {};
+              if (monitorToken) {
+                event.waitUntil(new Promise((resolve) => {
+                  let timer = null;
+                  const release = () => {
+                    if (timer !== null) clearTimeout(timer);
+                    monitorReleases.delete(monitorToken);
+                    resolve();
+                  };
+                  timer = setTimeout(release, 15_000);
+                  monitorReleases.set(monitorToken, release);
+                  event.source?.postMessage({ peerdNetworkMonitorToken: monitorToken });
+                }));
+                return;
+              }
+              if (monitorReleaseToken) {
+                monitorReleases.get(monitorReleaseToken)?.();
+                event.source?.postMessage({ peerdNetworkMonitorReleaseToken: monitorReleaseToken });
+                return;
+              }
               event.waitUntil((async () => {
                 await fetch('/attempt?vector=worker-' + encodeURIComponent(token)
                   + '-websocket-' + typeof WebSocket, { cache: 'no-store' });
@@ -1106,9 +1126,69 @@ export const STATES = [
         };
         const networkFailureFor = (monitor, token) => monitor?.events
           .find((event) => event.url.includes(token));
+        const wakeWorkerForMonitor = async (tabId) => evalIn(ctx.page, `(async () => {
+          const [injection] = await chrome.scripting.executeScript({
+            target: { tabId: ${tabId} },
+            world: 'MAIN',
+            func: async () => {
+              const registration = await navigator.serviceWorker.ready;
+              const monitorToken = crypto.randomUUID();
+              return new Promise((resolve) => {
+                const finish = (value) => {
+                  clearTimeout(timer);
+                  navigator.serviceWorker.removeEventListener('message', onMessage);
+                  resolve(value);
+                };
+                const onMessage = (event) => {
+                  if (event.data?.peerdNetworkMonitorToken === monitorToken) finish(true);
+                };
+                const timer = setTimeout(() => finish(false), 5_000);
+                navigator.serviceWorker.addEventListener('message', onMessage);
+                registration.active.postMessage({ monitorToken });
+              }).then((acknowledged) => acknowledged ? monitorToken : null);
+            },
+          });
+          return injection?.result ?? null;
+        })()`, true);
+        const releaseWorkerMonitorHold = async (tabId, monitorToken) => evalIn(ctx.page, `(async () => {
+          const [injection] = await chrome.scripting.executeScript({
+            target: { tabId: ${tabId} },
+            world: 'MAIN',
+            func: async (token) => {
+              const registration = await navigator.serviceWorker.ready;
+              return new Promise((resolve) => {
+                const finish = (value) => {
+                  clearTimeout(timer);
+                  navigator.serviceWorker.removeEventListener('message', onMessage);
+                  resolve(value);
+                };
+                const onMessage = (event) => {
+                  if (event.data?.peerdNetworkMonitorReleaseToken === token) finish(true);
+                };
+                const timer = setTimeout(() => finish(false), 5_000);
+                navigator.serviceWorker.addEventListener('message', onMessage);
+                registration.active.postMessage({ monitorReleaseToken: token });
+              });
+            },
+            args: [${JSON.stringify(monitorToken)}],
+          });
+          return injection?.result === true;
+        })()`, true);
+        // A registered page worker is allowed to retire before this state reaches
+        // the worker lane. Wake it through its ordinary client before polling the
+        // debugger target list; otherwise a one-time target snapshot races Chrome's
+        // service-worker startup and makes the Network gate intermittently blind.
+        const monitorToken = await wakeWorkerForMonitor(drivenTab.id);
         const ordersWorkerMonitor = await attachWorkerMonitor(new URL(networkGuardFixtureUrl).origin);
+        const monitorHoldReleased = typeof monitorToken === 'string'
+          && await releaseWorkerMonitorHold(drivenTab.id, monitorToken);
         rec.check('Chrome exposes the fixture service worker to the network test',
-          ordersWorkerMonitor !== null, JSON.stringify({ monitored: ordersWorkerMonitor !== null }));
+          typeof monitorToken === 'string' && ordersWorkerMonitor !== null && monitorHoldReleased === true,
+          JSON.stringify({
+            monitorWakeAcknowledged: typeof monitorToken === 'string',
+            monitored: ordersWorkerMonitor !== null,
+            monitorHoldReleased,
+          }));
 
         const triggerWorker = async (tabId, token) => evalIn(ctx.page, `(async () => {
           const [injection] = await chrome.scripting.executeScript({
