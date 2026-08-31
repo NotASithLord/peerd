@@ -53,14 +53,14 @@ The accepted candidate passed:
 
 The release gate now exercises packaged probes through their real owners: notebook remote imports, Options artifact import, Home repository operations, the singleton offscreen host, and the native side panel. Synthetic targets are closed rather than leaked. Timeout custody tests use deterministic clocks or exact packet settlement instead of millisecond sleeps.
 
-## Deliberate exclusion
+## Chrome network acceptance
 
-The owner explicitly excluded the two remaining broad Chrome network suites from this closeout:
+The two previously excluded Chrome network lanes now ran against the final branch harness:
 
-- `browser-network-rules`
-- `browser-network-floor`
+- `browser-network-rules`: every authored regex was accepted and the complete session-rule family installed.
+- `browser-network-floor`: all gating checks passed. Private, sensitive, and opaque children each ran through a separate browser-trusted click and remained contained and closed; every ordinary request vector used its own probe server and cleaned its DOM.
 
-They were not required for this branch acceptance and must not be represented as run. Focused network authority, sender provenance, package policy, static security, and existing browser coverage passed. Resume those broad suites only as separate follow-up work if desired.
+The structured result records two accepted Chrome platform residuals without turning them into false product guarantees: service-worker-created WebSockets bypass DNR even under the unscoped diagnostic rule, and a blocked direct top-level private navigation can establish one TCP connection/preconnect while sending no HTTP request. The live lane still gates that each probe actually ran and that the enforced HTTP, custody, closure, and isolation behavior held.
 
 ## Future change rule
 

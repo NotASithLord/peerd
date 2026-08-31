@@ -61,12 +61,17 @@ const selected = (s) => {
 
 const makeRecorder = (ctx, state) => {
   const checks = [];
+  const observations = [];
   const screenshots = [];
   const visuals = [];
   return {
     check(name, pass, detail = '') {
       checks.push({ name, pass: !!pass, detail: String(detail ?? '') });
       log(`  ${pass ? 'PASS' : 'FAIL'}  [${state.name}] ${name}${detail ? ` — ${detail}` : ''}`);
+    },
+    observe(name, value) {
+      observations.push({ name, value });
+      log(`  NOTE  [${state.name}] ${name} — ${JSON.stringify(value)}`);
     },
     async shot(label) {
       const png = await ctx.screenshot();
@@ -138,7 +143,7 @@ const makeRecorder = (ctx, state) => {
     },
     result() {
       const ok = checks.every((c) => c.pass) && visuals.every((v) => v.pass);
-      return { name: state.name, kind: state.kind, ok, checks, screenshots, visuals };
+      return { name: state.name, kind: state.kind, ok, checks, observations, screenshots, visuals };
     },
   };
 };

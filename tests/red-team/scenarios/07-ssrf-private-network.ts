@@ -70,7 +70,7 @@ export const scenario: Scenario = {
   title: 'Private-network / metadata SSRF',
   adversary: 'malicious webpage',
   asset: 'internal network + cloud metadata credentials',
-  claim: 'Open-web and browser entry points refuse private targets, no-tab worker fetch rules require a custodied page domain, and child guards require exact source identity.',
+  claim: 'Open-web and browser entry points refuse private targets, no-tab worker rules are narrowly scoped to a custodied page domain, and child guards require exact source identity; live Chrome acceptance separately classifies the browser worker-WebSocket limitation.',
   threatModelRef: 'INV-7',
   tier: 'unit',
   async run() {
@@ -172,8 +172,8 @@ export const scenario: Scenario = {
         && JSON.stringify(rule.condition?.tabIds) === JSON.stringify([-1])
         && JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['shop.example']));
       probes.push(exactRuleSet && exactScope
-        ? blocked('use a page service worker to bypass tab custody', 'every no-tab private-target rule requires no-tab attribution and the custodied initiator domain')
-        : leaked('use a page service worker to bypass tab custody', 'the worker rule family was missing or overbroad'));
+        ? blocked('broaden the no-tab worker backstop beyond current custody', 'every no-tab private-target rule requires no-tab attribution and the custodied initiator domain; the live Chrome lane separately records worker-WebSocket behavior')
+        : leaked('broaden the no-tab worker backstop beyond current custody', 'the worker rule family was missing or overbroad'));
       probes.push(buildPrivateNetworkInitiatorBlockRules({ initiatorDomains: [] }).length === 0
         ? blocked('install a no-tab private-network rule without page custody', 'no initiator domain produced no rule')
         : leaked('install a no-tab private-network rule without page custody', 'a browser-wide no-tab rule was produced'));
@@ -290,7 +290,7 @@ export const scenario: Scenario = {
         'webFetch pre-flight host check',
         'browser automation target classifier',
         'tab-scoped private-network DNR rules',
-        'origin-scoped no-tab worker fetch DNR rules',
+        'origin-scoped no-tab worker DNR rule shape (live Chrome classifies worker-WebSocket enforcement)',
         'exact-child blocking Firefox request stop',
         'exact-source startup child rule copy',
         'redirect fail-closed',

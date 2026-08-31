@@ -181,9 +181,9 @@ _Generated from the current checkout by the command above._
 
 - Adversary: malicious webpage
 - Asset: internal network + cloud metadata credentials
-- Claim checked: Open-web and browser entry points refuse private targets, no-tab worker fetch rules require a custodied page domain, and child guards require exact source identity.
+- Claim checked: Open-web and browser entry points refuse private targets, no-tab worker rules are narrowly scoped to a custodied page domain, and child guards require exact source identity; live Chrome acceptance separately classifies the browser worker-WebSocket limitation.
 - Threat-model invariant: INV-7
-- Defenses exercised: isPrivateOrLocalHost (SSRF guard), webFetch pre-flight host check, browser automation target classifier, tab-scoped private-network DNR rules, origin-scoped no-tab worker fetch DNR rules, exact-child blocking Firefox request stop, exact-source startup child rule copy, redirect fail-closed
+- Defenses exercised: isPrivateOrLocalHost (SSRF guard), webFetch pre-flight host check, browser automation target classifier, tab-scoped private-network DNR rules, origin-scoped no-tab worker DNR rule shape (live Chrome classifies worker-WebSocket enforcement), exact-child blocking Firefox request stop, exact-source startup child rule copy, redirect fail-closed
 - Verified in the browser by: `scripts/cdp/states.mjs (browser network floor); scripts/firefox/run-runtime-tests.mjs (Firefox private-network and child navigation probes)`
 
 | Probe (adversary action) | Result | Evidence |
@@ -225,7 +225,7 @@ _Generated from the current checkout by the command above._
 | automate IPv4-mapped IPv6 metadata via URL parser at committed_origin | blocked | browser target refused as private_network; result contains no target URL |
 | turn the private-network floor into a browser-wide rule | blocked | every tab-family rule is block-only and scoped to the driven tab |
 | install the private-network floor with no driven tab | blocked | the rule builder returned no rules |
-| use a page service worker to bypass tab custody | blocked | every no-tab private-target rule requires no-tab attribution and the custodied initiator domain |
+| broaden the no-tab worker backstop beyond current custody | blocked | every no-tab private-target rule requires no-tab attribution and the custodied initiator domain; the live Chrome lane separately records worker-WebSocket behavior |
 | install a no-tab private-network rule without page custody | blocked | no initiator domain produced no rule |
 | use an ordinary source tab to acquire its child during startup | blocked | no browser rule changed without the complete exact-source rule set |
 | redirect startup protection onto an unrelated tab | blocked | the complete rule set was copied only from the exact source to the exact child |
