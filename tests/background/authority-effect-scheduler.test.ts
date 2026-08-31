@@ -17,7 +17,7 @@ const pageKey = (sessionId: string, tabId: number | null, pinned: string) =>
 const siteClientKey = (sessionId: string, tabId: number | null, pinned: string,
   backing: 'tab' | 'api', origin = 'https://example.test') =>
   authorityEffectResourceKey('turn.site-client.run', { origin }, {
-    actorType: 'web', actorBacking: backing,
+    actorType: 'web', backing,
     actorInstanceId: backing === 'api' ? origin : 'web',
     authorityPageResourceKey: pinned,
     activeTab: tabId === null ? null : { id: tabId }, session: { sessionId },

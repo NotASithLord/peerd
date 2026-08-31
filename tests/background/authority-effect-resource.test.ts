@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { authorityEffectResourceKey } from '../../extension/background/authority-effect-resource.js';
+import {
+  projectControllerTurnAuthorityClass,
+  snapshotControllerTurnAuthorityBinding,
+} from '../../extension/background/controller-turn-authority-scope.js';
 
 describe('authority effect resource identity', () => {
   test.each([
@@ -51,19 +55,19 @@ describe('authority effect resource identity', () => {
   test('established tab actors share only their host-owned tab lane', () => {
     const first = {
       actorType: 'web', actorInstanceId: 'web',
-      actorBacking: 'tab',
+      backing: 'tab',
       authorityPageResourceKey: 'page:tab:7',
       activeTab: { id: 7 }, session: { sessionId: 'actor-a' },
     };
     const sameTabSibling = {
       actorType: 'web', actorInstanceId: 'web',
-      actorBacking: 'tab',
+      backing: 'tab',
       authorityPageResourceKey: 'page:tab:7',
       activeTab: { id: 7 }, session: { sessionId: 'actor-b' },
     };
     const otherTab = {
       actorType: 'web', actorInstanceId: 'web',
-      actorBacking: 'tab',
+      backing: 'tab',
       authorityPageResourceKey: 'page:tab:8',
       activeTab: { id: 8 }, session: { sessionId: 'actor-c' },
     };
@@ -78,9 +82,24 @@ describe('authority effect resource identity', () => {
     )).toBe('page:tab:7');
     expect(authorityEffectResourceKey(
       'turn.site-client.run', { origin: 'https://api.example.test' }, {
-        ...first, actorBacking: 'api', authorityPageResourceKey: undefined,
+        ...first, backing: 'api', authorityPageResourceKey: undefined,
         activeTab: null, actorInstanceId: 'https://api.example.test',
       },
+    )).toBe('siteclient:https://api.example.test');
+  });
+
+  test('the live projected API site-client scope serializes by owned origin', () => {
+    const signal = new AbortController().signal;
+    const binding = snapshotControllerTurnAuthorityBinding({
+      session: { sessionId: 'api-actor-a' }, actorType: 'web', backing: 'api',
+      actorInstanceId: 'https://api.example.test', activeTab: null,
+    }, {
+      sessionId: 'api-actor-a', operationGrant: new Set(), abortSignal: signal,
+    });
+    const scope = projectControllerTurnAuthorityClass(binding, 'siteclient');
+    expect(scope?.backing).toBe('api');
+    expect(authorityEffectResourceKey(
+      'turn.site-client.run', { origin: 'https://api.example.test' }, scope,
     )).toBe('siteclient:https://api.example.test');
   });
 });
