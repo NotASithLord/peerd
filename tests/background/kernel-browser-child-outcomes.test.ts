@@ -63,6 +63,101 @@ describe('kernel browser child outcomes', () => {
     expect(owner.releaseAction(7, action!)).toBe(true);
   });
 
+  test('duplicate events preserve the original action through its final settlement', async () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const action = owner.reserveAction(7)!;
+    const child = Symbol('duplicate-child');
+    owner.begin(7, 8, child);
+    owner.begin(7, 8, child);
+    owner.settle(7, 8, child);
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: child,
+    });
+    expect(owner.consumeAction(7, action)).toEqual([{
+      reason: 'protected_child_navigation', outcome: 'not_run',
+      child: 'closed', retryable: false,
+    }]);
+    expect(owner.consume(7)).toEqual([]);
+
+    let terminalSettled = false;
+    const terminal = owner.waitAction(7, action, 50, true)
+      .then((settled) => { terminalSettled = true; return settled; });
+    await Promise.resolve();
+    expect(terminalSettled).toBe(false);
+    owner.settle(7, 8, child);
+    expect(await terminal).toBe(true);
+    expect(owner.releaseAction(7, action)).toBe(true);
+  });
+
+  test('a pre-reservation generation is never rebound by a duplicate event', async () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const child = owner.begin(7, 8, Symbol('pre-reservation-child'));
+    const action = owner.reserveAction(7)!;
+    owner.begin(7, 8, child);
+    expect(await owner.waitAction(7, action, 0)).toBe(false);
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: child,
+    });
+    owner.settle(7, 8, child);
+    owner.settle(7, 8, child);
+    expect(owner.consumeAction(7, action)).toEqual([]);
+    expect(owner.consume(7)).toEqual([{
+      reason: 'protected_child_navigation', outcome: 'not_run',
+      child: 'closed', retryable: false,
+    }]);
+    expect(owner.releaseAction(7, action)).toBe(true);
+  });
+
+  test('terminal action custody waits for every child even after an early notice', async () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const action = owner.reserveAction(7)!;
+    const first = owner.begin(7, 8, Symbol('first-child'));
+    const second = owner.begin(7, 9, Symbol('second-child'));
+    owner.recordBlocked({
+      sourceTabId: 7, tabId: 8, reason: 'private_network', child: 'closed',
+      guarded: true, outcome: 'not_run', flowToken: first,
+    });
+    owner.settle(7, 8, first);
+
+    let terminalSettled = false;
+    const terminal = owner.waitAction(7, action, 50, true)
+      .then((settled) => { terminalSettled = true; return settled; });
+    await Promise.resolve();
+    expect(terminalSettled).toBe(false);
+    owner.recordFailed({
+      sourceTabId: 7, tabId: 9, reason: 'child_guard_failed',
+      child: 'left_blank', guarded: false, flowToken: second,
+    });
+    owner.settle(7, 9, second);
+    expect(await terminal).toBe(true);
+    expect(owner.consumeAction(7, action)).toEqual([
+      {
+        reason: 'protected_child_navigation', outcome: 'not_run',
+        child: 'closed', retryable: false,
+      },
+      {
+        reason: 'child_navigation_failed', outcome: 'unverified',
+        child: 'left_blank', retryable: false,
+      },
+    ]);
+    expect(owner.releaseAction(7, action)).toBe(true);
+  });
+
+  test('same-tab actions serialize while different source tabs remain independent', () => {
+    const owner = createKernelBrowserChildOutcomes({});
+    const first = owner.reserveAction(7)!;
+    expect(owner.reserveAction(7)).toBeNull();
+    const independent = owner.reserveAction(8)!;
+    expect(typeof independent).toBe('symbol');
+    expect(owner.releaseAction(7, first)).toBe(true);
+    const successor = owner.reserveAction(7)!;
+    expect(typeof successor).toBe('symbol');
+    expect(owner.releaseAction(7, successor)).toBe(true);
+    expect(owner.releaseAction(8, independent)).toBe(true);
+  });
+
   test('an action with no child takes only its onset path and leaves no synthetic receipt', async () => {
     const owner = createKernelBrowserChildOutcomes({});
     const action = owner.reserveAction(7)!;

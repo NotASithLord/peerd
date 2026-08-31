@@ -6,7 +6,7 @@ const MAX_NOTICES = 32;
 export const createKernelBrowserChildOutcomes = ({ audit = () => {}, noteBlank = () => {} }) => {
   /** @type {Map<number,any[]>} */ const notices = new Map();
   /** @type {Map<number,Set<()=>void>>} */ const waiters = new Map();
-  /** @type {Map<number,Map<number,{token:symbol,count:number,guarded:boolean,actionToken?:symbol}>>} */ const pending = new Map();
+  /** @type {Map<number,Map<number,{token:symbol,count:number,guarded:boolean,actionToken:symbol|undefined}>>} */ const pending = new Map();
   /** @type {Map<number,symbol>} */ const currentTokens = new Map();
   /** @type {Map<number,symbol>} */ const reportedTokens = new Map();
   /** @type {Map<number,{token:symbol,observed:boolean,notices:any[],waiters:Set<()=>void>}>} */
@@ -123,8 +123,10 @@ export const createKernelBrowserChildOutcomes = ({ audit = () => {}, noteBlank =
       const current = actions.get(sourceTabId);
       if (current?.token !== actionToken) return false;
       if (!terminal) return current.observed || current.notices.length > 0;
-      return current.notices.length > 0
-        || current.observed && pendingForAction(sourceTabId, actionToken).length === 0;
+      // why: one source action can synchronously open several children. A
+      // notice proves only its own flow settled; returning while sibling flows
+      // remain would discard their exact attribution during release.
+      return current.observed && pendingForAction(sourceTabId, actionToken).length === 0;
     };
     if (complete()) return Promise.resolve(true);
     if (signal?.aborted) return Promise.resolve(false);
@@ -200,17 +202,21 @@ export const createKernelBrowserChildOutcomes = ({ audit = () => {}, noteBlank =
       const children = pending.get(sourceTabId) ?? new Map();
       const current = children.get(childTabId);
       const action = actions.get(sourceTabId);
-      if (action) {
+      const sameGeneration = current?.token === token;
+      // why: duplicate browser events for one child generation must preserve
+      // the generation's original action membership, including no membership.
+      // Otherwise a late duplicate could retask a pre-reservation child to the
+      // next page action.
+      const actionToken = sameGeneration ? current.actionToken : action?.token;
+      if (!sameGeneration && action && actionToken === action.token) {
         action.observed = true;
         wakeAction(sourceTabId);
       }
       children.set(childTabId, {
         token,
-        count: current?.token === token ? current.count + 1 : 1,
-        guarded: current?.token === token && current.guarded === true,
-        ...(current?.token === token && current.actionToken
-          ? { actionToken: current.actionToken }
-          : action ? { actionToken: action.token } : {}),
+        count: sameGeneration ? current.count + 1 : 1,
+        guarded: sameGeneration && current.guarded === true,
+        actionToken,
       });
       pending.set(sourceTabId, children);
       return token;
@@ -221,7 +227,7 @@ export const createKernelBrowserChildOutcomes = ({ audit = () => {}, noteBlank =
       const current = children?.get(childTabId);
       if (!current || (token && current.token !== token)) return;
       if (current.count > 1) children?.set(childTabId, {
-        token: current.token, count: current.count - 1, guarded: current.guarded,
+        ...current, count: current.count - 1,
       });
       else children?.delete(childTabId);
       if (children?.size === 0) pending.delete(sourceTabId);

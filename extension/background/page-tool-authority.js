@@ -343,29 +343,35 @@ export const createPageToolAuthority = ({
         let notices = normalizeBrowserChildPolicyNotices(
           consumeCurrentAction ? consumeCurrentAction() : consumeChildNotices(tabId),
         );
-        if (notices.length === 0 && embedded.length === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-          if (consumeCurrentAction) {
+        if (consumeCurrentAction) {
+          let observed = notices.length > 0;
+          if (!observed) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
             // why: the reservation was minted before the page effect. A child
             // event first proves this exact action has a child; only then can
             // that action enter the longer terminal custody wait. An ordinary
             // click pays only the short event-onset window.
-            const observed = await ctx.waitForBrowserChildPolicyAction(
+            observed = await ctx.waitForBrowserChildPolicyAction(
               tabId, currentActionToken, 175, false, abortSignal,
             );
-            if (observed && !stopped()) {
-              await ctx.waitForBrowserChildPolicyAction(
-                tabId, currentActionToken, 5_000, true, abortSignal,
-              );
-            }
-          } else if (typeof ctx?.waitForBrowserChildPolicyNotice === 'function') {
+          }
+          // A notice can arrive before sibling children settle. Drain the
+          // entire exact generation before releasing its attribution.
+          if (observed && !stopped()) {
+            await ctx.waitForBrowserChildPolicyAction(
+              tabId, currentActionToken, 5_000, true, abortSignal,
+            );
+          }
+          notices = normalizeBrowserChildPolicyNotices([
+            ...notices, ...consumeCurrentAction(),
+          ]);
+        } else if (notices.length === 0 && embedded.length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (typeof ctx?.waitForBrowserChildPolicyNotice === 'function') {
             await ctx.waitForBrowserChildPolicyNotice(tabId, 175);
           }
-          notices = normalizeBrowserChildPolicyNotices(
-            consumeCurrentAction ? consumeCurrentAction() : consumeChildNotices(tabId),
-          );
-          if (!consumeCurrentAction && notices.length === 0
-              && ctx?.hasPendingBrowserChildPolicy?.(tabId)) {
+          notices = normalizeBrowserChildPolicyNotices(consumeChildNotices(tabId));
+          if (notices.length === 0 && ctx?.hasPendingBrowserChildPolicy?.(tabId)) {
             await ctx.waitForBrowserChildPolicyNotice?.(tabId, 5_000, true);
             notices = normalizeBrowserChildPolicyNotices(consumeChildNotices(tabId));
           }
