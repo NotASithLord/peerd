@@ -211,19 +211,18 @@ export async function* callLocalWebgpu({ messages, system, model = LOCAL_MODEL_I
     })();
     yield* parseLocalStream(tokenStream);
   } catch (e) {
-    // why the cast (not `e instanceof Error`): a DOMException isn't an
-    // instanceof Error in browsers but does carry `.message`, and WebGPU
-    // rejects with DOMExceptions — so keep the original `e?.message ?? String(e)`
-    // exactly, just typed (the cast is erased at runtime).
-    const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
-    yield { type: 'error', error: `local inference failed: ${msg}` };
-    return;
+    if (!signal?.aborted) {
+      // why: WebGPU can reject with a DOMException that is not an Error.
+      const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+      yield { type: 'error', error: `local inference failed: ${msg}` };
+      return;
+    }
   }
   // why synthetic usage: on-device generation has no billed token counts, but the
   // eval scorecard's "runner tokens" split needs a number to stay honest about
   // where work went (output tokens only; prefill is local + free).
-  yield { type: 'usage', usage: { inputTokens: 0, outputTokens: outTokens, cacheReadTokens: 0, cacheWriteTokens: 0 } };
-  yield { type: 'message-stop', stopReason: 'end_turn' };
+  if (!signal?.aborted) yield { type: 'usage', usage: { inputTokens: 0, outputTokens: outTokens, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+  yield { type: 'message-stop', stopReason: signal?.aborted ? 'aborted' : 'end_turn' };
 }
 
 /**

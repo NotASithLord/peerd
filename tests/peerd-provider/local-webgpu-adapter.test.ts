@@ -77,6 +77,15 @@ describe('callLocalWebgpu', () => {
     setLocalGenerate(null);
   });
 
+  test('Stop ends the call with an aborted stop reason', async () => {
+    const controller = new AbortController();
+    setLocalGenerate(() => (async function* () { controller.abort(); })());
+    const out = await collect(callLocalWebgpu({ messages: [], system: 'sys', signal: controller.signal } as any));
+    expect(out.at(-1)).toEqual({ type: 'message-stop', stopReason: 'aborted' });
+    expect(out.some((event) => event.type === 'usage')).toBe(false);
+    setLocalGenerate(null);
+  });
+
   test('projects messages before the local provider transport', async () => {
     let received: any = null;
     setLocalGenerate((request) => {
