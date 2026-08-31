@@ -683,7 +683,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             allowRecursion: request.allowRecursion === true,
             grantedToolNames: childToolNamesFor(request),
             grantedOperations: childOperationsFor(request),
-            ...(request.tools === undefined ? {} : { tools: request.tools }),
+            // why: the controller's normalized scope includes semantic
+            // companions (script -> read_result); authority validates exactly it.
+            ...(request.tools === undefined ? {} : { tools: childToolNamesFor(request) }),
             ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
             ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
           },
@@ -694,7 +696,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
             allowRecursion: request.allowRecursion === true,
             grantedToolNames: childToolNamesFor(request),
             grantedOperations: childOperationsFor(request),
-            ...(request.tools === undefined ? {} : { tools: request.tools }),
+            ...(request.tools === undefined ? {} : { tools: childToolNamesFor(request) }),
             ...(request.maxSteps === undefined ? {} : { maxSteps: request.maxSteps }),
             ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
           },

@@ -216,9 +216,20 @@ export const controllerToolNamesForSpawnedTools = (
   )), false).filter((tool) => allowRecursion || tool.name !== 'actor_create');
   const requested = Array.isArray(requestedNames)
     ? new Set(requestedNames.filter((name) => typeof name === 'string')) : null;
-  return Object.freeze(spawnable
+  // why: script can spill a large value and its trusted result footer directs
+  // the child to read_result. Treat the pager as part of that semantic grant so
+  // an explicit tools:['script'] scope cannot advertise an impossible follow-up.
+  if (requested?.has('script')) requested.add('read_result');
+  const selected = spawnable
     .filter((tool) => !requested || requested.has(tool.name))
-    .map((tool) => tool.name));
+    .map((tool) => tool.name);
+  // The manifest/runtime projection should already close this dependency.
+  // Fail closed if a malformed caller advertises script without its pager;
+  // never invent a name beyond the host-validated visible-name ceiling.
+  if (selected.includes('script') && !selected.includes('read_result')) {
+    return Object.freeze(selected.filter((name) => name !== 'script'));
+  }
+  return Object.freeze(selected);
 };
 
 export const controllerOperationsForSpawnedTools = (

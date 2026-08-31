@@ -1668,7 +1668,7 @@ export const TOOL_METADATA_RECORDS = {
           "items": {
             "type": "string"
           },
-          "description": "Optional. Exact tool-name subset to grant. Omit to inherit your tools (minus actor_create). [] = no tools."
+          "description": "Optional. Exact tool-name subset to grant; required companions such as read_result for script are included automatically. Omit to inherit your tools (minus actor_create). [] = no tools."
         },
         "maxSteps": {
           "type": "integer",

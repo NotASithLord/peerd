@@ -463,7 +463,10 @@ const runControllerTurnWith = async (payload, options) => {
                 allowRecursion: actorRequest.allowRecursion === true,
                 grantedToolNames: childToolNamesFor(actorRequest),
                 grantedOperations: childOperationsFor(actorRequest),
-                ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
+                // why: the sealed semantic owner may add a required companion
+                // such as read_result for script. Send that normalized scope to
+                // the authority shell so its exact-grant cross-check stays true.
+                ...(actorRequest.tools === undefined ? {} : { tools: childToolNamesFor(actorRequest) }),
                 ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
                 ...(actorRequest.maxDepth === undefined ? {} : { maxDepth: actorRequest.maxDepth }),
               }),
@@ -473,7 +476,7 @@ const runControllerTurnWith = async (payload, options) => {
                 allowRecursion: actorRequest.allowRecursion === true,
                 grantedToolNames: childToolNamesFor(actorRequest),
                 grantedOperations: childOperationsFor(actorRequest),
-                ...(actorRequest.tools === undefined ? {} : { tools: actorRequest.tools }),
+                ...(actorRequest.tools === undefined ? {} : { tools: childToolNamesFor(actorRequest) }),
                 ...(actorRequest.maxSteps === undefined ? {} : { maxSteps: actorRequest.maxSteps }),
                 ...(actorRequest.maxDepth === undefined ? {} : { maxDepth: actorRequest.maxDepth }),
               }),

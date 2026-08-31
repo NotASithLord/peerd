@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_DEPTH,
 } from '../../extension/peerd-runtime/actor/spawn.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '../../extension/peerd-runtime/errors.js';
+import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
 
 // ---- pure helpers ---------------------------------------------------------
 
@@ -459,6 +460,42 @@ describe('makeSpawnActor', () => {
 
     expect(job.tools.map((tool: any) => tool.name)).toEqual(['a']);
     expect(store.map.get(out.sessionId!).grantedOperations).toEqual(['turn.test.read']);
+  });
+
+  test('accepts the controller-normalized script pager under a script-only parent manifest', async () => {
+    const store = makeStore();
+    const parent = await store.create({ toolManifest: { allow: ['script'] } });
+    let job: any = null;
+    const { loop } = makeMockLoop();
+    const operations = [
+      'turn.execution.run-script',
+      'turn.execution.spill-script',
+      'turn.resource.read-result',
+    ];
+    const { deps } = baseDeps(store, loop, {
+      projectChildSurface: async (input: any) => {
+        const projected: any = projectControllerToolSurface(input);
+        if (!projected.ok) throw new Error(projected.code);
+        return projected;
+      },
+      runChildOffscreen: async (value: any) => {
+        job = value;
+        return {
+          ok: true, started: true, finalText: 'done',
+          newMessages: [{ role: 'assistant', content: 'done' }],
+        };
+      },
+    });
+    const out = await makeSpawnActor(deps)({
+      task: 't', parentSessionId: parent.sessionId,
+      // The sealed controller normalized the model's tools:['script'] request.
+      tools: ['script', 'read_result'],
+      grantedToolNames: ['script', 'read_result'],
+      grantedOperations: operations,
+    });
+
+    expect(job.tools.map((tool: any) => tool.name)).toEqual(['script', 'read_result']);
+    expect(store.map.get(out.sessionId!).grantedOperations).toEqual(operations);
   });
 
   test.each([
