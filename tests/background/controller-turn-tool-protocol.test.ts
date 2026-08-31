@@ -1482,6 +1482,54 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('normalizes a script-only child scope through the controller and exact host binding', async () => {
+    const descriptors = ['actor_create', 'script', 'read_result'].map(authorityDescriptor);
+    let spawned: any = null;
+    let round = 0;
+    const privateAuthority = context({
+      tools: descriptors, refreshTools: async () => descriptors,
+      actorAuthority: {
+        spawnSync: async (request: any) => {
+          spawned = request;
+          return {
+            result: 'done', sessionId: 'child-script', toolCalls: 1,
+            durationMs: 1, depth: 1,
+          };
+        },
+      },
+      callModel: async function* () {
+        round += 1;
+        if (round > 1) {
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+          return;
+        }
+        yield { type: 'tool-use-start', id: 'spawn-script', name: 'actor_create' };
+        yield {
+          type: 'tool-use-delta', id: 'spawn-script',
+          partialJson: '{"task":"compute","tools":["script"],"sync":true}',
+        };
+        yield { type: 'tool-use-stop', id: 'spawn-script' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const result = await runHarness({
+      ctx: {
+        ...privateAuthority,
+        actorAuthority: undefined,
+        loadAuthorityContext: async () => privateAuthority,
+      },
+    });
+
+    expect(result.error).toBeNull();
+    expect(spawned.tools).toEqual(['script', 'read_result']);
+    expect(spawned.grantedToolNames).toEqual(['script', 'read_result']);
+    expect(spawned.grantedOperations).toEqual([
+      'turn.execution.run-script',
+      'turn.execution.spill-script',
+      'turn.resource.read-result',
+    ]);
+  });
+
   test('one frozen actor scope cannot replace semantic state or change binding mid-turn', async () => {
     const actorCancelDescriptor = authorityDescriptor('actor_cancel');
     const cancelled: string[] = [];
