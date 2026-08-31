@@ -78,9 +78,8 @@ export const DEFAULT_CONFIRM_ACTIONS = true;
 // primitive) pair into ONE of four action CLASSES. The confirm rule
 // itself no longer distinguishes the non-read classes (anything non-read
 // confirms when confirmActions is ON), but the taxonomy STAYS: the
-// lineage UI and the confirm prompt label actions by class, and the
-// review orchestrator intersects on READ. This is the single place the
-// taxonomy is encoded; the dispatcher and the UI both read it from here.
+// lineage UI and the confirm prompt label actions by class. This is the single
+// place the taxonomy is encoded; the dispatcher and the UI both read it from here.
 
 export const ACTION_CLASSES = Object.freeze({
   READ: /** @type {const} */ ('read'),

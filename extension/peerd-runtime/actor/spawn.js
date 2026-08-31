@@ -254,7 +254,7 @@ export const makeSpawnActor = (deps) => {
    *   (untrusted-origin)? Stamped onto the child as `spawnedTrusted` — the
    *   per-hop verdict the trusted-lineage gate walks (delegation-lineage.js).
    *   FAIL-CLOSED: only an explicit `false` (the actor_create tool passes
-   *   ctx.inbound) yields a trusted hop; undefined (the Notebook route, review,
+   *   ctx.inbound) yields a trusted hop; undefined (the Notebook route,
    *   cheap-call, any legacy caller) taints the child — those children never
    *   had delegation, so nothing regresses.
    * @param {number} [req.timeoutMs]               wall-clock budget for the whole
