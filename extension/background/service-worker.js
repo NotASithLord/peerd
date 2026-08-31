@@ -4033,22 +4033,21 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
     error: hostError,
   };
   localGens.set(genId, state);
-  // Stop must actually stop a 30B on-device generation: the engine holds a
-  // generation lease per instance, so an orphaned run would block every
-  // follow-up local turn with "is already generating" until it exhausts its
-  // token budget. The host aborts by genId; fired when the caller's signal
-  // aborts AND from the generator's finally (a consumer that abandons the
-  // stream without a signal still releases the lease). Best-effort: aborting a
-  // settled run is a no-op on the host.
+  // A local generation holds an exclusive engine lease. Stop must release it.
+  // An orphan blocks the next local turn until its token budget ends.
+  // Abort by genId on caller cancellation and generator cleanup.
+  // A consumer without a signal also releases the lease. Host abort is idempotent.
   const abortHostGeneration = () => {
+    state.done = true; wakeLocalGen(state);
     try {
       browser.runtime.sendMessage({ type: 'local-model/host/abort', genId })?.catch?.(() => { /* offscreen gone */ });
     } catch { /* messaging unavailable */ }
   };
   if (hostAvailable) {
     if (opts.signal) opts.signal.addEventListener('abort', abortHostGeneration, { once: true });
-    ensureOffscreen()
-      .then(() => browser.runtime.sendMessage({
+    if (opts.signal?.aborted) abortHostGeneration();
+    else ensureOffscreen()
+      .then(() => opts.signal?.aborted ? abortHostGeneration() : browser.runtime.sendMessage({
         type: 'local-model/host/generate', genId, model: opts.model, messages: opts.messages, system: opts.system, tools: opts.tools,
         // Token budget per ENGINE: the muse model spends its Harmony reasoning
         // channel out of the same budget as the visible answer, and a measured
