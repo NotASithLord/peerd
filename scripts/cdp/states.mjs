@@ -857,13 +857,15 @@ export const STATES = [
         const ordinaryStartedAt = Date.now();
         const ordinaryTab = await evalIn(ctx.page,
           `chrome.tabs.create({ url: ${JSON.stringify(ordinaryUrl)}, active: false })`, true);
+        // why tabs.get: executeScript can wait indefinitely on an inactive tab
+        // whose own fetch/socket probes are intentionally still settling. The
+        // browser-owned tab record is enough to prove the navigation committed
+        // without turning this control into another injected-code test.
         const ordinaryReady = typeof ordinaryTab?.id === 'number' && await waitFor(() =>
-          evalIn(ctx.page, `chrome.scripting.executeScript({
-            target: { tabId: ${ordinaryTab.id} },
-            func: () => ({ title: document.title, body: document.body?.innerText ?? '',
-              historyLength: history.length }),
-          }).then((rows) => rows[0]?.result).catch(() => null)`, true).then((value) =>
-            value?.title === 'ordinary-quarantine-ready' ? value : null), {
+          evalIn(ctx.page, `chrome.tabs.get(${ordinaryTab.id}).catch(() => null)`, true).then((value) =>
+            value?.status === 'complete'
+              && value?.title === 'ordinary-quarantine-ready'
+              && value?.url === ordinaryUrl ? value : null), {
           budgetMs: 5_000, pollMs: 25,
         });
         await waitFor(() => probeRequests.filter((request) =>
@@ -881,8 +883,8 @@ export const STATES = [
         rec.check('an ordinary post-arm page loads once without an error document',
           ordinaryObserved.routeRequests === 1
             && ordinaryReady?.title === 'ordinary-quarantine-ready'
-            && ordinaryReady?.body.includes('ordinary-quarantine-ready')
-            && ordinaryReady?.historyLength >= 1,
+            && ordinaryReady?.status === 'complete'
+            && ordinaryReady?.url === ordinaryUrl,
           JSON.stringify(ordinaryObserved));
         rec.check('the ordinary page keeps focus and its first localhost fetch and socket',
           activeAfterOrdinary === activeBeforeOrdinary

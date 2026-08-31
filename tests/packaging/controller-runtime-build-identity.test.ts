@@ -91,10 +91,12 @@ describe('controller runtime build identity', () => {
     writeFileSync(join(candidate, 'peerd-runtime/controller-feature-fixture.js'), [
       '// Representative catalog-registered semantic feature reusing one exact read authority.',
       "export const CONTROLLER_FEATURE_TOOL_NAME = 'fixture_feature';",
-      'export const executeControllerFeatureTool = async (_args, authority) => {',
-      '  const posture = await authority.readProviderPosture();',
-      "  return { ok: true, content: `provider:${posture.provider}` };",
-      '};',
+      'export const controllerFeatureTool = Object.freeze({',
+      '  execute: async (_args, ctx) => {',
+      '    const posture = await ctx.introspectionAuthority.readProviderPosture();',
+      "    return { ok: true, content: `provider:${posture.provider}` };",
+      '  },',
+      '});',
       '',
     ].join('\n'));
     const catalog = join(candidate, 'peerd-runtime/tools/metadata/catalog.js');
@@ -121,21 +123,12 @@ describe('controller runtime build identity', () => {
       .replace("import { loadSkillTool } from './skills/load-skill-tool.js';", [
         "import { loadSkillTool } from './skills/load-skill-tool.js';",
         'import {',
-        '  CONTROLLER_FEATURE_TOOL_NAME, executeControllerFeatureTool,',
+        '  CONTROLLER_FEATURE_TOOL_NAME, controllerFeatureTool,',
         "} from './controller-feature-fixture.js';",
       ].join('\n'))
       .replace(
-        "  'actor_list', 'inspect', 'load_skill',",
-        "  'actor_list', 'inspect', 'load_skill', CONTROLLER_FEATURE_TOOL_NAME,",
-      )
-      .replace(
-        '  const tool = tools[/** @type {keyof typeof tools} */ (name)];',
-        [
-          '  if (name === CONTROLLER_FEATURE_TOOL_NAME) {',
-          '    return executeControllerFeatureTool(args, authority);',
-          '  }',
-          '  const tool = tools[/** @type {keyof typeof tools} */ (name)];',
-        ].join('\n'),
+        'const tools = Object.freeze({',
+        'const tools = Object.freeze({\n  [CONTROLLER_FEATURE_TOOL_NAME]: controllerFeatureTool,',
       ));
     const ownership = join(candidate, 'peerd-runtime/controller-tool-ownership.js');
     writeFileSync(ownership, readFileSync(ownership, 'utf8').replace(
@@ -150,6 +143,10 @@ describe('controller runtime build identity', () => {
       `${pathToFileURL(introspectionTools).href}?fixture=${Date.now()}`
     );
     const readCalls: string[] = [];
+    expect(candidateIntrospectionTools.CONTROLLER_INTROSPECTION_TOOL_NAMES)
+      .toContain('fixture_feature');
+    expect(candidateIntrospectionTools.controllerHostsIntrospectionTool('fixture_feature'))
+      .toBe(true);
     expect(await candidateIntrospectionTools.executeControllerIntrospectionTool(
       'fixture_feature', {}, { sessionId: 'feature-growth' }, {
         readProviderPosture: async () => {
@@ -159,6 +156,15 @@ describe('controller runtime build identity', () => {
       },
     )).toEqual({ ok: true, content: 'provider:fixture-provider' });
     expect(readCalls).toEqual(['turn.introspection.provider-posture']);
+
+    const candidateOwnership = await import(
+      `${pathToFileURL(ownership).href}?fixture=${Date.now()}`
+    );
+    expect(candidateOwnership.controllerHostsTool('fixture_feature')).toBe(true);
+    expect(candidateOwnership.controllerAuthorityClassForTool('fixture_feature'))
+      .toBe('introspection');
+    expect(candidateOwnership.controllerOperationsForTools(['fixture_feature']))
+      .toEqual(['turn.introspection.provider-posture']);
 
     const candidateProjection = await import(
       `${pathToFileURL(join(candidate, 'peerd-runtime/controller-tool-projection.js')).href}?fixture=${Date.now()}`
@@ -235,7 +241,7 @@ describe('controller runtime build identity', () => {
       join(candidate, 'peerd-runtime/controller-feature-fixture.js'), 'utf8',
     );
     expect(readFileSync(catalog, 'utf8')).toContain('"fixture_feature"');
-    expect(fixture).toContain('executeControllerFeatureTool');
+    expect(fixture).toContain('controllerFeatureTool');
 
     expect(readFileSync(join(candidate, 'background/vault-kernel.js'), 'utf8'))
       .toBe(readFileSync(join(baseline, 'background/vault-kernel.js'), 'utf8'));
