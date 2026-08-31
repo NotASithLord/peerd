@@ -106,7 +106,9 @@ describe('cold entry graphs', () => {
 
   test('the honest native closure excludes growing controller owners and Firefox-only hosts', async () => {
     const measured = await nativeKernelStats();
+    expect(existsSync(join(EXTENSION_DIR, 'background/kernel-control-plane.js'))).toBe(false);
     for (const forbidden of [
+      'background/kernel-control-plane.js',
       'offscreen/controller-runtime.js',
       'offscreen/controller-turn-runtime.js',
       'offscreen/semantic-route-host.js',

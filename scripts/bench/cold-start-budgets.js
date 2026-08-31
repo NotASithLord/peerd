@@ -155,10 +155,11 @@ export const OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT = Object.freeze({
 
 export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Exact achieved authority graph: controller/tool semantics, completed
-  // migration ledgers and pass-through composition aliases remain outside it.
+  // migration ledgers remain outside it; pass-through composition aliases are
+  // deleted.
   // Browser-child generations, runtime-capability-hosts and the semantic hook
   // manifest are fixed custody/policy inputs, not feature ownership.
-  kernel: Object.freeze({ modules: 406, graphBytes: 3_994_651, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 405, graphBytes: 3_994_111, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createKernelSenderPolicy } from '../../extension/background/kernel-control-plane.js';
+import { createKernelSenderPolicy } from '../../extension/background/kernel-sender-policy.js';
 
 const origin = 'chrome-extension://runtime/';
 const policy = createKernelSenderPolicy({

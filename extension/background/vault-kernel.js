@@ -55,25 +55,29 @@ import {
   createKernelDenylistPolicy,
   makeKernelDenylistRoutes,
 } from './kernel-denylist-policy.js';
+import { createKernelSenderPolicy } from './kernel-sender-policy.js';
+import { createKernelConfirmation } from './kernel-confirmation.js';
 import {
-  attachKernelFrontDoor,
-  attachKernelLifecycleEvents,
-  attachKernelTabEvents,
-  createKernelBrowserChildOutcomes,
-  createKernelBrowserEventOwners,
-  createKernelBrowserNetworkOwner,
   createKernelColdReceipts,
-  createKernelConfirmation,
-  createKernelFeatureHost,
+  makeKernelGenerationLifecycle,
+} from './kernel-cold-receipts.js';
+import { createKernelFeatureHost } from './kernel-feature-host.js';
+import { createKernelBrowserChildOutcomes } from './kernel-browser-child-outcomes.js';
+import { attachKernelFrontDoor } from './kernel-front-door.js';
+import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
+import {
   createKernelPortOwners,
   createKernelPortRouter,
-  createKernelSenderPolicy,
-  createKernelTabCustody,
   createKernelUiPortOwner,
+} from './kernel-port-owners.js';
+import {
+  attachKernelLifecycleEvents,
+  attachKernelTabEvents,
+  createKernelBrowserEventOwners,
+  createKernelBrowserNetworkOwner,
+  createKernelTabCustody,
   INERT_CHILD_REQUEST_GUARD,
-  makeKernelDemandRoutes,
-  makeKernelGenerationLifecycle,
-} from './kernel-control-plane.js';
+} from './kernel-tab-events.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { createKernelProviderProjection } from './kernel-provider-projection.js';
 import { createKernelRecoveryCustody } from './kernel-recovery-custody.js';
