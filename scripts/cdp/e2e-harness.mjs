@@ -814,6 +814,7 @@ export async function launchPeerd({
     });
     const listeners = new Set();
     const events = [];
+    const requestUrls = new Map();
     const onTargetEvent = (method, params, message) => {
       if (message.sessionId !== sessionId) return;
       if (method === 'Runtime.exceptionThrown') {
@@ -823,6 +824,15 @@ export async function launchPeerd({
       if (method === 'Runtime.consoleAPICalled' && params?.type === 'error') {
         events.push('ERR ' + (params.args || [])
           .map((arg) => arg.value || arg.description || arg.type).join(' '));
+      }
+      if (method === 'Network.requestWillBeSent') {
+        requestUrls.set(params?.requestId, params?.request?.url);
+      }
+      if (method === 'Network.responseReceived' && (params?.response?.status ?? 0) >= 400) {
+        events.push(`NETFAIL ${params.response.status} ${params.response.url}`);
+      }
+      if (method === 'Network.loadingFailed' && !params?.canceled) {
+        events.push(`NETFAIL ${params?.errorText || 'failed'} ${requestUrls.get(params?.requestId) || '(unknown url)'}`);
       }
       for (const listener of listeners) listener(method, params, message);
     };
@@ -843,6 +853,9 @@ export async function launchPeerd({
   }
   await page.send('Runtime.enable');
   await page.send('Page.enable');
+  // Enable before the native-panel reload so its synchronous CSS/font/image
+  // requests are covered by the same missing-package-resource proof as tabs.
+  await page.send('Network.enable');
   await armDeterministicCapture(page);
   // A background target may throttle requestAnimationFrame indefinitely. The
   // product shell's paint proof intentionally waits two frames, so foreground

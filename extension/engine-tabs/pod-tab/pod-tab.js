@@ -175,9 +175,9 @@ const makePodResolverDeps = () => ({
   readFile: (path) => workspace.read(path),
   /** @param {string} source */
   makeBlobUrl: (source) => URL.createObjectURL(new Blob([source], { type: 'application/javascript' })),
-  // why omitted: fetchRemote and readToolboxModule are authority-bearing
-  // resolver dependencies. Pod JS is local-only; source imports must already
-  // exist in this Pod's workspace and network remains the shell's curl lane.
+  // why omitted: fetchRemote is an authority-bearing resolver dependency. Pod
+  // JS is local-only; source imports must already exist in this Pod's workspace
+  // and network remains the shell's curl lane.
   builtins: NOTEBOOK_BUILTINS,
 });
 
