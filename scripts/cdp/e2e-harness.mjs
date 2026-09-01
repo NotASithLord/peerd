@@ -261,8 +261,13 @@ export const WIDE_METRICS = Object.freeze({ width: 1280, height: 900, deviceScal
  * @param {{ bringToFront?: boolean }} [options]
  * @returns {Promise<Buffer>}
  */
+const foregroundedPages = new WeakSet();
 export async function capturePage(page, { bringToFront = true } = {}) {
-  if (bringToFront) await page.send('Page.bringToFront').catch(() => {});
+  // why: Repeating bringToFront can stall the next headless screenshot.
+  if (bringToFront && !foregroundedPages.has(page)) {
+    await page.send('Page.bringToFront').catch(() => {});
+    foregroundedPages.add(page);
+  }
   let pumping = true;
   let toggle = false;
   const pump = (async () => {
@@ -293,6 +298,11 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } 
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
   const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
   const page = await attach(created.webSocketDebuggerUrl);
+  const disconnect = page.close;
+  page.close = () => {
+    disconnect();
+    return fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
+  };
   await page.send('Runtime.enable');
   await page.send('Page.enable');
   await page.send('Emulation.setDeviceMetricsOverride', metrics);
@@ -750,6 +760,11 @@ export async function openExtPage(ctx, path) {
   // before navigation captures the FULL load. (Same pattern as run-inbrowser-tests.)
   const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
   const page = await attach(created.webSocketDebuggerUrl);
+  const disconnect = page.close;
+  page.close = () => {
+    disconnect();
+    return fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
+  };
   await page.send('Runtime.enable');
   await page.send('Page.enable');
   // The packaged-page boot check needs failed subresource loads (a pruned CSS/font/

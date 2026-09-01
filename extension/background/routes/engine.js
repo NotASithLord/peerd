@@ -1,20 +1,8 @@
 // @ts-check
-// background/routes/engine.js — engine-instance metadata, the Library (apps)
-// surface, .peerd artifact export/import, and VM-originated HTTP egress.
-//
-// apps/delete stays inline in the SW (it reads the reassigned settings to
-// decide whether to un-share over the dweb). Everything here closes over only
-// stable collaborators. Bodies verbatim, deps injected, imports none.
+// Keep engine routes import-free and inject stable collaborators.
 
-/**
- * Await work through the same cancellation boundary as the operation it gates.
- * The underlying one-time hydration may still finish for other callers, but a
- * stopped or expired run no longer waits for it or proceeds to egress.
- * @template T
- * @param {() => Promise<T>} start
- * @param {AbortSignal | null} signal
- * @returns {Promise<T>}
- */
+/** why: A stopped run must not wait for shared hydration or reach egress.
+ * @template T @param {()=>Promise<T>} start @param {AbortSignal|null} signal @returns {Promise<T>} */
 const awaitWithinSignal = (start, signal) => {
   if (!signal) return Promise.resolve().then(start);
   if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
@@ -49,7 +37,8 @@ export const makeEngineRoutes = (deps) => {
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
-    repositories, parseAppManifest, podGitRemoteOperation, getCurrentSessionId, onAppDeleted,
+    repositories, parseAppManifest, podGitRemoteOperation, appReleaseDescriptorMatches,
+    getCurrentSessionId, onAppDeleted,
   } = deps;
   if (typeof awaitDenylistPolicy !== 'function') {
     throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
@@ -67,15 +56,15 @@ export const makeEngineRoutes = (deps) => {
   /** @param {string} appId @param {() => Promise<any>} operation */
   const coordinateApp = (appId, operation) => repositories.coordinate({ kind: 'app', id: appId }, operation);
   /** @param {string} appId @param {() => Promise<any>} operation */
-  const quiesceApp = (appId, operation) => appQuiescence.run(
+  const quiesceApp = (appId, operation, options = {}) => appQuiescence.run(
     appId,
     () => coordinateApp(appId, operation),
-    { close: true },
+    { close: true, ...options },
   );
-  /** @param {unknown} appId @param {unknown} path @param {any} sender */
-  const ownsAppDataMutation = (appId, path, sender) => typeof appId === 'string'
-    && typeof path === 'string'
-    && /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path)
+  /** @param {string} appId @param {() => Promise<any>} operation */
+  const mutateApp = (appId, operation) => quiesceApp(appId, operation, { invalidateDweb: true });
+  /** @param {unknown} appId @param {any} sender */
+  const ownsAppTab = (appId, sender) => typeof appId === 'string'
     && sender?.tab?.id != null
     && appTabTracker.getTabId(appId) === sender.tab.id
     && appTabTracker.parseIdFromUrl?.(sender.tab.url) === appId;
@@ -124,13 +113,8 @@ export const makeEngineRoutes = (deps) => {
     catch { return null; }
   };
 
-  /**
-   * Pod Git stays behind an exact instance/tab pin. Agent jobs receive one
-   * structured, target-bound grant; direct terminal jobs carry the explicit
-   * `true` grant minted by their visible first-party host.
-   * @param {any} msg
-   * @param {any} sender
-   */
+  /** why: Remote Pod Git requires an exact tab and target grant.
+   * @param {any} msg @param {any} sender */
   const runPodGit = async ({ podId, jobId, argv = [], remoteGrant = null }, sender) => {
     if (typeof podId !== 'string' || !Array.isArray(argv)) {
       return { ok: false, error: 'podId-and-argv-required' };
@@ -138,9 +122,7 @@ export const makeEngineRoutes = (deps) => {
     const senderError = await podSenderError(podId, sender);
     if (senderError) return { ok: false, error: senderError };
     const ref = { kind: 'pod', id: podId };
-    // Grant validation and the resulting Git operation are one repository
-    // transaction. Otherwise a concurrent remote set-url can land after the
-    // user approves target A but before push reads origin, sending to target B.
+    // why: One transaction prevents a remote change after target approval.
     return repositories.coordinate(ref, async () => {
     const [command = '', ...args] = argv.map(String);
     const remoteOp = podGitRemoteOperation(argv);
@@ -324,9 +306,7 @@ export const makeEngineRoutes = (deps) => {
         record: { id: record.id, name: record.name, persistent: record.persistent !== false },
       };
     },
-    // Notebook tabs and the offscreen job host own the actual OPFS handles.
-    // They ask here immediately before mutation so the service worker's live
-    // schema posture remains authoritative in Chrome and Firefox alike.
+    // why: The worker stays authoritative for OPFS write posture.
     'lifecycle/assert-opfs-writable': async (_msg, sender = undefined) => {
       const notebookHost = browser.runtime.getURL('engine-tabs/notebook-tab/index.html');
       const senderUrl = sender?.url ?? sender?.tab?.url;
@@ -345,16 +325,7 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // VM-originated HTTP egress. The VM tab's HTTP-marker dispatcher
-    // calls this when it sees a wrapper script's request marker. webFetch
-    // applies the denylist + audit; response body is base64-encoded back
-    // so runtime.sendMessage's JSON serialization preserves the bytes.
-    // Max ~50MB body (matches vm_import's cap) so we don't allow a
-    // runaway curl to OOM the SW.
-    // why vmHttpFetch (not webFetch directly): #53 moved the VM egress glue into
-    // an IO-injected factory (vm-net/vm-http-fetch.js) so it's bun-testable — it
-    // layers the revalidating IDB GET cache + host-bound git-auth + body cap +
-    // chunked base64 on top of webFetch's denylist/SSRF/audit chokepoint.
+    // why: vmHttpFetch adds cache, credentials, size, and byte transport to the egress gate.
     'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract, runId, ownerSessionId, deadlineAt, abortToken, notebookId }, sender = undefined) => {
       if (typeof url !== 'string' || url.length === 0) {
         return { ok: false, error: 'url-required' };
@@ -399,17 +370,8 @@ export const makeEngineRoutes = (deps) => {
           else deadlineTimer = setTimeout(() => runController?.abort(), remaining);
         }
       }
-      // GET callers (the VM HTTP marker fast path) pass only { url } and behave
-      // exactly as before; the rich VM path + the Notebook code-mode bridge pass
-      // method/headers/body. webFetch applies denylist + SSRF + audit on EVERY
-      // method (parity with fetch_url), so a POST here is not a new egress surface.
-      // vmHttpFetch layers the IDB GET cache + optional git-auth on top; noCache
-      // (module-source fetches) bypasses that cache so every run is re-audited.
       try {
-        // why: hydration is part of the egress operation, not a preflight outside
-        // it. Admit the run and arm Stop/deadline first, then await policy through
-        // that signal. A stopped or expired run cannot reach vmHttpFetch even if
-        // the shared hydration later succeeds.
+        // why: Stop and deadline also cancel policy hydration before egress.
         await awaitWithinSignal(
           awaitDenylistPolicy,
           runController?.signal ?? null,
@@ -419,9 +381,6 @@ export const makeEngineRoutes = (deps) => {
           url, method, headers, body, gitAuth, noCache: noCache === true,
           ...(runController ? { signal: runController.signal } : {}),
         });
-        // Design 2a extract post-step (Notebook tab relay) — why + security
-        // posture: shared/fetch-extract.js. Absent `extract` (every VM caller)
-        // it is a passthrough, byte-for-byte as before.
         return await applyWebExtract(resp, extract, url);
       } catch (e) {
         const ev = /** @type {{ name?: string, message?: string }} */ (e);
@@ -446,55 +405,53 @@ export const makeEngineRoutes = (deps) => {
       return { ok: true, aborted: controller != null };
     },
 
-    // --- App metadata fetch -----------------------------------------------
-    // app-tab/index.html requests its name + entry filename here at load
-    // time. The parent then reads files from OPFS directly + composes the
-    // body before posting to the sandboxed runner.
-    'app/get-meta': async ({ appId }) => {
+    'app/get-meta': async ({ appId }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        let meta = await appRegistry.get(appId);
-        if (!meta) return { ok: false, error: 'app-not-found' };
-        let runtimeDweb = meta.dweb ?? null;
-        let runtimeAgent = { kind: 'bound-app', profile: 'developer', surface: 'code' };
-        try {
-          const contract = parseAppManifest(await appClient.readFile({ appId, path: 'peerd.json' }));
-          const paths = new Set((await appClient.listFiles({ appId })).map((/** @type {{path:string}} */ file) => file.path.replace(/^\/+/, '')));
-          if (!paths.has(contract.entry)) return { ok: false, error: `peerd.json entry is missing: ${contract.entry}` };
-          runtimeDweb = contract.capabilities.includes('dweb') && DWEB_ENABLED
-            ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
-            : null;
-          runtimeAgent = contract.agent;
-          if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
-        } catch (error) {
-          if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
-            return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
+        await appTabTracker.dwebGenerationsReady();
+        return await appTabTracker.withDwebAuthority(appId, () => coordinateApp(appId, async () => {
+          let meta = await appRegistry.get(appId);
+          if (!meta) return { ok: false, error: 'app-not-found' };
+          if (meta.dweb?.hash && !ownsAppTab(appId, sender)) return { ok: false, error: 'app-sender-not-instance-pinned' };
+          let runtimeDweb = meta.dweb ?? null;
+          let runtimeAgent = { kind: 'bound-app', profile: 'developer', surface: 'code' };
+          try {
+            const contract = parseAppManifest(await appClient.readFile({ appId, path: 'peerd.json' }));
+            const paths = new Set((await appClient.listFiles({ appId })).map((/** @type {{path:string}} */ file) => file.path.replace(/^\/+/, '')));
+            if (!paths.has(contract.entry)) return { ok: false, error: `peerd.json entry is missing: ${contract.entry}` };
+            runtimeDweb = contract.capabilities.includes('dweb') && DWEB_ENABLED
+              ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
+              : null;
+            runtimeAgent = contract.agent;
+            if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
+          } catch (error) {
+            if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
+              return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
+            }
           }
-        }
-        // dweb meta unlocks the app-tab bridge for dwapps (preview builds);
-        // harmless null elsewhere.
-        return {
-          ok: true,
-          name: meta.name,
-          entryFile: meta.entryFile,
-          fileKinds: meta.fileKinds ?? {},
-          dweb: runtimeDweb,
-          agent: runtimeAgent,
-        };
+          // A hash grant applies only to the installed App bytes, not a mutable fork.
+          const installedBytesMatch = !runtimeDweb?.hash || (appReleaseDescriptorMatches(meta)
+            && typeof runtimeDweb.git_oid === 'string'
+            && await repositories.matches({ kind: 'app', id: appId }, { at: runtimeDweb.git_oid, excludeAppData: true }).catch(() => false));
+          if (!installedBytesMatch) runtimeDweb = { ...runtimeDweb, forked: true };
+          if (runtimeDweb) runtimeDweb = { ...runtimeDweb, generation: appTabTracker.getDwebGeneration?.(appId) ?? 0 };
+          return {
+            ok: true, name: meta.name, entryFile: meta.entryFile,
+            fileKinds: meta.fileKinds ?? {}, dweb: runtimeDweb, agent: runtimeAgent,
+          };
+        }));
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
 
-    // The App editor reads OPFS directly but sends every mutation through the
-    // SW client so byte caps, kind metadata, and rollback stay one contract.
     'app/editor-write': async ({ appId, path, content, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
       if (typeof content !== 'string') return { ok: false, error: 'content-required' };
-      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
+      if (!ownsAppTab(appId, sender) || (runtimeData && !/^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path))) return { ok: false, error: 'app-data-unauthorized' };
       try {
-        const result = await appClient.writeFile({ appId, path, content, reload: false });
+        const result = await appClient.writeFile({ appId, path, content, reload: false, invalidateDweb: !runtimeData });
         return { ok: true, ...result };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -504,9 +461,9 @@ export const makeEngineRoutes = (deps) => {
     'app/editor-delete': async ({ appId, path, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
-      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
+      if (!ownsAppTab(appId, sender) || (runtimeData && !/^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path))) return { ok: false, error: 'app-data-unauthorized' };
       try {
-        await appClient.deleteFile({ appId, path, reload: false });
+        await appClient.deleteFile({ appId, path, reload: false, invalidateDweb: !runtimeData });
         return { ok: true };
       } catch (e) {
         if (runtimeData && (/** @type {{name?:string}} */ (e))?.name === 'NotFoundError') return { ok: true };
@@ -514,34 +471,20 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // vm-tab/index.html fetches its full record here at boot. why a route
-    // (not a direct chrome.storage.local read like before): the VM catalog
-    // moved to IndexedDB (idbKV('vms')), which the tab page reaches through
-    // the registry the SW owns — mirroring app/get-meta.
+    // why: The worker owns the IndexedDB VM registry.
     'vm/get-meta': async ({ vmId }) => {
       if (typeof vmId !== 'string') return { ok: false, error: 'vmId-required' };
       try {
         const record = await vmRegistry.get(vmId);
         if (!record) return { ok: false, error: 'vm-not-found' };
-        // why devMode rides along: vm-tab has no settings of its own; it reads
-        // it here (once, at boot) to honour the "verbose VM diagnostics" toggle
-        // (Settings → Behavior) — surfaces the install/verify output in the
-        // terminal at boot (the persistent shell is never traced with `set -x`).
+        // why: The VM tab has no settings store.
         return { ok: true, record, devMode: !!settingsStore.get().devMode };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
 
-    // --- Library (the full-tab apps surface in the options page) ----------
-    // Metadata only — the catalog records, never OPFS file bodies (the grid
-    // stays light under default persistence). Open goes through the appClient
-    // so tab lifecycle + OPFS teardown match the agent's tools.
-    // why vault-gated: matches the memory/* + session/* convention — the
-    // lock is a privacy curtain over plaintext-IDB user content (the app
-    // catalog reveals what the user has been building), and export is
-    // exfiltrating. The options page already hides the Library when locked;
-    // this is the message-level backstop.
+    // why: The vault lock hides plaintext App metadata at the message boundary.
     'apps/list': async () => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       try {
@@ -602,8 +545,7 @@ export const makeEngineRoutes = (deps) => {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
-    // App-tab editor IO goes through the same mutation coordinator as Git.
-    // This keeps a multi-surface browser App from writing around restore/share.
+    // why: Editor and Git writes use one mutation coordinator.
     'app/editor/read': async ({ appId, path }) => {
       if (typeof appId !== 'string' || typeof path !== 'string') return { ok: false, error: 'appId-and-path-required' };
       try { return { ok: true, content: await appClient.readFile({ appId, path }) }; }
@@ -656,7 +598,7 @@ export const makeEngineRoutes = (deps) => {
     'apps/repository/restore': async ({ appId, to }) => {
       if (typeof appId !== 'string' || typeof to !== 'string') return { ok: false, error: 'appId-and-to-required' };
       try {
-        const result = await quiesceApp(appId, () => repositories.restoreApp(appId, { to }));
+        const result = await mutateApp(appId, () => repositories.restoreApp(appId, { to }));
         appTabTracker.reloadTab(appId).catch(() => {});
         await auditLog.append({ type: 'git_version_restored', details: { kind: 'app', appId, to, oid: result.oid } });
         return { ok: true, result };
@@ -664,13 +606,13 @@ export const makeEngineRoutes = (deps) => {
     },
     'apps/repository/branch': async ({ appId, name, checkout = true }) => {
       if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
-      try { return { ok: true, result: await (checkout === false ? coordinateApp : quiesceApp)(appId, () => repositories.branch({ kind: 'app', id: appId }, { name, checkout: checkout !== false })) }; }
+      try { return { ok: true, result: await (checkout === false ? coordinateApp : mutateApp)(appId, () => repositories.branch({ kind: 'app', id: appId }, { name, checkout: checkout !== false })) }; }
       catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
     },
     'apps/repository/checkout': async ({ appId, name }) => {
       if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
       try {
-        const result = await quiesceApp(appId, () => repositories.checkout({ kind: 'app', id: appId }, { name }));
+        const result = await mutateApp(appId, () => repositories.checkout({ kind: 'app', id: appId }, { name }));
         appTabTracker.reloadTab(appId).catch(() => {});
         return { ok: true, result };
       } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
@@ -707,15 +649,12 @@ export const makeEngineRoutes = (deps) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         const result = await withDwebPublication(() => withAppLifecycle(appId, async () => {
-          // Revoke the live network copy before removing the only durable record
-          // that names it. A transient host failure leaves the local App intact so
-          // the user can retry without losing the hashes needed for revocation.
+          // why: Keep the record until all live network copies are revoked.
           const record = await appRegistry.get(appId);
           if (!record) return { ok: false, error: 'app-not-found' };
           if (DWEB_ENABLED && (record.dweb || record.shared)) {
             try {
-              // Never create a host just to revoke. No offscreen context means
-              // no in-memory content store can still be serving these bytes.
+              // why: An absent host cannot still serve in-memory bytes.
               const contexts = await listOffscreenContexts(browser);
               if (contexts.length) {
                 const reply = await browser.runtime.sendMessage({
@@ -754,14 +693,7 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // --- artifacts: .peerd export/import (DESIGN-10) ---
-    //
-    // One bundle format under manual shares, web publishing, and (later)
-    // dwapps. The engine module owns the format (build/verify/unpack);
-    // these routes inject the IO: registry records, OPFS trees, the
-    // stored TOFU image pin. Same inspect-then-apply shape as the
-    // settings transfer — and like every import here, apply mints
-    // a FRESH id, never overwriting an existing artifact.
+    // why: Imports mint fresh IDs and never replace existing artifacts.
     'export/artifact': async ({ kind, id }) => {
       if (typeof id !== 'string' || !id) return { ok: false, error: 'id-required' };
       /** @param {string[]} rootPath @param {'text' | 'bytes'} mode */
@@ -780,8 +712,7 @@ export const makeEngineRoutes = (deps) => {
         if (kind === 'app') {
           const snapshot = await appClient.snapshotFiles({ appId: id });
           record = snapshot.record;
-          // why every App file is read as bytes: artifact transfer is lossless;
-          // the persisted kind map decides which bytes are editable text.
+          // why: App artifact transfer must preserve every byte.
           envelope = await buildAppExport({ record, files: snapshot.files });
         } else if (kind === 'notebook') {
           record = await jsRegistry.get(id);
@@ -790,10 +721,7 @@ export const makeEngineRoutes = (deps) => {
         } else if (kind === 'vm') {
           record = await vmRegistry.get(id);
           if (!record) return { ok: false, error: 'vm-not-found' };
-          // The recipe's whole point is carrying the base-image pin
-          // (receiver pins BEFORE first boot). v1 streams ONE stock
-          // image, so the sole pin entry is the image; without it
-          // (never booted) there is nothing trustworthy to export.
+          // why: A VM recipe needs a trusted base-image pin.
           const stored = await browser.storage.local.get(IMAGE_PIN_STORAGE_KEY);
           const pins = stored?.[IMAGE_PIN_STORAGE_KEY] ?? {};
           const [imageUrl, pin] = Object.entries(pins)[0] ?? [];
@@ -807,16 +735,13 @@ export const makeEngineRoutes = (deps) => {
         auditLog.append({ type: 'artifact_exported', details: { kind, id, name: record.name } }).catch(() => {});
         return { ok: true, filename: exportFilename(record.name, kind), envelope };
       } catch (e) {
-        // why cast: the error class arrives via the `any` deps bag, so
-        // instanceof can't narrow `e` for tsc — read .message off a view.
+        // why: The any-typed dependency does not narrow the caught value.
         if (e instanceof ArtifactTooLargeError) return { ok: false, error: /** @type {{ message?: string }} */ (e).message };
         throw e;
       }
     },
 
-    // Pre-flight: parse + verify hashes + summarize BEFORE any write
-    // (the envelope is self-verifying; nothing is trusted until the
-    // chunk hashes match the manifest).
+    // why: Verify the envelope before any write.
     'import/inspect': async ({ envelope }) => inspectEnvelope(envelope),
 
     'import/apply': async ({ envelope }) => {
@@ -827,15 +752,13 @@ export const makeEngineRoutes = (deps) => {
         if (e instanceof EnvelopeFormatError
             || e instanceof EnvelopeIntegrityError
             || e instanceof ArtifactTooLargeError) {
-          // why cast: the error classes arrive via the `any` deps bag, so
-          // instanceof can't narrow `e` for tsc — read .message off a view.
+          // why: The any-typed dependency does not narrow the caught value.
           return { ok: false, error: /** @type {{ message?: string }} */ (e).message };
         }
         throw e;
       }
       const { kind, name, entry, files, fileKinds, meta } = opened;
-      // Notebook source files use the existing text contract. Apps receive the
-      // raw file map so import preserves every byte, including unknown suffixes.
+      // why: Apps keep raw bytes, but Notebooks use text files.
       const textFiles = () => {
         /** @type {Record<string, string>} */
         const out = {};
@@ -845,8 +768,6 @@ export const makeEngineRoutes = (deps) => {
       };
       let result;
       if (kind === 'app') {
-        // appClient.create is the same path the agent's sandbox_create app arm takes:
-        // fresh id, registry record, OPFS writes.
         let record;
         try {
           record = await appClient.create({
@@ -861,9 +782,7 @@ export const makeEngineRoutes = (deps) => {
         }
         result = { ok: true, kind, id: record.id };
       } else if (kind === 'notebook') {
-        // Refuse before minting metadata. The guarded OPFS helper checks again
-        // at each file write, but a preflight avoids an empty registry record
-        // when the workspace schema is read-only.
+        // why: Refuse before a read-only workspace gets an empty record.
         try { await assertOpfsWritable(); }
         catch (error) {
           return {
@@ -879,10 +798,7 @@ export const makeEngineRoutes = (deps) => {
         result = { ok: true, kind, id: record.id };
       } else {
         const record = await vmRegistry.create({ name });
-        // Seed the TOFU pin BEFORE first boot — the recipe's payoff. A
-        // pin we already hold for the same URL is NEVER overwritten:
-        // TOFU means local evidence wins, and the boot path fails
-        // closed on any mismatch either way.
+        // why: Existing local TOFU evidence wins over imported evidence.
         const image = meta.image;
         if (typeof image?.url === 'string' && typeof image?.pin?.headSha256 === 'string') {
           const stored = await browser.storage.local.get(IMAGE_PIN_STORAGE_KEY);

@@ -1,65 +1,21 @@
 // @ts-check
-// tab-tracker — SW-side bookkeeping of which engine-instance id lives in
-// which browser tab. The shared core behind vm-/notebook-/pod-/app-tab-tracker.
-//
-// Each TAB-HOSTED peerd execution kind (WebVM, Notebook, Pod, App) is a discrete
-// browser tab at chrome-extension://<id>/<kind>-tab/index.html#<id> (the
-// headless script worker has no tab, so it isn't tracked here). The
-// tab announces itself on load (`<kind>/tab-ready` message) and we learn
-// its tabId from the sender. We also pre-populate the map at SW startup
-// by querying for matching URLs (the SW can restart while instance tabs
-// keep running). chrome.tabs.onRemoved drops stale entries.
-//
-// The kinds share the same bookkeeping; the only real
-// differences are the tab path, the ready timeout, the injectable tabs
-// API (the in-browser vm test stubs it), and the error thrown when a tab
-// closes before it's ready. Those are the config below. Each kind's
-// module is now a thin wrapper that picks a name + the subset of methods
-// it exposes (e.g. app adds reloadTab and omits isReady).
-//
-// What this module is NOT responsible for:
-//   - Spawning the instance (that happens here too, as a convenience,
-//     but the caller decides when).
-//   - Tracking which session is attached to which instance (registry).
-//   - Persisting anything (the persisted catalog lives in the registry).
+// Track each tab-hosted engine instance across service-worker restarts.
 
 import browser from '/vendor/browser-polyfill.js';
 
-/**
- * @typedef {Object} TabTrackerConfig
+/** @typedef {Object} TabTrackerConfig
  * @property {string} tabPath
- *   Extension-relative path to the instance tab page (e.g. VM_TAB_PATH).
  * @property {number} readyTimeoutMs
- *   How long ensureTab waits for the tab's `ready` broadcast before
- *   rejecting. VMs stream a disk image (slow); Notebooks/apps boot fast.
- * @property {(id: string) => Error} closedError
- *   Builds the rejection for a tab that closes before ready. vm injects
- *   VMTabClosedError (carries `.vmId`); notebook/app use a plain Error.
- * @property {(id: string) => string} notReadyMessage
- *   Message for the ensureTab readiness-timeout Error.
+ * @property {(id:string)=>Error} closedError
+ * @property {(id:string)=>string} notReadyMessage
  * @property {import('webextension-polyfill').TabGroups.Color} [groupColor]
- *   tabGroups color for the collapsible peerd group. Defaults to orange.
  * @property {typeof browser.tabs} [tabs]
- *   Injected tabs API (query/get/create/update/remove). Defaults to the
- *   real browser.tabs; the in-browser tests inject a stub so tracker
- *   behavior is exercised without spawning real tabs.
- * @property {((tabId: number, kindLabel: string, id?: string) => void) | null} [announce]
- *   Drops a "go there" card in the chat for an agent-opened background tab.
- *   Injected by the SW (announceAgentTab); null when no announcer is wired.
+ * @property {((tabId:number,kindLabel:string,id?:string)=>void)|null} [announce]
  * @property {string} [kindLabel]
- *   Human noun for the announce card ('a Linux VM', 'a Notebook', 'an App').
  * @property {boolean} [announceOnReady]
- *   Delay the card until mandatory host initialization succeeds.
- * @property {((id: string, tabId: number) => void) | null} [onAdopt]
- *   Lifecycle liveness hook: fired on every id↔tab association (spawn,
- *   tab-ready, bootstrap re-adoption). Best-effort — see the §9 ledger.
- * @property {((id: string) => void) | null} [onDrop]
- *   Lifecycle liveness hook: fired on a clean tab removal.
- */
-
-/**
- * @param {TabTrackerConfig} config
- */
+ * @property {((id:string,tabId:number)=>void)|null} [onAdopt]
+ * @property {((id:string)=>void)|null} [onDrop] */
+/** @param {TabTrackerConfig} config */
 export const createTabTracker = ({
   tabPath,
   readyTimeoutMs,
@@ -67,17 +23,11 @@ export const createTabTracker = ({
   notReadyMessage,
   groupColor = 'orange',
   tabs = browser.tabs,
-  // why: agent-opened tabs open in the BACKGROUND (active:false) and never steal
-  // focus; `announce(tabId, kindLabel)` drops a "go there" card in the chat
-  // instead (DESIGN-12). Injected by the SW (announceAgentTab). kindLabel is the
-  // human noun for the card ('a Linux VM', 'a Notebook', 'an App').
+  // why: Announce agent-opened background tabs without taking focus.
   announce = null,
   kindLabel = 'a tab',
   announceOnReady = false,
-  // Lifecycle liveness hooks (§9): fired on every id↔tab association and
-  // clean drop, so the durable ledger knows which instances were HOSTED if
-  // an eviction hits. Optional + best-effort — tracker bookkeeping never
-  // depends on them.
+  // why: Best-effort hooks keep the durable liveness ledger current.
   onAdopt = /** @type {((id: string, tabId: number) => void) | null} */ (null),
   onDrop = /** @type {((id: string) => void) | null} */ (null),
 }) => {
@@ -87,6 +37,8 @@ export const createTabTracker = ({
   const byId = new Map();
   /** @type {Map<number, string>} */
   const tabIdToId = new Map();
+  /** @type {Map<string,Promise<number>>} */
+  const ensureById = new Map();
 
   /** @param {string | undefined} url @returns {string | null} */
   const parseIdFromUrl = (url) => {
@@ -102,8 +54,7 @@ export const createTabTracker = ({
   const recordEntry = (id, tabId, ready = false) => {
     let entry = byId.get(id);
     if (!entry) {
-      // why the executor runs synchronously, so both are assigned before the
-      // constructor returns; the casts express that to tsc (it can't prove it).
+      // why: The Promise executor assigns both callbacks synchronously.
       /** @type {(tabId: number) => void} */
       let resolveReady = () => {};
       /** @type {(err: Error) => void} */
@@ -113,15 +64,12 @@ export const createTabTracker = ({
         resolveReady = resolve;
         rejectReady = reject;
       });
-      // why the no-op catch: if the tab closes while NOBODY is awaiting
-      // readiness (no ensureTab in flight), the rejectReady below would
-      // otherwise surface as an unhandled rejection in the SW console.
-      // Attaching one handler marks it handled; ensureTab's racers still
-      // observe the rejection normally.
+      // why: Handle a rejection when no caller waits for readiness.
       readyPromise.catch(() => {});
       entry = { tabId, ready, readyPromise, resolveReady, rejectReady };
       byId.set(id, entry);
     } else {
+      tabIdToId.delete(entry.tabId);
       entry.tabId = tabId;
     }
     tabIdToId.set(tabId, id);
@@ -137,15 +85,7 @@ export const createTabTracker = ({
     entry.resolveReady?.(entry.tabId);
   };
 
-  /**
-   * Reset an id's entry to "reloading": not-ready, with a FRESH readyPromise the
-   * reloaded tab resolves when it re-announces <kind>/tab-ready. why: a wedged
-   * tab is recovered with tabs.reload — same tabId, but the old readyPromise is
-   * already settled, so without this an ensureTab after the reload would early-
-   * return on the stale `ready` flag and race the re-boot. The tab is NOT removed,
-   * so no onTabRemoved / command-queue interrupt fires. No-op if the entry is gone.
-   * @param {string} id
-   */
+  /** why: A reload needs a new readiness promise for the same tab. @param {string} id */
   const markReloading = (id) => {
     const entry = byId.get(id);
     if (!entry) return;
@@ -162,11 +102,7 @@ export const createTabTracker = ({
     entry.rejectReady = rejectReady;
   };
 
-  /**
-   * Walk existing tabs at SW boot. Any instance tab still alive in the
-   * browser gets re-registered. They've already booted, so they're
-   * considered ready immediately.
-   */
+  /** Adopt existing instance tabs after a service-worker restart. */
   const bootstrap = async () => {
     try {
       const liveTabs = await tabs.query({ url: `${tabUrlPrefix}*` });
@@ -182,11 +118,7 @@ export const createTabTracker = ({
     }
   };
 
-  /**
-   * Called from the SW's runtime.onMessage when a tab broadcasts
-   * <kind>/tab-ready. Marks the tracker entry ready and pins the tabId.
-   * @param {string} id @param {number} tabId
-   */
+  /** @param {string} id @param {number} tabId */
   const onTabReady = (id, tabId) => {
     recordEntry(id, tabId, true);
     markReady(id);
@@ -195,14 +127,11 @@ export const createTabTracker = ({
     }
   };
 
-  // Record a host tab before it is runnable. Apps use this while installing
-  // their mandatory tab-scoped network rule; only onTabReady resolves callers.
+  // why: Apps must install tab-scoped network rules before they become ready.
   /** @param {string} id @param {number} tabId */
   const onTabPending = (id, tabId) => { recordEntry(id, tabId, false); };
 
-  /** Reject readiness immediately when a host cannot establish its mandatory
-   * runtime floor. why: callers need the real failure, not a later timeout.
-   * @param {string} id @param {Error} error */
+  /** why: Return the host failure instead of a later timeout. @param {string} id @param {Error} error */
   const onTabFailed = (id, error) => {
     const entry = byId.get(id);
     if (!entry) return null;
@@ -213,16 +142,7 @@ export const createTabTracker = ({
     return entry.tabId;
   };
 
-  /**
-   * Called from chrome.tabs.onRemoved. Drops the entry and rejects any
-   * pending ready waiters with the configured closedError. Returns the
-   * id that lived in the closed tab (or null) so the SW wiring can
-   * interrupt that instance's pending RPCs in its client — the tracker
-   * only knows tabId↔id; the client owns the command queue.
-   *
-   * @param {number} tabId
-   * @returns {string | null}
-   */
+  /** @param {number} tabId @returns {string|null} */
   const onTabRemoved = (tabId) => {
     const id = tabIdToId.get(tabId);
     if (!id) return null;
@@ -236,40 +156,22 @@ export const createTabTracker = ({
     return id;
   };
 
-  /**
-   * Return the tabId for id without creating it. Used for "is the
-   * instance live?" checks (e.g. for the side panel chip).
-   * @param {string} id
-   */
+  /** @param {string} id */
   const getTabId = (id) => byId.get(id)?.tabId ?? null;
 
   /** @param {string} id */
   const isReady = (id) => !!byId.get(id)?.ready;
 
-  /**
-   * Ensure a tab exists for id. If one is already live, return its id
-   * immediately. Otherwise spawn a tab and wait for its <kind>/tab-ready
-   * broadcast.
-   *
-   * `active` applies ONLY to the create path: a newly spawned tab can
-   * take focus so the user sees it appear (DECISIONS #20, 2026-06-14),
-   * while a call that finds the tab already live returns early and never
-   * re-focuses it — so acting on an existing instance leaves the user put.
-   *
-   * @param {string} id
-   * @param {{ active?: boolean, groupTitle?: string, hashSuffix?: string }} [opts]
-   * @returns {Promise<number>} tabId
-   */
-  const ensureTab = async (id, opts = {}) => {
+  /** why: Only a newly created active tab can take focus.
+   * @param {string} id @param {{active?:boolean,groupTitle?:string,hashSuffix?:string}} [opts] @returns {Promise<number>} */
+  const ensureTabUnlocked = async (id, opts = {}) => {
     const existing = byId.get(id);
     if (existing) {
       // If the tab is still alive, we're done; otherwise spawn.
       try {
         const tab = await tabs.get(existing.tabId);
         if (tab) {
-          // Interacting with an EXISTING agent tab (e.g. vm_boot on a live VM)
-          // — update the "current agent tab" card so it tracks where the loop is
-          // working, not just where it last created a tab. Background only.
+          // why: Keep the current agent-tab card on the live background tab.
           if (opts.active !== true && announce) {
             try { announce(existing.tabId, kindLabel, id); } catch { /* best-effort */ }
           }
@@ -280,15 +182,12 @@ export const createTabTracker = ({
           ]);
         }
       } catch {
-        // Tab no longer exists; fall through to create a new one.
         tabIdToId.delete(existing.tabId);
         byId.delete(id);
       }
     }
 
-    // Launch context belongs in the fragment so it never leaves the extension
-    // origin. Refuse a second fragment or an unbounded value; callers supply an
-    // encoded query beginning with `?` (for example the App actor owner).
+    // why: Keep bounded launch context inside the extension origin fragment.
     const hashSuffix = typeof opts.hashSuffix === 'string'
       && opts.hashSuffix.startsWith('?')
       && !opts.hashSuffix.includes('#')
@@ -305,14 +204,11 @@ export const createTabTracker = ({
     const entry = recordEntry(id, tab.id, false);
     entry.announceWhenReady = opts.active !== true;
 
-    // Agent-opened (background) tab → announce a "go there" card. Fired on CREATE
-    // (not after ready) so even a slow-booting background tab surfaces a card the
-    // moment it exists. A user-focused open (active:true) doesn't announce.
+    // why: Surface a slow background tab as soon as it exists.
     if (opts.active !== true && announce && !announceOnReady) {
       try { announce(tab.id, kindLabel, id); } catch { /* best-effort card */ }
     }
 
-    // Best-effort: park in a tab group so the user can collapse them.
     if (opts.groupTitle) {
       addToGroup(tab.id, opts.groupTitle, groupColor).catch((e) => {
         console.debug(`[tab-tracker ${tabPath}] addToGroup failed`, e);
@@ -324,11 +220,17 @@ export const createTabTracker = ({
       timeout(readyTimeoutMs, notReadyMessage(id)),
     ]);
   };
+  const ensureTab = (/** @type {string} */ id, /** @type {{active?:boolean,groupTitle?:string,hashSuffix?:string}} */ opts = {}) => {
+    const active = ensureById.get(id);
+    if (active) return active;
+    const pending = ensureTabUnlocked(id, opts).finally(() => {
+      if (ensureById.get(id) === pending) ensureById.delete(id);
+    });
+    ensureById.set(id, pending);
+    return pending;
+  };
 
-  /**
-   * Close an id's tab (if alive). Returns true if a close was issued.
-   * @param {string} id
-   */
+  /** @param {string} id */
   const closeTab = async (id) => {
     const tabId = getTabId(id);
     if (tabId == null) return false;
@@ -340,8 +242,7 @@ export const createTabTracker = ({
     }
   };
 
-  /** Re-trigger a reload (used after app body updates so the iframe re-renders).
-   * @param {string} id */
+  /** @param {string} id */
   const reloadTab = async (id) => {
     const tabId = getTabId(id);
     if (tabId == null) return false;
