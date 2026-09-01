@@ -1,31 +1,5 @@
 // @ts-check
-// Service worker — wiring + dependency-injection assembly (architecture.md §6).
-//
-// The SW imports each peerd-* module's public surface, creates concrete
-// instances (vault, audit log, session store), assembles the per-call
-// dependency context (buildToolContext, buildStateSnapshot), drives the agent
-// turn, and routes messages. It owns no business logic of its own — that lives
-// in the peerd-* modules and in the route handlers under background/routes/.
-//
-// Message routes: the dispatcher handlers live in background/routes/*.js —
-// import-free, deps-injected factories (makeVaultRoutes, makeProviderRoutes, …)
-// spread into makeDispatcher with a shared `routeDeps` object. They are
-// Bun-unit-tested in tests/background/ and statically wiring-checked in
-// tests/meta/sw-routes-wiring.test.ts. A route stays INLINE here only when it
-// closes over reassigned module state (settings, activeSession, denylist*,
-// defaultProfile, localModel*) that a captured reference couldn't track — those
-// are the handful left in the dispatcher below. Keep that rule: a new route
-// that needs only stable collaborators belongs in a routes/ module, not here.
-// New non-route logic that grows past a few lines of glue belongs in a module
-// (a peerd-* barrel, or a background/*.js helper like settings-patch.js), not
-// inlined into a handler.
-//
-// SW lifetime: this module is re-executed on every cold start. Module
-// scope is the "per-SW-lifetime singleton" surface. The offscreen doc
-// holds a keepalive port so the SW survives the 30s idle timer during
-// active sessions. State that must survive SW termination lives in
-// chrome.storage.session (`peerd-egress` sessionCache namespace) or
-// chrome.storage.local (`egress.kv`).
+// Assemble module surfaces. Keep logic in modules and durable state in browser storage.
 
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
@@ -405,7 +379,7 @@ import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
-import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
+import { createAppClient, APP_TAB_GROUP_TITLE, appReleaseDescriptorMatches } from './app-client.js';
 import { createPageActivityReporter } from './page-activity.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
 import { createAppQuiescence } from './app-quiescence.js';
@@ -3140,10 +3114,19 @@ const podTabTracker = createPodTabTracker({
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
+const purgeAppRoomOwners = async (/** @type {string} */ appId, /** @type {number} */ generation) => {
+  if (!DWEB_ENABLED) return;
+  await ensureOffscreen();
+  const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+    type: 'dweb/base-host/room', op: 'leave-app-owners', appId, generation,
+  }));
+  if (!reply?.ok) throw new Error(reply?.error ?? 'App dweb owners did not stop');
+};
 const appTabTracker = createAppTabTracker({
   announce: trackerNote(appRegistry, 'App'),
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
+  purgeDwebOwners: purgeAppRoomOwners,
 });
 const repositories = createRepositoryService({
   loadGit: async () => browserGit,
@@ -4595,21 +4578,11 @@ const pushState = makeCoalescedStatePush({
   onError: (error) => console.warn('[state] push failed', error),
 });
 
-// Keepalive ports we hold references to so they're not GC'd. Recent
-// Chrome versions retain SW ports via their internal table, but holding
-// our own reference is belt-and-suspenders against version-to-version
-// drift.
+// why: Hold keepalive ports across browser-version changes.
 /** @type {Set<chrome.runtime.Port>} */
 const keepalivePorts = new Set();
 
-// Side-panel forwarder. The offscreen doc broadcasts voice/* (chunk,
-// auto-stop, error, permission-result) and the VM tabs broadcast
-// vm/stdout-chunk + vm/stderr-chunk via runtime.sendMessage; the SW
-// forwards them all to the active side-panel port so the side panel
-// only has to subscribe to one surface. (Voice chunks stream the live
-// transcript; VM chunks render per-tool-use stdout/stderr inline next
-// to the vm_boot card.) Returns false so the unified makeDispatcher
-// continues to other listeners that might care.
+// Forward host streams through the side panel's single message surface.
 const FORWARD_TYPES = new Set([
   'voice/chunk', 'voice/auto-stop', 'voice/error', 'voice/permission-result',
   'vm/stdout-chunk', 'vm/stderr-chunk',
@@ -4624,17 +4597,61 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
   return false;
 });
 
-// Tab tracker wiring. Each kind's tab broadcasts <kind>/tab-ready
-// on load; we resolve the pending readyPromise so any in-flight
-// ensureTab call returns. Closed tabs drop from the map via
-// chrome.tabs.onRemoved.
+// Resolve host readiness messages and drop closed tabs.
+/** @type {Map<number,Promise<void>>} */
+const appRetirements = new Map();
+const retireAppDweb = (/** @type {string} */ appId) =>
+  appTabTracker.retireDwebTab(appId).catch((error) => {
+    console.warn('[app] authority retirement failed', appId, error);
+    throw error;
+  });
+const trackAppRetirement = (/** @type {number} */ tabId, /** @type {()=>Promise<void>} */ operation) => {
+  const retirement = operation();
+  appRetirements.set(tabId, retirement);
+  retirement.then(() => appRetirements.get(tabId) === retirement && appRetirements.delete(tabId), () => {});
+  return retirement;
+};
+const failAppTab = async (/** @type {string} */ appId, /** @type {Error} */ error, /** @type {number} */ tabId) => {
+  const failedTabId = appTabTracker.onTabFailed(appId, error, tabId);
+  if (failedTabId != null) await trackAppRetirement(tabId, () => retireAppDweb(appId)).catch(() => {});
+  return failedTabId;
+};
+/** @param {number} tabId @param {string|undefined} url @param {string|null} trackedAppId */
+const retireAppDocument = async (tabId, url, trackedAppId) => {
+  const entry = trackedAppId ? null : await engineLiveness.findByTab('app', tabId);
+  const appId = trackedAppId ?? entry?.id;
+  if (!appId) return;
+  if (typeof url === 'string' && appTabTracker.parseIdFromUrl(url) !== appId) {
+    if (trackedAppId) appTabTracker.onTabRemoved(tabId);
+    else engineLiveness.drop('app', appId);
+  }
+  await retireAppDweb(appId);
+};
+const refuseAppTab = async (/** @type {string} */ appId, /** @type {number} */ tabId, /** @type {string} */ error) => {
+  await appTabTracker.disposeDwebTab(appId, tabId).catch(() => {});
+  setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
+  return { ok: false, error };
+};
 /** @param {any} msg @param {any} sender */
-const attachAppTabActor = async (msg, sender) => {
+const attachAppTabActorUnlocked = async (/** @type {any} */ msg, /** @type {any} */ sender, /** @type {number|null} */ attachEpoch = null) => {
+  try {
+    if (sender?.tab?.id != null) await appRetirements.get(sender.tab.id);
+    await appTabTracker.dwebGenerationsReady();
+  }
+  catch {
+    const appId = appTabTracker.parseIdFromUrl(sender?.tab?.url);
+    if (attachEpoch != null && sender?.tab?.id != null && !appTabTracker.isAttachCurrent(sender.tab.id, attachEpoch)) {
+      return { ok: false, error: 'stale-app-attach' };
+    }
+    return appId && sender?.tab?.id != null
+      ? refuseAppTab(appId, sender.tab.id, 'App authority state is unavailable.')
+      : { ok: false, error: 'App authority state is unavailable.' };
+  }
   const claim = validateAppTabClaim({
     claimedAppId: msg?.appId,
     urlAppId: appTabTracker.parseIdFromUrl(sender?.tab?.url),
     senderTabId: sender?.tab?.id,
-    liveTabId: typeof msg?.appId === 'string' ? appTabTracker.getTabId(msg.appId) : null,
+    liveTabId: null,
   });
   if (!claim.ok) return claim;
   const { appId, tabId } = claim;
@@ -4649,19 +4666,24 @@ const attachAppTabActor = async (msg, sender) => {
   });
   if (!ownerClaim.ok) return ownerClaim;
   const ownerSessionId = ownerClaim.ownerSessionId;
+  const attachCurrent = () => attachEpoch == null || appTabTracker.isAttachCurrent(tabId, attachEpoch);
 
+  if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+  if (!appTabTracker.onTabPending(appId, tabId, ownerSessionId)) {
+    return refuseAppTab(appId, tabId, 'app-already-open');
+  }
   if (msg.type === 'app/actor-retry') appTabTracker.markReloading(appId);
-  appTabTracker.onTabPending(appId, tabId, ownerSessionId);
   if (typeof browser.runtime.getBrowserInfo === 'function') {
-    appTabTracker.onTabFailed(appId, new Error('Apps are not available in Firefox yet.'));
+    await failAppTab(appId, new Error('Apps are not available in Firefox yet.'), tabId);
     setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
     return { ok: false, error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.' };
   }
 
   await denylistNetGuard.sync();
   const net = denylistNetGuard.state();
+  if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
   if (!net.supported || net.lastError) {
-    appTabTracker.onTabFailed(appId, new Error('App network isolation is unavailable.'));
+    await failAppTab(appId, new Error('App network isolation is unavailable.'), tabId);
     setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
     return {
       ok: false,
@@ -4674,13 +4696,17 @@ const attachAppTabActor = async (msg, sender) => {
     if (!actorSessionId) throw new Error('manifest-defined App actor could not be attached');
     const actor = await sessions.get(actorSessionId);
     if (!actor?.parentSessionId) throw new Error('manifest-defined App actor has no owner root');
-    appTabTracker.onTabReady(appId, tabId, ownerSessionId, actor.parentSessionId);
+    if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+    if (!appTabTracker.onTabReady(appId, tabId, ownerSessionId, actor.parentSessionId)) {
+      return refuseAppTab(appId, tabId, 'app-already-open');
+    }
     poisonedAppRuntimeTabs.delete(tabId);
     return { ok: true, actorSessionId };
   } catch (error) {
-    // The actor is required, not optional degradation. Keep the trusted shell
-    // open so it can show Retry, but drop this failed host from runnable state.
-    appTabTracker.onTabFailed(appId, error instanceof Error ? error : new Error(String(error)));
+    // why: Keep the shell for Retry, but drop its failed runnable state.
+    if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+    if (appTabTracker.getTabId(appId) !== tabId) return refuseAppTab(appId, tabId, 'app-already-open');
+    await failAppTab(appId, error instanceof Error ? error : new Error(String(error)), tabId);
     denylistNetGuard.sync();
     console.warn('[app] required manifest actor attach failed', error);
     return {
@@ -4691,11 +4717,16 @@ const attachAppTabActor = async (msg, sender) => {
     };
   }
 };
+/** @param {any} msg @param {any} sender */
+const attachAppTabActor = (msg, sender) => {
+  const tabId = sender?.tab?.id;
+  if (tabId == null) return attachAppTabActorUnlocked(msg, sender);
+  return appTabTracker.coordinateAttach(tabId, (epoch) => attachAppTabActorUnlocked(msg, sender, epoch));
+};
 
 browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
   if (!isTrustedSender(sender)) return false;
-  // Each tab-ready is a new tabId entering the driven set, so each one resyncs
-  // the denylist network backstop (idempotent; a no-op when nothing moved).
+  // why: Add each ready tab to the denylist network backstop.
   if (msg?.type === 'vm/tab-ready') {
     if (typeof msg.vmId !== 'string' || sender?.tab?.id == null) return false;
     vmTabTracker.onTabReady(msg.vmId, sender.tab.id);
@@ -4734,6 +4765,7 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
+  appRetirements.delete(tabId);
   poisonedAppRuntimeTabs.delete(tabId);
   // why the vmClient hop: a VM tab closing mid-command would otherwise
   // leave its pending RPCs stalling out the 90s message timeout. The
@@ -4758,19 +4790,16 @@ browser.tabs.onRemoved.addListener((tabId) => {
     }).catch((error) => console.warn('[sw] ephemeral Pod cleanup failed', closedPodId, error))
       .finally(() => podsClosing.delete(closedPodId));
   }
-  appTabTracker.onTabRemoved(tabId);
-  // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to
-  // interrupt on tab-close (above). The Notebook/App clients have no such lane —
-  // their ops are request/response with a per-call timeout — so there is nothing
-  // to "generalize" for js/app at P0 beyond the tracker mapping drop already
-  // done here. An actor bound to a tabless instance simply re-spawns the tab on
-  // its next op (the clients ensureTab internally); the binding persists.
-  // Drop any DOM-nav refs for the closed tab.
+  const closedAppId = appTabTracker.onTabRemoved(tabId);
+  if (closedAppId) void retireAppDweb(closedAppId).catch(() => {});
+  else void engineLiveness.findByTab('app', tabId).then((entry) => {
+    if (!entry) return;
+    engineLiveness.drop('app', entry.id);
+    return retireAppDweb(entry.id);
+  }).catch((error) => console.warn('[app] cold tab authority retirement failed', error));
   domRefs.clear(tabId);
   browserOriginCustody.close(tabId).catch(() => {});
   browserNetworkCustody.close(tabId).catch(() => {});
-  // ...and drop it out of the network backstop's tab scope. Tab ids remain
-  // unique within one browser session, but closed tabs no longer need rules.
   denylistNetGuard.sync();
   // A downloaded preview update may have been waiting only for this engine
   // host to close. The update module re-checks every other surface and active
@@ -4778,12 +4807,17 @@ browser.tabs.onRemoved.addListener((tabId) => {
   updateCheck.onQuiet();
 });
 
-// Invalidate a tab's DOM-nav refs when it starts navigating. The backend DOM
-// node ids belong to the old document. tabs.onUpdated covers full navigations;
-// an SPA route change that slips through still fails safe when DOM.resolveNode
-// cannot find the node and the model has to take a new snapshot.
+// why: DOM node IDs and App attach authority belong to one document.
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'loading') domRefs.clear(tabId);
+  const appDocumentChanged = changeInfo.status === 'loading'
+    || changeInfo.discarded === true || typeof changeInfo.url === 'string';
+  if (appDocumentChanged) {
+    domRefs.clear(tabId);
+    appTabTracker.markAttachLoading(tabId);
+    const trackedAppId = appTabTracker.getAppIdByTab(tabId);
+    void trackAppRetirement(tabId,
+      () => retireAppDocument(tabId, changeInfo.url, trackedAppId));
+  }
   if (typeof changeInfo.url === 'string' && drivenTabIds().includes(tabId)) {
     browserOriginCustody.retain(tabId, changeInfo.url, { keepOnPersistFailure: true })
       .then((originReceipt) => {
@@ -6280,12 +6314,14 @@ const dwebAgentOn = () => DWEB_ENABLED
 // — so without this guard repeated unlocks leak refs + presence beacons. The
 // flag resets when the base host tears down (a fresh SW re-joins cleanly).
 let dwebAgentRoomJoined = false;
+const DWEB_AGENT_ROOM_OWNER = 'agent:dweb';
 const joinDwebAgentInbox = async () => {
   if (!dwebAgentOn() || dwebAgentRoomJoined) return;
   const r = /** @type {any} */ (await withDwebPublication(async (isCurrent) => {
     if (!isCurrent() || !dwebAgentOn() || dwebAgentRoomJoined) return null;
     return browser.runtime.sendMessage({
-      type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+      type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, roomOwnerId: DWEB_AGENT_ROOM_OWNER,
+      op: 'join', name: 'peerd agent',
     });
   }).catch(() => null));
   if (r?.ok) { dwebAgentRoomJoined = true; console.log('[sw] dweb agent inbox joined'); }
@@ -6293,7 +6329,9 @@ const joinDwebAgentInbox = async () => {
 const leaveDwebAgentInbox = async () => {
   if (!dwebAgentRoomJoined) return;
   dwebAgentRoomJoined = false;
-  await browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'leave' }).catch(() => {});
+  await browser.runtime.sendMessage({
+    type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, roomOwnerId: DWEB_AGENT_ROOM_OWNER, op: 'leave',
+  }).catch(() => {});
   console.log('[sw] dweb agent inbox left');
 };
 // The base host tore down (master OFF) → every room closed, incl. the inbox, so
@@ -8156,7 +8194,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
-    repositories, parseAppManifest, podGitRemoteOperation,
+    repositories, parseAppManifest, podGitRemoteOperation, appReleaseDescriptorMatches,
     getCurrentSessionId,
     onAppDeleted,
   }),
@@ -8238,7 +8276,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
-    repositories, isOffscreenSender, createDwebRollbackGuard,
+    repositories, isOffscreenSender, createDwebRollbackGuard, appReleaseDescriptorMatches,
     getCurrentSessionId,
   }),
 

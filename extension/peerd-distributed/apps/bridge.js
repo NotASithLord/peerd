@@ -1,65 +1,10 @@
 // @ts-check
-// peerd-distributed/apps/bridge.js — the dwapp API (bridge v0).
-//
-// THE new privilege boundary (NORTH-STAR §4, MIGRATION §3): a sandboxed,
-// opaque-origin dwapp talks to the dweb ONLY through this postMessage RPC,
-// hosted by the trusted app-tab parent page. The surface is deliberately
-// small and FROZEN for Phase 1 — growing it is a security event, not a
-// convenience.
-//
-// CONNECTIVITY = THE ALWAYS-ON BASE NETWORK. A dwapp is a SUB-PROTOCOL, not a
-// thing tied to a signaler: "join a room" opens a NAMESPACED overlay on the one
-// shared base mesh in the offscreen document (base-network.js openRoom), so the
-// app rides connections that already exist — no per-app rendezvous, no per-app
-// mesh, no rendezvous prompt. The bridge relays each op to that offscreen host
-// over the SW (swCall 'dweb/base/room'); the host pushes feed/dm/presence events
-// back as 'dweb/base-room/event' runtime messages (onHostEvent), filtered to the
-// room we joined. The identity is the user's vault did, held by the offscreen
-// base node — the bridge never mints or sees key material.
-//
-// v0 surface (one room per app):
-//   hello                          → { available, app, launch, did, joined }
-//   join { roomId, name? }         → CONSENT-GATED (confirm + remembered
-//                                    per-app grant; every outcome audited)
-//   leave · status · presence · history { topic } · retain { topic }
-//   publish { topic, data, retain? } · subscribe { topic } · mute { did }
-//   dm-send { to, data }           → a DIRECT 1:1 message (ch=3, PROTOCOL
-//                                    §6.1): point-to-point over one mesh
-//                                    link, never flooded or relayed. This is
-//                                    a NARROWER send than publish (one peer,
-//                                    not the whole room), so it adds no reach
-//                                    a flooding app didn't already have.
-//   announce { meta }
-//   install-app { uri, name? }     → CONSENT-GATED EVERY TIME (never
-//                                    remembered): fetch from base peers,
-//                                    verify, install as an engine App
-// Events pushed to the app: message · direct · presence-join · presence-leave ·
-//   peer · peer-gone · status
-//
-// What v0 deliberately does NOT expose:
-//   - raw sign(): nothing in the demo needs it — post/doc attribution is
-//     the platform envelope's `from`. When an app-visible sign() lands it
-//     MUST be domain-separated per D-8; until then the capability simply
-//     doesn't exist, which is safer than scoping it.
-//   - content put/get: attachments are a Phase 2 surface.
-//   - cross-room/multi-room: one room per app keeps consent legible.
-//   - a custom signaler: the base network IS the connectivity (above).
-//
-// Trust notes:
-//   - Replies go ONLY to the app frame (e.source identity check in the
-//     transport), and the identity key never crosses the boundary — the app
-//     sees its did string, never material.
-//   - Inbound host events are filtered to OUR room id before reaching the
-//     app, so a second dwapp's traffic can't leak across the shared push.
-//   - Payloads stay opaque end-to-end (D-7): `data` passes through
-//     structured-clone untouched.
+// Expose one consent-bound room to one opaque App frame.
+// why: The App can use its did, but it never receives identity key material.
 
 const GRANTS_KEY = 'dweb.grants.v1';
 
-// The default transport for the app-tab host: post events into the dwapp's
-// iframe and receive its ops (identity-checked by e.source). createDwebBridge
-// is otherwise transport-agnostic — the SAME bridge logic runs in the app-tab
-// page today and, with an SW-relay transport, in the offscreen document.
+// The parent accepts iframe requests only from the exact App frame.
 /** @param {HTMLIFrameElement} frame */
 export const iframeTransport = (frame) => ({
   /** @param {any} msg */
@@ -99,12 +44,14 @@ export const createDwebBridge = ({
   onHostEvent,
   launch = {},
 }) => {
-  // Grants key on the app's content identity when it has one (stable
-  // across reinstalls of the same bundle), else the seed key / local id.
-  const appKey = appDweb?.hash || (appDweb?.seed ? `seed:${appDweb.seed}` : appId);
+  // Grants key on verified content. Mutable forks also bind to their base version.
+  let appKey = appDweb?.forked ? `fork:${appId}:${appDweb.hash}`
+    : appDweb?.hash || (appDweb?.seed ? `seed:${appDweb.seed}` : appId);
 
   /** @type {string | null} */
   let roomId = null;        // the room we're in (one per app, v0)
+  /** @type {string | null} */
+  let hostRoomId = null;
   /** @type {string | null} */
   let did = null;           // our base-network did (the offscreen's vault identity)
   let displayName = '';
@@ -112,16 +59,13 @@ export const createDwebBridge = ({
   let roomClientId = null;
   /** @type {string | null} */
   let activeClientId = null;
-  // Once an iframe epoch has been replaced or disposed it can never become
-  // active again. Otherwise a late ordinary RPC from A can replace B, reclaim
-  // roomClientId, and make A's later dispose tear down B's adopted room.
-  // Refuse new epochs after a generous per-tab ceiling instead of evicting
-  // tombstones and making very old epochs replayable again.
+  // why: Keep bounded tombstones so retired iframe epochs cannot regain authority.
   const MAX_CLIENT_EPOCHS = 128;
   /** @type {Set<string>} */
   const retiredClientIds = new Set();
   let admittedClientEpochs = 0;
   let disposed = false;
+  let hostJoinInFlight = false;
   let transitionTail = Promise.resolve();
   /** @type {Map<string,{clientId:string,id:string,cancelled:boolean}>} */
   const pending = new Map();
@@ -143,7 +87,16 @@ export const createDwebBridge = ({
   // One room op, relayed to the offscreen base host (which serves the room as a
   // namespaced sub-protocol on the shared mesh). roomId rides every op.
   /** @param {string} op @param {Record<string, any>} [args] @param {string|null} [exactRoomId] */
-  const room = (op, args = {}, exactRoomId = roomId) => swCall('dweb/base/room', { op, roomId: exactRoomId, ...args });
+  const room = (op, args = {}, exactRoomId = roomId) => swCall('dweb/base/room', {
+    op, roomId: exactRoomId, ...args,
+    bridgeAppId: appId, bridgeAppHash: appDweb?.hash, bridgeAppForked: appKey.startsWith('fork:'),
+    bridgeAppGeneration: appDweb?.generation ?? 0,
+  });
+  /** @param {string} exactRoomId */
+  const leaveRoom = async (exactRoomId) => {
+    const result = await room('leave', {}, exactRoomId);
+    if (!result?.ok) throw new Error(result?.error ?? 'leave failed');
+  };
 
   /** @template T @param {()=>Promise<T>} operation */
   const serializeTransition = (operation) => {
@@ -169,9 +122,7 @@ export const createDwebBridge = ({
     if (activeClientId === clientId) activeClientId = null;
   };
 
-  // Grants are keyed by ROOM id, not just per-app: the consent dialog names a
-  // specific room, so a remembered grant must authorize only THAT room — else
-  // one approval would let the app silently join any room name it likes later.
+  // why: A grant authorizes one room for the current verified App identity.
   const grantStore = {
     /** @param {string} rid */
     async has(rid) {
@@ -191,9 +142,7 @@ export const createDwebBridge = ({
     },
   };
 
-  // Events pushed from the offscreen base host. Filter to OUR room (the shared
-  // runtime push reaches every app-tab) and, for feed messages, to topics this
-  // app actually subscribed — so another dwapp in the same room can't bleed in.
+  // Filter shared host events to this room and its subscribed topics.
   const offHostEvent = onHostEvent?.((/** @type {any} */ m) => {
     if (!roomId || m?.roomId !== roomId) return;
     if (m.event === 'message' && !subbedTopics.has(m.data?.topic)) return;
@@ -201,11 +150,14 @@ export const createDwebBridge = ({
   }) ?? (() => {});
   disposers.push(offHostEvent);
 
-  // The consent gate every join runs. A remembered grant skips the dialog,
-  // never the audit. No rendezvous in the copy: connectivity is the base network.
   /** @param {string} rid @param {{clientId:string,cancelled:boolean}} request */
   const consent = async (rid, request) => {
     if (isCancelled(request)) throw new Error('cancelled');
+    if (appDweb?.hash) {
+      const current = await swCall('app/get-meta', { appId });
+      if (!current?.ok || current.dweb?.hash !== appDweb.hash || (appKey.startsWith('fork:') && !current.dweb?.forked)) throw new Error('App identity changed. Reload the App.');
+      appKey = current.dweb.forked ? `fork:${appId}:${current.dweb.hash}` : current.dweb.hash;
+    }
     if (await grantStore.has(rid)) return true;
     if (isCancelled(request)) throw new Error('cancelled');
     const okd = await confirmAction({
@@ -231,6 +183,11 @@ export const createDwebBridge = ({
         if (roomId === rid) return { did, joined: roomId };
         throw new Error('already in a room — leave first (one room per app)');
       }
+      if (hostRoomId) {
+        await leaveRoom(hostRoomId);
+        hostRoomId = null;
+        roomClientId = null;
+      }
       if (typeof rid !== 'string' || !rid.trim()) throw new Error('roomId required');
       const id = rid.trim();
       if (id.length > 64) throw new Error('room name too long (max 64 chars)');
@@ -239,28 +196,41 @@ export const createDwebBridge = ({
       if (isCancelled(request)) throw new Error('cancelled');
       const nextDisplayName = String(name ?? '').slice(0, 40);
       // Do not publish shared state until the host proves the exact room joined.
-      const r = await room('join', { name: nextDisplayName }, id);
-      if (!r?.ok) throw new Error(r?.error ?? 'join failed');
-      if (isCancelled(request)) {
-        // The host may have incremented an offscreen room ref after the client
-        // disappeared. Exact-room rollback is mandatory; ambient roomId is
-        // still null and must never select another client's room.
-        await room('leave', {}, id).catch(() => {});
-        throw new Error('cancelled');
-      }
-      displayName = nextDisplayName;
-      roomId = id;
+      hostJoinInFlight = true;
+      hostRoomId = id;
       roomClientId = request.clientId;
-      did = r.did;
-      audit('room_joined', { roomId, did });
-      return { did, joined: roomId, present: r.present };
+      try {
+        const r = await room('join', { name: nextDisplayName }, id);
+        if (!r?.ok) throw new Error(r?.error ?? 'join failed');
+        if (isCancelled(request)) {
+          await leaveRoom(id);
+          hostRoomId = null;
+          roomClientId = null;
+          throw new Error('cancelled');
+        }
+        displayName = nextDisplayName;
+        roomId = id;
+        roomClientId = request.clientId;
+        did = r.did;
+        audit('room_joined', { roomId, did });
+        return { did, joined: roomId, present: r.present };
+      } catch (error) {
+        if (hostRoomId === id) {
+          try { await leaveRoom(id); hostRoomId = null; roomClientId = null; }
+          catch { /* dispose retries the exact owner */ }
+        }
+        throw error;
+      } finally {
+        hostJoinInFlight = false;
+      }
     },
 
     leave: async () => {
-      if (!roomId) return { left: false };
-      const was = roomId;
-      await room('leave', {}, was);
+      const was = roomId ?? hostRoomId;
+      if (!was) return { left: false };
+      await leaveRoom(was);
       roomId = null;
+      hostRoomId = null;
       roomClientId = null;
       subbedTopics.clear();
       audit('room_left', { roomId: was });
@@ -388,17 +358,18 @@ export const createDwebBridge = ({
       // also prevents hostile dispose spam from growing the retired set.
       if (activeClientId !== m.clientId) return;
       retireClient(m.clientId);
-      if (roomId && roomClientId === m.clientId) {
+      if (hostRoomId && roomClientId === m.clientId) {
         void serializeTransition(async () => {
-          if (!roomId || roomClientId !== m.clientId) return;
-          const was = roomId;
-          await room('leave', {}, was).catch(() => {});
+          if (!hostRoomId || roomClientId !== m.clientId) return;
+          const was = hostRoomId;
+          await leaveRoom(was);
           roomId = null;
+          hostRoomId = null;
           roomClientId = null;
           did = null;
           subbedTopics.clear();
           audit('room_left', { roomId: was, reason: 'client-disposed' });
-        });
+        }).catch(() => {});
       }
       return;
     }
@@ -425,13 +396,12 @@ export const createDwebBridge = ({
     if (activeClientId && activeClientId !== m.clientId) {
       const priorClientId = activeClientId;
       retireClient(priorClientId);
-      // A completed membership belongs to the bridge/App tab, not a dead
-      // iframe epoch. The replacement adopts it; late dispose from the old
-      // epoch can no longer tear down the replacement's room.
-      if (roomId && roomClientId === priorClientId) roomClientId = m.clientId;
+      // why: A replacement iframe adopts the bridge's completed membership.
+      if (hostRoomId && roomClientId === priorClientId) roomClientId = m.clientId;
     }
     if (activeClientId !== m.clientId) {
       activeClientId = m.clientId;
+      if (roomClientId && retiredClientIds.has(roomClientId)) roomClientId = m.clientId;
       admittedClientEpochs += 1;
     }
     const op = /** @type {Record<string, (args?: any) => Promise<any>>} */ (/** @type {unknown} */ (ops))[m.op];
@@ -464,9 +434,7 @@ export const createDwebBridge = ({
       if (!isCancelled(request)) reply(true, value);
       else if (activeClientId === request.clientId) reply(false, 'cancelled');
     } catch (err) {
-      // A stale epoch receives no late result into a replacement client. Same-
-      // epoch cancellation gets a terminal rejection so its pending promise can
-      // settle if the frame is still alive.
+      // why: Never send a late result to a replacement iframe.
       if (activeClientId === request.clientId) reply(false, err);
     } finally {
       pending.delete(pendingKey);
@@ -475,22 +443,30 @@ export const createDwebBridge = ({
   };
 
   const offTransport = transport.onMessage(handleOp);
+  const clearRoom = () => { roomId = null; hostRoomId = null; roomClientId = null; did = null; subbedTopics.clear(); };
 
+  const dispose = async (waitForJoin = true) => {
+    disposed = true;
+    if (activeClientId) cancelClient(activeClientId);
+    offTransport();
+    for (const off of disposers.splice(0)) off();
+    if (!waitForJoin) {
+      const was = hostRoomId;
+      if (was) void leaveRoom(was).catch(() => {});
+      clearRoom();
+      return;
+    }
+    if (hostJoinInFlight) await transitionTail;
+    if (!hostRoomId) return;
+    await serializeTransition(async () => {
+      const was = hostRoomId;
+      if (!was) return;
+      await leaveRoom(was);
+      clearRoom();
+    });
+  };
   return {
-    dispose() {
-      disposed = true;
-      if (activeClientId) cancelClient(activeClientId);
-      offTransport();
-      for (const off of disposers.splice(0)) off();
-      void serializeTransition(async () => {
-        if (!roomId) return;
-        const was = roomId;
-        await room('leave', {}, was).catch(() => {});
-        roomId = null;
-        roomClientId = null;
-        did = null;
-        subbedTopics.clear();
-      });
-    },
+    dispose: () => dispose(),
+    invalidate: () => dispose(false),
   };
 };

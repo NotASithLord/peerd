@@ -385,7 +385,7 @@ describe('home.library', () => {
       'dweb/base/updates': () => ({ ok: true, updates: { 'app-7': { uri: 'peerd://x/v2', version_id: 'v2', seq: 2, name: 'Notes', slug: 'notes', dwapp_id: 'D', changelog: 'Improve sync' } } }),
       'dweb/base/update-app': (msg) => msg.strategy === 'fork'
         ? { ok: true, app: { dweb: { version_id: 'v2' } }, fork: { id: 'fork-1', name: 'Notes: local fork' } }
-        : { ok: false, error: 'local-changes' },
+        : { ok: false, error: 'local-changes', conflictToken: 7 },
     });
     const { root, unmount } = await mountView(send, { dweb: true });
     try {
@@ -394,10 +394,13 @@ describe('home.library', () => {
       clickText(root, 'button', 'Update');
       await flush();
       expect(root.textContent).toContain('will not overwrite');
+      window.dispatchEvent(new Event('focus'));
+      await flush();
       clickText(root, 'button', 'Keep a fork & update');
       await flush();
       const calls = send.calls.filter((c) => c.type === 'dweb/base/update-app');
       expect(calls.at(-1)?.strategy).toBe('fork');
+      expect(calls.at(-1)?.conflictToken).toBe(7);
       expect(root.textContent).toContain('Kept your local work');
     } finally { unmount(); }
   });

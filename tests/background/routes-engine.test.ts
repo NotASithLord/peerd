@@ -5,6 +5,7 @@ import { listOffscreenContexts } from '../../extension/background/offscreen-cont
 import { requireDenylistPolicy } from '../../extension/background/denylist-store.js';
 import { parseAppManifest } from '../../extension/peerd-engine/app-manifest.js';
 import { podGitRemoteOperation } from '../../extension/peerd-engine/pod-shell.js';
+import { appReleaseDescriptorMatches } from '../../extension/background/app-client.js';
 
 class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
@@ -51,6 +52,8 @@ const baseDeps = (over: any = {}) => ({
   appTabTracker: {
     reloadTab: async () => {}, getTabId: () => null,
     parseIdFromUrl: () => null,
+    dwebGenerationsReady: async () => {}, getDwebGeneration: () => 0,
+    withDwebAuthority: async (_appId: string, operation: () => Promise<any>) => operation(),
     quiesceTab: async () => true, resumeTab: async () => true,
     closeTab: async () => {}, ensureTab: async () => {},
   },
@@ -78,6 +81,7 @@ const baseDeps = (over: any = {}) => ({
   awaitDenylistPolicy: async () => {},
   parseAppManifest,
   podGitRemoteOperation,
+  appReleaseDescriptorMatches,
   repositories: {
     init: async () => 'abc123456789',
     status: async () => ({ oid: 'abc', branch: 'main', dirty: false, changed: [] }),
@@ -98,6 +102,7 @@ const baseDeps = (over: any = {}) => ({
     diffApp: async () => ({ files: [], patch: '', truncated: false }),
     commitApp: async () => ({ oid: 'abc', changed: [], created: false }),
     restoreApp: async (_id: string, opts: any) => ({ oid: opts.to, restored: true }),
+    matches: async () => true,
     coordinate: async (_ref: any, operation: any) => operation(),
     destroy: async () => {},
   },
@@ -242,6 +247,10 @@ describe('App repository quiescence', () => {
         closeTab: async () => { order.push('close'); return true; },
         ensureTab: async () => { order.push('reopen'); return 41; },
         reloadTab: async () => true,
+        withDwebAuthority: async (_appId: string, operation: () => Promise<any>, options?: any) => {
+          if (options?.invalidate) order.push('rotate');
+          return operation();
+        },
       };
       const deps = baseDeps({
         appTabTracker: tracker,
@@ -274,6 +283,8 @@ describe('App repository quiescence', () => {
       expect(result.ok).toBe(true);
       const operationOrder = repositoryMethod === 'push'
         ? ['lifecycle', 'flush', 'close', 'lock', 'checkpoint', 'operation', 'unlock', 'reopen', 'lifecycle-release']
+        : repositoryMethod === 'restoreApp' || repositoryMethod === 'checkout'
+          ? ['lifecycle', 'flush', 'rotate', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release']
         : ['lifecycle', 'flush', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release'];
       expect(order).toEqual(operationOrder);
     });
@@ -303,6 +314,38 @@ describe('App repository quiescence', () => {
     expect(result).toEqual({ ok: false, error: 'save failed' });
     expect(closed).toBe(false);
     expect(mutated).toBe(false);
+  });
+
+  test('a cold App restore finds its tab and rotates authority before the repository lock', async () => {
+    const order: string[] = [];
+    const tracker = {
+      getTabId: () => null,
+      quiesceTab: async () => { order.push('cold-flush'); return true; },
+      withDwebAuthority: async (_appId: string, operation: () => Promise<any>, options?: any) => {
+        expect(options).toEqual({ invalidate: true });
+        order.push('rotate');
+        return operation();
+      },
+      closeTab: async () => { order.push('close'); return true; },
+      ensureTab: async () => { order.push('reopen'); return 41; },
+      resumeTab: async () => true,
+      reloadTab: async () => true,
+    };
+    const deps = baseDeps({
+      appTabTracker: tracker,
+      appQuiescence: createAppQuiescence({
+        tracker,
+        withLifecycle: async (_appId, operation) => operation(),
+        afterClose: async () => {},
+      }),
+    });
+    deps.repositories.coordinate = async (_ref: any, operation: () => Promise<any>) => {
+      order.push('lock');
+      try { return await operation(); } finally { order.push('unlock'); }
+    };
+    deps.repositories.restoreApp = async () => { order.push('restore'); return { oid: 'old' }; };
+    expect((await makeEngineRoutes(deps)['apps/repository/restore']({ appId: 'a1', to: 'old' })).ok).toBe(true);
+    expect(order).toEqual(['cold-flush', 'rotate', 'close', 'lock', 'restore', 'unlock', 'reopen']);
   });
 });
 
@@ -599,6 +642,16 @@ describe('sw/web-fetch', () => {
 });
 
 describe('app/vm meta + apps Library', () => {
+  const dwebSender = { tab: { id: 41, url: 'moz-extension://peerd/engine-tabs/app-tab/index.html#a1' } };
+  const dwebMetaDeps = (over: any) => baseDeps({
+    appTabTracker: {
+      getTabId: (id: string) => id === 'a1' ? 41 : null,
+      parseIdFromUrl: (url: string) => url.endsWith('#a1') ? 'a1' : null,
+      dwebGenerationsReady: async () => {}, getDwebGeneration: () => 0,
+      withDwebAuthority: async (_appId: string, operation: () => Promise<any>) => operation(),
+    },
+    ...over,
+  });
   test('app/get-meta unknown → app-not-found', async () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['app/get-meta']({ appId: 'zzz' })).toEqual({ ok: false, error: 'app-not-found' });
@@ -662,6 +715,127 @@ describe('app/vm meta + apps Library', () => {
       },
     }));
     expect((await r['app/get-meta']({ appId: 'a1' })).dweb).toMatchObject({ local: true });
+  });
+  test('app/get-meta keeps the installed identity across runtime data create and delete', async () => {
+    const dweb = {
+      hash: 'bundle-v1', git_oid: 'commit-v1', version_id: 'bundle-v1',
+      release_entry_file: 'index.html', release_file_kinds: {},
+    };
+    let record: any = {
+      id: 'a1', name: 'App', entryFile: 'index.html', fileKinds: { 'data/state.json': 'text' }, dweb,
+    };
+    const deps = dwebMetaDeps({
+      DWEB_ENABLED: true,
+      appRegistry: {
+        get: async () => record,
+        update: async () => null,
+      },
+      appClient: {
+        readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: ['dweb'] }),
+        listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+      },
+    });
+    deps.repositories.matches = async () => true;
+    const route = makeEngineRoutes(deps)['app/get-meta'];
+    expect(await route({ appId: 'a1' }, { tab: { id: 42, url: dwebSender.tab.url } }))
+      .toEqual({ ok: false, error: 'app-sender-not-instance-pinned' });
+    expect((await route({ appId: 'a1' }, dwebSender)).dweb).toEqual({ ...dweb, generation: 0 });
+    record = {
+      ...record, fileKinds: {},
+      dweb: { ...dweb, release_file_kinds: { 'data/state.json': 'text' } },
+    };
+    expect((await route({ appId: 'a1' }, dwebSender)).dweb)
+      .toEqual({ ...record.dweb, generation: 0 });
+  });
+  test('app/get-meta rotates the runtime identity after local byte changes', async () => {
+    const dweb = {
+      hash: 'bundle-v1', git_oid: 'commit-v1', version_id: 'bundle-v1',
+      release_entry_file: 'index.html', release_file_kinds: {},
+    };
+    const deps = dwebMetaDeps({
+      DWEB_ENABLED: true,
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'App', entryFile: 'index.html', dweb }),
+        update: async () => null,
+      },
+      appClient: {
+        readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: ['dweb'] }),
+        listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+      },
+    });
+    let comparison: any = null;
+    deps.repositories.matches = async (ref: any, options: any) => { comparison = { ref, options }; return false; };
+    expect((await makeEngineRoutes(deps)['app/get-meta']({ appId: 'a1' }, dwebSender)).dweb).toMatchObject({
+      hash: 'bundle-v1',
+      forked: true,
+    });
+    expect(comparison).toEqual({ ref: { kind: 'app', id: 'a1' }, options: { at: 'commit-v1', excludeAppData: true } });
+  });
+  test('app/get-meta waits for a second fork mutation before it reads generation', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const mutation = new Promise<void>((resolve) => { release = resolve; });
+    const coordinated = new Promise<void>((resolve) => { entered = resolve; });
+    let generation = 1;
+    let reads = 0;
+    const deps = dwebMetaDeps({
+      DWEB_ENABLED: true,
+      appRegistry: {
+        get: async () => { reads += 1; return { id: 'a1', name: 'App', entryFile: 'index.html', fileKinds: {}, dweb: { hash: 'bundle-v1', git_oid: 'commit-v1', release_entry_file: 'index.html', release_file_kinds: {} } }; },
+        update: async () => null,
+      },
+      appClient: { readFile: async () => { throw Object.assign(new Error('missing'), { name: 'NotFoundError' }); } },
+    });
+    deps.appTabTracker.getDwebGeneration = () => generation;
+    deps.repositories.matches = async () => false;
+    deps.repositories.coordinate = async (_ref: any, operation: () => Promise<any>) => {
+      entered();
+      await mutation;
+      return operation();
+    };
+    const pending = makeEngineRoutes(deps)['app/get-meta']({ appId: 'a1' }, dwebSender);
+    await coordinated;
+    expect(reads).toBe(0);
+    generation = 2;
+    release();
+    expect((await pending).dweb).toMatchObject({ forked: true, generation: 2 });
+  });
+  test('app/get-meta checks changed bytes when peerd.json is missing', async () => {
+    const deps = dwebMetaDeps({
+      DWEB_ENABLED: true,
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'App', entryFile: 'index.html', fileKinds: {}, dweb: { hash: 'bundle-v1', git_oid: 'commit-v1', release_entry_file: 'index.html', release_file_kinds: {} } }),
+        update: async () => null,
+      },
+      appClient: {
+        readFile: async () => { throw Object.assign(new Error('missing'), { name: 'NotFoundError' }); },
+      },
+    });
+    deps.repositories.matches = async () => false;
+    expect((await makeEngineRoutes(deps)['app/get-meta']({ appId: 'a1' }, dwebSender)).dweb).toMatchObject({ forked: true });
+  });
+  test('app/get-meta rotates the runtime identity when the baseline is missing or unavailable', async () => {
+    for (const [dweb, expectedChecks] of [
+      [{ hash: 'bundle-v1' }, 0],
+      [{ hash: 'bundle-v1', git_oid: 'commit-v1' }, 0],
+      [{ hash: 'bundle-v1', git_oid: 'commit-v1', release_entry_file: 'index.html', release_file_kinds: {} }, 1],
+    ] as const) {
+      const deps = dwebMetaDeps({
+        DWEB_ENABLED: true,
+        appRegistry: {
+          get: async () => ({ id: 'a1', name: 'App', entryFile: 'index.html', dweb }),
+          update: async () => null,
+        },
+        appClient: {
+          readFile: async () => JSON.stringify({ schema: 1, kind: 'app', entry: 'index.html', agent: { kind: 'bound-app' }, capabilities: ['dweb'] }),
+          listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
+        },
+      });
+      let checks = 0;
+      deps.repositories.matches = async () => { checks += 1; throw new Error('repository unavailable'); };
+      expect((await makeEngineRoutes(deps)['app/get-meta']({ appId: 'a1' }, dwebSender)).dweb).toMatchObject({ forked: true });
+      expect(checks).toBe(expectedChecks);
+    }
   });
   test('vm/get-meta requires a string id', async () => {
     const r = makeEngineRoutes(baseDeps());
@@ -729,12 +903,14 @@ describe('app/vm meta + apps Library', () => {
         parseIdFromUrl: (url: string) => url.endsWith('#app-1') ? 'app-1' : null,
       },
       appClient: {
-        writeFile: async ({ path, content, reload }: any) => {
+        writeFile: async ({ path, content, reload, invalidateDweb }: any) => {
           expect(reload).toBe(false);
+          expect(invalidateDweb).toBe(false);
           writes.push({ path, content });
         },
-        deleteFile: async ({ path, reload }: any) => {
+        deleteFile: async ({ path, reload, invalidateDweb }: any) => {
           expect(reload).toBe(false);
+          expect(invalidateDweb).toBe(false);
           writes.push({ path, delete: true });
         },
       },
@@ -757,6 +933,10 @@ describe('app/vm meta + apps Library', () => {
       .toEqual({ ok: false, error: 'app-data-unauthorized' });
     expect(await r['app/editor-write'](
       { appId: 'app-1', path: 'data/document.json', content: '{}', runtimeData: true },
+      { tab: { id: 45, url: sender.tab.url } },
+    )).toEqual({ ok: false, error: 'app-data-unauthorized' });
+    expect(await r['app/editor-write'](
+      { appId: 'app-1', path: 'script.js', content: 'changed' },
       { tab: { id: 45, url: sender.tab.url } },
     )).toEqual({ ok: false, error: 'app-data-unauthorized' });
   });

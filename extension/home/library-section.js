@@ -253,7 +253,17 @@ export const LibrarySection = {
   refreshUpdates(vnode) {
     if (!vnode.attrs.dweb) return;
     vnode.attrs.send({ type: 'dweb/base/updates' }).then((/** @type {any} */ r) => {
-      if (r?.ok) { vnode.state.updates = r.updates ?? {}; m.redraw(); }
+      if (r?.ok) {
+        const updates = r.updates ?? {};
+        const id = vnode.state.updateConflictId;
+        const current = vnode.state.updates[id];
+        const fresh = updates[id];
+        if (current && fresh && current.version_id === fresh.version_id && Number.isSafeInteger(current.conflictToken)) {
+          fresh.conflictToken = current.conflictToken;
+        }
+        vnode.state.updates = updates;
+        m.redraw();
+      }
     }).catch(() => { /* best-effort — no badge on failure */ });
   },
 
@@ -647,7 +657,7 @@ export const LibrarySection = {
     vnode.state.busyId = app.id;
     let succeeded = false;
     try {
-      const r = await vnode.attrs.send({ type: 'dweb/base/update-app', appId: app.id, uri: up.uri, name: up.name, dwappId: up.dwapp_id, slug: up.slug, seq: up.seq, publisher: up.publisher, ...(strategy ? { strategy } : {}) });
+      const r = await vnode.attrs.send({ type: 'dweb/base/update-app', appId: app.id, uri: up.uri, name: up.name, dwappId: up.dwapp_id, slug: up.slug, seq: up.seq, publisher: up.publisher, ...(strategy ? { strategy, conflictToken: up.conflictToken } : {}) });
       if (r?.ok) {
         succeeded = true;
         delete vnode.state.updates[app.id];      // cleared: we're now on the new version
@@ -669,7 +679,8 @@ export const LibrarySection = {
           notices.push('Older shared bytes will be cleaned up on the next update or delete.');
         }
         vnode.state.warning = notices.join(' ') || null;
-      } else if (r?.error === 'local-changes') {
+      } else if (r?.error === 'local-changes' && Number.isSafeInteger(r.conflictToken)) {
+        up.conflictToken = r.conflictToken;
         vnode.state.updateConflictId = app.id;
       } else {
         vnode.state.error = r?.error ?? 'update failed';

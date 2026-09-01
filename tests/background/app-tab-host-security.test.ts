@@ -1,6 +1,95 @@
 import { describe, expect, test } from 'bun:test';
+import { createDwebBridgeLifecycle } from '../../extension/engine-tabs/app-tab/dweb-bridge-lifecycle.js';
 
 describe('App tab required-actor and runtime lifecycle contracts', () => {
+  test('concurrent bridge attach and detach share one lifecycle', async () => {
+    let releaseCreate!: () => void;
+    let releaseLeave!: () => void;
+    const creating = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    const leaving = new Promise<void>((resolve) => { releaseLeave = resolve; });
+    let creates = 0;
+    let disposes = 0;
+    const lifecycle = createDwebBridgeLifecycle();
+    lifecycle.allow();
+    const create = async () => {
+      await creating;
+      creates += 1;
+      return { dispose: async () => { disposes += 1; await leaving; } };
+    };
+    const firstAttach = lifecycle.attach(create);
+    const secondAttach = lifecycle.attach(create);
+    expect(secondAttach).toBe(firstAttach);
+    releaseCreate();
+    await firstAttach;
+    expect(creates).toBe(1);
+
+    const firstDispose = lifecycle.dispose();
+    const secondDispose = lifecycle.dispose();
+    expect(secondDispose).toBe(firstDispose);
+    await Promise.resolve();
+    expect(disposes).toBe(1);
+    releaseLeave();
+    await firstDispose;
+
+    let retries = 0;
+    const retained = createDwebBridgeLifecycle();
+    retained.allow();
+    await retained.attach(async () => ({
+      dispose: async () => { if (++retries === 1) throw new Error('leave-failed'); },
+    }));
+    await expect(retained.invalidate()).rejects.toThrow('leave-failed');
+    retained.allow();
+    let recreated = false;
+    await retained.attach(async () => { recreated = true; return null; });
+    expect(recreated).toBe(false);
+    await retained.invalidate();
+    expect(retries).toBe(2);
+  });
+
+  test('authority invalidation bypasses a generic dispose that waits for a join', async () => {
+    let disposeStarted!: () => void;
+    let releaseDispose!: () => void;
+    const started = new Promise<void>((resolve) => { disposeStarted = resolve; });
+    const blocked = new Promise<void>((resolve) => { releaseDispose = resolve; });
+    let invalidated = 0;
+    const lifecycle = createDwebBridgeLifecycle();
+    lifecycle.allow();
+    await lifecycle.attach(async () => ({
+      dispose: async () => { disposeStarted(); await blocked; },
+      invalidate: async () => { invalidated += 1; },
+    }));
+    const disposing = lifecycle.dispose();
+    await started;
+    await lifecycle.invalidate();
+    expect(invalidated).toBe(1);
+    releaseDispose();
+    await disposing;
+
+    let fallbackDispose = 0;
+    const synchronous = createDwebBridgeLifecycle();
+    synchronous.allow();
+    await synchronous.attach(async () => ({
+      dispose: () => { fallbackDispose += 1; },
+      invalidate: () => { invalidated += 1; },
+    }));
+    await synchronous.invalidate();
+    expect(fallbackDispose).toBe(0);
+  });
+
+  test('document loss retires authority after a lost page leave and a cold worker', async () => {
+    const tracker = await Bun.file('./extension/background/app-tab-tracker.js').text();
+    const worker = await Bun.file('./extension/background/service-worker.js').text();
+    expect(tracker).toContain('purgeDwebOwners(appId, await advanceDwebGeneration(appId))');
+    expect(worker).toContain('retireAppDweb(closedAppId)');
+    expect(worker).toContain("engineLiveness.findByTab('app', tabId)");
+    expect(worker).toContain('retireAppDweb(entry.id)');
+    expect(worker).toContain("changeInfo.discarded === true || typeof changeInfo.url === 'string'");
+    expect(worker).toContain('await appRetirements.get(sender.tab.id)');
+    expect(worker).toContain('retireAppDocument(tabId, changeInfo.url, trackedAppId)');
+    expect(worker).toContain('await retireAppDweb(appId)');
+    expect(worker).toContain('await trackAppRetirement(tabId, () => retireAppDweb(appId))');
+  });
+
   test('the host binds owner from its URL, exposes retry, and never delivers owner to App launch data', async () => {
     const source = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();

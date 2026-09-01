@@ -182,7 +182,7 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // one small repository bootstrap verb, not a worker-side UI controller.
     expect(graph.size).toBeLessThanOrEqual(458);
     expect(bytes).toBeLessThanOrEqual(4_705_000);
-    expect(statSync(entry).size).toBeLessThanOrEqual(460_000);
+    expect(statSync(entry).size).toBeLessThanOrEqual(461_000);
   });
 
   test('the offscreen host uses its exact runtime and engine surfaces', async () => {

@@ -1,28 +1,12 @@
 // @ts-check
-// peerd-distributed/apps/loader.js — verified bundle → engine App.
-//
-// Phase 0 built fetch + verify; this is the missing last mile: turn a
-// verified `app`-type bundle into an installed App the existing engine
-// runtime opens in its sandbox (NORTH-STAR beat 1 — install-from-peer).
-// The single biggest reuse in the module: we do not build an app runtime,
-// we feed the existing one (ARCHITECTURE §4.4).
-//
-// Trust posture: fetchBundle already verified the manifest hash, the
-// manifest signature, and every chunk hash. This file RE-verifies the
-// manifest commitment anyway (cheap, and fail-closed against a future
-// caller that skips fetchBundle), then validates the SHAPE: an `app`
-// bundle with a present entry file, bounded file count and size. The
-// install itself is INJECTED — the SW route or page supplies it — so the
-// loader stays pure logic over bytes.
+// Validate a verified peer App bundle before the injected installer runs.
 
 import { assertBundleWithinLimits, manifestHash, verifyManifest } from '../content/manifest.js';
 import { unpackTransportBundle } from '../content/bundle.js';
 import { chunkBytes, sha256hex } from '../content/chunk.js';
 import { parsePeerdUri } from '../content/uri.js';
 
-// The peer-install rails are enforced both before bundle decoding and again on
-// the decoded file tree. Keep the live values beside the checks rather than in
-// prose that drifts from the storage and publishing layers.
+// why: Enforce limits before and after bundle decoding.
 const MAX_TOTAL_BYTES = 50_000_000;
 const MAX_FILES = 256;
 
@@ -49,7 +33,8 @@ export class BundleRejectedError extends Error {
  *     dweb: { uri: string, publisher: string | null, hash: string,
  *             version_id: string, dwapp_id?: string, slug?: string, seq?: number,
  *             published_hashes?: string[], previous_version_id?: string,
- *             source_git_oid?: string, changelog?: string },
+ *             source_git_oid?: string, changelog?: string, release_entry_file: string,
+ *             release_file_kinds: Record<string, 'text' | 'binary'> },
  *   }) => Promise<any>,
  *   name?: string,
  *   dwappId?: string | null,
@@ -150,6 +135,8 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
     dweb: {
       uri, publisher: manifest.publisher ?? null, hash, version_id: hash,
       published_hashes: [hash],
+      release_entry_file: entry,
+      release_file_kinds: { ...fileKinds },
       ...(dwappId ? { dwapp_id: dwappId } : {}),
       ...(slug ? { slug } : {}),
       ...(Number.isInteger(seq) ? { seq: /** @type {number} */ (seq) } : {}),
