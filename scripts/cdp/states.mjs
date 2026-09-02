@@ -5885,12 +5885,32 @@ document.querySelector('#refresh').addEventListener('click', async () => {
             && narrow?.targetsTall === true,
           JSON.stringify(narrow));
 
-        await evalIn(page, `document.querySelector('.actor-space-node.is-subactor')?.click()`);
+        // why: HTMLElement.click() only runs the Mithril handler; its redraw is
+        // frame-scheduled and can remain uncommitted after viewport emulation in
+        // a long headless run. Foregrounded pointer input drives a real frame.
+        await page.send('Page.bringToFront');
+        const actorCenter = await evalIn(page, `(() => {
+          const actor = document.querySelector('.actor-space-node.is-subactor');
+          if (!(actor instanceof HTMLElement)) return null;
+          actor.scrollIntoView({ block: 'center', inline: 'nearest' });
+          const rect = actor.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        })()`);
+        if (!actorCenter) throw new Error('actor-space-subactor-not-rendered');
+        await page.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', ...actorCenter, button: 'none',
+        });
+        await page.send('Input.dispatchMouseEvent', {
+          type: 'mousePressed', ...actorCenter, button: 'left', clickCount: 1,
+        });
+        await page.send('Input.dispatchMouseEvent', {
+          type: 'mouseReleased', ...actorCenter, button: 'left', clickCount: 1,
+        });
         const inspected = await waitFor(() => evalIn(page, `(() => {
           const panel = document.querySelector('.actor-space-inspector');
           return panel ? { text: panel.textContent ?? '', pressed:
             document.querySelector('.actor-space-node.is-subactor')?.getAttribute('aria-pressed') } : null;
-        })()`), { budgetMs: 2_000, pollMs: 40 });
+        })()`), { budgetMs: 5_000, pollMs: 40 });
         rec.check('a worker opens an exact access and isolation inspector',
           inspected?.pressed === 'true'
             && inspected?.text.includes('reasoning only')
@@ -5929,12 +5949,24 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           const overview = await rpc(page, { type: 'actors/overview' });
           return overview?.roots?.length === 0 ? overview : null;
         }, { budgetMs: 45_000, pollMs: 150 });
-        await waitFor(() => evalIn(page, `(() => {
+        await page.send('Page.bringToFront');
+        const refreshCenter = await waitFor(() => evalIn(page, `(() => {
           const refresh = document.querySelector('.actor-space-refresh');
-          if (!(refresh instanceof HTMLButtonElement) || refresh.disabled) return false;
-          refresh.click();
-          return true;
+          if (!(refresh instanceof HTMLButtonElement) || refresh.disabled) return null;
+          refresh.scrollIntoView({ block: 'center', inline: 'nearest' });
+          const rect = refresh.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
         })()`), { budgetMs: 5_000, pollMs: 50 });
+        if (!refreshCenter) throw new Error('actor-space-refresh-not-ready');
+        await page.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', ...refreshCenter, button: 'none',
+        });
+        await page.send('Input.dispatchMouseEvent', {
+          type: 'mousePressed', ...refreshCenter, button: 'left', clickCount: 1,
+        });
+        await page.send('Input.dispatchMouseEvent', {
+          type: 'mouseReleased', ...refreshCenter, button: 'left', clickCount: 1,
+        });
         let emptyProbe = /** @type {any} */ (null);
         const empty = await waitFor(async () => {
           const overview = await rpc(page, { type: 'actors/overview' });
