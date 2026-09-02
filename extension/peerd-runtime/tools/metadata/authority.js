@@ -6,7 +6,7 @@
 import { TOOL_METADATA_ORDER, TOOL_METADATA_RECORDS } from './catalog.js';
 
 const AUTHORITY_FIELDS = Object.freeze([
-  'name', 'primitive', 'sideEffect', 'originRule', 'dispatch', 'retryClass', 'dweb',
+  'name', 'primitive', 'sideEffect', 'originRule', 'retryClass', 'dweb',
 ]);
 
 /** @param {Record<string, any>} metadata */

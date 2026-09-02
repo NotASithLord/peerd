@@ -61,7 +61,7 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [actorCorrelationId]
  * @property {string} [actorDeliveryId]
  * @property {string[]} [actorDeliveryIds]
- * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
+ * @property {{ primitive?: string, durationMs?: number, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
  */
 
 /** @typedef {{ toolUse: ToolUse, toolResult: ToolResult|null }} PairedTool */

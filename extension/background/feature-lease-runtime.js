@@ -22,9 +22,6 @@ const leaseCapability = (/** @type {any} */ result) => Object.freeze(
   Object.fromEntries(LEASE_KEYS.map((key) => [key, result[key]])),
 );
 
-/** @param {any} lease @param {any} result */
-const localReceipt = (lease, result) => ({ ok: true, ...lease, result });
-
 /**
  * @param {Object} deps
  * @param {import('../shared/kernel-identity.js').KernelIdentity} deps.identity
@@ -39,10 +36,6 @@ const localReceipt = (lease, result) => ({ ok: true, ...lease, result });
  * @param {number} [deps.recoveryAttempts]
  * @param {typeof setTimeout} [deps.setTimeoutFn]
  * @param {typeof clearTimeout} [deps.clearTimeoutFn]
- * @param {Partial<Record<'goal'|'recovery'|'schedule', {
- *   start:(lease:any,signal:AbortSignal)=>Promise<any>|any,
- *   stop?:(lease:any)=>Promise<any>|any,
- * }>>} [deps.logical]
  * @param {() => string} [deps.newId]
  * @param {boolean} [deps.vaultUnlocked]
  */
@@ -59,7 +52,6 @@ export const createProductionFeatureLeaseRuntime = ({
   recoveryAttempts = 6,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
-  logical = {},
   newId,
   vaultUnlocked = false,
 }) => {
@@ -264,20 +256,7 @@ export const createProductionFeatureLeaseRuntime = ({
   /** @type {Record<string, any>} */
   const dispatchers = {};
   for (const scope of FEATURE_LEASE_SCOPES) {
-    if (OFFSCREEN_SCOPES.has(scope)) {
-      dispatchers[scope] = offscreenDispatcher;
-      continue;
-    }
-    const owner = logical[/** @type {'goal'|'recovery'|'schedule'} */ (scope)];
-    dispatchers[scope] = {
-      prepare: (/** @type {any} */ lease) => ({
-        dispatch: async (/** @type {AbortSignal} */ signal) => {
-          if (!owner?.start) throw new Error(`feature-lease-${scope}-owner-unavailable`);
-          return localReceipt(lease, await owner.start(lease, signal));
-        },
-      }),
-      stop: async (/** @type {any} */ lease) => localReceipt(lease, await owner?.stop?.(lease)),
-    };
+    dispatchers[scope] = offscreenDispatcher;
   }
 
   const coordinator = createFeatureLeaseCoordinator({

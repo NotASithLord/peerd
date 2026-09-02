@@ -49,6 +49,44 @@ const withPaintGateFakes = (run) => {
   }
 };
 
+const unlockedSnapshot = () => ({
+  hydrated: true,
+  vault: {
+    initialized: true, locked: false, unlockedAt: 1,
+    prfEnrolled: false, hasRecovery: true, lockReason: null,
+  },
+  settings: { vaultAutoLockMs: 0, confirmWebWrites: true },
+  session: {
+    sessionId: null, messages: [],
+    permission: { mode: 'act', confirmActions: false },
+  },
+  providers: { current: 'ollama', model: 'qwen3:8b', hasKey: false },
+  composer: {
+    provider: 'ollama', model: 'qwen3:8b', keyless: true,
+    credentialReady: true, localReady: true, canSend: true, reason: null,
+  },
+  profile: { id: 'default', peerName: 'peerd', onboardingComplete: true },
+  capabilities: {
+    actorExecution: {
+      status: 'temporarily_unavailable', host: 'background-page-worker',
+      reason: 'controller-not-ready', retryable: true,
+    },
+  },
+  actors: {},
+  actorProjectionEpoch: null,
+  actorProjectionRevision: 0,
+  spawned: { byToolUse: {}, sessions: {} },
+  asyncTasks: {},
+  projection: {
+    schema: KERNEL_STATE_SCHEMA,
+    provenance: KERNEL_STATE_PROVENANCE,
+    authorityEpoch: 'kernel-firefox-port', generation: 1,
+    settings: 'hydrated', actorIsolation: 'hydrated',
+    semanticController: 'required',
+    deferredFields: [...KERNEL_STATE_DEFERRED_FIELDS], failures: [],
+  },
+});
+
 describe('vault shell static paint gate', () => {
   it('starts once from the fallback when animation frames are throttled', () => {
     withPaintGateFakes((frames, timers) => {
@@ -106,43 +144,7 @@ describe('vault shell application load', () => {
       });
       messageListeners[0]?.({
         type: 'state',
-        state: {
-          hydrated: true,
-          vault: {
-            initialized: true, locked: false, unlockedAt: 1,
-            prfEnrolled: false, hasRecovery: true, lockReason: null,
-          },
-          settings: { vaultAutoLockMs: 0, confirmWebWrites: true },
-          session: {
-            sessionId: null, messages: [],
-            permission: { mode: 'act', confirmActions: false },
-          },
-          providers: { current: 'ollama', model: 'qwen3:8b', hasKey: false },
-          composer: {
-            provider: 'ollama', model: 'qwen3:8b', keyless: true,
-            credentialReady: true, localReady: true, canSend: true, reason: null,
-          },
-          profile: { id: 'default', peerName: 'peerd', onboardingComplete: true },
-          capabilities: {
-            actorExecution: {
-              status: 'temporarily_unavailable', host: 'background-page-worker',
-              reason: 'controller-not-ready', retryable: true,
-            },
-          },
-          actors: {},
-          actorProjectionEpoch: null,
-          actorProjectionRevision: 0,
-          spawned: { byToolUse: {}, sessions: {} },
-          asyncTasks: {},
-          projection: {
-            schema: KERNEL_STATE_SCHEMA,
-            provenance: KERNEL_STATE_PROVENANCE,
-            authorityEpoch: 'kernel-firefox-port', generation: 1,
-            settings: 'hydrated', actorIsolation: 'hydrated',
-            semanticController: 'required',
-            deferredFields: [...KERNEL_STATE_DEFERRED_FIELDS], failures: [],
-          },
-        },
+        state: unlockedSnapshot(),
       });
 
       await waitFor(() => document.documentElement.dataset.peerdBootStage === 'app-ready');
@@ -196,19 +198,7 @@ describe('vault shell application load', () => {
       });
       messageListeners[0]?.({
         type: 'state',
-        state: {
-          vault: {
-            initialized: true, locked: false, unlockedAt: 1,
-            prfEnrolled: false, hasRecovery: true, lockReason: null,
-          },
-          settings: { vaultAutoLockMs: 0, confirmWebWrites: true },
-          capabilities: {
-            actorExecution: {
-              status: 'available', host: 'offscreen-document-worker',
-              reason: null, retryable: false,
-            },
-          },
-        },
+        state: unlockedSnapshot(),
       });
 
       await waitFor(() => document.documentElement.dataset.peerdBootStage === 'failed');

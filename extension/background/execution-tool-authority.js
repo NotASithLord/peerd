@@ -49,6 +49,12 @@ export const createExecutionToolAuthority = ({ binding, ctx, signal, shared = {}
   const args = binding.args ?? {};
   const sessionId = ctx?.session?.sessionId;
   const abortSignal = signal ?? ctx?.abortSignal;
+  const actPermissionStillLive = async () => {
+    const permission = typeof ctx?.readAuthorityPermission === 'function'
+      ? await ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
+      : ctx?.permission;
+    return permission?.mode === 'act';
+  };
   const requireOperation = (/** @type {string} */ operation) => {
     if (binding.operation !== operation) throw mismatch();
   };
@@ -88,6 +94,11 @@ export const createExecutionToolAuthority = ({ binding, ctx, signal, shared = {}
       return { error: 'git_clone_declined' };
     }
     if (abortSignal?.aborted) return { error: 'git_clone_aborted' };
+    // why: confirmation is consent, not Plan/Act authority. The mode may be
+    // revoked while the nested Git prompt is open, after outer admission ran.
+    const actStillLive = await actPermissionStillLive();
+    if (abortSignal?.aborted) return { error: 'git_clone_aborted' };
+    if (!actStillLive) return { error: 'plan_mode_refused' };
     try {
       return await ctx.repositories.clone({ kind, id }, {
         url: remote.url,
@@ -219,6 +230,14 @@ export const createExecutionToolAuthority = ({ binding, ctx, signal, shared = {}
             return { ok: false, error: 'git_clone_declined' };
           }
           if (abortSignal?.aborted) return { ok: false, error: 'git_clone_aborted' };
+          const actStillLive = await actPermissionStillLive();
+          if (abortSignal?.aborted) return { ok: false, error: 'git_clone_aborted' };
+          if (!actStillLive) {
+            return {
+              ok: false, code: 'plan_mode_refused', error: 'plan_mode_refused',
+              outcomeKind: 'pre-effect-failure', retryable: false,
+            };
+          }
           const result = await client.createFromGit({
             name: typeof plan.name === 'string' ? plan.name
               : new URL(remote.url).pathname.split('/').at(-1)?.replace(/\.git$/, ''),

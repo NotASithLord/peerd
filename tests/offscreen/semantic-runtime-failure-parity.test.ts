@@ -317,7 +317,7 @@ describe('main and actor semantic failure integration parity', () => {
       };
       expect(main.result).toMatchObject(expected);
       expect(actor.result).toMatchObject(expected);
-      const stableMeta = ({ durationMs: _duration, dispatch: _dispatch, ...meta }: any) => meta;
+      const stableMeta = ({ durationMs: _duration, ...meta }: any) => meta;
       expect(stableMeta(actor.result.meta)).toEqual(stableMeta(main.result.meta));
       expect(main.audit).toMatchObject({
         type: 'tool_failed', details: { outcome: 'semantic-failure', outcomeKnown: true },

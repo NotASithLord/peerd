@@ -1537,45 +1537,27 @@ describe('production feature-lease runtime', () => {
     expect(env.host).not.toBeNull();
   });
 
-  test('Store initialization orders logical recovery without opening an offscreen host', async () => {
+  test('Store initialization keeps the offscreen host cold', async () => {
     const env = makeEnvironment();
-    const order: string[] = [];
-    const owner = (scope: string) => ({
-      start: () => { order.push(scope); return { active: true }; },
-      stop: () => ({ active: false }),
-    });
     const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
       vaultUnlocked: false,
-      logical: { goal: owner('goal'), recovery: owner('recovery'), schedule: owner('schedule') },
     });
     await runtime.ready;
     const results = await runtime.runTransition('initialize', { dwebEnabled: false });
-    expect(results.map((item: any) => item.scope)).toEqual([
-      'goal', 'recovery', 'schedule',
-    ]);
-    expect(order).toEqual(['goal', 'recovery', 'schedule']);
+    expect(results).toEqual([]);
     expect(env.starts).toEqual([]);
     expect(env.ensureCount).toBe(0);
   });
 
-  test('Preview initialization acquires the durable dweb lease before logical owners', async () => {
+  test('Preview initialization acquires the durable dweb lease', async () => {
     const env = makeEnvironment();
-    const order: string[] = [];
-    const owner = (scope: string) => ({
-      start: () => { order.push(scope); return { active: true }; },
-      stop: () => ({ active: false }),
-    });
     const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
       vaultUnlocked: false,
-      logical: { goal: owner('goal'), recovery: owner('recovery'), schedule: owner('schedule') },
     });
     await runtime.ready;
     const results = await runtime.runTransition('initialize', { dwebEnabled: true });
-    expect(results.map((item: any) => item.scope)).toEqual([
-      'dweb', 'goal', 'recovery', 'schedule',
-    ]);
+    expect(results.map((item: any) => item.scope)).toEqual(['dweb']);
     expect(env.starts).toEqual(['dweb']);
-    expect(order).toEqual(['goal', 'recovery', 'schedule']);
     expect(env.host?.snapshot().leases).toEqual([
       expect.objectContaining({ scope: 'dweb', orphaned: false }),
     ]);

@@ -141,7 +141,7 @@ describe('post-vault feature lease coordinator', () => {
     let firstLease: any;
     let crossedDispatch = false;
     const hosts = makeDispatchers();
-    hosts.dispatchers.recovery = {
+    hosts.dispatchers.dweb = {
       prepare(lease: any) {
         firstLease = lease;
         return { dispatch: (signal: AbortSignal) => new Promise((_resolve, reject) => {
@@ -153,40 +153,40 @@ describe('post-vault feature lease coordinator', () => {
     };
     const { coordinator, store } = setup({ dispatchers: hosts.dispatchers });
     const abort = new AbortController();
-    const running = coordinator.acquire('recovery', {
-      reason: 'vault-resume', hostEpoch: 'recovery-host-a', signal: abort.signal,
+    const running = coordinator.acquire('dweb', {
+      reason: 'vault-resume', hostEpoch: 'dweb-host-a', signal: abort.signal,
     });
     while (!crossedDispatch) await Promise.resolve();
     abort.abort();
     expect(await running).toMatchObject({ ok: false, outcomeKnown: false });
-    expect(await coordinator.acquire('recovery', {
-      reason: 'vault-resume', hostEpoch: 'recovery-host-a',
+    expect(await coordinator.acquire('dweb', {
+      reason: 'vault-resume', hostEpoch: 'dweb-host-a',
     })).toMatchObject({ code: 'feature-lease-host-poisoned', outcomeKnown: false });
 
-    hosts.dispatchers.recovery = {
+    hosts.dispatchers.dweb = {
       prepare: (lease: any) => ({ dispatch: () => receipt(lease) }),
       stop: (lease: any) => receipt(lease),
     };
-    expect(await coordinator.acquire('recovery', {
-      reason: 'vault-resume', hostEpoch: 'recovery-host-b',
-    })).toMatchObject({ ok: true, hostEpoch: 'recovery-host-b' });
+    expect(await coordinator.acquire('dweb', {
+      reason: 'vault-resume', hostEpoch: 'dweb-host-b',
+    })).toMatchObject({ ok: true, hostEpoch: 'dweb-host-b' });
     gate.resolve(receipt(firstLease));
   });
 
   test('invalid build/kernel/host receipt is unknown and never activates the lease', async () => {
     const dispatchers = makeDispatchers().dispatchers;
-    dispatchers.goal = {
+    dispatchers.controller = {
       prepare: (lease: any) => ({
         dispatch: () => receipt(lease, { kernelEpoch: 'retired-kernel' }),
       }),
       stop: (lease: any) => receipt(lease),
     };
     const { coordinator } = setup({ dispatchers });
-    expect(await coordinator.acquire('goal', {
-      reason: 'vault-unlock', hostEpoch: 'goal-host-a',
+    expect(await coordinator.acquire('controller', {
+      reason: 'vault-unlock', hostEpoch: 'controller-host-a',
     })).toMatchObject({ code: 'feature-lease-receipt-invalid', outcomeKnown: false });
-    expect(coordinator.snapshot().leases.goal).toMatchObject({
-      status: 'unknown', poisonedHostEpoch: 'goal-host-a',
+    expect(coordinator.snapshot().leases.controller).toMatchObject({
+      status: 'unknown', poisonedHostEpoch: 'controller-host-a',
     });
   });
 
@@ -236,7 +236,7 @@ describe('post-vault feature lease coordinator', () => {
     expect(await first).toMatchObject({ ok: true, hostEpoch: 'host-a' });
   });
 
-  test('transition plan keeps Store initialize offscreen-cold and orders post-vault owners', async () => {
+  test('transition plan keeps Store initialize offscreen-cold and acquires dweb when enabled', async () => {
     const order: string[] = [];
     const hosts = makeDispatchers();
     for (const scope of FEATURE_LEASE_SCOPES) {
@@ -249,16 +249,14 @@ describe('post-vault feature lease coordinator', () => {
     }
     const initialized = setup({ dispatchers: hosts.dispatchers, vaultUnlocked: false });
     expect((await initialized.coordinator.runTransition('initialize')).map((item: any) => item.scope))
-      .toEqual(['goal', 'recovery', 'schedule']);
-    expect(order).toEqual(['goal', 'recovery', 'schedule']);
+      .toEqual([]);
+    expect(order).toEqual([]);
 
     const resumed = setup({ dispatchers: hosts.dispatchers, vaultUnlocked: false });
     order.length = 0;
     expect((await resumed.coordinator.runTransition('resume', { dwebEnabled: true }))
-      .map((item: any) => item.scope)).toEqual([
-      'dweb', 'goal', 'recovery', 'schedule',
-    ]);
-    expect(order).toEqual(['dweb', 'goal', 'recovery', 'schedule']);
+      .map((item: any) => item.scope)).toEqual(['dweb']);
+    expect(order).toEqual(['dweb']);
   });
 
   test('lock and feature disable revoke synchronously; late starts cannot reactivate', async () => {
@@ -297,8 +295,8 @@ describe('post-vault feature lease coordinator', () => {
   test('locked successor preserves intent until authoritative lock clears it', async () => {
     const store = makeStore();
     const first = setup({ store, identity: generation('build-aaaa', 'kernel-old') });
-    await first.coordinator.acquire('schedule', {
-      reason: 'vault-resume', hostEpoch: 'schedule-host-old',
+    await first.coordinator.acquire('model-host', {
+      reason: 'vault-resume', hostEpoch: 'model-host-old',
     });
     expect(store.values.get(FEATURE_LEASE_INTENT_KEY).intents).toHaveLength(1);
 
@@ -312,7 +310,7 @@ describe('post-vault feature lease coordinator', () => {
     expect(store.setCalls - writesBeforeReady).toBe(1);
     const adoptedDocument = store.values.get(FEATURE_LEASE_INTENT_KEY);
     expect(adoptedDocument.ownerKernelEpoch).toBe('kernel-new');
-    expect(adoptedDocument.intents.map((intent: any) => intent.scope)).toEqual(['schedule']);
+    expect(adoptedDocument.intents.map((intent: any) => intent.scope)).toEqual(['model-host']);
 
     const writesBeforeLock = store.setCalls;
     await second.coordinator.lock();
@@ -324,31 +322,31 @@ describe('post-vault feature lease coordinator', () => {
   test('crash/restart replays only nonsecret intent under a fresh kernel and host epoch', async () => {
     const store = makeStore();
     const first = setup({ store, identity: generation('build-aaaa', 'kernel-old') });
-    await first.coordinator.acquire('schedule', {
-      reason: 'vault-resume', hostEpoch: 'schedule-host-old',
+    await first.coordinator.acquire('model-host', {
+      reason: 'vault-resume', hostEpoch: 'model-host-old',
     });
-    expect(await first.coordinator.acquire('schedule', {
-      hostEpoch: 'schedule-host-old',
+    expect(await first.coordinator.acquire('model-host', {
+      hostEpoch: 'model-host-old',
       payload: { passphrase: 'must-not-be-accepted-or-persisted' },
     })).toMatchObject({ code: 'feature-lease-options-invalid', outcomeKnown: true });
     const persisted = JSON.stringify(store.values.get(FEATURE_LEASE_INTENT_KEY));
     expect(persisted).not.toContain('passphrase');
     expect(persisted).not.toContain('must-not-be-accepted');
-    expect(persisted).not.toContain('schedule-host-old');
+    expect(persisted).not.toContain('model-host-old');
 
     const secondHosts = makeDispatchers();
     const second = setup({
       store,
       identity: generation('build-aaaa', 'kernel-new'),
       dispatchers: secondHosts.dispatchers,
-      resolveHostEpoch: () => 'schedule-host-new',
+      resolveHostEpoch: () => 'model-host-new',
     });
     await second.coordinator.ready;
     expect(await second.coordinator.reconcile()).toEqual([
-      expect.objectContaining({ ok: true, hostEpoch: 'schedule-host-new' }),
+      expect.objectContaining({ ok: true, hostEpoch: 'model-host-new' }),
     ]);
     expect(secondHosts.dispatched).toHaveLength(1);
-    await expect(first.coordinator.revoke('schedule', 'vault-lock'))
+    await expect(first.coordinator.revoke('model-host', 'vault-lock'))
       .resolves.toMatchObject({ outcomeKnown: false, code: 'feature-lease-revoke-intent-uncertain' });
   });
 
@@ -426,8 +424,7 @@ describe('post-vault feature lease coordinator', () => {
     await next.coordinator.ready;
     expect(await next.coordinator.reconcile()).toEqual([]);
     expect(FEATURE_LEASE_SCOPES).toEqual([
-      'controller', 'dweb', 'recovery', 'goal', 'schedule', 'dom-host', 'media-host',
-      'model-host', 'vault-authority',
+      'controller', 'dweb', 'dom-host', 'media-host', 'model-host', 'vault-authority',
     ]);
   });
 

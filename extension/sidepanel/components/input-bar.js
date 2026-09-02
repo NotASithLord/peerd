@@ -247,8 +247,15 @@ export const sendAgentWithCustody = async ({ send, message, pending, currentSess
   const originalSessionId = pending.sessionId;
   const settle = (/** @type {UnconfirmedSend|null} */ value) => {
     saveUnconfirmed(originalSessionId, value);
+    if (value) return;
     const current = currentSessionId?.();
-    if (current && current !== originalSessionId) saveUnconfirmed(current, value);
+    // why: a first send can acquire its durable session id while awaiting the
+    // reply, but the user can also switch to an unrelated chat. Clear only an
+    // adopted copy of this exact operation; never erase that chat's own fence.
+    if (current && current !== originalSessionId
+      && loadUnconfirmed(current)?.operationId === pending.operationId) {
+      saveUnconfirmed(current, null);
+    }
   };
   settle(pending);
   try {

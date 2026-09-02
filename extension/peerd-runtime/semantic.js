@@ -20,7 +20,7 @@ export const listToolMetadata = () => TOOL_METADATA_ORDER.map((name) => {
 });
 
 const AUTHORITY_FIELDS = Object.freeze([
-  'primitive', 'sideEffect', 'originRule', 'dispatch', 'retryClass', 'dweb',
+  'primitive', 'sideEffect', 'originRule', 'retryClass', 'dweb',
 ]);
 
 /**
@@ -44,7 +44,7 @@ export const hydrateToolDescriptors = (descriptors, runtimeCapabilities) => {
       }
     }
     return Object.freeze(/** @type {{name:string,description:string,schema:object,
-     * primitive:any,sideEffect:any,dispatch?:any,retryClass?:any,dweb?:any}} */ ({
+     * primitive:any,sideEffect:any,retryClass?:any,dweb?:any}} */ ({
       ...descriptor,
       description: metadata.description,
       schema: metadata.schema,
