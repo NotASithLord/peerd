@@ -5950,6 +5950,10 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         let emptyProbe = /** @type {any} */ (null);
         const empty = await waitFor(async () => {
           const overview = await rpc(page, { type: 'actors/overview' });
+          await evalIn(page, `(async () => {
+            const { default: m } = await import('/vendor/mithril/mithril.js');
+            m.redraw.sync();
+          })()`, true);
           const view = await evalIn(page, `(() => ({
             text: document.querySelector('.actor-space-empty')?.textContent ?? '',
             badge: document.querySelector('[data-home-view="actors"] .home-nav-count')?.textContent ?? null,
