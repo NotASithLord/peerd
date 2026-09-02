@@ -1,7 +1,7 @@
 // @ts-check
 
 import { describe, it, expect } from '../../framework.js';
-import { startVaultShell } from '/sidepanel/vault-shell.js';
+import { afterStaticShellPaint, startVaultShell } from '/sidepanel/vault-shell.js';
 import {
   KERNEL_STATE_DEFERRED_FIELDS,
   KERNEL_STATE_PROVENANCE,
@@ -15,6 +15,64 @@ const waitFor = async (/** @type {() => boolean} */ predicate) => {
   }
   throw new Error('timeout');
 };
+
+/** @param {(frames: FrameRequestCallback[], timers: TimerHandler[]) => void} run */
+const withPaintGateFakes = (run) => {
+  const windowApi = /** @type {any} */ (window);
+  const prior = {
+    requestAnimationFrame: window.requestAnimationFrame,
+    setTimeout: window.setTimeout,
+    clearTimeout: window.clearTimeout,
+  };
+  /** @type {FrameRequestCallback[]} */
+  const frames = [];
+  /** @type {TimerHandler[]} */
+  const timers = [];
+  windowApi.requestAnimationFrame = (/** @type {FrameRequestCallback} */ callback) => (
+    frames.push(callback), frames.length
+  );
+  windowApi.setTimeout = (/** @type {TimerHandler} */ handler) => (
+    timers.push(handler), timers.length
+  );
+  windowApi.clearTimeout = () => {};
+  const root = document.createElement('div');
+  root.id = 'app';
+  root.innerHTML = '<main class="boot-shell" style="width:1px;height:1px">peerd</main>';
+  document.body.append(root);
+  try { run(frames, timers); }
+  finally {
+    root.remove();
+    delete document.documentElement.dataset.peerdStaticShellPainted;
+    window.requestAnimationFrame = prior.requestAnimationFrame;
+    window.setTimeout = prior.setTimeout;
+    window.clearTimeout = prior.clearTimeout;
+  }
+};
+
+describe('vault shell static paint gate', () => {
+  it('starts once from the fallback when animation frames are throttled', () => {
+    withPaintGateFakes((frames, timers) => {
+      let starts = 0;
+      afterStaticShellPaint(() => { starts += 1; });
+      /** @type {() => void} */ (timers.shift())();
+      expect(starts).toBe(1);
+      while (frames.length > 0) frames.shift()?.(0);
+      expect(starts).toBe(1);
+    });
+  });
+
+  it('starts once when two animation frames win the race', () => {
+    withPaintGateFakes((frames, timers) => {
+      let starts = 0;
+      afterStaticShellPaint(() => { starts += 1; });
+      frames.shift()?.(0);
+      frames.shift()?.(0);
+      expect(starts).toBe(1);
+      /** @type {() => void} */ (timers.shift())();
+      expect(starts).toBe(1);
+    });
+  });
+});
 
 describe('vault shell application load', () => {
   it('enters the application from a valid Port snapshot without message fallback', async () => {

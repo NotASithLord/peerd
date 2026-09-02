@@ -39,9 +39,23 @@ const EMPTY_VAULT = Object.freeze({
 /** @param {number} ms */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** @param {() => void} done */
+const afterTwoFramesOrTimeout = (done) => {
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(fallback);
+    done();
+  };
+  // why: Chromium can indefinitely suppress side-panel frames after reload.
+  const fallback = setTimeout(finish, 250);
+  requestAnimationFrame(() => requestAnimationFrame(finish));
+};
+
 /** Keep the CSP-safe shell visible for two frames. @param {() => void} start */
 export const afterStaticShellPaint = (start) => {
-  requestAnimationFrame(() => requestAnimationFrame(() => {
+  afterTwoFramesOrTimeout(() => {
     const node = document.querySelector('#app > .boot-shell');
     const rect = node?.getBoundingClientRect();
     const style = node ? getComputedStyle(node) : null;
@@ -51,7 +65,7 @@ export const afterStaticShellPaint = (start) => {
     }
     document.documentElement.dataset.peerdStaticShellPainted = 'true';
     start();
-  }));
+  });
 };
 
 /**
@@ -130,9 +144,7 @@ export const startVaultShell = ({
       // Mithril may commit the first rich-app tree on its next redraw frame.
       // The module/start promise proves registration, not visible mount; give
       // the renderer two frames before enforcing the nonblank postcondition.
-      await new Promise((resolve) => requestAnimationFrame(
-        () => requestAnimationFrame(resolve),
-      ));
+      await new Promise((resolve) => afterTwoFramesOrTimeout(() => resolve(undefined)));
       if (!root.querySelector(appSelector)) {
         throw new Error(`application did not mount ${appSelector}`);
       }
