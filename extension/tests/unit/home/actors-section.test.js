@@ -109,7 +109,7 @@ describe('home.actors', () => {
       expect(refresh.textContent).toBe('Refreshing…');
       expect(root.querySelector('[aria-live="polite"]')?.textContent).toContain('Refreshing actor activity');
       finishRefresh(OVERVIEW);
-      await flush();
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(root.querySelector('[aria-live="polite"]')?.textContent).toContain('Actor activity refreshed');
     } finally {
       m.mount(root, null);

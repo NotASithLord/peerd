@@ -49,17 +49,6 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
   };
 })()`);
 
-// Headless Chrome can defer Mithril's frame-scheduled redraw after long
-// tab-heavy runs. Exercise the real handler, then commit that redraw directly.
-const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
-  const element = document.querySelector(${JSON.stringify(selector)});
-  if (!(element instanceof HTMLElement)) return false;
-  element.click();
-  const { default: m } = await import('/vendor/mithril/mithril.js');
-  m.redraw.sync();
-  return true;
-})()`, true);
-
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
 const REQUIRE_SITE_CAPTURE_TAP = process.env.PEERD_REQUIRE_SITE_CAPTURE_TAP === '1';
@@ -5584,6 +5573,10 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         inspectionGate, releaseInspection,
       };
       try {
+        // why: earlier states may leave this shared test chat with a settled
+        // `web` binding to a tab they closed. This state proves fresh binding,
+        // so isolate it in the same ordinary new-chat path a user would take.
+        await rpc(ctx.page, { type: 'session/reset' });
         // Generic `web` is intentionally unable to invent authority over an
         // arbitrary tab. Establish a real public target through open_tab and
         // the shipped Go control before exercising the nested delegation.
@@ -5660,8 +5653,8 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           && hierarchy?.text.includes('compare warranty terms independently'),
         JSON.stringify(hierarchy?.text));
 
-      await clickAndSyncRedraw(ctx.page,
-        '.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound');
+      await evalIn(ctx.page, `document.querySelector(
+        '.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound')?.click()`);
       const inspected = await waitFor(
         () => evalIn(ctx.page, `(() => {
           const detail = document.querySelector('.actor-fabric-detail');
@@ -5897,7 +5890,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
             && narrow?.targetsTall === true,
           JSON.stringify(narrow));
 
-        await clickAndSyncRedraw(page, '.actor-space-node.is-subactor');
+        await evalIn(page, `document.querySelector('.actor-space-node.is-subactor')?.click()`);
         const inspected = await waitFor(() => evalIn(page, `(() => {
           const panel = document.querySelector('.actor-space-inspector');
           return panel ? { text: panel.textContent ?? '', pressed:
@@ -5946,14 +5939,10 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           return refresh instanceof HTMLButtonElement && !refresh.disabled;
         })()`), { budgetMs: 5_000, pollMs: 50 });
         if (!refreshReady) throw new Error('actor-space-refresh-not-ready');
-        await clickAndSyncRedraw(page, '.actor-space-refresh');
+        await evalIn(page, `document.querySelector('.actor-space-refresh')?.click()`);
         let emptyProbe = /** @type {any} */ (null);
         const empty = await waitFor(async () => {
           const overview = await rpc(page, { type: 'actors/overview' });
-          await evalIn(page, `(async () => {
-            const { default: m } = await import('/vendor/mithril/mithril.js');
-            m.redraw.sync();
-          })()`, true);
           const view = await evalIn(page, `(() => ({
             text: document.querySelector('.actor-space-empty')?.textContent ?? '',
             badge: document.querySelector('[data-home-view="actors"] .home-nav-count')?.textContent ?? null,
