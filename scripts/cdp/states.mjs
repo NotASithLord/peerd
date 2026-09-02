@@ -49,6 +49,17 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
   };
 })()`);
 
+// Headless Chrome can defer Mithril's frame-scheduled redraw after long
+// tab-heavy runs. Exercise the real handler, then commit that redraw directly.
+const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
+  const element = document.querySelector(${JSON.stringify(selector)});
+  if (!(element instanceof HTMLElement)) return false;
+  element.click();
+  const { default: m } = await import('/vendor/mithril/mithril.js');
+  m.redraw.sync();
+  return true;
+})()`, true);
+
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
 const REQUIRE_SITE_CAPTURE_TAP = process.env.PEERD_REQUIRE_SITE_CAPTURE_TAP === '1';
@@ -5649,7 +5660,8 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           && hierarchy?.text.includes('compare warranty terms independently'),
         JSON.stringify(hierarchy?.text));
 
-      await evalIn(ctx.page, `document.querySelector('.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound')?.click()`);
+      await clickAndSyncRedraw(ctx.page,
+        '.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound');
       const inspected = await waitFor(
         () => evalIn(ctx.page, `(() => {
           const detail = document.querySelector('.actor-fabric-detail');
@@ -5885,27 +5897,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
             && narrow?.targetsTall === true,
           JSON.stringify(narrow));
 
-        // why: HTMLElement.click() only runs the Mithril handler; its redraw is
-        // frame-scheduled and can remain uncommitted after viewport emulation in
-        // a long headless run. Foregrounded pointer input drives a real frame.
-        await page.send('Page.bringToFront');
-        const actorCenter = await evalIn(page, `(() => {
-          const actor = document.querySelector('.actor-space-node.is-subactor');
-          if (!(actor instanceof HTMLElement)) return null;
-          actor.scrollIntoView({ block: 'center', inline: 'nearest' });
-          const rect = actor.getBoundingClientRect();
-          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-        })()`);
-        if (!actorCenter) throw new Error('actor-space-subactor-not-rendered');
-        await page.send('Input.dispatchMouseEvent', {
-          type: 'mouseMoved', ...actorCenter, button: 'none',
-        });
-        await page.send('Input.dispatchMouseEvent', {
-          type: 'mousePressed', ...actorCenter, button: 'left', clickCount: 1,
-        });
-        await page.send('Input.dispatchMouseEvent', {
-          type: 'mouseReleased', ...actorCenter, button: 'left', clickCount: 1,
-        });
+        await clickAndSyncRedraw(page, '.actor-space-node.is-subactor');
         const inspected = await waitFor(() => evalIn(page, `(() => {
           const panel = document.querySelector('.actor-space-inspector');
           return panel ? { text: panel.textContent ?? '', pressed:
@@ -5949,24 +5941,12 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           const overview = await rpc(page, { type: 'actors/overview' });
           return overview?.roots?.length === 0 ? overview : null;
         }, { budgetMs: 45_000, pollMs: 150 });
-        await page.send('Page.bringToFront');
-        const refreshCenter = await waitFor(() => evalIn(page, `(() => {
+        const refreshReady = await waitFor(() => evalIn(page, `(() => {
           const refresh = document.querySelector('.actor-space-refresh');
-          if (!(refresh instanceof HTMLButtonElement) || refresh.disabled) return null;
-          refresh.scrollIntoView({ block: 'center', inline: 'nearest' });
-          const rect = refresh.getBoundingClientRect();
-          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          return refresh instanceof HTMLButtonElement && !refresh.disabled;
         })()`), { budgetMs: 5_000, pollMs: 50 });
-        if (!refreshCenter) throw new Error('actor-space-refresh-not-ready');
-        await page.send('Input.dispatchMouseEvent', {
-          type: 'mouseMoved', ...refreshCenter, button: 'none',
-        });
-        await page.send('Input.dispatchMouseEvent', {
-          type: 'mousePressed', ...refreshCenter, button: 'left', clickCount: 1,
-        });
-        await page.send('Input.dispatchMouseEvent', {
-          type: 'mouseReleased', ...refreshCenter, button: 'left', clickCount: 1,
-        });
+        if (!refreshReady) throw new Error('actor-space-refresh-not-ready');
+        await clickAndSyncRedraw(page, '.actor-space-refresh');
         let emptyProbe = /** @type {any} */ (null);
         const empty = await waitFor(async () => {
           const overview = await rpc(page, { type: 'actors/overview' });
