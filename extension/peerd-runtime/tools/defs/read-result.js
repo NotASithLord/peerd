@@ -4,7 +4,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_result: page any oversized result emitted by a supported producer.
 //
 // One session-owned opaque store serves fetch_url, read_doc, read_page, and
-// script. The stored record:not the caller:decides the source label, metadata,
+// script. The stored record, not the caller, decides the source label, metadata,
 // and whether the page must re-enter fenced.
 //
 // Two refusals, both fail-closed:
@@ -31,7 +31,11 @@ export const readResultTool = composeTool('read_result', {
     if (read?.ok !== true && read?.error) return { ok: false, error: read.error };
     const rec = read?.record;
     if (!rec || typeof rec.text !== 'string') {
-      return { ok: false, error: `no_such_result: ${args.key}: the spill may have been evicted; re-run the producing tool.` };
+      return {
+        ok: false,
+        error: `no_such_result: ${args.key}: the spill may have been evicted. `
+          + 'Re-run the producer only if it was read-only or idempotent; otherwise verify external state first or report that the result is unavailable.',
+      };
     }
     // buildPagedResult fits the FRAMED slice under the paged ceiling (the JSON
     // envelope escapes quote/backslash-dense values well past the raw cap) so the

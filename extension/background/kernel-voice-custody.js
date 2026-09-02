@@ -3,6 +3,7 @@
 // this owner holds the media-host lifetime and addresses one physical host.
 
 import { withDeadline } from '/shared/cold-util.js';
+import { sameDocumentUrlIgnoringHash } from '/shared/sender-trust.js';
 import {
   VOICE_CHANNEL_OFFER, VOICE_CHANNEL_PROTOCOL, VOICE_CHANNEL_RESULT, VOICE_COMMANDS,
   parseVoiceChannelOffer, parseVoiceCommand,
@@ -197,7 +198,7 @@ export const createKernelVoiceCustody = ({
         setTimeoutFn,
         clearTimeoutFn,
       )).filter(
-        (/** @type {any} */ client) => client?.url === offscreenUrl,
+        (/** @type {any} */ client) => sameDocumentUrlIgnoringHash(client?.url, offscreenUrl),
       );
       if (clients.length !== 1) throw new Error('voice-host-unavailable');
       const requestId = newId();

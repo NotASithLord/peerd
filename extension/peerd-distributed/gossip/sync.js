@@ -173,6 +173,7 @@ export const createTopicSync = ({
     // use gossip.publish directly and are never stored).
     /** @param {string} topic @param {any} data */
     async publish(topic, data) {
+      retained.add(topic);
       const env = await gossip.publish(topic, data);
       keep(topic, env);
       return env;

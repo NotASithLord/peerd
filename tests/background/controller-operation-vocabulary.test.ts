@@ -155,6 +155,7 @@ const actorClient = () => makeOffscreenActorClient({
   ensureHost: async () => {},
   isRelaySender: () => true,
   sendMessage: async () => ({ ok: true }),
+  spendRefusalFor: async () => null,
   sessions: { get: async () => null },
   buildToolContext: async () => ({}),
   inboundDwebToolNames: [],

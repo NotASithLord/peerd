@@ -172,8 +172,8 @@ export const createKernelDwebReseedOwner = ({
       }
       const preparedFingerprint = reseedFingerprint(prepared);
       try {
-        const outcome = await withDwebReseedPublication((/** @type {()=>boolean} */ current) =>
-          withAppLifecycle(candidate.id, async () => {
+        const outcome = await withDwebReseedPublication((/** @type {()=>boolean} */ current) => {
+          return withAppLifecycle(candidate.id, async () => {
             if (!current() || !exact()) return 'retired';
             const app = await readBounded(
               'dweb-reseed-read-timeout', () => appRegistry.get(candidate.id),
@@ -214,7 +214,8 @@ export const createKernelDwebReseedOwner = ({
               });
             }
             return reply?.ok === true ? 'seeded' : 'failed';
-          }), {
+          });
+        }, {
           timeoutMs: messageTimeoutMs * 2,
           hostEpoch,
           setTimeoutFn,

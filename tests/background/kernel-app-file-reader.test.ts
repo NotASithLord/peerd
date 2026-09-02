@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   createKernelAppFileReader,
   makeKernelAppEditorRoutes,
-  resolveKernelSessionAppId,
 } from '../../extension/background/kernel-app-file-reader.js';
 import { makeKernelComposerRoutes } from '../../extension/background/kernel-composer-routes.js';
 
@@ -18,21 +17,6 @@ const appFiles = (overrides: Record<string, any> = {}) => ({
 });
 
 describe('native kernel App file picker', () => {
-  test('accepts only the exact IDB catalog row and a live session default', () => {
-    const row = {
-      key: 'apps.v1',
-      value: {
-        schemaVersion: 1,
-        apps: { 'app-1': { id: 'app-1' } },
-        sessionDefaults: { chat: 'app-1', stale: 'missing' },
-      },
-    };
-    expect(resolveKernelSessionAppId(row, 'chat')).toBe('app-1');
-    expect(resolveKernelSessionAppId(row, 'stale')).toBeNull();
-    expect(resolveKernelSessionAppId(row.value, 'chat')).toBeNull();
-    expect(resolveKernelSessionAppId({ ...row, key: 'vms.v1' }, 'chat')).toBeNull();
-  });
-
   test('resolves the active App before crossing the demand-owned file channel', async () => {
     const calls: string[] = [];
     const reader = createKernelAppFileReader({

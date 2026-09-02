@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import { makeKernelOriginCredentialRoutes } from '../../extension/background/kernel-credential-routes.js';
 import { createKernelKeyedOriginAuthority } from '../../extension/background/kernel-keyed-origin-authority.js';
 import { DPOP_KEY_STORE } from '../../extension/peerd-egress/dpop/keys.js';
+import { makeCredentialScope } from '../../extension/peerd-runtime/actor/origin-lock.js';
 
 class FakeLockedError extends Error {}
 
@@ -68,6 +69,28 @@ describe('kernel origin-credential routes', () => {
     expect(authority.has('https://api.second.example')).toBe(true);
     authority.remove('https://api.example.com');
     expect(authority.has('https://api.example.com')).toBe(false);
+  });
+
+  test('a locked-start refusal rehydrates after unlock before roaming scope is read', async () => {
+    let locked = true;
+    const authority = createKernelKeyedOriginAuthority({
+      listSecretNames: async () => {
+        if (locked) throw new FakeLockedError('locked');
+        return ['origin:https://bank.example'];
+      },
+    });
+    const roamingScope = () => makeCredentialScope({
+      getState: () => ({ mode: 'roaming' }),
+      getOrigin: () => 'https://bank.example',
+      hasVaultSecret: authority.has,
+    })();
+
+    expect(await authority.hydrate()).toBe(false);
+    expect(authority.has('https://bank.example')).toBe(false);
+    locked = false;
+    expect(await authority.hydrate()).toBe(true);
+    expect(authority.has('https://bank.example')).toBe(true);
+    expect(roamingScope()).toBeUndefined();
   });
 
   test('a dpop credential mints the keypair at provisioning and lists its public jkt', async () => {

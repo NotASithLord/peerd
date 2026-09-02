@@ -99,7 +99,7 @@ export const runScenario = async (s: Scenario): Promise<RanScenario> => ({
 // ---- report formatting -------------------------------------------------------
 
 const statusCell = (r: RanScenario): string => {
-  if (r.result.held && r.result.coverage === 'partial') return 'partial — platform residual';
+  if (r.result.held && r.result.coverage === 'partial') return 'partial: platform residual';
   if (r.tier === 'in-browser') return r.result.held ? 'verified' : 'FAILED';
   return r.result.held ? 'blocked' : 'LEAKED';
 };
@@ -140,7 +140,7 @@ export const formatMarkdown = (ran: RanScenario[], generatedNote: string): strin
     lines.push(`- Asset: ${r.asset}`);
     lines.push(`- Claim checked: ${r.claim}`);
     lines.push(`- Threat-model invariant: ${r.threatModelRef}`);
-    lines.push(`- Coverage: ${r.result.coverage === 'partial' ? 'partial — platform residual' : 'complete for the stated probes'}`);
+    lines.push(`- Coverage: ${r.result.coverage === 'partial' ? 'partial: platform residual' : 'complete for the stated probes'}`);
     if (r.result.residuals?.length) lines.push(`- Platform residuals: ${r.result.residuals.join('; ')}`);
     lines.push(`- Defenses exercised: ${r.result.defenses.join(', ')}`);
     if (r.mcpMapping) lines.push(`- MCP mapping: ${r.mcpMapping}`);

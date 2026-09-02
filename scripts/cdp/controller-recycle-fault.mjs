@@ -12,11 +12,12 @@ import { fileURLToPath } from 'node:url';
 import { ARTIFACTS_DIR, REPO_ROOT } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
-import { FEATURE_LEASE_HOST_PROTOCOL } from '../../extension/shared/feature-lease-protocol.js';
 import {
   digestTree, PRODUCTION_BACKGROUND_ENTRY, readChromeIdentity, sha256File,
 } from './passkey-signup-lane.mjs';
-import { startOllamaAcceptanceFixture } from './product-acceptance-probes.mjs';
+import {
+  readActiveFeatureLease, startOllamaAcceptanceFixture,
+} from './product-acceptance-probes.mjs';
 import {
   attach, evalIn, launchPeerd, rpc, sseText, sseToolCall, unlockAndReady, waitFor,
 } from './e2e-harness.mjs';
@@ -76,7 +77,8 @@ const offscreenContexts = (page) => evalIn(page, `(async () => {
   }
   return (await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
-  })).filter((context) => String(context.documentUrl || '').endsWith('/offscreen/offscreen.html'))
+  })).filter((context) => String(context.documentUrl || '').split('#', 1)[0]
+    .endsWith('/offscreen/offscreen.html'))
     .map((context) => ({
       contextId: context.contextId,
       contextType: context.contextType,
@@ -111,36 +113,13 @@ const closeOffscreenHost = async (serviceWorkerConnection, page, context) => {
   return { method: 'chrome.offscreen.closeDocument', success: true };
 };
 
-const featureHostStatus = (serviceWorkerConnection) => evalIn(
-  serviceWorkerConnection,
-  `new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, error: 'host-status-timeout' }), 5000);
-    chrome.runtime.sendMessage({
-      type: 'feature-lease/host-status',
-      protocol: ${FEATURE_LEASE_HOST_PROTOCOL},
-    }, (reply) => {
-      clearTimeout(timer);
-      const error = chrome.runtime.lastError?.message;
-      resolve(error ? { ok: false, error } : reply);
-    });
-  })`,
-  true,
-);
-
-const exactControllerHost = async (serviceWorkerConnection) => {
-  const status = await featureHostStatus(serviceWorkerConnection);
-  const controllerLeases = status?.leases?.filter(
-    (lease) => lease?.scope === 'controller' && lease?.orphaned !== true,
-  ) ?? [];
-  if (status?.ok !== true || typeof status.hostEpoch !== 'string'
-      || controllerLeases.length !== 1) {
-    throw new Error(`exact active controller lease missing: ${JSON.stringify(status)}`);
-  }
+const exactControllerHost = async (page) => {
+  const { lease } = await readActiveFeatureLease(page, 'controller');
   return {
-    hostEpoch: status.hostEpoch,
-    leaseId: controllerLeases[0].leaseId,
-    generation: controllerLeases[0].generation,
-    kernelEpoch: controllerLeases[0].kernelEpoch,
+    hostEpoch: lease.hostEpoch,
+    leaseId: lease.leaseId,
+    generation: lease.generation,
+    kernelEpoch: lease.kernelEpoch,
   };
 };
 
@@ -408,7 +387,7 @@ export async function runControllerFaultEvidence({
     });
     if (!hostFaultContext) throw new Error('whole-host fault did not create one exact offscreen host');
     const hostFaultHost = await waitFor(
-      () => exactControllerHost(serviceWorkerConnection).catch(() => null),
+      () => exactControllerHost(ctx.page).catch(() => null),
       { budgetMs: 15_000, pollMs: 10 },
     );
     if (!hostFaultHost) throw new Error('whole-host fault did not acquire one exact controller lease');
@@ -436,7 +415,7 @@ export async function runControllerFaultEvidence({
     }, { budgetMs: 15_000, pollMs: 10 });
     if (!hostRecoveryContext) throw new Error('whole-host retry did not create a fresh offscreen host');
     const hostRecoveryHost = await waitFor(
-      () => exactControllerHost(serviceWorkerConnection).catch(() => null),
+      () => exactControllerHost(ctx.page).catch(() => null),
       { budgetMs: 15_000, pollMs: 10 },
     );
     if (!hostRecoveryHost) throw new Error('whole-host retry did not acquire a fresh controller lease');
@@ -458,7 +437,7 @@ export async function runControllerFaultEvidence({
     );
     if (!postEffectContext) throw new Error('post-effect fault did not create one exact offscreen host');
     const postEffectHost = await waitFor(
-      () => exactControllerHost(serviceWorkerConnection).catch(() => null),
+      () => exactControllerHost(ctx.page).catch(() => null),
       { budgetMs: 15_000, pollMs: 10 },
     );
     if (!postEffectHost) throw new Error('post-effect fault did not acquire one exact controller lease');
@@ -497,7 +476,7 @@ export async function runControllerFaultEvidence({
     }, { budgetMs: 15_000, pollMs: 10 });
     if (!postEffectWakeContext) throw new Error('post-effect wake did not create a fresh host');
     const postEffectWakeHost = await waitFor(
-      () => exactControllerHost(serviceWorkerConnection).catch(() => null),
+      () => exactControllerHost(ctx.page).catch(() => null),
       { budgetMs: 15_000, pollMs: 10 },
     );
     if (!postEffectWakeHost) throw new Error('post-effect wake did not acquire a fresh lease');

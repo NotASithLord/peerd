@@ -120,6 +120,28 @@ describe('kernel dweb agent owner', () => {
     expect(persisted).toBe(1);
   });
 
+  test('reply audit preserves an unknown mesh mutation outcome', async () => {
+    const state = setup();
+    state.deps.meshDispatch.reply = async () => ({
+      ok: false, error: 'response lost', performed: true,
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
+    state.owner.handleInbound({
+      from: 'did:peer',
+      data: { deliver: {
+        kind: 'ask', convId: 'conversation-unknown',
+        reqId: 'request-unknown', message: 'hello',
+      } },
+    });
+    await waitFor(() => state.audits.some((event) => event.type === 'a2a_reply_failed'));
+    expect(state.audits.find((event) => event.type === 'a2a_reply_failed')).toMatchObject({
+      details: {
+        performed: true, outcomeKnown: false,
+        outcomeKind: 'transport-lost', retryable: false,
+      },
+    });
+  });
+
   test('trickles notable unthreaded activity without stealing a live turn', async () => {
     const state = setup();
     state.owner.handleInbound({ from: 'did:peer', data: 'notice' });

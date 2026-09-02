@@ -148,7 +148,9 @@ export const createKernelBrowserNetworkAuthority = ({
     }
     try {
       const rows = await sessionCache.sessionGet(GUARDED_ORIGINS_KEY);
-      await origins.hydrate(Array.isArray(rows) ? rows : []);
+      // why: a genuinely absent first-run snapshot is empty. Present corrupt or
+      // partial custody is unknown authority and must leave surviving DNR rules untouched.
+      await origins.hydrate(rows == null ? [] : rows);
       return /** @type {const} */ ({ ok: true });
     } catch (cause) {
       return { ok: false, error: `guarded_origins_hydration_failed: ${reason(cause)}` };

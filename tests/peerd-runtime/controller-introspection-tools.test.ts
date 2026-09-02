@@ -38,16 +38,33 @@ describe('controller-owned introspection semantics', () => {
   test('selects the exact inspect facet without exposing storage machinery', async () => {
     let reads = 0;
     const result: any = await executeControllerIntrospectionTool(
-      'inspect', { kind: 'storage', prefix: 'vault:' }, {}, {
+      'inspect', { kind: 'storage', prefix: 'vault' }, {}, {
         readStorageSnapshot: async (prefix: string) => {
           reads += 1;
-          expect(prefix).toBe('vault:');
+          expect(prefix).toBe('vault');
           return { 'vault:key': 'ciphertext' };
         },
       },
     );
     expect(reads).toBe(1);
     expect(JSON.parse(result.content)).toEqual({ 'vault:key': 'ciphertext' });
+  });
+
+  test('reports the sealed vault custody contract without the retired SW-only claim', async () => {
+    const result: any = await executeControllerIntrospectionTool(
+      'inspect', { kind: 'provider_config' }, {}, {
+        readProviderPosture: async () => ({
+          provider: 'anthropic', model: 'claude-sonnet-4-6',
+          hasKey: true, vaultLocked: false,
+        }),
+      },
+    );
+    const contract = JSON.parse(result.content).contract;
+    expect(contract).toContain('Argon2id');
+    expect(contract).toContain('sealed offscreen Worker');
+    expect(contract).toContain('semantic controller');
+    expect(contract).not.toContain('PBKDF2');
+    expect(contract).not.toContain('never leaves the service worker');
   });
 
   test('frames an exact installed-skill read with the projected session watermark', async () => {

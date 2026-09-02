@@ -11,7 +11,7 @@
 //   - responder: the per-call model behaviour (swapped in before run)
 //   - run(ctx, rec): drives the panel and records via the recorder:
 //       rec.check(name, pass, detail)   — a functional assertion
-//       rec.observe(name, value)         — structured, non-gating telemetry
+//       rec.observe(name, value)         : structured, non-gating telemetry
 //       rec.shot(label)                 — a screenshot artifact (Claude can read)
 //       rec.visual(name, opts)          — capture + baseline pixel-compare
 //
@@ -26,6 +26,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
+  reloadReadyPanel,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -50,6 +51,7 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
+const REQUIRE_SITE_CAPTURE_TAP = process.env.PEERD_REQUIRE_SITE_CAPTURE_TAP === '1';
 
 const auditEntries = async (ctx, limit = 800) => {
   const audit = await rpc(ctx.page, { type: 'audit/list', limit });
@@ -116,7 +118,7 @@ let pdaToolResultBody = '';
 // request — and after the ack tool_result the orchestrator loop CONTINUES, so a
 // real model delegates once then ends its turn (the ack says the reply lands
 // later). We mirror that: delegate once, then return plain text.
-let actorState = { delegates: 0, seen: [] };
+let actorState = { delegates: 0, seen: [], afterStop: false };
 let actorBoundaryState = { delegates: 0 };
 let scriptFanState = { scripts: 0, seen: [] };
 let dwebActorState = { delegates: 0, actorCalls: 0 };
@@ -2631,8 +2633,10 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         const actorEvidence = siteClientVertical.actorBodies.join('\n');
         rec.check('capture observed the real page request and returned its redacted dossier',
           actorEvidence.includes('/api/status')
-            && (actorEvidence.includes('deriver: capture-cdp')
-              || actorEvidence.includes('deriver: capture-tap')),
+            && (REQUIRE_SITE_CAPTURE_TAP
+              ? actorEvidence.includes('deriver: capture-tap')
+              : actorEvidence.includes('deriver: capture-cdp')
+                || actorEvidence.includes('deriver: capture-tap')),
           actorEvidence.slice(-1200));
         rec.check('write settled, read returned the persisted client, and sealed run used it',
           /create/i.test(siteClientVertical.actorResults[5] ?? '')
@@ -3052,7 +3056,10 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           JSON.stringify(settled));
 
         await ctx.page.send('Page.bringToFront');
-        await ctx.page.send('Page.reload', { ignoreCache: true });
+        const session = await rpc(ctx.page, { type: 'state/get' });
+        await reloadReadyPanel(ctx, {
+          expectedSessionId: session?.state?.session?.sessionId ?? null,
+        });
         const checkReady = await waitFor(() => evalIn(ctx.page, `(() => {
           const button = [...document.querySelectorAll('button')]
             .find((candidate) => candidate.textContent === 'Check delivery');
@@ -4922,7 +4929,10 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           && fabric?.toggleHeight >= 44,
         JSON.stringify(fabric));
       if (fabric) {
-        await ctx.page.send('Page.reload', { ignoreCache: true });
+        const session = await rpc(ctx.page, { type: 'state/get' });
+        await reloadReadyPanel(ctx, {
+          expectedSessionId: session?.state?.session?.sessionId ?? null,
+        });
         const rehydrated = await waitFor(
           () => evalIn(ctx.page, `(() => {
             const panel = document.querySelector('.actor-fabric');
@@ -4973,7 +4983,18 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         settledFabric?.text.includes('all actor work finished')
           && settledFabric?.focusPreserved === true,
         JSON.stringify(settledFabric));
-      await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
+      // The composer remains disabled for a brief interval while the fenced
+      // wake turn settles. A disabled textarea refuses focus, which left the
+      // inspected actor button focused and correctly paused the receipt's
+      // accessibility-aware expiry forever. Body is always an available,
+      // deterministic focus target outside the fabric.
+      await evalIn(ctx.page, `(() => {
+        document.body.tabIndex = -1;
+        document.body.focus();
+      })()`);
+      await ctx.page.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: 1, y: 1, button: 'none',
+      });
       let out = {};
       await waitFor(async () => {
         out = await evalIn(ctx.page, `(() => {
@@ -5203,8 +5224,18 @@ document.querySelector('#refresh').addEventListener('click', async () => {
     name: 'actor-stop', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
-      if (body.includes('<actor_agent>')) return { delayMs: 20_000, sse: sseText('this-never-renders') };
-      if (body.includes('you messaged has replied')) return { sse: sseText('should-not-reach-wake') };
+      if (body.includes('<actor_agent>')) {
+        actorState.actorCalls += 1;
+        return { delayMs: 2_500, sse: sseText('this-never-renders') };
+      }
+      if (body.includes('you messaged has replied')) {
+        actorState.wakeCalls += 1;
+        return { sse: sseText('should-not-reach-wake') };
+      }
+      if (actorState.afterStop) {
+        actorState.continuationCalls += 1;
+        return { sse: sseText('POST-STOP-CONTINUATION') };
+      }
       // delegate once, then end the orchestrator turn (so it doesn't re-delegate
       // on the post-ack step) — leaving exactly one hung actor for Stop to cancel.
       if (actorState.delegates === 0) {
@@ -5214,24 +5245,100 @@ document.querySelector('#refresh').addEventListener('click', async () => {
       return { sse: sseText('Delegated; awaiting the slow web read.') };
     },
     async run(ctx, rec) {
-      actorState = { delegates: 0, seen: [] };
+      actorState = {
+        delegates: 0, seen: [], afterStop: false,
+        actorCalls: 0, wakeCalls: 0, continuationCalls: 0,
+      };
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'slowly read the page' });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
+      const stoppedSessionId = await waitFor(async () => {
+        const admitted = await rpc(ctx.page, { type: 'state/get' });
+        return admitted?.state?.session?.sessionId ?? null;
+      }, { budgetMs: 5_000, pollMs: 25 });
       const pending = await waitFor(
         () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-pending')`),
         { budgetMs: 15_000, pollMs: 100 });
       rec.check('the actor card is working (pending) before Stop', !!pending);
+      const actorInFlight = await waitFor(
+        () => actorState.actorCalls === 1 ? { ...actorState } : null,
+        { budgetMs: 15_000, pollMs: 50 });
+      rec.check('the isolated actor crossed its model boundary before Stop',
+        actorInFlight?.actorCalls === 1, JSON.stringify(actorInFlight ?? actorState));
       const stopped = await rpc(ctx.page, { type: 'agent/stop' });
       rec.check('agent/stop accepted', !!stopped?.ok, JSON.stringify(stopped));
       const cancelled = await waitFor(
         () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-cancelled')`),
         { budgetMs: 15_000, pollMs: 100 });
-      rec.check('Stop cascades to the in-flight actor — card flips to cancelled', !!cancelled);
+      rec.check('Stop cascades to the in-flight actor; card flips to cancelled',
+        !!cancelled);
       let busy = true;
       await waitFor(async () => { busy = await evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`); return !busy; }, { budgetMs: 12_000 });
       rec.check('Stop returns the chat to idle', busy === false);
+      actorState.afterStop = true;
+      await new Promise((resolve) => setTimeout(resolve, 3_500));
       const noLeak = await evalIn(ctx.page, `![...document.querySelectorAll('.message-assistant .bubble')].some((b) => b.textContent.includes('this-never-renders'))`);
       rec.check('the hung actor reply never renders', noLeak === true);
+      rec.check('Stop suppresses every late actor wake/model call',
+        actorState.actorCalls === 1 && actorState.wakeCalls === 0
+          && actorState.continuationCalls === 0,
+        JSON.stringify(actorState));
+      const noFailure = await evalIn(ctx.page, `(() => ({
+        failed: document.querySelectorAll('.message-assistant.failed').length,
+        unknown: document.body.innerText.includes('Turn outcome unknown'),
+      }))()`);
+      rec.check('Stop does not surface a failed or unknown-outcome turn',
+        noFailure.failed === 0 && noFailure.unknown === false, JSON.stringify(noFailure));
+
+      let durableSession = null;
+      const durableCancellation = await waitFor(async () => {
+        if (!stoppedSessionId) return null;
+        const result = await rpc(ctx.page, {
+          type: 'session/get', sessionId: stoppedSessionId,
+        }).catch(() => null);
+        durableSession = result?.session ?? null;
+        return result?.session?.messages?.find((message) =>
+          message?.synthetic === true
+            && message?.actorReply?.aborted === true
+            && message?.actorReply?.performed === false
+            && message?.actorReply?.outcomeKnown === true) ?? null;
+      }, { budgetMs: 15_000, pollMs: 50 });
+      rec.check('Stop durably records the host-proven cancelled actor receipt before reload',
+        !!durableCancellation, JSON.stringify(durableCancellation ?? durableSession));
+
+      await reloadReadyPanel(ctx, { expectedSessionId: stoppedSessionId });
+      const persisted = await waitFor(() => evalIn(ctx.page, `(() => {
+        const state = {
+          busy: !!document.querySelector('form.input-bar button.stop'),
+          failed: document.querySelectorAll('.message-assistant.failed').length,
+          unknown: document.body.innerText.includes('Turn outcome unknown'),
+          request: [...document.querySelectorAll('.message-user:not(.message-actor-reply) .bubble')]
+            .some((bubble) => bubble.textContent.includes('slowly read the page')),
+          cancelled: !!document.querySelector('.tool-call.tool-actor.tool-cancelled'),
+        };
+        // Stop can win before the post-tool model round emits prose. The durable
+        // turn is the user request plus its host-stamped cancelled tool receipt.
+        return state.request && state.cancelled && !state.busy ? state : null;
+      })()`), { budgetMs: 15_000, pollMs: 100 });
+      rec.check('the stopped turn and cancelled actor receipt survive panel reload',
+        persisted?.request === true && persisted?.cancelled === true && persisted?.busy === false
+          && persisted?.failed === 0 && persisted?.unknown === false,
+        JSON.stringify(persisted));
+
+      const continued = await rpc(ctx.page, {
+        type: 'agent/send', text: 'confirm the chat can continue after Stop',
+      });
+      rec.check('a subsequent turn is accepted', !!continued?.ok, JSON.stringify(continued));
+      const resumed = await waitFor(() => evalIn(ctx.page, `(() => {
+        const bubbles = [...document.querySelectorAll('.message-assistant .bubble')]
+          .map((bubble) => bubble.textContent.trim());
+        const busy = !!document.querySelector('form.input-bar button.stop');
+        return bubbles.includes('POST-STOP-CONTINUATION') && !busy ? { bubbles, busy } : null;
+      })()`), { budgetMs: 20_000, pollMs: 100 });
+      rec.check('a subsequent model turn succeeds with valid persisted history',
+        !!resumed, JSON.stringify(resumed));
+      rec.check('only the admitted actor and explicit post-Stop user turn reached the model',
+        actorState.actorCalls === 1 && actorState.continuationCalls === 1,
+        JSON.stringify(actorState));
     },
   },
 
@@ -5643,7 +5750,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         `${alphaRoot} / ${betaRoot}`);
       if (!distinctRoots) return;
 
-      const page = await openWidePage(ctx, 'home/home.html#actors');
+      const page = await openWidePage(ctx, 'home/home.html#actors', { ready: '.actor-space' });
       try {
         await rpc(ctx.page, { type: 'session/switch', sessionId: alphaRoot });
         await rpc(ctx.page, { type: 'agent/send', text: 'ALPHA-ROOT research the launch risks' });
@@ -5828,6 +5935,14 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           JSON.stringify(empty ?? emptyProbe));
       } finally {
         actorOverviewState.releaseLive();
+        if (alphaRoot) {
+          await rpc(ctx.page, { type: 'session/switch', sessionId: alphaRoot }).catch(() => null);
+          await rpc(ctx.page, { type: 'agent/stop' }).catch(() => null);
+        }
+        if (betaRoot) {
+          await rpc(ctx.page, { type: 'session/switch', sessionId: betaRoot }).catch(() => null);
+          await rpc(ctx.page, { type: 'agent/stop' }).catch(() => null);
+        }
         try { page.close(); } catch { /* */ }
       }
     },

@@ -9,7 +9,9 @@ import {
   parseLocalModelChannelOffer,
 } from '../shared/feature-lease-protocol.js';
 import { KERNEL_LOCAL_ROUTE_NAMES } from '../shared/kernel-feature-route-inventory.js';
+import { sameCanonicalStructuredClone } from '../shared/canonical-clone-digest.js';
 import { createKernelFeatureControl } from './kernel-feature-control.js';
+import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 
 const success = (/** @type {unknown} */ value) => Object.freeze({
   ok: true, outcomeKnown: true, value,
@@ -19,10 +21,6 @@ const failure = (/** @type {string} */ code, /** @type {boolean} */ outcomeKnown
   ok: false, code, outcomeKnown,
   error: /** @type {{message?:string}} */ (cause)?.message ?? code,
 });
-const same = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
-};
-
 /** @param {Record<string,any>} deps */
 export const createKernelLocalControl = (deps) => {
   if (typeof deps.callFeature !== 'function' || !deps.settingsStore
@@ -43,7 +41,9 @@ export const createKernelLocalControl = (deps) => {
       entered = true;
       const clientsApi = deps.clientsApi ?? /** @type {any} */ (globalThis).clients;
       const matches = (await clientsApi.matchAll({ type: 'window', includeUncontrolled: true }))
-        .filter((/** @type {any} */ client) => client?.url === deps.offscreenUrl);
+        .filter((/** @type {any} */ client) => sameDocumentUrlIgnoringHash(
+          client?.url, deps.offscreenUrl,
+        ));
       if (matches.length !== 1) throw Object.assign(new Error('local model host unavailable'), {
         outcomeKnown: true, code: 'local-model-host-unavailable',
       });
@@ -153,7 +153,9 @@ export const createKernelLocalControl = (deps) => {
     }
     if (operation === 'local.models.snapshot') {
       const sessionId = typeof message.sessionId === 'string' ? message.sessionId : null;
-      if (!same(payload, { sessionId })) return failure('local-effect-substitution', true);
+      if (!sameCanonicalStructuredClone(payload, { sessionId })) {
+        return failure('local-effect-substitution', true);
+      }
       await deps.ready;
       const session = sessionId
         ? await (deps.sessions.getMetadata?.(sessionId) ?? deps.sessions.get(sessionId))
@@ -212,7 +214,9 @@ export const createKernelLocalControl = (deps) => {
     const entry = /** @type {[string,Record<string,any>]|undefined} */ (
       methods[/** @type {keyof typeof methods} */ (operation)]
     );
-    if (!entry || !same(payload, entry[1])) return failure('local-effect-substitution', true);
+    if (!entry || !sameCanonicalStructuredClone(payload, entry[1])) {
+      return failure('local-effect-substitution', true);
+    }
     return success(await localModel(entry[0], payload, context.signal));
   };
   const feature = createKernelFeatureControl({

@@ -11,6 +11,23 @@ export const ACCEPTANCE_MODEL = 'qwen3:8b';
 export const ACCEPTANCE_REPLY = 'production-controller-first-message-ok';
 export const ACCEPTANCE_OLLAMA_HOST = 'http://127.0.0.1:11434';
 
+export const readActiveFeatureLease = async (page, scope) => {
+  const reply = await rpc(page, { type: 'bootstrap/ready' }, { timeoutMs: 10_000 });
+  const snapshot = reply?.featureLeases;
+  const lease = snapshot?.leases?.[scope];
+  if (reply?.ok !== true || snapshot?.schema !== 1
+      || typeof snapshot.buildId !== 'string'
+      || typeof snapshot.bootId !== 'string'
+      || typeof snapshot.kernelEpoch !== 'string'
+      || lease?.status !== 'active'
+      || typeof lease.hostEpoch !== 'string'
+      || typeof lease.leaseId !== 'string'
+      || !Number.isSafeInteger(lease.generation)) {
+    throw new Error(`exact active ${scope} lease missing: ${JSON.stringify(snapshot)}`);
+  }
+  return { snapshot, lease };
+};
+
 const listen = (server, port, host) => new Promise((resolve, reject) => {
   const onError = (error) => { server.off('listening', onListening); reject(error); };
   const onListening = () => { server.off('error', onError); resolve(); };

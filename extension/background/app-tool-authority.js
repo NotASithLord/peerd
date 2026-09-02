@@ -4,15 +4,13 @@
 // catalog, tab, repository lock, session default, and actor binding; the
 // controller owns validation, search presentation, paging, and result shaping.
 
+import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
+
+const APP_AUTHORITY_ARGUMENT_BYTES = 8 * 1024 * 1024;
+
 const mismatch = () => Object.assign(new Error('App authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
-
-/** @param {unknown} left @param {unknown} right */
-const sameClone = (left, right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); }
-  catch { return false; }
-};
 
 /** @param {{binding:any,ctx:any,signal?:AbortSignal,shared?:any,appProgramSemanticToken?:string}} input */
 export const createAppToolAuthority = ({
@@ -45,10 +43,12 @@ export const createAppToolAuthority = ({
     ) => {
       requireOperation('turn.app.update');
       if (!sameApp(appId) || name !== args.name || html !== args.html
-          || entryFile !== args.entryFile || !sameClone(tags, args.tags)
+          || entryFile !== args.entryFile || !sameCanonicalStructuredClone(
+            tags, args.tags, { maxBytes: APP_AUTHORITY_ARGUMENT_BYTES },
+          )
           || typeof ctx?.appClient?.update !== 'function') throw mismatch();
       const record = await ctx.appClient.update({
-        appId: appIdFor(appId), name, html, tags, entryFile, sessionId,
+        appId: appIdFor(appId), name, html, tags, entryFile, sessionId, signal,
       });
       return record ? {
         id: record.id, name: record.name, entryFile: record.entryFile,
@@ -106,9 +106,13 @@ export const createAppToolAuthority = ({
       const expected = typeof args.contentBase64 === 'string'
         ? { base64: args.contentBase64 }
         : args.content;
-      if (!sameApp(appId) || path !== args.path || !sameClone(content, expected)
+      if (!sameApp(appId) || path !== args.path || !sameCanonicalStructuredClone(
+        content, expected, { maxBytes: APP_AUTHORITY_ARGUMENT_BYTES },
+      )
           || typeof ctx?.appClient?.writeFile !== 'function') throw mismatch();
-      return ctx.appClient.writeFile({ appId: appIdFor(appId), path, content, sessionId });
+      return ctx.appClient.writeFile({
+        appId: appIdFor(appId), path, content, sessionId, signal,
+      });
     },
     readFile: (/** @type {string|undefined} */ appId, /** @type {string} */ path) => {
       requireOperation('turn.app.read-file');
@@ -128,7 +132,7 @@ export const createAppToolAuthority = ({
       requireOperation('turn.app.delete-file');
       if (!sameApp(appId) || path !== args.path
           || typeof ctx?.appClient?.deleteFile !== 'function') throw mismatch();
-      return ctx.appClient.deleteFile({ appId: appIdFor(appId), path, sessionId });
+      return ctx.appClient.deleteFile({ appId: appIdFor(appId), path, sessionId, signal });
     },
     observeRuntime: () => {
       requireOperation('turn.app.observe');
@@ -140,7 +144,9 @@ export const createAppToolAuthority = ({
     },
     actRuntime: (/** @type {string} */ action, /** @type {Record<string,unknown>} */ params) => {
       requireOperation('turn.app.act');
-      if (action !== args.action || !sameClone(params, args.params ?? {})) throw mismatch();
+      if (action !== args.action || !sameCanonicalStructuredClone(
+        params, args.params ?? {}, { maxBytes: APP_AUTHORITY_ARGUMENT_BYTES },
+      )) throw mismatch();
       if (typeof ctx?.appAgentCall !== 'function') return {
         ok: false, error: 'app_playtest_not_available', outcomeKnown: true,
         outcomeKind: 'pre-effect-failure',

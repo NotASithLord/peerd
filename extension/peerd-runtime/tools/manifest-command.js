@@ -19,25 +19,42 @@
 import {
   TOOL_MANIFEST_PRESETS,
   resolveManifestAllow,
+  resolveManifestStatus,
   manifestLabel,
 } from './manifests.js';
 
 const USAGE = '"/tools list" shows presets; "/tools <preset>" narrows this chat\'s toolset; "/tools full" restores everything.';
+const REPORT_NAME_LIMIT = 8;
+const visibleToolName = (/** @type {string} */ name) =>
+  /^[a-z][a-z0-9_]{0,127}$/.test(name) ? name : '(invalid entry)';
+const migrationNoteFor = (/** @type {{renamed:string[],unavailable:string[]}} */ status) => [
+  status.renamed.length ? `Using current names: ${status.renamed.join(', ')}.` : '',
+  status.unavailable.length
+    ? `Unavailable saved tools ignored: ${status.unavailable.slice(0, REPORT_NAME_LIMIT)
+      .map(visibleToolName).join(', ')}${status.unavailable.length > REPORT_NAME_LIMIT
+      ? `, +${status.unavailable.length - REPORT_NAME_LIMIT} more` : ''}.`
+    : '',
+].filter(Boolean).join(' ');
 
 /**
  * Pure command planner used by the sealed controller. The authority host
  * applies only the returned finite session mutation and audit event.
  * @param {unknown} rawArg
  * @param {unknown} currentManifest
+ * @param {Iterable<string>} [knownToolNames]
  */
-export const planToolsCommand = (rawArg, currentManifest) => {
+export const planToolsCommand = (rawArg, currentManifest, knownToolNames = undefined) => {
   const arg = typeof rawArg === 'string' ? rawArg.trim() : '';
   if (!arg) {
-    const allow = resolveManifestAllow(currentManifest);
+    const status = knownToolNames
+      ? resolveManifestStatus(currentManifest, knownToolNames)
+      : { allow: resolveManifestAllow(currentManifest), renamed: [], unavailable: [] };
+    const allow = status.allow;
+    const migrationNote = migrationNoteFor(status);
     return Object.freeze({
       action: 'note',
       note: allow
-        ? `Tool manifest active for this chat: ${manifestLabel(currentManifest)} (${allow.size} tools exposed). ${USAGE}`
+        ? `Tool manifest active for this chat: ${manifestLabel(currentManifest, knownToolNames ?? undefined)} (${allow.size} tools exposed).${migrationNote ? ` ${migrationNote}` : ''} ${USAGE}`
        : `No tool manifest set: the default tool surface is exposed. ${USAGE}`,
     });
   }
@@ -88,11 +105,12 @@ export const describePresets = () => {
  *   same contract as /system's lazy-create path.
  * @param {(text: string) => void} deps.postNote       chat system-note
  * @param {(entry: object) => Promise<unknown>} deps.audit
+ * @param {Iterable<string>} [deps.knownToolNames] current controller catalog
  * @returns {(arg: string) => Promise<{ session: import('../sessions/types.js').Session | null }>}
  *   `session` is the updated record when the manifest changed (the SW
  *   refreshes its cache + pushes state), null for the read-only forms.
  */
-export const makeToolsCommand = ({ sessions, getCurrentSessionId, ensureSession, postNote, audit }) =>
+export const makeToolsCommand = ({ sessions, getCurrentSessionId, ensureSession, postNote, audit, knownToolNames = undefined }) =>
   async (rawArg) => {
     const arg = (rawArg ?? '').trim();
 
@@ -100,9 +118,13 @@ export const makeToolsCommand = ({ sessions, getCurrentSessionId, ensureSession,
     if (!arg) {
       const sessionId = await getCurrentSessionId();
       const s = sessionId ? await sessions.get(sessionId) : null;
-      const allow = resolveManifestAllow(s?.toolManifest);
+      const status = knownToolNames
+        ? resolveManifestStatus(s?.toolManifest, knownToolNames)
+        : { allow: resolveManifestAllow(s?.toolManifest), renamed: [], unavailable: [] };
+      const allow = status.allow;
+      const migrationNote = migrationNoteFor(status);
       postNote(allow
-        ? `Tool manifest active for this chat: ${manifestLabel(s.toolManifest)} (${allow.size} tools exposed). ${USAGE}`
+        ? `Tool manifest active for this chat: ${manifestLabel(s.toolManifest, knownToolNames ?? undefined)} (${allow.size} tools exposed).${migrationNote ? ` ${migrationNote}` : ''} ${USAGE}`
         : `No tool manifest set — every registered tool is exposed. ${USAGE}`);
       return { session: null };
     }

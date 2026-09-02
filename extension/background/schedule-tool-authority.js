@@ -1,6 +1,7 @@
 // @ts-check
 
 import { controllerOperationAllowedInPermissionMode } from '/shared/controller-kernel-quota.js';
+import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
 
 const mismatch = () => Object.assign(new Error('schedule authority mismatch'), {
   outcomeKnown: true, retryable: false,
@@ -13,12 +14,6 @@ const knownFailure = (cause) => {
     return cause;
   }
   return Object.assign(new Error(String(cause)), { outcomeKnown: true });
-};
-
-/** @param {unknown} left @param {unknown} right */
-const sameClone = (left, right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); }
-  catch { return false; }
 };
 
 /** @param {{operation:string,args:any,ctx:any,signal?:AbortSignal}} input */
@@ -51,7 +46,7 @@ export const createScheduleToolAuthority = ({ operation, args = {}, ctx, signal 
         && request.every.length >= 1 && request.every.length <= 128)
         !== (typeof request?.dailyAt === 'string'
           && request.dailyAt.length >= 1 && request.dailyAt.length <= 128);
-      if (!sameClone(request, expected)
+      if (!sameCanonicalStructuredClone(request, expected)
           || typeof request?.prompt !== 'string'
           || request.prompt.length < 1 || request.prompt.length > 16_384
           || !validCadence

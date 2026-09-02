@@ -6,9 +6,6 @@ import {
   kernelSessionAppId,
 } from './kernel-app-catalog.js';
 
-/** @param {unknown} row @param {string} sessionId */
-export const resolveKernelSessionAppId = kernelSessionAppId;
-
 /** @param {any} deps */
 export const createKernelAppFileReader = ({ idb, sessionCache, appFiles }) => {
   if (typeof idb?.get !== 'function' || typeof sessionCache?.sessionGet !== 'function'
@@ -24,7 +21,7 @@ export const createKernelAppFileReader = ({ idb, sessionCache, appFiles }) => {
   const list = async () => {
     const sessionId = await sessionCache.sessionGet('currentSessionId');
     if (typeof sessionId !== 'string' || !sessionId) return [];
-    const appId = resolveKernelSessionAppId(
+    const appId = kernelSessionAppId(
       await idb.get('apps', KERNEL_APP_CATALOG_KEY), sessionId,
     );
     return appId ? appFiles.listApp(appId) : [];

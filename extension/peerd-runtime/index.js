@@ -54,7 +54,6 @@ export { makeTrimEnricher, ENRICHMENT_MAX_OUTPUT_TOKENS } from './loop/summary-e
 // concurrently, everything else stays serial. The loop consumes it; it's
 // exported for tests and for the SW's lineage/debug surfaces.
 export { partitionToolBatch } from './loop/tool-batch.js';
-export { renderSystemPrompt, _setTemplateForTests } from './loop/system-prompt.js';
 // File attachments — pure classify/validate/strip core. The SW validates
 // agent/send payloads through it (fail closed); the side panel uses the
 // same caps/classifier for instant pre-send feedback; the loop strips.

@@ -16,19 +16,14 @@ import browser from '/vendor/browser-polyfill.js';
 
 // bootstrap.js synthesizes runtime.id/getURL for the http harness but
 // deliberately NOT sendMessage — its absence is the honest "no real SW
-// here" signal (same environment gate as state-get.test.js).
+// here" signal (same environment gate as state-get.test.js). The HTTP suite
+// registers no substitute assertion, so an absent worker cannot add a pass.
 const HAVE_LIVE_SW = typeof globalThis.chrome?.runtime?.sendMessage === 'function';
 
 /** @param {object} msg @returns {Promise<{ ok?: boolean, error?: string, value?: object }>} */
 const send = (msg) => /** @type {Promise<any>} */ (browser.runtime.sendMessage(msg));
 
 describe('background/script-model-call — the sub-model relay refusal matrix', () => {
-  it(HAVE_LIVE_SW
-    ? 'live service worker present — round-trip tests registered'
-    : 'no live service worker (http harness) — round-trips skipped (open chrome-extension://<id>/tests/runner.html)', () => {
-    expect(true).toBe(true);
-  });
-
   if (!HAVE_LIVE_SW) return;
 
   it('refuses the runner page before owner/run validation', async () => {

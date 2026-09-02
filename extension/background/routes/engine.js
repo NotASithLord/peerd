@@ -177,6 +177,7 @@ export const makeEngineRoutes = (deps) => {
     return repositories.coordinate(ref, async () => {
     const [command = '', ...args] = argv.map(String);
     const remoteOp = podGitRemoteOperation(argv);
+    /** @type {string|undefined} */ let expectedRemote;
     if (remoteOp && remoteGrant !== true) {
       let target = null;
       if (remoteOp === 'clone' || remoteOp === 'link') {
@@ -198,6 +199,10 @@ export const makeEngineRoutes = (deps) => {
           },
         };
       }
+      if (remoteOp === 'fetch' || remoteOp === 'push') expectedRemote = target ?? undefined;
+    }
+    if ((remoteOp === 'fetch' || remoteOp === 'push') && expectedRemote === undefined) {
+      expectedRemote = (await repositories.getRemote(ref))?.url;
     }
     const abortable = remoteOp && typeof jobId === 'string'
       ? registerPodController(podId, jobId)
@@ -255,13 +260,15 @@ export const makeEngineRoutes = (deps) => {
         });
         result = { stdout: shellLine(`Cloned ${cloned.remote.url}`), stderr: '', exitCode: 0 };
       } else if (command === 'fetch') {
-        const fetched = await repositories.fetch(ref, { signal: abortable?.controller.signal });
+        const fetched = await repositories.fetch(ref, {
+          signal: abortable?.controller.signal, expectedRemote,
+        });
         result = { stdout: shellLine(`Fetched ${fetched.remote.url}`), stderr: '', exitCode: 0 };
       } else if (command === 'push') {
         const branchName = args.find((arg) => !arg.startsWith('-') && arg !== 'origin');
         const pushed = await repositories.push(ref, {
           ...(branchName ? { ref: branchName } : {}),
-          signal: abortable?.controller.signal,
+          signal: abortable?.controller.signal, expectedRemote,
         });
         result = pushed.ok
           ? { stdout: shellLine(`Pushed ${pushed.branch} to ${pushed.remote.url}`), stderr: '', exitCode: 0 }
@@ -748,7 +755,11 @@ export const makeEngineRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        const result = await coordinateApp(appId, () => repositories.fetch({ kind: 'app', id: appId }));
+        const result = await coordinateApp(appId, async () => {
+          const ref = { kind: 'app', id: appId };
+          const expectedRemote = (await repositories.getRemote(ref))?.url;
+          return repositories.fetch(ref, { expectedRemote });
+        });
         await auditLog.append({ type: 'git_remote_fetched', details: { kind: 'app', appId, host: result.remote.host } });
         return { ok: true, result };
       } catch (e) { return repositoryFailure(e, 'fetch this Git remote'); }
@@ -758,8 +769,12 @@ export const makeEngineRoutes = (deps) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         const result = await quiesceApp(appId, async () => {
+          const ref = { kind: 'app', id: appId };
+          const expectedRemote = (await repositories.getRemote(ref))?.url;
           await repositories.commitApp(appId, { message: 'checkpoint before push' });
-          return repositories.push({ kind: 'app', id: appId }, { ref: typeof branch === 'string' ? branch : undefined });
+          return repositories.push(ref, {
+            ref: typeof branch === 'string' ? branch : undefined, expectedRemote,
+          });
         }, false);
         await auditLog.append({ type: 'git_remote_pushed', details: { kind: 'app', appId, host: result.remote.host, branch: result.branch } });
         return { ok: result.ok, result, ...(result.ok ? {} : { error: result.error || 'push rejected (the remote may contain unrelated or newer commits)' }) };
@@ -795,6 +810,9 @@ export const makeEngineRoutes = (deps) => {
                       : []),
                     ...(Array.isArray(record.dweb?.pending_seed_unserve_hashes)
                       ? record.dweb.pending_seed_unserve_hashes
+                      : []),
+                    ...(Array.isArray(record.dweb?.pending_room_unserve_hashes)
+                      ? record.dweb.pending_room_unserve_hashes
                       : []),
                   ].filter((hash) => typeof hash === 'string' && hash))],
                 });

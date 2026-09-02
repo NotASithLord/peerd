@@ -13,10 +13,9 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { EXTENSION_DIR, REPO_ROOT, parseArgs } from './lib.ts';
+import { REPO_ROOT, parseArgs } from './lib.ts';
 import {
   CONTROLLER_BUILD_STAMP_MODULES,
-  writeControllerBuildIdentity,
 } from './controller-build-identity.ts';
 
 const run = (label: string, cmd: string, args: string[]) => {
@@ -25,7 +24,6 @@ const run = (label: string, cmd: string, args: string[]) => {
 };
 
 type SyncRunner = typeof execFileSync;
-type IdentityStamper = typeof writeControllerBuildIdentity;
 
 export const PREFLIGHT_GENERATED_FILES = Object.freeze([
   'extension/manifest.json', 'extension/shared/channel-config.js',
@@ -39,12 +37,13 @@ export const PREFLIGHT_GENERATED_FILES = Object.freeze([
 
 export const regenerateDevIdentity = async (
   generate: () => void = () => run(
-    'regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev'],
+    'regenerate dev generated files + controller identity', 'bun', ['run', 'gen:dev'],
   ),
-  stamp: IdentityStamper = writeControllerBuildIdentity,
 ) => {
+  // gen:dev owns build-config generation and both identity stamps. Keeping
+  // preflight on that one path prevents CI, E2E, and local drift checks from
+  // observing different generated trees.
   generate();
-  await stamp(EXTENSION_DIR);
 };
 
 /** One pathspec-batched diff preserves the old any-file-drift verdict. */
@@ -69,7 +68,7 @@ export const generatedFilesDifferFromHead = (
 const main = async () => {
   const args = parseArgs(process.argv.slice(2));
 
-  // Drift check. gen:dev rewrites the two generated files, so snapshot
+  // Drift check. gen:dev rewrites the generated files, so snapshot
   // their current bytes first: if they were already modified in the
   // working tree (e.g. a regen the user intends to commit), we must not
   // silently clobber that — we compare the freshly-generated output to

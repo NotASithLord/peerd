@@ -272,7 +272,7 @@ export default [
   },
   // pdf/ocr-store loads the opt-in OCR engine assets (CDN URLs); same posture
   // as voice/model-store — DATA verified by SRI, not a provider API call.
-  // offscreen/pdf-extract fetches the PDF bytes for the read_pdf tool (the
+  // offscreen/pdf-extract fetches the PDF bytes for the read_doc tool (the
   // target is denylist-checked at the tool boundary before we get here).
   // offscreen/doc-extract is the exact same posture for read_doc: the office
   // document's bytes, whose target read-doc.js denylist- and SSRF-checked

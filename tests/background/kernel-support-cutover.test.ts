@@ -8,10 +8,11 @@ import {
   KERNEL_FEATURE_DISPATCH_CAPABILITY,
   createKernelFeatureEffectQuota,
   kernelFeatureAuthorityFor,
+  kernelFeatureResultAllowed,
 } from '../../extension/shared/kernel-feature-policy.js';
 import {
+  KERNEL_SUPPORT_EFFECTS_BY_ROUTE,
   KERNEL_SESSION_SUPPORT_ROUTE_NAMES,
-  KERNEL_SUPPORT_EFFECT_OPERATIONS,
 } from '../../extension/shared/kernel-support-protocol.js';
 
 const session = (overrides: Record<string, unknown> = {}) => ({
@@ -124,7 +125,7 @@ describe('session support cutover', () => {
     const lane = harness();
     expect(Object.keys(lane.control.routes).sort())
       .toEqual([...KERNEL_SESSION_SUPPORT_ROUTE_NAMES].sort());
-    expect([...KERNEL_SUPPORT_EFFECT_OPERATIONS].sort()).toEqual([
+    expect([...new Set(Object.values(KERNEL_SUPPORT_EFFECTS_BY_ROUTE).flat())].sort()).toEqual([
       'support.permission.commit',
       'support.session.context-snapshots',
       'support.session.model.commit',
@@ -413,5 +414,26 @@ describe('session support cutover', () => {
       .toMatchObject({ ok: false, code: 'feature-effect-denied' });
     expect(quota.admit('support.session.read', { sessionId: 'chat-1', forged: true }))
       .toMatchObject({ ok: false, code: 'feature-effect-denied' });
+  });
+
+  test('bounds a full session read at both the exact effect and outer reply', () => {
+    const request = {
+      cluster: 'support', route: 'session/get', dispatchId: 'support-session-bound',
+      message: { sessionId: 'chat-1' },
+    };
+    const quota = createKernelFeatureEffectQuota(KERNEL_FEATURE_DISPATCH_CAPABILITY, request);
+    expect(quota.admit('support.session.read', { sessionId: 'chat-1' }))
+      .toMatchObject({ ok: true });
+    const result = {
+      ok: true, outcomeKnown: true,
+      value: {
+        status: 'ok',
+        session: { sessionId: 'chat-1', messages: [{ content: 'x'.repeat(32 * 1024 * 1024) }] },
+      },
+    };
+    expect(quota.observe('support.session.read', { sessionId: 'chat-1' }, result))
+      .toMatchObject({ ok: false, code: 'feature-effect-result-too-large' });
+    expect(kernelFeatureResultAllowed(KERNEL_FEATURE_DISPATCH_CAPABILITY, request, result))
+      .toBe(false);
   });
 });

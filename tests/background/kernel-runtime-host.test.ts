@@ -17,7 +17,6 @@ import {
   parseRuntimeDispatch,
   RUNTIME_DISPATCH_MANIFEST,
   runtimeDispatchAuthorityAllowed,
-  runtimeDispatchPayloadAllowed,
   runtimeDispatchResultAllowed,
 } from '../../extension/shared/kernel-runtime-policy.js';
 import { makeBoundedModuleLoader } from '../../extension/shared/bounded-module-load.js';
@@ -134,11 +133,11 @@ describe('sealed kernel runtime dispatch policy', () => {
 
   test('accepts only the exact fixed operation, input, authority, and result envelopes', () => {
     expect(parseRuntimeDispatch(REQUEST)).toMatchObject({ operation: 'runtime.probe' });
-    expect(runtimeDispatchPayloadAllowed({ operation: 'runtime.unknown', input: {} })).toBe(false);
-    expect(runtimeDispatchPayloadAllowed({ ...REQUEST, extra: true })).toBe(false);
-    expect(runtimeDispatchPayloadAllowed({
+    expect(parseRuntimeDispatch({ operation: 'runtime.unknown', input: {} })).toBeNull();
+    expect(parseRuntimeDispatch({ ...REQUEST, extra: true })).toBeNull();
+    expect(parseRuntimeDispatch({
       operation: 'runtime.probe', input: { bytes: 'x'.repeat(2_000) },
-    })).toBe(false);
+    })).toBeNull();
     expect(runtimeDispatchAuthorityAllowed(REQUEST, AUTHORITY)).toBe(true);
     expect(runtimeDispatchAuthorityAllowed(REQUEST, { ...AUTHORITY, generation: 2 })).toBe(false);
     expect(runtimeDispatchAuthorityAllowed(REQUEST, { ...AUTHORITY, replayClass: 'E' })).toBe(false);

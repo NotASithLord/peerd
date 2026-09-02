@@ -49,7 +49,7 @@ const validReport = () => ({
   },
   budgets: {
     startupMs: 180_000, afterClickMs: 30_000, controllerMs: 30_000,
-    repositoryMs: 30_000, recycleMs: 60_000,
+    repositoryMs: 30_000, recycleMs: 60_000, lockMs: 30_000,
   },
   timings: {
     clock: 'host-monotonic-ms',
@@ -64,6 +64,8 @@ const validReport = () => ({
     appGitReadyMs: 180,
     remoteGitReadyMs: 185,
     recycleReadyMs: 190,
+    lockStartedMs: 195,
+    lockReadyMs: 200,
   },
   observations: {
     cutover: completeLiveKernelAssemblyFixture('store-chrome'),
@@ -126,6 +128,16 @@ const validReport = () => ({
         cleanup: { appRemoved: true, credentialRemoved: true, credentialAbsent: true },
       },
       recycledUi: { stage: 'app-ready', appShell: true, failure: false },
+    },
+    lockTeardown: {
+      offscreenContexts: [],
+      state: {
+        vault: { locked: true },
+        composer: { canSend: false, reason: 'vault-locked' },
+      },
+      sendRefusal: { ok: false, error: 'vault-locked' },
+      modelCallsBefore: 2,
+      modelCallsAfter: 2,
     },
     dweb: { status: 'pruned-by-target-policy' },
     stageTrace: ['vault-ready', 'app-loading', 'app-ready'],
@@ -211,6 +223,14 @@ describe('packaged first-install passkey lane', () => {
       /authoritative worker stop/);
     rejects((report) => { report.observations.coldRecycle.controllerRecovery.completionCalls = 3; },
       /cold recycle continuity/);
+    rejects((report) => { report.observations.lockTeardown.offscreenContexts.push({}); },
+      /physical vault-lock teardown/);
+    rejects((report) => { report.observations.lockTeardown.state.vault.locked = false; },
+      /physical vault-lock teardown/);
+    rejects((report) => { report.observations.lockTeardown.sendRefusal.ok = true; },
+      /physical vault-lock teardown/);
+    rejects((report) => { report.observations.lockTeardown.modelCallsAfter = 3; },
+      /physical vault-lock teardown/);
   });
 
   test('rejects reordered milestones and breached budgets', () => {
@@ -228,6 +248,8 @@ describe('packaged first-install passkey lane', () => {
       report.timings.appGitReadyMs = 180_007;
       report.timings.remoteGitReadyMs = 180_008;
       report.timings.recycleReadyMs = 180_009;
+      report.timings.lockStartedMs = 180_010;
+      report.timings.lockReadyMs = 180_011;
     }, /CTA startup budget/);
     rejects((report) => {
       report.timings.richAppReadyMs = 40_131;
@@ -235,6 +257,8 @@ describe('packaged first-install passkey lane', () => {
       report.timings.appGitReadyMs = 40_151;
       report.timings.remoteGitReadyMs = 40_156;
       report.timings.recycleReadyMs = 40_161;
+      report.timings.lockStartedMs = 40_171;
+      report.timings.lockReadyMs = 40_181;
     }, /post-click completion budget/);
   });
 

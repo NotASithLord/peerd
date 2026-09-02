@@ -58,6 +58,7 @@ export const PASSKEY_SIGNUP_BUDGETS = Object.freeze({
   controllerMs: 30_000,
   repositoryMs: 30_000,
   recycleMs: 60_000,
+  lockMs: 30_000,
 });
 
 const exactBudgetProfile = (actual, expected) => actual != null
@@ -199,6 +200,7 @@ export const assertPasskeySignupReport = (report) => {
     'staticShellPaintedMs', 'bootModuleEvaluatedMs', 'ctaEnabledMs', 'clickMs',
     'authenticatorReturnMs', 'durableVaultCommitMs', 'richAppReadyMs',
     'controllerFirstMessageMs', 'appGitReadyMs', 'remoteGitReadyMs', 'recycleReadyMs',
+    'lockStartedMs', 'lockReadyMs',
   ];
   let previous = -Infinity;
   for (const name of ordered) {
@@ -215,6 +217,8 @@ export const assertPasskeySignupReport = (report) => {
     'repository completion budget');
   assert(timings.recycleReadyMs - timings.remoteGitReadyMs <= budgets.recycleMs,
     'recycle completion budget');
+  assert(timings.lockReadyMs - timings.lockStartedMs <= budgets.lockMs,
+    'lock teardown budget');
   assert(observations?.authenticatorReturnObserved === true, 'authenticator return');
   assert(observations?.durableVaultCommitted === true, 'durable vault commit');
   assert(observations?.controllerFirstMessage?.completionCalls === 1,
@@ -225,7 +229,7 @@ export const assertPasskeySignupReport = (report) => {
     && observations.coldLocked.offscreenContexts.length === 0, 'eager cold offscreen host');
   assert(Array.isArray(observations?.semanticHost?.offscreenContexts)
     && observations.semanticHost.offscreenContexts.some((context) =>
-      String(context?.documentUrl ?? '').endsWith('/offscreen/offscreen.html')),
+      String(context?.documentUrl ?? '').split('#', 1)[0].endsWith('/offscreen/offscreen.html')),
   'lazy semantic host');
   assert(observations?.appGit?.ok === true
     && observations.appGit.payload?.ok === true, 'App/isomorphic-git probe');
@@ -289,6 +293,16 @@ export const assertPasskeySignupReport = (report) => {
     && observations?.coldRecycle?.recycledUi?.appShell === true
     && observations?.coldRecycle?.recycledUi?.failure !== true,
   'cold recycle continuity');
+  assert(Array.isArray(observations?.lockTeardown?.offscreenContexts)
+    && observations.lockTeardown.offscreenContexts.length === 0
+    && observations.lockTeardown.state?.vault?.locked === true
+    && observations.lockTeardown.state?.composer?.canSend === false
+    && observations.lockTeardown.state?.composer?.reason === 'vault-locked'
+    && observations.lockTeardown.sendRefusal?.ok === false
+    && observations.lockTeardown.sendRefusal?.error === 'vault-locked'
+    && observations.lockTeardown.modelCallsBefore
+      === observations.lockTeardown.modelCallsAfter,
+  'physical vault-lock teardown');
   assert(observations?.dweb?.status === 'pruned-by-target-policy', 'Store dweb posture');
   assert(observations?.stageTrace?.includes('vault-ready'), 'vault-ready trace');
   assert(observations?.stageTrace?.includes('app-ready'), 'app-ready trace');
@@ -339,7 +353,7 @@ export const readUi = (page) => evalIn(page, `(() => {
     appShell: !!root?.querySelector('.app-shell'),
     gate: !!root?.querySelector('.gate-card'),
     failure: html.dataset.peerdBootStage === 'failed'
-      || !!root?.querySelector('.boot-shell[role="alert"], [role="alert"]'),
+      || !!root?.querySelector('.boot-shell[role="alert"]'),
     spinnerTerminal: terminalBusy,
   };
 })()`);
@@ -740,6 +754,35 @@ export async function runPackagedPasskeySignup({
     assertExactGitFixtureRequests(remoteGitFixture.summary);
     const recycleReadyMs = sinceLaunch();
 
+    const lockStartedMs = sinceLaunch();
+    const modelCallsBeforeLock = fixture.completionCalls();
+    const locked = await rpc(ctx.page, { type: 'vault/lock' }, {
+      timeoutMs: PASSKEY_SIGNUP_BUDGETS.lockMs,
+    });
+    if (locked?.ok !== true) throw new Error(`vault lock failed: ${JSON.stringify(locked)}`);
+    const lockTeardown = await waitFor(async () => {
+      const [contexts, stateReply] = await Promise.all([
+        offscreenContexts(ctx.page),
+        rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 5_000 }),
+      ]);
+      const state = stateReply?.state;
+      return contexts.length === 0
+        && state?.vault?.locked === true
+        && state?.composer?.canSend === false
+        && state?.composer?.reason === 'vault-locked'
+        ? { contexts, state: { vault: state.vault, composer: state.composer } } : null;
+    }, { budgetMs: PASSKEY_SIGNUP_BUDGETS.lockMs, pollMs: 25 });
+    if (!lockTeardown) {
+      throw new Error('vault lock did not retire the semantic host and publish locked state');
+    }
+    const sendRefusal = await rpc(ctx.page, {
+      type: 'agent/send', text: 'this request must not reach the model while locked',
+    }, { timeoutMs: 10_000 });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay,
+      Math.max(1_000, fixture.completionDelayMs * 2)));
+    const modelCallsAfterLock = fixture.completionCalls();
+    const lockReadyMs = sinceLaunch();
+
     postRun = await collectPostRunDigests(artifactPath, treePath);
     const inputsImmutable = postRun.artifact.sha256 === bindings.artifact.sha256
       && postRun.artifact.bytes === bindings.artifact.bytes
@@ -765,6 +808,8 @@ export async function runPackagedPasskeySignup({
         appGitReadyMs,
         remoteGitReadyMs,
         recycleReadyMs,
+        lockStartedMs,
+        lockReadyMs,
       },
       observations: {
         cutover,
@@ -803,6 +848,13 @@ export async function runPackagedPasskeySignup({
           remoteGitPersisted: remoteGitPersisted.ok === true,
           remoteGitPersistence: remoteGitPersisted,
           recycledUi,
+        },
+        lockTeardown: {
+          offscreenContexts: lockTeardown.contexts,
+          state: lockTeardown.state,
+          sendRefusal,
+          modelCallsBefore: modelCallsBeforeLock,
+          modelCallsAfter: modelCallsAfterLock,
         },
         dweb: { status: 'pruned-by-target-policy', target: 'store-chrome' },
         stageTrace: trace,

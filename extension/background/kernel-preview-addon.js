@@ -1,6 +1,7 @@
 // @ts-check
 
 import { withDeadline } from '../shared/cold-util.js';
+import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 import { createPreviewContributorRoutes } from './kernel-contributor-owner.js';
 export {
   CONTRIBUTOR_ACTIVE_CONSENT_KEY, CONTRIBUTOR_PENDING_RECEIPTS_KEY,
@@ -166,8 +167,6 @@ const DWEB_EFFECT_OPERATIONS = new Set([
   'identity/read', 'identity/create', 'identity/policy', 'identity/commit',
   'self/read', 'self/write',
 ]);
-const DWEB_MUTATION_EFFECTS = new Set(['identity/create', 'identity/commit', 'self/write']);
-
 const safeDwebId = (/** @type {unknown} */ value) => typeof value === 'string'
   && value.length >= 3 && value.length <= 256
   && !/[\u0000-\u001f\u007f]/.test(value);
@@ -1024,7 +1023,8 @@ const createUpdateCustody = (/** @type {any} */ c) => createKernelUpdateCustody(
     if (!clients?.matchAll) throw new Error('kernel-update-window-oracle-unavailable');
     return clients.matchAll({ type: 'window' });
   },
-  isBlockingWindow: (/** @type {any} */ client) => client?.url !== c.offscreenUrl,
+  isBlockingWindow: (/** @type {any} */ client) =>
+    !sameDocumentUrlIgnoringHash(client?.url, c.offscreenUrl),
   notify: (/** @type {string} */ text) => {
     if (c.uiPorts.size === 0) return false;
     c.uiPorts.broadcast({ type: 'turn/system-note', text });

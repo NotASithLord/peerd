@@ -575,6 +575,39 @@ describe('reduceChat', () => {
     });
   });
 
+  test('fresh hydration rebuilds a cancelled card from its correlated durable receipt', () => {
+    const hydrated = reduceChat(INITIAL_STATE, {
+      type: 'state',
+      state: {
+        session: {
+          sessionId: 'chat-A',
+          messages: [
+            { id: 'call', role: 'assistant', toolUses: [{
+              id: 'stopped-call', name: 'message_actor',
+              input: { to: 'web', message: 'slow work' },
+            }] },
+            { id: 'accepted', role: 'user', toolResults: [{
+              tool_use_id: 'stopped-call', is_error: false, content: 'accepted',
+              actorCorrelationId: 'delivery-stopped', actorTerminal: false,
+            }] },
+            { id: 'receipt', role: 'user', synthetic: true, content: 'stopped', actorReply: {
+              kind: 'web', instanceId: 'web', parentToolUseId: 'stopped-call',
+              actorDeliveryId: 'delivery-stopped', failed: true, aborted: true,
+              performed: false, outcomeKnown: true,
+            } },
+          ],
+        },
+        actors: {},
+      },
+    });
+
+    expect(hydrated.actors['stopped-call']).toMatchObject({
+      kind: 'web', instanceId: 'web', actorCorrelationId: 'delivery-stopped',
+      streaming: false, aborted: true, performed: false, outcomeKnown: true,
+      error: null,
+    });
+  });
+
   test('a durable failure overrides an earlier aborted pulse', () => {
     const viewing = withSession('chat-A');
     const started = reduceChat(viewing, {
@@ -875,6 +908,32 @@ describe('reduceChat', () => {
         error: failed ? 'the actor turn did not complete' : null,
       });
     }
+  });
+
+  test('hydration refuses a receipt whose delivery id does not match the acknowledgement', () => {
+    const hydrated = reduceChat(withSession('chat-A'), {
+      type: 'turn/state',
+      session: {
+        sessionId: 'chat-A',
+        messages: [
+          { id: 'call', role: 'assistant', toolUses: [{
+            id: 'actor-call', name: 'message_actor', input: { to: 'web' },
+          }] },
+          { id: 'ack', role: 'user', toolResults: [{
+            tool_use_id: 'actor-call', is_error: false, content: 'accepted',
+            actorCorrelationId: 'acknowledged-delivery', actorTerminal: false,
+          }] },
+          { id: 'forged-receipt', role: 'user', synthetic: true, content: 'done',
+            actorReply: {
+              kind: 'web', instanceId: 'web', parentToolUseId: 'actor-call',
+              actorDeliveryId: 'different-delivery', failed: false,
+              outcomeKnown: true, performed: true,
+            } },
+        ],
+      },
+    });
+
+    expect(hydrated.actors['actor-call']).toBeUndefined();
   });
 
   test('an older correlated awaited result settles after a newer same-id pre-effect refusal', () => {

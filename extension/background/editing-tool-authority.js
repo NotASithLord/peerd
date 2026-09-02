@@ -26,6 +26,12 @@ export const createEditingToolAuthority = ({ binding, ctx, signal, shared = {} }
   };
   const client = kind === 'app' ? ctx?.appClient : ctx?.jsClient;
   const registry = kind === 'app' ? ctx?.appRegistry : ctx?.jsRegistry;
+  if (kind === 'notebook' && typeof ctx?.repositories?.coordinate !== 'function') {
+    // why: compare-then-write must share the Notebook repository lane with
+    // checkout/restore/commit; a private fallback can overwrite a concurrent
+    // repository mutation after comparing stale bytes.
+    throw new TypeError('notebook repository coordination is required');
+  }
   const canResolveDefault = !!sessionId
     && typeof registry?.getDefaultForSession === 'function';
   const stoppedResult = () => ({
@@ -145,8 +151,7 @@ export const createEditingToolAuthority = ({ binding, ctx, signal, shared = {} }
         }
         return { ok: true };
       };
-      if (kind === 'notebook' && resolvedTargetId
-          && typeof ctx?.repositories?.coordinate === 'function') {
+      if (kind === 'notebook' && resolvedTargetId) {
         return ctx.repositories.coordinate(
           { kind: 'notebook', id: resolvedTargetId }, compareAndWrite,
         );

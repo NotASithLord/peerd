@@ -251,9 +251,6 @@ export const parseRuntimeDispatch = (value) => {
   return Object.freeze({ operation: input.operation, input: input.input, policy });
 };
 
-/** @param {unknown} value */
-export const runtimeDispatchPayloadAllowed = (value) => parseRuntimeDispatch(value) !== null;
-
 /** @param {unknown} value @param {number} [now] */
 export const runtimeDispatchTimeoutMs = (value, now = Date.now()) => {
   const request = parseRuntimeDispatch(value);

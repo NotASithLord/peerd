@@ -37,11 +37,14 @@ describe('kernel production runtime', () => {
   test('receives exact target factories without a runtime import fallback', () => {
     const background = join(import.meta.dir, '../../extension/background');
     const kernel = readFileSync(join(background, 'vault-kernel.js'), 'utf8');
+    const demand = readFileSync(join(background, 'kernel-demand-plane.js'), 'utf8');
     const production = readFileSync(join(background, 'kernel-production-runtime.js'), 'utf8');
     expect(kernel).toContain('const createKernelDemandPlane = await runtimeModules.demandPlane();');
     expect(kernel).toContain('loadProductionRuntimeModule(), runtimeModules.turnFactories(),');
     expect(production).not.toContain('createKernelDemandPlane');
     expect(production).toContain('deps.createTurnFactories({ ...deps, engine: sharedEngine })');
+    expect(demand).toContain('liveProduction?.executableLive?.invalidateDwebPublications?.()');
+    expect(kernel.match(/demandPlane\?\.invalidateDwebPublications\?\.\(\)/g)).toHaveLength(2);
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('background/kernel-demand-plane.js');
   });
 

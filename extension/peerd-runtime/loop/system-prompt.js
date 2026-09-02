@@ -1,17 +1,6 @@
 // @ts-check
-// System prompt assembly.
-//
-// The provider-agnostic template lives in
-// `/peerd-provider/system-prompt.txt`. This module loads the template
-// at first use and renders it with current session context (date,
-// memory, skills, temporal block). When skills and memory land
-// (V1.4 / V1.5), this is where their context gets stitched in.
-//
-// We cache the template in module scope after first load — it doesn't
-// change between session starts. The cache is per-SW-lifetime; cold
-// SW start reloads.
-
-import { DWEB_ENABLED } from '/shared/channel-config.js';
+// Pure system-prompt assembly over packaged assets supplied by the sealed
+// controller host.
 import {
   actorCapabilityManifest,
   actorCodeSurfaceTools,
@@ -24,11 +13,6 @@ import { PREWALK_NUDGE } from './prewalk.js';
 // — the App/Notebook ACTOR — not the orchestrator's create-result. Reused
 // from the one source of truth (intra-module deep import is allowed).
 import { CODE_STYLE_NOTE, JS_PITFALLS_NOTE } from '../tools/defs/code-style-note.js';
-
-/** @type {string | null} */
-let cachedTemplate = null;
-/** @type {string | null} */
-let cachedDwebBlock = null;
 
 // why: prompt growth is a performance regression even when behavior still
 // passes. Tests render every profile against these fixed ceilings so new lore
@@ -44,44 +28,6 @@ export const SYSTEM_PROMPT_CHAR_CEILINGS = Object.freeze({
   api: 4_000,
   dweb: 5_000,
 });
-
-/**
- * Fetch the V1 system-prompt template. Lives in the provider module
- * because the prompt's shape is provider-agnostic but the content
- * (and the `<untrusted_web_content>` framing) is part of how providers
- * are expected to behave.
- */
-const loadTemplate = async () => {
-  if (cachedTemplate !== null) return cachedTemplate;
-  // The template is shipped as a static asset under the extension
-  // origin. Both SW and side panel contexts can fetch it via the
-  // extension origin's relative URL.
-  const url = '/peerd-provider/system-prompt.txt';
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`system-prompt template not found at ${url}`);
-  }
-  cachedTemplate = await res.text();
-  return cachedTemplate;
-};
-
-/**
- * The dweb paragraph for {{DWEB_BLOCK}}. It lives in its own
- * static asset (system-prompt-dweb.txt) because the store package
- * must ship a prompt that contains NO dweb claims — the module is
- * pruned from that artifact, so describing it to the model would be a
- * lie. package.ts prunes the asset from store artifacts; the flag gate
- * means the store package never even fetches it. Collapses to '' so the
- * template reads cleanly without it.
- */
-const loadDwebBlock = async () => {
-  if (!DWEB_ENABLED) return '';
-  if (cachedDwebBlock !== null) return cachedDwebBlock;
-  const res = await fetch('/peerd-provider/system-prompt-dweb.txt');
-  const text = res.ok ? (await res.text()).trim() : '';
-  cachedDwebBlock = text ? `\n${text}\n` : '';
-  return cachedDwebBlock;
-};
 
 /**
  * Render the system prompt with the provided context. Pure once the
@@ -218,23 +164,6 @@ export const renderSystemPromptFromAssets = (ctx, { template = '', dwebBlock = '
   // leading <context> message instead (design 01 — see buildTemporalContext for
   // the full rationale).
   return out;
-};
-
-/**
- * Legacy/local renderer facade. The semantic controller calls the pure
- * renderSystemPromptFromAssets entry with kernel-loaded packaged assets, so
- * its sealed Worker never receives ambient fetch or storage authority.
- * @param {Parameters<typeof renderSystemPromptFromAssets>[0]} ctx
- */
-export const renderSystemPrompt = async (ctx) => {
-  if ((typeof ctx.taskOverride === 'string' && ctx.taskOverride.trim().length > 0)
-      || (typeof ctx.actorType === 'string' && ctx.actorType.length > 0)) {
-    return renderSystemPromptFromAssets(ctx);
-  }
-  return renderSystemPromptFromAssets(ctx, {
-    template: await loadTemplate(),
-    dwebBlock: await loadDwebBlock(),
-  });
 };
 
 /** @param {{ url: string, title?: string }} tab */
@@ -605,12 +534,12 @@ reply only from what the user has already made shareable.`,
 // An API actor is a web actor with NO tab. Its exact five-tool surface is emitted
 // from the capability manifest; this text only explains how those tools cooperate.
 const ACTOR_API_FRAMING = 'an API integration that owns ONE origin. Work directly against it with no tab or DOM, then report what you found.';
-const ACTOR_API_LORE = `fetch_url makes direct, denylist-gated, audited GET/POST requests.
+const ACTOR_API_LORE = `fetch_url makes direct, denylist-gated, audited HTTP requests.
 read_result pages oversized fetched material; site_client_read/write persist an origin client and
 site_client_run executes it. The code client exposed inside a site run is exactly:
 ${codeClientReference('site')}.
 Requests carry the user's session only for your OWN origin (same-origin); cross-origin calls are
-SESSIONLESS. POST and other writes remain confirmation-gated.
+SESSIONLESS. Mutating methods remain confirmation-gated.
 AUTH: a key for your origin (if the user stored one) is attached automatically — you never
 hold it. A 401/403 can mean a missing credential, insufficient scope, endpoint policy, or a
 request-shape error. Inspect the response, don't blindly retry, and mention Settings → API
@@ -831,18 +760,3 @@ const TAB_POLICY = [
   'clicking, typing, or running commands leave the user wherever they are,',
   'free to multitask while you work.',
 ].join(' ');
-
-
-/**
- * Test hook — swap the in-memory template without going through fetch.
- * The SW never calls this; only tests do. Also pins the dweb block
- * (default: empty) so tests never hit fetch for the dweb asset
- * even though the dev channel-config has DWEB_ENABLED = true.
- *
- * @param {string} text
- * @param {string} [dwebBlock]
- */
-export const _setTemplateForTests = (text, dwebBlock = '') => {
-  cachedTemplate = text;
-  cachedDwebBlock = dwebBlock;
-};

@@ -361,6 +361,49 @@ describe('the offscreen host reaches the stores through exactly two doors', () =
     )).toEqual({ ok: false, error: 'second row failed', partial: { written: 1, skipped: 0 } });
   });
 
+  test('surface apply failures preserve direct and partial-cause effect custody', async () => {
+    const direct: any = Object.assign(new Error('App rollback incomplete'), {
+      performed: true, outcomeKnown: false,
+      outcomeKind: 'host-lost', retryable: false,
+    });
+    const { routes: directRoutes } = routesFor({
+      surfaceAppliers: { settings: async () => { throw direct; } },
+    });
+    expect(await directRoutes['dweb/self-apply-surface'](
+      { surface: 'settings', bytes: btoa('{}'), sourceDeviceDid: 'did:key:zA' }, OFFSCREEN,
+    )).toMatchObject({
+      ok: false, error: 'App rollback incomplete', performed: true,
+      outcomeKnown: false, outcomeKind: 'host-lost', retryable: false,
+    });
+
+    const partial: any = new Error('second App failed', { cause: direct });
+    partial.result = { installed: 1, skipped: 0 };
+    const { routes: partialRoutes } = routesFor({
+      surfaceAppliers: { settings: async () => { throw partial; } },
+    });
+    expect(await partialRoutes['dweb/self-apply-surface'](
+      { surface: 'settings', bytes: btoa('{}'), sourceDeviceDid: 'did:key:zA' }, OFFSCREEN,
+    )).toMatchObject({
+      ok: false, error: 'second App failed', partial: { installed: 1, skipped: 0 },
+      performed: true, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false,
+    });
+  });
+
+  test('a lost self-restore response remains unknown and nonretryable', async () => {
+    const { routes } = routesFor({
+      callBaseHost: async (type: string) => {
+        if (type === 'dweb/base-host/self-start') return { ok: true, running: true };
+        throw new Error('response lost');
+      },
+    });
+    expect(await routes['dweb/self-restore']({
+      deviceDid: 'did:key:zPeer', surfaces: ['apps'],
+    })).toEqual({
+      ok: false, error: 'response lost', performed: true,
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
+  });
+
   test('every route is inert when the dweb is off', async () => {
     const { routes, baseHostCalls } = routesFor({ dwebReady: async () => false });
     for (const [name, msg] of [

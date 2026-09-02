@@ -3,7 +3,7 @@
 // extraction and trim-summary enrichment.
 //
 // Reuses the EXISTING actor machinery (spawn.js): a `tools: []` spawn is a
-// fresh child session whose only input is the task — clean context for free, no
+// fresh child session whose only input is the task: clean context for free, no
 // dispatcher/tool plumbing stood up at all, and an output cap riding
 // spawnActor's maxOutputTokens guardrail. We do not build a second
 // model-call path.

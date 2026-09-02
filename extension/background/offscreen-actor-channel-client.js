@@ -9,6 +9,7 @@ import {
   ACTOR_CHANNEL_PROTOCOL,
   actorRelayRouteClass,
 } from '/shared/actor-channel-protocol.js';
+import { sameDocumentUrlIgnoringHash } from '/shared/sender-trust.js';
 
 const ACTOR_CHANNEL_OFFER = 'peerd/actor-channel';
 
@@ -43,7 +44,8 @@ export const selectExactActorHostClient = (
   candidates,
   expectedUrl,
 ) => {
-  const exact = candidates.filter((client) => client.url === expectedUrl);
+  const exact = candidates.filter((client) =>
+    sameDocumentUrlIgnoringHash(client.url, expectedUrl));
   return exact.length === 1 ? exact[0] : null;
 };
 

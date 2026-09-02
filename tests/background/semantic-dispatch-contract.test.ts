@@ -29,8 +29,6 @@ describe('semantic host manifest', () => {
   test('contains only the exact executable host routes', () => {
     const compiled = compileSemanticHostRouteManifest(SEMANTIC_HOST_ROUTE_MANIFEST);
     expect(compiled.size).toBe(SEMANTIC_HOST_ROUTE_MANIFEST.length);
-    expect(SEMANTIC_HOST_ROUTE_MANIFEST.filter((row) => row.channels.includes('store')))
-      .toHaveLength(15);
     for (const route of DIRECT_KERNEL_ROUTES) {
       expect(compiled.has(route)).toBe(false);
     }

@@ -7,7 +7,6 @@ import {
 import {
   CONTROLLER_BUILD_STAMP_MODULES,
 } from '../../packaging/controller-build-identity.ts';
-import { EXTENSION_DIR } from '../../packaging/lib.ts';
 
 describe('preflight generated-file drift batching', () => {
   test('tracks every controller identity leaf that regeneration mutates', () => {
@@ -44,12 +43,9 @@ describe('preflight generated-file drift batching', () => {
     expect(generatedFilesDifferFromHead('/repo', [], runner)).toBe(false);
   });
 
-  test('regeneration stamps the controller identity before returning', async () => {
+  test('regeneration uses gen:dev as the single identity-generation path', async () => {
     const calls: string[] = [];
-    await regenerateDevIdentity(
-      () => { calls.push('generate'); },
-      async (root) => { calls.push(`stamp:${root}`); return 'digest'; },
-    );
-    expect(calls).toEqual(['generate', `stamp:${EXTENSION_DIR}`]);
+    await regenerateDevIdentity(() => { calls.push('generate'); });
+    expect(calls).toEqual(['generate']);
   });
 });

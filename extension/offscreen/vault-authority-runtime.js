@@ -19,10 +19,6 @@ import { createVault } from '../peerd-egress/offscreen.js';
 const deriveArgon2id = async (/** @type {any} */ args) =>
   (await import('../shared/argon2id.js')).deriveArgon2id(args);
 
-const VAULT_STORE = 'vault';
-const VAULT_KEY = 'vault.v1';
-const SESSION_DK_KEY = 'vault.unlocked.v1';
-
 /** @param {unknown} value */
 const record = (value) => value && typeof value === 'object' && !Array.isArray(value)
   ? /** @type {Record<string, any>} */ (value) : null;
@@ -189,12 +185,19 @@ export const serveVaultAuthority = async ({ port, channelId }) => {
             return vault.attemptResume().then((resumed) => ({ resumed }));
           })()
           : await (/** @type {any} */ (vault))[call.method](...args);
+      const result = await value;
+      let responseValue = result;
+      if (MUTATING_METHODS.has(call.method)) {
+        // why: status is an advisory cache refresh after the mutation has
+        // already returned success. A failed follow-up read cannot turn that
+        // committed mutation into a known failure or invite a blind retry.
+        const authorityStatus = await status().catch(() => null);
+        responseValue = authorityStatus ? { result, authorityStatus } : result;
+      }
       port.postMessage({
         type: VAULT_AUTHORITY_RESULT, protocol: VAULT_AUTHORITY_PROTOCOL,
         channelId, requestId: call.requestId, ok: true,
-        value: MUTATING_METHODS.has(call.method)
-          ? { result: await value, authorityStatus: await status() }
-          : value,
+        value: responseValue,
       });
     } catch (cause) {
       const failure = classifyError(cause);

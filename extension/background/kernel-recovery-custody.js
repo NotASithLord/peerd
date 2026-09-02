@@ -7,7 +7,7 @@ const RECOVERY_KEYS = Object.freeze([
 const RETRY_MIN_MS = 30_000;
 const RETRY_MAX_MS = 5 * 60_000;
 
-/** @param {{kv:{get:(key:string)=>Promise<unknown>},alarms:{create:(name:string,info:{when:number})=>Promise<unknown>|unknown},dwebActive:()=>boolean,load:()=>Promise<unknown>,now?:()=>number}} deps */
+/** @param {{kv:{get:(key:string)=>Promise<unknown>},alarms:{create:(name:string,info:{when:number})=>Promise<unknown>|unknown},dwebActive:()=>boolean,load:(currentSessionId:string|null)=>Promise<unknown>,now?:()=>number}} deps */
 export const createKernelRecoveryCustody = ({
   kv, alarms, dwebActive, load, now = Date.now,
 }) => {
@@ -17,6 +17,7 @@ export const createKernelRecoveryCustody = ({
   }
   let failures = 0;
   /** @type {Promise<unknown>|null} */ let active = null;
+  /** @type {string|null} */ let activeSessionId = null;
   const needsRecovery = (/** @type {unknown} */ value) => {
     if (value == null) return false;
     if (typeof value !== 'object' || Array.isArray(value)) return true;
@@ -27,18 +28,33 @@ export const createKernelRecoveryCustody = ({
     try { await alarms.create('peerd-schedule', { when: now() + delay }); }
     catch {}
   };
-  const resume = () => {
-    if (active) return active;
+  /** @param {string|null|undefined} currentSessionId @returns {Promise<unknown>} */
+  const resume = (currentSessionId = null) => {
+    const requestedSessionId = typeof currentSessionId === 'string' && currentSessionId
+      ? currentSessionId : null;
+    if (active) {
+      if (!requestedSessionId || activeSessionId === requestedSessionId) return active;
+      const prior = active;
+      // An interactive unlock must not disappear behind an already-running cold
+      // recovery that had no current-session continuation to restore.
+      return prior.catch(() => undefined).then(() => {
+        if (active === prior) {
+          active = null;
+          activeSessionId = null;
+        }
+        return resume(requestedSessionId);
+      });
+    }
     const attempt = (async () => {
       try {
         const stored = await Promise.all(RECOVERY_KEYS.map((key) => kv.get(key)));
-        if (!stored.some(needsRecovery) && !dwebActive()) {
+        if (!stored.some(needsRecovery) && !dwebActive() && !requestedSessionId) {
           failures = 0;
           return Object.freeze({ loaded: false });
         }
       } catch {}
       try {
-        const result = await load();
+        const result = await load(requestedSessionId);
         failures = 0;
         return result;
       } catch (cause) {
@@ -48,8 +64,12 @@ export const createKernelRecoveryCustody = ({
       }
     })();
     active = attempt;
+    activeSessionId = requestedSessionId;
     void attempt.finally(() => {
-      if (active === attempt) active = null;
+      if (active === attempt) {
+        active = null;
+        activeSessionId = null;
+      }
     }).catch(() => {});
     return attempt;
   };

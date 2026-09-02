@@ -235,7 +235,9 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
         if (!sameRemote(live, approvedRemote)) throw new Error(
           'Git remote changed while authorization was pending; review and retry',
         );
-        return repositories.fetch(requireRepository(), { signal });
+        return repositories.fetch(requireRepository(), {
+          signal, expectedRemote: approvedRemote.url,
+        });
       });
     },
     push: (/** @type {string} */ target, /** @type {string|undefined} */ branch) => {
@@ -251,7 +253,9 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
         );
         await repositories.commit(requireRepository(), { message: 'checkpoint before push' });
         try {
-          const result = await repositories.push(requireRepository(), { ref: branch, signal });
+          const result = await repositories.push(requireRepository(), {
+            ref: branch, signal, expectedRemote: approvedRemote.url,
+          });
           return result?.ok === false
             ? { ...result, performed: true, retryable: false } : result;
         } catch (cause) {

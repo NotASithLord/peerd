@@ -53,7 +53,15 @@ const report = () => ({
         servedAppInstalled: true,
       },
     },
-    teardown: { disabledContexts: 0, lockedContexts: 0, vaultLocked: true },
+    teardown: {
+      disabledContexts: 1,
+      disabledDwebStatus: 'revoked',
+      disabledDwebHostEpoch: 'host-b',
+      disabledVaultStatus: 'active',
+      disabledVaultHostEpoch: 'host-b',
+      lockedContexts: 0,
+      vaultLocked: true,
+    },
     inputsImmutable: true,
   },
   budgets: { ...FEATURE_LEASE_DWEB_BUDGETS },
@@ -86,6 +94,8 @@ describe('packaged Preview dweb feature-lease contract', () => {
       (value: any) => { value.observations.continuity.renderer.hostEpoch = 'host-a'; },
       (value: any) => { value.observations.continuity.renderer.roomRejoined = false; },
       (value: any) => { value.observations.continuity.renderer.servedAppInstalled = false; },
+      (value: any) => { value.observations.teardown.disabledContexts = 0; },
+      (value: any) => { value.observations.teardown.disabledVaultHostEpoch = 'host-a'; },
       (value: any) => { value.observations.teardown.lockedContexts = 1; },
       (value: any) => { value.observations.worker.stoppedRunningStatus = 'running'; },
       (value: any) => { value.observations.worker.stoppedRunningStatus = undefined; },
@@ -112,11 +122,11 @@ describe('packaged Preview dweb feature-lease contract', () => {
     expect(source).toContain('expectedBackgroundEntry: backgroundEntry');
     expect(source).toContain('ctx.stopServiceWorker()');
     expect(source).toContain('chrome.offscreen.closeDocument()');
-    expect(source).toContain("type: 'feature-lease/host-status'");
+    expect(source).toContain("readActiveFeatureLease(ctx.page, 'dweb')");
     expect(source).toContain("contextTypes: ['OFFSCREEN_DOCUMENT']");
     expect(source).toContain("type: 'dweb/base/share-app'");
-    expect(source).toContain("'install-app'");
-    expect(source).toContain('verifyPackagedAcceptanceAppPayload');
+    expect(source).toContain("type: 'dweb/base/install'");
+    expect(source).toContain('verifyPackagedAcceptanceAppPayload(homePage, seededAppId)');
     expect(source).toContain("'history'");
     expect(source).toContain('stoppedRunningStatus');
     expect(source).toContain('meshGeneration');

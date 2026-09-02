@@ -8,11 +8,12 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ARTIFACTS_DIR, REPO_ROOT, readVersion } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
-import { FEATURE_LEASE_HOST_PROTOCOL } from '../../extension/shared/feature-lease-protocol.js';
+import { makeDocx } from '../../tests/peerd-runtime/doc/fixtures.ts';
 import {
   GIT_FIXTURE_HOST, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_TLS_KEY,
 } from '../acceptance/git-smart-http-fixture.mjs';
 import { PRODUCTION_BACKGROUND_ENTRY } from './passkey-signup-lane.mjs';
+import { readActiveFeatureLease } from './product-acceptance-probes.mjs';
 import {
   SITE_CLIENT_FIXTURE_TLS_PORT, attach, evalIn, launchPeerd, rpc, resetSession,
   sseText, sseToolCall, unlockAndReady, waitFor,
@@ -20,10 +21,13 @@ import {
 
 const REPORT_PATH = join(ARTIFACTS_DIR, 'e2e', 'read-doc-store-evidence.json');
 const FIXTURE_URL = `https://${GIT_FIXTURE_HOST}/long.pdf`;
+const DOCX_FIXTURE_URL = `https://${GIT_FIXTURE_HOST}/report.docx`;
 const HEAD_SENTINEL = 'READ_DOC_HEAD_SENTINEL_ALPHA_4107';
 const LATER_SENTINEL = 'READ_DOC_LATER_PAGE_SENTINEL_OMEGA_9253';
 const PRIMARY_PROMPT = 'Read the complete local PDF and report its later-page sentinel.';
 const PRIMARY_REPLY = 'store read_doc lane complete';
+const DOCX_PROMPT = 'Read the local Word report and summarize its findings and table.';
+const DOCX_REPLY = 'store DOCX read_doc lane complete';
 const SECONDARY_PROMPT = 'Try to page the prior document result from this new chat.';
 const SECONDARY_REPLY = 'cross-session read_result refusal observed';
 const REQUIRED_OPERATIONS = Object.freeze([
@@ -135,12 +139,15 @@ const makeResponder = () => {
     phase: 'primary',
     primaryDelegated: false,
     secondaryDelegated: false,
+    docxDelegated: false,
     primaryActorCalls: 0,
     secondaryActorCalls: 0,
     spillKey: null,
     initialOffset: null,
     primaryDone: false,
     secondaryRefused: false,
+    docxActorCalls: 0,
+    docxDone: false,
     actorBodies: [],
     toolResults: [],
     readResultPages: 0,
@@ -195,6 +202,25 @@ const makeResponder = () => {
         }) };
       }
 
+      if (state.phase === 'docx') {
+        state.docxActorCalls += 1;
+        if (state.docxActorCalls === 1) {
+          return { sse: sseToolCall('read_doc', {
+            url: DOCX_FIXTURE_URL, maxChars: 4_000,
+          }) };
+        }
+        const latest = results.at(-1) ?? '';
+        state.docxDone = latest.includes('Quarterly Report')
+          && latest.includes('Findings')
+          && latest.includes('Revenue')
+          && latest.includes('EMEA | North');
+        if (!state.docxDone) {
+          state.failure = `DOCX conversion omitted expected structure: ${latest.slice(0, 4000)}`;
+          return { sse: sseText('actor DOCX lane failed') };
+        }
+        return { sse: sseText('actor read the complete Word report') };
+      }
+
       state.secondaryActorCalls += 1;
       const latest = results.at(-1) ?? '';
       if (results.length === 0) {
@@ -217,6 +243,18 @@ const makeResponder = () => {
         }) };
       }
       return { sse: sseText('document work delegated') };
+    }
+    if (state.phase === 'docx') {
+      if (state.docxDelegated && body.includes('actor read the complete Word report')) {
+        return { sse: sseText(DOCX_REPLY) };
+      }
+      if (!state.docxDelegated) {
+        state.docxDelegated = true;
+        return { sse: sseToolCall('message_actor', {
+          to: 'web', message: `Read and summarize the Word report at ${DOCX_FIXTURE_URL}.`,
+        }) };
+      }
+      return { sse: sseText('Word report work delegated') };
     }
     if (actorReply) return { sse: sseText(SECONDARY_REPLY) };
     if (!state.secondaryDelegated) {
@@ -260,23 +298,10 @@ const audits = async (page) => {
   return result.entries;
 };
 
-const controllerLease = async (serviceWorkerConnection) => {
-  const status = await evalIn(serviceWorkerConnection, `new Promise((resolve) => {
-    chrome.runtime.sendMessage({
-      type: 'feature-lease/host-status', protocol: ${FEATURE_LEASE_HOST_PROTOCOL},
-    }, (reply) => resolve(chrome.runtime.lastError
-      ? { ok: false, error: chrome.runtime.lastError.message } : reply));
-  })`, true);
-  const leases = status?.leases?.filter(
-    (lease) => lease?.scope === 'controller' && lease?.orphaned !== true,
-  ) ?? [];
-  assert(status?.ok === true && typeof status.hostEpoch === 'string' && leases.length === 1,
-    `exact controller lease missing: ${JSON.stringify(status)}`);
-  const lease = leases[0];
-  assert(typeof lease.leaseId === 'string' && Number.isInteger(lease.generation)
-    && typeof lease.kernelEpoch === 'string', 'controller lease identity is incomplete');
+const controllerLease = async (page) => {
+  const { lease } = await readActiveFeatureLease(page, 'controller');
   return {
-    hostEpoch: status.hostEpoch, leaseId: lease.leaseId,
+    hostEpoch: lease.hostEpoch, leaseId: lease.leaseId,
     generation: lease.generation, kernelEpoch: lease.kernelEpoch,
   };
 };
@@ -284,7 +309,8 @@ const controllerLease = async (serviceWorkerConnection) => {
 const attachOffscreenNetwork = async (port) => {
   const target = await waitFor(async () => {
     const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
-    return targets.find((candidate) => candidate?.url?.endsWith('/offscreen/offscreen.html')
+    return targets.find((candidate) => candidate?.url?.split('#', 1)[0]
+      .endsWith('/offscreen/offscreen.html')
       && typeof candidate.webSocketDebuggerUrl === 'string') ?? null;
   }, { budgetMs: 10_000, pollMs: 25 });
   assert(target, 'physical offscreen controller/document host target was not observable');
@@ -317,7 +343,7 @@ const runOne = async (treePath, iteration) => {
       budgetMs: 30_000, pollMs: 25,
     }), 'delegated Web actor never reached the fake model wire');
 
-    const lease = await controllerLease(ctx.swConn);
+    const lease = await controllerLease(ctx.page);
     offscreen = await attachOffscreenNetwork(ctx.port);
     scripted.releaseFirstActor();
 
@@ -357,6 +383,15 @@ const runOne = async (treePath, iteration) => {
       && entry.details?.realmVerified === true);
     assert(isolatedActor, 'document tools did not originate from a verified sealed actor realm');
 
+    scripted.state.phase = 'docx';
+    await sendTurn(ctx.page, DOCX_PROMPT);
+    const docxTerminal = await waitFor(
+      () => terminalState(ctx.page, DOCX_PROMPT, DOCX_REPLY),
+      { budgetMs: 45_000, pollMs: 50 },
+    );
+    assert(docxTerminal && scripted.state.docxDone,
+      `physical DOCX conversion did not settle: ${scripted.state.failure ?? 'unknown failure'}`);
+
     await resetSession(ctx);
     scripted.state.phase = 'secondary';
     await sendTurn(ctx.page, SECONDARY_PROMPT);
@@ -386,6 +421,7 @@ const runOne = async (treePath, iteration) => {
       spillKeyObserved: typeof scripted.state.spillKey === 'string',
       readResultPages: scripted.state.readResultPages,
       laterSentinelObserved: scripted.state.primaryDone,
+      docxStructureObserved: scripted.state.docxDone,
       crossSessionRefused: scripted.state.secondaryRefused,
       exactOperations: operations.sort(),
       sealedActor: {
@@ -412,24 +448,29 @@ const closeServer = (server) => new Promise((resolve) => server.close(resolve));
 export async function runReadDocStoreLane({ runs = 1 } = {}) {
   assert(Number.isInteger(runs) && runs > 0 && runs <= 5, 'runs must be an integer from 1 to 5');
   const pdf = makePdf();
-  let fixtureRequests = 0;
+  const docx = Buffer.from(await makeDocx());
+  const fixtureRequests = { pdf: 0, docx: 0 };
   const server = createServer({
     key: GIT_FIXTURE_TLS_KEY,
     cert: GIT_FIXTURE_TLS_CERT,
   }, (request, response) => {
-    if (request.url !== '/long.pdf') {
+    if (request.url !== '/long.pdf' && request.url !== '/report.docx') {
       response.writeHead(404, { 'content-type': 'text/plain' });
       response.end('not found');
       return;
     }
-    fixtureRequests += 1;
+    const isPdf = request.url === '/long.pdf';
+    fixtureRequests[isPdf ? 'pdf' : 'docx'] += 1;
+    const body = isPdf ? pdf : docx;
     response.writeHead(200, {
-      'content-type': 'application/pdf',
-      'content-length': pdf.byteLength,
+      'content-type': isPdf
+        ? 'application/pdf'
+        : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'content-length': body.byteLength,
       'cache-control': 'no-store',
       connection: 'close',
     });
-    response.end(pdf);
+    response.end(body);
   });
   await listen(server);
   try {
@@ -451,15 +492,20 @@ export async function runReadDocStoreLane({ runs = 1 } = {}) {
     for (let iteration = 1; iteration <= runs; iteration += 1) {
       iterations.push(await runOne(treePath, iteration));
     }
-    assert(fixtureRequests === runs,
-      `fixture expected ${runs} real document fetches, observed ${fixtureRequests}`);
+    assert(fixtureRequests.pdf === runs && fixtureRequests.docx === runs,
+      `fixture expected ${runs} fetches per format, observed ${JSON.stringify(fixtureRequests)}`);
     const report = {
       ok: true,
       channel: 'store',
       browser: 'chrome',
       version,
       artifactBytes: statSync(artifactPath).size,
-      fixture: { url: FIXTURE_URL, bytes: pdf.byteLength, requests: fixtureRequests },
+      fixture: {
+        pdf: { url: FIXTURE_URL, bytes: pdf.byteLength, requests: fixtureRequests.pdf },
+        docx: {
+          url: DOCX_FIXTURE_URL, bytes: docx.byteLength, requests: fixtureRequests.docx,
+        },
+      },
       iterations,
     };
     mkdirSync(join(ARTIFACTS_DIR, 'e2e'), { recursive: true });

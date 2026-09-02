@@ -15,6 +15,7 @@ import {
   parseArtifactChannelOffer,
 } from '/shared/artifact-channel.js';
 import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
+import { sameDocumentUrlIgnoringHash } from '/shared/sender-trust.js';
 
 export {
   ARTIFACT_CHANNEL_OFFER,
@@ -108,7 +109,8 @@ export const makeArtifactEngineClient = ({
   const callOffscreen = async (/** @type {string} */ operation, /** @type {any[]} */ args) => {
     try {
       return await withHost(async (lease) => {
-      const matches = (await listWindowClients()).filter((client) => client?.url === offscreenUrl);
+      const matches = (await listWindowClients()).filter((client) =>
+        sameDocumentUrlIgnoringHash(client?.url, offscreenUrl));
       if (matches.length !== 1) throw new Error('artifact host unavailable or ambiguous');
       const channelId = newId();
       if (!parseArtifactChannelOffer({

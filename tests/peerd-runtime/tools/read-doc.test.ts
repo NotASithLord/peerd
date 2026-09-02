@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { readDocTool } from '../../../extension/peerd-runtime/tools/defs/read-doc.js';
+import {
+  READ_DOC_PRESENTATION_MAX_CHARS,
+  readDocTool,
+} from '../../../extension/peerd-runtime/tools/defs/read-doc.js';
+import { getToolMetadata } from '../../../extension/peerd-runtime/semantic.js';
 import { readResultTool } from '../../../extension/peerd-runtime/tools/defs/read-result.js';
 import { isPrivateOrLocalHost } from '../../../extension/shared/private-network.js';
 import { MAX_SPILL_TEXT_CHARS } from '../../../extension/peerd-runtime/tools/result-store-policy.js';
@@ -62,7 +66,6 @@ describe('read_doc as the one public document reader', () => {
     expect(result.content).toContain('title: Report');
     expect(result.content).toContain('[page 1]');
     expect(result.content).toContain('Quarterly result');
-    expect(result.content).not.toContain('tool="read_pdf"');
   });
 
   test('omitted URL reads the active PDF tab through the same path', async () => {
@@ -199,6 +202,69 @@ describe('read_doc as the one public document reader', () => {
     expect(result.content).toContain('retained text prefix');
     expect(result.content).toContain('extraction cap reached');
     expect(result.content).not.toContain('from 5023 chars stored locally');
+  });
+
+  test('caps structured text before query, paging totals, and the stored spill diverge', async () => {
+    const unreachableTail = 'UNREACHABLE-TAIL-NEEDLE';
+    let spilled: any = null;
+    const result = await readDocTool.execute({
+      url: 'https://docs.example/huge.docx', query: unreachableTail, maxChars: 1_000,
+    }, docContext({
+      docOffscreenClient: { extract: async () => ({
+        format: 'docx', bytes: MAX_SPILL_TEXT_CHARS + 10_000, sniffedVia: 'magic',
+        doc: {
+          format: 'docx', title: 'Huge', meta: {}, notes: [],
+          blocks: [{
+            type: 'paragraph',
+            inlines: [{ text: `${'x'.repeat(MAX_SPILL_TEXT_CHARS + 10_000)}${unreachableTail}` }],
+          }],
+        },
+      }) },
+      spillResult: async (record: any) => {
+        spilled = { key: 'result:doc-cap', ...record };
+        return spilled.key;
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(spilled.text).toHaveLength(MAX_SPILL_TEXT_CHARS);
+    expect(spilled.text).toEndWith(
+      '[note: document conversion stopped at its local safety cap; later text was not stored.]_',
+    );
+    expect(spilled.text).not.toContain(unreachableTail);
+    expect(result.content).not.toContain(unreachableTail);
+    expect(result.content).toContain('retained text prefix');
+    expect(result.content).toContain('extraction cap reached');
+    expect(result.content).not.toContain('The full text');
+  });
+
+  test('clamps oversized initial windows and preserves the middle in a spill', async () => {
+    const middle = 'RECOVERABLE-MIDDLE';
+    const markdown = `${'a'.repeat(5_000)}${middle}${'z'.repeat(5_000)}`;
+    let spilled: any = null;
+    const result = await readDocTool.execute({
+      url: 'https://docs.example/oversized.docx', maxChars: 100_000,
+    }, docContext({
+      docOffscreenClient: { extract: async () => ({
+        format: 'docx', bytes: markdown.length, sniffedVia: 'magic',
+        doc: {
+          format: 'docx', title: 'Oversized', meta: {}, notes: [],
+          blocks: [{ type: 'paragraph', inlines: [{ text: markdown }] }],
+        },
+      }) },
+      spillResult: async (record: any) => {
+        spilled = { key: 'result:oversized', ...record };
+        return spilled.key;
+      },
+    }));
+
+    expect(getToolMetadata('read_doc').schema.properties.maxChars).toMatchObject({
+      minimum: 1, maximum: READ_DOC_PRESENTATION_MAX_CHARS,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain('read_result');
+    expect(result.content.length).toBeLessThan(8_000);
+    expect(spilled.text).toContain(middle);
   });
 
   test('refuses private targets before the offscreen reader can fetch', async () => {

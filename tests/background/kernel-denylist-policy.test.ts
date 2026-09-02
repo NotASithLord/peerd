@@ -66,6 +66,24 @@ describe('lazy native-kernel denylist policy', () => {
     }
   });
 
+  test('overlay read and schema failures keep readiness, routes, and matching closed', async () => {
+    for (const get of [
+      async () => { throw new Error('overlay unavailable'); },
+      async () => ({ added: ['private.example'] }),
+    ]) {
+      const policy = createKernelDenylistPolicy({
+        kv: { get, set: async () => {} }, readSeed: async () => seed,
+      });
+      const status = await policy.ready();
+      expect(status).toMatchObject({ ok: false });
+      expect(policy.isReady()).toBe(false);
+      expect(policy.blocks('example.com')).toBe(true);
+      await expect(policy.snapshot()).resolves.toEqual(status);
+      await expect(policy.add('another.example')).resolves.toEqual(status);
+      await expect(policy.remove('bank.example')).resolves.toEqual(status);
+    }
+  });
+
   test('composer tabs preserve legacy projection while full URLs remain kernel-local', async () => {
     const queried = [{
       id: 1, title: 'Allowed', url: 'https://example.com/private?q=secret', active: true,

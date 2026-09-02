@@ -18,8 +18,11 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'offscreen/offscreen.js',
   'offscreen/feature-lease-host.js',
   'offscreen/repository-host.js',
+  // Per-offer module Workers are selected through new URL(), which the static
+  // graph intentionally does not follow. Bind their executable bytes directly.
+  'offscreen/repository-worker.js',
   // Name the App-file policy as an operation root in its own right. It is
-  // currently a static child of repository-host, but keeping the root explicit
+  // currently a static child of repository-worker, but keeping the root explicit
   // prevents a later lazy-load refactor from silently dropping digest custody.
   'offscreen/repository-app-files.js',
   'offscreen/artifact-host.js',

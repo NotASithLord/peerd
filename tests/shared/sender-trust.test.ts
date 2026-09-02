@@ -99,9 +99,9 @@ describe('isOffscreenSender', () => {
     expect(isOffscreenSender({ id: ID, url: offscreenUrl }, offscreenTrust)).toBe(true);
   });
 
-  it('rejects query and hash variants', () => {
+  it('accepts a browser-owned physical-host fragment but rejects query variants', () => {
     expect(isOffscreenSender({ id: ID, url: `${offscreenUrl}?copy=1` }, offscreenTrust)).toBe(false);
-    expect(isOffscreenSender({ id: ID, url: `${offscreenUrl}#frame` }, offscreenTrust)).toBe(false);
+    expect(isOffscreenSender({ id: ID, url: `${offscreenUrl}#physical-host` }, offscreenTrust)).toBe(true);
   });
 
   it('rejects a tab-hosted copy of the offscreen page', () => {

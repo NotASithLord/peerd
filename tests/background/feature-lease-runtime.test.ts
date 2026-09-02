@@ -54,6 +54,7 @@ const makeEnvironment = () => {
   let ensureCount = 0;
   let closeCount = 0;
   let failStarts = 0;
+  let startHook = async (_scope: string) => {};
   const startGates = new Map<string, Promise<void>>();
   const starts: string[] = [];
   const stops: string[] = [];
@@ -68,6 +69,7 @@ const makeEnvironment = () => {
       startScope: async (scope) => {
         starts.push(scope);
         await startGates.get(scope);
+        await startHook(scope);
         if (failStarts > 0) { failStarts -= 1; throw new Error('transient-host-start'); }
         return { started: scope };
       },
@@ -95,6 +97,7 @@ const makeEnvironment = () => {
     get closeCount() { return closeCount; },
     get host() { return host; },
     failNextStarts(count: number) { failStarts = count; },
+    onStart(fn: (scope: string) => Promise<void>) { startHook = fn; },
     stallStart(scope: string, gate: Promise<void>) { startGates.set(scope, gate); },
     replaceHost() { void host?.close(); return createHost(); },
     crashHost() { host = null; },
@@ -256,9 +259,12 @@ describe('production feature-lease runtime', () => {
       expect.objectContaining({ scope: 'dweb', orphaned: true }),
     ]);
 
-    const successor = makeRuntime(env, store, 'kernel-epoch-b');
+    const successor = makeRuntime(env, store, 'kernel-epoch-b', { vaultUnlocked: false });
     await successor.ready;
-    expect(await successor.reconcile()).toEqual([
+    expect((await store.get(FEATURE_LEASE_INTENT_KEY)).intents).toContainEqual(
+      expect.objectContaining({ scope: 'dweb' }),
+    );
+    expect((await successor.resume({ dwebEnabled: true })).reconciled).toEqual([
       expect.objectContaining({ ok: true, scope: 'dweb' }),
     ]);
     expect(env.starts).toEqual(['dweb']);
@@ -303,6 +309,196 @@ describe('production feature-lease runtime', () => {
     });
     expect(env.host?.snapshot().leases).toHaveLength(1);
     expect(oldLease?.hostEpoch).toBe(oldHostEpoch);
+  });
+
+  test('renderer recovery releases the host lane for dweb vault identity restoration', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
+    let identityReads = 0;
+    env.onStart(async (scope) => {
+      if (scope !== 'dweb') return;
+      await runtime.runWithLease('vault-authority', async () => { identityReads += 1; });
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority', { reason: 'vault-unlock' });
+    await runtime.runTransition('resume', { dwebEnabled: true });
+    const oldHostEpoch = env.host?.hostEpoch;
+    env.crashHost();
+
+    const recovered = await Promise.race([
+      runtime.handleHostLoss(oldHostEpoch!),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('renderer recovery deadlocked on nested vault lease')), 100,
+      )),
+    ]);
+
+    expect(recovered).toMatchObject({
+      hostEpoch: oldHostEpoch,
+      results: [
+        { ok: true, scope: 'vault-authority' },
+        { ok: true, scope: 'dweb' },
+      ],
+    });
+    expect(identityReads).toBe(2);
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+    expect(env.host?.snapshot().leases).toEqual(expect.arrayContaining([
+      expect.objectContaining({ scope: 'vault-authority', orphaned: false }),
+      expect.objectContaining({ scope: 'dweb', orphaned: false }),
+    ]));
+  });
+
+  test('explicit host retirement releases the lane before durable dweb recovery', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
+    let identityReads = 0;
+    env.onStart(async (scope) => {
+      if (scope !== 'dweb') return;
+      await runtime.runWithLease('vault-authority', async () => { identityReads += 1; });
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority', { reason: 'vault-unlock' });
+    await runtime.runTransition('resume', { dwebEnabled: true });
+    const oldHostEpoch = env.host?.hostEpoch;
+
+    const retired = await Promise.race([
+      runtime.retireActiveHost('repository-mutation-outcome-unknown'),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('explicit retirement deadlocked on nested vault lease')), 100,
+      )),
+    ]);
+
+    expect(retired).toMatchObject({
+      hostEpoch: oldHostEpoch,
+      results: [
+        { ok: true, scope: 'vault-authority' },
+        { ok: true, scope: 'dweb' },
+      ],
+    });
+    expect(identityReads).toBe(2);
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+  });
+
+  test('epoch-exact retirement proves a stale host gone without closing its healthy successor', async () => {
+    const env = makeEnvironment();
+    const store = makeStore();
+    const runtime = makeRuntime(env, store, 'kernel-epoch-a');
+    await runtime.ready;
+    await runtime.acquire('controller');
+    const staleHostEpoch = env.host!.hostEpoch;
+    env.replaceHost();
+    await runtime.handleHostLoss(staleHostEpoch);
+    const successorHostEpoch = env.host!.hostEpoch;
+    const closeCount = env.closeCount;
+
+    await expect(runtime.retireHostEpoch(
+      staleHostEpoch, 'repository-worker-termination-unconfirmed',
+    )).resolves.toEqual({ hostEpoch: staleHostEpoch, affected: [], results: [] });
+    expect(env.closeCount).toBe(closeCount);
+    expect(env.host?.hostEpoch).toBe(successorHostEpoch);
+    expect(env.host?.snapshot().leases).toEqual([
+      expect.objectContaining({ scope: 'controller', orphaned: false }),
+    ]);
+    expect(store.values.get(FEATURE_HOST_RETIREMENT_KEY)).toBeNull();
+  });
+
+  test('epoch-exact retirement closes and recovers the matching current host', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
+    await runtime.ready;
+    await runtime.acquire('controller');
+    const currentHostEpoch = env.host!.hostEpoch;
+
+    const retired = await runtime.retireHostEpoch(
+      currentHostEpoch, 'repository-worker-termination-unconfirmed',
+    );
+    expect(retired).toMatchObject({
+      hostEpoch: currentHostEpoch,
+      affected: [{ scope: 'controller', durable: true, priorStatus: 'active' }],
+      results: [{ ok: true, scope: 'controller' }],
+    });
+    expect(env.closeCount).toBe(1);
+    expect(env.host?.hostEpoch).not.toBe(currentHostEpoch);
+  });
+
+  test('poisoned revocation releases the lane before durable dweb recovery', async () => {
+    const env = makeEnvironment();
+    let loseControllerStop = false;
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      hostEffectTimeoutMs: 5,
+      sendHostMessage: (message: any) => loseControllerStop
+        && message.type === 'feature-lease/host-stop'
+        && message.lease?.scope === 'controller'
+        ? new Promise(() => {})
+        : env.sendHostMessage(message),
+    });
+    let identityReads = 0;
+    env.onStart(async (scope) => {
+      if (scope !== 'dweb') return;
+      await runtime.runWithLease('vault-authority', async () => { identityReads += 1; });
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority', { reason: 'vault-unlock' });
+    await runtime.runTransition('resume', { dwebEnabled: true });
+    await runtime.acquire('controller');
+    const oldHostEpoch = env.host?.hostEpoch;
+    loseControllerStop = true;
+
+    const revoked = await Promise.race([
+      runtime.revoke('controller'),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('poison recovery deadlocked on nested vault lease')), 100,
+      )),
+    ]);
+
+    expect(revoked).toMatchObject({
+      ok: false, code: 'feature-lease-stop-unknown', outcomeKnown: false,
+    });
+    expect(identityReads).toBe(2);
+    expect(env.host?.hostEpoch).not.toBe(oldHostEpoch);
+    expect(env.host?.snapshot().leases).toEqual(expect.arrayContaining([
+      expect.objectContaining({ scope: 'vault-authority', orphaned: false }),
+      expect.objectContaining({ scope: 'dweb', orphaned: false }),
+    ]));
+  });
+
+  test('duplicate stale loss cannot retire a replacement while it is starting', async () => {
+    const env = makeEnvironment();
+    let staleHostEpoch: string | null = null;
+    let reportStaleStatus = false;
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      sendHostMessage: async (message: any) => {
+        const result = await env.sendHostMessage(message);
+        return reportStaleStatus && message.type === 'feature-lease/host-status'
+          ? { ...result, hostEpoch: staleHostEpoch }
+          : result;
+      },
+    });
+    const replacementStart = deferred<void>();
+    let dwebStarts = 0;
+    env.onStart(async (scope) => {
+      if (scope !== 'dweb' || ++dwebStarts !== 2) return;
+      await replacementStart.promise;
+    });
+    await runtime.ready;
+    await runtime.acquire('dweb', { reason: 'vault-resume' });
+    staleHostEpoch = env.host?.hostEpoch ?? null;
+    env.crashHost();
+
+    const recovering = runtime.handleHostLoss(staleHostEpoch!);
+    while (env.starts.filter((scope) => scope === 'dweb').length < 2) await Promise.resolve();
+    const replacementEpoch = env.host?.hostEpoch;
+    reportStaleStatus = true;
+    expect(await runtime.handleHostLoss(staleHostEpoch!)).toMatchObject({
+      hostEpoch: staleHostEpoch, affected: [], results: [],
+    });
+    expect(env.closeCount).toBe(0);
+    expect(env.host?.hostEpoch).toBe(replacementEpoch);
+
+    reportStaleStatus = false;
+    replacementStart.resolve();
+    await expect(recovering).resolves.toMatchObject({
+      results: [expect.objectContaining({ ok: true, scope: 'dweb' })],
+    });
   });
 
   test('an unknown bounded operation retires the shared realm before durable dweb recovers', async () => {

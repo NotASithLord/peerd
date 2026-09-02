@@ -323,6 +323,35 @@ describe('kernel browser network authority', () => {
     });
   });
 
+  test('rejects partial origin custody without replacing the surviving DNR floor', async () => {
+    const survivingRules = [{
+      id: 10, priority: 4, action: { type: 'block' },
+      condition: {
+        tabIds: [1], resourceTypes: ['main_frame', 'xmlhttprequest'],
+        regexFilter: '^https?://private', isUrlFilterCaseSensitive: false,
+      },
+    }];
+    const harness = setup({
+      stored: {
+        guardedBrowserTabIds: [1],
+        guardedBrowserOriginDomains: [[1, ['one.example']], [2]],
+      },
+      external: [1],
+      rules: survivingRules,
+    });
+
+    await expect(harness.authority.ready()).resolves.toEqual({
+      ok: false,
+      error: 'guarded_origins_hydration_failed: browser-origin-custody-snapshot-invalid',
+    });
+    expect(harness.authority.status()).toMatchObject({
+      ready: false,
+      startupError: 'guarded_origins_hydration_failed: browser-origin-custody-snapshot-invalid',
+    });
+    expect(harness.dnrCalls).toEqual([]);
+    expect(harness.rules()).toEqual(survivingRules);
+  });
+
   test('keeps a volatile navigated origin closed until its snapshot persists', async () => {
     const harness = setup({ external: [1] });
     await harness.authority.ready();
@@ -488,7 +517,7 @@ describe('kernel browser network authority', () => {
     const updates: any[] = [];
     const session = new Map<string, any>([
       ['guardedBrowserTabIds', [41]],
-      ['guardedBrowserOriginDomains', [{ tabId: 41, domain: 'user.example' }]],
+      ['guardedBrowserOriginDomains', [[41, ['user.example']]]],
     ]);
     const authority = createKernelBrowserNetworkAuthority({
       browser: {

@@ -69,6 +69,8 @@ describe('formatRunResult — fence decision matrix', () => {
     expect(afterFence).toContain('read_result');
     expect(afterFence).toContain('"result:opaque-9"');
     expect(afterFence).toContain('123456');
+    expect(afterFence).toContain('On future runs, return a compact value');
+    expect(afterFence).not.toContain('prefer re-running');
   });
 
   test('no spill → no footer (page_code and existing callers unchanged)', () => {

@@ -535,19 +535,41 @@ const reconcileActorTerminals = (actors, messages) => {
   let next = actors ?? {};
   let changed = false;
 
-  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorCorrelationId?: string }} terminal */
+  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorCorrelationId?: string, kind?: string, instanceId?: string, name?: string }} terminal */
   const settle = (call, terminal) => {
     if (!call) return;
-    const card = next[call.id];
-    if (!card) return;
-    const callCorrelationIds = [
+    const acknowledgedCorrelationIds = [
       call.result?.actorCorrelationId,
       call.result?.actorDeliveryId,
       ...(Array.isArray(call.result?.actorDeliveryIds) ? call.result.actorDeliveryIds : []),
-      terminal.actorCorrelationId,
     ].filter((id) => typeof id === 'string');
+    let card = next[call.id];
+    if (!card) {
+      // A fresh panel has no live actor projection. Rebuild only from an exact
+      // host correlation present in both the immediate acknowledgement and the
+      // later durable receipt; bare tool ids are provider-controlled and may be
+      // reused across turns.
+      if (typeof terminal.actorCorrelationId !== 'string'
+          || !acknowledgedCorrelationIds.includes(terminal.actorCorrelationId)
+          || typeof terminal.kind !== 'string'
+          || typeof terminal.instanceId !== 'string') return;
+      card = {
+        kind: terminal.kind, instanceId: terminal.instanceId,
+        ...(typeof terminal.name === 'string' ? { name: terminal.name } : {}),
+        actorCorrelationId: terminal.actorCorrelationId,
+        fromIndex: 0, messages: [], streaming: true, error: null,
+      };
+    }
     if (typeof card.actorCorrelationId === 'string') {
-      if (!callCorrelationIds.includes(card.actorCorrelationId)) return;
+      // A mounted live card is itself host-authored evidence, so it can settle
+      // after a crash lost the acknowledgement. Hydrating a missing card above
+      // is stricter: only the acknowledgement may authenticate the receipt.
+      if (typeof terminal.actorCorrelationId === 'string'
+          && terminal.actorCorrelationId !== card.actorCorrelationId) return;
+      if (acknowledgedCorrelationIds.length > 0
+          && !acknowledgedCorrelationIds.includes(card.actorCorrelationId)) return;
+      if (typeof terminal.actorCorrelationId !== 'string'
+          && acknowledgedCorrelationIds.length === 0) return;
     } else {
       // Legacy cards without host correlation can only use the conservative
       // latest-occurrence fallback. A correlated older call may still own the
@@ -630,6 +652,9 @@ const reconcileActorTerminals = (actors, messages) => {
       failed: reply.failed === true,
       ...(typeof reply.actorDeliveryId === 'string'
         ? { actorCorrelationId: reply.actorDeliveryId } : {}),
+      ...(typeof reply.kind === 'string' ? { kind: reply.kind } : {}),
+      ...(typeof reply.instanceId === 'string' ? { instanceId: reply.instanceId } : {}),
+      ...(typeof reply.name === 'string' ? { name: reply.name } : {}),
       ...(reply.outcomeKnown !== undefined ? { outcomeKnown: reply.outcomeKnown } : {}),
       ...(reply.performed !== undefined ? { performed: reply.performed } : {}),
       ...(reply.aborted === true ? { aborted: true } : {}),

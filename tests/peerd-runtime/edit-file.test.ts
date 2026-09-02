@@ -18,6 +18,7 @@ const baseCtx = (over: any = {}) => ({
   jsClient: { readFile: async () => '', writeFile: async () => {} },
   appRegistry: { getDefaultForSession: async () => null },
   jsRegistry: { getDefaultForSession: async () => null },
+  repositories: { coordinate: async (_ref: any, operation: () => Promise<any>) => operation() },
   ...over,
 });
 
@@ -39,6 +40,17 @@ const executeEdit = (args: any, ctx: any) => {
 };
 
 describe('edit_file — create-first hint (progressive disclosure consistency)', () => {
+  test('notebook authority fails closed without repository coordination', () => {
+    const ctx = baseCtx({ repositories: undefined });
+    expect(() => createEditingToolAuthority({
+      binding: {
+        operation: 'turn.editing.read-target',
+        args: { kind: 'notebook', path: 'x.js', targetId: 'nb-1' },
+      },
+      ctx,
+    })).toThrow('notebook repository coordination is required');
+  });
+
   test('app: no current app → create-first hint naming sandbox_create', async () => {
     const r: any = await executeEdit({ path: 'index.html', edits: WHOLE_FILE }, baseCtx());
     expect(r.ok).toBe(false);

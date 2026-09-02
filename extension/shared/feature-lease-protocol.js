@@ -5,6 +5,10 @@
 
 export const FEATURE_LEASE_HOST_PROTOCOL = 1;
 export const FEATURE_LEASE_KEEPALIVE_PORT = 'feature-lease-keepalive';
+export const FEATURE_LEASE_HOST_COMMAND = 'feature-lease/host-command';
+export const FEATURE_LEASE_HOST_COMMAND_RESULT = 'feature-lease/host-command-result';
+export const FEATURE_LEASE_CLIENT_PROBE = 'peerd/feature-lease-client-probe';
+export const FEATURE_LEASE_CLIENT_PROOF = 'feature-lease/client-proof';
 export const LOCAL_MODEL_CHANNEL_OFFER = 'peerd/local-model-channel';
 export const LOCAL_MODEL_CHANNEL_RESULT = 'local-model/result';
 export const LOCAL_MODEL_CHANNEL_CHUNK = 'local-model/chunk';
@@ -28,7 +32,7 @@ const METHODS = new Set(REPOSITORY_METHODS);
 const MUTATING_METHODS = new Set([
   'init', 'stage', 'commit', 'restore', 'branch', 'checkout', 'setRemote',
   'fetch', 'push', 'clone', 'fork', 'replaceWorkingTree', 'destroy',
-  'snapshot', 'matches',
+  'matches',
   'appWrite', 'appDelete',
 ]);
 const NETWORK_METHODS = new Set(['fetch', 'push', 'clone']);
@@ -108,8 +112,7 @@ export const parseRepositoryChannelOffer = (value) => {
       || !Number.isSafeInteger(lease.generation) || lease.generation <= 0
       || !safeId(lease.buildId) || !safeId(lease.kernelEpoch)
       || !safeId(lease.hostEpoch)
-      || (lease.schema !== undefined && lease.schema !== 1)
-      || (lease.bootId !== undefined && !safeId(lease.bootId))) return null;
+      || lease.schema !== 1 || !safeId(lease.bootId)) return null;
   if (!repositoryChannelPayloadFits(message.args)) return null;
   return Object.freeze({
     type: REPOSITORY_CHANNEL_OFFER,

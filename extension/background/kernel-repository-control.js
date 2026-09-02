@@ -1,6 +1,7 @@
 // @ts-check
 
 import { KERNEL_REPOSITORY_ROUTE_NAMES } from '../shared/kernel-feature-route-inventory.js';
+import { sameCanonicalStructuredClone } from '../shared/canonical-clone-digest.js';
 import { createKernelFeatureControl } from './kernel-feature-control.js';
 
 const success = (/** @type {unknown} */ value) => Object.freeze({
@@ -11,9 +12,6 @@ const failure = (/** @type {string} */ code, /** @type {boolean} */ outcomeKnown
   ok: false, code, outcomeKnown,
   error: /** @type {{message?:string}} */ (cause)?.message ?? code,
 });
-const same = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
-};
 const expected = (/** @type {string} */ operation, /** @type {any} */ message) => {
   if (!message || typeof message !== 'object') return null;
   const appId = message.appId;
@@ -128,7 +126,7 @@ export const createKernelRepositoryControl = (deps) => {
     /** @type {any} */ context) => {
     const message = context?.message;
     const projection = expected(operation, message);
-    if (projection && !same(projection, payload)) {
+    if (projection && !sameCanonicalStructuredClone(projection, payload)) {
       return failure('repository-effect-substitution', true);
     }
     if (context?.signal?.aborted) return failure('repository-call-aborted', true);
@@ -258,7 +256,10 @@ export const createKernelRepositoryControl = (deps) => {
       return success({ ok: true, remote });
     }
     if (operation === 'repository.fetch') {
-      const result = await coordinate(appId, () => deps.repositories.fetch(ref, { signal }));
+      const result = await coordinate(appId, async () => {
+        const expectedRemote = (await deps.repositories.getRemote(ref))?.url;
+        return deps.repositories.fetch(ref, { signal, expectedRemote });
+      });
       audit({ type: 'git_remote_fetched', details: {
         kind: 'app', appId, host: result.remote.host,
       } });
@@ -266,8 +267,11 @@ export const createKernelRepositoryControl = (deps) => {
     }
     if (operation === 'repository.push') {
       const result = await quiesce(appId, async () => {
+        const expectedRemote = (await deps.repositories.getRemote(ref))?.url;
         await deps.repositories.commitApp(appId, { message: 'checkpoint before push', signal });
-        return deps.repositories.push(ref, { ref: payload.branch ?? undefined, signal });
+        return deps.repositories.push(ref, {
+          ref: payload.branch ?? undefined, signal, expectedRemote,
+        });
       }, false);
       if (!result.ok) return success({
         ok: false,

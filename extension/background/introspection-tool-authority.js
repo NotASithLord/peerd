@@ -9,6 +9,85 @@ const mismatch = () => Object.assign(new Error('introspection authority mismatch
   outcomeKnown: true, retryable: false,
 });
 
+const STORAGE_PROOF_PREFIXES = new Set(['vault', 'vault:', 'secret:']);
+const STORAGE_PROOF_MAX_KEYS = 256;
+const STORAGE_VALUE_TYPES = Object.freeze([
+  'null', 'array', 'binary', 'object', 'string', 'number', 'boolean', 'undefined',
+]);
+
+/** @param {string} key */
+const isProtectedStorageKey = (key) => key === 'vault'
+  || key.startsWith('vault.')
+  || key.startsWith('vault:')
+  || key.startsWith('secret:');
+
+/** @param {unknown} value */
+const storageValuePosture = (value) => {
+  const type = value === null ? 'null'
+    : Array.isArray(value) ? 'array'
+      : ArrayBuffer.isView(value) || value instanceof ArrayBuffer ? 'binary'
+        : typeof value;
+  try {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    return {
+      type,
+      bytes: typeof serialized === 'string'
+        ? new TextEncoder().encode(serialized).byteLength
+        : 0,
+      ...(Array.isArray(value) ? { items: value.length } : {}),
+      ...(value && typeof value === 'object' && !Array.isArray(value)
+        && !ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)
+        ? { fields: Object.keys(value).length } : {}),
+    };
+  } catch {
+    return { type, bytes: null };
+  }
+};
+
+/** @param {unknown} value @param {string|undefined} prefix */
+const storageInspectionProof = (value, prefix) => {
+  const entries = value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.entries(value) : [];
+  const scanned = entries.slice(0, STORAGE_PROOF_MAX_KEYS);
+  const byType = Object.fromEntries(STORAGE_VALUE_TYPES.map((type) => [type, {
+    entries: 0, knownBytes: 0, unknownBytes: 0,
+  }]));
+  const protectedPosture = { entries: 0, knownBytes: 0, unknownBytes: 0 };
+  let knownBytes = 0;
+  let unknownBytes = 0;
+  for (const [key, item] of scanned) {
+    const posture = storageValuePosture(item);
+    const type = Object.hasOwn(byType, posture.type) ? posture.type : 'undefined';
+    const bucket = byType[type];
+    bucket.entries += 1;
+    if (typeof posture.bytes === 'number' && Number.isInteger(posture.bytes)) {
+      bucket.knownBytes += posture.bytes;
+      knownBytes += posture.bytes;
+    } else {
+      bucket.unknownBytes += 1;
+      unknownBytes += 1;
+    }
+    if (isProtectedStorageKey(key)) {
+      protectedPosture.entries += 1;
+      if (typeof posture.bytes === 'number' && Number.isInteger(posture.bytes)) {
+        protectedPosture.knownBytes += posture.bytes;
+      }
+      else protectedPosture.unknownBytes += 1;
+    }
+  }
+  return {
+    scope: prefix ?? 'all',
+    status: 'metadata-only',
+    totalEntries: entries.length,
+    scannedEntries: scanned.length,
+    omittedEntries: entries.length - scanned.length,
+    knownBytes,
+    unknownBytes,
+    protected: protectedPosture,
+    byType,
+  };
+};
+
 /** @param {unknown} cause */
 const messageOf = (cause) => /** @type {{message?:string}} */ (cause)?.message ?? String(cause);
 
@@ -118,11 +197,13 @@ export const createIntrospectionToolAuthority = ({ binding, ctx }) => {
         vaultLocked: ctx?.vault?.isLocked !== false,
       };
     },
-    readStorageSnapshot: (/** @type {string|undefined} */ prefix) => {
+    readStorageSnapshot: async (/** @type {string|undefined} */ prefix) => {
       requireOperation('turn.introspection.storage-snapshot');
       const expected = typeof args?.prefix === 'string' ? args.prefix : undefined;
-      if (prefix !== expected || typeof ctx?.kv?.list !== 'function') throw mismatch();
-      return ctx.kv.list(prefix);
+      if (prefix !== expected || typeof ctx?.kv?.list !== 'function'
+          || (prefix !== undefined && !STORAGE_PROOF_PREFIXES.has(prefix))) throw mismatch();
+      const storagePrefix = prefix === 'vault:' ? 'vault' : prefix;
+      return storageInspectionProof(await ctx.kv.list(storagePrefix), prefix);
     },
     readAutomatableTabs: async () => {
       requireOperation('turn.introspection.automatable-tabs');

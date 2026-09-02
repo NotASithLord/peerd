@@ -718,6 +718,27 @@ throw new Error('unrelated failure');`,
     expect(/** @type {any} */ (r.value)?.[0]?.did).toBe('did:key:z6MkBob');
   });
 
+  it('a caught failed known-performed mesh call keeps its exact host receipt', async () => {
+    const r = await runJob(
+      {
+        code: 'try { await mesh.cast("did:key:z6MkBob", "hello"); } catch {} return "caught";',
+        a2a: true, ownerSessionId: 'dweb-sess-1', runId: 'a2a-known-performed',
+      },
+      { sendToSW: async (type) => type === 'a2a/call'
+        ? {
+            ok: false, error: 'peer refused after delivery', performed: true,
+            outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+          }
+        : { ok: false } },
+    );
+    expect(r.value).toBe('caught');
+    expect(r.error).toBe(null);
+    expect(r.performed).toBe(true);
+    expect(r.outcomeKnown).toBe(true);
+    expect(r.outcomeKind).toBe('effect-completed');
+    expect(r.retryable).toBe(false);
+  });
+
   it('a mesh call in a NON-a2a run is refused (the bridge is capability-gated)', async () => {
     const r = await runJob(
       { code: 'try { await mesh.peers(); return "REACHED"; } catch (e) { return "no-mesh"; }' },

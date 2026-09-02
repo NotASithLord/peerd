@@ -109,6 +109,21 @@ export const canonicalStructuredClone = (input, options = {}) => {
   return JSON.stringify(visit(input, 0));
 };
 
+/**
+ * @param {unknown} left
+ * @param {unknown} right
+ * @param {{maxBytes?:number}} [options]
+ */
+export const sameCanonicalStructuredClone = (left, right, options) => {
+  try {
+    return canonicalStructuredClone(left, options) === canonicalStructuredClone(right, options);
+  } catch {
+    // why: exact authority comparison fails closed for values outside the
+    // admitted structured-clone subset or its byte bound.
+    return false;
+  }
+};
+
 /** @param {unknown} input @param {{maxBytes?:number}} [options] */
 export const canonicalCloneDigest = async (input, options) => {
   const text = canonicalStructuredClone(input, options);

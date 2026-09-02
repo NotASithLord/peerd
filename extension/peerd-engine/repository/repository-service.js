@@ -488,11 +488,14 @@ export const createRepositoryService = ({
     return result;
   };
 
-  /** @param {{kind:string,id:string}} ref @param {{signal?:AbortSignal}} [opts] */
-  const fetchRemote = (ref, { signal } = {}) => run(ref, async (ctx) => {
+  /** @param {{kind:string,id:string}} ref @param {{signal?:AbortSignal,expectedRemote?:string}} [opts] */
+  const fetchRemote = (ref, { signal, expectedRemote } = {}) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx);
     if (!webFetch) throw new Error('git remote transport unavailable');
     const remote = await remoteFor(ctx);
+    if (expectedRemote !== undefined && normalizeGitRemote(expectedRemote).url !== remote.url) {
+      throw new Error('Git remote changed before fetch');
+    }
     const current = await ctx.git.currentBranch({
       fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, fullname: false,
     });
@@ -501,11 +504,14 @@ export const createRepositoryService = ({
     return { remote, fetchHead: result.fetchHead ?? null, fetchHeadDescription: result.fetchHeadDescription ?? null };
   });
 
-  /** @param {{kind:string,id:string}} ref @param {{ref?:string,signal?:AbortSignal}} [opts] */
-  const push = (ref, { ref: branchName, signal } = {}) => run(ref, async (ctx) => {
+  /** @param {{kind:string,id:string}} ref @param {{ref?:string,signal?:AbortSignal,expectedRemote?:string}} [opts] */
+  const push = (ref, { ref: branchName, signal, expectedRemote } = {}) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx);
     if (!webFetch) throw new Error('git remote transport unavailable');
     const remote = await remoteFor(ctx);
+    if (expectedRemote !== undefined && normalizeGitRemote(expectedRemote).url !== remote.url) {
+      throw new Error('Git remote changed before push');
+    }
     const current = branchName ? validBranch(branchName) : await ctx.git.currentBranch({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, fullname: false });
     if (!current) throw new Error('cannot push a detached HEAD');
     const http = createGitHttpClient({ remote, webFetch, getSecret, audit, signal });
@@ -539,7 +545,7 @@ export const createRepositoryService = ({
   /** Return immutable bytes from a commit, never a concurrently mutable tree. */
   /** @param {{kind:string,id:string}} ref @param {{at?:string}} [opts] */
   const snapshot = (ref, { at = 'HEAD' } = {}) => run(ref, async (ctx) => {
-    await ensureUnlocked(ctx);
+    if (!await resolveHead(ctx)) throw new Error('repository is not initialized');
     return snapshotAtUnlocked(ctx, at);
   });
 

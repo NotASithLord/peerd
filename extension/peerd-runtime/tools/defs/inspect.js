@@ -48,10 +48,12 @@ const inspectProviderConfig = async (_args, ctx) => {
       hasKey: posture.hasKey,
       vaultLocked: posture.vaultLocked,
       contract: [
-        'The API key is encrypted in the vault under a passphrase-derived',
-        'KEK (PBKDF2-SHA256 600k iter → AES-KW). It is decrypted into SW',
-        'memory only when a request is about to fire; the plaintext never',
-        'lands in chrome.storage and never leaves the service worker.',
+        'The API key is encrypted in the vault under a non-extractable AES-KW',
+        'key derived by Argon2id from the passphrase or by WebAuthn PRF.',
+        'Vault cryptography and data-key custody run in a sealed offscreen Worker.',
+        'A requested provider secret crosses only its private bounded channel into',
+        'service-worker egress immediately before the request; plaintext never lands',
+        'in chrome.storage, the semantic controller, or the model context.',
         'This tool intentionally cannot retrieve the key value — it would',
         'be a bug in the contract if it could.',
       ].join(' '),
@@ -60,27 +62,12 @@ const inspectProviderConfig = async (_args, ctx) => {
 };
 
 // ── storage — proves encryption-at-rest ────────────────────────────────────
-/** @param {any} v @returns {unknown} */
-const truncateForDisplay = (v) => {
-  if (typeof v === 'string' && v.length > 80) {
-    return `${v.slice(0, 32)}…${v.slice(-16)} (${v.length} chars, base64)`;
-  }
-  if (v && typeof v === 'object' && !Array.isArray(v)) {
-    /** @type {Record<string, unknown>} */
-    const out = {};
-    for (const [k, vv] of Object.entries(v)) out[k] = truncateForDisplay(vv);
-    return out;
-  }
-  return v;
-};
-
 /** @param {any} args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
 const inspectStorage = async (args, ctx) => {
-  const all = await introspectionAuthority(ctx).readStorageSnapshot(args?.prefix);
-  /** @type {Record<string, unknown>} */
-  const display = {};
-  for (const [k, v] of Object.entries(all)) display[k] = truncateForDisplay(v);
-  return { ok: true, content: JSON.stringify(display, null, 2) };
+  // The authority returns the final bounded display proof. Raw storage values
+  // never enter this semantic heap, even if its tool dispatcher is bypassed.
+  const proof = await introspectionAuthority(ctx).readStorageSnapshot(args?.prefix);
+  return { ok: true, content: JSON.stringify(proof, null, 2) };
 };
 
 // ── session_access — proves "your sessions are already there" ──────────────
@@ -92,11 +79,6 @@ const inspectStorage = async (args, ctx) => {
  * @property {boolean} [active]
  */
 
-/** @param {string | undefined} s @param {number} n @returns {string} */
-const truncate = (s, n) => {
-  if (!s) return '';
-  return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
-};
 /** @param {any} _args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
 const inspectSessionAccess = async (_args, ctx) => {
   /** @type {Array<Record<string, unknown>>} */

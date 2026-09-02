@@ -1,88 +1,10 @@
 // @ts-check
 
-export const TOOL_METADATA_ORDER = Object.freeze([
-  "inspect",
-  "actor_list",
-  "open_tab",
-  "read_page",
-  "snapshot",
-  "read_state",
-  "watch_changes",
-  "query_dom",
-  "navigate",
-  "type",
-  "click",
-  "login",
-  "read_doc",
-  "fetch_url",
-  "page_code",
-  "read_result",
-  "site_client_run",
-  "site_client_read",
-  "site_client_write",
-  "site_capture",
-  "sandbox_create",
-  "vm_boot",
-  "vm_import",
-  "vm_write_file",
-  "vm_delete",
-  "js_notebook",
-  "script",
-  "js_write_file",
-  "js_read_file",
-  "js_delete",
-  "pod_exec",
-  "pod_status",
-  "pod_cancel",
-  "pod_read",
-  "pod_write",
-  "pod_destroy",
-  "app_update",
-  "app_open",
-  "app_search",
-  "app_delete",
-  "app_write_file",
-  "app_read_file",
-  "app_list_files",
-  "app_delete_file",
-  "app_code",
-  "app_observe",
-  "app_act",
-  "repo_history",
-  "repo_version",
-  "repo_remote",
-  "edit_file",
-  "actor_create",
-  "actor_tasks",
-  "actor_cancel",
-  "message_actor",
-  "read_memory",
-  "remember",
-  "complete_goal",
-  "schedule_create",
-  "schedule_list",
-  "schedule_cancel",
-  "todo_init",
-  "todo_check",
-  "todo_add",
-  "dweb_discover",
-  "dweb_share",
-  "dweb_install",
-  "dweb_peers",
-  "dweb_block",
-  "dweb_discovery",
-  "a2a_run",
-  "now",
-  "capture",
-  "view",
-  "load_skill"
-]);
-
 export const TOOL_METADATA_RECORDS = {
   "inspect": {
     "name": "inspect",
     "primitive": "inspect",
-    "description": "Introspect peerd itself: read-only proof of its sovereignty contract. Pick a `kind`: \"provider_config\" (current provider/model + that a key is stored, never the key itself: BYOK); \"storage\" (persistent KV; vault blobs show as base64 ciphertext: encryption-at-rest; optional prefix=\"vault\"|\"secret:\"); \"session_access\" (tabs/origins the agent can see: it inherits your logged-in browser sessions); \"denylist\" (the always-off-limits origin floor; optional domain=\"chase.com\" to test one host); \"audit_log\" (the append-only security trail, newest first; optional limit and types[]).",
+    "description": "Introspect peerd itself: read-only proof of its sovereignty contract. Pick a `kind`: \"provider_config\" (current provider/model + that a key is stored, never the key itself: BYOK); \"storage\" (aggregate persistent KV posture: fixed type/count/byte summaries, never storage labels or values; optional prefix=\"vault\"|\"secret:\"); \"session_access\" (tabs/origins the agent can see: it inherits your logged-in browser sessions); \"denylist\" (the always-off-limits origin floor; optional domain=\"chase.com\" to test one host); \"audit_log\" (the append-only security trail, newest first; optional limit and types[]).",
     "schema": {
       "type": "object",
       "properties": {
@@ -448,6 +370,8 @@ export const TOOL_METADATA_RECORDS = {
         },
         "maxChars": {
           "type": "integer",
+          "minimum": 1,
+          "maximum": 6000,
           "description": "Cap on the initial returned text or Markdown window. Longer results remain available through read_result paging up to the documented local extraction/storage cap."
         },
         "query": {
@@ -586,7 +510,7 @@ export const TOOL_METADATA_RECORDS = {
   "site_client_run": {
     "name": "site_client_run",
     "primitive": "web",
-    "description": "Run the stored SITE CLIENT for an origin: derived knowledge of that site's API, far cheaper than re-driving the DOM. Write JS against the injected `site` client: the loaded client module's ops are available as `client` (the object its body RETURNS: call e.g. `await client.listCharges()`), and Exact host client: site.fetch(pathOrUrl, options?). It makes requests PINNED to the origin (it carries your session same-origin, exactly like fetch_url: never pass credentials). site.fetch RESOLVES to { status, finalUrl, contentType, body, json } for ANY HTTP response: check `status` yourself; it is NOT a Fetch Response (no .ok, and json is already the parsed value or null, not a method). It only THROWS when the call is REFUSED (cross-origin, denylisted, redirect, declined write) or the network fails, so wrap in try/catch. TREAT THE CLIENT AS A CACHE: it may be stale or wrong. If a call fails or returns something off, DRIVE THE PAGE instead (ground truth) and propose a fix with site_client_write. Returns the run value + console, fenced (the bytes are the site's).",
+    "description": "Run the stored SITE CLIENT for an origin: derived knowledge of that site's API, far cheaper than re-driving the DOM. Write JS against the injected `site` client: the loaded client module's ops are available as `client` (the object its body RETURNS: call e.g. `await client.listCharges()`), with the exact host client `site.fetch(pathOrUrl, options?)`. It makes requests PINNED to the origin (it carries your session same-origin, exactly like fetch_url: never pass credentials). site.fetch RESOLVES to { status, finalUrl, contentType, body, json } for ANY HTTP response: check `status` yourself; it is NOT a Fetch Response (no .ok, and json is already the parsed value or null, not a method). It only THROWS when the call is REFUSED (cross-origin, denylisted, redirect, declined write) or the network fails, so wrap in try/catch. TREAT THE CLIENT AS A CACHE: it may be stale or wrong. If a call fails or returns something off, DRIVE THE PAGE instead (ground truth) and propose a fix with site_client_write. Returns the run value + console, fenced (the bytes are the site's).",
     "schema": {
       "type": "object",
       "required": [
@@ -2246,3 +2170,7 @@ const deepFreeze = (value) => {
 };
 
 deepFreeze(TOOL_METADATA_RECORDS);
+
+// why: insertion order is the catalog order; deriving it prevents a second
+// manually synchronized tool inventory from drifting during feature growth.
+export const TOOL_METADATA_ORDER = Object.freeze(Object.keys(TOOL_METADATA_RECORDS));

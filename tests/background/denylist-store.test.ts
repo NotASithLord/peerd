@@ -39,17 +39,22 @@ describe('denylist-store — load + recompute', () => {
     await s.load(['a.com', 'b.com']);
     expect(s.patterns()).toEqual(['a.com', 'x.com']);
   });
-  test('load fails open to empty overlay when kv throws', async () => {
+  test('overlay read failures propagate instead of dropping stored user policy', async () => {
     const kv = { get: async () => { throw new Error('idb'); }, set: async () => {} };
     const s = freshStore(kv);
-    await s.load(['a.com']); // must not reject
-    expect(s.patterns()).toEqual(['a.com']);
+    await expect(s.load(['a.com'])).rejects.toThrow('idb');
+    expect(s.patterns()).toEqual([]);
   });
-  test('non-string overlay entries are filtered out', async () => {
-    const kv = makeKv({ added: ['ok.com', 5, null], disabled: [{}, 'b.com'] });
-    const s = freshStore(kv);
-    await s.load(['a.com', 'b.com']);
-    expect(s.overlay()).toEqual({ added: ['ok.com'], disabled: ['b.com'] });
+  test('partial or non-string overlay schemas reject instead of being narrowed', async () => {
+    for (const value of [
+      { added: ['ok.com'] },
+      { added: ['ok.com', 5], disabled: ['b.com'] },
+    ]) {
+      const s = freshStore(makeKv(value));
+      await expect(s.load(['a.com', 'b.com']))
+        .rejects.toThrow('denylist user overlay is malformed');
+      expect(s.patterns()).toEqual([]);
+    }
   });
 });
 

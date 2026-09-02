@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
   TURN_COMPOSE_CAPABILITY,
-  TURN_PHASE_CAPABILITIES,
   createTurnPhaseQuota,
   turnPhaseAuthorityFor,
   turnPhasePayloadAllowed,
@@ -17,7 +16,6 @@ const success = (value: unknown) => ({ ok: true, outcomeKnown: true, value });
 
 describe('closed controller turn phase policy', () => {
   test('publishes one named capability and refuses unknown or malformed payloads', () => {
-    expect(TURN_PHASE_CAPABILITIES).toEqual([TURN_COMPOSE_CAPABILITY]);
     expect(turnPhasePayloadAllowed(TURN_COMPOSE_CAPABILITY, { text: 'hello' })).toBe(true);
     expect(turnPhaseAuthorityFor(TURN_COMPOSE_CAPABILITY, { text: 'hello' }))
       .toMatchObject({ target: 'turn-compose', replayClass: 'A' });

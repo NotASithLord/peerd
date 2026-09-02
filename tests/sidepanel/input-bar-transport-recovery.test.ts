@@ -24,6 +24,8 @@ describe('composer transport recovery', () => {
     expect(source).not.toContain("text: pending.text, goal: pending.goal");
     expect(source).toContain('attached files will never be resent by this check');
     expect(source).toContain('Never persist attachment bytes');
+    expect(source).toContain('pending.hadAttachments && ui.attachments.length === 0');
+    expect(source).toContain('then reattach the files before choosing Send');
     expect(source).toContain('sessionId: sid ?? null');
     expect(source).toContain('!!ui.unconfirmedSend');
     expect(source).toContain("role: unavailableCopy || ui.sendError ? 'alert' : 'status'");

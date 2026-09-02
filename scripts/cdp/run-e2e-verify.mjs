@@ -71,7 +71,7 @@ const makeRecorder = (ctx, state) => {
     },
     observe(name, value) {
       observations.push({ name, value });
-      log(`  NOTE  [${state.name}] ${name} — ${JSON.stringify(value)}`);
+      log(`  NOTE  [${state.name}] ${name}: ${JSON.stringify(value)}`);
     },
     async shot(label) {
       const png = await ctx.screenshot();

@@ -57,8 +57,20 @@ export const dwebShareTool = composeTool("dweb_share", {
     };
     if (!r?.ok) {
       const error = r?.error ?? 'share_failed';
+      if (error === 'share-propagation-failed') return {
+        ok: false,
+        error,
+        content: 'The App is published and saved locally, but its discovery card was not forwarded to peers. It may not be discoverable yet; retry sharing later.',
+        outcomeKnown: true,
+        outcomeKind: 'effect-completed',
+        retryable: false,
+        structured: { localPublished: true, propagated: false },
+      };
       const preEffect = ['dweb-disabled', 'dweb-start-failed', 'app-not-found'].includes(error);
-      return { ok: false, error, ...(preEffect ? { outcomeKind: 'pre-effect-failure' } : {}) };
+      return {
+        ok: false, error,
+        ...(preEffect ? { outcomeKind: /** @type {const} */ ('pre-effect-failure') } : {}),
+      };
     }
     return {
       ok: true,

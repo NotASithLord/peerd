@@ -198,6 +198,117 @@ describe('thin-kernel demand-only feature host', () => {
     expect(hostLosses).toEqual(['host-bbbbbbbb']);
   });
 
+  test('routes lifecycle commands only through the sole current offscreen document', async () => {
+    const { browser } = makeBrowser();
+    const offscreenUrl = browser.runtime.getURL('offscreen/offscreen.html');
+    let contexts = [{
+      documentId: 'document-current', documentUrl: `${offscreenUrl}#current`,
+    }];
+    let runtimeDeps: any;
+    const requests: Array<[string, any]> = [];
+    const makeEvent = () => {
+      const listeners: Array<(value?: any) => void> = [];
+      return {
+        addListener: (listener: (value?: any) => void) => { listeners.push(listener); },
+        emit: (value?: any) => { for (const listener of listeners) listener(value); },
+      };
+    };
+    const attach = (deps: any) => ({
+      request: async (message: any) => {
+        requests.push([deps.port.label, message]);
+        return { ok: true, protocol: 1, hostEpoch: `${deps.port.label}-epoch` };
+      },
+    });
+    const host = createKernelFeatureHost({
+      browser,
+      identity,
+      createRuntime: ((deps: any) => {
+        runtimeDeps = deps;
+        return { ready: Promise.resolve(), snapshot: () => ({ leases: {} }) };
+      }) as any,
+      attachKeepalive: attach as any,
+      listContexts: async () => contexts,
+    });
+    const staleMessage = makeEvent();
+    const staleDisconnect = makeEvent();
+    host.handleKeepalive({
+      label: 'stale', sender: { url: `${offscreenUrl}#stale` },
+      onMessage: staleMessage, onDisconnect: staleDisconnect,
+      disconnect: () => staleDisconnect.emit(),
+    } as any);
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(runtimeDeps.sendHostMessage({
+      type: 'feature-lease/host-status', protocol: 1,
+    })).rejects.toThrow('feature-lease-host-channel-unavailable');
+    expect(requests).toEqual([]);
+
+    const onMessage = makeEvent();
+    const onDisconnect = makeEvent();
+    host.handleKeepalive({
+      label: 'current', sender: { url: `${offscreenUrl}#current` }, onMessage, onDisconnect,
+      disconnect: () => onDisconnect.emit(),
+    } as any);
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(runtimeDeps.sendHostMessage({
+      type: 'feature-lease/host-status', protocol: 1,
+    })).resolves.toMatchObject({ ok: true, hostEpoch: 'current-epoch' });
+    expect(requests).toHaveLength(1);
+
+    contexts = [
+      { documentId: 'document-current', documentUrl: `${offscreenUrl}#current` },
+      { documentId: 'document-other', documentUrl: `${offscreenUrl}#other` },
+    ];
+    await expect(runtimeDeps.sendHostMessage({
+      type: 'feature-lease/host-start', protocol: 1, lease: {},
+    })).rejects.toThrow('feature-lease-host-channel-unavailable');
+    expect(requests).toHaveLength(1);
+  });
+
+  test('an older delayed candidate cannot replace a newer current channel', async () => {
+    const { browser } = makeBrowser();
+    const offscreenUrl = browser.runtime.getURL('offscreen/offscreen.html');
+    let releaseStale = () => {};
+    let calls = 0;
+    const requests: string[] = [];
+    let runtimeDeps: any;
+    const makeEvent = () => ({ addListener: (_listener: () => void) => {} });
+    const host = createKernelFeatureHost({
+      browser,
+      identity,
+      createRuntime: ((deps: any) => {
+        runtimeDeps = deps;
+        return { ready: Promise.resolve(), snapshot: () => ({ leases: {} }) };
+      }) as any,
+      attachKeepalive: (({ port }: any) => ({
+        request: async () => { requests.push(port.label); return { ok: true }; },
+      })) as any,
+      listContexts: async () => {
+        calls += 1;
+        if (calls === 1) {
+          await new Promise<void>((resolve) => { releaseStale = resolve; });
+          return [{ documentUrl: `${offscreenUrl}#stale` }];
+        }
+        return [{ documentUrl: `${offscreenUrl}#current` }];
+      },
+    });
+    host.handleKeepalive({
+      label: 'stale', sender: { url: `${offscreenUrl}#stale` },
+      onDisconnect: makeEvent(), disconnect: () => {},
+    } as any);
+    host.handleKeepalive({
+      label: 'current', sender: { url: `${offscreenUrl}#current` },
+      onDisconnect: makeEvent(), disconnect: () => {},
+    } as any);
+    await Promise.resolve();
+    releaseStale();
+    await Promise.resolve();
+    await Promise.resolve();
+    await runtimeDeps.sendHostMessage({ type: 'feature-lease/host-status', protocol: 1 });
+    expect(requests).toEqual(['current']);
+  });
+
   test('captures one Firefox event synchronously but loads heartbeat code only on demand', async () => {
     const { browser, counts, sessionChangeListeners } = makeBrowser();
     const runtime = {

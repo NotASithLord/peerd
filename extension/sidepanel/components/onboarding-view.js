@@ -88,8 +88,7 @@ const letterSpans = (text) => Array.from(text).map((ch, i) =>
 // Type-and-delete tease cadence (ms). Type slower than delete — the
 // same asymmetry real typing has; holds long enough to read. Exported
 // MUTABLE so tests can shrink the delays to drive the loop in real
-// time (same escape-hatch posture as system-prompt's
-// _setTemplateForTests) — production code never writes it.
+// time; production code never writes it.
 export const TEASE = { type: 95, del: 55, holdFull: 1500, holdEmpty: 450 };
 
 /**

@@ -27,12 +27,9 @@
 import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
 import {
   ACTORS_ADDRESS_MAX_CHARS,
-  ACTORS_ASK_DEFAULT_TIMEOUT_MS,
   ACTORS_ASK_MAX_TIMEOUT_MS,
   ACTORS_GOAL_MAX_CHARS,
-  ACTORS_RUN_MAX_OPS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
-  ACTORS_TRACE_TARGET_MAX_CHARS,
   settleActorCodeCall,
 } from '../../shared/actor-code-authority.js';
 

@@ -15,7 +15,7 @@ export { KERNEL_ADMINISTRATIVE_ROUTE_NAMES } from './kernel-feature-route-invent
 
 const KIB = 1024;
 const MIB = 1024 * KIB;
-const SESSION_READ_BYTES = Number.POSITIVE_INFINITY;
+const SESSION_READ_BYTES = 32 * MIB;
 const OWNER_ID = 'peerd-authority-kernel';
 const DISPATCH_ID = /^[A-Za-z0-9._-]{8,512}$/;
 export const KERNEL_FEATURE_DISPATCH_CAPABILITY = 'feature.dispatch';
@@ -252,11 +252,11 @@ const LOCAL_EFFECTS = Object.freeze({
     ),
   }),
   'models/options': Object.freeze({
-    'local.models.snapshot': effectPolicy(
+    'local.models.snapshot': readEffectPolicy(
       ['sessionId'], 1, 16 * KIB, 512 * KIB,
       (input) => nullableString(input.sessionId, 256),
     ),
-    'local.models.ollama': effectPolicy(
+    'local.models.ollama': readEffectPolicy(
       [], 1, 16 * KIB, MIB,
     ),
     'local.models.observe-ollama': readEffectPolicy(
@@ -267,22 +267,22 @@ const LOCAL_EFFECTS = Object.freeze({
     ),
   }),
   'openrouter/models': Object.freeze({
-    'local.openrouter.models': effectPolicy([], 1, 16 * KIB, 4 * MIB),
+    'local.openrouter.models': readEffectPolicy([], 1, 16 * KIB, 4 * MIB),
   }),
   'local-model/status': Object.freeze({
-    'local.model.status': effectPolicy(
+    'local.model.status': readEffectPolicy(
       ['model', 'includeSupport'], 1, 16 * KIB, MIB,
       (input) => nullableString(input.model, 256) && typeof input.includeSupport === 'boolean',
     ),
   }),
   'local-model/catalog': Object.freeze({
-    'local.model.catalog': effectPolicy(
+    'local.model.catalog': readEffectPolicy(
       ['includeSupport'], 1, 16 * KIB, MIB,
       (input) => typeof input.includeSupport === 'boolean',
     ),
   }),
   'local-model/probe': Object.freeze({
-    'local.model.probe': effectPolicy([], 1, 16 * KIB, MIB),
+    'local.model.probe': readEffectPolicy([], 1, 16 * KIB, MIB),
   }),
   'local-model/init': Object.freeze({
     'local.model.init': effectPolicy(
@@ -427,11 +427,9 @@ const routeEntries = [
 ]));
 const ROUTE_POLICIES = Object.freeze(Object.fromEntries(routeEntries));
 const bounded = (/** @type {unknown} */ value, /** @type {number} */ maxBytes) => {
-  if (maxBytes === Number.POSITIVE_INFINITY) return true;
   const bytes = controllerPayloadBytes(value, {
     maxDepth: 32,
-    maxNodes: Number.isFinite(maxBytes)
-      ? Math.max(250_000, Math.ceil(maxBytes / 32)) : Number.POSITIVE_INFINITY,
+    maxNodes: Math.max(250_000, Math.ceil(maxBytes / 32)),
   });
   return Number.isFinite(bytes) && bytes <= maxBytes;
 };

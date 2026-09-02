@@ -469,7 +469,7 @@ const ModelPicker = {
   },
   /** @param {ModelPickerVnode} vnode */
   view: (vnode) => {
-    const { attrs: { send, sessionId }, state: ui } = vnode;
+    const { attrs: { sessionId }, state: ui } = vnode;
     const pendingModel = ui.unconfirmed;
     if (!ui.options || ui.options.length < 2) return null;
     const options = ui.options;

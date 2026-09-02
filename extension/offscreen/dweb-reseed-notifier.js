@@ -103,7 +103,13 @@ export const createDwebReseedNotifier = ({
         return { ok: false, cancelled: true, error: 'dweb-generation-retired' };
       }
       result = await runAttempt(notice, owner);
-      if (result?.ok === true || result?.cancelled === true) return result;
+      // A partial result means the kernel completed this generation's pass.
+      // Retry transport/startup failures, not permanently bad individual apps.
+      if (result?.ok === true || result?.error === 'dweb-reseed-partial') return result;
+      // The offscreen host can announce before the SW has committed the start
+      // receipt that makes this same epoch current. Retry that transient refusal;
+      // local retirement still ends the loop at the guard above.
+      if (result?.cancelled === true && !current(notice)) return result;
       const delay = retryDelaysMs[Math.min(attempt, retryDelaysMs.length - 1)];
       await wait(delay, owner);
     }

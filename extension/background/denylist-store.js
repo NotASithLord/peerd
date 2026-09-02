@@ -43,16 +43,16 @@ export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
     /** @param {string[]} seedPatterns */
     async load(seedPatterns) {
       seed = Array.isArray(seedPatterns) ? seedPatterns : [];
-      try {
-        const user = await kv.get(key);
-        if (user && typeof user === 'object') {
-          overlay = {
-            added: Array.isArray(user.added) ? user.added.filter((/** @type {unknown} */ s) => typeof s === 'string') : [],
-            disabled: Array.isArray(user.disabled) ? user.disabled.filter((/** @type {unknown} */ s) => typeof s === 'string') : [],
-          };
-        }
-      } catch (e) {
-        console.error('[denylist-store] user overlay load threw', e);
+      const user = await kv.get(key);
+      if (user == null) {
+        overlay = { added: [], disabled: [] };
+      } else if (typeof user !== 'object' || Array.isArray(user)
+          || !Array.isArray(user.added) || !Array.isArray(user.disabled)
+          || user.added.some((/** @type {unknown} */ item) => typeof item !== 'string')
+          || user.disabled.some((/** @type {unknown} */ item) => typeof item !== 'string')) {
+        throw new TypeError('denylist user overlay is malformed');
+      } else {
+        overlay = { added: [...user.added], disabled: [...user.disabled] };
       }
       recompute();
     },

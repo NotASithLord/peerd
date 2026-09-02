@@ -99,7 +99,7 @@ export const mainAgentDescriptors = (descriptors) =>
 // descriptor filters which are advisory):
 //
 //   - ACTOR_ONLY_TOOLS leave the MAIN agent. A non-actor ctx
-//     (main / spawned / direct) is REFUSED any of them —
+//     (main / spawned / direct) is REFUSED any of them.
 //     so a one-line `actor_create({tools:['app_delete']})` can't escalate.
 //     Originally only MUTATION was tiered and the fenced READS
 //     (app_read_file/app_list_files/js_read_file) stayed global for cheap

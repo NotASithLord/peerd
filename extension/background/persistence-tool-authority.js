@@ -2,14 +2,11 @@
 
 // why: the controller owns memory/todo semantics; this adapter pins each exact
 // durable read or mutation to the already-admitted call and its live session.
+import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
+
 const mismatch = () => Object.assign(new Error('persistence authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
-
-const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); }
-  catch { return false; }
-};
 
 /** @param {{binding:any,ctx:any}} input */
 export const createPersistenceToolAuthority = ({ binding, ctx }) => {
@@ -21,7 +18,8 @@ export const createPersistenceToolAuthority = ({ binding, ctx }) => {
   return Object.freeze({
     readMemoryScope: (/** @type {any} */ scope) => {
       requireOperation('turn.memory.read-scope');
-      if (!sameClone(scope, args.scope) || typeof ctx?.memory?.readScope !== 'function') {
+      if (!sameCanonicalStructuredClone(scope, args.scope)
+          || typeof ctx?.memory?.readScope !== 'function') {
         throw mismatch();
       }
       return ctx.memory.readScope(scope);
@@ -37,7 +35,7 @@ export const createPersistenceToolAuthority = ({ binding, ctx }) => {
     },
     writeMemory: (/** @type {any} */ scope, /** @type {string} */ body) => {
       requireOperation('turn.memory.write');
-      if (!sameClone(scope, args.scope) || body !== args.body
+      if (!sameCanonicalStructuredClone(scope, args.scope) || body !== args.body
           || typeof ctx?.memory?.writeWithConfirm !== 'function') throw mismatch();
       return ctx.memory.writeWithConfirm({
         scope, body, origin: 'agent',

@@ -8,6 +8,7 @@ import {
   LOCAL_MODEL_CHANNEL_OFFER, LOCAL_MODEL_CHANNEL_PROTOCOL,
   LOCAL_MODEL_CHANNEL_RESULT, parseLocalModelChannelOffer,
 } from '../shared/feature-lease-protocol.js';
+import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 
 const MAX_TOKEN_CHARS = 64 * 1024;
 const MAX_STREAM_CHARS = 8 * 1024 * 1024;
@@ -86,7 +87,7 @@ export const createLocalModelGenerationAuthority = ({
     streams.set(streamId, stream);
     const run = featureHost.runtime.runWithLease('model-host', async (lease) => {
       const matches = (await clientsApi.matchAll({ type: 'window', includeUncontrolled: true }))
-        .filter((client) => client?.url === offscreenUrl);
+        .filter((client) => sameDocumentUrlIgnoringHash(client?.url, offscreenUrl));
       if (streams.get(streamId) !== stream || stream.done
           || retiredOwners.has(owner) || signal?.aborted) {
         throw localFailure('local-model-generation-aborted');

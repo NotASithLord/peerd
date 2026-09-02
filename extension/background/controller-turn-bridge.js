@@ -17,9 +17,8 @@ import {
   safeLifecycleDiagnostic as safeDiagnostic,
   safeHostEffectFailure,
   safeHostPolicyAttribution,
-  stampAuthorityToolResult,
-  stampAuthorityToolResultBlock,
-  strongestLifecycleRewrite,
+  settleWithin,
+  stampLifecycleToolResult,
 } from './host-effect-verdict.js';
 import { semanticCallAuditEntry } from './semantic-call-audit.js';
 import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
@@ -45,7 +44,10 @@ import {
 } from '../shared/controller-kernel-quota.js';
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import { authorityEffectResourceKey } from './authority-effect-resource.js';
-import { canonicalCloneDigest } from '../shared/canonical-clone-digest.js';
+import {
+  canonicalCloneDigest,
+  sameCanonicalStructuredClone,
+} from '../shared/canonical-clone-digest.js';
 import { authorityEffectConfirmationPresentation } from '../shared/authority-confirmation-presentation.js';
 import {
   createReadOnlyOperationGrant,
@@ -91,12 +93,6 @@ const projectedToolNameSet = (/** @type {unknown} */ value) => {
   return names;
 };
 
-/** @param {unknown} left @param {unknown} right */
-const sameClone = (left, right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); }
-  catch { return false; }
-};
-
 const known = (/** @type {unknown} */ value) => ({
   ok: true, value, outcomeKnown: true,
 });
@@ -112,16 +108,21 @@ const jsonUnwire = (/** @type {unknown} */ value, /** @type {string} */ label) =
   try { return JSON.parse(value); }
   catch { throw new Error(`${label} wire payload is invalid`); }
 };
-const digestJson = async (/** @type {unknown} */ value) => {
-  const bytes = new TextEncoder().encode(jsonWire(value));
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0')).join('');
-};
 const unknown = (/** @type {any} */ run, /** @type {unknown} */ cause) => {
   run.nestedUnknown = true;
   return { ...failed(cause, false), retryable: false };
 };
+const auditUnavailable = (
+  /** @type {any} */ receipt = null,
+  /** @type {boolean} */ outcomeKnown = receipt?.outcomeKnown !== false,
+) => ({
+  ok: false,
+  code: 'audit_unavailable',
+  error: 'Authority audit persistence is unavailable.',
+  outcomeKnown,
+  retryable: false,
+  ...(receipt ? { authorityReceipt: receipt } : {}),
+});
 
 const makeEventQueue = () => {
   /** @type {{value:unknown,ack:()=>void}[]} */
@@ -224,6 +225,23 @@ export const makeControllerTurnBridge = ({
   const sessionGenerations = new Map();
   const runIsLive = (/** @type {any} */ run) =>
     runs.get(run.runId) === run && run.signal.aborted !== true;
+  const appendRunAudit = async (/** @type {any} */ run, /** @type {any} */ entry) => {
+    try {
+      await run.ctx.appendAudit(entry);
+      return true;
+    } catch {
+      // why: a missing durable audit edge is a host failure, not a semantic
+      // warning. Latch it in the privileged run so no later effect or clean
+      // finalization can cross the failed settlement boundary.
+      run.auditUnavailable = true;
+      return false;
+    }
+  };
+  const auditUnavailableForRun = (
+    /** @type {any} */ run,
+    /** @type {boolean} */ outcomeKnown = true,
+  ) => auditUnavailable(null, outcomeKnown && !run.nestedUnknown
+    && ![...run.effectReceipts.values()].some((receipt) => receipt.outcomeKnown === false));
   const ensureAuthorityBinding = async (/** @type {any} */ run) => {
     if (run.authorityBindingReady) return run.authorityBindingReady;
     if (typeof run.loadAuthorityContext !== 'function') {
@@ -272,17 +290,7 @@ export const makeControllerTurnBridge = ({
   const cleanupFuseMs = Number.isFinite(cleanupTimeoutMs) && cleanupTimeoutMs > 0
     ? Math.floor(cleanupTimeoutMs) : 250;
   const boundedCleanup = (/** @type {Promise<unknown>} */ pending) =>
-    new Promise((resolve) => {
-      let finished = false;
-      const finish = (/** @type {unknown} */ value) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        resolve(value);
-      };
-      const timer = setTimeout(() => finish(undefined), cleanupFuseMs);
-      pending.then(finish, () => finish(undefined));
-    });
+    settleWithin(pending, cleanupFuseMs);
   const openProviderCustody = async (
     /** @type {any} */ run,
     /** @type {()=>Promise<any>} */ open,
@@ -355,51 +363,80 @@ export const makeControllerTurnBridge = ({
     /** @type {unknown} */ callId,
     /** @type {Record<string,any>} */ result,
   ) => {
-    const receipts = authorityReceiptsForCall(run.effectReceipts, callId);
-    const stamped = stampAuthorityToolResult(receipts, result);
-    const recoveryEntry = strongestLifecycleRewrite(
-      typeof callId === 'string' ? [...run.lifecycleRewrites.values()]
-        .filter((entry) => entry.callId === callId) : [],
-    );
-    if (!recoveryEntry) return stamped;
-    const { rewrite, physical } = recoveryEntry;
-    return {
-      ...stamped,
-      ok: false,
-      error: rewrite.error,
-      recovery: rewrite.recovery,
-      ...recoveryCustody(rewrite),
-      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
-      meta: {
-        ...(isRecord(stamped.meta) ? stamped.meta : {}),
-        recovery: rewrite.recovery,
-      },
-    };
+    return stampLifecycleToolResult({
+      receipts: authorityReceiptsForCall(run.effectReceipts, callId),
+      rewrites: run.lifecycleRewrites.values(), callId, value: result,
+    });
   };
   const stampStoredToolResult = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ block,
   ) => {
-    const receipts = authorityReceiptsForCall(run.effectReceipts, block.tool_use_id);
-    const stamped = stampAuthorityToolResultBlock(receipts, block);
-    const recoveryEntry = strongestLifecycleRewrite(
-      typeof block.tool_use_id === 'string' ? [...run.lifecycleRewrites.values()]
-        .filter((entry) => entry.callId === block.tool_use_id) : [],
-    );
-    if (!recoveryEntry) return stamped;
-    const { rewrite, physical } = recoveryEntry;
-    return {
-      ...stamped,
-      is_error: true,
-      content: rewrite.error,
-      recovery: rewrite.recovery,
-      ...recoveryCustody(rewrite),
-      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
-      meta: {
-        ...(isRecord(stamped.meta) ? stamped.meta : {}),
-        recovery: rewrite.recovery,
-      },
-    };
+    return stampLifecycleToolResult({
+      receipts: authorityReceiptsForCall(run.effectReceipts, block.tool_use_id),
+      rewrites: run.lifecycleRewrites.values(), callId: block.tool_use_id,
+      value: block, stored: true,
+    });
+  };
+  const exactTerminalActorCancellation = (
+    /** @type {unknown} */ result,
+    /** @type {any} */ receipt,
+  ) => isRecord(result)
+    && receipt?.operation === 'turn.actor.message'
+    && receipt?.outcomeKnown === true
+    && result.actorTerminal === true
+    && result.actorOutcomeKnown === true
+    && result.actorPerformed === false
+    && result.actorAborted === true;
+  const receiptHasTerminalActorCancellation = (
+    /** @type {any} */ run,
+    /** @type {any} */ receipt,
+  ) => {
+    const proof = run.terminalActorCancellations.get(receipt?.effectId);
+    return proof?.callId === receipt?.callId
+      && proof?.effectId === receipt?.effectId
+      && proof?.operation === receipt?.operation;
+  };
+  const exactStoppedActorCancellations = (/** @type {any} */ run) => {
+    const unpersisted = [...run.modelToolCalls.entries()]
+      .filter(([callId]) => !run.persistedSemanticCalls.has(callId));
+    if (unpersisted.length === 0) return [];
+    const cancellations = [];
+    for (const [callId, issued] of unpersisted) {
+      const claimed = run.claimedEffectsByCall.get(callId);
+      if (issued?.name !== 'message_actor') return [];
+      // Stop may freeze the run before the sealed semantic owner submits its
+      // first authority claim. After the kernel-call drain, an empty ledger is
+      // itself host proof that the actor boundary was never approached.
+      if (!claimed || claimed.size === 0) {
+        if (authorityReceiptsForCall(run.effectReceipts, callId).length > 0) return [];
+        cancellations.push(callId);
+        continue;
+      }
+      const terminal = [...claimed].every(([effectId, operation]) => {
+        const receipt = run.effectReceipts.get(effectId);
+        return operation === 'turn.actor.message'
+          && receiptHasTerminalActorCancellation(run, receipt);
+      });
+      if (terminal
+          && authorityReceiptsForCall(run.effectReceipts, callId).length === claimed.size) {
+        cancellations.push(callId);
+        continue;
+      }
+      for (const [effectId, operation] of claimed) {
+        const receipt = run.effectReceipts.get(effectId);
+        if (operation !== 'turn.actor.message'
+            || receipt?.callId !== callId
+            || receipt?.operation !== operation
+            || receipt?.outcome !== 'not-performed'
+            || receipt?.outcomeKnown !== true
+            || receipt?.performed !== false
+            || receipt?.code !== 'authority-run-aborted') return [];
+      }
+      if (authorityReceiptsForCall(run.effectReceipts, callId).length !== claimed.size) return [];
+      cancellations.push(callId);
+    }
+    return cancellations;
   };
   const closeSemanticCall = async (
     /** @type {any} */ run, /** @type {string} */ callId,
@@ -457,7 +494,7 @@ export const makeControllerTurnBridge = ({
     if (rawCallIds.includes(null) || callIds.length !== rawCallIds.length
         || callIds.some((callId) => !run.modelToolCalls.has(callId)
           || run.persistedSemanticCalls.has(callId))) {
-      throw new Error('session tool result does not reference a model-issued call');
+      throw new Error('session tool result does not reference a live semantic call');
     }
     // why: transcript persistence is an authority boundary too. A controller
     // cannot append its result before the exact host effects it started have
@@ -591,6 +628,15 @@ export const makeControllerTurnBridge = ({
         || typeof effectOutcome?.rejected !== 'function')) {
       return failed('domain effect verdict contract is unavailable', true);
     }
+    if (run.auditUnavailable) {
+      const receipt = Object.freeze({
+        effectId: effect.effectId, operation, outcome: 'not-performed',
+        outcomeKnown: true, performed: false, refused: true, retryable: false,
+        code: 'audit_unavailable', ...(target ? { target } : {}),
+      });
+      run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
+      return auditUnavailable(receipt);
+    }
     try {
       const result = await authorityScheduler.run({
         read: policy?.riskClass === 'read', target: schedulerTarget ?? operation,
@@ -666,7 +712,16 @@ export const makeControllerTurnBridge = ({
         },
       });
       if (recoveryRewrite?.recovery?.state === 'outcome_unknown') run.nestedUnknown = true;
-      await run.ctx.appendAudit({
+      // A message can be durably admitted (the outer receipt is performed)
+      // while its actor later stops with a host-known empty effect ledger. Keep
+      // that narrower host result beside the exact effect id; semantic result
+      // bytes are not trusted to weaken Stop's conservative fallback.
+      if (!recoveryRewrite && exactTerminalActorCancellation(result, receipt)) {
+        run.terminalActorCancellations.set(effect.effectId, Object.freeze({
+          callId: effect.callId, effectId: effect.effectId, operation,
+        }));
+      }
+      const auditPersisted = await appendRunAudit(run, {
         type: 'authority_effect', sessionId: run.sessionId,
         details: {
           operation, outcome: receiptOutcome,
@@ -679,7 +734,8 @@ export const makeControllerTurnBridge = ({
           ...policyAttribution,
           ...(target ? { target } : {}), runId: run.runId,
         },
-      }).catch(() => {});
+      });
+      if (!auditPersisted) return auditUnavailable(receipt);
       if (recoveryRewrite) return {
         ok: false, code: 'domain-authority-lifecycle-recovery',
         error: recoveryRewrite.error, recovery: recoveryRewrite.recovery,
@@ -715,32 +771,76 @@ export const makeControllerTurnBridge = ({
         ...(target ? { target } : {}),
       });
       run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
-      const recoveryRewrite = await settleAuthorityTracking({
-        run, authorityCtx, tracking, receipt: { ...receipt, callId: effect.callId },
-        physical: isRecord(cause) ? cause : {},
-        outcome: {
-          ok: verdict === 'performed',
-          error: safeError,
-          aborted: run.signal?.aborted === true
-            || detail?.aborted === true || detail?.actorAborted === true,
-          outcomeKind: verdict === 'performed' ? 'effect-completed'
-            : verdict === 'unknown' ? 'host-lost' : 'pre-effect-failure',
-        },
-      });
-      if (recoveryRewrite?.recovery?.state === 'outcome_unknown') run.nestedUnknown = true;
-      await run.ctx.appendAudit({
-        type: 'authority_effect_failed', sessionId: run.sessionId,
-        details: {
-          operation, outcome: verdict,
-          outcomeKnown: receipt.outcomeKnown === true,
-          performed: receipt.performed === true,
-          refused: receipt.refused === true,
-          retryable: receipt.retryable === true,
-          ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
-          ...lifecycleRecoveryAttribution(recoveryRewrite),
-          ...(target ? { target } : {}), runId: run.runId,
-        },
-      }).catch(() => {});
+      const settleFailure = async () => {
+        const recoveryRewrite = await settleAuthorityTracking({
+          run, authorityCtx, tracking, receipt: { ...receipt, callId: effect.callId },
+          physical: isRecord(cause) ? cause : {},
+          outcome: {
+            ok: verdict === 'performed',
+            error: safeError,
+            aborted: run.signal?.aborted === true
+              || detail?.aborted === true || detail?.actorAborted === true,
+            outcomeKind: verdict === 'performed' ? 'effect-completed'
+              : verdict === 'unknown' ? 'host-lost' : 'pre-effect-failure',
+          },
+        });
+        if (recoveryRewrite?.recovery?.state === 'outcome_unknown') run.nestedUnknown = true;
+        await appendRunAudit(run, {
+          type: 'authority_effect_failed', sessionId: run.sessionId,
+          details: {
+            operation, outcome: verdict,
+            outcomeKnown: receipt.outcomeKnown === true,
+            performed: receipt.performed === true,
+            refused: receipt.refused === true,
+            retryable: receipt.retryable === true,
+            ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
+            ...lifecycleRecoveryAttribution(recoveryRewrite),
+            ...(target ? { target } : {}), runId: run.runId,
+          },
+        });
+        return recoveryRewrite;
+      };
+      const settlement = settleFailure();
+      // No actor host call began: the scheduler supplied an exact no-effect
+      // verdict. A known user-visible cancellation still requires the durable
+      // lifecycle owner to accept that receipt; otherwise a worker restart
+      // could later recover the same operation as unknown.
+      if (operation === 'turn.actor.message' && verdict === 'not-performed'
+          && run.signal.aborted && failure.code === 'authority-run-aborted') {
+        let settlementFinished = false;
+        /** @type {any} */
+        let recoveryRewrite = null;
+        const observed = settlement.then((value) => {
+          recoveryRewrite = value;
+          settlementFinished = true;
+        });
+        await boundedCleanup(observed);
+        if (!settlementFinished) {
+          observed.catch(() => {});
+          return unknown(run, 'actor cancellation lifecycle settlement remained pending');
+        }
+        if (run.auditUnavailable) return auditUnavailable(receipt);
+        if (recoveryRewrite) return {
+          ok: false, code: 'domain-authority-lifecycle-recovery',
+          error: recoveryRewrite.error, recovery: recoveryRewrite.recovery,
+          ...recoveryCustody(recoveryRewrite),
+          ...actorRecoveryCustody(recoveryRewrite, isRecord(cause) ? cause : {}),
+          authorityReceipt: receipt,
+        };
+        return known({
+          authorityValue: {
+            ok: false, code: 'actor_message_stopped',
+            error: 'message_actor: stopped before the actor started',
+            performed: false, outcomeKnown: true, retryable: false,
+            actorTerminal: true, actorOutcomeKnown: true,
+            actorPerformed: false, actorAborted: true,
+            outcomeKind: 'pre-effect-failure',
+          },
+          authorityReceipt: receipt,
+        });
+      }
+      const recoveryRewrite = await settlement;
+      if (run.auditUnavailable) return auditUnavailable(receipt);
       if (recoveryRewrite) return {
         ok: false, code: 'domain-authority-lifecycle-recovery',
         error: recoveryRewrite.error, recovery: recoveryRewrite.recovery,
@@ -1138,6 +1238,10 @@ export const makeControllerTurnBridge = ({
       let target;
       try { target = await durableAuthorityTarget(run, operation, entry.call.args); }
       catch { return failed('domain authority arguments are invalid', true); }
+      if (run.auditUnavailable) return performSemanticEffect(
+        run, entry.semanticEffect, operation, target, execute, effectOutcome,
+        null, schedulerTarget,
+      );
       if (!runIsLive(run)) return performSemanticEffect(
         run, entry.semanticEffect, operation, target,
         () => ({ ok: false, error: 'authority_effect_aborted' }),
@@ -1276,8 +1380,8 @@ export const makeControllerTurnBridge = ({
     if (!entry) return null;
     entry.authority = bindExecutionToolAuthority(entry.domainState, {
       operation, args: entry.call.args,
-      // why: live script-operation receipts are correlated to the model-issued
-      // call, not the cached execution authority class. Keep the call id on
+      // why: live script-operation receipts are correlated to the controller-
+      // reported semantic call, not the cached execution authority class. Keep the call id on
       // this exact binding so nested actor work cannot lose its transcript card.
       ctx: { ...entry.custody?.ctx, toolUseId: entry.call.id },
       signal: run.signal,
@@ -1391,10 +1495,10 @@ export const makeControllerTurnBridge = ({
         if (domainPolicy && !run.allowedOperations.has(operation)) {
           return failed('domain authority operation is not granted', true);
         }
-        // why: a compromised semantic realm must first prove that this exact
-        // effect belongs to a live model-issued call. Forged, stale, duplicate,
-        // or ungranted envelopes cannot force construction of the rich host
-        // authority binding even though the binding remains lazy per turn.
+        // why: the semantic call id is correlation, not provider provenance.
+        // Authority comes from the frozen exact-operation ceiling plus live
+        // host policy; stale, duplicate, or ungranted envelopes still cannot
+        // force construction of the rich binding.
         if (domainPolicy && !semanticEffectEnvelopeAllowed(run, value, operation)) {
           return failed('domain authority effect envelope is invalid', true);
         }
@@ -1433,17 +1537,18 @@ export const makeControllerTurnBridge = ({
             for (const result of message?.toolResults ?? []) {
               run.persistedSemanticCalls.add(result.tool_use_id);
               const issued = run.modelToolCalls.get(result.tool_use_id);
-              await run.ctx.appendAudit(semanticCallAuditEntry({
+              await appendRunAudit(run, semanticCallAuditEntry({
                 sessionId: run.sessionId,
                 callId: result.tool_use_id,
                 label: issued?.name,
                 result,
-              })).catch(() => {});
+              }));
             }
             run.resumeAssistantId = null;
             if (message?.role === 'assistant' && typeof message.id === 'string') {
               run.currentAssistantId = message.id;
             }
+            if (run.auditUnavailable) return auditUnavailableForRun(run);
             return known(externalizeSessionWire(run, session));
           } catch (cause) { return unknown(run, cause); }
         case 'turn.session.update-assistant':
@@ -1877,7 +1982,7 @@ export const makeControllerTurnBridge = ({
           if (!entry || intents.length > 1 || typeof entry.domainState.podId !== 'string'
               || value.command !== args?.command || value.podId !== entry.domainState.podId
               || value.timeoutMs !== expectedTimeout || value.background !== expectedBackground
-              || !sameClone(value.remoteGitGrant, expectedGrant)) {
+              || !sameCanonicalStructuredClone(value.remoteGitGrant, expectedGrant)) {
             return failed('Pod execution authority mismatch', true);
           }
           if (expectedGrant) entry.domainState.remoteGitGrant = null;
@@ -2656,15 +2761,66 @@ export const makeControllerTurnBridge = ({
           await boundedCleanup(drain);
           const receipts = [...run.effectReceipts.values()];
           const hostOutcomeUnknown = !kernelCallsDrained || !custodyDrained
-            || run.activeDispatches.size > 0
-            || receipts.some((receipt) => receipt.performed === true
+            || run.activeDispatches.size > 0 || run.nestedUnknown
+            || receipts.some((receipt) => (receipt.performed === true
+              && !receiptHasTerminalActorCancellation(run, receipt))
               || receipt.outcomeKnown === false);
-          const outcomeUnknown = controllerOutcomeUnknown || hostOutcomeUnknown;
+          // The semantic loop loses its local dispatch race when Stop fires, but
+          // the host ledger can prove one narrower truth: every unpersisted call
+          // was message_actor and either never entered its host or returned a
+          // terminal, known no-actor-effect cancellation. Persist only those
+          // exact results so the transcript remains a valid tool_use ->
+          // tool_result pair. No other operation may downgrade the controller's
+          // conservative unknown outcome here.
+          const actorCancellations = controllerOutcomeUnknown && run.signal.aborted
+            && !hostOutcomeUnknown
+            ? exactStoppedActorCancellations(run) : [];
+          const outcomeUnknown = hostOutcomeUnknown
+            || controllerOutcomeUnknown && actorCancellations.length === 0;
           if (hostOutcomeUnknown) run.nestedUnknown = true;
           run.abortFinalized = true;
           run.currentAssistantId = null;
           try {
-            await run.ctx.sessions.updateAssistantMessage(run.sessionId, value.messageId, {
+            const cancellationResults = actorCancellations.map((callId) => {
+              const authorityPerformed = authorityReceiptsForCall(
+                run.effectReceipts, callId,
+              ).some((receipt) => receipt.performed === true);
+              const cancellation = {
+                code: 'actor_message_stopped',
+                error: authorityPerformed
+                  ? 'message_actor: stopped before the actor affected its target'
+                  : 'message_actor: stopped before the actor started',
+                outcomeKnown: true, retryable: false,
+                actorTerminal: true, actorOutcomeKnown: true,
+                actorPerformed: false, actorAborted: true,
+              };
+              const live = stampLiveToolResult(run, callId, { ok: false, ...cancellation });
+              const stored = stampStoredToolResult(run, {
+                tool_use_id: callId, content: cancellation.error,
+                is_error: true, ...cancellation,
+              });
+              return {
+                callId,
+                live: { ...live, authorityPerformed },
+                stored: { ...stored, authorityPerformed },
+              };
+            });
+            if (cancellationResults.length > 0) {
+              await run.ctx.sessions.appendMessage(run.sessionId, {
+                role: 'user', content: '',
+                toolResults: cancellationResults.map(({ stored }) => stored),
+                id: newId(), when: Date.now(),
+              });
+              for (const { callId, stored } of cancellationResults) {
+                run.persistedSemanticCalls.add(callId);
+                const issued = run.modelToolCalls.get(callId);
+                await appendRunAudit(run, semanticCallAuditEntry({
+                  sessionId: run.sessionId, callId, label: issued?.name, result: stored,
+                }));
+              }
+            }
+            const session = await run.ctx.sessions.updateAssistantMessage(
+              run.sessionId, value.messageId, {
               ...(value.content === undefined ? {} : { content: value.content }),
               streaming: false,
               ...(outcomeUnknown ? {
@@ -2675,7 +2831,17 @@ export const makeControllerTurnBridge = ({
                 outcomeKnown: false,
                 retryable: false,
               } : { stopReason: 'aborted' }),
-            });
+              },
+            );
+            for (const { callId, live } of cancellationResults) {
+              await run.events.push({
+                type: 'tool-result', sessionId: run.sessionId,
+                toolUseId: callId, result: live,
+              });
+            }
+            if (cancellationResults.length > 0) {
+              await run.events.push({ type: 'state', session: externalizeSession(run, session) });
+            }
             await run.events.push(outcomeUnknown ? {
               type: 'error', sessionId: run.sessionId, messageId: value.messageId,
               error: hostOutcomeUnknown
@@ -2687,8 +2853,9 @@ export const makeControllerTurnBridge = ({
               type: 'stop', sessionId: run.sessionId,
               messageId: value.messageId, stopReason: 'aborted',
             });
+            if (run.auditUnavailable) return auditUnavailableForRun(run, !outcomeUnknown);
             run.finalizedKnown = true;
-            return known(null);
+            return known({ outcomeKnown: !outcomeUnknown });
           } catch (cause) { return unknown(run, cause); }
         }
         case 'turn.finalize':
@@ -2722,6 +2889,7 @@ export const makeControllerTurnBridge = ({
           if (run.nestedUnknown) {
             return unknown(run, 'a kernel operation crossed dispatch without a known outcome');
           }
+          if (run.auditUnavailable) return auditUnavailableForRun(run);
           run.finalizedKnown = true;
           return known(null);
         default:
@@ -2776,13 +2944,14 @@ export const makeControllerTurnBridge = ({
       providerClose: null,
       providerCustodyGeneration: 0, providerCloseGeneration: -1,
       tools: [], system: null,
-      nestedUnknown: false, abortFinalized: false,
+      nestedUnknown: false, auditUnavailable: false, abortFinalized: false,
       currentAssistantId: null, resumeAssistantId: null,
       activeDispatches: new Set(), activeSafeDispatches: new Set(),
       activeKernelCalls: new Set(),
       dispatchesByCall: new Map(),
       semanticEffectIds: new Set(), semanticCallState: new Map(), effectReceipts: new Map(),
       lifecycleRewrites: new Map(),
+      terminalActorCancellations: new Map(),
       claimedEffectsByCall: new Map(),
       persistedSemanticCalls: new Set(),
       completedSemanticCalls: new Set(), closingSemanticCalls: new Set(),

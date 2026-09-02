@@ -26,14 +26,11 @@ export const validKernelVault = (value) => {
   return true;
 };
 
-/** @param {unknown} value @param {boolean} legacy */
-export const validKernelActorIsolation = (value, legacy = false) => {
+/** @param {unknown} value */
+export const validKernelActorIsolation = (value) => {
   if (!record(value)) return false;
   const c = value;
-  const statuses = legacy
-    ? ['available', 'unsupported', 'temporarily_unavailable', 'unavailable']
-    : ['available', 'unsupported', 'temporarily_unavailable'];
-  if (!statuses.includes(c.status)
+  if (!['available', 'unsupported', 'temporarily_unavailable'].includes(c.status)
       || ![null, 'offscreen-document-worker', 'background-page-worker'].includes(c.host)
       || (c.reason !== null && typeof c.reason !== 'string')
       || typeof c.retryable !== 'boolean') return false;

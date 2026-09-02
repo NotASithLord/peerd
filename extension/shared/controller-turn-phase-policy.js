@@ -26,7 +26,6 @@ import {
 const OWNER_ID = 'peerd-authority-kernel';
 
 export const TURN_COMPOSE_CAPABILITY = 'turn.compose';
-export const TURN_PHASE_CAPABILITIES = Object.freeze([TURN_COMPOSE_CAPABILITY]);
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);

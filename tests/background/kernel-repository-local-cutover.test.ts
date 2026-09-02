@@ -14,6 +14,7 @@ const repositoryDeps = (overrides: Record<string, any> = {}) => {
     coordinate: async (_ref: any, operation: () => Promise<any>) => operation(),
     statusApp: async () => ({ branch: 'main' }),
     getAppRemote: async () => null,
+    getRemote: async () => ({ host: 'example.test', url: 'https://example.test/a.git' }),
     branches: async () => ['main'],
     historyApp: async () => [{ oid: 'one' }],
     diffApp: async () => 'diff',
@@ -120,6 +121,29 @@ describe('repository controller cutover', () => {
     expect(await lane.control.routes['apps/repository/commit']({ appId: 'app-1' }))
       .toMatchObject({ ok: false, outcomeKnown: false });
     expect(commits).toBe(1);
+  });
+
+  test('binds fetch and push to the remote observed inside repository custody', async () => {
+    const options: any[] = [];
+    const lane = repositoryLane({ repositories: {
+      fetch: async (_ref: any, value: any) => {
+        options.push(value); return { remote: { host: 'example.test' } };
+      },
+      push: async (_ref: any, value: any) => {
+        options.push(value);
+        return { ok: true, remote: { host: 'example.test' }, branch: 'main' };
+      },
+    } });
+    await expect(lane.control.routes['apps/repository/fetch']({ appId: 'app-1' }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(lane.control.routes['apps/repository/push']({
+      appId: 'app-1', branch: 'main',
+    })).resolves.toMatchObject({ ok: true });
+    expect(options).toHaveLength(2);
+    expect(options[0].expectedRemote).toBe('https://example.test/a.git');
+    expect(options[1]).toMatchObject({
+      ref: 'main', expectedRemote: 'https://example.test/a.git',
+    });
   });
 
   test('does not roll back a provisional import after clone outcome loss', async () => {

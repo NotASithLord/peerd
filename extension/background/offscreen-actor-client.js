@@ -20,8 +20,8 @@ import {
   safeLifecycleDiagnostic as safeDiagnostic,
   safeHostEffectFailure,
   safeHostPolicyAttribution,
-  stampAuthorityToolResult,
-  stampAuthorityToolResultBlock,
+  settleWithin,
+  stampLifecycleToolResult,
   strongestLifecycleRewrite,
 } from './host-effect-verdict.js';
 import { semanticCallAuditEntry } from './semantic-call-audit.js';
@@ -32,7 +32,10 @@ import {
   controllerOperationAllowedInPermissionMode,
   controllerOperationRequiresConfirmation,
 } from '/shared/controller-kernel-quota.js';
-import { canonicalCloneDigest } from '/shared/canonical-clone-digest.js';
+import {
+  canonicalCloneDigest,
+  sameCanonicalStructuredClone,
+} from '/shared/canonical-clone-digest.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { ACTOR_LOOP_EVENT_BYTES } from '/shared/actor-channel-protocol.js';
 import { normalizeApiOrigin } from '/shared/api-origin.js';
@@ -61,6 +64,14 @@ import { createReadOnlyOperationGrant } from './controller-turn-authority-scope.
 
 const PAGE_PROGRAM_EXACT_OPERATION_SET = new Set(PAGE_PROGRAM_EXACT_OPERATIONS);
 const APP_PROGRAM_EXACT_OPERATION_SET = new Set(APP_PROGRAM_EXACT_OPERATIONS);
+const auditUnavailableResult = (/** @type {any} */ receipt = null) => ({
+  ok: false,
+  code: 'audit_unavailable',
+  error: 'Authority audit persistence is unavailable.',
+  outcomeKnown: receipt?.outcomeKnown !== false,
+  retryable: false,
+  ...(receipt ? { authorityReceipt: receipt } : {}),
+});
 
 const ACTOR_OPERATION_GRANTS = Object.freeze({
   webvm: Object.freeze([
@@ -193,41 +204,6 @@ const ACTOR_SEMANTIC_TOOL_RESULT_CAP = 2 * 1024 * 1024;
 const isRecord = (value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
 
-/** @returns {boolean} */
-const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  if (Object.is(left, right)) return true;
-  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-    const leftKeys = Object.keys(left).sort();
-    const rightKeys = Object.keys(right).sort();
-    return leftKeys.length === rightKeys.length
-      && leftKeys.every((key, index) => key === rightKeys[index]
-        && sameClone(Reflect.get(left, key), Reflect.get(right, key)));
-  }
-  if (left instanceof ArrayBuffer || right instanceof ArrayBuffer) {
-    if (!(left instanceof ArrayBuffer) || !(right instanceof ArrayBuffer)
-        || left.byteLength !== right.byteLength) return false;
-    const leftBytes = new Uint8Array(left);
-    const rightBytes = new Uint8Array(right);
-    return leftBytes.every((byte, index) => byte === rightBytes[index]);
-  }
-  if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) {
-    if (!ArrayBuffer.isView(left) || !ArrayBuffer.isView(right)
-        || left.constructor !== right.constructor || left.byteLength !== right.byteLength) return false;
-    const leftBytes = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
-    const rightBytes = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
-    return leftBytes.every((byte, index) => byte === rightBytes[index]);
-  }
-  const leftRecord = /** @type {Record<string,unknown>} */ (left);
-  const rightRecord = /** @type {Record<string,unknown>} */ (right);
-  const leftKeys = Object.keys(leftRecord).sort();
-  const rightKeys = Object.keys(rightRecord).sort();
-  return leftKeys.length === rightKeys.length
-    && leftKeys.every((key, index) => key === rightKeys[index]
-      && sameClone(leftRecord[key], rightRecord[key]));
-};
-
 // An inbound dweb wake is reasoning over bytes chosen by a remote peer. Keep its
 // useful read/moderation surface, but do not advertise any operation that can
 // delegate, spend, sign/publish, install peer code, or change standing network
@@ -261,10 +237,6 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  * @param {(call: Record<string, any>) => void} [deps.recordModelCall]  the context
  *   inspector's capture hook — fed every delegated model call with the runMeta-derived
  *   identity (never the worker's own claim). Optional; defaults to a no-op.
- * @param {(msg: Record<string, any>) => void} [deps.broadcastOp]  announce each settled
- *   ACTOR tool dispatch on the UI ports ('actor/op' — bounded name/ok only).
- *   The isolated heap emits no turn/tool-use, so this is how the eval harness's OM2W
- *   recorder (and any activity view) sees what an actor did. Optional; defaults to a no-op.
  * @param {(entry:Record<string,unknown>)=>Promise<void>|void} [deps.appendAudit]
  *   append-only host audit. Actor semantic events are reduced to a closed schema
  *   and stamped with the live run/session identity before this is called.
@@ -275,15 +247,9 @@ const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) =>
  *   not sufficient.
  * @param {() => string} [deps.mintRelayToken]  mints the per-run relay grant (below).
  *   Injected so the grant is testable without a browser; defaults to crypto.randomUUID.
- * @param {(sessionId: string) => Promise<string | null>} [deps.spendRefusalFor]  spend-limit
+ * @param {(sessionId: string) => Promise<string | null>} deps.spendRefusalFor  spend-limit
  *   preflight for a relayed model call: resolves a refusal MESSAGE when the run's owning
- *   chat session is past the user's hard cap, or null to proceed. Optional and
- *   fail-OPEN by omission (an unwired client behaves as before) — the cap is a coarse
- *   safety lever, and refusing every actor call because a dep is missing would break
- *   the lane outright.
- * @param {number} [deps.maxModelRelaysPerRun]
- * @param {number} [deps.maxToolRelaysPerRun]
- * @param {number} [deps.maxLoopEventsPerRun]
+ *   chat session is past the user's hard cap, or null to proceed.
  * @param {number} [deps.settlementCleanupMs]
  * @param {ReturnType<typeof createAuthorityEffectScheduler>} [deps.authorityScheduler]
  */
@@ -292,37 +258,20 @@ export const makeOffscreenActorClient = ({
   sessions, buildToolContext, ownedTabFor, EXPOSURE_ACTOR = 'actor',
   now = Date.now,
   recordModelCall = () => {},
-  broadcastOp = (/** @type {any} */ _msg) => {},
   appendAudit = async () => {},
   mintRelayToken = () => globalThis.crypto.randomUUID(),
-  spendRefusalFor = undefined,
+  spendRefusalFor,
   isRelaySender,
-  maxModelRelaysPerRun = Number.POSITIVE_INFINITY,
-  maxToolRelaysPerRun = Number.POSITIVE_INFINITY,
-  maxLoopEventsPerRun = 256,
   settlementCleanupMs = 250,
   authorityScheduler = createAuthorityEffectScheduler(),
 }) => {
-  const modelRelayLimit = Number.isFinite(maxModelRelaysPerRun) && maxModelRelaysPerRun > 0
-    ? Math.floor(maxModelRelaysPerRun) : Number.POSITIVE_INFINITY;
-  const toolRelayLimit = Number.isFinite(maxToolRelaysPerRun) && maxToolRelaysPerRun > 0
-    ? Math.floor(maxToolRelaysPerRun) : Number.POSITIVE_INFINITY;
-  const loopEventLimit = Number.isFinite(maxLoopEventsPerRun) && maxLoopEventsPerRun > 0
-    ? Math.floor(maxLoopEventsPerRun) : 256;
+  if (typeof spendRefusalFor !== 'function') {
+    throw new TypeError('actor spend-limit authority is required');
+  }
   const cleanupFuseMs = Number.isFinite(settlementCleanupMs) && settlementCleanupMs > 0
     ? Math.floor(settlementCleanupMs) : 250;
   const boundedCleanup = (/** @type {Promise<unknown>} */ pending) =>
-    new Promise((resolve) => {
-      let finished = false;
-      const finish = (/** @type {unknown} */ value) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        resolve(value);
-      };
-      const timer = setTimeout(() => finish(undefined), cleanupFuseMs);
-      pending.then(finish, () => finish(undefined));
-    });
+    settleWithin(pending, cleanupFuseMs);
   let seq = 0;
   /**
    * @type {Map<string, any>} Firefox relay grants:
@@ -399,7 +348,10 @@ export const makeOffscreenActorClient = ({
     // why: Stop can win before an async actor reaches this client; sending abort
     // before actor/run exists cannot cancel the Worker that actor/run then creates.
     if (signal?.aborted) {
-      return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
+      return {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true,
+      };
     }
     if (job.probeOnly === true) return runIsolationProbe(signal);
     const actorRecord = await sessions.get(job.actorSessionId).catch(() => null);
@@ -471,10 +423,14 @@ export const makeOffscreenActorClient = ({
       return {
         ok: false, started: false, phase: 'startup', code: 'actor_host_unavailable',
         error: `actor host unavailable: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`,
+        performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
       };
     }
     if (signal?.aborted) {
-      return { ok: false, started: true, phase: 'startup', code: 'actor_run_aborted', error: 'actor run aborted', aborted: true };
+      return {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true,
+      };
     }
     const runId = `aw-${now().toString(36)}-${++seq}`;
     const relayToken = mintRelayToken();
@@ -515,8 +471,8 @@ export const makeOffscreenActorClient = ({
         ? tools.map((tool) => tool?.name).filter((name) => typeof name === 'string') : []),
       allowedOperations: new Set(grantedOperations),
       authorityPageResourceKey,
-      effectRelayLimit: Math.min(toolRelayLimit, 256 * semanticStepCap),
-      modelRelayLimit: Math.min(modelRelayLimit, 32 * semanticStepCap),
+      effectRelayLimit: 256 * semanticStepCap,
+      modelRelayLimit: 32 * semanticStepCap,
       modelRelays: 0, toolRelays: 0, loopEvents: 0,
       programOperations: new Set(
         programOperations,
@@ -526,7 +482,7 @@ export const makeOffscreenActorClient = ({
       semanticCallState: new Map(), effectReceipts: new Map(), lifecycleRewrites: new Map(),
       claimedEffectsByCall: new Map(),
       closingCalls: new Set(), completedCalls: new Set(),
-      finalizing: false,
+      finalizing: false, auditUnavailable: false,
       pendingClaimsByCall: new Map(),
       nestedCallIds: new Set(),
       openEffects: new Map(),
@@ -647,7 +603,7 @@ export const makeOffscreenActorClient = ({
         return {
           ok: false,
           code: 'actor_semantic_result_ledger_invalid',
-          error: 'actor semantic results do not uniquely match model-issued calls',
+          error: 'actor semantic results do not uniquely match actor-reported calls',
           outcomeKnown: false, retryable: false,
           authorityPerformed: [...grant.effectReceipts.values()]
             .some((receipt) => receipt.performed === true),
@@ -682,12 +638,16 @@ export const makeOffscreenActorClient = ({
           for (const block of Array.isArray(message?.toolResults) ? message.toolResults : []) {
             const callId = block?.tool_use_id;
             if (typeof callId !== 'string') continue;
-            await Promise.resolve(appendAudit(semanticCallAuditEntry({
-              sessionId: grant.actorSessionId,
-              callId,
-              label: issuedCalls.get(callId),
-              result: block,
-            }))).catch(() => {});
+            try {
+              await Promise.resolve(appendAudit(semanticCallAuditEntry({
+                sessionId: grant.actorSessionId,
+                callId,
+                label: issuedCalls.get(callId),
+                result: block,
+              })));
+            } catch {
+              grant.auditUnavailable = true;
+            }
           }
         }
       }
@@ -704,8 +664,27 @@ export const makeOffscreenActorClient = ({
           .some((receipt) => receipt.performed === true);
         result.finalText = '';
       }
+      if (grant.auditUnavailable) {
+        const exactOutcomeKnown = result?.outcomeKnown !== false
+          && ![...grant.effectReceipts.values()]
+            .some((receipt) => receipt.outcomeKnown === false);
+        Object.assign(result, auditUnavailableResult(), {
+          outcomeKnown: exactOutcomeKnown,
+          authorityPerformed: [...grant.effectReceipts.values()]
+            .some((receipt) => receipt.performed === true),
+          finalText: '',
+        });
+      }
       if (signal?.aborted && result && !result.finalText && result.outcomeKnown !== false) {
         result.aborted = true;
+        // Model inference is not target authority. If Stop lands after inference
+        // admission but before any tool relay, the actor still cannot have read
+        // or changed its target. Preserve that exact no-effect verdict so the
+        // durable parent card does not degrade to Outcome unknown on reload.
+        if (grant.toolRelays === 0 && grant.effectReceipts.size === 0) {
+          result.performed = false;
+          result.outcomeKnown = true;
+        }
       }
       return result;
     } finally {
@@ -800,7 +779,9 @@ export const makeOffscreenActorClient = ({
       if (record.actorType !== grant.actorRecord.actorType
           || canonicalActorBacking(record) !== canonicalActorBacking(grant.actorRecord)
           || record.instanceId !== grant.actorRecord.instanceId) return null;
-    } else if (!sameClone(record.grantedOperations, grant.actorRecord.grantedOperations)) return null;
+    } else if (!sameCanonicalStructuredClone(
+      record.grantedOperations, grant.actorRecord.grantedOperations,
+    )) return null;
     if (!actorOperationGrant(record, grant.inbound).includes(operation)) return null;
     const activeTabId = record.kind === 'actor' && record.actorType === 'web'
       && canonicalActorBacking(record) === 'tab' && ownedTabFor
@@ -1008,25 +989,32 @@ export const makeOffscreenActorClient = ({
     /** @type {boolean} */ failed,
     /** @type {any} */ rewrite = null,
   ) => {
-    const append = entry.ctx?.appendAudit ?? entry.ctx?.audit;
-    if (typeof append !== 'function') return;
-    await append({
-      type: failed || receipt.outcomeKnown !== true
-        ? 'authority_effect_failed' : 'authority_effect',
-      sessionId: entry.grant.actorSessionId,
-      details: {
-        operation: entry.operation, outcome: receipt.outcome,
-        outcomeKnown: receipt.outcomeKnown === true,
-        performed: receipt.performed === true,
-        refused: receipt.refused === true,
-        retryable: receipt.retryable === true,
-        ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
-        ...(typeof receipt.ugcZone === 'string' ? { ugcZone: receipt.ugcZone } : {}),
-        ...lifecycleRecoveryAttribution(rewrite),
-        target: receipt.target, runId: entry.grant.runId,
-        actorSessionId: entry.grant.actorSessionId,
-      },
-    }).catch(() => {});
+    const append = entry.ctx?.appendAudit ?? entry.ctx?.audit ?? appendAudit;
+    try {
+      await Promise.resolve(append({
+        type: failed || receipt.outcomeKnown !== true
+          ? 'authority_effect_failed' : 'authority_effect',
+        sessionId: entry.grant.actorSessionId,
+        details: {
+          operation: entry.operation, outcome: receipt.outcome,
+          outcomeKnown: receipt.outcomeKnown === true,
+          performed: receipt.performed === true,
+          refused: receipt.refused === true,
+          retryable: receipt.retryable === true,
+          ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
+          ...(typeof receipt.ugcZone === 'string' ? { ugcZone: receipt.ugcZone } : {}),
+          ...lifecycleRecoveryAttribution(rewrite),
+          target: receipt.target, runId: entry.grant.runId,
+          actorSessionId: entry.grant.actorSessionId,
+        },
+      }));
+      return true;
+    } catch {
+      // why: this grant owns the physical receipt, so it must also own the
+      // durable-audit failure and stop every later privileged dispatch.
+      entry.grant.auditUnavailable = true;
+      return false;
+    }
   };
   const recordAuthorityReceipt = (
     /** @type {any} */ entry,
@@ -1107,6 +1095,14 @@ export const makeOffscreenActorClient = ({
         ok: false, error: 'domain effect verdict contract is unavailable',
         outcomeKnown: true, retryable: false,
       };
+    }
+    if (entry.grant.auditUnavailable) {
+      const receipt = Object.freeze({
+        ...receiptFor(entry, 'not-performed', true, false, false, target),
+        refused: true, code: 'audit_unavailable',
+      });
+      recordAuthorityReceipt(entry, receipt);
+      return auditUnavailableResult(receipt);
     }
     try {
       const parentLease = entry.effect.parentEffect?.lease ?? null;
@@ -1193,7 +1189,10 @@ export const makeOffscreenActorClient = ({
               : refusal ? 'pre-effect-failure' : undefined,
         }, { ...stampedReceipt, callId: entry.effect.callId }, value,
       );
-      await appendAuthorityAudit(entry, stampedReceipt, false, recoveryRewrite);
+      const auditPersisted = await appendAuthorityAudit(
+        entry, stampedReceipt, false, recoveryRewrite,
+      );
+      if (!auditPersisted) return auditUnavailableResult(stampedReceipt);
       if (recoveryRewrite) {
         return {
           ok: false, code: 'actor-authority-lifecycle-recovery',
@@ -1248,7 +1247,10 @@ export const makeOffscreenActorClient = ({
             : verdict === 'unknown' ? 'host-lost' : 'pre-effect-failure',
         }, { ...stampedReceipt, callId: entry.effect.callId }, cause,
       );
-      await appendAuthorityAudit(entry, stampedReceipt, true, recoveryRewrite);
+      const auditPersisted = await appendAuthorityAudit(
+        entry, stampedReceipt, true, recoveryRewrite,
+      );
+      if (!auditPersisted) return auditUnavailableResult(stampedReceipt);
       if (recoveryRewrite) {
         return {
           ok: false, code: 'actor-authority-lifecycle-recovery',
@@ -1465,6 +1467,11 @@ export const makeOffscreenActorClient = ({
         };
       }
       const schedulerTarget = authorityEffectResourceKey(operation, entry.args, entry.ctx);
+      if (entry.grant.auditUnavailable) {
+        return performSemanticEffect(
+          entry, target, execute, effectOutcome, null, schedulerTarget,
+        );
+      }
       if (policy?.riskClass === 'read') {
         return performSemanticEffect(entry, target, execute, effectOutcome, null, schedulerTarget);
       }
@@ -1509,50 +1516,20 @@ export const makeOffscreenActorClient = ({
   ) => {
     const base = value && typeof value === 'object' && !Array.isArray(value)
       ? /** @type {Record<string,any>} */ (value) : { ok: true, value };
-    const receipts = authorityReceiptsForCall(grant.effectReceipts, callId);
-    const stamped = stampAuthorityToolResult(receipts, base);
-    const recoveryEntry = strongestLifecycleRewrite(
-      [...grant.lifecycleRewrites.values()].filter((entry) => entry.callId === callId),
-    );
-    if (!recoveryEntry) return stamped;
-    const { rewrite, physical } = recoveryEntry;
-    return {
-      ...stamped,
-      ok: false,
-      error: rewrite.error,
-      recovery: rewrite.recovery,
-      ...recoveryCustody(rewrite),
-      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
-      meta: {
-        ...(isRecord(stamped.meta) ? stamped.meta : {}),
-        recovery: rewrite.recovery,
-      },
-    };
+    return stampLifecycleToolResult({
+      receipts: authorityReceiptsForCall(grant.effectReceipts, callId),
+      rewrites: grant.lifecycleRewrites.values(), callId, value: base,
+    });
   };
   const stampActorStoredResult = (
     /** @type {any} */ grant,
     /** @type {Record<string,any>} */ block,
   ) => {
-    const receipts = authorityReceiptsForCall(grant.effectReceipts, block.tool_use_id);
-    const stamped = stampAuthorityToolResultBlock(receipts, block);
-    const recoveryEntry = strongestLifecycleRewrite(
-      typeof block.tool_use_id === 'string' ? [...grant.lifecycleRewrites.values()]
-        .filter((entry) => entry.callId === block.tool_use_id) : [],
-    );
-    if (!recoveryEntry) return stamped;
-    const { rewrite, physical } = recoveryEntry;
-    return {
-      ...stamped,
-      is_error: true,
-      content: rewrite.error,
-      recovery: rewrite.recovery,
-      ...recoveryCustody(rewrite),
-      ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
-      meta: {
-        ...(isRecord(stamped.meta) ? stamped.meta : {}),
-        recovery: rewrite.recovery,
-      },
-    };
+    return stampLifecycleToolResult({
+      receipts: authorityReceiptsForCall(grant.effectReceipts, block.tool_use_id),
+      rewrites: grant.lifecycleRewrites.values(), callId: block.tool_use_id,
+      value: block, stored: true,
+    });
   };
   const stampActorRunRecovery = (
     /** @type {any} */ grant,
@@ -1611,12 +1588,10 @@ export const makeOffscreenActorClient = ({
         // session past the hard cap must not be pushed further by its own actors. Without
         // this the cap bounded the orchestrator's turns only, and any actor fan-out
         // walked straight past it.
-        if (spendRefusalFor) {
-          const refusal = await spendRefusalFor(grant.actorSessionId).catch(() => null);
-          if (refusal) {
-            grant.modelActive = false;
-            return { ok: false, error: refusal };
-          }
+        const refusal = await spendRefusalFor(grant.actorSessionId);
+        if (refusal) {
+          grant.modelActive = false;
+          return { ok: false, error: refusal };
         }
         if (grant.relaySignal.aborted || abortedRuns.has(key)) {
           grant.modelActive = false;
@@ -2085,7 +2060,7 @@ export const makeOffscreenActorClient = ({
       if (!entry || intents.length > 1 || typeof entry.domainState.podId !== 'string'
           || msg.command !== args?.command || msg.podId !== entry.domainState.podId
           || msg.timeoutMs !== expectedTimeout || msg.background !== expectedBackground
-          || !sameClone(msg.remoteGitGrant, expectedGrant)) {
+          || !sameCanonicalStructuredClone(msg.remoteGitGrant, expectedGrant)) {
         return refuseClaimedEntry(entry, {
           ok: false, error: 'pod/exec: authority mismatch', outcomeKnown: true,
         });
@@ -3099,7 +3074,9 @@ export const makeOffscreenActorClient = ({
       // why: the isolated heap is not trusted to choose what the SW retains or
       // appends to a session. Preserve already-recorded host receipts, but
       // replace an unsafe semantic payload with one bounded terminal failure.
-      const semanticResult = Number.isFinite(resultBytes)
+      const semanticResult = grant.auditUnavailable
+        ? auditUnavailableResult()
+        : Number.isFinite(resultBytes)
         && resultBytes <= ACTOR_SEMANTIC_TOOL_RESULT_CAP
         ? msg.result : {
           ok: false,
@@ -3135,7 +3112,7 @@ export const makeOffscreenActorClient = ({
         error: 'actor loop event exceeds its structured-clone boundary',
         outcomeKnown: true,
       };
-      if (grant.loopEvents >= loopEventLimit) return { ok: true, coalesced: true };
+      if (grant.loopEvents >= 256) return { ok: true, coalesced: true };
       grant.loopEvents += 1;
       try { if (msg.event) runOnEvent.get(grant.runId)?.(msg.event); } catch { /* never break the relay */ }
       return { ok: true };

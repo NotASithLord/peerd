@@ -171,6 +171,7 @@ describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
     expect(reply.result.exitCode).toBe(0);
     expect(pushedRef.ref).toEqual({ kind: 'pod', id: 'pod-1' });
     expect(pushedRef.opts.ref).toBe('main');
+    expect(pushedRef.opts.expectedRemote).toBe('https://github.com/a/b.git');
     expect(pushedRef.opts.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -981,6 +982,7 @@ describe('apps/delete', () => {
           publisher: 'pub', hash: 'main', room_hash: 'room', slug: 'a',
           pending_unserve_hashes: ['older-share'],
           pending_seed_unserve_hashes: ['older-seed'],
+          pending_room_unserve_hashes: ['older-room'],
         },
       }) },
       appClient: { delete: async () => true },
@@ -988,7 +990,7 @@ describe('apps/delete', () => {
       browser: { runtime: { getContexts: async () => [{}], sendMessage: async (message: any) => { msg = message; return { ok: true }; } } },
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
-    expect(msg.hashes).toEqual(['main', 'room', 'older-share', 'older-seed']);
+    expect(msg.hashes).toEqual(['main', 'room', 'older-share', 'older-seed', 'older-room']);
   });
   test('deleting an installed App does not tombstone the peer discovery card', async () => {
     let msg: any = null;
