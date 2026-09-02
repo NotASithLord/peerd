@@ -115,6 +115,67 @@ describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
     expect(mt.results().find((r) => r.id === 'request-0002')).toMatchObject({ ok: true, value: { id: 'e1' } });
   });
 
+  test('cancellation cannot hide completed publish or direct-message effects', async () => {
+    for (const effect of [
+      { publicOp: 'publish', hostOp: 'publish', args: { topic: 'feed', data: { text: 'hi' } } },
+      { publicOp: 'dm-send', hostOp: 'dm', args: { to: 'did:key:zPeer', data: 'hi' } },
+    ]) {
+      const completed = deferred<any>();
+      const { mt } = makeBridge({
+        roomCall: async (payload) => {
+          if (payload.op === 'join') return {
+            ok: true, did: 'did:key:zME', joined: payload.roomId,
+            hostEpoch: 'host-epoch-0001', present: [],
+            admissionToken: payload.roomAdmissionToken,
+          };
+          if (payload.op === 'join-ack') {
+            return { ok: true, admissionToken: payload.roomAdmissionToken };
+          }
+          if (payload.op === effect.hostOp) return completed.promise;
+          return { ok: true };
+        },
+      });
+      mt.drive(rpc('request-join', 'join', { roomId: 'peerd-global' }));
+      await tick();
+      mt.drive(rpc('request-effect', effect.publicOp, effect.args));
+      await tick();
+      mt.drive({ peerd: 'dweb:cancel', clientId: CLIENT, id: 'request-effect' });
+      completed.resolve({ ok: true, id: 'committed-event', ts: 1 });
+      await tick();
+      expect(mt.results().find((result) => result.id === 'request-effect')).toMatchObject({
+        ok: true, value: { id: 'committed-event' },
+      });
+    }
+  });
+
+  test('failed publish and DM replies never become success and preserve unknown custody', async () => {
+    const { mt } = makeBridge({
+      roomCall: async (payload) => payload.op === 'join'
+        ? {
+            ok: true, did: 'did:key:zME', joined: payload.roomId,
+            hostEpoch: 'host-epoch-0001', present: [],
+            admissionToken: payload.roomAdmissionToken,
+          }
+        : payload.op === 'join-ack'
+          ? { ok: true, admissionToken: payload.roomAdmissionToken }
+          : {
+              ok: false, error: 'response lost', performed: true,
+              outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+            },
+    });
+    mt.drive(rpc('request-0001', 'join', { roomId: 'r' }));
+    await tick();
+    mt.drive(rpc('request-0002', 'publish', { topic: 'feed', data: 'x' }));
+    mt.drive(rpc('request-0003', 'dm-send', { to: 'did:key:zPeer', data: 'x' }));
+    await tick();
+    for (const id of ['request-0002', 'request-0003']) {
+      expect(mt.results().find((result) => result.id === id)).toMatchObject({
+        ok: false, error: 'response lost', performed: true,
+        outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+      });
+    }
+  });
+
   test('publishing the current App sends its trusted id, not page-supplied files', async () => {
     const { mt, calls, confirmations } = makeBridge();
     mt.drive(rpc('request-0001', 'join', { roomId: 'r', name: 'ada' }));
@@ -413,6 +474,43 @@ describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
     expect(members.size).toBe(0);
     expect(storage.values[compensationKey]).toBeNull();
     reopened.bridge.dispose();
+  });
+
+  test('an already-absent durable compensation clears before a later join', async () => {
+    const storage = memoryStorage();
+    const compensationKey = 'dweb.room-compensation.v1:commons';
+    storage.values[compensationKey] = {
+      schema: 1,
+      appId: 'commons',
+      roomId: 'orphaned-room',
+      clientId: 'room-client-orphaned',
+      admissionToken: 'room-admission-orphaned',
+      hostEpoch: 'host-epoch-orphaned',
+    };
+    const { mt, bridge, calls } = makeBridge({
+      storage,
+      roomCall: async (payload) => {
+        if (payload.op === 'leave') return { ok: false, error: 'not-in-room' };
+        if (payload.op === 'join') return {
+          ok: true, did: 'did:key:zME', joined: payload.roomId,
+          hostEpoch: 'host-epoch-0002', present: [],
+          admissionToken: payload.roomAdmissionToken,
+        };
+        if (payload.op === 'join-ack') {
+          return { ok: true, admissionToken: payload.roomAdmissionToken };
+        }
+        return { ok: true };
+      },
+    });
+    await tick(20);
+    expect(storage.values[compensationKey]).toBeNull();
+
+    mt.drive(rpc('request-after-compensation', 'join', { roomId: 'next-room' }));
+    await tick(20);
+    expect(calls.map((call) => call.op)).toEqual(['leave', 'join', 'join-ack']);
+    expect(mt.results().find((row) => row.id === 'request-after-compensation'))
+      .toMatchObject({ ok: true, value: { joined: 'next-room' } });
+    bridge.dispose();
   });
 
   test('a replacement epoch adopts an established room and stale dispose cannot tear it down', async () => {

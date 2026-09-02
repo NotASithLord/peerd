@@ -5,17 +5,14 @@
 // may create engine records, open engine tabs, mount session storage, mint run
 // grants, or place spill bytes in the session-owned result store.
 import { normalizeGitRemote } from '/peerd-engine/authority.js';
+import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
 
 const ENGINE_TAB_GROUP_TITLE = 'peerd';
+const EXECUTION_AUTHORITY_ARGUMENT_BYTES = 8 * 1024 * 1024;
 
 const mismatch = () => Object.assign(new Error('execution authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
-
-const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); }
-  catch { return false; }
-};
 
 const expectedTimeout = (
   /** @type {any} */ args, /** @type {boolean} */ actors,
@@ -57,7 +54,9 @@ export const createExecutionToolAuthority = ({ binding, ctx, signal, shared = {}
   };
   const requirePlan = (/** @type {string} */ kind, /** @type {any} */ plan) => {
     requireOperation(`turn.execution.create-${kind}`);
-    if (!sameClone(plan, args.plan)) throw mismatch();
+    if (!sameCanonicalStructuredClone(
+      plan, args.plan, { maxBytes: EXECUTION_AUTHORITY_ARGUMENT_BYTES },
+    )) throw mismatch();
   };
   const cloneRemote = async (
     /** @type {'notebook'|'pod'} */ kind, /** @type {string} */ id,

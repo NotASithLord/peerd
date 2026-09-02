@@ -140,7 +140,7 @@ describe('packaged Chrome controller physical fault contract', () => {
     expect(source).toContain('faultLifecycleAfterWake');
     expect(source).toContain("type: 'session/get'");
     expect(source).toContain("type: 'audit/list'");
-    expect(source).toContain("type: 'feature-lease/host-status'");
+    expect(source).toContain("readActiveFeatureLease(page, 'controller')");
     expect(source).not.toContain('Target.closeTarget');
     expect(source).not.toContain('workerOnlyLoss');
     expect(source).not.toContain('controller/test');

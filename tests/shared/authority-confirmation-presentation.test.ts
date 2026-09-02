@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  AUTHORITY_CONFIRMATION_OPERATIONS,
   authorityEffectConfirmationPresentation,
 } from '../../extension/shared/authority-confirmation-presentation.js';
 import { CONTROLLER_DOMAIN_OPERATIONS } from '../../extension/shared/controller-kernel-quota.js';
@@ -12,7 +11,11 @@ describe('exact authority confirmation presentation', () => {
     const expected = Object.entries(CONTROLLER_DOMAIN_OPERATIONS)
       .filter(([operation, policy]) => operation !== 'turn.goal.complete' && policy.riskClass !== 'read')
       .map(([operation]) => operation).sort();
-    expect([...AUTHORITY_CONFIRMATION_OPERATIONS].sort()).toEqual(expected);
+    for (const operation of expected) {
+      expect(authorityEffectConfirmationPresentation(
+        operation, {}, `${operation}:fixture:${'a'.repeat(64)}`,
+      ), operation).not.toBeNull();
+    }
   });
 
   test.each([

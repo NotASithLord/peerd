@@ -36,4 +36,5 @@ describe('repository storage paths', () => {
     await expect(fs.promises.rm('/peerd-git/app/app-1'))
       .rejects.toMatchObject({ code: 'ENOENT' });
   });
+
 });

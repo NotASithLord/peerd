@@ -11,6 +11,7 @@ import {
   createVaultKernelAssemblyReport,
 } from '../../extension/background/vault-kernel-assembly.js';
 import {
+  coldEventKeysFor,
   coldPortNamesFor,
   KERNEL_COLD_EVENTS,
   KERNEL_PORT_CLASSES,
@@ -34,9 +35,8 @@ const makePort = (name: string, senderClass = name) => {
 };
 
 describe('thin vault-kernel Port assembly', () => {
-  test('routes exactly six names through their own provenance and owner', () => {
+  test('routes every declared name through its own provenance and owner', () => {
     expect(KERNEL_PORT_NAMES).toEqual(KERNEL_PORT_CLASSES.map((entry) => entry.name));
-    expect(KERNEL_PORT_NAMES).toHaveLength(6);
     const proven: string[] = [];
     const handled: string[] = [];
     const contexts: any[] = [];
@@ -129,7 +129,7 @@ describe('executable vault-kernel assembly report', () => {
       .toEqual(KERNEL_COLD_EVENTS.map((entry) => entry.key));
     expect(store.ports.map((entry) => entry.name))
       .toEqual(KERNEL_PORT_CLASSES.map((entry) => entry.name));
-    expect(store.missingRequiredEvents).toHaveLength(13);
+    expect(store.missingRequiredEvents).toEqual(coldEventKeysFor());
     expect(store.incompletePorts).toEqual([
       'sidepanel', 'home', 'eval', 'feature-lease-keepalive',
     ]);
@@ -209,6 +209,12 @@ test('native entry uses one identity and target-exact kernel custody', async () 
   expect(source).toContain('createKernelColdReceipts');
   expect(source).toContain('coldReceipts.registerRecovery');
   expect(source).toContain('createKernelFeatureHost');
+  const keyedOriginHydration = source.indexOf(
+    'if (demandPlane && !await demandPlane.hydrateKeyedOrigins())',
+  );
+  expect(keyedOriginHydration).toBeGreaterThan(-1);
+  expect(source.indexOf('await featureHost.vaultUnlocked();', keyedOriginHydration))
+    .toBeGreaterThan(keyedOriginHydration);
   expect(source).toContain('attachKernelTabEvents({');
   expect(source).toContain('firefox: kernelFirefox');
   expect(source).not.toContain('onBeforeRequest: () => ({})');

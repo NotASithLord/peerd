@@ -244,20 +244,6 @@ export const resolveKernelPermission = (session, cachedMode, cachedConfirm) => {
   };
 };
 
-/** @param {ReturnType<typeof buildVaultKernelState>|Record<string, any>} state */
-export const projectVaultGateState = (state) => ({
-  hydrated: state.hydrated === true,
-  vault: {
-    initialized: state.vault.initialized,
-    locked: state.vault.locked,
-    unlockedAt: state.vault.locked ? 0 : state.vault.unlockedAt,
-    prfEnrolled: state.vault.prfEnrolled,
-    hasRecovery: state.vault.hasRecovery,
-    lockReason: state.vault.lockReason ?? null,
-  },
-  settings: { vaultAutoLockMs: state.settings.vaultAutoLockMs },
-});
-
 export const VAULT_KERNEL_ROUTE_NAMES = Object.freeze([
   'vault/initialize',
   'vault/unlock',

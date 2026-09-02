@@ -14,10 +14,11 @@ import {
   TOOL_MANIFEST_PRESETS,
   normalizeToolManifest,
   resolveManifestAllow,
+  resolveManifestStatus,
   manifestLabel,
   filterDescriptorsByManifest,
 } from '../../extension/peerd-runtime/tools/manifests.js';
-import { makeToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
+import { makeToolsCommand, planToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
 import { exposureGate as exposureGateRaw } from '../../extension/peerd-runtime/tools/gates.js';
 import { mainAgentDescriptors } from '../../extension/peerd-runtime/tools/exposure.js';
 import { narrowTools, makeSpawnActor } from '../../extension/peerd-runtime/actor/spawn.js';
@@ -136,6 +137,25 @@ describe('resolveManifestAllow', () => {
     expect([...allow]).toEqual(['snapshot']);
     // garbage-but-present manifest → empty set
     expect(resolveManifestAllow({})!.size).toBe(0);
+  });
+
+  test('saved manifests resolve renamed tools without rewriting their stored bytes', () => {
+    const saved = {
+      allow: ['read_web_cache', 'read_run_cache', 'read_pdf', 'page_keys', 'future_tool'],
+    };
+    expect(normalizeToolManifest(saved)).toEqual(saved);
+    expect([...resolveManifestAllow(saved)!].sort()).toEqual([
+      'future_tool', 'page_keys', 'read_doc', 'read_result',
+    ]);
+    expect(resolveManifestStatus(saved, ['read_doc', 'read_result', 'now'])).toEqual({
+      allow: new Set(['read_result', 'read_doc']),
+      renamed: [
+        'read_web_cache → read_result',
+        'read_run_cache → read_result',
+        'read_pdf → read_doc',
+      ],
+      unavailable: ['page_keys', 'future_tool'],
+    });
   });
 });
 
@@ -476,5 +496,16 @@ describe('makeToolsCommand — grammar over injected IO', () => {
     expect(notes[3]).toContain('/tools research');
     expect(notes[3]).toContain('/tools browse-only');
     expect(notes[3]).toContain('/tools full');
+  });
+
+  test('/tools reports only current effective tools and explains renamed or retired entries', () => {
+    const plan = planToolsCommand('', {
+      allow: ['read_web_cache', 'read_run_cache', 'read_pdf', 'page_keys'],
+    }, ['read_result', 'read_doc', 'now']);
+    expect(plan.note).toContain('custom (2 tools) (2 tools exposed)');
+    expect(plan.note).toContain('read_web_cache → read_result');
+    expect(plan.note).toContain('read_run_cache → read_result');
+    expect(plan.note).toContain('read_pdf → read_doc');
+    expect(plan.note).toContain('Unavailable saved tools ignored: page_keys.');
   });
 });

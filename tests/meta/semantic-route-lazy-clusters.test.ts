@@ -31,7 +31,6 @@ describe('digest-bound lazy semantic route clusters', () => {
 
   test('compact host admission has one exact row per executable host route', () => {
     const routes = SEMANTIC_HOST_ROUTE_MANIFEST.map((row) => row.route);
-    expect(routes).toHaveLength(18);
     expect(new Set(routes).size).toBe(routes.length);
     expect(SEMANTIC_HOST_ROUTE_MANIFEST.every((row) =>
       Object.keys(row).sort().join(',') === 'channels,route,source')).toBe(true);

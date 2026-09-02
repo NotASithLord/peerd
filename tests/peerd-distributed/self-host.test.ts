@@ -155,6 +155,34 @@ describe('self sync host completion semantics', () => {
     });
   });
 
+  test('a lost apply response remains an unknown performed restore outcome', async () => {
+    const bytes = encodeSurfacePayload({ v: 1, settings: { theme: 'dark' } });
+    const snapshot = await buildSnapshotOffer({ surfaces: { settings: { bytes, version: 1 } } });
+    let receiver: ReturnType<typeof createSyncReceiver>;
+    const source = createSyncSource({
+      coordinator: selfCoordinator, manifest: snapshot.manifest, payloads: snapshot.payloads,
+      send: (_to, frame) => receiver.onFrame(SOURCE, frame),
+    });
+    receiver = createSyncReceiver({
+      coordinator: selfCoordinator, sourceDeviceDid: SOURCE, timeoutMs: 0,
+      send: (_to, frame) => source.onFrame(RECEIVER, frame),
+      applySurface: async () => { throw Object.assign(new Error('response lost'), {
+        performed: true, outcomeKnown: false, retryable: false,
+        outcomeKind: 'transport-lost',
+      }); },
+    });
+    const resultPromise = receiver.restore();
+    await receiver.onFrame(SOURCE, source.offer());
+    expect(await resultPromise).toMatchObject({
+      ok: false, performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+      failed: [expect.objectContaining({
+        surface: 'settings', performed: true, outcomeKnown: false,
+        outcomeKind: 'transport-lost', retryable: false,
+      })],
+    });
+  });
+
   test('parallel duplicate pulls coalesce into one streamed serve', async () => {
     const bytes = encodeSurfacePayload({ v: 1, sessions: [{ content: 'x'.repeat(100_000) }] });
     const snapshot = await buildSnapshotOffer({ surfaces: { sessions: { bytes, version: 1 } } });

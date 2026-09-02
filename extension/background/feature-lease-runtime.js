@@ -226,7 +226,9 @@ export const createProductionFeatureLeaseRuntime = ({
         || typeof reply.hostEpoch !== 'string');
     /** @type {any} */
     let reply = null;
-    const attempts = create ? 8 : 1;
+    // why: Chrome exposes the new offscreen context before its module has
+    // connected the exact control Port. Wait through that real startup gap.
+    const attempts = create ? 40 : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       reply = await query().catch(() => null);
       if (valid() || authenticatedButIncompatible()) break;
@@ -448,9 +450,11 @@ export const createProductionFeatureLeaseRuntime = ({
     if (present === false) return false;
     const status = present === true ? await readHost(false).catch(() => null) : null;
     if (status && (status.leases?.length ?? 0) > 0) return false;
-    if (!status && Object.values(coordinator.snapshot().leases).some(
-      (lease) => ['starting', 'active', 'unknown'].includes(lease.status),
-    )) return false;
+    // why: the host publishes a lease only after its feature startup settles.
+    // A different scope may therefore be starting even when the host snapshot
+    // is empty; closing that shared realm would await or cancel unrelated work.
+    if (Object.entries(coordinator.snapshot().leases).some(([scope, lease]) =>
+      OFFSCREEN_SCOPES.has(scope) && ['starting', 'active'].includes(lease.status))) return false;
     const exactEpoch = status?.hostEpoch ?? residentHostEpoch;
     return typeof exactEpoch === 'string' ? retirePhysicalHostUnsafe(exactEpoch) : false;
   };
@@ -459,7 +463,13 @@ export const createProductionFeatureLeaseRuntime = ({
   const recoverAffectedUnsafe = async (hostEpoch, affected) => {
     if (affected.length === 0) return Object.freeze({ hostEpoch, affected, results: [] });
     const results = [];
-    for (const item of affected) {
+    // why: dweb startup reads its durable identity through the sealed vault
+    // authority. Restore that substrate before replaying dweb intent so the
+    // nested bounded read joins an active durable lease instead of tearing its
+    // temporary authority down while dweb is still starting.
+    const ordered = [...affected].sort((left, right) =>
+      Number(right.scope === 'vault-authority') - Number(left.scope === 'vault-authority'));
+    for (const item of ordered) {
       if (!item.durable) continue;
       const token = (recoveryTokens.get(item.scope) ?? 0) + 1;
       recoveryTokens.set(item.scope, token);
@@ -485,23 +495,27 @@ export const createProductionFeatureLeaseRuntime = ({
     return Object.freeze({ hostEpoch, affected, results });
   };
 
-  /** @param {string} hostEpoch @param {readonly any[]} affected */
-  const recoverHostLossUnsafe = async (hostEpoch, affected) => {
-    if (affected.length === 0) return Object.freeze({ hostEpoch, affected, results: [] });
-    await retirePhysicalHostUnsafe(hostEpoch);
-    return recoverAffectedUnsafe(hostEpoch, affected);
-  };
-
   const poisonedHostEpochs = () => [...new Set(Object.entries(coordinator.snapshot().leases)
     .filter(([scope, state]) => OFFSCREEN_SCOPES.has(scope)
       && typeof state?.poisonedHostEpoch === 'string')
     .map(([, state]) => /** @type {string} */ (state.poisonedHostEpoch)))];
 
   const retirePoisonedHostsUnsafe = async () => {
-    const results = [];
+    const retirements = [];
     for (const hostEpoch of poisonedHostEpochs()) {
       const affected = coordinator.hostLost(hostEpoch);
-      results.push(await recoverHostLossUnsafe(hostEpoch, affected));
+      for (const item of affected) durableScopes.delete(item.scope);
+      if (affected.length > 0) await retirePhysicalHostUnsafe(hostEpoch);
+      retirements.push(Object.freeze({ hostEpoch, affected }));
+    }
+    return retirements;
+  };
+
+  /** @param {readonly {hostEpoch:string,affected:readonly any[]}[]} retirements */
+  const recoverRetirements = async (retirements) => {
+    const results = [];
+    for (const { hostEpoch, affected } of retirements) {
+      results.push(await recoverAffectedUnsafe(hostEpoch, affected));
     }
     return results;
   };
@@ -511,13 +525,12 @@ export const createProductionFeatureLeaseRuntime = ({
     const result = await resultPromise;
     if (OFFSCREEN_SCOPES.has(scope)) {
       if (result?.outcomeKnown === false) {
-        await retirePoisonedHostsUnsafe();
-        return result;
+        return Object.freeze({ result, retirements: await retirePoisonedHostsUnsafe() });
       }
       await stopOrphanedHostScopes([scope]);
       await closeHostIfIdleUnsafe();
     }
-    return result;
+    return Object.freeze({ result, retirements: [] });
   };
 
   const revokeUnsafe = (/** @type {string} */ scope,
@@ -528,15 +541,10 @@ export const createProductionFeatureLeaseRuntime = ({
 
   const finishLockUnsafe = async (/** @type {Promise<any[]>} */ resultsPromise) => {
     const results = await resultsPromise;
-    await retirePoisonedHostsUnsafe();
+    const retirements = await retirePoisonedHostsUnsafe();
     await stopOrphanedHostScopes(OFFSCREEN_FEATURE_LEASE_SCOPES);
     await closeHostIfIdleUnsafe();
-    return results;
-  };
-
-  const lockUnsafe = () => {
-    durableScopes.clear();
-    return finishLockUnsafe(coordinator.lock());
+    return Object.freeze({ results, retirements });
   };
 
   const runWithLease = async (/** @type {string} */ scope,
@@ -565,11 +573,13 @@ export const createProductionFeatureLeaseRuntime = ({
       if (remaining === 0) scopedUsers.delete(scope);
       else scopedUsers.set(scope, remaining);
       if (acquired && remaining === 0) {
-        await withHostLifecycle(async () => {
+        const finished = await withHostLifecycle(async () => {
           if (!durableScopes.has(scope)) {
-            await revokeUnsafe(scope, 'feature-disabled');
+            return revokeUnsafe(scope, 'feature-disabled');
           }
-        }).catch(() => {});
+          return null;
+        }).catch(() => null);
+        if (finished) await recoverRetirements(finished.retirements).catch(() => {});
       }
     }
   };
@@ -623,24 +633,32 @@ export const createProductionFeatureLeaseRuntime = ({
     }
     return result;
   };
+  const finishRevocation = async (/** @type {string} */ scope,
+    /** @type {Promise<any>} */ result) => {
+    const finished = await withHostLifecycle(() => finishRevocationUnsafe(scope, result));
+    await recoverRetirements(finished.retirements);
+    return finished.result;
+  };
   const revoke = (/** @type {string} */ scope,
     /** @type {string} */ reason = 'feature-disabled') => {
     cancelRecovery(scope);
     durableScopes.delete(scope);
     const result = coordinator.revoke(scope, reason);
-    return withHostLifecycle(() => finishRevocationUnsafe(scope, result));
+    return finishRevocation(scope, result);
   };
   const disable = (/** @type {string} */ scope) => {
     cancelRecovery(scope);
     durableScopes.delete(scope);
     const result = coordinator.disable(scope);
-    return withHostLifecycle(() => finishRevocationUnsafe(scope, result));
+    return finishRevocation(scope, result);
   };
-  const lock = () => {
+  const lock = async () => {
     for (const scope of FEATURE_LEASE_SCOPES) cancelRecovery(scope);
     durableScopes.clear();
     const results = coordinator.lock();
-    return withHostLifecycle(() => finishLockUnsafe(results));
+    const finished = await withHostLifecycle(() => finishLockUnsafe(results));
+    await recoverRetirements(finished.retirements);
+    return finished.results;
   };
   const reconcile = () => withHostLifecycle(async () => {
     await ensureHostRetirementUnsafe();
@@ -666,8 +684,32 @@ export const createProductionFeatureLeaseRuntime = ({
   const handleHostLoss = (/** @type {string} */ hostEpoch) => {
     const affected = coordinator.hostLost(hostEpoch);
     for (const item of affected) durableScopes.delete(item.scope);
-    return withHostLifecycle(() => recoverHostLossUnsafe(hostEpoch, affected));
+    // why: duplicate loss notifications for an already-retired epoch are
+    // inert. Consulting physical status here could mistake a stale reply for
+    // the old realm and close its replacement while that realm is starting.
+    if (affected.length === 0) return recoverAffectedUnsafe(hostEpoch, affected);
+    // why: a fresh dweb host must re-enter this lane for its vault-backed
+    // identity read. Keep physical retirement serialized, then release the
+    // lane before replaying durable scopes just like the normal transition
+    // path does for a cold dweb start.
+    return withHostLifecycle(() => retirePhysicalHostUnsafe(hostEpoch))
+      .then(() => recoverAffectedUnsafe(hostEpoch, affected));
   };
+
+  /** @param {string} hostEpoch @param {string|undefined} reason */
+  const retireHostEpoch = (hostEpoch, reason) => withHostLifecycle(async () => {
+    await coordinator.ready;
+    await writeHostRetirementUnsafe(hostEpoch, reason ?? 'operation-outcome-unknown');
+    const affected = coordinator.hostLost(hostEpoch);
+    for (const item of affected) durableScopes.delete(item.scope);
+    // why: a late operation belongs to the epoch in its lease, not whichever
+    // host happens to be current. An observed successor proves the old epoch
+    // is gone and must never be closed to settle stale operation cleanup.
+    await retireMarkedHostUnsafe(hostEpoch);
+    await clearHostRetirementUnsafe(hostEpoch);
+    return Object.freeze({ hostEpoch, affected });
+  }).then(({ hostEpoch: retiredHostEpoch, affected }) =>
+    recoverAffectedUnsafe(retiredHostEpoch, affected));
 
   const retireActiveHost = (/** @type {string|undefined} */ reason) => {
     const snapshot = coordinator.snapshot();
@@ -685,15 +727,7 @@ export const createProductionFeatureLeaseRuntime = ({
         affected: [], results: [],
       }));
     }
-    return withHostLifecycle(async () => {
-      await coordinator.ready;
-      await writeHostRetirementUnsafe(epoch, reason ?? 'operation-outcome-unknown');
-      const affected = coordinator.hostLost(epoch);
-      for (const item of affected) durableScopes.delete(item.scope);
-      await retireMarkedHostUnsafe(epoch);
-      await clearHostRetirementUnsafe(epoch);
-      return recoverAffectedUnsafe(epoch, affected);
-    });
+    return retireHostEpoch(epoch, reason);
   };
 
   const resume = async (/** @type {{dwebEnabled?:boolean}} */ {
@@ -719,6 +753,7 @@ export const createProductionFeatureLeaseRuntime = ({
     runTransition,
     runWithLease,
     handleHostLoss,
+    retireHostEpoch,
     retireActiveHost,
     ensureHostRetirement,
     armHostRetirement,

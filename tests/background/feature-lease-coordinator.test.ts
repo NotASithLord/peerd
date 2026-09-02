@@ -294,7 +294,7 @@ describe('post-vault feature lease coordinator', () => {
       .toMatchObject({ code: 'feature-lease-disabled', outcomeKnown: true });
   });
 
-  test('locked successor claims its generation and clears stale intent in one write', async () => {
+  test('locked successor preserves intent until authoritative lock clears it', async () => {
     const store = makeStore();
     const first = setup({ store, identity: generation('build-aaaa', 'kernel-old') });
     await first.coordinator.acquire('schedule', {
@@ -310,14 +310,14 @@ describe('post-vault feature lease coordinator', () => {
     });
     await second.coordinator.ready;
     expect(store.setCalls - writesBeforeReady).toBe(1);
-    expect(store.values.get(FEATURE_LEASE_INTENT_KEY)).toMatchObject({
-      ownerKernelEpoch: 'kernel-new',
-      intents: [],
-    });
+    const adoptedDocument = store.values.get(FEATURE_LEASE_INTENT_KEY);
+    expect(adoptedDocument.ownerKernelEpoch).toBe('kernel-new');
+    expect(adoptedDocument.intents.map((intent: any) => intent.scope)).toEqual(['schedule']);
 
     const writesBeforeLock = store.setCalls;
     await second.coordinator.lock();
-    expect(store.setCalls - writesBeforeLock).toBe(0);
+    expect(store.setCalls - writesBeforeLock).toBe(1);
+    expect(store.values.get(FEATURE_LEASE_INTENT_KEY).intents).toEqual([]);
     expect(second.coordinator.snapshot().locked).toBe(true);
   });
 

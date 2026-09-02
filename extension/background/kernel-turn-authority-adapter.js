@@ -149,7 +149,6 @@ import {
 } from './app-actor-policy.js';
 
 import { sha256Hex } from '/shared/util.js';
-import { CHANNEL_DEFAULTS } from '/shared/channel-config.js';
 import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
 import {
   WEB_ACTOR_SOURCE_PROJECTION_KEY,
@@ -186,16 +185,25 @@ const ACTOR_EXPOSURE = 'actor';
  * @param {Record<string,any>} result
  * @param {Record<string,any>|null} record
  * @param {(entry:Record<string,any>)=>Promise<unknown>} appendAudit
+ * @param {boolean} [localAborted]
  */
-export const appendBoundActorIsolationAudit = async (result, record, appendAudit) => {
+export const appendBoundActorIsolationAudit = async (
+  result, record, appendAudit, localAborted = false,
+) => {
   if (record?.kind !== 'actor' || typeof record.sessionId !== 'string') return;
+  const { outcomeKnown, performed } = boundActorFailureCustody(result);
+  // why: Stop can win after the bound-actor card is projected but before the
+  // sealed channel commits the run. The host then proves a known, no-effect
+  // cancellation; it is neither an isolation failure nor an isolated run.
+  if (result?.aborted === true && result?.started !== true
+      && result?.phase === 'startup' && result?.code === 'actor_run_aborted'
+      && localAborted && outcomeKnown && !performed) return;
   const lineage = {
     ...(typeof record?.parentSessionId === 'string'
       ? { parentSessionId: record.parentSessionId } : {}),
     actorSessionId: record.sessionId,
     ...(Number.isSafeInteger(record?.depth) ? { depth: Number(record.depth) } : {}),
   };
-  const { outcomeKnown, performed } = boundActorFailureCustody(result);
   const entry = result?.ok === true && result?.started === true ? {
     type: 'actor_ran_isolated',
     details: { workerType: 'dedicated', realmVerified: true, ...lineage },
@@ -211,8 +219,10 @@ export const appendBoundActorIsolationAudit = async (result, record, appendAudit
   } : {
     type: 'actor_isolation_failure',
     details: {
-      error: result?.error ?? 'actor isolation unavailable',
-      code: result?.code ?? 'unknown', performed: false, ...lineage,
+      error: result?.error ?? 'actor isolation unavailable', code: result?.code ?? 'unknown',
+      performed: typeof result?.performed === 'boolean'
+        || typeof result?.authorityPerformed === 'boolean' ? performed : false,
+      ...(result?.outcomeKnown === true ? { outcomeKnown } : {}), ...lineage,
     },
   };
   await appendAudit(entry).catch(() => {});
@@ -370,7 +380,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           ? input.ctx.signal.reason : new DOMException('composer stopped', 'AbortError');
       }
       const requests = composerReferenceRequests(input.text, commands);
-      const referenceContext = await composerReferences.pinContext(input.ctx, requests);
+      const referenceContext = await composerReferences.pinContext(input.ctx);
       const allowedReferenceTemplate = new Map();
       for (const request of requests) {
         const key = composerReferenceRequestKey(request.operation, request.payload);
@@ -682,17 +692,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       }
       return makeDwebShare({
         enabled: deps.dwebEnabled, active: dwebTransportOn,
-        withDwebPublication: engine.withDwebPublication,
+        withDwebPublication,
         withIdentityMutation: dweb.withIdentityMutation,
         withAppLifecycle: engine.withAppLifecycle,
         withAppWriteLock: (id, operation) => engine.appQuiescence.runUnlocked(
           id, () => engine.appClient.withWriteLock(id, operation),
         ),
         appRegistry: engine.appRegistry, repositories: engine.repositories,
-        prepareRuntime: async () => {
-          await deps.ensureDwebFeature();
-          return deps.browser.runtime.sendMessage({ type: 'dweb/base-host/start' });
-        },
+        prepareRuntime: () =>
+          deps.browser.runtime.sendMessage({ type: 'dweb/base-host/start' }),
         sendMessage: (message) => deps.browser.runtime.sendMessage(message),
       });
     })();
@@ -706,16 +714,14 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     engine.withDwebPublication(async (/** @type {()=>boolean} */ current) => {
       if (!current() || !dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
       await deps.ensureDwebFeature();
+      if (!current() || !dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
       return operation(current);
     });
   const dwebSurface = deps.dwebEnabled ? Object.freeze({
     prepareShare: prepareLocalAppShare,
     share: shareLocalApp,
-    discover: async () => {
-      if (!dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
-      await deps.ensureDwebFeature();
-      return deps.browser.runtime.sendMessage({ type: 'dweb/base-host/heard' });
-    },
+    discover: () => withDwebPublication(() =>
+      deps.browser.runtime.sendMessage({ type: 'dweb/base-host/heard' })),
     install: (/** @type {any} */ { uri, name } = {}) => withDwebPublication((current) => {
       if (!current()) return Promise.resolve({ ok: false, error: 'dweb-disabled' });
       return deps.browser.runtime.sendMessage({
@@ -723,15 +729,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         publicationGeneration: engine.dwebPublicationGeneration(),
       });
     }),
-    peers: async () => {
-      if (!dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
-      await deps.ensureDwebFeature();
-      return deps.browser.runtime.sendMessage({ type: 'dweb/base-host/peers' });
-    },
+    peers: () => withDwebPublication(() =>
+      deps.browser.runtime.sendMessage({ type: 'dweb/base-host/peers' })),
     block: (/** @type {any} */ { did, block = true, reason } = {}) =>
-      withDwebPublication(async () => {
+      withDwebPublication(async (current) => {
         if (block && typeof did === 'string') {
           await /** @type {any} */ (dwebAgentOwner)?.revokePeer(did);
+        }
+        if (!current() || !dwebTransportOn()) {
+          return { ok: false, error: 'dweb-disabled' };
         }
         return deps.browser.runtime.sendMessage({
           type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason,
@@ -2071,6 +2077,28 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         ...(preflightReply ? { preflightReply } : {}),
       };
       const result = await live.runActorIsolated(job, { signal: controller.signal, onEvent });
+      const preStartCustody = boundActorFailureCustody(result);
+      // The pending card is projected before the sealed channel commits. Stop
+      // may therefore prove that no actor work started even though the user has
+      // already seen the card. Preserve that transport truth as a cancellation;
+      // the generic startup branch below is reserved for host/isolation faults.
+      if (result.aborted === true && result.started !== true
+          && result.phase === 'startup' && result.code === 'actor_run_aborted'
+          && controller.signal.aborted
+          && preStartCustody.outcomeKnown && !preStartCustody.performed) {
+        if (display && projection.patchBound(display, { streaming: false })) {
+          post({
+            type: 'turn/actor-done', ...display, sessionId: actorSessionId,
+            ok: false, aborted: true,
+            actorProjectionEpoch: projection.epoch(),
+            actorProjectionRevision: projection.revision(),
+          });
+        }
+        return await finishContributor({
+          result: 'the actor request was stopped before it started.',
+          stopped: true, aborted: true, performed: false, outcomeKnown: true,
+        }, result);
+      }
       if (!(result.ok || result.started)) {
         const error = result.error ?? 'the isolated actor worker did not start';
         if (display && projection.patchBound(display, { error, streaming: false })) {
@@ -2142,9 +2170,17 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         result: terminalError, stopped: true, executionFailed: true,
         outcomeKnown, performed, executionFailure: result, turnSnapshot,
       }, result);
-      if (result.aborted) return await finishContributor({
-        ...reply, stopped: true, aborted: true, turnSnapshot,
-      }, result);
+      if (result.aborted) {
+        const custody = boundActorFailureCustody(result);
+        // The isolated host owns whether any actor tool crossed its authority
+        // edge. Preserve its exact empty-ledger Stop proof; dropping these two
+        // fields makes actor messaging conservatively invent Outcome unknown.
+        return await finishContributor({
+          ...reply, stopped: true, aborted: true,
+          performed: custody.performed, outcomeKnown: custody.outcomeKnown,
+          turnSnapshot,
+        }, result);
+      }
       if (!result.ok) return await finishContributor({
         result: result.error ?? reply.result, stopped: true,
         executionFailed: true, outcomeKnown: result.outcomeKnown === true,
@@ -2282,7 +2318,6 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       ownedTabFor: (/** @type {string} */ sessionId) => webActorTabBindings.tabFor(sessionId),
       EXPOSURE_ACTOR: ACTOR_EXPOSURE,
       recordModelCall: contextSnapshots.record,
-      broadcastOp: post,
       appendAudit: deps.auditLog.append,
       isRelaySender: deps.firefox
         ? directActorHost.isRelaySender : deps.isOffscreenSender,
@@ -2330,6 +2365,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       if (!attempt.exhausted) {
         await appendBoundActorIsolationAudit(
           attempt.result, actorRecord, deps.auditLog.append,
+          options.signal?.aborted === true,
         );
         return attempt.result;
       }
@@ -2801,6 +2837,27 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           type: 'dweb/base-host/room', roomId: 'peerd-agent', ...payload,
         });
       });
+    const lostMeshMutation = () => ({
+      ok: false, error: 'The mesh operation outcome could not be confirmed.',
+      performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    });
+    /** @param {any} result @param {Record<string,unknown>} fields */
+    const meshMutationResult = (result, fields) => {
+      const detail = result?.ok === true
+        || typeof result?.outcomeKnown === 'boolean'
+        || typeof result?.performed === 'boolean' ? result : lostMeshMutation();
+      return {
+        ok: detail?.ok === true,
+        ...(detail?.ok === true ? fields : { error: detail?.error }),
+        ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
+        ...(typeof detail?.outcomeKnown === 'boolean'
+          ? { outcomeKnown: detail.outcomeKnown } : {}),
+        ...(typeof detail?.outcomeKind === 'string'
+          ? { outcomeKind: detail.outcomeKind } : {}),
+        ...(typeof detail?.retryable === 'boolean' ? { retryable: detail.retryable } : {}),
+      };
+    };
     const meshDispatch = makeMeshDispatch({
       sendDm: async (to, envelope) => {
         const replyConversationId = envelope?.kind === 'reply'
@@ -2809,11 +2866,8 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           { op: 'dm', to, data: envelope },
           replyConversationId
             ? () => conversationRegistry.ownedBy(replyConversationId, to) : () => true,
-        ).catch(() => null);
-        return {
-          ok: result?.ok === true, id: result?.id,
-          error: result?.error,
-        };
+        ).catch(lostMeshMutation);
+        return meshMutationResult(result, { id: result?.id });
       },
       listPeers: async () => {
         await deps.ensureDwebFeature();
@@ -2829,8 +2883,8 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         return result?.ok ? result.card ?? null : null;
       },
       publishCard: async (card) => {
-        const result = await meshHostRoom({ op: 'card-set', card }).catch(() => null);
-        return { ok: result?.ok === true, did: result?.did, error: result?.error };
+        const result = await meshHostRoom({ op: 'card-set', card }).catch(lostMeshMutation);
+        return meshMutationResult(result, { did: result?.did });
       },
       conversations: conversationRegistry,
     });
@@ -2893,6 +2947,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           method: message.method, args: message.args,
         });
         const args = /** @type {Record<string,any>} */ (rawArgs);
+        let oneShotTarget = null;
         if (signs) {
           const target = op === 'publishCard' ? 'self:publishCard'
             : op === 'say'
@@ -2906,7 +2961,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
             if (consent.persist) {
               a2aApprovedDids.add(target);
               await deps.sessionCache.sessionSet('a2aApprovedDids', [...a2aApprovedDids]);
-            }
+            } else if (consent.ok) oneShotTarget = target;
             deps.auditLog.append({
               type: 'a2a_consent',
               details: { target, op, approved: consent.ok, standing: consent.persist },
@@ -2918,12 +2973,35 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         }
         if (signal?.aborted) return { ok: false, error: 'a2a: run aborted' };
         const result = await meshDispatch.dispatch(op, args, {
-          signs, allowed: (did) => a2aApprovedDids.has(did),
+          signs, allowed: (did) => a2aApprovedDids.has(did) || did === oneShotTarget,
           signal: signal ?? undefined,
         });
+        if (result?.ok !== true) {
+          return {
+            ok: false,
+            error: result?.error ?? 'The mesh operation failed.',
+            ...(typeof result?.performed === 'boolean'
+              ? { performed: result.performed } : {}),
+            ...(typeof result?.outcomeKnown === 'boolean'
+              ? { outcomeKnown: result.outcomeKnown } : {}),
+            ...(typeof result?.outcomeKind === 'string'
+              ? { outcomeKind: result.outcomeKind } : {}),
+            ...(typeof result?.retryable === 'boolean'
+              ? { retryable: result.retryable } : {}),
+          };
+        }
         return { ok: true, value: shapeMeshResult(message.method ?? '', result) };
       } catch (cause) {
-        return { ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause) };
+        const detail = /** @type {any} */ (cause);
+        return {
+          ok: false, error: detail?.message ?? String(cause),
+          ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
+          ...(typeof detail?.outcomeKnown === 'boolean'
+            ? { outcomeKnown: detail.outcomeKnown } : {}),
+          ...(typeof detail?.outcomeKind === 'string'
+            ? { outcomeKind: detail.outcomeKind } : {}),
+          ...(typeof detail?.retryable === 'boolean' ? { retryable: detail.retryable } : {}),
+        };
       }
     };
     const reconcileTrackers = async () => {
@@ -3337,35 +3415,6 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       debuggerNudgeShown = true;
     } catch { /* the next unavailable result can retry after a surface reconnects */ }
   };
-  const checkpointMgr = {
-    capture: async (/** @type {{scope:string,label?:string|null}} */ { scope, label }) => {
-      if (typeof scope !== 'string' || !scope.startsWith('app:')) return null;
-      const appId = scope.slice(4);
-      const result = await engine.appQuiescence.run(appId, () => engine.repositories.coordinate(
-        { kind: 'app', id: appId },
-        async () => {
-          const status = await engine.repositories.statusApp(appId);
-          const paths = status.changed.slice(0, 3)
-            .map((/** @type {{path:string}} */ change) => change.path);
-          const automatic = paths.length
-            ? `agent turn: update ${paths.join(', ')}${status.changed.length > paths.length ? ', …' : ''}`
-            : 'agent turn';
-          return engine.repositories.commitApp(appId, { message: label || automatic });
-        },
-      ));
-      return result?.oid ? { id: result.oid, scope } : null;
-    },
-    diffSince: async (/** @type {{scope?:string|null,ref?:string|null}} */ { scope, ref }) => {
-      if (typeof scope !== 'string' || !scope.startsWith('app:')) return { files: [] };
-      const appId = scope.slice(4);
-      const status = await engine.repositories.statusApp(appId);
-      const from = ref || status.oid;
-      if (!from) return { files: [] };
-      const result = await engine.repositories.diffApp(appId, { from });
-      return { files: result.files, ref: from };
-    },
-  };
-
   const makeDriver = (/** @type {Record<string,any>} */ assembly) => {
     const driver = makeTurnAuthorityDriver(assembly);
     live.runAgentTurn = driver.runAgentTurn;

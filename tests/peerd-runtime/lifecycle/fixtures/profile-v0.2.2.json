@@ -75,7 +75,7 @@
       "spawnedTrusted": true,
       "grantedTools": [
         "snapshot", "read_page", "read_state", "query_dom",
-        "click", "type", "navigate", "fetch_url"
+        "click", "type", "navigate", "page_keys", "fetch_url"
       ],
       "permissionMode": "act",
       "messagesV2": true,
@@ -91,8 +91,8 @@
       "parentSessionId": "0198a2b0-1000-7000-8000-00000000c001",
       "task": "extract every line item from the receipt PDF",
       "depth": 1,
-      "grantedTools": ["read_doc"],
-      "toolManifest": { "allow": ["read_doc"] },
+      "grantedTools": ["read_pdf", "read_doc"],
+      "toolManifest": { "allow": ["read_pdf", "read_doc"] },
       "messagesV2": true,
       "msgIndex": ["0198a2b0-3001-7000-8000-00000000d004"]
     }

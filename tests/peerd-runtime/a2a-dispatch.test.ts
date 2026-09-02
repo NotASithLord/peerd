@@ -104,6 +104,29 @@ describe('ask / reply correlation', () => {
     expect(d._pendingCount()).toBe(0);
   });
 
+  test('irreversible mesh failures preserve unknown host custody', async () => {
+    const unknown = {
+      ok: false, error: 'response lost', performed: true,
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    };
+    const d = harness({
+      sendDm: async () => unknown,
+      publishCard: async () => unknown,
+    });
+    for (const result of [
+      await d.dispatch('send', { did: DID, message: 'x' }, {
+        signs: true, allowed: () => true,
+      }),
+      await d.dispatch('ask', { did: DID, message: 'x' }, {
+        signs: true, allowed: () => true,
+      }),
+      await d.dispatch('publishCard', { card: { name: 'me' } }, { signs: true }),
+    ]) {
+      expect(result).toMatchObject(unknown);
+    }
+    expect(d._pendingCount()).toBe(0);
+  });
+
   test('Stop aborts a pending ask and retires its correlation immediately', async () => {
     const d = harness();
     const controller = new AbortController();
@@ -115,7 +138,30 @@ describe('ask / reply correlation', () => {
     await tick();
     expect(d._pendingCount()).toBe(1);
     controller.abort();
-    expect(await pending).toEqual({ ok: false, error: 'a2a: aborted while awaiting reply' });
+    expect(await pending).toEqual({
+      ok: false, error: 'a2a: aborted while awaiting reply',
+      performed: true, outcomeKnown: true,
+      outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(d._pendingCount()).toBe(0);
+  });
+
+  test('an abort immediately after ask transmission preserves the completed-send receipt', async () => {
+    const controller = new AbortController();
+    const d = harness({
+      sendDm: async () => {
+        controller.abort();
+        return { ok: true, id: 'sent-before-stop' };
+      },
+    });
+    expect(await d.dispatch(
+      'ask', { did: DID, message: 'long request' },
+      { signs: true, allowed: () => true, signal: controller.signal },
+    )).toEqual({
+      ok: false, error: 'a2a: aborted after send',
+      performed: true, outcomeKnown: true,
+      outcomeKind: 'effect-completed', retryable: false,
+    });
     expect(d._pendingCount()).toBe(0);
   });
 });

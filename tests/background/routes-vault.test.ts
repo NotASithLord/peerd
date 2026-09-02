@@ -1,9 +1,9 @@
 import { describe, test, expect } from 'bun:test';
 import {
   makeConfirmAnswerRoute,
-  makeLegacyVaultUnlockEffect,
   makeVaultRoutes,
 } from '../../extension/background/routes/vault.js';
+import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 
 // The vault routes moved out of the service worker verbatim. These pin the
 // part with real branching — the typed-error → stable-error-code mapping — and
@@ -114,6 +114,31 @@ describe('vault routes — success paths', () => {
     releaseLock();
     await expect(result).resolves.toEqual({ ok: true });
     expect(order).toEqual(['lock:start', 'lock:settled', 'host:retired']);
+  });
+
+  test('lock then unlock cannot revive an admitted dweb publication', async () => {
+    const fence = createDwebPublicationFence();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    let admitted!: () => boolean;
+    const publication = fence.run(async (current) => {
+      admitted = current;
+      enter();
+      await held;
+      return current();
+    });
+    await entered;
+    const { deps } = makeDeps();
+    deps.onLocked = async () => { fence.invalidate(); };
+    const vaultRoutes = makeVaultRoutes(deps);
+    expect(admitted()).toBe(true);
+    await vaultRoutes['vault/lock']();
+    await vaultRoutes['vault/unlock']({ passphrase: 'pw' });
+    expect(admitted()).toBe(false);
+    release();
+    expect(await publication).toBe(false);
   });
 
   test('lock: reconciles host, audit, and UI even when durable finality rejects', async () => {
@@ -279,53 +304,5 @@ describe('vault routes — payload validation', () => {
   test('setRecoveryPassphrase rejects short passphrase', async () => {
     const { r } = routes();
     expect(await r['vault/setRecoveryPassphrase']({ passphrase: 'short' })).toEqual({ ok: false, error: 'invalid-passphrase' });
-  });
-});
-
-// #60: on an interactive unlock, goal runs must resume BEFORE auto-resume —
-// resume() re-adds a paused run to the runner's map (goalActiveFor → true)
-// before maybeAutoResume checks its guard, so the guard bails for a goal-owned
-// session instead of re-driving its interrupted turn and spuriously halting it.
-// A late-resolving resumeGoalRuns distinguishes the fix (auto-resume waits for
-// resume to settle) from the old inverted order (auto-resume fired first).
-describe('vault unlock — goal resume ordering (#60)', () => {
-  const orderingDeps = (order: string[]) => ({
-    vault: { unlock: async () => {}, unlockWithPrf: async () => {} },
-    auditLog: { append: async () => {} },
-    onInitialized: async () => {},
-    onLocked: async () => {},
-    onUnlocked: () => {},
-    base64ToBytes: () => new Uint8Array([1]),
-    sessionCache: { sessionGet: async () => 'cur' },
-    resumeGoalRuns: async () => { await new Promise((r) => setTimeout(r, 30)); order.push('resume'); },
-    maybeAutoResumeAfterRecovery: () => { order.push('autoresume'); },
-    resumeSchedules: async () => {},
-    WrongPassphraseError, VaultNotInitializedError, RecoveryPassphraseNotSetError,
-    PrfNotEnrolledError, PrfUnlockFailedError, VaultLockedError,
-  });
-  const settle = async (order: string[]) => {
-    for (let i = 0; i < 60 && order.length < 2; i++) await new Promise((res) => setTimeout(res, 5));
-  };
-
-  test('vault/unlock awaits goal resume BEFORE auto-resume (passphrase)', async () => {
-    const order: string[] = [];
-    const deps = orderingDeps(order);
-    const r = makeVaultRoutes({
-      ...deps, onUnlocked: makeLegacyVaultUnlockEffect(deps),
-    } as any);
-    expect(await r['vault/unlock']({ passphrase: 'pw' })).toEqual({ ok: true });
-    await settle(order);
-    expect(order).toEqual(['resume', 'autoresume']);
-  });
-
-  test('vault/unlockPrf awaits goal resume BEFORE auto-resume (Touch ID / PRF)', async () => {
-    const order: string[] = [];
-    const deps = orderingDeps(order);
-    const r = makeVaultRoutes({
-      ...deps, onUnlocked: makeLegacyVaultUnlockEffect(deps),
-    } as any);
-    expect(await r['vault/unlockPrf']({ prfOutput: 'AAAA' })).toEqual({ ok: true });
-    await settle(order);
-    expect(order).toEqual(['resume', 'autoresume']);
   });
 });

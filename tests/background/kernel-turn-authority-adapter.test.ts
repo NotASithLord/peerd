@@ -15,6 +15,7 @@ import { sha256Hex } from '../../extension/shared/util.js';
 import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
 import { composeTurn } from '../../extension/offscreen/controller-compose-runtime.js';
 import { browserProbeResult, TEST_DOCUMENT_ID } from '../helpers/browser-scripting.ts';
+import { ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
 
 const event = () => {
   const listeners = new Set<(...args: any[]) => void>();
@@ -111,6 +112,12 @@ const harness = async (
     postChatNote?: (...args: any[]) => void,
     pushState?: () => Promise<any>,
     confirm?: (prompt: any, signal?: AbortSignal) => Promise<any>,
+    dweb?: boolean,
+    runtimeSendMessage?: (message: any) => Promise<any>,
+    sessionCache?: {
+      sessionGet: (key: string) => Promise<any>,
+      sessionSet: (key: string, value: any) => Promise<void>,
+    },
   } = {},
 ) => {
   const toolProjections: any[] = [];
@@ -191,7 +198,7 @@ const harness = async (
     runtime: {
       getURL: (path: string) => `chrome-extension://test/${path}`,
       getManifest: () => ({ manifest_version: 3 }),
-      sendMessage: async () => ({ ok: true }),
+      sendMessage: options.runtimeSendMessage ?? (async () => ({ ok: true })),
     },
     tabs: {
       ...tabEvents,
@@ -275,9 +282,11 @@ const harness = async (
     providerName: 'anthropic', providerModel: 'claude-sonnet-4-6',
     permissionMode: 'act', confirmActions: false, reasoningEnabled: false,
     reasoningEffort: 'low', schemaValidatedReplies: false,
-    spendLimitUsd: 20, dwebEnabled: false, dwebAgentEnabled: false,
+    spendLimitUsd: 20, dwebEnabled: options.dweb === true,
+    dwebAgentEnabled: options.dweb === true,
     webActorActionSurface: 'tools', watchAgentTab: false, frontDoorView: 'panel',
   };
+  const scriptRuns = createScriptRunRegistry();
   const dependencies: any = {
     engine, browser, idb,
     vault: {
@@ -317,16 +326,18 @@ const harness = async (
       get: async (key: string) => kvState.get(key) ?? null,
       set: async (key: string, value: any) => { kvState.set(key, structuredClone(value)); },
     },
-    sessionCache: {
+    sessionCache: options.sessionCache ?? {
       sessionGet: async (key: string) => cache.get(key) ?? null,
       sessionSet: async (key: string, value: any) => { cache.set(key, structuredClone(value)); },
     },
     canWrite: () => {}, ready: Promise.resolve(),
     contextSnapshots: createContextSnapshots(),
-    scriptRuns: createScriptRunRegistry(),
+    scriptRuns,
     postChatNote: options.postChatNote ?? (() => {}),
     pushState: options.pushState ?? (async () => {}),
-    dwebEnabled: false, firefox: options.firefox === true,
+    dwebEnabled: options.dweb === true,
+    ensureDwebFeature: async () => {},
+    firefox: options.firefox === true,
     firefoxActorLifetime: options.firefoxActorLifetime,
     loadDirectActorHost: options.loadDirectActorHost ?? (options.firefox
       ? async () => ({
@@ -403,6 +414,7 @@ const harness = async (
     sourceProjections,
     toolProjections,
     audits,
+    scriptRuns,
     appNetworkAdmissions,
     actorConfig: () => actorConfig,
   };
@@ -554,6 +566,69 @@ describe('kernel turn authority adapter', () => {
         parentSessionId: 'chat-real', actorSessionId: 'actor-real', depth: 2,
       },
     }]);
+  });
+
+  test('does not audit a known pre-start actor cancellation as an isolation failure', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+      true,
+    );
+    expect(audits).toEqual([]);
+  });
+
+  test('does not infer a known pre-start cancellation without explicit outcome proof', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([expect.objectContaining({
+      type: 'actor_isolation_failure',
+      details: expect.objectContaining({ performed: false }),
+    })]);
+    expect(audits[0].details).not.toHaveProperty('outcomeKnown');
+  });
+
+  test('does not trust a cancellation-shaped transport result without a local abort', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([expect.objectContaining({
+      type: 'actor_isolation_failure',
+      details: expect.objectContaining({ performed: false, outcomeKnown: true }),
+    })]);
+  });
+
+  test('does not hide a performed actor effect behind a contradictory pre-start cancellation', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true, performed: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([expect.objectContaining({
+      type: 'actor_isolation_failure',
+      details: expect.objectContaining({ performed: true, outcomeKnown: true }),
+    })]);
   });
 
   test('takes every isolation-proof identity field from the persisted actor record', async () => {
@@ -1024,6 +1099,154 @@ describe('kernel turn authority adapter', () => {
     expect(h.broadcasts.some((message) => message.type === 'turn/actor-done')).toBe(true);
   });
 
+  test('projects a known pre-start bound actor abort as cancelled with no effect', async () => {
+    const cancelled = {
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    };
+    const h = await harness(async (job, options) => {
+      if (job.probeOnly) return { ok: true };
+      if (options.signal.aborted) return cancelled;
+      return new Promise((resolve) => options.signal.addEventListener(
+        'abort', () => resolve(cancelled), { once: true },
+      ));
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const pendingReply = ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-pre-start-stop', awaitReply: true,
+    });
+    for (let attempt = 0; !h.broadcasts.some((message) =>
+      message.type === 'turn/actor-start') && attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const actorStart = h.broadcasts.find((message) => message.type === 'turn/actor-start');
+    expect(h.shared.turnSlots.stop(actorStart.sessionId)).toBe(true);
+    const reply = await pendingReply;
+
+    expect(reply).toMatchObject({
+      ok: false, actorAborted: true, actorOutcomeKnown: true, actorPerformed: false,
+    });
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-start', parentToolUseId: 'tool-pre-start-stop',
+    }));
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-done', parentToolUseId: 'tool-pre-start-stop',
+      ok: false, aborted: true,
+    }));
+    expect(h.broadcasts.some((message) =>
+      message.type === 'turn/actor-error'
+        && message.parentToolUseId === 'tool-pre-start-stop')).toBe(false);
+    expect(h.audits.some((entry) => entry.type === 'actor_isolation_failure')).toBe(false);
+  });
+
+  test('preserves a host-known empty actor ledger when Stop lands after inference starts', async () => {
+    const cancelled = {
+      ok: false, started: true, error: 'aborted', aborted: true,
+      performed: false, outcomeKnown: true, newMessages: [],
+    };
+    const h = await harness(async (job, options) => {
+      if (job.probeOnly) return { ok: true };
+      if (options.signal.aborted) return cancelled;
+      return new Promise((resolve) => options.signal.addEventListener(
+        'abort', () => resolve(cancelled), { once: true },
+      ));
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const pendingReply = ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-inference-stop', awaitReply: true,
+    });
+    for (let attempt = 0; !h.broadcasts.some((message) =>
+      message.type === 'turn/actor-start') && attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const actorStart = h.broadcasts.find((message) => message.type === 'turn/actor-start');
+    expect(h.shared.turnSlots.stop(actorStart.sessionId)).toBe(true);
+
+    expect(await pendingReply).toMatchObject({
+      ok: false, actorTerminal: true, actorAborted: true,
+      actorOutcomeKnown: true, actorPerformed: false,
+    });
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-done', parentToolUseId: 'tool-inference-stop',
+      ok: false, aborted: true,
+    }));
+  });
+
+  test('a cancellation-shaped actor reply cannot replace the local Stop signal', async () => {
+    const h = await harness(async (job) => job.probeOnly ? { ok: true } : ({
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    }));
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    await ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-forged-stop', awaitReply: true,
+    });
+    expect(h.audits).toContainEqual(expect.objectContaining({
+      type: 'actor_isolation_failure',
+    }));
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-error', parentToolUseId: 'tool-forged-stop',
+    }));
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-done', parentToolUseId: 'tool-forged-stop', aborted: false,
+    }));
+  });
+
+  test('serializes Stop cleanup behind a stalled durable started write', async () => {
+    const stored = new Map<string, any>([['currentSessionId', 'session-1']]);
+    let actorMailboxWrites = 0;
+    let releaseStartedWrite!: () => void;
+    let startedWriteEntered!: () => void;
+    let removePersisted!: () => void;
+    const startedWriteGate = new Promise<void>((resolve) => { releaseStartedWrite = resolve; });
+    const startedWrite = new Promise<void>((resolve) => { startedWriteEntered = resolve; });
+    const removed = new Promise<void>((resolve) => { removePersisted = resolve; });
+    let actorRuns = 0;
+    const h = await harness(async () => {
+      actorRuns += 1;
+      return { ok: true, started: true };
+    }, {
+      sessionCache: {
+        sessionGet: async (key) => structuredClone(stored.get(key) ?? null),
+        sessionSet: async (key, value) => {
+          if (key === 'actorMailbox' && ++actorMailboxWrites === 2) {
+            startedWriteEntered();
+            await startedWriteGate;
+          }
+          stored.set(key, structuredClone(value));
+          if (key === 'actorMailbox' && actorMailboxWrites === 3) removePersisted();
+        },
+      },
+    });
+    const controller = new AbortController();
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const pending = ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-mailbox-stop', awaitReply: true, awaitSignal: controller.signal,
+    });
+    await startedWrite;
+    controller.abort(ABORT_STOP);
+    h.factories.makeRouteDeps(h.shared).turn.actorMessaging.stopActorsFor(h.root.sessionId);
+
+    expect(await pending).toMatchObject({
+      ok: false, code: 'actor_message_stopped', performed: false, outcomeKnown: true,
+      actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+      actorAborted: true, outcomeKind: 'pre-effect-failure',
+    });
+    expect(actorMailboxWrites).toBe(2);
+    expect(Object.values(stored.get('actorMailbox'))).toEqual([
+      expect.objectContaining({ state: 'queued' }),
+    ]);
+    releaseStartedWrite();
+    await removed;
+    expect(stored.get('actorMailbox')).toEqual({});
+    expect(actorMailboxWrites).toBe(3);
+    expect(actorRuns).toBe(0);
+  });
+
   test('records an armed tab-Web actor settlement through the production owner', async () => {
     const calls: any[] = [];
     const contributor = {
@@ -1322,6 +1545,65 @@ describe('kernel turn authority adapter', () => {
 
     expect(result).toMatchObject({ ok: true, capability: { status: 'available' } });
     expect(pushStarted).toBe(false);
+  });
+
+  test('a lost a2a mutation response remains unknown through the SW relay', async () => {
+    const h = await harness(undefined, {
+      dweb: true,
+      runtimeSendMessage: async (message) => {
+        if (message?.type === 'dweb/base-host/room' && message?.op === 'dm') {
+          throw new Error('response port closed after commit');
+        }
+        return { ok: true };
+      },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['a2a_run'] }, depth: 1,
+      actorType: 'dweb', instanceId: 'dweb',
+    });
+    const runId = h.scriptRuns.mintRunId(actor.sessionId);
+    h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+    const result = await h.runtime.relays.relayRoutes['a2a/call']({
+      method: 'cast', args: { did: 'did:key:zPeer', message: 'hello' },
+      ownerSessionId: actor.sessionId, runId,
+    }, {});
+    expect(result).toMatchObject({
+      ok: false, performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    });
+  });
+
+  test('a failed known-performed a2a result keeps its exact receipt through the SW relay', async () => {
+    const h = await harness(undefined, {
+      dweb: true,
+      runtimeSendMessage: async (message) => message?.type === 'dweb/base-host/room'
+        && message?.op === 'dm'
+        ? {
+            ok: false, error: 'peer refused after delivery', performed: true,
+            outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+          }
+        : { ok: true },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['a2a_run'] }, depth: 1,
+      actorType: 'dweb', instanceId: 'dweb',
+    });
+    const runId = h.scriptRuns.mintRunId(actor.sessionId);
+    h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+    const result = await h.runtime.relays.relayRoutes['a2a/call']({
+      method: 'cast', args: { did: 'did:key:zPeer', message: 'hello' },
+      ownerSessionId: actor.sessionId, runId,
+    }, {});
+    expect(result).toEqual({
+      ok: false, error: 'peer refused after delivery', performed: true,
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
   });
 
   test('rehydrates scheduler custody, repairs provider selection, and applies live settings and capture transitions', async () => {

@@ -63,10 +63,6 @@ const until = async (predicate: () => boolean, timeoutMs = 1000) => {
   }
 };
 
-test('review remains an internal tool without an external route', () => {
-  const { deps } = baseDeps();
-});
-
 test('session/debugBundle is observational', async () => {
   let writes = 0;
   const { deps } = baseDeps({

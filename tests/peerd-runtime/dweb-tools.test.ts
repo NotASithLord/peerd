@@ -97,6 +97,25 @@ describe('dweb tools — share', () => {
     });
     expect(JSON.parse((result as any).content).recovery).toContain('next share or delete');
   });
+
+  test('reports local publication without peer forwarding as an honest partial failure', async () => {
+    const { ctx } = mkCtx({
+      dweb: {
+        share: async () => ({
+          ok: false, error: 'share-propagation-failed', performed: true,
+          outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+        }),
+      },
+    });
+    const result = await execute(dwebShareTool, { appId: 'a1' }, ctx);
+    expect(result).toMatchObject({
+      ok: false, error: 'share-propagation-failed',
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+      structured: { localPublished: true, propagated: false },
+    });
+    expect((result as any).content).toContain('published and saved locally');
+    expect((result as any).content).toContain('not forwarded to peers');
+  });
 });
 
 describe('dweb tools — discover', () => {

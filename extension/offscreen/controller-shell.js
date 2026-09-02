@@ -242,7 +242,6 @@ export const makeSealedControllerLoader = ({
  *   signal: AbortSignal, authority?: unknown, deadlineAt?: number,
  *   kernelCall?: (operation: string, payload: unknown) => Promise<any>,
  * }) => Promise<any> }>) & { close?: () => void }} deps.loadController
- * @param {number} [deps.maxPayloadBytes]
  * @param {number} [deps.maxPending]
  * @param {number} [deps.maxPendingBytes]
  * @param {number} [deps.maxConcurrent]
@@ -262,7 +261,6 @@ export const bindControllerChannel = ({
   offeredCaps,
   supportedCaps,
   loadController,
-  maxPayloadBytes = 256 * 1024,
   maxPending = 32,
   maxPendingBytes = 4 * 1024 * 1024,
   maxConcurrent = 4,

@@ -28,6 +28,19 @@ import { toMarkdown } from '../../doc/markdown.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
 import { MAX_SPILL_TEXT_CHARS } from '../result-store-policy.js';
 
+// Keep the initial read below the loop's ordinary 8k persistence backstop,
+// including the provenance fence and paging footer. Anything longer is
+// retained behind read_result instead of being silently re-cut by the loop.
+export const READ_DOC_PRESENTATION_MAX_CHARS = 6_000;
+
+/** @param {unknown} value @param {number} fallback */
+const presentationChars = (value, fallback) => Math.min(
+  Number.isFinite(value) && /** @type {number} */ (value) > 0
+    ? Math.floor(/** @type {number} */ (value))
+    : fallback,
+  READ_DOC_PRESENTATION_MAX_CHARS,
+);
+
 const boundedPdfPages = (/** @type {any[]} */ pages) => {
   const bounded = [];
   let remaining = MAX_SPILL_TEXT_CHARS;
@@ -47,6 +60,15 @@ const boundedPdfText = (/** @type {string} */ text, capped = false) => {
   if (!capped && text.length <= MAX_SPILL_TEXT_CHARS) return text;
   const note = '\n[note] PDF extraction stopped at its local safety cap; later PDF text was not stored.';
   return `${text.slice(0, Math.max(0, MAX_SPILL_TEXT_CHARS - note.length))}${note}`;
+};
+
+const boundedDocText = (/** @type {string} */ text) => {
+  if (text.length <= MAX_SPILL_TEXT_CHARS) return { text, capped: false };
+  const note = '\n\n_[note: document conversion stopped at its local safety cap; later text was not stored.]_';
+  return {
+    text: `${text.slice(0, Math.max(0, MAX_SPILL_TEXT_CHARS - note.length))}${note}`,
+    capped: true,
+  };
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
@@ -89,11 +111,7 @@ export const readDocTool = composeTool("read_doc", {
     const result = extracted.result;
     if (typeof target !== 'string' || !target) return { ok: false, error: 'no_document_url' };
     if (result?.pdf) {
-      const maxChars = Math.min(
-        Number.isFinite(args?.maxChars) && args.maxChars > 0
-          ? Math.floor(args.maxChars) : DEFAULT_PDF_MAX_CHARS,
-        MAX_SPILL_TEXT_CHARS,
-      );
+      const maxChars = presentationChars(args?.maxChars, DEFAULT_PDF_MAX_CHARS);
       const pdf = result.pdf;
       const source = boundedPdfPages(pdf.pages);
       const textCapped = pdf.textCapped === true || source.capped;
@@ -133,17 +151,17 @@ export const readDocTool = composeTool("read_doc", {
     }
     if (!result?.doc) return { ok: false, error: 'doc_read_failed', content: 'empty conversion result' };
 
-    const maxChars = Number.isFinite(args?.maxChars) && args.maxChars > 0
-      ? Math.floor(args.maxChars) : DEFAULT_DOC_MAX_CHARS;
+    const maxChars = presentationChars(args?.maxChars, DEFAULT_DOC_MAX_CHARS);
 
     // SPILL-AND-PAGE, exactly as fetch_url does it. A document is the case
     // where a silent truncation hurts most — the answer is as likely to be in
     // an appendix as in the intro, and unlike a web page there is no second
-    // way to reach the tail. So the FULL markdown is stored locally and the
-    // model gets a window plus the read_result call that pages the rest;
+    // way to reach the tail. So markdown up to the shared local safety cap is
+    // stored and the model gets a window plus read_result to page the retained text;
     // with a query it gets the passages that MATCH instead of a blind
     // head+tail. Same idiom, same pager, same footer the actor already knows.
-    const markdown = toMarkdown(result.doc);
+    const source = boundedDocText(toMarkdown(result.doc));
+    const markdown = source.text;
     const head = formatDocHead({ doc: result.doc, source: target });
     if (!authority.spillResult) {
       // No spill capability → the plain capped render (which announces its cut).
@@ -176,8 +194,14 @@ export const readDocTool = composeTool("read_doc", {
         });
         if (cacheKey) {
           footer = ex
-            ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
-            : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+            ? excerptFooter({
+              key: cacheKey, total: ex.total, passagesShown: ex.passagesShown,
+              passagesTotal: ex.passagesTotal, query, retainedPrefix: source.capped,
+            })
+            : pagingFooter({
+              key: cacheKey, total: win.total, headChars: win.headChars,
+              tailChars: win.tailChars, retainedPrefix: source.capped,
+            });
         }
       } catch { /* spill failed — the window still ships, with its elision markers */ }
     }

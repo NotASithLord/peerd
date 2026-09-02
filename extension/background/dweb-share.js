@@ -160,28 +160,47 @@ export const makeDwebShare = ({
     const previousHash = record.dweb?.hash ?? null;
     const previousShareHash = record.dweb?.local === true ? previousHash : null;
     const previousSeedHash = record.dweb && record.dweb.local !== true ? previousHash : null;
-    const reply = await sendMessage({
-      type: 'dweb/base-host/share-app',
-      appId,
-      name: record.name,
-      entry: record.entryFile,
-      fileKinds: record.fileKinds ?? {},
-      slug: useSlug,
-      previousHash: previousShareHash,
-      ...(release ? { release, releaseSnapshot } : {}),
-    });
-    if (!reply?.ok) return reply;
-    const rollbackShare = async () => {
+    // why: the SW must know the rollback handle before the offscreen effect
+    // begins. Runtime messaging may lose a success reply after publication.
+    const transactionId = crypto.randomUUID();
+    const rollbackShare = async (failedSeq = undefined) => {
       let rollback = null;
       for (let attempt = 0; attempt < 2 && !rollback?.ok; attempt += 1) {
         rollback = await sendMessage({
           type: 'dweb/base-host/rollback-share',
-          transactionId: reply.transactionId,
-          failedSeq: reply.seq,
+          transactionId,
+          ...(Number.isInteger(failedSeq) ? { failedSeq } : {}),
         }).catch(() => null);
       }
       return rollback;
     };
+    let reply;
+    try {
+      reply = await sendMessage({
+        type: 'dweb/base-host/share-app', transactionId,
+        appId,
+        name: record.name,
+        entry: record.entryFile,
+        fileKinds: record.fileKinds ?? {},
+        slug: useSlug,
+        previousHash: previousShareHash,
+        ...(release ? { release, releaseSnapshot } : {}),
+      });
+    } catch {
+      const rollback = await rollbackShare();
+      const rollbackComplete = rollback?.ok
+        && (!previousShareHash || rollback.restored === true);
+      return rollbackComplete ? {
+        ok: false, error: 'share-response-lost-rolled-back',
+        performed: true, outcomeKnown: true,
+        outcomeKind: 'effect-completed', retryable: false,
+      } : {
+        ok: false, error: 'share-response-lost',
+        performed: true, outcomeKnown: false,
+        outcomeKind: 'transport-lost', retryable: false,
+      };
+    }
+    if (!reply?.ok) return reply;
     const persistUncertainHash = async () => {
       if (typeof reply.hash !== 'string') return false;
       const recoveryHashes = [...new Set([
@@ -197,8 +216,23 @@ export const makeDwebShare = ({
         dweb: { ...(record.dweb ?? {}), pending_unserve_hashes: recoveryHashes },
       }).catch(() => null));
     };
+    if (reply.transactionId !== transactionId) {
+      // why: never leave the transaction named by the request live merely
+      // because the reply named something else. Only the SW-minted id is ours
+      // to compensate; the returned id may belong to an unrelated transaction.
+      const rollback = await rollbackShare(reply.seq);
+      const rollbackComplete = rollback?.ok
+        && (!previousShareHash || rollback.restored === true);
+      if (!rollbackComplete) await persistUncertainHash();
+      return {
+        ok: false, error: 'share-transaction-mismatch',
+        performed: true, outcomeKnown: rollbackComplete,
+        outcomeKind: rollbackComplete ? 'effect-completed' : 'host-lost',
+        retryable: false,
+      };
+    }
     if (!isCurrent() || !active()) {
-      const rollback = await rollbackShare();
+      const rollback = await rollbackShare(reply.seq);
       if (!rollback?.ok) await persistUncertainHash();
       return rollback?.ok
         ? { ok: false, error: 'dweb-disabled' }
@@ -247,7 +281,7 @@ export const makeDwebShare = ({
     } catch (cause) {
       // Retry with the same host transaction. Its state remains pending until
       // metadata restoration and byte revocation both finish.
-      const rollback = await rollbackShare();
+      const rollback = await rollbackShare(reply.seq);
       const rollbackComplete = rollback?.ok && (!previousShareHash || rollback.restored === true);
       if (!rollbackComplete) await persistUncertainHash();
       return {
@@ -256,13 +290,34 @@ export const makeDwebShare = ({
         cause: /** @type {{ message?: string }} */ (cause)?.message ?? String(cause),
       };
     }
-    if (typeof reply.transactionId === 'string') {
-      let committed = null;
-      for (let attempt = 0; attempt < 2 && !committed?.ok; attempt += 1) {
+    let committed = null;
+    let commitOutcomeKind = null;
+    for (let attempt = 0;
+      attempt < 2 && !(committed?.ok === true && committed?.committed === true);
+      attempt += 1) {
+      try {
         committed = await sendMessage({
-          type: 'dweb/base-host/commit-share', transactionId: reply.transactionId,
-        }).catch(() => null);
+          type: 'dweb/base-host/commit-share', transactionId,
+        });
+        if (committed?.outcomeKnown === false
+            && ['host-lost', 'transport-lost'].includes(committed?.outcomeKind)) {
+          commitOutcomeKind ??= committed.outcomeKind;
+        }
+      } catch {
+        // why: a later explicit refusal cannot make an earlier lost terminal
+        // reply known. A successful retry is the only proof the rollback handle
+        // is no longer pending.
+        commitOutcomeKind = 'transport-lost';
+        committed = null;
       }
+    }
+    if (!(committed?.ok === true && committed?.committed === true)) {
+      return {
+        ok: false, error: 'share-commit-finality-failed',
+        cause: committed?.error ?? 'commit response lost',
+        performed: true, outcomeKnown: false,
+        outcomeKind: commitOutcomeKind ?? 'host-lost', retryable: false,
+      };
     }
     /** @param {string[]} hashes @param {'share' | 'seed'} slot */
     const cleanSlot = async (hashes, slot) => {
@@ -292,6 +347,17 @@ export const makeDwebShare = ({
         remainingSeed.splice(0, remainingSeed.length, ...pendingSeedHashes);
       }
     }
+    if (reply.propagated === false) return {
+      ...reply,
+      ok: false,
+      error: 'share-propagation-failed',
+      warning: 'published-locally-but-not-forwarded',
+      performed: true,
+      outcomeKnown: true,
+      outcomeKind: 'effect-completed',
+      retryable: false,
+      ...(remaining.length || remainingSeed.length ? { cleanupPending: true } : {}),
+    };
     return remaining.length || remainingSeed.length
       ? { ...reply, warning: 'previous-version-cleanup-pending', cleanupPending: true }
       : reply;
@@ -302,7 +368,8 @@ export const makeDwebShare = ({
           || result.error === 'share-rollback-failed';
         return {
           ...result, performed: true, outcomeKnown: !unknown,
-          outcomeKind: unknown ? 'host-lost' : 'effect-completed', retryable: false,
+          outcomeKind: unknown ? result.outcomeKind ?? 'host-lost' : 'effect-completed',
+          retryable: false,
         };
       }
       return result;

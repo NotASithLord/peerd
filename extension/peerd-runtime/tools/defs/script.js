@@ -273,7 +273,7 @@ export const formatRunResult = (code, r, valueSpill, serializedValue) => {
   if (valueSpill) {
     lines.push([
       `[paging] The [VALUE] (${valueSpill.total} chars) is stored locally.`,
-      `Read more with read_result { "key": "${valueSpill.key}", "offset": <char offset>, "limit": <chars, max ${RESULT_PAGE_CHARS}> }; but prefer re-running with a more compact return value.`,
+      `Read more with read_result { "key": "${valueSpill.key}", "offset": <char offset>, "limit": <chars, max ${RESULT_PAGE_CHARS}> }. On future runs, return a compact value when possible.`,
     ].join('\n'));
   }
   return lines.join('\n');

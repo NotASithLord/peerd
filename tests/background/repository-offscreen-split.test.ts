@@ -9,33 +9,98 @@ import {
   makeRepositoryKernelFetch,
 } from '../../extension/background/repository-client.js';
 import { createLazyLocalRepositoryClient } from '../../extension/background/repository-local-client.js';
+import { CONTROLLER_BUILD_ENTRIES } from '../../packaging/controller-build-identity.ts';
+import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
   REPOSITORY_CHANNEL_CANCEL,
+  REPOSITORY_CHANNEL_CANCELLED,
   REPOSITORY_CHANNEL_RESULT,
   REPOSITORY_KERNEL_FETCH,
   REPOSITORY_KERNEL_FETCH_RESULT,
+  REPOSITORY_WORKER_BOOTSTRAP,
+  REPOSITORY_WORKER_SETTLED,
 } from '../../extension/shared/repository-channel.js';
 import {
+  FEATURE_LEASE_CLIENT_PROBE,
+  FEATURE_LEASE_CLIENT_PROOF,
+  FEATURE_LEASE_HOST_PROTOCOL,
   REPOSITORY_CHANNEL_PROTOCOL,
   parseRepositoryChannelOffer,
   repositoryMethodIsMutating,
 } from '../../extension/shared/feature-lease-protocol.js';
-import { admitRepositoryChannelOffer } from '../../extension/offscreen/supervisor-channels.js';
-import { acceptRepositoryOffer } from '../../extension/offscreen/repository-host.js';
+import {
+  admitRepositoryCancellation,
+  admitRepositoryChannelOffer,
+  createServiceWorkerChannels,
+} from '../../extension/offscreen/supervisor-channels.js';
+import { backgroundScriptUrl } from '../../extension/offscreen/sender-checks.js';
+import {
+  abortRepositoryHostCalls,
+  acceptRepositoryOffer as acceptRepositoryWorkerHost,
+  cancelRepositoryCall,
+} from '../../extension/offscreen/repository-host.js';
+import { acceptRepositoryOffer } from '../../extension/offscreen/repository-worker.js';
 import { createRepositoryAppFileService } from '../../extension/offscreen/repository-app-files.js';
 
 const ref = { kind: 'app', id: 'app-one' };
 const testLease = {
+  schema: 1,
   scope: 'controller', leaseId: 'repository-test-lease', generation: 1,
-  buildId: `0.7.0:${'0'.repeat(64)}`, kernelEpoch: 'repository-test-kernel',
+  buildId: `0.7.0:${'0'.repeat(64)}`, bootId: 'repository-test-boot',
+  kernelEpoch: 'repository-test-kernel',
   hostEpoch: 'repository-test-host',
 };
+const proveFeatureHost = (message: any, port: MessagePort, owned = true) => {
+  if (message?.type === REPOSITORY_CHANNEL_CANCEL) {
+    port.postMessage({
+      type: REPOSITORY_CHANNEL_CANCELLED,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId: message.channelId,
+      leaseId: message.lease?.leaseId,
+      hostEpoch: message.lease?.hostEpoch,
+    });
+    port.close();
+    return true;
+  }
+  if (message?.type !== FEATURE_LEASE_CLIENT_PROBE) return false;
+  port.postMessage({
+    type: FEATURE_LEASE_CLIENT_PROOF,
+    protocol: FEATURE_LEASE_HOST_PROTOCOL,
+    probeId: message.probeId,
+    hostEpoch: owned ? message.lease?.hostEpoch : null,
+    owned,
+  });
+  port.close();
+  return true;
+};
+
+class FakeRepositoryWorker {
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessageerror: (() => void) | null = null;
+  messages: any[] = [];
+  transfers: Transferable[][] = [];
+  terminated = 0;
+  postMessage(message: any, transfer: Transferable[] = []) {
+    this.messages.push(message);
+    this.transfers.push(transfer);
+  }
+  terminate() { this.terminated += 1; }
+  settle(channelId: string) {
+    this.onmessage?.({ data: {
+      type: REPOSITORY_WORKER_SETTLED,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId,
+    } } as MessageEvent);
+  }
+}
 const makePrivateClient = (
   handle: (message: any) => any,
   options: Record<string, unknown> = {},
 ) => {
   const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
+  const { onSupervisorCancel, ...clientOptions } = options;
   return createOffscreenRepositoryClient({
     withHost: (operation: any) => operation(testLease),
     offscreenUrl,
@@ -44,6 +109,12 @@ const makePrivateClient = (
       url: offscreenUrl,
       postMessage(offer: any, ports: MessagePort[]) {
         const port = ports[0];
+        if (offer?.type === REPOSITORY_CHANNEL_CANCEL) {
+          if (typeof onSupervisorCancel === 'function') onSupervisorCancel(offer);
+          proveFeatureHost(offer, port);
+          return;
+        }
+        if (proveFeatureHost(offer, port)) return;
         port.onmessage = (event) => {
           if (event.data?.type === REPOSITORY_CHANNEL_CANCEL) {
             void handle({ type: 'repository/host-cancel', callId: offer.channelId });
@@ -73,7 +144,7 @@ const makePrivateClient = (
         }));
       },
     }],
-    ...options,
+    ...clientOptions,
   });
 };
 
@@ -160,12 +231,80 @@ describe('operation-lazy offscreen repository split', () => {
     });
   });
 
+  test('an authoritative result waits for exact targeted termination without retiring its host', async () => {
+    const cancellations: any[] = [];
+    const retirements: string[] = [];
+    const client = makePrivateClient(async (message: any) => message.type === 'repository/host-call'
+      ? { ok: true, result: { dirty: false } } : undefined, {
+      onSupervisorCancel: (message: any) => { cancellations.push(message); },
+      retireHost: async (reason: string) => { retirements.push(reason); },
+      newId: () => 'repository-success-termination-ack',
+    });
+    await expect(client.status(ref)).resolves.toEqual({ dirty: false });
+    expect(cancellations).toEqual([expect.objectContaining({
+      type: REPOSITORY_CHANNEL_CANCEL,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId: 'repository-success-termination-ack',
+      lease: testLease,
+    })]);
+    expect(retirements).toEqual([]);
+  });
+
+  test('a forged termination acknowledgement retires the shared host before lane release', async () => {
+    const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
+    const retirements: { reason: string; hostEpoch?: string }[] = [];
+    const client = createOffscreenRepositoryClient({
+      withHost: (operation: any) => operation(testLease),
+      offscreenUrl,
+      kernelFetch: async () => ({ ok: true }),
+      newId: () => 'repository-forged-termination-ack',
+      cancelAckTimeoutMs: 20,
+      retireHost: async (reason: string, hostEpoch?: string) => {
+        retirements.push({ reason, hostEpoch });
+      },
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage(message: any, ports: MessagePort[]) {
+          if (message.type === FEATURE_LEASE_CLIENT_PROBE) {
+            proveFeatureHost(message, ports[0]);
+            return;
+          }
+          if (message.type === REPOSITORY_CHANNEL_CANCEL) {
+            ports[0].postMessage({
+              type: REPOSITORY_CHANNEL_CANCELLED,
+              protocol: REPOSITORY_CHANNEL_PROTOCOL,
+              channelId: `${message.channelId}-forged`,
+              leaseId: message.lease.leaseId,
+              hostEpoch: message.lease.hostEpoch,
+            });
+            return;
+          }
+          ports[0].postMessage({
+            type: REPOSITORY_CHANNEL_RESULT,
+            protocol: REPOSITORY_CHANNEL_PROTOCOL,
+            channelId: message.channelId,
+            ok: true,
+            result: encodeRepositoryRpcValue({ dirty: false }),
+            outcomeKnown: true,
+          });
+        },
+      }],
+    });
+    await expect(client.status(ref)).resolves.toEqual({ dirty: false });
+    expect(retirements).toEqual([{
+      reason: 'repository-worker-termination-unconfirmed',
+      hostEpoch: testLease.hostEpoch,
+    }]);
+  });
+
   test('binds Git and reverse credentialed fetch to one exact lease-owned private port', async () => {
     const offers: any[] = [];
     const fetches: any[] = [];
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-controller-private', generation: 1,
-      buildId: `0.7.0:${'a'.repeat(64)}`, kernelEpoch: 'kernel-private-epoch',
+      buildId: `0.7.0:${'a'.repeat(64)}`, bootId: 'boot-controller-private',
+      kernelEpoch: 'kernel-private-epoch',
       hostEpoch: 'host-private-epoch',
     };
     const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
@@ -181,9 +320,13 @@ describe('operation-lazy offscreen repository split', () => {
       listWindowClients: async () => [{
         url: offscreenUrl,
         postMessage(offer: any, ports: MessagePort[]) {
+          if (proveFeatureHost(offer, ports[0])) return;
           offers.push(offer);
           const admitted = parseRepositoryChannelOffer(offer);
           expect(admitted?.lease).toEqual(lease);
+          expect((decodeRepositoryRpcValue(admitted?.args) as any)?.[1]).toMatchObject({
+            expectedRemote: 'https://example.com/owner/a.git',
+          });
           const port = ports[0];
           port.onmessage = (event) => {
             const reply = event.data;
@@ -212,16 +355,107 @@ describe('operation-lazy offscreen repository split', () => {
         },
       }],
     });
-    await expect(client.fetch(ref)).resolves.toEqual({ dirty: false });
+    await expect(client.fetch(ref, {
+      expectedRemote: 'https://example.com/owner/a.git',
+    })).resolves.toEqual({ dirty: false });
     expect(offers).toHaveLength(1);
     expect(fetches).toHaveLength(1);
   });
 
-  test('the admitted host executes once on the private port and refuses channel replay', async () => {
+  test('pins fetch, push, and clone before credential or network authority', async () => {
+    for (const method of ['fetch', 'push', 'clone'] as const) {
+      let kernelFetches = 0;
+      const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
+      const client = createOffscreenRepositoryClient({
+        withHost: (operation: any) => operation(testLease),
+        offscreenUrl,
+        kernelFetch: async () => {
+          kernelFetches += 1;
+          return { ok: true, status: 200, headers: {}, bodyB64: '' };
+        },
+        newId: () => `repository-remote-capability-${method}`,
+        listWindowClients: async () => [{
+          url: offscreenUrl,
+          postMessage(offer: any, ports: MessagePort[]) {
+            if (proveFeatureHost(offer, ports[0])) return;
+            ports[0].postMessage({
+              type: REPOSITORY_KERNEL_FETCH,
+              protocol: REPOSITORY_CHANNEL_PROTOCOL,
+              channelId: offer.channelId,
+              fetchId: `${offer.channelId}:fetch:1`,
+              request: {
+                remote: 'https://example.com/owner/b.git',
+                url: 'https://example.com/owner/b.git/info/refs',
+              },
+            });
+          },
+        }],
+      });
+      const operation = method === 'fetch'
+        ? client.fetch(ref, { expectedRemote: 'https://example.com/owner/a.git' })
+        : method === 'push'
+          ? client.push(ref, {
+            ref: 'main', expectedRemote: 'https://example.com/owner/a.git',
+          })
+          : client.clone(ref, { url: 'https://example.com/owner/a.git' });
+
+      await expect(operation).rejects.toMatchObject({
+        code: 'repository-reverse-fetch-invalid', outcomeKnown: false,
+      });
+      expect(kernelFetches).toBe(0);
+    }
+  });
+
+  test('waits past a retired same-URL client and dispatches only to the exact lease owner', async () => {
+    const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
+    let listings = 0;
+    let staleDispatches = 0;
+    let liveDispatches = 0;
+    let ids = 0;
+    const stale = {
+      url: offscreenUrl,
+      postMessage(message: any, ports: MessagePort[]) {
+        if (proveFeatureHost(message, ports[0], false)) return;
+        staleDispatches += 1;
+      },
+    };
+    const live = {
+      url: offscreenUrl,
+      postMessage(message: any, ports: MessagePort[]) {
+        if (proveFeatureHost(message, ports[0], true)) return;
+        liveDispatches += 1;
+        ports[0].postMessage({
+          type: REPOSITORY_CHANNEL_RESULT,
+          protocol: REPOSITORY_CHANNEL_PROTOCOL,
+          channelId: message.channelId,
+          ok: true,
+          result: encodeRepositoryRpcValue({ dirty: false }),
+          outcomeKnown: true,
+        });
+      },
+    };
+    const client = createOffscreenRepositoryClient({
+      withHost: (operation: any) => operation(testLease),
+      offscreenUrl,
+      kernelFetch: async () => ({ ok: true }),
+      listWindowClients: async () => ++listings === 1 ? [stale] : [stale, live],
+      hostResolveRetryMs: 0,
+      newId: () => `repository-exact-host-${++ids}`,
+    });
+    await expect(client.status(ref)).resolves.toEqual({ dirty: false });
+    expect({ staleDispatches, liveDispatches }).toEqual({
+      staleDispatches: 0, liveDispatches: 1,
+    });
+    expect(listings).toBeGreaterThanOrEqual(2);
+  });
+
+  test('the operation Worker executes once and remains alive until exact cancellation', async () => {
     const channelId = 'repository-host-integration';
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-host-integration', generation: 2,
-      buildId: `0.7.0:${'b'.repeat(64)}`, kernelEpoch: 'kernel-host-integration',
+      buildId: `0.7.0:${'b'.repeat(64)}`, bootId: 'boot-host-integration',
+      kernelEpoch: 'kernel-host-integration',
       hostEpoch: 'renderer-host-integration',
     };
     const offer = {
@@ -230,8 +464,10 @@ describe('operation-lazy offscreen repository split', () => {
     };
     const first = new MessageChannel();
     const calls: any[] = [];
+    let settled = 0;
     expect(acceptRepositoryOffer({ data: offer, ports: [first.port2] } as any, {
       ownsLease: () => true,
+      onSettled: () => { settled += 1; },
       createService: () => ({
         status: async (...args: any[]) => { calls.push(args); return { dirty: false }; },
       }),
@@ -245,18 +481,107 @@ describe('operation-lazy offscreen repository split', () => {
     });
     expect(decodeRepositoryRpcValue(result.result)).toEqual({ dirty: false });
     expect(calls).toEqual([[ref]]);
+    expect(settled).toBe(0);
+    first.port1.postMessage({
+      type: REPOSITORY_CHANNEL_CANCEL,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(1);
+  });
 
-    const replay = new MessageChannel();
-    expect(acceptRepositoryOffer({ data: offer, ports: [replay.port2] } as any, {
+  test('the supervisor targets one exact operation Worker and retains a settled tombstone', () => {
+    const channelId = 'repository-worker-target-one';
+    const lease = { ...testLease, leaseId: 'repository-worker-target-lease' };
+    const offer = {
+      type: 'peerd/repository-channel', protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId, method: 'status', args: [ref], lease,
+    };
+    const channel = new MessageChannel();
+    const worker = new FakeRepositoryWorker();
+    expect(acceptRepositoryWorkerHost({ data: offer, ports: [channel.port2] } as any, {
       ownsLease: () => true,
-      createService: () => { throw new Error('replay must not load the host'); },
+      createWorker: () => worker as any,
+    })).toBe(true);
+    expect(worker.messages).toEqual([{ type: REPOSITORY_WORKER_BOOTSTRAP, offer }]);
+    expect(worker.transfers[0]).toEqual([channel.port2]);
+    expect(cancelRepositoryCall({
+      type: REPOSITORY_CHANNEL_CANCEL,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId: `${channelId}-forged`,
+      lease,
     })).toBe(false);
+    expect(cancelRepositoryCall({
+      type: REPOSITORY_CHANNEL_CANCEL,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId,
+      lease: { ...lease, leaseId: `${lease.leaseId}-forged` },
+    })).toBe(false);
+    expect(worker.terminated).toBe(0);
+    const cancellation = {
+      type: REPOSITORY_CHANNEL_CANCEL,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId,
+      lease,
+    };
+    expect(cancelRepositoryCall(cancellation)).toBe(true);
+    expect(worker.terminated).toBe(1);
+    expect(cancelRepositoryCall(cancellation)).toBe(true);
+    expect(worker.terminated).toBe(1);
+    const replay = new MessageChannel();
+    expect(acceptRepositoryWorkerHost({ data: offer, ports: [replay.port2] } as any, {
+      ownsLease: () => true,
+      createWorker: () => { throw new Error('replay must not construct a Worker'); },
+    })).toBe(false);
+  });
+
+  test('the supervisor tombstones a Worker that settles before targeted cancellation', () => {
+    const channelId = 'repository-worker-settled-one';
+    const lease = { ...testLease, leaseId: 'repository-worker-settled-lease' };
+    const channel = new MessageChannel();
+    const worker = new FakeRepositoryWorker();
+    expect(acceptRepositoryWorkerHost({ data: {
+      type: 'peerd/repository-channel', protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId, method: 'status', args: [ref], lease,
+    }, ports: [channel.port2] } as any, {
+      ownsLease: () => true,
+      createWorker: () => worker as any,
+    })).toBe(true);
+    worker.settle(channelId);
+    expect(worker.terminated).toBe(1);
+    expect(cancelRepositoryCall({
+      type: REPOSITORY_CHANNEL_CANCEL,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId,
+      lease,
+    })).toBe(true);
+    expect(worker.terminated).toBe(1);
+  });
+
+  test('shared-host retirement terminates every outstanding operation Worker', () => {
+    const workers = [new FakeRepositoryWorker(), new FakeRepositoryWorker()];
+    for (const [index, worker] of workers.entries()) {
+      const channel = new MessageChannel();
+      expect(acceptRepositoryWorkerHost({ data: {
+        type: 'peerd/repository-channel', protocol: REPOSITORY_CHANNEL_PROTOCOL,
+        channelId: `repository-worker-abort-${index}`, method: 'status', args: [ref],
+        lease: { ...testLease, leaseId: `repository-worker-abort-lease-${index}` },
+      }, ports: [channel.port2] } as any, {
+        ownsLease: () => true,
+        createWorker: () => worker as any,
+      })).toBe(true);
+    }
+    expect(abortRepositoryHostCalls()).toBe(2);
+    expect(workers.map((worker) => worker.terminated)).toEqual([1, 1]);
   });
 
   test('rechecks the exact lease after lazy host import before any operation dispatch', async () => {
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-revoked-during-load', generation: 4,
-      buildId: `0.7.0:${'d'.repeat(64)}`, kernelEpoch: 'kernel-revoked-during-load',
+      buildId: `0.7.0:${'d'.repeat(64)}`, bootId: 'boot-revoked-during-load',
+      kernelEpoch: 'kernel-revoked-during-load',
       hostEpoch: 'host-revoked-during-load',
     };
     const offer = {
@@ -285,8 +610,10 @@ describe('operation-lazy offscreen repository split', () => {
   test('a read-only private port cannot redeem the kernel Git credential capability', async () => {
     let fetches = 0;
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-read-no-fetch', generation: 1,
-      buildId: `0.7.0:${'e'.repeat(64)}`, kernelEpoch: 'kernel-read-no-fetch',
+      buildId: `0.7.0:${'e'.repeat(64)}`, bootId: 'boot-read-no-fetch',
+      kernelEpoch: 'kernel-read-no-fetch',
       hostEpoch: 'host-read-no-fetch',
     };
     const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
@@ -299,6 +626,7 @@ describe('operation-lazy offscreen repository split', () => {
       listWindowClients: async () => [{
         url: offscreenUrl,
         postMessage(offer: any, ports: MessagePort[]) {
+          if (proveFeatureHost(offer, ports[0])) return;
           const port = ports[0];
           port.start();
           port.postMessage({
@@ -325,8 +653,10 @@ describe('operation-lazy offscreen repository split', () => {
     let credentialFetches = 0;
     let nextId = 0;
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-app-files-private', generation: 5,
-      buildId: `0.7.0:${'f'.repeat(64)}`, kernelEpoch: 'kernel-app-files-private',
+      buildId: `0.7.0:${'f'.repeat(64)}`, bootId: 'boot-app-files-private',
+      kernelEpoch: 'kernel-app-files-private',
       hostEpoch: 'host-app-files-private',
     };
     const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
@@ -339,6 +669,7 @@ describe('operation-lazy offscreen repository split', () => {
       listWindowClients: async () => [{
         url: offscreenUrl,
         postMessage(offer: any, ports: MessagePort[]) {
+          if (proveFeatureHost(offer, ports[0])) return;
           expect(acceptRepositoryOffer({ data: offer, ports } as any, {
             ownsLease: () => true,
             createService: () => ({
@@ -416,10 +747,12 @@ describe('operation-lazy offscreen repository split', () => {
     });
   });
 
-  test('bounds App file UX waits, retries only reads, and retires unknown writes', async () => {
+  test('bounds App file UX waits and isolates timed-out operation Workers', async () => {
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-app-files-timeout', generation: 6,
-      buildId: `0.7.0:${'1'.repeat(64)}`, kernelEpoch: 'kernel-app-files-timeout',
+      buildId: `0.7.0:${'1'.repeat(64)}`, bootId: 'boot-app-files-timeout',
+      kernelEpoch: 'kernel-app-files-timeout',
       hostEpoch: 'host-app-files-timeout',
     };
     const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
@@ -438,6 +771,7 @@ describe('operation-lazy offscreen repository split', () => {
       listWindowClients: async () => [{
         url: offscreenUrl,
         postMessage(offer: any, ports: MessagePort[]) {
+          if (proveFeatureHost(offer, ports[0])) return;
           offers.push(offer.method);
           ports[0].start();
         },
@@ -452,16 +786,15 @@ describe('operation-lazy offscreen repository split', () => {
     await expect(client.appFiles.writeText('app-one', 'index.html', 'dirty'))
       .rejects.toMatchObject({ code: 'repository-host-timeout', outcomeKnown: false });
     expect(offers.at(-1)).toBe('appWrite');
-    expect(retirements.slice(0, -1)).toEqual(
-      Array.from({ length: readOffers }, () => 'repository-read-host-unavailable'),
-    );
-    expect(retirements.at(-1)).toBe('repository-mutation-outcome-unknown');
+    expect(retirements).toEqual([]);
   });
 
   test('sender, port, and exact active lease are proven before the lazy repository host loads', () => {
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-admission-proof', generation: 3,
-      buildId: `0.7.0:${'c'.repeat(64)}`, kernelEpoch: 'kernel-admission-proof',
+      buildId: `0.7.0:${'c'.repeat(64)}`, bootId: 'boot-admission-proof',
+      kernelEpoch: 'kernel-admission-proof',
       hostEpoch: 'host-admission-proof',
     };
     const offer = {
@@ -494,6 +827,63 @@ describe('operation-lazy offscreen repository split', () => {
     }, workerUrl, () => true)).toMatchObject({
       matched: true, ok: false, reason: 'offer-invalid', offer: null,
     });
+    const cancellation = {
+      ...event,
+      data: {
+        type: REPOSITORY_CHANNEL_CANCEL,
+        protocol: REPOSITORY_CHANNEL_PROTOCOL,
+        channelId: offer.channelId,
+        lease,
+      },
+    };
+    expect(admitRepositoryCancellation(cancellation, workerUrl))
+      .toMatchObject({ matched: true, ok: true, port });
+    expect(admitRepositoryCancellation({ ...cancellation, isTrusted: false }, workerUrl))
+      .toMatchObject({ matched: true, ok: false });
+    expect(admitRepositoryCancellation({ ...cancellation, ports: [] }, workerUrl))
+      .toMatchObject({ matched: true, ok: false, port: null });
+  });
+
+  test('the trusted supervisor terminates an exact call after its feature lease is released', async () => {
+    const lease = { ...testLease, leaseId: 'repository-cancel-after-release' };
+    const cancellations: any[] = [];
+    const channels = createServiceWorkerChannels({
+      getFeatureLeaseHost: () => ({
+        isActive: () => false,
+        ownsLease: () => false,
+      }),
+      loadControllerBootstrap: async () => ({}),
+      loadRepositoryHost: async () => ({
+        cancelRepositoryCall: (value: any) => {
+          cancellations.push(value);
+          return true;
+        },
+      }),
+    });
+    const channel = new MessageChannel();
+    const acknowledged = new Promise<any>((resolve) => {
+      channel.port1.onmessage = (event) => resolve(event.data);
+      channel.port1.start();
+    });
+    channels.onMessage({
+      isTrusted: true,
+      source: { scriptURL: backgroundScriptUrl },
+      data: {
+        type: REPOSITORY_CHANNEL_CANCEL,
+        protocol: REPOSITORY_CHANNEL_PROTOCOL,
+        channelId: 'repository-cancel-after-release-call',
+        lease,
+      },
+      ports: [channel.port2],
+    } as unknown as MessageEvent);
+    await expect(acknowledged).resolves.toEqual({
+      type: REPOSITORY_CHANNEL_CANCELLED,
+      protocol: REPOSITORY_CHANNEL_PROTOCOL,
+      channelId: 'repository-cancel-after-release-call',
+      leaseId: lease.leaseId,
+      hostEpoch: lease.hostEpoch,
+    });
+    expect(cancellations).toHaveLength(1);
   });
 
   test('Firefox loads one local repository controller only on first use', async () => {
@@ -736,8 +1126,10 @@ describe('operation-lazy offscreen repository split', () => {
 
   test('classifies a synchronous private-port dispatch refusal as known-safe', async () => {
     const lease = {
+      schema: 1,
       scope: 'controller', leaseId: 'lease-predispatch-safe', generation: 1,
-      buildId: `0.7.0:${'2'.repeat(64)}`, kernelEpoch: 'kernel-predispatch-safe',
+      buildId: `0.7.0:${'2'.repeat(64)}`, bootId: 'boot-predispatch-safe',
+      kernelEpoch: 'kernel-predispatch-safe',
       hostEpoch: 'host-predispatch-safe',
     };
     const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
@@ -749,7 +1141,10 @@ describe('operation-lazy offscreen repository split', () => {
       newId: () => 'repository-predispatch-safe',
       listWindowClients: async () => [{
         url: offscreenUrl,
-        postMessage() { throw new Error('transfer refused before dispatch'); },
+        postMessage(message: any, ports: MessagePort[]) {
+          if (proveFeatureHost(message, ports[0])) return;
+          throw new Error('transfer refused before dispatch');
+        },
       }],
     });
     await expect(client.commit(ref, { message: 'never dispatched' })).rejects.toMatchObject({
@@ -848,12 +1243,11 @@ describe('operation-lazy offscreen repository split', () => {
       .toHaveLength(1);
   });
 
-  test('a timed-out mutation physically retires its host before the keyed lane reopens', async () => {
+  test('a timed-out mutation terminates its exact Worker before the keyed lane reopens', async () => {
     const first = new Promise(() => {});
     let calls = 0;
-    let retired = false;
-    let releaseRetirement!: () => void;
-    const retirement = new Promise<void>((resolve) => { releaseRetirement = resolve; });
+    const retirements: string[] = [];
+    const cancellations: any[] = [];
     const client = makePrivateClient(async (message: any) => {
       if (message.type === 'repository/host-cancel') return { ok: true };
       calls += 1;
@@ -861,21 +1255,18 @@ describe('operation-lazy offscreen repository split', () => {
       return { ok: true, result: { oid: 'replacement' } };
     }, {
       effectTimeoutMs: 5,
-      retireHost: async () => { await retirement; retired = true; },
+      onSupervisorCancel: (message: any) => { cancellations.push(message); },
+      retireHost: async (reason: string) => { retirements.push(reason); },
     });
     const timedOut = client.commit(ref, { message: 'first' });
-    await new Promise((resolve) => setTimeout(resolve, 12));
-    const successor = client.commit(ref, { message: 'second' });
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    expect(calls).toBe(1);
-    expect(retired).toBe(false);
-    releaseRetirement();
     await expect(timedOut).rejects.toMatchObject({
       code: 'repository-host-timeout', outcomeKnown: false,
     });
+    const successor = client.commit(ref, { message: 'second' });
     expect(await successor).toEqual({ oid: 'replacement' });
-    expect(retired).toBe(true);
     expect(calls).toBe(2);
+    expect(cancellations).toHaveLength(2);
+    expect(retirements).toEqual([]);
   });
 
   test('kernel revalidates the Git remote, strips forged credentials, and injects its token', async () => {
@@ -941,6 +1332,11 @@ describe('operation-lazy offscreen repository split', () => {
     expect(kernel).not.toContain("import browserGit from '/vendor/isomorphic-git/index.js'");
     expect(offscreen).toContain("import('./repository-host.js')");
     expect(supervisor).toContain('export const admitRepositoryChannelOffer');
+  });
+
+  test('packages and digest-binds the disposable operation Worker as an explicit root', () => {
+    expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/repository-worker.js');
+    expect(CONTROLLER_BUILD_ENTRIES).toContain('offscreen/repository-worker.js');
   });
 
   test('has one private repository transport and no broadcast compatibility path', () => {

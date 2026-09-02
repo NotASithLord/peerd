@@ -96,6 +96,46 @@ describe('sealed kernel feature protocol', () => {
     })).toMatchObject({ ok: false, code: 'feature-effect-result-too-large' });
   });
 
+  test('classifies observational local-model effects as replayable reads', () => {
+    const cases = [
+      ['models/options', 'local.models.snapshot', { sessionId: null }],
+      ['models/options', 'local.models.ollama', {}],
+      ['openrouter/models', 'local.openrouter.models', {}],
+      ['local-model/status', 'local.model.status', { model: null, includeSupport: false }],
+      ['local-model/catalog', 'local.model.catalog', { includeSupport: true }],
+      ['local-model/probe', 'local.model.probe', {}],
+    ] as const;
+    for (const [index, [route, operation, payload]] of cases.entries()) {
+      const quota = createKernelFeatureEffectQuota(
+        KERNEL_FEATURE_DISPATCH_CAPABILITY,
+        request({
+          cluster: 'local', route, dispatchId: `dispatch-local-read-${index}`,
+          message: {},
+        }),
+      );
+      expect(quota.admit(operation, payload)).toMatchObject({ ok: true });
+      expect(quota.pendingLoss(operation)).toEqual({
+        outcomeKnown: true, retryable: true,
+      });
+      expect(quota.observe(operation, payload, {
+        ok: false, outcomeKnown: false, code: 'host-lost', retryable: false,
+      })).toMatchObject({ ok: true });
+      expect(quota.custody()).toEqual({ outcomeKnown: true, retryable: true });
+    }
+
+    const init = createKernelFeatureEffectQuota(
+      KERNEL_FEATURE_DISPATCH_CAPABILITY,
+      request({
+        cluster: 'local', route: 'local-model/init',
+        dispatchId: 'dispatch-local-init', message: {},
+      }),
+    );
+    expect(init.admit('local.model.init', { model: null })).toMatchObject({ ok: true });
+    expect(init.pendingLoss('local.model.init')).toEqual({
+      outcomeKnown: false, retryable: false,
+    });
+  });
+
   test('uses one-use client grants and refuses forged reverse effects', async () => {
     const calls: any[] = [];
     let authority: any;

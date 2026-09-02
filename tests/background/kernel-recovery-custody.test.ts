@@ -41,6 +41,39 @@ describe('kernel recovery custody', () => {
     }
   });
 
+  test('loads an interactive current session even when no background work exists', async () => {
+    const sessions: Array<string|null> = [];
+    const { custody, loads } = make({
+      load: async (currentSessionId: string|null) => {
+        sessions.push(currentSessionId);
+        return { loaded: true };
+      },
+    });
+    await expect(custody.resume('chat-a')).resolves.toEqual({ loaded: true });
+    expect(sessions).toEqual(['chat-a']);
+    expect(loads()).toBe(0);
+  });
+
+  test('an interactive unlock follows a concurrent background recovery instead of joining it', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const sessions: Array<string|null> = [];
+    const { custody } = make({
+      stored: { ...empty, 'goal.runs.v1': { session: {} } },
+      load: async (currentSessionId: string|null) => {
+        sessions.push(currentSessionId);
+        if (currentSessionId === null) await held;
+        return { loaded: true };
+      },
+    });
+    const startup = custody.resume();
+    await Promise.resolve();
+    const unlock = custody.resume('chat-a');
+    release();
+    await Promise.all([startup, unlock]);
+    expect(sessions).toEqual([null, 'chat-a']);
+  });
+
   test('coalesces every concurrent recovery source', async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });

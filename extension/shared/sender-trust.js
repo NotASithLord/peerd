@@ -11,6 +11,11 @@ export const isFirstPartySender = (sender, { runtimeId, extensionOrigin } = {}) 
   return sender.url.startsWith(extensionOrigin);
 };
 
+export const sameDocumentUrlIgnoringHash = (/** @type {unknown} */ actual,
+  /** @type {unknown} */ expected) => typeof actual === 'string'
+  && typeof expected === 'string'
+  && actual.split('#', 1)[0] === expected.split('#', 1)[0];
+
 /** @param {{ id?: string, url?: string, tab?: unknown } | null | undefined} sender
  * @param {{ runtimeId?: string, extensionOrigin?: string, offscreenUrl?: string }} [trust]
  * @returns {boolean}
@@ -19,7 +24,7 @@ export const isOffscreenSender = (sender, { runtimeId, extensionOrigin, offscree
   if (!isFirstPartySender(sender, { runtimeId, extensionOrigin })) return false;
   if (typeof offscreenUrl !== 'string' || offscreenUrl.length === 0) return false;
   if (sender && typeof sender === 'object' && 'tab' in sender) return false;
-  return sender?.url === offscreenUrl;
+  return sameDocumentUrlIgnoringHash(sender?.url, offscreenUrl);
 };
 
 /** @param {{ id?: string, url?: string, tab?: unknown, documentId?: string } | null | undefined} sender

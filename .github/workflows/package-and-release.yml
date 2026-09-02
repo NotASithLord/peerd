@@ -175,8 +175,8 @@ jobs:
       - name: Generated-file drift (dev manifest + channel-config + tscheck and supply-chain badges)
         run: |
           bun run gen:dev
-          git diff --exit-code extension/manifest.json extension/shared/channel-config.js badges/tscheck.json badges/vendor-integrity.json badges/actions-pinned.json badges/no-build.json || {
-            echo '::error::A generated file (manifest.json, channel-config.js, or a badges/*.json written by gen:dev) is out of sync with its generator. Run `bun run gen:dev` and commit.'
+          git diff --exit-code extension/manifest.json extension/shared/channel-config.js extension/shared/build-config.js extension/shared/controller-build.js badges/tscheck.json badges/vendor-integrity.json badges/actions-pinned.json badges/no-build.json || {
+            echo '::error::A generated file (manifest.json, channel-config.js, build identity, or a badges/*.json written by gen:dev) is out of sync with its generator. Run `bun run gen:dev` and commit.'
             exit 1
           }
       # No visual images are tracked: each run renders its own reference from the
@@ -436,8 +436,8 @@ jobs:
       - name: Run packaged Store document extraction and paging regression
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
-        # Exact Store package, real born-digital PDF, sealed read_doc execution,
-        # spill paging, and cross-session read_result refusal.
+        # Exact Store package, real PDF + DOCX conversion, sealed read_doc
+        # execution, spill paging, and cross-session read_result refusal.
         run: bun run test:e2e:read-doc
       - name: Run packaged Preview dweb renderer/SW lifecycle regression
         env:

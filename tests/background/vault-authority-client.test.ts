@@ -264,6 +264,72 @@ describe('sealed vault authority channel', () => {
     client.close();
   });
 
+  test('a committed secret write is not negated by a failed advisory status read', async () => {
+    const storage = makeStorage();
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(vaultLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    await client.initializeWithPrfOnly({
+      prfOutput: new Uint8Array(32).fill(5),
+      credentialId: new Uint8Array([1, 2, 3]),
+      prfSalt: new Uint8Array(32).fill(6),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    storage.idb.get = async () => { throw new Error('advisory status unavailable'); };
+
+    await expect(client.setSecret('provider:test', 'committed-secret')).resolves.toBeUndefined();
+    expect(storage.local.has('secret:provider:test')).toBe(true);
+    client.close();
+  });
+
+  test('a true secret mutation failure remains a known failure', async () => {
+    const storage = makeStorage();
+    const client = makeVaultAuthorityClient({
+      offscreen: true,
+      offscreenUrl,
+      workerUrl,
+      kv: storage.kv,
+      idb: storage.idb,
+      sessionCache: storage.sessionCache,
+      withHost: async (operation) => operation(vaultLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    await client.initializeWithPrfOnly({
+      prfOutput: new Uint8Array(32).fill(5),
+      credentialId: new Uint8Array([1, 2, 3]),
+      prfSalt: new Uint8Array(32).fill(6),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const set = storage.kv.set;
+    storage.kv.set = async (key: string, value: any) => {
+      if (key === 'secret:provider:test') throw new Error('credential store unavailable');
+      return set(key, value);
+    };
+
+    await expect(client.setSecret('provider:test', 'not-committed')).rejects.toMatchObject({
+      code: 'vault-authority-failed', outcomeKnown: true,
+    });
+    expect(storage.local.has('secret:provider:test')).toBe(false);
+    client.close();
+  });
+
   test('manual lock crosses the exact reverse fence when session deletion is unavailable', async () => {
     const storage = makeStorage();
     const deleteSession = storage.sessionCache.sessionDelete;
@@ -413,6 +479,9 @@ describe('sealed vault authority channel', () => {
     const runtime = source.indexOf("import('./vault-authority-runtime.js')");
     expect(seal).toBeGreaterThan(0);
     expect(runtime).toBeGreaterThan(seal);
+    expect(source.indexOf('recoveredPrototypeCapabilityBlocked')).toBeLessThan(runtime);
+    expect(source.indexOf('prototypeFetchBlocked')).toBeLessThan(runtime);
+    expect(source.indexOf('prototypeStorageBlocked')).toBeLessThan(runtime);
     for (const primitive of ['fetch', 'Worker', 'indexedDB', 'caches', 'BroadcastChannel']) {
       expect(source).toContain(`'${primitive}'`);
     }

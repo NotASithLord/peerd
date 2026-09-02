@@ -574,7 +574,7 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
       to: 'app-1', message: 'x', senderSessionId: 'chat-1', awaitReply: true, awaitSignal: ac.signal,
     });
     expect(r.ok).toBe(false);
-    expect(r.error).toContain('aborted');
+    expect(r.error).toContain('stopped before the actor started');
     expect(r.actorAborted).toBe(true);
     expect(r.actorOutcomeKnown).toBe(true);
     expect(r.actorPerformed).toBe(false);
@@ -896,7 +896,7 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     const mb = makeMailbox();
     const slots = makeTurnSlots();
     const parentTurn = slots.claim('chat-1');
-    const { messageActor, stopActorsFor, hasInFlightFor, reentries } = harness({
+    const { messageActor, stopActorsFor, hasInFlightFor, reentries, recoveryNotices } = harness({
       turnSlots: slots,
       mailbox: {
         ...mb.mailbox,
@@ -912,7 +912,46 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     await tick();
 
     expect(reentries).toEqual([]);
+    expect(recoveryNotices).toHaveLength(1);
     expect(hasInFlightFor('chat-1')).toBe(true);
+  });
+
+  test('Stop passively persists a running actor cancellation without waking the model', async () => {
+    const mb = makeMailbox();
+    let settleActor: (value: any) => void = () => {};
+    let actorStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => { actorStarted = resolve; });
+    const actorResult = new Promise<any>((resolve) => { settleActor = resolve; });
+    const { messageActor, stopActorsFor, reentries, recoveryNotices, hasInFlightFor } = harness({
+      mailbox: mb.mailbox,
+      runActorTurn: async () => { actorStarted(); return actorResult; },
+    });
+
+    await messageActor({
+      to: 'app-1', message: 'slow work', senderSessionId: 'chat-1',
+      toolUseId: 'tool-parent',
+    });
+    await started;
+    expect(stopActorsFor('chat-1')).toEqual(['res-1']);
+    settleActor({
+      result: 'the request was stopped', stopped: true, aborted: true,
+      performed: false, outcomeKnown: true,
+    });
+    await tick();
+    await tick();
+
+    expect(reentries).toEqual([]);
+    expect(recoveryNotices).toHaveLength(1);
+    expect(recoveryNotices[0]).toMatchObject({
+      sessionId: 'chat-1', recoveryId: mb.appended[0].id,
+      actorReply: {
+        actorDeliveryId: mb.appended[0].id,
+        parentToolUseId: 'tool-parent', aborted: true,
+        performed: false, outcomeKnown: true,
+      },
+    });
+    expect(mb.removed).toEqual([mb.appended[0].id]);
+    expect(hasInFlightFor('chat-1')).toBe(false);
   });
 
   test('a WEB message IS persisted now (async like every kind)', async () => {
@@ -1173,6 +1212,125 @@ describe('message_actor — durable mailbox (persist + redrain)', () => {
     releases[1]();
     await tick();
     expect(actorsFor('chat-1')).toEqual([]);
+  });
+
+  test('Stop during target resolution cancels the admission before persistence or actor work', async () => {
+    let releaseResolution: (actor: any) => void = () => {};
+    let resolutionEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => { resolutionEntered = resolve; });
+    const resolution = new Promise<any>((resolve) => { releaseResolution = resolve; });
+    const appended: any[] = [];
+    const { messageActor, stopActorsFor, turnsRun, hasInFlightFor } = harness({
+      resolveActor: async () => {
+        resolutionEntered();
+        return resolution;
+      },
+      mailbox: {
+        append: async (entry: any) => { appended.push(entry); },
+        remove: async () => {},
+        load: async () => [],
+      },
+    });
+    const abort = new AbortController();
+    const pending = messageActor({
+      to: 'app-1', message: 'A', senderSessionId: 'chat-1', awaitReply: true,
+      awaitSignal: abort.signal,
+    });
+    await entered;
+    abort.abort(ABORT_STOP);
+    stopActorsFor('chat-1');
+    releaseResolution({
+      instanceId: 'app-1', kind: 'app', actorSessionId: 'res-1', name: 'todo', tabId: 7,
+    });
+    expect(await pending).toMatchObject({
+      ok: false, code: 'actor_message_stopped', performed: false, outcomeKnown: true,
+      actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+      actorAborted: true, outcomeKind: 'pre-effect-failure',
+    });
+    await tick();
+    expect(appended).toEqual([]);
+    expect(turnsRun).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(false);
+  });
+
+  test('Stop during the durable start write removes the row and releases admission ownership', async () => {
+    let releaseStart: () => void = () => {};
+    let startEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => { startEntered = resolve; });
+    const startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const removed: string[] = [];
+    const { messageActor, stopActorsFor, turnsRun, hasInFlightFor } = harness({
+      mailbox: {
+        append: async () => {},
+        markStarted: async () => { startEntered(); await startGate; },
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => [],
+      },
+    });
+    const abort = new AbortController();
+    const pending = messageActor({
+      to: 'app-1', message: 'A', senderSessionId: 'chat-1', awaitReply: true,
+      awaitSignal: abort.signal,
+    });
+    await entered;
+    abort.abort(ABORT_STOP);
+    stopActorsFor('chat-1');
+    expect(await pending).toMatchObject({
+      ok: false, code: 'actor_message_stopped', performed: false, outcomeKnown: true,
+      actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+      actorAborted: true, outcomeKind: 'pre-effect-failure', actorDeliveryId: 'correlation-1',
+    });
+    expect(removed).toEqual(['correlation-1']);
+    expect(turnsRun).toEqual([]);
+    expect(hasInFlightFor('chat-1')).toBe(false);
+    releaseStart();
+    await tick();
+
+    const next = await messageActor({
+      to: 'app-1', message: 'A', senderSessionId: 'chat-1', awaitReply: true,
+    });
+    expect(next.ok).toBe(true);
+    expect(turnsRun).toHaveLength(1);
+  });
+
+  test('a committed Stop result lets redrain close a residual started row without a contradictory warning', async () => {
+    let startEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => { startEntered = resolve; });
+    const neverSettles = new Promise<void>(() => {});
+    const first = harness({
+      mailbox: {
+        append: async () => {},
+        markStarted: async () => { startEntered(); await neverSettles; },
+        remove: async () => { await neverSettles; },
+        load: async () => [],
+      },
+    });
+    const abort = new AbortController();
+    const pending = first.messageActor({
+      to: 'app-1', message: 'A', senderSessionId: 'chat-1', awaitReply: true,
+      awaitSignal: abort.signal,
+    });
+    await entered;
+    abort.abort(ABORT_STOP);
+    first.stopActorsFor('chat-1');
+    const stopped: any = await pending;
+    expect(stopped.actorDeliveryId).toBe('correlation-1');
+
+    const removed: string[] = [];
+    const restarted = harness({
+      deliveryCommitted: async ({ deliveryId }) => deliveryId === stopped.actorDeliveryId,
+      mailbox: {
+        append: async () => {}, markStarted: async () => {},
+        remove: async (id: string) => { removed.push(id); },
+        load: async () => [{
+          id: 'correlation-1', senderSessionId: 'chat-1', to: 'app-1', message: 'A',
+          createdAt: 1, state: 'started', kind: 'app',
+        }],
+      },
+    });
+    expect(await restarted.redrain()).toEqual({ redrained: 0, retained: 0 });
+    expect(restarted.recoveryNotices).toEqual([]);
+    expect(removed).toEqual(['correlation-1']);
   });
 
   test('stopActorsFor returns the in-flight actors AND makes a then-queued turn skip', async () => {

@@ -42,7 +42,10 @@ const recordingCtx = (over: any = {}) => {
       const response = await webFetch(request.url, seen.init);
       const headers: Record<string, string> = {};
       response.headers.forEach((value: string, name: string) => { headers[name] = value; });
-      return { status: response.status, body: await response.text(), headers, finalUrl: response.url };
+      return {
+        status: response.status, body: await response.text(),
+        bodyTruncated: over.bodyTruncated === true, headers, finalUrl: response.url,
+      };
     },
   };
   if (typeof over.confirm === 'function') {
@@ -277,6 +280,23 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     expect(body.body).toContain('characters elided');
     expect(body.body.startsWith('H'.repeat(100))).toBe(true);
     expect(body.body.endsWith('T'.repeat(100))).toBe(true);
+  });
+
+  test('labels a host-capped response as a retained prefix, never the full text', async () => {
+    const stored: any[] = [];
+    const { ctx } = recordingCtx({
+      bodyTruncated: true,
+      webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/capped' }),
+      resultStore: { key: () => 'result:opaque-capped', put: async (rec: any) => { stored.push(rec); } },
+    });
+    const result = await fetchUrlTool.execute({ url: 'https://site.example/capped' }, ctx);
+    if (!result.ok) throw new Error('expected ok');
+    const fenced = JSON.parse(result.content!.split(/<untrusted_web_content [^>]*>\n/)[1].split('\n</untrusted_web_content>')[0]);
+    expect(fenced.bodyTruncated).toBe(true);
+    expect(result.content).toContain('retained text prefix');
+    expect(result.content).toContain('extraction cap reached');
+    expect(result.content).not.toContain('The full text');
+    expect(stored[0].text).toBe(BIG);
   });
 
   test('no resultStore capability → the pre-spill head-only slice, no footer', async () => {

@@ -12,6 +12,7 @@ import {
   VAULT_AUTHORITY_RESULT,
   VAULT_AUTHORITY_STORAGE_RESULT,
 } from '../shared/vault-authority-protocol.js';
+import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 
 export class VaultAuthorityChannelError extends Error {
   /**
@@ -304,7 +305,8 @@ export const makeVaultAuthorityClient = ({
       ), { once: true });
       port1.start();
       if (offscreen) {
-        const matches = (await listWindowClients()).filter((client) => client?.url === offscreenUrl);
+        const matches = (await listWindowClients()).filter((client) =>
+          sameDocumentUrlIgnoringHash(client?.url, offscreenUrl));
         if (matches.length !== 1) {
           retire('vault authority host unavailable or ambiguous', connection);
           port2.close();

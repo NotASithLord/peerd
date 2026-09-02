@@ -19,7 +19,6 @@ import {
   controllerHostsIntrospectionTool,
   controllerHostsScheduleTool,
   controllerHostsDwebTool,
-  controllerAuthorityClassForTool,
   controllerHostsTool,
   controllerOperationsForSpawnedTools,
   controllerToolNamesForSpawnedTools,
@@ -910,8 +909,9 @@ const runControllerTurnWith = async (payload, options) => {
         });
       },
       finalizeAbort: async (/** @type {any} */ value) => {
-        await rpc('turn.abort.finalize', value);
+        const result = await rpc('turn.abort.finalize', value);
         abortFinalized = true;
+        return result;
       },
       enrichTrimSummary: (/** @type {unknown} */ request) => {
         trackAdvisory(rpc('turn.trim.enrich', { request })).catch(() => {});
@@ -966,9 +966,13 @@ export const createControllerTurnRuntime = () => Object.freeze({
         || typeof input.argument !== 'string' || input.argument.length > 4096) {
       return { ok: false, code: 'turn-tools-command-invalid', outcomeKnown: true };
     }
+    const inventory = projectControllerToolSurface({ surface: 'all' });
+    const knownToolNames = inventory.ok
+      ? inventory.tools.flatMap((tool) => typeof tool.name === 'string' ? [tool.name] : [])
+      : [];
     return {
       ok: true,
-      plan: planToolsCommand(input.argument, input.currentManifest),
+      plan: planToolsCommand(input.argument, input.currentManifest, knownToolNames),
       outcomeKnown: true,
     };
   },

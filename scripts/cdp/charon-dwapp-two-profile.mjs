@@ -19,11 +19,12 @@ import { ARTIFACTS_DIR, REPO_ROOT } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { openEnvelope } from '../../extension/peerd-engine/export.js';
-import { FEATURE_LEASE_HOST_PROTOCOL } from '../../extension/shared/feature-lease-protocol.js';
 import {
   digestTree, PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY, readChromeIdentity, sha256File,
 } from './passkey-signup-lane.mjs';
-import { kernelIdentityFromReply } from './product-acceptance-probes.mjs';
+import {
+  kernelIdentityFromReply, readActiveFeatureLease,
+} from './product-acceptance-probes.mjs';
 import { assertLiveKernelAssembly } from '../acceptance/live-kernel-assembly.mjs';
 import {
   attach, evalIn, hostMonotonicMs, launchPeerd, openExtPage, rpc, sleep,
@@ -450,23 +451,9 @@ const waitForLinkedProfiles = async (left, right) => {
   return linked;
 };
 
-const hostStatus = (ctx) => {
-  if (!ctx.swConn) throw new Error('service-worker connection unavailable');
-  return evalIn(ctx.swConn, `new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, error: 'host-status-timeout' }), 5000);
-    chrome.runtime.sendMessage({
-      type: 'feature-lease/host-status', protocol: ${FEATURE_LEASE_HOST_PROTOCOL},
-    }, (reply) => {
-      clearTimeout(timer);
-      const error = chrome.runtime.lastError?.message;
-      resolve(error ? { ok: false, error } : reply);
-    });
-  })`, true);
-};
-
 const exactDwebLease = async (ctx) => {
-  const [status, contexts] = await Promise.all([
-    hostStatus(ctx),
+  const [active, contexts] = await Promise.all([
+    readActiveFeatureLease(ctx.page, 'dweb'),
     evalIn(ctx.swConn, `(async () => {
       if (typeof chrome.runtime?.getContexts !== 'function') return [];
       const rows = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
@@ -477,14 +464,16 @@ const exactDwebLease = async (ctx) => {
       }));
     })()`, true),
   ]);
-  const dweb = status?.leases?.filter((lease) => lease?.scope === 'dweb') ?? [];
-  if (status?.ok !== true || status.protocol !== FEATURE_LEASE_HOST_PROTOCOL
-      || typeof status.hostEpoch !== 'string' || dweb.length !== 1
-      || dweb[0].orphaned === true || contexts?.length !== 1
-      || !String(contexts[0]?.documentUrl).endsWith('/offscreen/offscreen.html')) {
-    throw new Error(`expected one exact dweb host: ${JSON.stringify({ status, contexts })}`);
+  if (contexts?.length !== 1
+      || !String(contexts[0]?.documentUrl).split('#', 1)[0]
+        .endsWith('/offscreen/offscreen.html')) {
+    throw new Error(`expected one exact dweb host: ${JSON.stringify({ active, contexts })}`);
   }
-  return { status, lease: dweb[0], contexts };
+  return {
+    status: { ok: true, hostEpoch: active.lease.hostEpoch },
+    lease: active.lease,
+    contexts,
+  };
 };
 
 const closeOffscreenRenderer = async (ctx) => {

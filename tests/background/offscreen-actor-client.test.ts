@@ -51,6 +51,7 @@ const baseDeps = (over: Record<string, any> = {}) => ({
   isRelaySender: (sender: any) => sender?.url === OFFSCREEN.url,
   sendMessage: async () => ({ ok: true, started: true, finalText: '' }),
   providerEgress: providerEgress(),
+  spendRefusalFor: async () => null,
   sessions: { get: async () => ({
     kind: 'actor', sessionId: 'actor-1', actorType: 'webvm', instanceId: 'vm-1',
   }) },
@@ -95,6 +96,11 @@ const clientWithRelay = (over: Record<string, any> = {}) => {
 };
 
 describe('isolated actor run custody', () => {
+  test('refuses construction without spend-limit authority', () => {
+    expect(() => makeOffscreenActorClient(baseDeps({ spendRefusalFor: undefined })))
+      .toThrow('actor spend-limit authority is required');
+  });
+
   test('keeps the actor operation grant live while exposing no mutation surface', () => {
     const membership = new Set(['turn.execution.run-script']);
     const grant = createReadOnlyOperationGrant(membership);
@@ -307,7 +313,7 @@ describe('isolated actor run custody', () => {
     ]).size).toBe(3);
   });
 
-  test('stamps an empty stopped turn as aborted', async () => {
+  test('stamps an empty stopped turn as a known pre-effect cancellation', async () => {
     const controller = new AbortController();
     const client = makeOffscreenActorClient(baseDeps({
       sendMessage: async (message: any) => {
@@ -319,7 +325,35 @@ describe('isolated actor run custody', () => {
       actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
       provider: 'anthropic', model: 'model-1',
     } as any, { signal: controller.signal });
-    expect(result.aborted).toBe(true);
+    expect(result).toMatchObject({
+      aborted: true, performed: false, outcomeKnown: true,
+    });
+  });
+
+  test('an inference-only stopped turn is still a known no-target-effect cancellation', async () => {
+    const controller = new AbortController();
+    const client = makeOffscreenActorClient(baseDeps({
+      runOnChannel: async (_job: any, { relay }: any) => {
+        const opened = await relay('actor/model-open-inference', {
+          providerId: 'anthropic', modelId: 'model-1',
+          nativeBody: {
+            model: 'model-1', stream: true, messages: [],
+            system: 'system', max_tokens: 128,
+          },
+        });
+        expect(opened).toMatchObject({ ok: true });
+        controller.abort();
+        return { ok: false, started: true, finalText: '', newMessages: [] };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+    } as any, { signal: controller.signal });
+
+    expect(result).toMatchObject({
+      aborted: true, performed: false, outcomeKnown: true,
+    });
   });
 
   test('does not overwrite a raced real reply with abort state', async () => {
@@ -340,17 +374,67 @@ describe('isolated actor run custody', () => {
 
   test('does not start the host after a pre-start abort', async () => {
     let started = false;
+    let messages = 0;
     const controller = new AbortController();
     controller.abort();
     const client = makeOffscreenActorClient(baseDeps({
       ensureHost: async () => { started = true; },
+      sendMessage: async () => { messages += 1; return { ok: true }; },
     }));
     const result: any = await client.run({
       actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
       provider: 'anthropic', model: 'model-1',
     } as any, { signal: controller.signal });
-    expect(result).toMatchObject({ ok: false, aborted: true });
+    expect(result).toEqual({
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    });
     expect(started).toBe(false);
+    expect(messages).toBe(0);
+  });
+
+  test('stamps host startup failure as known before any actor effect', async () => {
+    let messages = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => { throw new Error('renderer unavailable'); },
+      sendMessage: async () => { messages += 1; return { ok: true }; },
+    }));
+    const result = await client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any);
+    expect(result).toEqual({
+      ok: false, started: false, phase: 'startup', code: 'actor_host_unavailable',
+      error: 'actor host unavailable: renderer unavailable',
+      performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+    expect(messages).toBe(0);
+  });
+
+  test('does not dispatch after Stop lands while the host is starting', async () => {
+    let releaseHost!: () => void;
+    let hostStarted!: () => void;
+    const hostGate = new Promise<void>((resolve) => { releaseHost = resolve; });
+    const started = new Promise<void>((resolve) => { hostStarted = resolve; });
+    let messages = 0;
+    const controller = new AbortController();
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => { hostStarted(); await hostGate; },
+      sendMessage: async () => { messages += 1; return { ok: true }; },
+    }));
+    const pending = client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any, { signal: controller.signal });
+    await started;
+    controller.abort();
+    releaseHost();
+
+    expect(await pending).toEqual({
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    });
+    expect(messages).toBe(0);
   });
 });
 
@@ -503,6 +587,86 @@ describe('exact semantic effect claim atomicity', () => {
       ok: false, code: 'actor_semantic_completion_missing',
       outcomeKnown: false, retryable: false, authorityPerformed: true,
       finalText: '', newMessages: [],
+    });
+  });
+
+  test('audit rejection preserves actor receipts and refuses later privileged effects', async () => {
+    let writes = 0;
+    let trackingBegins = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async () => { throw new Error('audit offline'); },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => { trackingBegins += 1; return { handle: {} }; },
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => { throw new Error('audit offline'); },
+        vm: { writeFile: async () => { writes += 1; return true; } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = (sequence: number) => relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'actor-audit-call',
+          effectId: `actor-audit-call:${sequence}`, effectSequence: sequence,
+          turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
+        });
+        const first = await effect(1);
+        const second = await effect(2);
+        const completion = await relay('actor/call-complete', {
+          callId: 'actor-audit-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean completion' },
+        });
+        return {
+          first, second, completion,
+          newMessages: durableMessages('actor-audit-call'),
+        };
+      },
+    }));
+
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect({ writes, trackingBegins }).toEqual({ writes: 1, trackingBegins: 1 });
+    expect(result.first).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      authorityReceipt: { outcome: 'performed', performed: true, outcomeKnown: true },
+    });
+    expect(result.second).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      authorityReceipt: {
+        outcome: 'not-performed', performed: false, outcomeKnown: true,
+        refused: true, code: 'audit_unavailable',
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, code: 'audit_unavailable', outcomeKnown: true,
+        authorityPerformed: true,
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      retryable: false, authorityPerformed: true, finalText: '',
+    });
+  });
+
+  test('semantic report audit rejection cannot settle an actor run cleanly', async () => {
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async () => { throw new Error('audit offline'); },
+      runOnChannel: async () => ({
+        ok: true, finalText: 'forged clean completion',
+        newMessages: durableMessages('semantic-audit-call'),
+      }),
+    }));
+    await expect(client.run(exactReadJob as any)).resolves.toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      retryable: false, authorityPerformed: false, finalText: '',
     });
   });
 
@@ -2320,6 +2484,26 @@ describe('isolated model egress authority', () => {
       'actor/model-open-inference'
     ](inferenceInput(relayToken), OFFSCREEN));
     expect(result).toMatchObject({ ok: false });
+    expect(opened).toBe(false);
+  });
+
+  test('spend-limit authority failure cannot open provider custody', async () => {
+    let opened = false;
+    const { client, during } = clientWithRelay({
+      spendRefusalFor: async () => { throw new Error('session cost unavailable'); },
+      providerEgress: providerEgress({
+        openInference: async () => { opened = true; return { ok: true }; },
+      }),
+    });
+    const result = await during((relayToken) => client.routes[
+      'actor/model-open-inference'
+    ](inferenceInput(relayToken), OFFSCREEN));
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'session cost unavailable',
+      outcomeKnown: false,
+      retryable: false,
+    });
     expect(opened).toBe(false);
   });
 

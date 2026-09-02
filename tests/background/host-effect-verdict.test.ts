@@ -88,6 +88,10 @@ describe('exact host effect verdicts', () => {
     expect(HOST_EFFECT_OUTCOME.podCancel.fulfilled({ cancelled: false })).toBe('not-performed');
     expect(HOST_EFFECT_OUTCOME.spill.fulfilled('result-key')).toBe('performed');
     expect(HOST_EFFECT_OUTCOME.spill.fulfilled(null)).toBe('unknown');
+    expect(HOST_EFFECT_OUTCOME.dwebInstall.fulfilled({
+      ok: false, performed: true, outcomeKnown: false,
+      outcomeKind: 'host-lost', retryable: false,
+    })).toBe('unknown');
   });
 
   test.each([

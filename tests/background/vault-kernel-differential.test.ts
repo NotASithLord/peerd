@@ -9,8 +9,6 @@ import {
   resolveVaultAutoLockMs,
   resolveKernelPermission,
   VAULT_KERNEL_ROUTE_NAMES,
-  buildVaultKernelState,
-  projectVaultGateState,
 } from '../../extension/background/vault-kernel-core.js';
 import { normalizeSettingsPatch } from '../../extension/background/settings-patch.js';
 import { normalizeVaultAutoLockPatch } from '../../extension/background/settings-patch.js';
@@ -786,32 +784,4 @@ describe('vault authority kernel boot and UI contract', () => {
 
   });
 
-  test('first-install VaultGate projection is exact against legacy locked state', () => {
-    const legacyLockedSnapshot = {
-      hydrated: true,
-      vault: {
-        initialized: false, locked: true, unlockedAt: 0,
-        prfEnrolled: false, hasRecovery: false, lockReason: null,
-      },
-      settings: { vaultAutoLockMs: 45 * 60_000, unrelated: 'rich-host-only' },
-    };
-    const kernel = buildVaultKernelState({
-      kernel: {
-        schema: 1,
-        buildId: `0.7.0:${'a'.repeat(64)}`,
-        bootId: 'boot-differential',
-        kernelEpoch: 'kernel-differential',
-      },
-      status: { initialized: false, prfEnrolled: false, hasRecovery: false },
-      locked: true, unlockedAt: 999, lockReason: null, autoLockMs: 45 * 60_000,
-      settings: { vaultAutoLockMs: 45 * 60_000 },
-      session: { sessionId: null, messages: [], permission: { mode: 'plan', confirmActions: true } },
-      providers: { current: 'anthropic', model: 'claude-sonnet-4-6', hasKey: false },
-      composer: { provider: 'anthropic', model: 'claude-sonnet-4-6', keyless: false,
-        credentialReady: false, localReady: false, canSend: false, reason: 'vault-locked' },
-    });
-    expect(projectVaultGateState(kernel)).toEqual(projectVaultGateState(legacyLockedSnapshot));
-    expect(JSON.stringify(projectVaultGateState(kernel)))
-      .not.toMatch(/credentialId|prfSalt|wrappedDK|secret|apiKey/);
-  });
 });

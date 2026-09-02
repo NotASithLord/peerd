@@ -3,7 +3,6 @@
 import browser from '/shared/browser-api.js';
 import { CHANNEL, CONTROLLER_BUILD_DIGEST, EXTENSION_VERSION } from '/shared/build-config.js';
 import {
-  FEATURE_LEASE_HOST_PROTOCOL,
   FEATURE_LEASE_KEEPALIVE_PORT,
 } from '/shared/feature-lease-protocol.js';
 import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
@@ -417,34 +416,9 @@ const ensureFeatureLeaseHost = makeBoundedModuleLoader(
   },
 );
 
-// This is the only runtime-message lifecycle authority in the document. The
-// ordinary feature handlers above merely consume already-active leases.
-browser.runtime.onMessage.addListener(/** @type {any} */ ((
-  /** @type {any} */ message,
-  /** @type {any} */ sender,
-  /** @type {(value:any)=>void} */ sendResponse,
-) => {
-  if (typeof message?.type !== 'string'
-      || !message.type.startsWith('feature-lease/host-')) return false;
-  if (!isServiceWorkerSender(sender)) {
-    sendResponse({
-      ok: false,
-      protocol: FEATURE_LEASE_HOST_PROTOCOL,
-      error: 'feature-lease-host-sender-invalid',
-    });
-    return false;
-  }
-  ensureFeatureLeaseHost()
-    .then((host) => host.handleMessage(message))
-    .then(sendResponse, (cause) => sendResponse({
-      ok: false,
-      protocol: FEATURE_LEASE_HOST_PROTOCOL,
-      code: cause?.code ?? 'feature-lease-host-load-failed',
-      error: 'Feature host unavailable. Try again.',
-      outcomeKnown: true,
-      retryable: true,
-    }));
-  return true;
-}));
+// The exact lifecycle Port must exist before the first lease command. Keeping
+// this small host eager avoids extension-wide message fan-out to a retired
+// same-URL renderer; heavy feature modules remain demand-loaded.
+void ensureFeatureLeaseHost();
 
 globalThis.addEventListener('pagehide', () => { void featureLeaseHost?.close(); }, { once: true });

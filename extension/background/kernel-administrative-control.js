@@ -8,7 +8,6 @@ import {
 } from '../shared/semantic-hook-manifest.js';
 import {
   KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
-  KERNEL_FEATURE_DISPATCH_CAPABILITY,
   validAdministrativeHookRecord,
 } from '../shared/kernel-feature-policy.js';
 import { createKernelAdministrativeMemory } from './kernel-administrative-memory.js';

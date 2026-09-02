@@ -1,20 +1,6 @@
 // @ts-check
 
 /** @param {Record<string, any>} deps */
-export const makeLegacyVaultUnlockEffect = ({
-  onUnlocked, resumeGoalRuns, sessionCache, maybeAutoResumeAfterRecovery, resumeSchedules,
-}) => (/** @type {string} */ reason) => {
-  Promise.resolve(onUnlocked(reason)).catch((/** @type {unknown} */ error) =>
-    console.error('[sw] post-unlock transition failed', error));
-  Promise.resolve(resumeGoalRuns())
-    .catch(() => {})
-    .then(() => sessionCache.sessionGet('currentSessionId'))
-    .then((/** @type {any} */ current) => maybeAutoResumeAfterRecovery(current))
-    .catch(() => {});
-  Promise.resolve(resumeSchedules()).catch(() => {});
-};
-
-/** @param {Record<string, any>} deps */
 export const makeConfirmAnswerRoute = ({
   confirmCoordinator, sessionCache, isActualSidepanelSender, isActualHomeSender,
 }) => async (/** @type {any} */ {

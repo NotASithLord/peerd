@@ -50,6 +50,7 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'background/repository-local-client.js',
   'peerd-egress/ui.js',
   'offscreen/repository-host.js',
+  'offscreen/repository-worker.js',
   'offscreen/repository-app-files.js',
   'background/kernel-repository-control.js',
   'background/kernel-keyed-origin-authority.js',

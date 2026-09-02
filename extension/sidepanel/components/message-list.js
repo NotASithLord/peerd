@@ -1073,7 +1073,6 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
   // which wrongly implies a tab/DOM agent for a tabless fetch-only thing).
   const isApiIntegration = card?.kind === 'web' && /^https?:\/\//.test(String(who));
   const resultText = toolResult ? formatResultContent(toolResult) : '';
-  const failureText = `${card?.error ?? ''} ${resultText}`;
   const outcomeUnknown = card?.outcomeKnown === false
     || (!card && toolResult?.actorOutcomeKnown === false);
   // The actor's own live state drives the status (the tool result is the async
@@ -1264,7 +1263,7 @@ const formatResultContent = (toolResult) => {
 //                     pod     : Pod execution kind
 //                     app      — App execution kind
 //   distributed       dweb     — the dweb / dwapp network (share/discover/
-//   (magenta)                    install/peers/block/discovery/guide)
+//   (magenta)                    install/peers/block/discovery)
 //
 // provider (cyan) owns no tool primitive — the model call isn't a tool. The
 // dweb tools are preview-only (exposure-gated), so the distributed badge only

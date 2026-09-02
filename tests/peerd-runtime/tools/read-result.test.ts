@@ -82,10 +82,15 @@ describe('read_result', () => {
       { key: 'result:opaque-1' },
       { resourceAuthority: { readResult: async () => ({ ok: false, error: 'not_your_result' }) } } as any,
     )).ok).toBe(false);
-    expect((await readResultTool.execute(
+    const missing = await readResultTool.execute(
       { key: 'result:missing' },
       context({}) as any,
-    )).ok).toBe(false);
+    );
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.error).toContain('only if it was read-only or idempotent');
+      expect(missing.error).not.toContain('re-run the producing tool');
+    }
     expect((await readResultTool.execute(
       { key: 'result:opaque-1' },
       {} as any,

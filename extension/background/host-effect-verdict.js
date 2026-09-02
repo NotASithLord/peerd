@@ -351,6 +351,53 @@ export const stampAuthorityToolResultBlock = (
   return { ...stamped, is_error: false, outcomeKnown: true, retryable: false };
 };
 
+/**
+ * Apply the strongest durable lifecycle rewrite to one live or stored result.
+ * Both orchestrator and actor hosts use this pure projection so their recovery
+ * truth cannot drift while their separate authority state machines remain
+ * isolated.
+ * @param {{receipts:any[],rewrites:Iterable<any>,callId:unknown,
+ *   value:Record<string,any>,stored?:boolean}} input
+ */
+export const stampLifecycleToolResult = ({
+  receipts, rewrites, callId, value, stored = false,
+}) => {
+  const stamped = stored
+    ? stampAuthorityToolResultBlock(receipts, value)
+    : stampAuthorityToolResult(receipts, value);
+  const recoveryEntry = strongestLifecycleRewrite(
+    typeof callId === 'string' ? [...rewrites].filter((entry) => entry.callId === callId) : [],
+  );
+  if (!recoveryEntry) return stamped;
+  const { rewrite, physical } = recoveryEntry;
+  return {
+    ...stamped,
+    ...(stored
+      ? { is_error: true, content: rewrite.error }
+      : { ok: false, error: rewrite.error }),
+    recovery: rewrite.recovery,
+    ...recoveryCustody(rewrite),
+    ...actorRecoveryCustody(rewrite, { ...stamped, ...physical }),
+    meta: {
+      ...(isRecord(stamped.meta) ? stamped.meta : {}),
+      recovery: rewrite.recovery,
+    },
+  };
+};
+
+/** @param {Promise<unknown>} pending @param {number} timeoutMs */
+export const settleWithin = (pending, timeoutMs) => new Promise((resolve) => {
+  let finished = false;
+  const finish = (/** @type {unknown} */ value) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    resolve(value);
+  };
+  const timer = setTimeout(() => finish(undefined), timeoutMs);
+  pending.then(finish, () => finish(undefined));
+});
+
 export const HOST_EFFECT_OUTCOME = Object.freeze({
   okResult: Object.freeze({
     fulfilled: (/** @type {any} */ value) => value?.outcomeKnown === false

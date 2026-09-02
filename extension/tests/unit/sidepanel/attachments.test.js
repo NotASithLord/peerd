@@ -297,6 +297,27 @@ describe('sidepanel.attachments', () => {
     } finally { unmount(); }
   });
 
+  it('reload recovery says to reattach files whose bytes were not persisted', async () => {
+    localStorage.setItem('peerd.unconfirmed-send.new', JSON.stringify({
+      operationId: 'send.reloaded', text: 'review this document', goal: false,
+      sessionId: null, hadAttachments: true, source: 'composer',
+    }));
+    const { root, unmount } = await mountInputBar(baseState(), async () => ({ ok: true }));
+    try {
+      expect(root.querySelector('.attach-chip')).toBeFalsy();
+      const release = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((entry) => entry.textContent === 'I checked; allow a new message'));
+      release.click();
+      await flush();
+      expect(root.textContent).toContain('reattach the files before choosing Send');
+      expect(root.textContent?.includes('restored text and files')).toBe(false);
+    } finally {
+      unmount();
+      localStorage.removeItem('peerd.unconfirmed-send.new');
+      localStorage.removeItem('peerd.draft.new');
+    }
+  });
+
   for (const order of ['rejection-first', 'state-first']) {
     it(`keeps a first-message draft when the new session arrives ${order}`, async () => {
       localStorage.removeItem('peerd.draft.new');

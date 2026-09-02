@@ -69,8 +69,6 @@ const OPERATION_LABELS = Object.freeze({
   'turn.dweb.run-mesh-program': 'Run a dweb mesh program',
 });
 
-export const AUTHORITY_CONFIRMATION_OPERATIONS = Object.freeze(Object.keys(OPERATION_LABELS));
-
 const clean = (/** @type {unknown} */ value, max = 120) => {
   const text = String(value ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;

@@ -31,7 +31,12 @@ describe('targeted offscreen actor MessageChannel', () => {
       target, { url: expected },
     ], expected)).toBeNull();
     expect(selectExactActorHostClient([
-      { url: `${expected}?sibling=1` }, { url: `${expected}#sibling` },
+      { url: `${expected}?sibling=1` },
+    ], expected)).toBeNull();
+    const physical = { url: `${expected}#physical-host` };
+    expect(selectExactActorHostClient([physical], expected)).toBe(physical);
+    expect(selectExactActorHostClient([
+      physical, { url: `${expected}#other-host` },
     ], expected)).toBeNull();
   });
 

@@ -5,7 +5,7 @@
 // _denylist/_provider_config) collapsed into ONE `inspect({ kind })` — this
 // verifies each facet's output shape and the §02 demonstration property
 // (e.g. kind:'provider_config' does NOT return the API key; kind:'storage'
-// truncates encrypted blobs), plus the dispatch itself (unknown kind → error).
+// renders the authority-projected proof), plus dispatch (unknown kind → error).
 
 import { describe, it, expect } from '../../framework.js';
 // Tests are exempt from the public-API import rule and exercise the concrete
@@ -61,7 +61,7 @@ const baseCtx = (overrides = {}) => {
 const inspect = (kind, args, ctx) => inspectTool.execute({ kind, ...args }, ctx);
 
 describe('inspect kind:storage', () => {
-  it('returns the kv contents as a JSON string', async () => {
+  it('returns the authority proof as a JSON string', async () => {
     const ctx = baseCtx({ kv: { list: async () => ({ 'foo': 'bar', 'baz': 42 }) } });
     const r = await inspect('storage', {}, ctx);
     expect(r.ok).toBe(true);
@@ -70,13 +70,12 @@ describe('inspect kind:storage', () => {
     expect(parsed.baz).toBe(42);
   });
 
-  it('truncates very long base64 strings while preserving head/tail', async () => {
-    const longBlob = 'A'.repeat(500);
-    const ctx = baseCtx({ kv: { list: async () => ({ 'secret:k': longBlob }) } });
+  it('renders the authority-produced ciphertext preview without reshaping it', async () => {
+    const preview = `${'A'.repeat(32)}…${'A'.repeat(16)} (500 chars, base64)`;
+    const ctx = baseCtx({ kv: { list: async () => ({ 'secret:k': preview }) } });
     const r = await inspect('storage', {}, ctx);
     const parsed = JSON.parse(okContent(r));
-    expect(parsed['secret:k'].includes('…')).toBe(true);
-    expect(parsed['secret:k'].includes('500 chars')).toBe(true);
+    expect(parsed['secret:k']).toBe(preview);
   });
 
   it('passes the prefix arg through to kv.list', async () => {
@@ -234,6 +233,16 @@ describe('inspect kind:provider_config', () => {
     const ctx = baseCtx({ getSecret: async () => 'sk-ant-this-must-not-leak-1234' });
     const r = await inspect('provider_config', {}, ctx);
     expect(okContent(r).includes('sk-ant-this-must-not-leak-1234')).toBe(false);
+  });
+
+  it('describes the sealed vault custody path instead of the retired SW-only contract', async () => {
+    const r = await inspect('provider_config', {}, baseCtx());
+    const contract = JSON.parse(okContent(r)).contract;
+    expect(contract.includes('Argon2id')).toBe(true);
+    expect(contract.includes('sealed offscreen Worker')).toBe(true);
+    expect(contract.includes('semantic controller')).toBe(true);
+    expect(contract.includes('PBKDF2')).toBe(false);
+    expect(contract.includes('never leaves the service worker')).toBe(false);
   });
 });
 

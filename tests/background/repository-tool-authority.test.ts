@@ -43,6 +43,7 @@ describe('repository tool authority', () => {
   test('does not quiesce an App for fetch but does for push', async () => {
     const order: string[] = [];
     const remote = { url: 'https://github.com/owner/repo.git', host: 'github.com' };
+    const networkOptions: any[] = [];
     const repositories = {
       getRemote: async () => remote,
       coordinate: async (_ref: any, operation: () => Promise<any>) => {
@@ -50,9 +51,13 @@ describe('repository tool authority', () => {
         try { return await operation(); }
         finally { order.push('unlock'); }
       },
-      fetch: async () => { order.push('fetch'); return { fetched: true }; },
+      fetch: async (_ref: any, options: any) => {
+        networkOptions.push(options); order.push('fetch'); return { fetched: true };
+      },
       commit: async () => { order.push('checkpoint'); return { created: true }; },
-      push: async () => { order.push('push'); return { ok: true }; },
+      push: async (_ref: any, options: any) => {
+        networkOptions.push(options); order.push('push'); return { ok: true };
+      },
     };
     const appQuiescence = {
       run: async (_id: string, operation: () => Promise<any>) => {
@@ -81,6 +86,9 @@ describe('repository tool authority', () => {
       ctx, signal, shared: fetchShared,
     }).fetch(remote.url);
     expect(order).toEqual(['lock', 'fetch', 'unlock']);
+    expect(networkOptions[0]).toMatchObject({
+      expectedRemote: remote.url, signal,
+    });
 
     order.length = 0;
     const pushShared: any = {};
@@ -102,6 +110,9 @@ describe('repository tool authority', () => {
       ctx, signal, shared: pushShared,
     }).push(remote.url, undefined);
     expect(order).toEqual(['quiesce', 'lock', 'checkpoint', 'push', 'unlock', 'resume']);
+    expect(networkOptions[1]).toMatchObject({
+      expectedRemote: remote.url, signal,
+    });
   });
 
   test('flushes and reloads a live Notebook after restore', async () => {

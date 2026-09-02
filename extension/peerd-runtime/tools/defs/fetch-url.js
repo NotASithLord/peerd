@@ -68,7 +68,7 @@ const stripSessionHeaders = (headers) => {
 /** @type {import('/shared/tool-types.js').Tool} */
 export const fetchUrlTool = composeTool("fetch_url", {
   execute: async (args, ctx) => {
-    const authority = /** @type {{confirmWebWrite?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<string|boolean>,requestWebText?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<{ok?:boolean,status:number,body:string,headers:Record<string,string>,finalUrl:string,reason?:string,error?:string}>,extractReadableMarkdown?:(html:string,url:string)=>Promise<{readerable:boolean,markdown?:string,title?:string|null}>,spillResult?:(record:Record<string,unknown>)=>Promise<string|null>}|undefined} */ (
+    const authority = /** @type {{confirmWebWrite?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<string|boolean>,requestWebText?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<{ok?:boolean,status:number,body:string,bodyTruncated?:boolean,headers:Record<string,string>,finalUrl:string,reason?:string,error?:string}>,extractReadableMarkdown?:(html:string,url:string)=>Promise<{readerable:boolean,markdown?:string,title?:string|null}>,spillResult?:(record:Record<string,unknown>)=>Promise<string|null>}|undefined} */ (
       /** @type {any} */ (ctx).resourceAuthority);
     if (!authority?.requestWebText) {
       return { ok: false, error: 'web_resource_authority_unavailable' };
@@ -195,8 +195,8 @@ export const fetchUrlTool = composeTool("fetch_url", {
           }
         } catch { /* extraction failed — raw fallback */ }
       }
-      // Spill-and-page for an oversized body (Hermes-style): the FULL text is
-      // stored locally and the model sees a head+tail WINDOW plus the exact
+      // Spill-and-page for an oversized body (Hermes-style): the retained text
+      // is stored locally and the model sees a head+tail WINDOW plus the exact
       // read_result paging call instead of the old silent head-only slice
       // that lost the tail without saying so. Falls back to the old slice when
       // the spill capability is absent (a ctx without resultStore).
@@ -204,8 +204,9 @@ export const fetchUrlTool = composeTool("fetch_url", {
       // for paragraphs, not object trees), surface the most-relevant PASSAGES
       // instead of a blind head+tail window: a long page's answer usually sits
       // mid-document. excerptRelevant returns null (no query / no match / too
-      // few passages) → fall back to windowText. Either way the FULL text is
-      // stored and pageable; this only picks a better first window.
+      // few passages) → fall back to windowText. Either way every retained char
+      // is stored and pageable; bodyTruncated says when the host cap cut the
+      // source response before this semantic layer received it.
       const query = typeof args.query === 'string' ? args.query.trim() : '';
       const ex = (query && !/(json|graphql)/i.test(ct))
         ? excerptRelevant(workingBody, query, MAX_BODY_CHARS) : null;
@@ -227,8 +228,15 @@ export const fetchUrlTool = composeTool("fetch_url", {
           });
           if (cacheKey) {
             footer = ex
-              ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
-              : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+              ? excerptFooter({
+                  key: cacheKey, total: ex.total, passagesShown: ex.passagesShown,
+                  passagesTotal: ex.passagesTotal, query,
+                  retainedPrefix: res.bodyTruncated === true,
+                })
+              : pagingFooter({
+                  key: cacheKey, total: win.total, headChars: win.headChars,
+                  tailChars: win.tailChars, retainedPrefix: res.bodyTruncated === true,
+                });
           }
         } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
       } else if (truncated) {
@@ -252,6 +260,7 @@ export const fetchUrlTool = composeTool("fetch_url", {
           format,
           ...(title ? { title } : {}),
           truncated,
+          bodyTruncated: res.bodyTruncated === true,
           body: text,
           json: parsedJson,
         }, null, 2),

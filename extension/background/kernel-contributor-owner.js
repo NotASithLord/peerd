@@ -9,6 +9,7 @@ import {
   CONTRIBUTOR_CHANNEL_RESULT, contributorPayloadFits, opaqueContributorToken,
   parseContributorOffer, validContributorToken,
 } from '../shared/contributor-channel.js';
+import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 
 export const CONTRIBUTOR_PENDING_RECEIPTS_KEY = 'contributor_metrics.pending.v1';
 export const CONTRIBUTOR_PENDING_MAX_RECEIPTS = 64;
@@ -588,7 +589,8 @@ export const createPreviewContributorRoutes = (/** @type {any} */ {
       const clients = await /** @type {any} */ (globalThis).clients?.matchAll?.({
         type: 'window', includeUncontrolled: true,
       }) ?? [];
-      const exact = clients.filter((/** @type {any} */ client) => client?.url === offscreenUrl);
+      const exact = clients.filter((/** @type {any} */ client) =>
+        sameDocumentUrlIgnoringHash(client?.url, offscreenUrl));
       if (exact.length !== 1) {
         return { ok: false, code: 'contributor-channel-host-unavailable', outcomeKnown: true };
       }

@@ -24,14 +24,14 @@ export const NATIVE_CHROME_BUNDLE_RATCHETS = Object.freeze({
     // authority/policy inputs, not controller feature ownership.
     // Source-action child generations are fixed browser custody, not a
     // semantic feature surface.
-    bytes: 1_338_454,
-    inputs: 403,
-    inputSha256: '6ce86b84797ae5012a0c2f1d7d6eb70c49e61a703a1a69c2ba7c9a0d9e78089e',
+    bytes: 1_347_805,
+    inputs: 402,
+    inputSha256: 'c6861d3086c91f9e43f55588f6cb64dbfd2544832698c4257240a049f2ac631d',
   }),
   'background/vault-kernel-preview.js': Object.freeze({
-    bytes: 1_419_128,
-    inputs: 409,
-    inputSha256: '84a2377a0d3a547ddc4a69ca6e10f3b3a2892a2ea3cb341f2c2e81782de1ecd6',
+    bytes: 1_438_000,
+    inputs: 408,
+    inputSha256: '90c8c7887d5e297cc8e19e1de35ee078c3305a624cfd6612115e73130f2f243a',
   }),
 });
 

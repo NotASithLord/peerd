@@ -10,9 +10,11 @@ import { isPrivateOrLocalHost } from '/shared/private-network.js';
 import { ALLOWED_METHODS, needsWebWriteConfirm } from '/peerd-engine/authority.js';
 import { finalWebRequestConfirmation } from '/shared/web-request-confirmation.js';
 import { normalizeApiOrigin } from '/shared/api-origin.js';
+import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
 
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_WEB_TEXT_CHARS = 2_000_000;
+const RESOURCE_AUTHORITY_ARGUMENT_BYTES = 20 * 1024 * 1024;
 const SESSION_HEADERS = new Set([
   'cookie', 'authorization', 'proxy-authorization', 'dpop',
 ]);
@@ -26,11 +28,6 @@ const exactKeys = (/** @type {Record<string,unknown>} */ value,
   const keys = Object.keys(value);
   return required.every((key) => Object.hasOwn(value, key))
     && keys.every((key) => required.includes(key) || optional.includes(key));
-};
-
-const sameClone = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  try { return JSON.stringify(left) === JSON.stringify(right); }
-  catch { return false; }
 };
 
 /** @param {unknown} value */
@@ -102,7 +99,9 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
           || request.url !== args.url || method !== expectedMethod(args)
           || !ALLOWED_METHODS.includes(method) || !needsWebWriteConfirm(method)
           || request.body !== expectedBody(args)
-          || !headers || !sameClone(headers, expectedHeaders(args))) throw mismatch();
+          || !headers || !sameCanonicalStructuredClone(
+            headers, expectedHeaders(args), { maxBytes: RESOURCE_AUTHORITY_ARGUMENT_BYTES },
+          )) throw mismatch();
       if (typeof ctx?.confirm !== 'function') return false;
       const presentation = finalWebRequestConfirmation({
         url: request.url, method, headers,
@@ -135,14 +134,16 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
           || request.body !== expectedBody(args)
           || typeof ctx?.webFetch !== 'function') throw mismatch();
       const headers = stringHeaders(request.headers);
-      if (!headers || !sameClone(headers, expectedHeaders(args))) throw mismatch();
+      if (!headers || !sameCanonicalStructuredClone(
+        headers, expectedHeaders(args), { maxBytes: RESOURCE_AUTHORITY_ARGUMENT_BYTES },
+      )) throw mismatch();
       if (needsWebWriteConfirm(request.method)) {
         const approval = shared.webWriteApproval;
         shared.webWriteApproval = null;
-        if (!approval || !sameClone(approval, {
+        if (!approval || !sameCanonicalStructuredClone(approval, {
           url: request.url, method: request.method, headers,
           ...(request.body === undefined ? {} : { body: request.body }),
-        })) throw mismatch();
+        }, { maxBytes: RESOURCE_AUTHORITY_ARGUMENT_BYTES })) throw mismatch();
       }
       const controller = new AbortController();
       const abort = () => controller.abort();
@@ -202,14 +203,16 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
                 };
           }
         }
-        const body = (await response.text()).slice(0, MAX_WEB_TEXT_CHARS);
+        const responseText = await response.text();
+        const bodyTruncated = responseText.length > MAX_WEB_TEXT_CHARS;
+        const body = bodyTruncated ? responseText.slice(0, MAX_WEB_TEXT_CHARS) : responseText;
         /** @type {Record<string,string>} */
         const responseHeaders = {};
         response.headers.forEach((/** @type {string} */ value, /** @type {string} */ name) => {
           responseHeaders[name] = value;
         });
         return {
-          ok: true, status: response.status, body, headers: responseHeaders,
+          ok: true, status: response.status, body, bodyTruncated, headers: responseHeaders,
           finalUrl: response.url ?? request.url,
         };
       } finally {

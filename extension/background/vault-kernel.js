@@ -537,7 +537,10 @@ const knownProviderNames = Object.freeze([
   'anthropic', 'openai', 'openrouter', 'ollama', 'glm', 'local-webgpu',
 ]);
 const onKernelSettingsChanging = (/** @type {Record<string,any>} */ patch) => {
-  if (patch.dwebEnabled === false) void featureHost.runtime.disable('dweb');
+  if (patch.dwebEnabled === false) {
+    demandPlane?.invalidateDwebPublications?.();
+    void featureHost.runtime.disable('dweb');
+  }
 };
 const onKernelSettingsChanged = async (/** @type {Record<string,any>} */ patch) => {
   if (Object.hasOwn(patch, 'providerName') || Object.hasOwn(patch, 'providerModel')) {
@@ -560,6 +563,7 @@ const onKernelSettingsChanged = async (/** @type {Record<string,any>} */ patch) 
 let featureLockInFlight = null;
 const lockFeatureHost = () => {
   if (featureLockInFlight) return featureLockInFlight;
+  demandPlane?.invalidateDwebPublications?.();
   controllerGateway.retire();
   const run = Promise.resolve(voiceCustody.teardown())
     .catch(() => {})
@@ -575,7 +579,13 @@ const recoveryCustody = createKernelRecoveryCustody({
   dwebActive: () => DWEB_ENABLED
     && settingsStore.get().dwebEnabled === true
     && settingsStore.get().dwebAgentEnabled === true,
-  load: async () => (await getControllerRelays()).resumeSchedules(),
+  load: async (/** @type {string|null} */ currentSessionId) => {
+    const plane = await loadDemandPlane();
+    if (!await plane.hydrateKeyedOrigins()) {
+      throw new Error('kernel-keyed-origin-hydration-failed');
+    }
+    return (await plane.getControllerRelays()).resumeRecovery(currentSessionId);
+  },
 });
 
 const vaultRoutes = makeVaultKernelRoutes({
@@ -588,8 +598,17 @@ const vaultRoutes = makeVaultKernelRoutes({
     VaultLockedError,
     onInitialized: featureHost.vaultInitialized,
     onUnlocked: async () => {
+      // why: an already-mounted controller may have observed a locked-start
+      // hydration refusal. Restore keyed-origin sensitivity before any durable
+      // controller lease or actor mailbox is allowed to wake.
+      if (demandPlane && !await demandPlane.hydrateKeyedOrigins()) {
+        throw new Error('kernel-keyed-origin-hydration-failed');
+      }
       await featureHost.vaultUnlocked();
-      await recoveryCustody.resume();
+      const currentSessionId = await sessionCache.sessionGet('currentSessionId');
+      await recoveryCustody.resume(
+        typeof currentSessionId === 'string' ? currentSessionId : null,
+      );
     },
     onLocked: lockFeatureHost,
   },
@@ -992,6 +1011,7 @@ const routes = {
       ok: true,
       kernel: true,
       assembly: assemblyReport(),
+      featureLeases: featureHost.runtime.snapshot(),
       browserCustody: childGuard.status(),
       timing: Object.freeze({
         clock: 'worker-performance-now-diagnostic',

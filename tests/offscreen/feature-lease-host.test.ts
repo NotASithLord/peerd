@@ -4,6 +4,10 @@ import {
   FEATURE_LEASE_HOST_PROTOCOL,
   FEATURE_LEASE_KEEPALIVE_PORT,
 } from '../../extension/offscreen/feature-lease-host.js';
+import {
+  FEATURE_LEASE_HOST_COMMAND,
+  FEATURE_LEASE_HOST_COMMAND_RESULT,
+} from '../../extension/shared/feature-lease-protocol.js';
 
 const BUILD = `0.7.0:${'a'.repeat(64)}`;
 
@@ -44,16 +48,22 @@ const makePort = (autoAck = true) => {
 };
 
 const lease = (scope: string, over: Record<string, any> = {}) => ({
+  schema: 1,
   scope,
   leaseId: `lease-${scope}-aaaa`,
   generation: 1,
   buildId: BUILD,
+  bootId: 'boot-epoch-aaaa',
   kernelEpoch: 'kernel-epoch-aaaa',
   hostEpoch: 'host-epoch-aaaaaa',
   ...over,
 });
 
-const setup = (options: { autoAck?: boolean, stopScope?: (scope: string, value: any) => any } = {}) => {
+const setup = (options: {
+  autoAck?: boolean,
+  startScope?: (scope: string, value: any) => any,
+  stopScope?: (scope: string, value: any) => any,
+} = {}) => {
   const ports: ReturnType<typeof makePort>[] = [];
   const started: any[] = [];
   const stopped: any[] = [];
@@ -64,7 +74,10 @@ const setup = (options: { autoAck?: boolean, stopScope?: (scope: string, value: 
   const host = createOffscreenFeatureLeaseHost({
     expectedBuildId: BUILD,
     newId: () => 'host-epoch-aaaaaa',
-    startScope: async (scope, value) => { started.push({ scope, value }); return { started: scope }; },
+    startScope: async (scope, value) => {
+      started.push({ scope, value });
+      return options.startScope ? options.startScope(scope, value) : { started: scope };
+    },
     stopScope: async (scope, value) => {
       stopped.push({ scope, value });
       return options.stopScope ? options.stopScope(scope, value) : { stopped: scope };
@@ -99,10 +112,11 @@ const setup = (options: { autoAck?: boolean, stopScope?: (scope: string, value: 
 };
 
 describe('offscreen feature-lease host', () => {
-  test('has no port or heartbeat before an exact lease and tears both down after the last stop', async () => {
+  test('opens one idle control port and keeps it through the last stop receipt', async () => {
     const h = setup();
     expect(h.host.snapshot().leases).toEqual([]);
-    expect(h.ports).toEqual([]);
+    expect(h.ports).toHaveLength(1);
+    expect(h.ports[0].sent).toEqual([]);
 
     const current = lease('controller');
     expect(await h.message('feature-lease/host-start', current)).toMatchObject({
@@ -125,8 +139,34 @@ describe('offscreen feature-lease host', () => {
       ok: true, active: false,
     });
     expect(h.stopped).toHaveLength(1);
-    expect(h.ports[0].disconnected).toBe(true);
+    expect(h.ports[0].disconnected).toBe(false);
     expect(h.host.snapshot().leases).toEqual([]);
+  });
+
+  test('serves only the three finite lifecycle commands over the exact control port', async () => {
+    const h = setup();
+    h.ports[0].onMessage.fire({
+      type: FEATURE_LEASE_HOST_COMMAND,
+      protocol: FEATURE_LEASE_HOST_PROTOCOL,
+      commandId: 'feature-command-status',
+      message: { type: 'feature-lease/host-status', protocol: FEATURE_LEASE_HOST_PROTOCOL },
+    });
+    await Promise.resolve();
+    expect(h.ports[0].sent.at(-1)).toMatchObject({
+      type: FEATURE_LEASE_HOST_COMMAND_RESULT,
+      commandId: 'feature-command-status',
+      result: { ok: true, hostEpoch: 'host-epoch-aaaaaa', leases: [] },
+    });
+
+    const prior = h.ports[0].sent.length;
+    h.ports[0].onMessage.fire({
+      type: FEATURE_LEASE_HOST_COMMAND,
+      protocol: FEATURE_LEASE_HOST_PROTOCOL,
+      commandId: 'feature-command-generic',
+      message: { type: 'feature-lease/anything', protocol: FEATURE_LEASE_HOST_PROTOCOL },
+    });
+    await Promise.resolve();
+    expect(h.ports[0].sent).toHaveLength(prior);
   });
 
   test('never publishes an active receipt before the exact heartbeat is acknowledged', async () => {
@@ -251,7 +291,7 @@ describe('offscreen feature-lease host', () => {
     await Promise.resolve();
     expect(h.host.isActive('controller')).toBe(false);
     expect(h.ports[0].disconnected).toBe(true);
-    expect(h.reconnects).toEqual([]);
+    expect(h.reconnects).toHaveLength(1);
   });
 
   test('schema/build/host and stale-stop forgeries cannot change active authority', async () => {
@@ -301,7 +341,8 @@ describe('offscreen feature-lease host', () => {
     expect(h.ports).toHaveLength(2);
 
     const dwebNext = lease('dweb', {
-      leaseId: 'lease-dweb-next', generation: 2, kernelEpoch: 'kernel-epoch-next',
+      leaseId: 'lease-dweb-next', generation: 2,
+      bootId: 'boot-dweb-next', kernelEpoch: 'kernel-epoch-next',
     });
     expect(await h.message('feature-lease/host-start', dwebNext))
       .toMatchObject({ ok: true, adopted: true });
@@ -375,7 +416,7 @@ describe('offscreen feature-lease host', () => {
     expect(await second.handleMessage({
       type: 'feature-lease/host-start', protocol: FEATURE_LEASE_HOST_PROTOCOL, lease: old,
     })).toMatchObject({ ok: false, error: 'feature-lease-host-binding-invalid' });
-    expect(secondPorts).toEqual([]);
+    expect(secondPorts).toHaveLength(1);
   });
 
   test('failed start stays dormant and failed stop retains exact custody for retry', async () => {
@@ -404,7 +445,7 @@ describe('offscreen feature-lease host', () => {
       type: 'feature-lease/host-start', protocol: FEATURE_LEASE_HOST_PROTOCOL, lease: current,
     })).toMatchObject({ ok: false, error: 'feature-lease-host-start-failed' });
     expect(host.snapshot().leases).toEqual([]);
-    expect(ports).toEqual([]);
+    expect(ports).toHaveLength(1);
 
     failStart = false;
     expect(await host.handleMessage({
@@ -421,5 +462,31 @@ describe('offscreen feature-lease host', () => {
       type: 'feature-lease/host-stop', protocol: FEATURE_LEASE_HOST_PROTOCOL, lease: current,
     })).toMatchObject({ ok: true, active: false });
     expect(host.snapshot().leases).toEqual([]);
+  });
+
+  test('a stop during slow startup fences late activation while another scope stays active', async () => {
+    let releaseStart = () => {};
+    const delayed = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const h = setup({
+      startScope: (scope) => scope === 'dweb' ? delayed : { started: scope },
+    });
+    const controller = lease('controller');
+    expect(await h.message('feature-lease/host-start', controller)).toMatchObject({ ok: true });
+    const dweb = lease('dweb');
+    const starting = h.message('feature-lease/host-start', dweb);
+    await Promise.resolve();
+    const stopping = h.message('feature-lease/host-stop', dweb);
+    releaseStart();
+    expect(await starting).toMatchObject({
+      ok: false, error: 'feature-lease-host-start-cancelled', scope: 'dweb',
+    });
+    expect(await stopping).toMatchObject({ ok: true, active: false, coalesced: true });
+    expect(h.host.isActive('dweb')).toBe(false);
+    expect(h.host.isActive('controller')).toBe(true);
+    expect(h.stopped).toEqual([
+      expect.objectContaining({ scope: 'dweb', value: expect.objectContaining({
+        reason: 'start-retired',
+      }) }),
+    ]);
   });
 });

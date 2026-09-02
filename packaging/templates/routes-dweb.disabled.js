@@ -14,7 +14,7 @@ const disabled = async () => ({ ok: false, error: 'dweb-disabled' });
  */
 export const makeDwebRoutes = (deps) => {
   const {
-    kv, isOffscreenSender, createDwebRollbackGuard, dwebPublicationGeneration,
+    kv, isOffscreenSender, createDwebRollbackGuard,
   } = deps;
   // Preserve the full factory's pure construction boundary. No admit call can
   // occur in a disabled package, but dependency/setup drift must remain visible.
@@ -24,17 +24,6 @@ export const makeDwebRoutes = (deps) => {
   const offscreenDisabled = async (_msg, sender) => isOffscreenSender?.(sender) === true
     ? { ok: false, error: 'dweb-disabled' }
     : { ok: false, error: 'offscreen-sender-required' };
-  /** @param {any} msg @param {any} sender */
-  const offscreenCustodyChanged = async (msg, sender) => {
-    if (isOffscreenSender?.(sender) !== true) {
-      return { ok: false, error: 'offscreen-sender-required' };
-    }
-    // The full storage callbacks check their exact publication generation
-    // before observing the disabled gate. Preserve that collaborator boundary
-    // and its thrown-error behavior, even though the result remains fail-closed.
-    if (typeof dwebPublicationGeneration === 'function') dwebPublicationGeneration();
-    return { ok: false, error: 'dweb-custody-changed' };
-  };
   /** @param {any} _msg @param {any} sender */
   const metaDisabled = async (_msg, sender) => isOffscreenSender?.(sender) === true
     ? { ok: false, accepted: false, error: 'dweb-disabled' }
@@ -44,8 +33,8 @@ export const makeDwebRoutes = (deps) => {
     'dweb/meta-admit': metaDisabled,
     'dweb/app-snapshot': offscreenDisabled,
     'dweb/audit': disabled,
-    'dweb/app-install': offscreenCustodyChanged,
-    'dweb/app-update': offscreenCustodyChanged,
+    'dweb/app-install': offscreenDisabled,
+    'dweb/app-update': offscreenDisabled,
     'dweb/app-record-served': offscreenDisabled,
     'dweb/open-commons': disabled,
     'dweb/ensure-seed-app': disabled,

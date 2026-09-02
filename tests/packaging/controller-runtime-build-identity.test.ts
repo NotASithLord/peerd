@@ -101,10 +101,6 @@ describe('controller runtime build identity', () => {
     ].join('\n'));
     const catalog = join(candidate, 'peerd-runtime/tools/metadata/catalog.js');
     writeFileSync(catalog, readFileSync(catalog, 'utf8')
-      .replace('export const TOOL_METADATA_ORDER = Object.freeze([', [
-        'export const TOOL_METADATA_ORDER = Object.freeze([',
-        '  "fixture_feature",',
-      ].join('\n'))
       .replace('export const TOOL_METADATA_RECORDS = {', [
         'export const TOOL_METADATA_RECORDS = {',
         '  "fixture_feature": {',

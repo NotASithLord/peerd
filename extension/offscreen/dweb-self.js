@@ -29,6 +29,7 @@
 
 import browser from '/shared/browser-api.js';
 import { loadDweb } from '/shared/dweb-loader.js';
+import { publishFailureError } from '/shared/publish-transaction.js';
 
 const log = (/** @type {any[]} */ ...a) => console.log('[offscreen/dweb-self]', ...a);
 const warn = (/** @type {any[]} */ ...a) => console.warn('[offscreen/dweb-self]', ...a);
@@ -52,7 +53,6 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
   let client = null;
   /** @type {any} */
   let coordinator = null;
-  let selfMesh = null;
   /** @type {Map<string, any>} */
   const sources = new Map();
   /** @type {Map<string, string>} target device -> newest offered snapshot */
@@ -170,7 +170,6 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
         return { running: false, reason: suspended ? 'suspended' : 'start-cancelled' };
       }
       client = nextClient;
-      selfMesh = nextMesh;
       coordinator = nextCoordinator;
       identity = nextIdentity;
       inertReason = null;
@@ -215,7 +214,6 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
       lastOfferRequestAt.clear();
       await coordinator?.stop?.();
       coordinator = null;
-      selfMesh = null;
       client = null;
       identity = null;
       if (!suspended) inertReason = null;
@@ -366,11 +364,21 @@ export const createSelfDeviceHost = ({ secretIo, swCall, getSignalingUrl }) => {
       applySurface: async (/** @type {string} */ surface, /** @type {Uint8Array} */ bytes) => {
         // Hash-verified against the offer before it gets here. The SW owns
         // what a surface MEANS; a rejection there fails this surface alone.
-        const reply = await swCall('dweb/self-apply-surface', {
-          surface, bytes: bytesToB64(bytes), sourceDeviceDid: deviceDid,
-        });
+        let reply;
+        try {
+          reply = await swCall('dweb/self-apply-surface', {
+            surface, bytes: bytesToB64(bytes), sourceDeviceDid: deviceDid,
+          });
+        } catch (cause) {
+          throw Object.assign(publishFailureError({
+            error: /** @type {{message?:string}} */ (cause)?.message
+              ?? 'service worker response lost',
+            code: 'dweb-sw-response-lost', performed: true, outcomeKnown: false,
+            outcomeKind: 'transport-lost', retryable: false,
+          }, 'service worker response lost'), { cause });
+        }
         if (!reply?.ok) {
-          const error = new Error(reply?.error ?? 'apply-refused');
+          const error = publishFailureError(reply, 'apply-refused');
           if (reply?.partial && typeof reply.partial === 'object') {
             /** @type {any} */ (error).partialResult = reply.partial;
           }

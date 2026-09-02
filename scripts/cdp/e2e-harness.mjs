@@ -1071,11 +1071,56 @@ export async function launchPeerd({
  * @param {object} ctx
  */
 export async function resetSession(ctx) {
-  await rpc(ctx.page, { type: 'session/reset' });
-  await waitFor(
-    () => evalIn(ctx.page, `!document.querySelector('.message-user, .message-assistant')`),
-    { budgetMs: 5_000 },
-  );
+  const reset = await rpc(ctx.page, { type: 'session/reset' });
+  if (reset?.ok !== true) throw new Error(`session reset failed: ${JSON.stringify(reset)}`);
+  const ready = await waitFor(async () => {
+    const view = await evalIn(ctx.page, `({
+      stage: document.documentElement.dataset.peerdBootStage ?? null,
+      shell: !!document.querySelector('.app-shell'),
+      composer: !!document.querySelector('.input-bar textarea'),
+      empty: !document.querySelector('.message-user, .message-assistant'),
+    })`).catch(() => null);
+    if (view?.stage !== 'app-ready' || !view.shell || !view.composer || !view.empty) return null;
+    const state = await rpc(ctx.page, { type: 'state/get' }).catch(() => null);
+    return !state?.state?.session?.sessionId ? { view, state } : null;
+  }, { budgetMs: READY_BUDGET_MS, pollMs: 25 });
+  if (!ready) throw new Error('session reset did not reach an empty ready panel');
+}
+
+/**
+ * Reload the shared side panel and prove a NEW rich document has mounted and
+ * adopted the expected durable session before another state can use it.
+ * @param {object} ctx
+ * @param {{expectedSessionId?:string|null,budgetMs?:number}} [opts]
+ */
+export async function reloadReadyPanel(ctx, {
+  expectedSessionId = null, budgetMs = READY_BUDGET_MS,
+} = {}) {
+  const priorTimeOrigin = await evalIn(ctx.page, 'performance.timeOrigin');
+  await ctx.page.send('Page.reload', { ignoreCache: true });
+  const ready = await waitFor(async () => {
+    const view = await evalIn(ctx.page, `({
+      timeOrigin: performance.timeOrigin,
+      readyState: document.readyState,
+      stage: document.documentElement.dataset.peerdBootStage ?? null,
+      shell: !!document.querySelector('.app-shell'),
+      composer: !!document.querySelector('.input-bar textarea'),
+    })`).catch(() => null);
+    if (!view || view.timeOrigin === priorTimeOrigin || view.readyState !== 'complete'
+        || view.stage !== 'app-ready' || !view.shell || !view.composer) return null;
+    const state = await rpc(ctx.page, { type: 'state/get' }).catch(() => null);
+    const sessionId = state?.state?.session?.sessionId ?? null;
+    if (expectedSessionId !== null && sessionId !== expectedSessionId) return null;
+    return { view, state };
+  }, { budgetMs, pollMs: 25 });
+  if (ready) return ready;
+  const diagnostics = await evalIn(ctx.page, `({
+    timeOrigin: performance.timeOrigin,
+    readyState: document.readyState,
+    stage: document.documentElement.dataset.peerdBootStage ?? null,
+    body: document.body?.innerText?.slice(0, 500) ?? null,
+  })`).catch((error) => ({ error: String(error) }));
+  throw new Error(`side panel reload did not reach a new ready document: ${JSON.stringify(diagnostics)}`);
 }
 
 /**

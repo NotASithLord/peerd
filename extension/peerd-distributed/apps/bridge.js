@@ -159,20 +159,52 @@ export const createDwebBridge = ({
   /** @param {string} event @param {any} data */
   const emit = (event, data) => post({ peerd: 'dweb:event', event, data });
 
+  const irreversibleRoomOps = new Set([
+    'publish', 'dm', 'dm-send', 'publish-app', 'install-app',
+  ]);
+  /** @param {unknown} cause @param {string} op */
+  const roomFailure = (cause, op) => {
+    const detail = /** @type {any} */ (cause);
+    const explicit = detail?.outcomeKnown === false
+      || typeof detail?.performed === 'boolean'
+      || ['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+        .includes(detail?.outcomeKind);
+    return Object.assign(
+      new Error(detail?.error ?? detail?.message ?? `room ${op} failed`),
+      explicit ? {
+        ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
+        ...(typeof detail?.outcomeKnown === 'boolean'
+          ? { outcomeKnown: detail.outcomeKnown } : {}),
+        ...(typeof detail?.retryable === 'boolean' ? { retryable: detail.retryable } : {}),
+        ...(['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+          .includes(detail?.outcomeKind) ? { outcomeKind: detail.outcomeKind } : {}),
+      } : irreversibleRoomOps.has(op) ? {
+        performed: true, outcomeKnown: false,
+        outcomeKind: 'transport-lost', retryable: false,
+      } : {},
+    );
+  };
+
   // One room op, relayed to the offscreen base host (which serves the room as a
   // namespaced sub-protocol on the shared mesh). roomId rides every op.
   /** @param {string} op @param {Record<string, any>} [args] @param {string|null} [exactRoomId] @param {string|null} [exactHostEpoch] @param {string} [exactClientId] @param {string|null} [exactAdmissionToken] */
-  const room = (op, args = {}, exactRoomId = roomId, exactHostEpoch = hostEpoch,
-    exactClientId = stableRoomClientId, exactAdmissionToken = roomAdmissionToken) =>
-    swCall('dweb/base/room', {
-      op,
-      appId,
-      roomId: exactRoomId,
-      roomClientId: exactClientId,
-      ...(exactHostEpoch ? { expectedHostEpoch: exactHostEpoch } : {}),
-      ...args,
-      ...(exactAdmissionToken ? { roomAdmissionToken: exactAdmissionToken } : {}),
-    });
+  const room = async (op, args = {}, exactRoomId = roomId, exactHostEpoch = hostEpoch,
+    exactClientId = stableRoomClientId, exactAdmissionToken = roomAdmissionToken) => {
+    let result;
+    try {
+      result = await swCall('dweb/base/room', {
+        op,
+        appId,
+        roomId: exactRoomId,
+        roomClientId: exactClientId,
+        ...(exactHostEpoch ? { expectedHostEpoch: exactHostEpoch } : {}),
+        ...args,
+        ...(exactAdmissionToken ? { roomAdmissionToken: exactAdmissionToken } : {}),
+      });
+    } catch (cause) { throw roomFailure(cause, op); }
+    if (result?.ok !== true) throw roomFailure(result, op);
+    return result;
+  };
 
   /** @template T @param {()=>Promise<T>} operation */
   const serializeTransition = (operation) => {
@@ -205,13 +237,19 @@ export const createDwebBridge = ({
   };
   /** @param {any} record */
   const compensateJoin = async (record) => {
-    const reply = await room(
-      'leave', {}, record.roomId, record.hostEpoch, record.clientId, record.admissionToken,
-    );
-    if (!reply?.ok && ![
-      'not-in-room', 'dweb-host-generation-changed', 'app-room-admission-mismatch',
-    ].includes(reply?.error)) {
-      throw new Error(reply?.error ?? 'room compensation failed');
+    try {
+      await room(
+        'leave', {}, record.roomId, record.hostEpoch, record.clientId, record.admissionToken,
+      );
+    } catch (cause) {
+      const failure = /** @type {any} */ (cause);
+      const alreadyAbsent = [
+        'not-in-room', 'dweb-host-generation-changed', 'app-room-admission-mismatch',
+      ].includes(failure?.message)
+        && failure?.outcomeKnown !== false
+        && failure?.performed !== true
+        && !['effect-completed', 'host-lost', 'transport-lost'].includes(failure?.outcomeKind);
+      if (!alreadyAbsent) throw cause;
     }
     await clearCompensation(record.admissionToken);
     return true;
@@ -657,7 +695,18 @@ export const createDwebBridge = ({
       id: m.id,
       clientId: m.clientId,
       ok,
-      ...(ok ? { value: valueOrError } : { error: String(valueOrError?.message ?? valueOrError) }),
+      ...(ok ? { value: valueOrError } : {
+        error: String(valueOrError?.message ?? valueOrError),
+        ...(typeof valueOrError?.performed === 'boolean'
+          ? { performed: valueOrError.performed } : {}),
+        ...(typeof valueOrError?.outcomeKnown === 'boolean'
+          ? { outcomeKnown: valueOrError.outcomeKnown } : {}),
+        ...(typeof valueOrError?.retryable === 'boolean'
+          ? { retryable: valueOrError.retryable } : {}),
+        ...(['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+          .includes(valueOrError?.outcomeKind)
+          ? { outcomeKind: valueOrError.outcomeKind } : {}),
+      }),
     });
     if (!op) return reply(false, `unknown op: ${m.op}`);
     if (m.op === 'install-app' && installInFlight) return reply(false, 'an install request is already in progress');
@@ -678,7 +727,12 @@ export const createDwebBridge = ({
               return op(m.args ?? {});
             });
       if (!isCancelled(request)) reply(true, value);
-      else if (activeClientId === request.clientId) reply(false, 'cancelled');
+      else if (activeClientId === request.clientId) {
+        // why: cancellation cannot erase a fulfilled irreversible host receipt;
+        // returning the result prevents a blind retry from duplicating the effect.
+        if (irreversibleRoomOps.has(m.op)) reply(true, value);
+        else reply(false, 'cancelled');
+      }
     } catch (err) {
       // A stale epoch receives no late result into a replacement client. Same-
       // epoch cancellation gets a terminal rejection so its pending promise can

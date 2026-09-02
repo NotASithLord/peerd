@@ -2,7 +2,8 @@
 
 // why: semantic heaps may shape model-visible results, but they never author
 // durable audit records. The host derives one bounded verdict from a
-// model-issued call identity plus the final host-stamped result block.
+// controller-reported call identity plus the final host-stamped result block;
+// the exact-operation receipt, not the semantic label, is authority evidence.
 
 const bounded = (/** @type {unknown} */ value, /** @type {number} */ max) =>
   typeof value === 'string'

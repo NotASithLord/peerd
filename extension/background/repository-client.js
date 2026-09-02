@@ -3,6 +3,7 @@
 
 import {
   REPOSITORY_CHANNEL_CANCEL,
+  REPOSITORY_CHANNEL_CANCELLED,
   REPOSITORY_CHANNEL_RESULT,
   REPOSITORY_KERNEL_FETCH,
   REPOSITORY_KERNEL_FETCH_RESULT,
@@ -11,6 +12,8 @@ import {
   encodeRepositoryRpcValue,
 } from '../shared/repository-channel.js';
 import {
+  FEATURE_LEASE_CLIENT_PROBE, FEATURE_LEASE_CLIENT_PROOF,
+  FEATURE_LEASE_HOST_PROTOCOL,
   REPOSITORY_CHANNEL_MAX_BYTES,
   REPOSITORY_CHANNEL_OFFER,
   REPOSITORY_CHANNEL_PROTOCOL,
@@ -23,6 +26,7 @@ import {
   repositoryMethodMayFetch,
 } from '../shared/feature-lease-protocol.js';
 import { base64ToBytes, bytesToBase64, withDeadline } from '../shared/cold-util.js';
+import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 export { decodeRepositoryRpcValue, encodeRepositoryRpcValue };
 
 const MAX_GIT_HTTP_BODY = 32 * 1024 * 1024;
@@ -272,11 +276,19 @@ export const createOffscreenRepositoryClient = ({
   },
   kernelFetch = undefined,
   createChannel = () => new MessageChannel(),
+  hostProbeTimeoutMs = 150,
+  cancelAckTimeoutMs = 500,
+  hostResolveAttempts = 12,
+  hostResolveRetryMs = 50,
 }) => {
   if (!Number.isFinite(readTimeoutMs) || readTimeoutMs <= 0
       || !Number.isFinite(effectTimeoutMs) || effectTimeoutMs <= 0
       || !Number.isFinite(appReadTimeoutMs) || appReadTimeoutMs <= 0
       || !Number.isFinite(appEffectTimeoutMs) || appEffectTimeoutMs <= 0
+      || !Number.isFinite(hostProbeTimeoutMs) || hostProbeTimeoutMs <= 0
+      || !Number.isFinite(cancelAckTimeoutMs) || cancelAckTimeoutMs <= 0
+      || !Number.isSafeInteger(hostResolveAttempts) || hostResolveAttempts < 1
+      || !Number.isFinite(hostResolveRetryMs) || hostResolveRetryMs < 0
       || typeof now !== 'function'
       || typeof withHost !== 'function'
       || typeof offscreenUrl !== 'string' || !offscreenUrl
@@ -289,6 +301,65 @@ export const createOffscreenRepositoryClient = ({
   const transactionTails = new Map();
   /** @type {Map<string, Promise<unknown>>} */
   const operationTails = new Map();
+  /** @param {any} candidate @param {any} lease */
+  const probeHost = (candidate, lease) => new Promise((resolve) => {
+    const probeId = newId();
+    const { port1, port2 } = createChannel();
+    let settled = false;
+    const finish = (/** @type {boolean} */ owned) => {
+      if (settled) return;
+      settled = true;
+      clearTimeoutFn(timer);
+      try { port1.close(); } catch { /* already closed */ }
+      try { port2.close(); } catch { /* already transferred/closed */ }
+      resolve(owned === true);
+    };
+    const timer = setTimeoutFn(() => finish(false), hostProbeTimeoutMs);
+    port1.onmessage = (/** @type {MessageEvent} */ event) => {
+      const proof = event.data;
+      finish(proof?.type === FEATURE_LEASE_CLIENT_PROOF
+        && proof.protocol === FEATURE_LEASE_HOST_PROTOCOL
+        && proof.probeId === probeId && proof.owned === true
+        && proof.hostEpoch === lease?.hostEpoch);
+    };
+    port1.onmessageerror = () => finish(false);
+    port1.addEventListener?.('close', () => finish(false), { once: true });
+    port1.start();
+    try { candidate.postMessage({
+      type: FEATURE_LEASE_CLIENT_PROBE,
+      protocol: FEATURE_LEASE_HOST_PROTOCOL,
+      probeId,
+      lease,
+    }, [port2]); } catch { finish(false); }
+  });
+  /** @param {any} lease @param {()=>boolean} cancelled */
+  const resolveHost = async (lease, cancelled) => {
+    for (let attempt = 0; attempt < hostResolveAttempts; attempt += 1) {
+      if (cancelled()) throw repositoryError(
+        'repository operation cancelled', 'repository-operation-cancelled', true, false,
+      );
+      const candidates = (await listWindowClients()).filter(
+        (/** @type {any} */ client) => sameDocumentUrlIgnoringHash(client?.url, offscreenUrl),
+      );
+      const proofs = await Promise.all(candidates.map(async (/** @type {any} */ candidate) => (
+        await probeHost(candidate, lease) ? candidate : null
+      )));
+      if (cancelled()) throw repositoryError(
+        'repository operation cancelled', 'repository-operation-cancelled', true, false,
+      );
+      const exact = proofs.filter(Boolean);
+      if (exact.length > 1) throw repositoryError(
+        'repository host lease is ambiguous', 'repository-host-ambiguous', true, false,
+      );
+      if (exact.length === 1) return exact[0];
+      if (attempt + 1 < hostResolveAttempts) {
+        await new Promise((resolve) => setTimeoutFn(resolve, hostResolveRetryMs));
+      }
+    }
+    throw repositoryError(
+      'repository host unavailable', 'repository-host-unavailable', true, false,
+    );
+  };
   /** @template T @param {Map<string, Promise<unknown>>} lanes @param {string} key @param {() => Promise<T>} operation */
   const enqueue = async (lanes, key, operation) => {
     const prior = lanes.get(key) ?? Promise.resolve();
@@ -298,11 +369,22 @@ export const createOffscreenRepositoryClient = ({
     finally { if (lanes.get(key) === current) lanes.delete(key); }
   };
 
-  /** @param {string} method @param {any[]} wireArgs @param {string} callId @param {any} lease @param {AbortSignal|undefined} signal @param {(cancel:()=>void)=>void} setCancel */
+  /** @param {string} method @param {any[]} wireArgs @param {string} callId @param {any} lease @param {AbortSignal|undefined} signal @param {(cancel:()=>Promise<boolean>)=>void} setCancel */
   const callPrivate = async (method, wireArgs, callId, lease, signal, setCancel) => {
     const boundKernelFetch = kernelFetch;
-    const matches = (await listWindowClients()).filter((/** @type {any} */ client) => client?.url === offscreenUrl);
-    if (matches.length !== 1) throw new Error('repository host unavailable or ambiguous');
+    // why: network authority is fixed by the kernel caller before the private
+    // host receives its port. The host may describe requests within this exact
+    // repository, but it cannot select a repository with its first request.
+    const boundRemote = method === 'clone'
+      ? normalizeGitRemote(wireArgs?.[1]?.url).url
+      : method === 'fetch' || method === 'push'
+        ? normalizeGitRemote(wireArgs?.[1]?.expectedRemote).url : null;
+    let cancelled = signal?.aborted === true;
+    setCancel(async () => { cancelled = true; return true; });
+    const host = await resolveHost(lease, () => cancelled || signal?.aborted === true);
+    if (cancelled || signal?.aborted) throw repositoryError(
+      'repository operation cancelled', 'repository-operation-cancelled', true, false,
+    );
     const offer = {
       type: REPOSITORY_CHANNEL_OFFER,
       protocol: REPOSITORY_CHANNEL_PROTOCOL,
@@ -315,30 +397,103 @@ export const createOffscreenRepositoryClient = ({
     const { port1, port2 } = createChannel();
     return new Promise((resolve, reject) => {
       let settled = false;
+      let dispatched = false;
+      let resultReceived = false;
+      /** @type {Promise<boolean>|null} */ let termination = null;
       let fetchSequence = 0;
-      let boundRemote = method === 'clone'
-        ? normalizeGitRemote(wireArgs?.[1]?.url).url : null;
       let reverseTransferChars = 0;
       /** @type {Set<AbortController>} */ const fetches = new Set();
       const finish = (/** @type {unknown} */ value, /** @type {boolean} */ ok) => {
         if (settled) return;
         settled = true;
-        signal?.removeEventListener('abort', cancel);
+        signal?.removeEventListener('abort', onSignalAbort);
         for (const controller of fetches) controller.abort('repository-channel-closed');
         fetches.clear();
         try { port1.close(); } catch { /* already closed */ }
         if (ok) resolve(value); else reject(value);
       };
-      const cancel = () => {
-        try { port1.postMessage({
-          type: REPOSITORY_CHANNEL_CANCEL,
-          protocol: REPOSITORY_CHANNEL_PROTOCOL,
-          channelId: callId,
-        }); } catch { /* already closed */ }
-        finish(signal?.reason ?? new Error('repository operation cancelled'), false);
+      const terminateWorker = (/** @type {boolean} */ cancelOperation) => {
+        cancelled = true;
+        if (!dispatched) return Promise.resolve(true);
+        if (termination) return termination;
+        if (cancelOperation) {
+          try { port1.postMessage({
+            type: REPOSITORY_CHANNEL_CANCEL,
+            protocol: REPOSITORY_CHANNEL_PROTOCOL,
+            channelId: callId,
+          }); } catch { /* already closed */ }
+        }
+        // why: OPFS can suspend the operation Worker so it cannot consume its
+        // private-port cancel. Do not release the repository lane until the
+        // exact supervisor confirms that Worker is gone; a missing confirmation
+        // falls back to retiring the shared host before any successor starts.
+        termination = new Promise((resolveTermination, rejectTermination) => {
+          const cancellation = createChannel();
+          let completed = false;
+          const complete = (/** @type {boolean} */ ok) => {
+            if (completed) return;
+            completed = true;
+            clearTimeoutFn(timer);
+            try { cancellation.port1.close(); } catch { /* already closed */ }
+            try { cancellation.port2.close(); } catch { /* transferred */ }
+            if (ok) resolveTermination(true);
+            else rejectTermination(repositoryError(
+              'repository worker termination unconfirmed',
+              'repository-worker-termination-unconfirmed',
+              !repositoryMethodIsMutating(method), true,
+            ));
+          };
+          const timer = setTimeoutFn(() => complete(false), cancelAckTimeoutMs);
+          cancellation.port1.onmessage = (/** @type {MessageEvent} */ event) => {
+            const reply = event.data;
+            complete(reply?.type === REPOSITORY_CHANNEL_CANCELLED
+              && reply?.protocol === REPOSITORY_CHANNEL_PROTOCOL
+              && reply?.channelId === callId
+              && reply?.leaseId === lease.leaseId
+              && reply?.hostEpoch === lease.hostEpoch);
+          };
+          cancellation.port1.onmessageerror = () => complete(false);
+          cancellation.port1.addEventListener?.('close', () => complete(false), { once: true });
+          cancellation.port1.start();
+          try { host.postMessage({
+            type: REPOSITORY_CHANNEL_CANCEL,
+            protocol: REPOSITORY_CHANNEL_PROTOCOL,
+            channelId: callId,
+            lease,
+          }, [cancellation.port2]); } catch { complete(false); }
+        }).catch(async () => {
+          await retireHost('repository-worker-termination-unconfirmed', lease.hostEpoch);
+          return true;
+        });
+        return termination;
+      };
+      const cancel = () => terminateWorker(true).then(
+        (terminated) => {
+          finish(signal?.reason ?? new Error('repository operation cancelled'), false);
+          return terminated;
+        },
+        (cause) => {
+          finish(cause, false);
+          throw cause;
+        },
+      );
+      const failAfterTermination = (/** @type {unknown} */ cause) => {
+        void terminateWorker(true).then(
+          () => finish(cause, false),
+          (terminationCause) => finish(terminationCause, false),
+        );
+      };
+      const onSignalAbort = () => {
+        void cancel().catch(() => {});
       };
       setCancel(cancel);
-      signal?.addEventListener('abort', cancel, { once: true });
+      if (cancelled || signal?.aborted) {
+        finish(signal?.reason ?? repositoryError(
+          'repository operation cancelled', 'repository-operation-cancelled', true, false,
+        ), false);
+        return;
+      }
+      signal?.addEventListener('abort', onSignalAbort, { once: true });
       port1.onmessage = (/** @type {MessageEvent} */ event) => {
         const reply = event.data;
         if (reply?.protocol !== REPOSITORY_CHANNEL_PROTOCOL || reply?.channelId !== callId) return;
@@ -347,8 +502,8 @@ export const createOffscreenRepositoryClient = ({
           let remote;
           try { remote = normalizeGitRemote(reply.request?.remote).url; }
           catch {
-            finish(repositoryError('repository-reverse-fetch-invalid',
-              'repository-reverse-fetch-invalid', !repositoryMethodIsMutating(method), true), false);
+            failAfterTermination(repositoryError('repository-reverse-fetch-invalid',
+              'repository-reverse-fetch-invalid', !repositoryMethodIsMutating(method), true));
             return;
           }
           const requestChars = typeof reply.request?.bodyB64 === 'string'
@@ -359,12 +514,11 @@ export const createOffscreenRepositoryClient = ({
               || reply.fetchId !== expectedFetchId
               || (boundRemote !== null && remote !== boundRemote)
               || reverseTransferChars + requestChars > REPOSITORY_CHANNEL_MAX_BYTES) {
-            finish(repositoryError('repository-reverse-fetch-invalid',
-              'repository-reverse-fetch-invalid', !repositoryMethodIsMutating(method), true), false);
+            failAfterTermination(repositoryError('repository-reverse-fetch-invalid',
+              'repository-reverse-fetch-invalid', !repositoryMethodIsMutating(method), true));
             return;
           }
           fetchSequence += 1;
-          boundRemote = remote;
           reverseTransferChars += requestChars;
           const controller = new AbortController();
           fetches.add(controller);
@@ -372,7 +526,7 @@ export const createOffscreenRepositoryClient = ({
             (result) => {
               const responseChars = typeof result?.bodyB64 === 'string' ? result.bodyB64.length : 0;
               if (reverseTransferChars + responseChars > REPOSITORY_CHANNEL_MAX_BYTES) {
-                finish(new Error('repository reverse fetch transfer exceeded'), false);
+                failAfterTermination(new Error('repository reverse fetch transfer exceeded'));
                 return;
               }
               reverseTransferChars += responseChars;
@@ -383,7 +537,7 @@ export const createOffscreenRepositoryClient = ({
                 fetchId: reply.fetchId,
                 ok: true,
                 result,
-              }); } catch (cause) { finish(cause, false); }
+              }); } catch (cause) { failAfterTermination(cause); }
             },
             (cause) => {
               try { port1.postMessage({
@@ -393,25 +547,37 @@ export const createOffscreenRepositoryClient = ({
                 fetchId: reply.fetchId,
                 ok: false,
                 error: cause instanceof Error ? cause.message : String(cause),
-              }); } catch (postCause) { finish(postCause, false); }
+              }); } catch (postCause) { failAfterTermination(postCause); }
             },
           ).finally(() => fetches.delete(controller));
           return;
         }
         if (reply.type !== REPOSITORY_CHANNEL_RESULT || typeof reply.ok !== 'boolean') return;
+        if (resultReceived) return;
         if (!repositoryChannelPayloadFits(reply)) {
-          finish(new Error('repository channel result exceeds the transfer ceiling'), false);
+          failAfterTermination(new Error('repository channel result exceeds the transfer ceiling'));
           return;
         }
-        finish(reply, true);
+        resultReceived = true;
+        void terminateWorker(false).then(
+          () => finish(reply, true),
+          (cause) => finish(cause, false),
+        );
       };
-      port1.onmessageerror = () => finish(new Error('repository channel reply invalid'), false);
-      port1.addEventListener?.('close', () => finish(
-        new Error('repository channel closed'), false,
-      ), { once: true });
+      port1.onmessageerror = () => failAfterTermination(
+        new Error('repository channel reply invalid'),
+      );
+      port1.addEventListener?.('close', () => {
+        if (!settled) failAfterTermination(new Error('repository channel closed'));
+      }, { once: true });
       port1.start();
-      try { matches[0].postMessage(offer, [port2]); }
+      try {
+        if (cancelled || signal?.aborted || settled) return;
+        host.postMessage(offer, [port2]);
+        dispatched = true;
+      }
       catch (cause) {
+        try { port2.close(); } catch { /* not transferred */ }
         finish(repositoryError(cause instanceof Error ? cause.message : String(cause),
           'repository-host-dispatch-failed', true, false), false);
       }
@@ -428,8 +594,8 @@ export const createOffscreenRepositoryClient = ({
     const callId = newId();
     const signal = args.findLast((entry) => entry?.signal instanceof AbortSignal)?.signal;
     if (signal?.aborted) throw signal.reason ?? new Error('repository operation aborted');
-    /** @type {()=>void} */ let cancelTransport = () => {};
-    const onAbort = () => cancelTransport();
+    /** @type {()=>Promise<boolean>} */ let cancelTransport = async () => true;
+    const onAbort = () => { void cancelTransport(); };
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
       const wireArgs = [...args];
@@ -443,6 +609,7 @@ export const createOffscreenRepositoryClient = ({
       }
       const reply = await new Promise((resolve, reject) => {
         let settled = false;
+        let timedOut = false;
         const finish = (/** @type {unknown} */ value, /** @type {boolean} */ ok) => {
           if (settled) return;
           settled = true;
@@ -450,15 +617,18 @@ export const createOffscreenRepositoryClient = ({
           if (ok) resolve(value); else reject(value);
         };
         const timer = setTimeoutFn(() => {
-          cancelTransport();
-          finish(repositoryError('repository-host-timeout',
-            'repository-host-timeout', !repositoryMethodIsMutating(method), true), false);
+          timedOut = true;
+          void cancelTransport().then(
+            () => finish(repositoryError('repository-host-timeout',
+              'repository-host-timeout', !repositoryMethodIsMutating(method), true), false),
+            (cause) => finish(cause, false),
+          );
         }, Math.min(timeoutMs, remainingMs));
         const transport = callPrivate(method, wireArgs, callId, lease, signal,
           (cancel) => { cancelTransport = cancel; });
         Promise.resolve(transport).then(
-          (value) => finish(value, true),
-          (cause) => finish(cause, false),
+          (value) => { if (!timedOut) finish(value, true); },
+          (cause) => { if (!timedOut) finish(cause, false); },
         );
       });
       if (!reply?.ok) {
@@ -484,20 +654,20 @@ export const createOffscreenRepositoryClient = ({
       if (!mutating && deadlineAt <= now()) {
         throw lastError ?? readDeadlineError();
       }
-      try { return await withHost((/** @type {any} */ lease) => callUnhosted(method, args, lease, deadlineAt)); }
+      try {
+        return await withHost((/** @type {any} */ lease) => {
+          return callUnhosted(method, args, lease, deadlineAt);
+        });
+      }
       catch (cause) {
         lastError = cause;
         const error = /** @type {RepositoryError} */ (cause);
         if (error?.code === 'repository-host-load-failed') {
           await retireHost('repository-host-module-load-failed');
         }
-        if (!mutating && error?.outcomeKnown === true
-            && ['repository-host-timeout', 'repository-host-transport-lost']
-              .includes(error.code ?? '')) {
-          await retireHost('repository-read-host-unavailable');
-        }
-        if (mutating && error?.outcomeKnown !== true && error?.repositoryHostDispatched === true) {
-          await retireHost('repository-mutation-outcome-unknown');
+        if (['repository-host-unavailable', 'repository-host-ambiguous']
+          .includes(error?.code ?? '')) {
+          await retireHost('repository-exact-host-unavailable');
         }
         if (error?.outcomeKnown !== true) throw cause;
       }

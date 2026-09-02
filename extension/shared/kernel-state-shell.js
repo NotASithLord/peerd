@@ -1,9 +1,6 @@
 // @ts-check
 
 import {
-  validKernelActorIsolation,
-  validKernelSettings,
-  validKernelVault,
   validateKernelStateProjection,
 } from './kernel-state-contract.js';
 
@@ -13,15 +10,8 @@ const record = (value) => value !== null && typeof value === 'object' && !Array.
 /** @param {unknown} value @returns {Record<string, any>|null} */
 export const normalizeColdStateSnapshot = (value) => {
   if (!record(value)) return null;
-  const state = /** @type {Record<string, any>} */ (value);
-  if (Object.hasOwn(state, 'projection')) {
-    const validated = validateKernelStateProjection(state);
-    return validated.ok ? validated.state : null;
-  }
-  if (!validKernelVault(state.vault) || !validKernelSettings(state.settings)
-      || !record(state.capabilities)
-      || !validKernelActorIsolation(state.capabilities.actorExecution, true)) return null;
-  return { ...state, hydrated: true };
+  const validated = validateKernelStateProjection(value);
+  return validated.ok ? validated.state : null;
 };
 
 /** @param {unknown} current @param {unknown} next @param {ReadonlySet<string>} [retired]

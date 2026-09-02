@@ -58,14 +58,6 @@ const preEffectTargetError = (message = 'browser_target_changed') => {
   return error;
 };
 
-/** @param {unknown} value */
-const hostLostError = (value) => {
-  const message = value instanceof Error ? value.message : String(value);
-  const error = new Error(`browser_evaluate_after_dispatch: ${message}`);
-  error.outcomeKind = 'host-lost';
-  return error;
-};
-
 /** @param {unknown} expected @returns {expected is ExpectedDocument} */
 const isExpectedDocument = (expected) => {
   const value = /** @type {Partial<ExpectedDocument> | null} */ (expected);

@@ -142,6 +142,8 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   runtimeUnsupported = false,
   turnUnknown = false,
   controllerFailureCode = '',
+  waitForProjectionAbort = false,
+  uiVisible = false,
 } = {}) => {
   const turnAbortController = new AbortController();
   const session: any = {
@@ -164,6 +166,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   let systemPromptRenders = 0;
   const systemPromptInputs: any[] = [];
   let releases = 0;
+  let projectionSignal: AbortSignal | null = null;
   const settings = {
     reasoningEnabled: false,
     reasoningEffort: 'medium',
@@ -188,15 +191,29 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
         primitive: name === 'message_actor' ? 'actor' : 'host', sideEffect: 'read',
       }))
       : [];
-  const projectToolDescriptors = async (input: any) => ({
-    tools: descriptorInventory.filter((descriptor) => {
-      if (input.runtimeCapabilities && ['script', 'read_doc'].includes(descriptor.name)) return false;
-      if (input.actorIsolation?.status !== 'available'
-          && ['message_actor', 'actor_create'].includes(descriptor.name)) return false;
-      return true;
-    }),
-    operations: [],
-  });
+  const projectToolDescriptors = async (input: any, options: { signal?: AbortSignal } = {}) => {
+    projectionSignal = options.signal ?? null;
+    if (waitForProjectionAbort) {
+      await new Promise((_resolve, reject) => {
+        if (options.signal?.aborted) {
+          reject(new DOMException('stopped', 'AbortError'));
+          return;
+        }
+        options.signal?.addEventListener('abort', () => {
+          reject(new DOMException('stopped', 'AbortError'));
+        }, { once: true });
+      });
+    }
+    return {
+      tools: descriptorInventory.filter((descriptor) => {
+        if (input.runtimeCapabilities && ['script', 'read_doc'].includes(descriptor.name)) return false;
+        if (input.actorIsolation?.status !== 'available'
+            && ['message_actor', 'actor_create'].includes(descriptor.name)) return false;
+        return true;
+      }),
+      operations: [],
+    };
+  };
   const callModel = async function* (args: any) {
     modelCalls.push(args);
     if (dynamicIsolation) {
@@ -277,7 +294,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     costOf: () => ({ usd: 0, known: true }),
     makeTurnCostTracker: () => ({ onUsage: async () => {}, maybeHalt: () => {} }),
     uiConnected: () => !uiDisconnected
-      && (boundaryFailure || streamBoundaryFailure || !!controllerFailureCode),
+      && (uiVisible || boundaryFailure || streamBoundaryFailure || !!controllerFailureCode),
     uiPorts: { broadcast: (message: any) => broadcasts.push(message) },
     auditLog: { append: async (entry: any) => { audits.push(entry); } },
     postChatNote: (note: string) => { chatNotes.push(note); },
@@ -358,6 +375,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     systemPromptRenders: () => systemPromptRenders,
     systemPromptInputs,
     releases: () => releases,
+    projectionSignal: () => projectionSignal,
     loopCtx: () => loopCtx,
     toolContextArgs: () => toolContextArgs,
     toolContextBuilds: () => toolContextBuilds,
@@ -520,6 +538,27 @@ describe('runAgentTurn credential custody', () => {
     fixture.turnAbortController.abort();
     await running;
     expect(fixture.lateProviderContinuation()).toBe(0);
+  });
+
+  test('first projection is visibly busy and Stop aborts it through the claimed turn signal', async () => {
+    const fixture = turnDeps('chat', { waitForProjectionAbort: true, uiVisible: true });
+    const running = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'inspect the page' });
+    for (let attempt = 0; attempt < 20 && fixture.projectionSignal() === null; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(fixture.projectionSignal()).toBe(fixture.turnAbortController.signal);
+    expect(fixture.broadcasts[0]).toEqual({
+      type: 'turn/streaming', sessionId: 's1', streaming: true,
+    });
+    expect(fixture.releases()).toBe(0);
+
+    fixture.turnAbortController.abort();
+    await expect(running).resolves.toEqual({ ok: false, stopReason: 'aborted' });
+    expect(fixture.releases()).toBe(1);
+    expect(fixture.broadcasts.at(-1)).toEqual({
+      type: 'turn/streaming', sessionId: 's1', streaming: false,
+    });
+    expect(fixture.loopCtx()).toBeNull();
   });
 
   test('the authority shell forwards only failover preferences to controller semantics', async () => {

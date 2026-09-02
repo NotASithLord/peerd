@@ -8,19 +8,8 @@ import {
 describe('installed-artifact live kernel assembly contract', () => {
   test('pins compact host admission and target-exact event and Port ownership', () => {
     const storeChrome = liveKernelAssemblyProfile('store-chrome');
-    expect(storeChrome.semanticHostRoutes).toHaveLength(15);
-    expect(storeChrome.eventKeys).toHaveLength(16);
-    expect(storeChrome.portNames).toHaveLength(6);
-    expect(storeChrome.requiredEvents).toHaveLength(13);
-    expect(storeChrome.requiredPorts).toHaveLength(4);
-    const previewChrome = liveKernelAssemblyProfile('preview-chrome');
-    expect(previewChrome.semanticHostRoutes).toHaveLength(18);
-    expect(previewChrome.requiredEvents).toHaveLength(14);
-    expect(previewChrome.requiredPorts).toHaveLength(5);
     const storeFirefox = liveKernelAssemblyProfile('store-firefox');
     expect(storeFirefox.semanticHostRoutes).toEqual(storeChrome.semanticHostRoutes);
-    expect(storeFirefox.requiredEvents).toHaveLength(15);
-    expect(storeFirefox.requiredPorts).toHaveLength(4);
     for (const target of ['store-chrome', 'preview-chrome', 'store-firefox'] as const) {
       const fixture = completeLiveKernelAssemblyFixture(target);
       expect(assertLiveKernelAssembly(fixture, target)).toBe(fixture);

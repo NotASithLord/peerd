@@ -7,7 +7,7 @@
 // lands AFTER the system + tool cache breakpoints, leaving the main system
 // string byte-stable within a session.
 //
-// These are the pure surfaces: renderSystemPrompt (now clock-free on the main
+// These are the pure surfaces: renderSystemPromptFromAssets (clock-free on the main
 // path), buildTemporalContext (carries the volatile bytes), and the to-anthropic
 // wire mapping (breakpoints land on system + last tool; the context message
 // carries none).
@@ -16,9 +16,8 @@ import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  renderSystemPrompt,
+  renderSystemPromptFromAssets,
   buildTemporalContext,
-  _setTemplateForTests,
 } from '../../extension/peerd-runtime/loop/system-prompt.js';
 import { buildTemporalBlock } from '../../extension/peerd-runtime/clock/context.js';
 import { toAnthropicBody } from '../../extension/peerd-provider/format/to-anthropic.js';
@@ -28,10 +27,10 @@ const TEMPLATE = readFileSync(
   join(import.meta.dir, '..', '..', 'extension', 'peerd-provider', 'system-prompt.txt'),
   'utf8',
 );
-// An ISO-8601 clock with seconds — exactly what used to bust the cache.
+// An ISO-8601 clock with seconds, exactly what used to bust the cache.
 const ISO_SECONDS = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
-describe('renderSystemPrompt — the main system string is byte-stable', () => {
+describe('renderSystemPromptFromAssets: the main system string is byte-stable', () => {
   test('the shipped template no longer carries a per-turn {{DATE}} line', () => {
     // {{TEMPORAL_BLOCK}} stays (the actor path still embeds it), but the date
     // line is gone — the ISO in the temporal block already carries the date.
@@ -39,7 +38,6 @@ describe('renderSystemPrompt — the main system string is byte-stable', () => {
   });
 
   test('the main render (temporalBlock: "") carries no timestamp and is deterministic', async () => {
-    _setTemplateForTests(TEMPLATE);
     // The exact args the orchestrator passes on the main path: no temporalBlock
     // (relocated to the context message), no activeTab (ditto). renderSystemPrompt
     // now reads no wall-clock at all, so two calls are byte-identical and the
@@ -47,17 +45,16 @@ describe('renderSystemPrompt — the main system string is byte-stable', () => {
     // read (a re-added `new Date()` / {{DATE}} substitution) creeps back in — a
     // re-added ISO/date stamp would land in the output and trip the regexes.
     const args = { memoryBlock: '<memory>ws facts</memory>', skillsBlock: '', temporalBlock: '' };
-    const a = await renderSystemPrompt(args);
-    const b = await renderSystemPrompt(args);
+    const a = renderSystemPromptFromAssets(args, { template: TEMPLATE });
+    const b = renderSystemPromptFromAssets(args, { template: TEMPLATE });
     expect(a).toBe(b);
     expect(ISO_SECONDS.test(a)).toBe(false);
     expect(/\d{4}-\d{2}-\d{2}/.test(a)).toBe(false); // no stray date-only stamp either
   });
 
   test('the actor path still embeds the temporal block (its prompt re-renders per turn)', async () => {
-    _setTemplateForTests(TEMPLATE);
     const block = buildTemporalBlock({ lastTurnAt: null, nowMs: Date.parse('2026-08-03T12:00:00Z') });
-    const out = await renderSystemPrompt({ actorType: 'notebook', temporalBlock: block });
+    const out = renderSystemPromptFromAssets({ actorType: 'notebook', temporalBlock: block });
     expect(out.includes(block)).toBe(true);
   });
 });

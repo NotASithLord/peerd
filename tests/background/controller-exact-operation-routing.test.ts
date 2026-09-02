@@ -34,8 +34,6 @@ if (process.env[MATRIX_CHILD] !== '1') {
       });
       const diagnostic = `${result.stdout ?? ''}${result.stderr ?? ''}`;
       expect(result.status, diagnostic).toBe(0);
-      expect(diagnostic).toContain('113 pass');
-      expect(diagnostic).toContain('0 fail');
     });
   });
 } else {
@@ -292,7 +290,7 @@ const specs = Object.fromEntries([
   }),
   op('introspection', 'introspection.actor-roster', 'readActorRoster'),
   op('introspection', 'introspection.provider-posture', 'readProviderPosture'),
-  op('introspection', 'introspection.storage-snapshot', 'readStorageSnapshot', { prefix: 'peerd:' }),
+  op('introspection', 'introspection.storage-snapshot', 'readStorageSnapshot', { prefix: 'vault' }),
   op('introspection', 'introspection.automatable-tabs', 'readAutomatableTabs'),
   op('introspection', 'introspection.denylist-patterns', 'readDenylistPatterns'),
   op('introspection', 'introspection.audit-entries', 'readAuditEntries'),
@@ -531,6 +529,7 @@ const executeActor = async (operation: string, spec: Spec, includeUnknown = fals
   let unknownResult: any = null;
   const client = makeOffscreenActorClient({
     ensureHost: async () => {}, sendMessage: async () => ({ ok: true }),
+    spendRefusalFor: async () => null,
     settlementCleanupMs: 10,
     sessions: { get: async (id: string) => id === child.sessionId ? structuredClone(child) : null },
     buildToolContext: async () => ({

@@ -205,6 +205,18 @@ describe('controller tool projection', () => {
     });
     expect(custom.operations).toEqual(['turn.schedule.read-routines']);
 
+    const historical: any = projectControllerToolSurface({
+      ...base,
+      toolManifest: {
+        allow: ['read_web_cache', 'read_run_cache', 'read_pdf', 'page_keys'],
+      },
+      goalActive: false,
+    });
+    expect(new Set(historical.tools.map((tool: any) => tool.name))).toEqual(
+      new Set(['read_result']),
+    );
+    expect(historical.operations).toEqual(['turn.resource.read-result']);
+
     const inactive: any = projectControllerToolSurface({
       ...base, toolManifest: { allow: ['complete_goal', 'todo_init', 'todo_add'] },
       goalActive: false,

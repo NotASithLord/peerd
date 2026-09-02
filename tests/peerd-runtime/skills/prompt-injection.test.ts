@@ -32,8 +32,7 @@ describe('skills block injection into the system prompt', () => {
     );
     const skillsBlock = await r.describeForPrompt();
 
-    sp._setTemplateForTests(TEMPLATE);
-    const prompt = await sp.renderSystemPrompt({ skillsBlock });
+    const prompt = sp.renderSystemPromptFromAssets({ skillsBlock }, { template: TEMPLATE });
 
     // The cheap half is present...
     expect(prompt).toContain('gmail-driver — Drive Gmail via @tab');
@@ -43,16 +42,14 @@ describe('skills block injection into the system prompt', () => {
   });
 
   test('no skills → placeholder collapses (empty), prompt still renders', async () => {
-    sp._setTemplateForTests(TEMPLATE);
-    const prompt = await sp.renderSystemPrompt({ skillsBlock: '' });
+    const prompt = sp.renderSystemPromptFromAssets({ skillsBlock: '' }, { template: TEMPLATE });
     expect(prompt).toContain('END');
     expect(prompt).not.toContain('{{SKILLS_BLOCK}}');
     expect(prompt).not.toContain('load_skill');
   });
 
   test('omitting skillsBlock is safe (defaults to empty)', async () => {
-    sp._setTemplateForTests(TEMPLATE);
-    const prompt = await sp.renderSystemPrompt({});
+    const prompt = sp.renderSystemPromptFromAssets({}, { template: TEMPLATE });
     expect(prompt).not.toContain('{{SKILLS_BLOCK}}');
   });
 });

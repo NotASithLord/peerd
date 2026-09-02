@@ -4,11 +4,12 @@
 // checks must not discover the privileged background entry at runtime.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   EXTENSION_DIR, parseArgs, type Browser, type ConfigChannel,
 } from './lib.ts';
 import { flattenDefaults } from './gen-channel-config.ts';
+import { writeControllerBuildIdentity } from './controller-build-identity.ts';
 
 const DEV_MANIFEST = join(EXTENSION_DIR, 'manifest.json');
 const DEV_OUT = join(EXTENSION_DIR, 'shared', 'build-config.js');
@@ -49,16 +50,32 @@ export const CONTROLLER_BUILD_DIGEST = '${'0'.repeat(64)}';
 `;
 };
 
-const main = () => {
-  const args = parseArgs(process.argv.slice(2));
-  const manifestFile = String(args.manifest ?? DEV_MANIFEST);
-  const out = String(args.out ?? DEV_OUT);
+export const writeDevBuildConfig = async ({
+  manifestFile = DEV_MANIFEST,
+  out = DEV_OUT,
+}: {
+  manifestFile?: string;
+  out?: string;
+} = {}): Promise<string> => {
   const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, genBuildConfigSource(manifest, {
     dwebEnabled: true, channel: 'preview', browser: 'chrome',
   }));
+  // why: build-config is one of two identity leaves. Stamp only after its
+  // target facts exist so every `gen:dev` caller gets one matching runtime
+  // identity instead of needing a second, easy-to-forget command.
+  const digest = await writeControllerBuildIdentity(resolve(dirname(out), '..'));
   console.log(`wrote ${out} (manifest=${manifestFile})`);
+  return digest;
 };
 
-if (import.meta.main) main();
+const main = async () => {
+  const args = parseArgs(process.argv.slice(2));
+  await writeDevBuildConfig({
+    manifestFile: String(args.manifest ?? DEV_MANIFEST),
+    out: String(args.out ?? DEV_OUT),
+  });
+};
+
+if (import.meta.main) await main();

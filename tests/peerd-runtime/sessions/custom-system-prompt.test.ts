@@ -1,7 +1,7 @@
 // Custom system prompts per session (/system) — the pure surfaces:
 //   - session store: create/setCustomSystemPrompt persistence semantics
 //     ("unset" is the ABSENT key, never an empty string);
-//   - renderSystemPrompt: the <session_instructions> block AUGMENTS the
+//   - renderSystemPromptFromAssets: the <session_instructions> block AUGMENTS the
 //     base prompt, never replaces it;
 //   - actor spawn: the parent's instructions are deliberately NOT
 //     inherited (an actor gets only its own task framing).
@@ -9,9 +9,8 @@
 import { describe, test, expect } from 'bun:test';
 import { createSessionStore } from '../../../extension/peerd-runtime/sessions/store.js';
 import {
-  renderSystemPrompt,
+  renderSystemPromptFromAssets,
   buildTemporalContext,
-  _setTemplateForTests,
 } from '../../../extension/peerd-runtime/loop/system-prompt.js';
 import { makeSpawnActor } from '../../../extension/peerd-runtime/actor/spawn.js';
 import type { Session } from '../../../extension/peerd-runtime/sessions/types.js';
@@ -92,12 +91,13 @@ describe('session store — customSystemPrompt', () => {
   });
 });
 
-describe('renderSystemPrompt — <session_instructions> augmentation', () => {
+describe('renderSystemPromptFromAssets: <session_instructions> augmentation', () => {
   const TEMPLATE = 'BASE-PROMPT date={{DATE}} {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}';
 
   test('appends a delimited block AFTER the full base prompt — never replaces it', async () => {
-    _setTemplateForTests(TEMPLATE);
-    const out = await renderSystemPrompt({ customSystemPrompt: 'answer like a pirate' });
+    const out = renderSystemPromptFromAssets(
+      { customSystemPrompt: 'answer like a pirate' }, { template: TEMPLATE },
+    );
     expect(out.includes('BASE-PROMPT')).toBe(true);
     expect(out.includes('<session_instructions>')).toBe(true);
     expect(out.includes('answer like a pirate')).toBe(true);
@@ -109,30 +109,31 @@ describe('renderSystemPrompt — <session_instructions> augmentation', () => {
   });
 
   test('omitted / whitespace-only block collapses to nothing', async () => {
-    _setTemplateForTests(TEMPLATE);
-    const none = await renderSystemPrompt({});
+    const none = renderSystemPromptFromAssets({}, { template: TEMPLATE });
     expect(none.includes('session_instructions')).toBe(false);
-    const blank = await renderSystemPrompt({ customSystemPrompt: '  \n ' });
+    const blank = renderSystemPromptFromAssets(
+      { customSystemPrompt: '  \n ' }, { template: TEMPLATE },
+    );
     expect(blank.includes('session_instructions')).toBe(false);
   });
 
   test('coexists with an actor taskOverride (instructions first, task after)', async () => {
     // Production never passes both (spawned do not inherit), but the
     // renderer must stay well-defined if a future caller does.
-    _setTemplateForTests(TEMPLATE);
-    const out = await renderSystemPrompt({ customSystemPrompt: 'be terse', taskOverride: 'do the thing' });
+    const out = renderSystemPromptFromAssets({
+      customSystemPrompt: 'be terse', taskOverride: 'do the thing',
+    });
     // The ephemeral-actor (actor) block shares the <actor_agent> tag since the
     // PR #134 unification; only taskOverride is set here, so it's unambiguous.
     expect(out.indexOf('<session_instructions>')).toBeLessThan(out.indexOf('<actor_agent>'));
   });
 });
 
-describe('renderSystemPrompt: controller-owned turn guidance', () => {
+describe('renderSystemPromptFromAssets: controller-owned turn guidance', () => {
   const TEMPLATE = 'BASE-PROMPT {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}';
 
   test('renders planning, actor-host, and runtime-capability corrections', async () => {
-    _setTemplateForTests(TEMPLATE);
-    const out = await renderSystemPrompt({
+    const out = renderSystemPromptFromAssets({
       prewalkPlanning: true,
       actorIsolation: {
         status: 'temporarily_unavailable',
@@ -147,7 +148,7 @@ describe('renderSystemPrompt: controller-owned turn guidance', () => {
           retryable: false, alternativeCode: 'use_visible_notebook',
         },
       } as any,
-    });
+    }, { template: TEMPLATE });
     expect(out).toContain('<goal_opening_discipline>');
     expect(out).toContain('<actor_execution status="temporarily_unavailable">');
     expect(out).toContain('Do not retry automatically');
@@ -156,7 +157,6 @@ describe('renderSystemPrompt: controller-owned turn guidance', () => {
   });
 
   test('keeps actor and ephemeral prompts free of orchestrator turn guidance', async () => {
-    _setTemplateForTests(TEMPLATE);
     const state = {
       prewalkPlanning: true,
       actorIsolation: {
@@ -164,8 +164,8 @@ describe('renderSystemPrompt: controller-owned turn guidance', () => {
         reason: 'worker startup failed', retryable: true,
       },
     } as const;
-    const bound = await renderSystemPrompt({ ...state, actorType: 'web', backing: 'tab' });
-    const ephemeral = await renderSystemPrompt({
+    const bound = renderSystemPromptFromAssets({ ...state, actorType: 'web', backing: 'tab' });
+    const ephemeral = renderSystemPromptFromAssets({
       ...state, taskOverride: 'inspect the change', effectiveTools: [],
     });
     for (const out of [bound, ephemeral]) {
@@ -177,9 +177,9 @@ describe('renderSystemPrompt: controller-owned turn guidance', () => {
 
 describe('buildTemporalContext — ephemeral <active_tab> reorientation', () => {
   // design 01: the active-tab reorientation moved OUT of the cached system block
-  // (renderSystemPrompt) into the per-turn <context> message so the system string
+  // (renderSystemPromptFromAssets) into the per-turn <context> message so the system string
   // stays byte-stable. The framing (untrusted CONTEXT, not an instruction) rides
-  // with it unchanged; renderSystemPrompt itself no longer emits <active_tab>.
+  // with it unchanged; renderSystemPromptFromAssets itself no longer emits <active_tab>.
   test('carries the active tab (title + url), framed as untrusted context', () => {
     const out = buildTemporalContext({ activeTab: { url: 'https://example.com/p', title: 'Example Page' } });
     expect(out.includes('<context>')).toBe(true);
@@ -190,12 +190,12 @@ describe('buildTemporalContext — ephemeral <active_tab> reorientation', () => 
     expect(out.toLowerCase().includes('not an instruction')).toBe(true);
   });
 
-  test('renderSystemPrompt no longer embeds the active tab', async () => {
-    _setTemplateForTests('BASE-PROMPT {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}');
-    // activeTab is no longer a renderSystemPrompt param — pass it through `any` to
+  test('renderSystemPromptFromAssets no longer embeds the active tab', async () => {
+    // activeTab is no longer a renderSystemPromptFromAssets param; pass it through `any` to
     // prove the renderer ignores it (the bytes live in buildTemporalContext now).
-    const out = await renderSystemPrompt(
+    const out = renderSystemPromptFromAssets(
       { activeTab: { url: 'https://example.com/p', title: 'Example Page' } } as any,
+      { template: 'BASE-PROMPT {{MEMORY_BLOCK}}{{TEMPORAL_BLOCK}}{{SKILLS_BLOCK}}{{WEB_TAB_POLICY}}{{DWEB_BLOCK}}' },
     );
     expect(out.includes('active_tab')).toBe(false);
   });

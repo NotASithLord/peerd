@@ -57,9 +57,22 @@ describe('exact API actor web-resource scope', () => {
     for (const method of ['GET', 'HEAD']) {
       const args = { url: 'https://api.example.com/v1/items', method, headers: {} };
       await expect(authorityFor(args).requestWebText(args)).resolves.toMatchObject({
-        ok: true, finalUrl: args.url,
+        ok: true, finalUrl: args.url, bodyTruncated: false,
       });
     }
+  });
+
+  test('marks and retains only the bounded prefix of an oversized response', async () => {
+    const args = { url: 'https://api.example.com/v1/large', method: 'GET', headers: {} };
+    const result = await authorityFor(args, {
+      webFetch: async () => ({
+        ...response(args.url),
+        text: async () => `${'x'.repeat(2_000_000)}tail`,
+      }),
+    }).requestWebText(args);
+    expect(result).toMatchObject({ ok: true, bodyTruncated: true });
+    expect(result.body).toHaveLength(2_000_000);
+    expect(result.body.endsWith('tail')).toBe(false);
   });
 
   test('refuses cross-origin, suffix, userinfo, and port substitutions before fetch', async () => {

@@ -116,8 +116,10 @@ export const createKernelDemandPlane = (deps) => {
     withRepositoryHost,
     repositoryWebFetch,
     repositoryAudit,
-    retireRepositoryHost: (/** @type {string} */ reason) =>
-      deps.featureHost.runtime.retireActiveHost(reason),
+    retireRepositoryHost: (/** @type {string} */ reason,
+      /** @type {string|undefined} */ hostEpoch) => typeof hostEpoch === 'string'
+      ? deps.featureHost.runtime.retireHostEpoch(hostEpoch, reason)
+      : deps.featureHost.runtime.retireActiveHost(reason),
     reloadApp,
   });
   const turnCustody = createKernelTurnCustody({
@@ -412,9 +414,12 @@ export const createKernelDemandPlane = (deps) => {
       (await loadControllerOwner()).routes['models/state-projection'](snapshot),
     controllerRelays,
     getControllerRelays,
+    hydrateKeyedOrigins: support.keyedOriginAuthority.hydrate,
     validateContributorFeedback,
     makeTransferRoutes: executableOwner.makeTransferRoutes,
     listApps: support.appCatalog.list,
+    invalidateDwebPublications: () =>
+      liveProduction?.executableLive?.invalidateDwebPublications?.(),
     reseedDwebShares: async (/** @type {any} */ generation) => {
       const owner = await getRichOwner();
       if (typeof owner.reseedDwebShares !== 'function') {

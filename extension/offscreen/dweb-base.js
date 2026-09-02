@@ -33,7 +33,7 @@ import {
   identityForDiscoveredUri,
 } from '/offscreen/install-card-identity.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
-import { runPublishTransaction } from '/shared/publish-transaction.js';
+import { publishFailureError, runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
 import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
@@ -165,6 +165,19 @@ const publishLocalApp = async (h, msg, ownerId) => {
 const rooms = new Map();        // roomId -> { room, clients, name, topicSubs:Map, offs:[] }
 /** @param {string} type @param {object} [payload] @returns {Promise<any>} */
 const swCall = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
+/** @param {string} type @param {object} payload @returns {Promise<any>} */
+const swEffectCall = async (type, payload) => {
+  try { return await swCall(type, payload); }
+  catch (cause) {
+    // why: runtime messaging can lose a response after the SW committed. The
+    // offscreen host cannot turn that transport ambiguity into a safe retry.
+    throw Object.assign(publishFailureError({
+      error: /** @type {{message?:string}} */ (cause)?.message ?? 'service worker response lost',
+      code: 'dweb-sw-response-lost', performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    }, 'service worker response lost'), { cause });
+  }
+};
 
 // The permanent identity seed and backup passphrase never ride swCall. This
 // dedicated channel is accepted only after the service worker verifies the
@@ -334,7 +347,7 @@ const baseLifecycle = makeStartStopBarrier({
       throw e;
     }
     log(`joining lobby "${client.BASE_TOPIC}" as …${identity.did.slice(-8)}`);
-    return client.joinBaseNetwork({
+    const joined = await client.joinBaseNetwork({
       identity,
       // Signature/shape/derived-id verification happens in discovery before
       // this callback. The SW persists the monotonic decision; fail closed if
@@ -350,6 +363,7 @@ const baseLifecycle = makeStartStopBarrier({
         return false;
       },
     });
+    return joined;
   },
   activate: (candidate) => {
     candidate.base.start();
@@ -558,12 +572,18 @@ const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ leas
     // Do not hold the feature-host start receipt behind reseeding. The kernel
     // finishes the dweb lease transition first, then keeps this exact runtime
     // message alive while it rebuilds durable shares.
+    // why: recovery must never become an in-lane install barrier. A transient
+    // reseed refusal retries in the background while local self-fetch reports
+    // its exact pre-effect unavailability until the bytes are announced.
     void reseedNotifier.notify({
       type: 'dweb/base-host/generation',
       hostEpoch: activeFeatureHostEpoch,
       meshGeneration,
       did: current.did ?? null,
-    });
+    }).catch((cause) => ({
+      ok: false,
+      error: /** @type {{message?:unknown}} */ (cause)?.message ?? String(cause),
+    }));
     return current;
   } catch (cause) {
     activeFeatureHostEpoch = null;
@@ -607,7 +627,7 @@ const pushRoomEvent = (roomId, event, data) =>
 const roomClientId = (value) => typeof value === 'string'
   && value.length >= 8 && value.length <= 160
   && !/[\u0000-\u001f\u007f]/.test(value)
-  ? value : 'legacy-room-client';
+  ? value : null;
 
 /** @param {unknown} value */
 const appRoomAdmissionToken = (value) => typeof value === 'string'
@@ -615,8 +635,8 @@ const appRoomAdmissionToken = (value) => typeof value === 'string'
   && !/[\u0000-\u001f\u007f]/.test(value)
   ? value : null;
 
-/** @param {string} roomId @param {string} [name] @param {string} [clientId] @param {{appId?:unknown,appDocumentId?:unknown,appTabId?:unknown,roomAdmissionToken?:unknown}} [owner] */
-const ensureRoom = async (roomId, name, clientId = 'legacy-room-client', owner = {}) => {
+/** @param {string} roomId @param {string|undefined} name @param {string} clientId @param {{appId?:unknown,appDocumentId?:unknown,appTabId?:unknown,roomAdmissionToken?:unknown}} [owner] */
+const ensureRoom = async (roomId, name, clientId, owner = {}) => {
   const appId = typeof owner.appId === 'string' ? owner.appId : '';
   const appDocumentId = typeof owner.appDocumentId === 'string' ? owner.appDocumentId : '';
   const appTabId = Number.isInteger(owner.appTabId) ? Number(owner.appTabId) : -1;
@@ -696,6 +716,7 @@ const handleRoomOp = async (msg) => {
     return { ok: false, error: 'dweb-host-generation-changed' };
   }
   const clientId = roomClientId(msg.roomClientId);
+  if (!clientId) return { ok: false, error: 'dweb-room-client-invalid' };
   const admissionToken = appRoomAdmissionToken(msg.roomAdmissionToken);
   if (op === 'join') {
     const entry = await ensureRoom(roomId, msg.name, clientId, msg);
@@ -725,11 +746,11 @@ const handleRoomOp = async (msg) => {
       announce: () => client.installAppBundle({
         uri: msg.uri, manifest, payload, name: msg.name,
         install: async (/** @type {any} */ a) => {
-          const r = await swCall('dweb/app-install', {
+          const r = await swEffectCall('dweb/app-install', {
             appId, ...a, files: jsonSafeFiles(a.files),
             publicationGeneration: msg.publicationGeneration,
           });
-          if (!r?.ok) throw new Error(r?.error ?? 'install failed');
+          if (!r?.ok) throw publishFailureError(r, 'install failed');
           return { app: r.app, warning: r.warning };
         },
       }),
@@ -791,7 +812,14 @@ const handleRoomOp = async (msg) => {
       const client = /** @type {any} */ (await loadDweb());
       let clean;
       try { clean = client.validateCard(msg.card).card; }
-      catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? 'agent card rejected' }; }
+      catch (e) {
+        return {
+          ok: false,
+          error: /** @type {{ message?: string }} */ (e)?.message ?? 'agent card rejected',
+          performed: false, outcomeKnown: true,
+          outcomeKind: 'pre-effect-failure', retryable: false,
+        };
+      }
       const card = { ...clean, did: room.did };
       room.sync.retain('~card');
       const env = await room.sync.publish('~card', card);
@@ -815,16 +843,33 @@ const handleRoomOp = async (msg) => {
     case 'publish-app': {
       const h = await start();
       const ownerId = appContentOwner(msg.appId, 'room');
-      const { uri, hash, ownershipAdded } = await publishLocalApp(h, msg, ownerId);
-      const recorded = await swCall('dweb/app-record-served', { appId: msg.appId, uri, hash });
-      if (!recorded?.ok) {
-        if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
-        throw new Error(recorded?.error ?? 'shared App version could not be recorded');
+      const { published, announced: recorded } = await runPublishTransaction({
+        publish: () => publishLocalApp(h, msg, ownerId),
+        announce: async ({ uri, hash }) => {
+          const result = await swEffectCall('dweb/app-record-served', {
+            appId: msg.appId, uri, hash,
+            publicationGeneration: msg.publicationGeneration,
+          });
+          if (!result?.ok) {
+            throw publishFailureError(result, 'shared App version could not be recorded');
+          }
+          return result;
+        },
+        rollback: ({ hash, ownershipAdded }) => {
+          if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
+        },
+      });
+      const { uri, hash } = published;
+      const pendingRoomUnserveHashes = [];
+      for (const staleHash of recorded.pendingUnserveHashes ?? []) {
+        try { unserveTrackedHash(h, ownerId, staleHash); }
+        catch { pendingRoomUnserveHashes.push(staleHash); }
       }
-      if (recorded.previousHash && recorded.previousHash !== hash) {
-        unserveTrackedHash(h, ownerId, recorded.previousHash);
-      }
-      return { ok: true, uri, hash };
+      return {
+        ok: true, uri, hash, pendingRoomUnserveHashes,
+        ...(pendingRoomUnserveHashes.length
+          ? { warning: 'previous-version-cleanup-pending' } : {}),
+      };
     }
     default: return { ok: false, error: `unknown room op: ${op}` };
   }
@@ -893,6 +938,13 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         // then announce it (gossip + DHT). dwapp_id = content hash.
         case 'dweb/base-host/share-app': {
           const reseed = msg.reseed === true;
+          const transactionId = !reseed && typeof msg.transactionId === 'string'
+            && /^[a-f0-9-]{36}$/i.test(msg.transactionId)
+            ? msg.transactionId : null;
+          if (!reseed && !transactionId) {
+            sendResponse({ ok: false, error: 'share-transaction-id-required' });
+            return;
+          }
           const reseedAttemptId = typeof msg.reseedAttemptId === 'string'
             && msg.reseedAttemptId.length >= 8 && msg.reseedAttemptId.length <= 128
             && !/[\u0000-\u001f\u007f]/.test(msg.reseedAttemptId)
@@ -1015,8 +1067,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           });
           const { published, announced } = transaction;
           const { uri, hash, created, size } = published;
-          const { dwapp_id, card } = announced;
-          const transactionId = msg.reseed ? null : crypto.randomUUID();
+          const { dwapp_id, card, propagated } = announced;
           if (transactionId) {
             shareRollbacks.register(transactionId, {
               appId: msg.appId,
@@ -1037,6 +1088,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           sendResponse({
             ok: true, uri, hash, size, created, dwapp_id, slug,
             seq: card.seq, publisher: h.base.did, transactionId,
+            propagated: propagated !== false,
           });
           return;
         }
@@ -1164,11 +1216,11 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               // Library later detect a newer announce for this same dwapp_id.
               dwappId: identity.dwappId, slug: identity.slug, seq: identity.seq,
               install: async (/** @type {any} */ a) => {
-                const r = await swCall('dweb/app-install', {
+                const r = await swEffectCall('dweb/app-install', {
                   appId, ...a, files: jsonSafeFiles(a.files),
                   publicationGeneration: msg.publicationGeneration,
                 });
-                if (!r?.ok) throw new Error(r?.error ?? 'install failed');
+                if (!r?.ok) throw publishFailureError(r, 'install failed');
                 return { app: r.app, warning: r.warning };
               },
             }),
@@ -1230,7 +1282,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                   ...(Array.isArray(msg.pendingHashes) ? msg.pendingHashes : []),
                   ...(previousHash ? [previousHash] : []),
                 ].filter((hash) => typeof hash === 'string' && hash !== a.dweb?.hash))];
-                const r = await swCall('dweb/app-update', {
+                const r = await swEffectCall('dweb/app-update', {
                   appId: msg.appId,
                   publicationGeneration: msg.publicationGeneration,
                   ...(msg.strategy === 'replace' || msg.strategy === 'fork' ? { strategy: msg.strategy } : {}),
@@ -1241,7 +1293,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                   },
                   files: jsonSafeFiles(a.files),
                 });
-                if (!r?.ok) throw new Error(r?.error ?? 'update failed');
+                if (!r?.ok) throw publishFailureError(r, 'update failed');
                 return { app: r.app, warning: r.warning, fork: r.fork };
               },
             }),
@@ -1280,12 +1332,17 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
       }
     } catch (e) {
       warn('handler threw', msg.type, '—', /** @type {{ message?: string }} */ (e)?.message ?? e);
+      const failure = /** @type {any} */ (e);
       sendResponse({
         ok: false,
-        error: /** @type {{ message?: string }} */ (e)?.message ?? String(e),
-        ...(typeof /** @type {any} */ (e)?.code === 'string'
-          ? { code: /** @type {any} */ (e).code } : {}),
-        ...(/** @type {any} */ (e)?.outcomeKnown === false ? { outcomeKnown: false } : {}),
+        error: failure?.message ?? String(e),
+        ...(typeof failure?.code === 'string' ? { code: failure.code } : {}),
+        ...(typeof failure?.performed === 'boolean' ? { performed: failure.performed } : {}),
+        ...(typeof failure?.outcomeKnown === 'boolean'
+          ? { outcomeKnown: failure.outcomeKnown } : {}),
+        ...(typeof failure?.retryable === 'boolean' ? { retryable: failure.retryable } : {}),
+        ...(['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+          .includes(failure?.outcomeKind) ? { outcomeKind: failure.outcomeKind } : {}),
       });
     }
   })();

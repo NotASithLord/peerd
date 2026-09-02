@@ -52,16 +52,32 @@ describe('kernel turn ownership boundaries', () => {
       'peerd-runtime/tools/metadata/policy.js',
     ]) expect(existsSync(join(EXTENSION_ROOT, path)), path).toBe(false);
 
-    const source = [...new Bun.Glob('**/*.js').scanSync({ cwd: EXTENSION_ROOT })]
-      .filter((path) => !path.startsWith('tests/'))
+    const productionPaths = [...new Bun.Glob('**/*.js').scanSync({ cwd: EXTENSION_ROOT })]
+      .filter((path) => !path.startsWith('tests/'));
+    const source = productionPaths
       .map((path) => readFileSync(join(EXTENSION_ROOT, path), 'utf8'))
       .join('\n');
     for (const retired of [
       'registerTool', 'makeRelayedToolDispatch',
       'turn.tool.prepare', 'turn.tool.settle', 'turn.tool.dispatch',
       'page_eval', 'page_exec', 'page_keys', 'wait_until', 'dweb_guide',
-      'read_web_cache', 'read_run_cache', 'toolbox',
     ]) expect(source, retired).not.toContain(retired);
+    const legacyManifestNames = ['read_web_cache', 'read_run_cache', 'read_pdf'];
+    const nonMigrationSource = productionPaths
+      .filter((path) => path !== 'peerd-runtime/tools/manifests.js')
+      .map((path) => readFileSync(join(EXTENSION_ROOT, path), 'utf8'))
+      .join('\n');
+    for (const retired of legacyManifestNames) {
+      expect(nonMigrationSource, retired).not.toContain(retired);
+    }
+    const manifestMigration = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-runtime/tools/manifests.js'), 'utf8',
+    );
+    for (const retired of legacyManifestNames) {
+      expect(manifestMigration.match(new RegExp(retired, 'g')), retired).toHaveLength(1);
+    }
+    expect(source.match(/toolbox/g)).toHaveLength(1);
+    expect(source).toContain("RETIRED_DATABASE_NAMES = Object.freeze(['peerd-toolbox'");
   });
 
   it('keeps semantic aggregate barrels out of the service-worker graph', async () => {

@@ -14,6 +14,7 @@ describe('kernel turn production runtime', () => {
     const marked = new Set([7]);
     const releases: number[] = [];
     const seen: any[] = [];
+    const recoveryOrder: string[] = [];
     let driverAssembly: any;
     let driven: any;
     const sessionCache = {
@@ -65,7 +66,7 @@ describe('kernel turn production runtime', () => {
               broadcastAgentTab: () => {}, onUiConnect: () => {},
               showWebTabHint: () => {}, isDrivenSource: () => false,
               webActorSessionForTab: () => null,
-              resumeSchedules: async () => {},
+              resumeSchedules: async () => { recoveryOrder.push('goals+schedules'); },
               eventOwners: {
                 onCreated: () => {}, onUpdated: () => {}, onRemoved: () => {},
                 onActivated: () => {}, onNavigationTarget: () => {},
@@ -82,7 +83,9 @@ describe('kernel turn production runtime', () => {
           driverAssembly = assembly;
           return {
             runAgentTurn: async (args: any) => { driven = args; return { ok: true }; },
-            maybeAutoResume: async () => {},
+            maybeAutoResume: async (sessionId: string) => {
+              recoveryOrder.push(`auto-resume:${sessionId}`);
+            },
           };
         },
         makeGoals: () => ({
@@ -143,6 +146,8 @@ describe('kernel turn production runtime', () => {
     expect(driverAssembly.sessions).toBe(runtime.relays.sessions);
     await expect((runtime.turnDeps as any).runAgentTurn).toBeFunction();
     expect(driven).toEqual({ sessionId: 'root', userText: 'direct' });
+    await runtime.relays.resumeRecovery('root');
+    expect(recoveryOrder).toEqual(['goals+schedules', 'auto-resume:root']);
     await runtime.close();
     expect(releases).toEqual([7]);
   });

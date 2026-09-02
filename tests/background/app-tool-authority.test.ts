@@ -24,6 +24,45 @@ const context = (overrides: Record<string, any> = {}) => ({
 });
 
 describe('exact App authority', () => {
+  test('threads the admitted run signal through every queued App file mutation', async () => {
+    const controller = new AbortController();
+    const seen: AbortSignal[] = [];
+    const ctx = context({
+      appClient: {
+        update: async (options: any) => {
+          seen.push(options.signal);
+          return { id: 'app-1', name: 'work', entryFile: 'index.html', updatedAt: 1 };
+        },
+        writeFile: async (options: any) => {
+          seen.push(options.signal); return { bytesWritten: 3 };
+        },
+        deleteFile: async (options: any) => { seen.push(options.signal); },
+      },
+    });
+    await createAppToolAuthority({
+      binding: {
+        operation: 'turn.app.update',
+        args: { appId: 'app-1', name: 'work', html: 'new', tags: [], entryFile: 'index.html' },
+      },
+      ctx, signal: controller.signal,
+    }).updateApp('app-1', 'work', 'new', [], 'index.html');
+    await createAppToolAuthority({
+      binding: {
+        operation: 'turn.app.write-file',
+        args: { appId: 'app-1', path: 'index.html', content: 'new' },
+      },
+      ctx, signal: controller.signal,
+    }).writeFile('app-1', 'index.html', 'new');
+    await createAppToolAuthority({
+      binding: {
+        operation: 'turn.app.delete-file', args: { appId: 'app-1', path: 'old.txt' },
+      },
+      ctx, signal: controller.signal,
+    }).deleteFile('app-1', 'old.txt');
+
+    expect(seen).toEqual([controller.signal, controller.signal, controller.signal]);
+  });
+
   test('Stop during the fresh delete probe prevents every physical delete edge', async () => {
     let releaseProbe!: () => void;
     let probeStarted!: () => void;

@@ -580,12 +580,14 @@ export const InputBar = {
       const pending = ui.unconfirmedSend;
       if (!pending || ui.busy) return;
       // This is an explicit human acknowledgement, never an automatic replay:
-      // keep the restored draft/attachments untouched, clear only the local
+      // keep any restored draft/attachments untouched, clear only the local
       // fence, and let a future Send mint a fresh operation id.
       ui.unconfirmedSend = null;
       saveUnconfirmed(sid, null);
-      ui.sendError = pending.hadAttachments
-        ? 'Delivery fence cleared. Review this chat and the restored text and files before choosing Send.'
+      ui.sendError = pending.hadAttachments && ui.attachments.length === 0
+        ? 'Delivery fence cleared. Review this chat and the restored text, then reattach the files before choosing Send.'
+        : pending.hadAttachments
+          ? 'Delivery fence cleared. Review this chat and the restored text and files before choosing Send.'
         : 'Delivery fence cleared. Review this chat and the restored draft before choosing Send.';
       m.redraw();
     };
@@ -900,7 +902,9 @@ export const InputBar = {
             canAttach ? m('button.attach-btn', {
               type: 'button',
               disabled: !!ui.unconfirmedSend,
-              title: 'Attach files — images, PDF, or text (or paste an image)',
+              title: documentReaderAvailable
+                ? 'Attach files — images, PDFs, office/e-book documents, or text (or paste an image)'
+                : 'Attach files — images, PDF, or text (or paste an image)',
               'aria-label': 'Attach files',
               onclick: () => ui.fileInputEl?.click(),
             }, PAPERCLIP_ICON()) : null,

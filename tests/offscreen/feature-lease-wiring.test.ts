@@ -4,17 +4,58 @@ import { join } from 'node:path';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { createServiceWorkerChannels } from '../../extension/offscreen/supervisor-channels.js';
 import { backgroundScriptUrl } from '../../extension/offscreen/sender-checks.js';
+import {
+  FEATURE_LEASE_CLIENT_PROBE,
+  FEATURE_LEASE_CLIENT_PROOF,
+  FEATURE_LEASE_HOST_PROTOCOL,
+} from '../../extension/shared/feature-lease-protocol.js';
 
 const source = (path: string) => readFileSync(join(EXTENSION_DIR, path), 'utf8');
 
 describe('offscreen production feature-lease wiring', () => {
+  test('proves exact lease ownership before a WindowClient receives a private capability', async () => {
+    const lease = { scope: 'controller', leaseId: 'exact-client', hostEpoch: 'exact-host' };
+    const channels = createServiceWorkerChannels({
+      getFeatureLeaseHost: () => ({
+        isActive: () => true,
+        ownsLease: (scope: string, candidate: unknown) =>
+          scope === 'controller' && candidate === lease,
+      }),
+      loadControllerBootstrap: async () => ({}),
+    });
+    const channel = new MessageChannel();
+    const proof = new Promise<any>((resolve) => {
+      channel.port1.onmessage = (event) => resolve(event.data);
+      channel.port1.start();
+    });
+    channels.onMessage({
+      isTrusted: true,
+      source: { scriptURL: backgroundScriptUrl },
+      data: {
+        type: FEATURE_LEASE_CLIENT_PROBE,
+        protocol: FEATURE_LEASE_HOST_PROTOCOL,
+        probeId: 'feature-client-probe',
+        lease,
+      },
+      ports: [channel.port2],
+    } as unknown as MessageEvent);
+    await expect(proof).resolves.toEqual({
+      type: FEATURE_LEASE_CLIENT_PROOF,
+      protocol: FEATURE_LEASE_HOST_PROTOCOL,
+      probeId: 'feature-client-probe',
+      hostEpoch: 'exact-host',
+      owned: true,
+    });
+  });
+
   test('the offscreen shell has no unconditional generic keepalive', () => {
     const shell = source('offscreen/offscreen.js');
     const channels = source('offscreen/supervisor-channels.js');
     expect(shell).not.toContain("'sw-keepalive'");
     expect(shell).not.toContain("type: 'heartbeat'");
     expect(shell).toContain('FEATURE_LEASE_KEEPALIVE_PORT');
-    expect(shell).toContain("feature-lease/host-");
+    expect(shell).not.toContain("message.startsWith('feature-lease/host-')");
+    expect(shell).toContain('void ensureFeatureLeaseHost()');
     expect(shell).toContain("claimLease('dweb'");
     expect(channels).toContain("ownsLease?.('controller', lease) === true");
     expect(shell).toContain("claimLease('dom-host'");
@@ -254,6 +295,8 @@ describe('offscreen production feature-lease wiring', () => {
     expect(dweb).toContain("type: 'dweb/base-host/generation'");
     expect(dweb).toContain('reseedNotifier.notify({');
     expect(dweb).toContain('reseedNotifier.cancel();');
+    expect(dweb).not.toContain('reseedReady');
+    expect(dweb).not.toContain('awaitReseedPass');
     expect(dweb).toContain('activeFeatureHostEpoch = null;');
     expect(dweb).toContain('runDwebReseedPublication({');
     expect(dweb).toContain('latestReseedAttempts.get(msg.appId) === reseedAttemptId');

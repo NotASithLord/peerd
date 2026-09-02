@@ -25,6 +25,15 @@
 
 /** @typedef {{ preset?: string, allow?: string[] }} ToolManifest */
 
+// Persisted manifests are user data, so old records stay byte-for-byte intact.
+// Resolve the few true renames at the semantic boundary instead: aliases never
+// become executable tool names and newly deleted tools naturally fail closed.
+export const LEGACY_TOOL_RENAMES = Object.freeze({
+  read_web_cache: 'read_result',
+  read_run_cache: 'read_result',
+  read_pdf: 'read_doc',
+});
+
 // Named presets — DATA, deliberately literal so editing a preset is a
 // one-line diff. Names must match controller tool names exactly; the
 // in-browser suite checks every entry against the real catalog, and the
@@ -139,10 +148,48 @@ export const resolveManifestAllow = (toolManifest) => {
     // undefined (the fail-closed path documented above), so the index is
     // safe to widen here.
     const preset = /** @type {Record<string, { allow: readonly string[] }>} */ (TOOL_MANIFEST_PRESETS)[manifest.preset];
-    if (preset) for (const n of preset.allow) names.add(n);
+    if (preset) {
+      for (const name of preset.allow) {
+        names.add(/** @type {Record<string,string>} */ (LEGACY_TOOL_RENAMES)[name] ?? name);
+      }
+    }
   }
-  if (manifest.allow) for (const n of manifest.allow) names.add(n);
+  if (manifest.allow) {
+    for (const name of manifest.allow) {
+      names.add(/** @type {Record<string,string>} */ (LEGACY_TOOL_RENAMES)[name] ?? name);
+    }
+  }
   return names;
+};
+
+/**
+ * Resolve a saved manifest against the current controller catalog. Historical
+ * bytes are not rewritten: callers get the effective allow-set plus a concise
+ * explanation of names that were renamed or retired.
+ *
+ * @param {unknown} toolManifest
+ * @param {Iterable<string>} knownToolNames
+ * @returns {{allow:Set<string>|null,renamed:string[],unavailable:string[]}}
+ */
+export const resolveManifestStatus = (toolManifest, knownToolNames) => {
+  const manifest = normalizeToolManifest(toolManifest);
+  if (!manifest) return { allow: null, renamed: [], unavailable: [] };
+  const known = new Set(knownToolNames);
+  const resolved = resolveManifestAllow(manifest) ?? new Set();
+  const allow = new Set([...resolved].filter((name) => known.has(name)));
+  /** @type {string[]} */
+  const renamed = [];
+  /** @type {string[]} */
+  const unavailable = [];
+  for (const name of manifest.allow ?? []) {
+    const replacement = /** @type {Record<string,string>} */ (LEGACY_TOOL_RENAMES)[name];
+    if (replacement) {
+      if (!renamed.includes(`${name} → ${replacement}`)) renamed.push(`${name} → ${replacement}`);
+    } else if (!known.has(name) && !unavailable.includes(name)) {
+      unavailable.push(name);
+    }
+  }
+  return { allow, renamed, unavailable };
 };
 
 /**
@@ -150,16 +197,24 @@ export const resolveManifestAllow = (toolManifest) => {
  * gate's refusal reason. null when no manifest is set ("full").
  *
  * @param {unknown} toolManifest
+ * @param {Iterable<string>} [knownToolNames]
  * @returns {string | null}
  */
-export const manifestLabel = (toolManifest) => {
+export const manifestLabel = (toolManifest, knownToolNames) => {
   const manifest = normalizeToolManifest(toolManifest);
   if (!manifest) return null;
+  const allow = knownToolNames
+    ? resolveManifestStatus(manifest, knownToolNames).allow
+    : resolveManifestAllow(manifest);
   if (manifest.preset !== undefined) {
-    const extra = manifest.allow?.length ? ` +${manifest.allow.length}` : '';
+    const presetAllow = resolveManifestAllow({ preset: manifest.preset }) ?? new Set();
+    const extraCount = allow
+      ? [...allow].filter((name) => !presetAllow.has(name)).length
+      : 0;
+    const extra = extraCount ? ` +${extraCount}` : '';
     return `${manifest.preset}${extra}`;
   }
-  const n = manifest.allow?.length ?? 0;
+  const n = allow?.size ?? 0;
   return `custom (${n} tool${n === 1 ? '' : 's'})`;
 };
 

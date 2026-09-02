@@ -61,7 +61,7 @@
       "customSystemPrompt": "Never guess a figure. If a number isn't on the page, say so.",
       "toolManifest": {
         "preset": "research",
-        "allow": ["fetch_url", "read_result", "actor_list", "open_tab", "message_actor", "inspect"]
+        "allow": ["fetch_url", "read_web_cache", "actor_list", "open_tab", "message_actor", "inspect"]
       },
       "messagesV2": true,
       "msgIndex": [
@@ -151,7 +151,7 @@
       "spawnedTrusted": true,
       "grantedTools": [
         "snapshot", "read_page", "read_state", "click", "type", "navigate",
-        "query_dom", "fetch_url", "read_result", "site_client_run"
+        "query_dom", "fetch_url", "read_web_cache", "site_client_run"
       ],
       "originState": {
         "mode": "bound",

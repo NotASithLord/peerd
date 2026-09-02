@@ -141,6 +141,7 @@ const runProductionActor = async ({
     buildToolContext,
     ownedTabFor,
     providerEgress,
+    spendRefusalFor: async () => null,
     appendAudit: async () => {},
     runOnChannel: async (job: any, { relay }: any) => {
       lateRelay.current = (type, payload) => Promise.resolve(relay(type, payload));
@@ -427,6 +428,7 @@ describe('production site-client actor vertical', () => {
     const client = makeOffscreenActorClient({
       ensureHost: async () => {}, isRelaySender: () => true,
       sendMessage: async () => ({ ok: false }), providerEgress,
+      spendRefusalFor: async () => null,
       sessions: { get: async () => structuredClone(actorRecord) },
       buildToolContext: async () => {
         contextBuilds += 1;
@@ -614,6 +616,7 @@ describe('production site-client actor vertical', () => {
       const client = makeOffscreenActorClient({
         ensureHost: async () => {}, isRelaySender: () => true,
         providerEgress: makeScriptedProviderAuthority(() => null),
+        spendRefusalFor: async () => null,
         sessions: { get: async (id: string) => id === 'chat-root'
           ? { kind: 'chat', sessionId: 'chat-root' } : structuredClone(actorRecord) },
         buildToolContext: async () => { contextBuilds += 1; return {}; },
@@ -643,6 +646,7 @@ describe('production site-client actor vertical', () => {
 
     const chatClient = makeOffscreenActorClient({
       ensureHost: async () => {}, isRelaySender: () => true,
+      spendRefusalFor: async () => null,
       sessions: { get: async () => ({ kind: 'chat', sessionId: 'chat-root' }) },
       buildToolContext: async () => { throw new Error('must not build chat actor context'); },
       sendMessage: async () => { throw new Error('must not start actor host'); },

@@ -10,10 +10,6 @@ export const KERNEL_SUPPORT_EFFECTS_BY_ROUTE = Object.freeze({
   'permission/set': Object.freeze(['support.permission.commit']),
 });
 
-export const KERNEL_SUPPORT_EFFECT_OPERATIONS = Object.freeze([
-  ...new Set(Object.values(KERNEL_SUPPORT_EFFECTS_BY_ROUTE).flat()),
-]);
-
 export const canonicalKernelSessionId = (/** @type {unknown} */ value) =>
   typeof value === 'string' && value.length > 0 ? value : null;
 

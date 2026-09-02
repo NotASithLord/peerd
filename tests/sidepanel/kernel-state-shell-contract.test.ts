@@ -32,6 +32,11 @@ const projected = (generation = 1, authorityEpoch = 'kernel-epoch-0001') => ({
     credentialReady: false, localReady: false, canSend: false, reason: 'vault-locked',
   },
   capabilities: { actorExecution },
+  actors: {},
+  spawned: { byToolUse: {}, sessions: {} },
+  asyncTasks: {},
+  actorProjectionEpoch: null,
+  actorProjectionRevision: 0,
   projection: {
     schema: KERNEL_STATE_SCHEMA,
     provenance: KERNEL_STATE_PROVENANCE,
@@ -46,12 +51,13 @@ const projected = (generation = 1, authorityEpoch = 'kernel-epoch-0001') => ({
 });
 
 describe('cold shell state contract', () => {
-  test('strictly normalizes complete legacy snapshots during migration', () => {
+  test('rejects provenance-less legacy snapshots', () => {
     const legacy = { vault, settings, capabilities: { actorExecution } };
-    expect(normalizeColdStateSnapshot(legacy)).toEqual({ ...legacy, hydrated: true });
+    expect(normalizeColdStateSnapshot(legacy)).toBeNull();
   });
 
-  test('rejects partial legacy and corrupt/future kernel snapshots', () => {
+  test('accepts only current valid projections and rejects corrupt/future snapshots', () => {
+    expect(normalizeColdStateSnapshot(projected())).toEqual(projected());
     expect(normalizeColdStateSnapshot({})).toBeNull();
     expect(normalizeColdStateSnapshot({ vault, settings })).toBeNull();
     expect(normalizeColdStateSnapshot({
@@ -59,6 +65,12 @@ describe('cold shell state contract', () => {
     })).toBeNull();
     expect(normalizeColdStateSnapshot({
       ...projected(), projection: { ...projected().projection, schema: KERNEL_STATE_SCHEMA + 1 },
+    })).toBeNull();
+    expect(normalizeColdStateSnapshot({
+      ...projected(),
+      capabilities: { actorExecution: {
+        status: 'unavailable', host: null, reason: 'legacy', retryable: true,
+      } },
     })).toBeNull();
     expect(normalizeColdStateSnapshot({ ...projected(), pendingConfirm: null })).toBeNull();
     expect(normalizeColdStateSnapshot({

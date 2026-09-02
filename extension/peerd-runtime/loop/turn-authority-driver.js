@@ -163,6 +163,21 @@ const runAgentTurn = async (/** @type {any} */ input) => {
   // turns streaming in OTHER chats are untouched.
   const claimedTurn = turnLease ?? turnSlots.claim(sessionId);
   const { controller: abortController, release: releaseTurnSlot } = claimedTurn;
+  let turnSettled = false;
+  const settleTurn = () => {
+    if (turnSettled) return;
+    turnSettled = true;
+    releaseTurnSlot();
+    if (uiConnected()) {
+      uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false });
+    }
+  };
+  // why: projection is part of the claimed turn. Publish busy before any
+  // session/controller wait so Stop is visible during cold controller startup.
+  if (uiConnected()) {
+    uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: true });
+  }
+  try {
   // why: semantic projection can be slower than the user-visible turn claim.
   // Publish only the bounded request label so authority observability describes
   // the work that actually owns the slot without waiting for transcript IO.
@@ -202,7 +217,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       sessionId,
       details: { reason: 'dedicated_worker_required', performed: false },
     }).catch(() => {});
-    releaseTurnSlot();
+    settleTurn();
     return;
   }
   // why snapshot: an unavailable boundary stays unavailable to the model for
@@ -349,7 +364,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       dwebEngaged: dwebEngagedSessions.has(sessionId),
       goalActive: !!goalActiveFor?.(sessionId),
       actorIsolation: isolation, runtimeCapabilities,
-    });
+    }, { signal: abortController.signal });
     if (!surface || !Array.isArray(surface.tools) || !Array.isArray(surface.operations)
         || surface.tools.some((/** @type {any} */ tool) =>
           !tool || typeof tool.name !== 'string')
@@ -413,10 +428,6 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       abortController.abort();
     },
   });
-  if (uiConnected()) {
-    uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: true });
-  }
-
   try {
     for await (const ev of runUserTurn({
       sessionId,
@@ -671,15 +682,12 @@ const runAgentTurn = async (/** @type {any} */ input) => {
     }
     // Self-scoped: a superseded (steered) turn unwinding late can only
     // clear its own slot, never the newer turn that replaced it.
-    releaseTurnSlot();
+    settleTurn();
     // Drain any queued trim-summary enrichment now that the stream is
     // done: fire-and-forget, mechanical fallback already persisted, so
     // a failure here costs nothing but summary quality.
     trimEnricher.drain(sessionId)
       .catch((/** @type {any} */ e) => console.warn('[sw] trim enrichment failed', e));
-    if (uiConnected()) {
-      uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false });
-    }
   }
   // why: the outcome lets goal mode stop on a failed/aborted turn rather than
   // re-driving a broken condition up to the cap. Normal sends ignore it.
@@ -688,6 +696,14 @@ const runAgentTurn = async (/** @type {any} */ input) => {
     stopReason: lastStopReason,
     ...(turnSnapshot ? { turnSnapshot } : {}),
   };
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      return { ok: false, stopReason: 'aborted' };
+    }
+    throw error;
+  } finally {
+    settleTurn();
+  }
 };
 
 // Per-SW-lifetime dedupe for auto-resume: the interrupted message id we've

@@ -204,6 +204,25 @@ describe('controller turn finite tool protocol', () => {
     }));
   });
 
+  test('semantic report audit rejection cannot finalize a controller turn cleanly', async () => {
+    const nowDescriptor = authorityDescriptor('now');
+    const result = await runHarness({
+      ctx: context({
+        appendAudit: async () => { throw new Error('audit offline'); },
+        tools: [nowDescriptor], refreshTools: async () => [nowDescriptor],
+        callModel: async function* () {
+          yield { type: 'tool-use-start', id: 'semantic-audit-call', name: 'now' };
+          yield { type: 'tool-use-delta', id: 'semantic-audit-call', partialJson: '{}' };
+          yield { type: 'tool-use-stop', id: 'semantic-audit-call' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      }),
+    });
+    expect(result.error).toMatchObject({
+      code: 'audit_unavailable', outcomeKnown: true, retryable: false,
+    });
+  });
+
   test('executes complete_goal through the exact goal authority operation', async () => {
     const summaries: string[] = [];
     const goalDescriptor = authorityDescriptor('complete_goal');
@@ -371,6 +390,133 @@ describe('controller turn finite tool protocol', () => {
       authorityPerformed: false, retryable: false,
     });
     expect(scheduled).toBe(0);
+  });
+
+  test('audit rejection preserves main receipts and prevents later effects or clean finalization', async () => {
+    const scheduleDescriptor = authorityDescriptor('schedule_cancel');
+    let removals = 0;
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    const ctx = context({
+      tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+      allowedOperations: ['turn.schedule.cancel-routine'],
+      appendAudit: async () => { throw new Error('audit offline'); },
+      scheduleRemove: async () => { removals += 1; return true; },
+    });
+    const replies: any[] = [];
+    const getClient = async () => ({
+      call: async (capability: string, payload: any, options: any) => {
+        const authority = bridge.authorize(payload);
+        const invoke = (operation: string, value: any) => bridge.handleKernelCall(
+          operation, { runId: payload.runId, value }, {
+            capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+          },
+        );
+        for (const callId of ['audit-call-1', 'audit-call-2']) {
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-start', id: callId, name: 'schedule_cancel',
+          });
+        }
+        replies.push(await invoke('turn.schedule.cancel-routine', {
+          callId: 'audit-call-1', effectId: 'audit-call-1:1', effectSequence: 1,
+          turnGeneration: payload.turnGeneration, id: 'routine-1',
+        }));
+        replies.push(await invoke('turn.schedule.cancel-routine', {
+          callId: 'audit-call-2', effectId: 'audit-call-2:1', effectSequence: 1,
+          turnGeneration: payload.turnGeneration, id: 'routine-2',
+        }));
+        replies.push(await invoke('turn.session.append', {
+          sessionId: payload.sessionId,
+          messageJson: JSON.stringify({
+            role: 'user', content: '', toolResults: [
+              { tool_use_id: 'audit-call-1', content: 'one', is_error: false },
+              { tool_use_id: 'audit-call-2', content: 'two', is_error: false },
+            ],
+          }),
+        }));
+        return invoke('turn.finalize', {});
+      },
+    });
+    bridge = makeControllerTurnBridge({ getClient, newId: () => 'audit-finality-run' });
+    let failure: any = null;
+    try {
+      for await (const _event of bridge.runUserTurn(withOperationSurface(ctx))) { /* drain */ }
+    } catch (cause) { failure = cause; }
+
+    expect(removals).toBe(1);
+    expect(replies[0]).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      authorityReceipt: { outcome: 'performed', performed: true, outcomeKnown: true },
+    });
+    expect(replies[1]).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      authorityReceipt: {
+        outcome: 'not-performed', performed: false, outcomeKnown: true,
+        refused: true, code: 'audit_unavailable',
+      },
+    });
+    expect(replies[2]).toMatchObject({ ok: false, code: 'audit_unavailable' });
+    expect(failure).toMatchObject({
+      code: 'audit_unavailable', outcomeKnown: true, retryable: false,
+    });
+  });
+
+  test('audit rejection cannot make an unknown receipt known during abort finalization', async () => {
+    const scheduleDescriptor = authorityDescriptor('schedule_cancel');
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    let effectReply: any;
+    let finalReply: any;
+    const ctx = context({
+      tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+      allowedOperations: ['turn.schedule.cancel-routine'],
+      appendAudit: async () => { throw new Error('audit offline'); },
+      scheduleRemove: async () => { throw Object.assign(new Error('response lost'), {
+        performed: true, outcomeKnown: false,
+      }); },
+    });
+    const getClient = async () => ({
+      call: async (capability: string, payload: any, options: any) => {
+        const authority = bridge.authorize(payload);
+        const invoke = (operation: string, value: any) => bridge.handleKernelCall(
+          operation, { runId: payload.runId, value }, {
+            capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+          },
+        );
+        await invoke('turn.session.append', {
+          sessionId: payload.sessionId,
+          messageJson: JSON.stringify({
+            role: 'assistant', id: 'audit-abort-assistant', content: '', streaming: true,
+          }),
+        });
+        await invoke('turn.model.observe-event', {
+          type: 'tool-use-start', id: 'audit-abort-call', name: 'schedule_cancel',
+        });
+        effectReply = await invoke('turn.schedule.cancel-routine', {
+          callId: 'audit-abort-call', effectId: 'audit-abort-call:1', effectSequence: 1,
+          turnGeneration: payload.turnGeneration, id: 'routine-1',
+        });
+        finalReply = await invoke('turn.abort.finalize', {
+          sessionId: payload.sessionId, messageId: 'audit-abort-assistant', content: '',
+          outcomeKnown: false, error: 'stopped', code: 'stopped', retryable: false,
+        });
+        return finalReply;
+      },
+    });
+    bridge = makeControllerTurnBridge({ getClient, newId: () => 'audit-abort-run' });
+    let failure: any = null;
+    try {
+      for await (const _event of bridge.runUserTurn(withOperationSurface(ctx))) { /* drain */ }
+    } catch (cause) { failure = cause; }
+
+    expect(effectReply).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: false,
+      authorityReceipt: { performed: true, outcomeKnown: false },
+    });
+    expect(finalReply).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: false, retryable: false,
+    });
+    expect(failure).toMatchObject({
+      code: 'audit_unavailable', outcomeKnown: false, retryable: false,
+    });
   });
 
   test('normal finalization cannot omit an accepted claim without a host receipt', async () => {
@@ -1169,6 +1315,173 @@ describe('controller turn finite tool protocol', () => {
     const result = await pending;
     expect(hostCalls).toBe(1);
     expect(result.error).toMatchObject({ outcomeKnown: false, retryable: false });
+  });
+
+  test('Stop stays unknown when the no-effect receipt cannot settle durably', async () => {
+    const actorDescriptor = authorityDescriptor('message_actor');
+    const stop = new AbortController();
+    let deliveries = 0;
+    let settlements = 0;
+    let round = 0;
+    const ctx = context({
+      signal: stop.signal,
+      tools: [actorDescriptor], refreshTools: async () => [actorDescriptor],
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+      lifecycle: {
+        requiresIntentConfirmation: async () => false,
+        beginTracking: async () => ({ handle: {} }),
+        settleTracking: async () => {
+          settlements += 1;
+          await new Promise(() => {});
+        },
+      },
+      actorAuthority: {
+        deliverMessage: async () => {
+          deliveries += 1;
+          return { ok: true, content: 'should not run' };
+        },
+      },
+      callModel: async function* () {
+        round += 1;
+        if (round > 1) return;
+        yield { type: 'tool-use-start', id: 'actor-pre-host-stop', name: 'message_actor' };
+        yield {
+          type: 'tool-use-delta', id: 'actor-pre-host-stop',
+          partialJson: '{"to":"web","message":"read it","await":true}',
+        };
+        yield { type: 'tool-use-stop', id: 'actor-pre-host-stop' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const result = await runHarness({
+      bridgeHooks: {
+        cleanupTimeoutMs: 20,
+        authorityScheduler: {
+          run: async () => {
+            stop.abort();
+            throw Object.assign(new Error('authority run stopped before host dispatch'), {
+              code: 'authority-run-aborted', outcomeKnown: true, retryable: false,
+            });
+          },
+        },
+      },
+      ctx,
+    });
+    expect(deliveries).toBe(0);
+    expect(settlements).toBe(1);
+    const live = result.events.find((event: any) =>
+      event.type === 'tool-result' && event.toolUseId === 'actor-pre-host-stop')?.result;
+    expect(live).toBeUndefined();
+    const stored = ctx.sessions.snapshot().messages
+      .flatMap((message: any) => message.toolResults ?? [])
+      .find((block: any) => block.tool_use_id === 'actor-pre-host-stop');
+    expect(stored).toBeUndefined();
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'error', outcomeKnown: false, retryable: false,
+    }));
+    expect(result.error).toMatchObject({ outcomeKnown: false, retryable: false });
+  });
+
+  test('Stop before an actor authority claim uses the empty host ledger as no-effect proof', async () => {
+    const actorDescriptor = authorityDescriptor('message_actor');
+    const stop = new AbortController();
+    let actorClaims = 0;
+    let round = 0;
+    const ctx = context({
+      signal: stop.signal,
+      tools: [actorDescriptor], refreshTools: async () => [actorDescriptor],
+      callModel: async function* () {
+        round += 1;
+        if (round > 1) return;
+        yield { type: 'tool-use-start', id: 'actor-never-claimed', name: 'message_actor' };
+        yield {
+          type: 'tool-use-delta', id: 'actor-never-claimed',
+          partialJson: '{"to":"web","message":"read it","await":true}',
+        };
+        yield { type: 'tool-use-stop', id: 'actor-never-claimed' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const result = await runHarness({
+      ctx,
+      interceptKernel: async (operation, _payload, next) => {
+        if (operation !== 'turn.actor.message') return next();
+        actorClaims += 1;
+        stop.abort();
+        await new Promise(() => {});
+      },
+    });
+    expect(actorClaims).toBe(1);
+    const live = result.events.find((event: any) =>
+      event.type === 'tool-result' && event.toolUseId === 'actor-never-claimed')?.result;
+    expect(live).toMatchObject({
+      ok: false, outcomeKnown: true, authorityPerformed: false,
+      actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: true,
+    });
+    expect(live).not.toHaveProperty('authorityReceipts');
+    const stored = ctx.sessions.snapshot().messages
+      .flatMap((message: any) => message.toolResults ?? [])
+      .find((block: any) => block.tool_use_id === 'actor-never-claimed');
+    expect(stored).toMatchObject({
+      is_error: true, outcomeKnown: true, authorityPerformed: false,
+      actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: true,
+    });
+    expect(stored).not.toHaveProperty('authorityReceipts');
+    expect(result.error).toBeNull();
+  });
+
+  test('Stop keeps an exact terminal actor cancellation after performed admission', async () => {
+    const actorDescriptor = authorityDescriptor('message_actor');
+    const stop = new AbortController();
+    let round = 0;
+    const ctx = context({
+      signal: stop.signal,
+      tools: [actorDescriptor], refreshTools: async () => [actorDescriptor],
+      actorAuthority: {
+        deliverMessage: async () => ({
+          ok: true, content: 'the actor stopped without touching its target',
+          actorDeliveryId: 'delivery-stopped', actorCorrelationId: 'correlation-stopped',
+          actorTerminal: true, actorOutcomeKnown: true,
+          actorPerformed: false, actorAborted: true,
+        }),
+      },
+      callModel: async function* () {
+        round += 1;
+        if (round > 1) return;
+        yield { type: 'tool-use-start', id: 'actor-terminal-stop', name: 'message_actor' };
+        yield {
+          type: 'tool-use-delta', id: 'actor-terminal-stop',
+          partialJson: '{"to":"web","message":"read it","await":true}',
+        };
+        yield { type: 'tool-use-stop', id: 'actor-terminal-stop' };
+        yield { type: 'message-stop', stopReason: 'tool_use' };
+      },
+    });
+    const result = await runHarness({
+      ctx,
+      interceptKernel: async (operation, _payload, next) => {
+        const value = await next();
+        if (operation === 'turn.actor.message') stop.abort();
+        return value;
+      },
+    });
+    const live = result.events.find((event: any) =>
+      event.type === 'tool-result' && event.toolUseId === 'actor-terminal-stop')?.result;
+    const stored = ctx.sessions.snapshot().messages
+      .flatMap((message: any) => message.toolResults ?? [])
+      .find((block: any) => block.tool_use_id === 'actor-terminal-stop');
+    for (const value of [live, stored]) expect(value).toMatchObject({
+      outcomeKnown: true, authorityPerformed: true,
+      actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: true,
+    });
+    expect(result.events).not.toContainEqual(expect.objectContaining({
+      type: 'error', outcomeKnown: false,
+    }));
+    expect(result.error).toBeNull();
   });
 
   test('main finalization rejects a performed effect whose result was never persisted', async () => {

@@ -66,14 +66,10 @@ const context = (over: any = {}) => {
 };
 
 describe('composer reference host authority', () => {
-  const captureRequest = (tabId: number | null) => [{
-    operation: 'turn.compose.capture-tab', payload: { tabId },
-  }];
-
   test('pins the admitted active tab and uses browser-issued document identity', async () => {
     const fixture = context();
     const authority = createComposerReferenceAuthority();
-    const pinned = await authority.pinContext(fixture.ctx, captureRequest(null));
+    const pinned = await authority.pinContext(fixture.ctx);
     fixture.switchActive(9);
     const result = await authority.captureTab(null, pinned);
     expect(result).toMatchObject({
@@ -89,7 +85,7 @@ describe('composer reference host authority', () => {
     const authority = createComposerReferenceAuthority();
     const explicit = context();
     await expect(authority.captureTab(
-      8, await authority.pinContext(explicit.ctx, captureRequest(8)),
+      8, await authority.pinContext(explicit.ctx),
     ))
       .resolves.toMatchObject({ ok: true, value: { snapshot: { text: 'body-8' } } });
 
@@ -97,21 +93,21 @@ describe('composer reference host authority', () => {
       urls: { 3: 'https://secure.bank.test/' }, denylist: ['bank.test', '*.bank.test'],
     });
     await expect(authority.captureTab(
-      null, await authority.pinContext(denied.ctx, captureRequest(null)),
+      null, await authority.pinContext(denied.ctx),
     ))
       .resolves.toMatchObject({ ok: false });
     expect(denied.calls).toHaveLength(0);
 
     const privateTarget = context({ urls: { 3: 'http://127.0.0.1/private' } });
     const privateResult = await authority.captureTab(
-      null, await authority.pinContext(privateTarget.ctx, captureRequest(null)),
+      null, await authority.pinContext(privateTarget.ctx),
     );
     expect(privateResult).toMatchObject({ ok: false });
     expect(JSON.stringify(privateResult)).not.toContain('/private');
 
     const redirected = context({ snapshotUrl: 'https://other.example/landed' });
     await expect(authority.captureTab(
-      null, await authority.pinContext(redirected.ctx, captureRequest(null)),
+      null, await authority.pinContext(redirected.ctx),
     ))
       .resolves.toMatchObject({ ok: false, error: 'tab_blocked: target_changed' });
   });
@@ -145,14 +141,12 @@ describe('composer reference host authority', () => {
   test('does no eager browser work and probes only an emitted explicit target', async () => {
     const fixture = context();
     const authority = createComposerReferenceAuthority();
-    const pinned = await authority.pinContext(fixture.ctx, [{
-      operation: 'turn.compose.read-file', payload: { path: 'notes.md' },
-    }]);
+    const pinned = await authority.pinContext(fixture.ctx);
     expect(fixture.tabCalls).toEqual([]);
     await authority.readFile('notes.md', pinned);
     expect(fixture.tabCalls).toEqual([]);
 
-    const explicit = await authority.pinContext(fixture.ctx, captureRequest(17));
+    const explicit = await authority.pinContext(fixture.ctx);
     expect(fixture.tabCalls).toEqual([]);
     await authority.captureTab(17, explicit);
     expect(fixture.tabCalls.every((call) => call[0] !== 'query')).toBe(true);

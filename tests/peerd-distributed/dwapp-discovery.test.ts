@@ -17,7 +17,17 @@ const head = (n = 1) => ({ version_id: `v${n}`, content_addr: 'peerd://p/h', siz
 
 const spawn = async (over: any = {}) => {
   const identity = await generateIdentity();
-  const mesh = createRoomMesh({ roomId: 'base', identity });
+  const rawMesh = createRoomMesh({ roomId: 'base', identity });
+  let failSign = false;
+  let failSend = false;
+  const mesh = over.failSign === true || over.failSend === true ? Object.freeze({
+    ...rawMesh,
+    sign: (channel: number, type: number, body: any) => failSign
+      ? Promise.reject(new Error('transport lost after local commit'))
+      : rawMesh.sign(channel, type, body),
+    send: (did: string, envelope: any) => failSend
+      ? false : rawMesh.send(did, envelope),
+  }) : rawMesh;
   const blocked = new Set<string>();
   const library = createLibrary({ isBlocked: (d: string) => blocked.has(d) });
   const discovery = createDiscovery({
@@ -26,7 +36,11 @@ const spawn = async (over: any = {}) => {
     block: (d: string) => blocked.add(d),
     ...(over.admitMeta ? { admitMeta: over.admitMeta } : {}),
   });
-  return { identity, mesh, library, discovery, blocked };
+  return {
+    identity, mesh, library, discovery, blocked,
+    failSign: () => { failSign = true; },
+    failSend: () => { failSend = true; },
+  };
 };
 
 const link = async (a: any, b: any) => {
@@ -66,6 +80,33 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     await waitFor(() => b.library.rows().some((r: any) => r.name === 'chess'));
     expect(b.library.rows().some((r: any) => r.name === 'chess')).toBe(true);
     [a, b].forEach((p) => p.discovery.close());
+  });
+
+  test('a failed subscriber forward cannot undo a locally committed announcement', async () => {
+    const a = await spawn({ failSign: true });
+    const b = await spawn();
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    a.failSign();
+    const result = await a.discovery.announce(await ownCard(a, 'committed'));
+    expect(result).toMatchObject({ fresh: true, propagated: false });
+    expect(a.library.rows().some((row: any) => row.name === 'committed')).toBe(true);
+    [a, b].forEach((peer) => peer.discovery.close());
+  });
+
+  test('a false mesh send is a propagation failure and a repeated announce retries it', async () => {
+    const a = await spawn({ failSend: true });
+    const b = await spawn();
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    const card = await ownCard(a, 'retry-forward');
+    a.failSend();
+    const first = await a.discovery.announce(card);
+    const second = await a.discovery.announce(card);
+    expect(first).toMatchObject({ fresh: true, propagated: false });
+    expect(second).toMatchObject({ fresh: false, propagated: false });
+    expect(a.library.rows().some((row: any) => row.name === 'retry-forward')).toBe(true);
+    [a, b].forEach((peer) => peer.discovery.close());
   });
 
   test('cards relay transitively over consented edges (A → B → C)', async () => {

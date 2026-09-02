@@ -64,6 +64,23 @@ describe('kernel dweb route runtime', () => {
       .toThrow('kernel-dweb-route-runtime-config-invalid');
   });
 
+  test('direct master OFF uses the canonical fenced settings transition', async () => {
+    const events: string[] = [];
+    const runtime = createKernelDwebRouteOwner(deps({
+      settingsStore: {
+        get: () => ({ dwebEnabled: true }), stored: () => ({}),
+        update: async () => { events.push('write'); },
+      },
+      transfer: {
+        ...deps().transfer,
+        onSettingsChanging: () => { events.push('invalidate'); },
+        onSettingsChanged: async () => { events.push('disable-host'); },
+      },
+    }));
+    expect(await runtime.routes['dweb/base/stop']()).toEqual({ ok: true, running: false });
+    expect(events).toEqual(['invalidate', 'write', 'disable-host']);
+  });
+
   test('wires exact active host and mesh generation into production reseed messages', async () => {
     const messages: any[] = [];
     const shared = {

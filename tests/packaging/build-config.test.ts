@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
   backgroundEntryFromManifest,
   genBuildConfigSource,
+  writeDevBuildConfig,
 } from '../../packaging/gen-build-config.ts';
 
 describe('generated build identity', () => {
@@ -40,5 +46,41 @@ describe('generated build identity', () => {
     expect(() => genBuildConfigSource({
       background: { service_worker: 'background/service-worker.js' },
     })).toThrow('manifest has no extension version');
+  });
+
+  test('writes build config before stamping both identity leaves', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-dev-build-config-'));
+    try {
+      const manifestFile = join(root, 'manifest.json');
+      const out = join(root, 'extension', 'shared', 'build-config.js');
+      const controllerBuild = join(root, 'extension', 'shared', 'controller-build.js');
+      mkdirSync(join(root, 'extension', 'shared'), { recursive: true });
+      mkdirSync(join(root, 'extension', 'offscreen'), { recursive: true });
+      writeFileSync(manifestFile, JSON.stringify({
+        version: '0.7.3',
+        background: { service_worker: 'background/vault-kernel-preview.js' },
+      }));
+      writeFileSync(
+        controllerBuild,
+        `export const CONTROLLER_BUILD_DIGEST = '${'0'.repeat(64)}';\n`,
+      );
+      writeFileSync(
+        join(root, 'extension', 'offscreen', 'offscreen.js'),
+        "import '../shared/build-config.js';\nimport '../shared/controller-build.js';\n",
+      );
+      const digest = await writeDevBuildConfig({
+        manifestFile,
+        out,
+      });
+      expect(digest).toMatch(/^[a-f0-9]{64}$/);
+      expect(digest).not.toBe('0'.repeat(64));
+      for (const file of [out, controllerBuild]) {
+        expect(readFileSync(file, 'utf8')).toContain(
+          `CONTROLLER_BUILD_DIGEST = '${digest}'`,
+        );
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

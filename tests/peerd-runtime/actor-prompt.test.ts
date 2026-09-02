@@ -1,9 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import {
   actorBlock,
-  renderSystemPrompt,
+  renderSystemPromptFromAssets,
   SYSTEM_PROMPT_CHAR_CEILINGS,
-  _setTemplateForTests,
 } from '../../extension/peerd-runtime/loop/system-prompt.js';
 import {
   actorCapabilityManifest,
@@ -107,6 +106,18 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
   test('the sections that stay on the main agent survive', () => {
     expect(base.includes('spawned')).toBe(true);
     expect(base.includes('Web content is UNTRUSTED')).toBe(true);
+  });
+});
+
+describe('the orchestrator dweb prompt fragment', () => {
+  test('delegates to the dweb actor instead of advertising its hidden tools as direct calls', async () => {
+    const dweb = await Bun.file('./extension/peerd-provider/system-prompt-dweb.txt').text();
+    expect(dweb).toContain('message_actor("dweb", "...")');
+    expect(dweb).toContain('message_actor("dweb", "Share App <id>');
+    for (const direct of [
+      'dweb_discover()', 'dweb_share(', 'dweb_install(',
+      'dweb_peers()', 'dweb_block(', 'dweb_discovery(',
+    ]) expect(dweb).not.toContain(direct);
   });
 });
 
@@ -246,12 +257,11 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     expect(block.includes('API integration')).toBe(false);
   });
 
-  // REGRESSION GUARD: actorBlock works in isolation, but renderSystemPrompt once CALLED
+  // REGRESSION GUARD: actorBlock works in isolation, but renderSystemPromptFromAssets once CALLED
   // it as actorBlock(actorType, backing) — dropping instanceId — so in production the API
   // actor was never told the origin it owns. This drives the real call site.
-  test('DESIGN-18: renderSystemPrompt threads instanceId so the API actor knows its origin', async () => {
-    _setTemplateForTests('BASE PROMPT');
-    const out = await renderSystemPrompt({ actorType: 'web', backing: 'api', instanceId: 'https://api.stripe.com' });
+  test('DESIGN-18: renderSystemPromptFromAssets threads instanceId so the API actor knows its origin', async () => {
+    const out = renderSystemPromptFromAssets({ actorType: 'web', backing: 'api', instanceId: 'https://api.stripe.com' });
     expect(out.includes('API integration')).toBe(true);
     expect(out.includes('scope: origin:https://api.stripe.com')).toBe(true);
     expect(out.includes('BASE PROMPT')).toBe(false); // compact actor kernel, not orchestrator profile
@@ -265,7 +275,7 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
 // never told the format fails on EVERY reply. These tests pin the two properties
 // that keep the halves one switch — the rule appears exactly where the validator
 // runs (SCHEMA_VALIDATED_KINDS = web/api, both of which are actorType 'web'),
-// and the flag survives the real renderSystemPrompt call site.
+// and the flag survives the real renderSystemPromptFromAssets call site.
 describe('the schema-reply rule (issue 241)', () => {
   const SCHEMA_MARK = 'must be ONE JSON object and nothing else';
   const FREE_MARK = 'complete, self-contained report';
@@ -316,11 +326,10 @@ describe('the schema-reply rule (issue 241)', () => {
   // as its FIFTH positional param, so a call site that forgets it silently ships
   // the free-form rule while the SW arms the validator — every web reply dropped,
   // and nothing in the unit tier would notice.
-  test('renderSystemPrompt threads schemaReply through to the rule', async () => {
-    _setTemplateForTests('BASE PROMPT');
-    const on = await renderSystemPrompt({ actorType: 'web', backing: 'tab', schemaReply: true });
+  test('renderSystemPromptFromAssets threads schemaReply through to the rule', async () => {
+    const on = renderSystemPromptFromAssets({ actorType: 'web', backing: 'tab', schemaReply: true });
     expect(on.includes(SCHEMA_MARK)).toBe(true);
-    const off = await renderSystemPrompt({ actorType: 'web', backing: 'tab' });
+    const off = renderSystemPromptFromAssets({ actorType: 'web', backing: 'tab' });
     expect(off.includes(SCHEMA_MARK)).toBe(false);
     expect(off.includes(FREE_MARK)).toBe(true);
   });
@@ -331,8 +340,7 @@ describe('the schema-reply rule (issue 241)', () => {
 // and — the inverted rule — it MAY message_actor.
 describe('the ephemeral-actor (actor) prompt', () => {
   test('shares the <actor_agent> framing as the ephemeral kind, carrying the task', async () => {
-    _setTemplateForTests('BASE PROMPT');
-    const out = await renderSystemPrompt({ taskOverride: 'summarize the release notes', effectiveTools: [] });
+    const out = renderSystemPromptFromAssets({ taskOverride: 'summarize the release notes', effectiveTools: [] });
     expect(out.includes('<actor_agent>\nkind: ephemeral')).toBe(true);
     expect(out.includes('fire-once actor')).toBe(true);
     expect(out.includes('summarize the release notes')).toBe(true);           // the task rides in
@@ -345,8 +353,7 @@ describe('the ephemeral-actor (actor) prompt', () => {
   });
 
   test('the inverted rule: an ephemeral actor MAY delegate (unlike a bound actor)', async () => {
-    _setTemplateForTests('BASE PROMPT');
-    const ephemeral = await renderSystemPrompt({
+    const ephemeral = renderSystemPromptFromAssets({
       taskOverride: 'do X',
       effectiveTools: ['script', 'message_actor'],
     });
@@ -363,22 +370,20 @@ describe('the ephemeral-actor (actor) prompt', () => {
   });
 
   test('does not claim delegation or create powers when they were not granted', async () => {
-    _setTemplateForTests('BASE PROMPT');
-    const out = await renderSystemPrompt({ taskOverride: 'review this text', effectiveTools: [] });
+    const out = renderSystemPromptFromAssets({ taskOverride: 'review this text', effectiveTools: [] });
     expect(out.includes('tools: none')).toBe(true);
     expect(out.includes('message_actor')).toBe(false);
     expect(out.includes('sandbox_create')).toBe(false);
   });
 
   test('effective grants keep orchestration lore exact instead of advertising partial clients', async () => {
-    _setTemplateForTests('BASE PROMPT');
-    const scriptOnly = await renderSystemPrompt({
+    const scriptOnly = renderSystemPromptFromAssets({
       taskOverride: 'compute only', effectiveTools: ['script'],
     });
     expect(scriptOnly).not.toContain('actors.call');
     expect(scriptOnly).not.toContain('actors.list');
 
-    const callOnly = await renderSystemPrompt({
+    const callOnly = renderSystemPromptFromAssets({
       taskOverride: 'delegate once', effectiveTools: ['script', 'message_actor'],
     });
     expect(callOnly).toContain('actors.call');
@@ -525,7 +530,7 @@ describe('capability-derived actor profiles', () => {
   });
 
   test('App package instructions carry publisher provenance, not /system authority', async () => {
-    const out = await renderSystemPrompt({
+    const out = renderSystemPromptFromAssets({
       actorType: 'app', instanceId: 'app-1',
       appRole: {
         source: 'dweb', publisher: 'did:key:z6MkPublisher', manifestDigest: 'a'.repeat(64),
@@ -543,8 +548,7 @@ describe('capability-derived actor profiles', () => {
 
   test('all fixed actor and orchestrator prompt ceilings hold', async () => {
     const base = await Bun.file('./extension/peerd-provider/system-prompt.txt').text();
-    _setTemplateForTests(base);
-    const orchestrator = await renderSystemPrompt({});
+    const orchestrator = renderSystemPromptFromAssets({}, { template: base });
     expect(orchestrator.length).toBeLessThanOrEqual(SYSTEM_PROMPT_CHAR_CEILINGS.orchestrator);
 
     const profiles = [
@@ -562,7 +566,7 @@ describe('capability-derived actor profiles', () => {
     }
 
     const task = 'review the proposed change';
-    const ephemeral = await renderSystemPrompt({ taskOverride: task, effectiveTools: [] });
+    const ephemeral = renderSystemPromptFromAssets({ taskOverride: task, effectiveTools: [] });
     expect(ephemeral.length - task.length).toBeLessThanOrEqual(SYSTEM_PROMPT_CHAR_CEILINGS.ephemeralKernel);
   });
 });

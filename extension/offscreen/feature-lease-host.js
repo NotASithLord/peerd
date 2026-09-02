@@ -1,10 +1,12 @@
 // @ts-check
-// Offscreen half of the production feature-lease protocol. No lease means no
-// keepalive port, heartbeat, controller offer, DOM/media operation, or dweb
-// network. The service worker remains the authority owner; this host only
-// executes exact generation-bound receipts.
+// Offscreen half of the production feature-lease protocol. One idle control
+// Port binds lifecycle commands to this document; no lease means no heartbeat,
+// controller offer, DOM/media operation, or dweb network. The service worker
+// remains the authority owner; this host only executes exact receipts.
 
 import {
+  FEATURE_LEASE_HOST_COMMAND,
+  FEATURE_LEASE_HOST_COMMAND_RESULT,
   FEATURE_LEASE_HOST_PROTOCOL,
   FEATURE_LEASE_KEEPALIVE_PORT,
   OFFSCREEN_FEATURE_LEASE_SCOPES,
@@ -31,7 +33,7 @@ const safeId = (/** @type {unknown} */ value, /** @type {number} */ max = 192) =
 
 /** @typedef {{
  * scope:string,leaseId:string,generation:number,buildId:string,kernelEpoch:string,
- * hostEpoch:string,schema?:1,bootId?:string,
+ * hostEpoch:string,schema:1,bootId:string,
  * }} ParsedFeatureLease */
 
 /**
@@ -41,28 +43,22 @@ const safeId = (/** @type {unknown} */ value, /** @type {number} */ max = 192) =
 const parseLease = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const lease = /** @type {Record<string, unknown>} */ (value);
-  const carriesStrictIdentity = lease.schema !== undefined || lease.bootId !== undefined;
-  const strictIdentity = carriesStrictIdentity ? parseKernelIdentity({
+  const strictIdentity = parseKernelIdentity({
     schema: lease.schema,
     buildId: lease.buildId,
     bootId: lease.bootId,
     kernelEpoch: lease.kernelEpoch,
-  }) : null;
+  });
   if (!SCOPES.has(/** @type {string} */ (lease.scope))
       || !safeId(lease.leaseId)
       || !Number.isSafeInteger(lease.generation) || Number(lease.generation) <= 0
-      || !safeId(lease.buildId)
-      || !safeId(lease.kernelEpoch)
       || !safeId(lease.hostEpoch)
-      || (carriesStrictIdentity && !strictIdentity)) return null;
+      || !strictIdentity) return null;
   return /** @type {Readonly<ParsedFeatureLease>} */ (Object.freeze({
     scope: /** @type {string} */ (lease.scope),
     leaseId: /** @type {string} */ (lease.leaseId),
     generation: Number(lease.generation),
-    ...(strictIdentity ?? {
-      buildId: /** @type {string} */ (lease.buildId),
-      kernelEpoch: /** @type {string} */ (lease.kernelEpoch),
-    }),
+    ...strictIdentity,
     hostEpoch: /** @type {string} */ (lease.hostEpoch),
   }));
 };
@@ -116,6 +112,8 @@ export const createOffscreenFeatureLeaseHost = ({
   if (!safeId(hostEpoch)) throw new TypeError('feature-lease-host-epoch-invalid');
   /** @type {Map<string, {lease:NonNullable<ReturnType<typeof parseLease>>,orphaned:boolean}>} */
   const active = new Map();
+  /** @type {Map<string, {lease:NonNullable<ReturnType<typeof parseLease>>,cancelled:boolean,promise:Promise<any>}>} */
+  const starting = new Map();
   /** @type {import('webextension-polyfill').Runtime.Port|null} */
   let port = null;
   /** @type {ReturnType<typeof setInterval>|null} */
@@ -157,7 +155,7 @@ export const createOffscreenFeatureLeaseHost = ({
 
   /** @param {string} reason @param {import('webextension-polyfill').Runtime.Port|null} [lostPort] */
   const onPortLost = (reason, lostPort = port) => {
-    if (closing || active.size === 0) return;
+    if (closing) return;
     // A delayed timeout/disconnect from a retired Port has no authority over a
     // successor connection or leases adopted through it.
     if (lostPort && port !== lostPort) return;
@@ -165,6 +163,16 @@ export const createOffscreenFeatureLeaseHost = ({
     port = null;
     stopHeartbeat();
     rejectHeartbeatWaiters(reason);
+    for (const entry of starting.values()) entry.cancelled = true;
+    if (active.size === 0) {
+      if (reconnectTimer === null) {
+        reconnectTimer = setTimeoutFn(() => {
+          reconnectTimer = null;
+          ensurePort();
+        }, reconnectMs);
+      }
+      return;
+    }
     for (const [scope, entry] of [...active]) {
       if (ADOPTABLE_AFTER_KERNEL_LOSS.has(scope)) {
         entry.orphaned = true;
@@ -180,7 +188,7 @@ export const createOffscreenFeatureLeaseHost = ({
     if (reason !== 'kernel-port-disconnected') {
       try { previous?.disconnect(); } catch { /* already disconnected */ }
     }
-    if (active.size > 0 && reconnectTimer === null) {
+    if (reconnectTimer === null) {
       reconnectTimer = setTimeoutFn(() => {
         reconnectTimer = null;
         ensurePort();
@@ -201,14 +209,31 @@ export const createOffscreenFeatureLeaseHost = ({
   };
 
   const ensurePort = () => {
-    if (closing || active.size === 0 || port) return;
+    if (closing || port) return;
     cancelReconnect();
     try {
       const next = connectPort();
       port = next;
       next.onMessage.addListener((/** @type {any} */ message) => {
-        if (port !== next
-            || message?.type !== 'feature-lease/heartbeat-ack'
+        if (port !== next) return;
+        if (message?.type === FEATURE_LEASE_HOST_COMMAND
+            && message.protocol === FEATURE_LEASE_HOST_PROTOCOL
+            && typeof message.commandId === 'string'
+            && message.commandId.length >= 8 && message.commandId.length <= 128
+            && ['feature-lease/host-status', 'feature-lease/host-start',
+              'feature-lease/host-stop'].includes(message.message?.type)) {
+          Promise.resolve(handleMessage(message.message)).then((result) => {
+            if (port !== next) return;
+            try { next.postMessage({
+              type: FEATURE_LEASE_HOST_COMMAND_RESULT,
+              protocol: FEATURE_LEASE_HOST_PROTOCOL,
+              commandId: message.commandId,
+              result,
+            }); } catch { /* kernel disconnect owns recovery */ }
+          });
+          return;
+        }
+        if (message?.type !== 'feature-lease/heartbeat-ack'
             || message?.protocol !== FEATURE_LEASE_HOST_PROTOCOL
             || message?.hostEpoch !== hostEpoch
             || typeof message?.heartbeatId !== 'string') return;
@@ -303,10 +328,7 @@ export const createOffscreenFeatureLeaseHost = ({
           });
         }
       }
-      const strictSuccessor = current.lease.bootId !== undefined || lease.bootId !== undefined
-        ? kernelIdentityIsSuccessor(current.lease, lease)
-        : current.lease.buildId === lease.buildId
-          && current.lease.kernelEpoch !== lease.kernelEpoch;
+      const strictSuccessor = kernelIdentityIsSuccessor(current.lease, lease);
       if (!current.orphaned || !ADOPTABLE_AFTER_KERNEL_LOSS.has(lease.scope)
           || !strictSuccessor) {
         return refuse('feature-lease-host-conflict', {
@@ -327,24 +349,57 @@ export const createOffscreenFeatureLeaseHost = ({
         });
       }
     }
-    try {
-      const result = await startScope(lease.scope, lease);
-      active.set(lease.scope, { lease, orphaned: false });
-      await awaitHeartbeatAck();
-      return receipt(lease, { active: true, result });
-    } catch (cause) {
-      await retireUnacknowledged(lease, 'heartbeat-unacknowledged');
-      return refuse('feature-lease-host-start-failed', {
+    const pending = starting.get(lease.scope);
+    if (pending) {
+      if (sameLease(pending.lease, lease)) return pending.promise;
+      return refuse('feature-lease-host-conflict', {
         scope: lease.scope,
-        errorDetail: cause instanceof Error ? cause.message : String(cause),
+        activeKernelEpoch: pending.lease.kernelEpoch,
       });
     }
+    /** @type {{lease:NonNullable<ReturnType<typeof parseLease>>,cancelled:boolean,promise:Promise<any>}} */
+    const entry = { lease, cancelled: false, promise: Promise.resolve(null) };
+    entry.promise = (async () => {
+      try {
+        const result = await startScope(lease.scope, lease);
+        if (entry.cancelled || starting.get(lease.scope) !== entry) {
+          await stopScope(lease.scope, { ...lease, reason: 'start-retired' });
+          return refuse('feature-lease-host-start-cancelled', { scope: lease.scope });
+        }
+        starting.delete(lease.scope);
+        active.set(lease.scope, { lease, orphaned: false });
+        await awaitHeartbeatAck();
+        return receipt(lease, { active: true, result });
+      } catch (cause) {
+        if (starting.get(lease.scope) === entry) starting.delete(lease.scope);
+        await retireUnacknowledged(lease, 'heartbeat-unacknowledged');
+        return refuse('feature-lease-host-start-failed', {
+          scope: lease.scope,
+          errorDetail: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+    })();
+    starting.set(lease.scope, entry);
+    return entry.promise;
   };
 
   const stop = async (/** @type {unknown} */ value) => {
     const lease = parseLease(value);
     if (!lease || lease.buildId !== expectedBuildId || lease.hostEpoch !== hostEpoch) {
       return refuse('feature-lease-host-binding-invalid');
+    }
+    const pending = starting.get(lease.scope);
+    if (pending) {
+      if (!sameLease(pending.lease, lease)) {
+        return refuse('feature-lease-host-stop-stale', { scope: lease.scope });
+      }
+      pending.cancelled = true;
+      const result = await pending.promise;
+      return result?.error === 'feature-lease-host-start-failed'
+        ? refuse('feature-lease-host-stop-failed', {
+            scope: lease.scope, errorDetail: result.errorDetail,
+          })
+        : receipt(lease, { active: false, coalesced: true });
     }
     const current = active.get(lease.scope);
     if (!current) return receipt(lease, { active: false, coalesced: true });
@@ -357,10 +412,7 @@ export const createOffscreenFeatureLeaseHost = ({
       if (active.size === 0) {
         stopHeartbeat();
         cancelReconnect();
-        const previous = port;
-        port = null;
         rejectHeartbeatWaiters('feature-lease-stopped');
-        try { previous?.disconnect(); } catch { /* already closed */ }
       }
       return receipt(lease, { active: false, result });
     } catch (cause) {
@@ -387,17 +439,25 @@ export const createOffscreenFeatureLeaseHost = ({
     stopHeartbeat();
     cancelReconnect();
     rejectHeartbeatWaiters('feature-lease-host-closing');
+    for (const entry of starting.values()) entry.cancelled = true;
+    const pendingStarts = [...starting.values()].map((entry) => entry.promise);
     const entries = [...active.values()];
     active.clear();
-    await Promise.allSettled(entries.map((entry) => stopScope(
-      entry.lease.scope,
-      { ...entry.lease, reason: 'host-closing' },
-    )));
+    await Promise.allSettled([
+      ...pendingStarts,
+      ...entries.map((entry) => stopScope(
+        entry.lease.scope,
+        { ...entry.lease, reason: 'host-closing' },
+      )),
+    ]);
     const previous = port;
     port = null;
     try { previous?.disconnect(); } catch { /* already closed */ }
   };
 
+  // why: lifecycle commands use this exact document-bound Port before the
+  // first lease exists; runtime messaging can fan out to a retired renderer.
+  ensurePort();
   return Object.freeze({
     hostEpoch,
     snapshot,

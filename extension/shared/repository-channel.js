@@ -7,9 +7,19 @@ export const REPOSITORY_KERNEL_FETCH = 'repository/kernel-fetch';
 export const REPOSITORY_KERNEL_FETCH_RESULT = 'repository/kernel-fetch-result';
 export const REPOSITORY_CHANNEL_RESULT = 'repository/result';
 export const REPOSITORY_CHANNEL_CANCEL = 'repository/cancel';
+export const REPOSITORY_CHANNEL_CANCELLED = 'repository/cancelled';
+export const REPOSITORY_WORKER_BOOTSTRAP = 'repository/worker-bootstrap';
+export const REPOSITORY_WORKER_SETTLED = 'repository/worker-settled';
 export const REPOSITORY_MAX_KERNEL_FETCHES = 8;
 export const GIT_SECRET_PREFIX = 'git:';
 const GIT_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
+
+/** @param {any} left @param {any} right */
+export const sameRepositoryLease = (left, right) => !!left && !!right
+  && left.schema === right.schema && left.scope === right.scope
+  && left.leaseId === right.leaseId && left.generation === right.generation
+  && left.buildId === right.buildId && left.bootId === right.bootId
+  && left.kernelEpoch === right.kernelEpoch && left.hostEpoch === right.hostEpoch;
 
 /** @returns {unknown} */
 export const encodeRepositoryRpcValue = (/** @type {unknown} */ value) => {

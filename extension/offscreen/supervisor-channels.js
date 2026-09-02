@@ -9,6 +9,8 @@ import {
   VAULT_AUTHORITY_PROTOCOL, VAULT_AUTHORITY_RESULT,
 } from '../shared/vault-authority-protocol.js';
 import {
+  FEATURE_LEASE_CLIENT_PROBE, FEATURE_LEASE_CLIENT_PROOF,
+  FEATURE_LEASE_HOST_PROTOCOL,
   LOCAL_MODEL_CHANNEL_PROTOCOL, LOCAL_MODEL_CHANNEL_RESULT,
   REPOSITORY_CHANNEL_OFFER, REPOSITORY_CHANNEL_PROTOCOL,
   parseLocalModelChannelOffer, parseRepositoryChannelOffer,
@@ -18,6 +20,10 @@ import {
   parseVoiceChannelOffer,
 } from '../shared/voice-channel.js';
 import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
+import {
+  REPOSITORY_CHANNEL_CANCEL,
+  REPOSITORY_CHANNEL_CANCELLED,
+} from '../shared/repository-channel.js';
 import {
   backgroundScriptUrl, isServiceWorkerSender, isTrustedSender,
 } from './sender-checks.js';
@@ -43,6 +49,22 @@ export const admitRepositoryChannelOffer = (event, workerUrl, ownsLease) => {
   return ownsLease(offer.lease)
     ? { matched: true, ok: true, reason: null, offer }
     : { matched: true, ok: false, reason: 'lease-invalid', offer };
+};
+
+/** @param {any} event @param {string} workerUrl */
+export const admitRepositoryCancellation = (event, workerUrl) => {
+  if (event?.data?.type !== REPOSITORY_CHANNEL_CANCEL) {
+    return { matched: false, ok: false, port: null };
+  }
+  const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
+  const port = event.ports?.length === 1 ? event.ports[0] : null;
+  const ok = event.isTrusted === true && source?.scriptURL === workerUrl
+    && event.data?.protocol === REPOSITORY_CHANNEL_PROTOCOL
+    && typeof event.data?.channelId === 'string'
+    && event.data.channelId.length >= 8 && event.data.channelId.length <= 256
+    && !!event.data?.lease && typeof event.data.lease === 'object'
+    && !Array.isArray(event.data.lease) && !!port;
+  return { matched: true, ok, port };
 };
 
 /** @param {any} event @param {string} workerUrl @param {(lease:any)=>boolean} ownsLease */
@@ -113,6 +135,29 @@ export const createServiceWorkerChannels = ({
   // service worker directly to this exact offscreen WindowClient. This avoids
   // runtime messaging and runtime Port fan-out to other extension frames.
   const onMessage = (/** @type {MessageEvent} */ event) => {
+    if (event.data?.type === FEATURE_LEASE_CLIENT_PROBE) {
+      const port = event.ports?.[0];
+      const source = /** @type {{scriptURL?:unknown}|null} */ (event.source ?? null);
+      const probeId = event.data?.probeId;
+      const lease = event.data?.lease;
+      const trusted = event.isTrusted === true && source?.scriptURL === backgroundScriptUrl
+        && event.data?.protocol === FEATURE_LEASE_HOST_PROTOCOL
+        && typeof probeId === 'string' && probeId.length >= 8 && probeId.length <= 128
+        && event.ports?.length === 1 && !!port;
+      if (trusted) {
+        const owned = typeof lease?.scope === 'string'
+          && getFeatureLeaseHost()?.ownsLease?.(lease.scope, lease) === true;
+        try { port.postMessage({
+          type: FEATURE_LEASE_CLIENT_PROOF,
+          protocol: FEATURE_LEASE_HOST_PROTOCOL,
+          probeId,
+          hostEpoch: owned ? lease.hostEpoch : null,
+          owned,
+        }); } catch { /* client already retired */ }
+      }
+      try { port?.close(); } catch { /* invalid/closed */ }
+      return;
+    }
     if (event.data?.type === 'peerd/controller-channel' && event.ports?.length === 1) {
       const lease = event.data.lease;
       if (getFeatureLeaseHost()?.ownsLease?.('controller', lease) !== true) {
@@ -230,6 +275,27 @@ export const createServiceWorkerChannels = ({
       return;
     }
     const repositoryHost = getFeatureLeaseHost();
+    const repositoryCancellation = admitRepositoryCancellation(event, backgroundScriptUrl);
+    if (repositoryCancellation.matched) {
+      const cancellationPort = repositoryCancellation.port;
+      const lease = event.data?.lease;
+      if (repositoryCancellation.ok && cancellationPort) {
+        loadRepository().then(({ cancelRepositoryCall }) => {
+          const cancelled = cancelRepositoryCall(event.data);
+          if (cancelled) cancellationPort.postMessage({
+            type: REPOSITORY_CHANNEL_CANCELLED,
+            protocol: REPOSITORY_CHANNEL_PROTOCOL,
+            channelId: event.data.channelId,
+            leaseId: lease.leaseId,
+            hostEpoch: lease.hostEpoch,
+          });
+          cancellationPort.close();
+        }).catch(() => { try { cancellationPort.close(); } catch {} });
+      } else {
+        for (const port of event.ports ?? []) try { port.close(); } catch {}
+      }
+      return;
+    }
     const repositoryAdmission = admitRepositoryChannelOffer(
       event,
       backgroundScriptUrl,
@@ -253,10 +319,12 @@ export const createServiceWorkerChannels = ({
         return;
       }
       loadRepository().then(
-        ({ acceptRepositoryOffer }) => acceptRepositoryOffer(event, {
-          ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
-            ?.ownsLease?.('controller', lease) === true,
-        }),
+        ({ acceptRepositoryOffer }) => {
+          return acceptRepositoryOffer(event, {
+            ownsLease: (/** @type {any} */ lease) => getFeatureLeaseHost()
+              ?.ownsLease?.('controller', lease) === true,
+          });
+        },
         () => {
           try {
             repositoryPort?.postMessage({

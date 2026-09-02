@@ -9,7 +9,7 @@ import {
   originOfUrl,
   resolveTargetTab,
 } from '/peerd-runtime/browser-authority.js';
-import { canonicalStructuredClone } from '/shared/canonical-clone-digest.js';
+import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
 
 const mismatch = () => Object.assign(new Error('site-client authority mismatch'), {
   outcomeKnown: true, retryable: false,
@@ -35,13 +35,6 @@ const completedRefusal = () => ({
 const expectedTimeout = (/** @type {unknown} */ value) => Math.min(
   60_000, Math.max(1000, Number(value ?? 30_000)),
 );
-
-const sameStoredClient = (/** @type {unknown} */ left, /** @type {unknown} */ right) => {
-  try {
-    return canonicalStructuredClone(left, { maxBytes: 2 * 1024 * 1024 })
-      === canonicalStructuredClone(right, { maxBytes: 2 * 1024 * 1024 });
-  } catch { return false; }
-};
 
 /** @param {string} origin */
 const relatedOrigins = (origin) => {
@@ -254,7 +247,9 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
       if (!await authorized(origin)) return refusal();
       const live = await ctx.siteClients.get(origin).catch(() => undefined);
       if (!await authorized(origin)) return refusal();
-      if (!sameStoredClient(live ?? null, shared.priorForWrite ?? null)) {
+      if (!sameCanonicalStructuredClone(live ?? null, shared.priorForWrite ?? null, {
+        maxBytes: 2 * 1024 * 1024,
+      })) {
         return {
           ok: false, code: 'site_client_write_conflict', retryable: false,
           error: 'The stored site client changed after it was reviewed; read it again before writing.',

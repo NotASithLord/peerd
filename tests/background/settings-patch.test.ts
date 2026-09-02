@@ -3,6 +3,7 @@ import {
   makeKernelSettingsRoutes,
   normalizeSettingsPatch,
 } from '../../extension/background/settings-patch.js';
+import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 import { normalizeVaultAutoLockPatch } from '../../extension/background/settings-patch.js';
 
 // These pin the contract the `settings/update` route used to inline: only
@@ -233,6 +234,47 @@ describe('native authority settings routes', () => {
       'persist:dwebEnabled,providerModel,providerName',
       'changed:dwebEnabled,providerModel,providerName', 'state',
     ]);
+  });
+
+  test('OFF then ON cannot revive a publication admitted before the settings change', async () => {
+    const fence = createDwebPublicationFence();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    let admitted!: () => boolean;
+    const publication = fence.run(async (current) => {
+      admitted = current;
+      enter();
+      await held;
+      return current();
+    });
+    await entered;
+    let current = { dwebEnabled: true };
+    const routes = makeKernelSettingsRoutes({
+      ready: Promise.resolve(),
+      settingsStore: {
+        get: () => current,
+        update: async (patch) => { current = { ...current, ...patch }; },
+        reset: async () => {},
+      },
+      defaults: { dwebEnabled: true },
+      knownProviderNames: [],
+      dwebEnabled: true,
+      normalizeVariant: () => 'base',
+      normalizeEngine: () => 'auto',
+      onChanging: (patch) => {
+        if (patch.dwebEnabled === false) fence.invalidate();
+      },
+      onChanged: async () => {},
+      pushState: () => {},
+    });
+    expect(admitted()).toBe(true);
+    await routes['settings/update']({ patch: { dwebEnabled: false } });
+    await routes['settings/update']({ patch: { dwebEnabled: true } });
+    expect(admitted()).toBe(false);
+    release();
+    expect(await publication).toBe(false);
   });
 
   test('reset uses package defaults and any post-dispatch loss stays unknown', async () => {

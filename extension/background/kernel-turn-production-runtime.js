@@ -53,6 +53,13 @@ export const createKernelTurnProductionRuntime = async (deps) => {
     pageActivity: shared.pageActivity,
     isActivityStopSender: deps.custody.isActivityStopSender,
     activeGoalStates: () => runtime?.goalRunner.activeStates?.() ?? [],
+    resumeRecovery: async (/** @type {string|null} */ currentSessionId) => {
+      // Goal recovery must claim its durable runs before ordinary interrupted-
+      // turn recovery checks goalActiveFor, or one chat can be driven twice.
+      await relays.resumeSchedules();
+      if (!runtime) throw new Error('kernel-turn-production-runtime-not-ready');
+      await runtime.maybeAutoResume(currentSessionId);
+    },
   };
   if (!relays.scriptRuns || !relays.sessions) {
     throw new TypeError('kernel-turn-production-relay-state-invalid');
@@ -70,7 +77,7 @@ export const createKernelTurnProductionRuntime = async (deps) => {
     'actorSnapshot', 'actorSnapshots', 'appActorChat', 'activeGoalStates',
     'broadcastAgentTab', 'onUiConnect',
     'showWebTabHint', 'isDrivenSource', 'webActorSessionForTab',
-    'resumeSchedules',
+    'resumeSchedules', 'resumeRecovery',
   ]) {
     if (typeof relays[key] !== 'function') {
       throw new TypeError(`kernel-turn-production-relay-${key}-invalid`);

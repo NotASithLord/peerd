@@ -95,8 +95,7 @@ function captureComposerTabInjected() {
 
 export const createComposerReferenceAuthority = () => {
   return Object.freeze({
-    pinContext: async (/** @type {Record<string,any>} */ offered,
-      /** @type {readonly {operation:string,payload:Record<string,unknown>}[]} */ requests = []) => {
+    pinContext: async (/** @type {Record<string,any>} */ offered) => {
       if (!offered || typeof offered !== 'object' || !offered.tabs || !offered.scripting) {
         throw new TypeError('composer-reference-context-invalid');
       }

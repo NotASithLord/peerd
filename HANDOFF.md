@@ -1,73 +1,42 @@
-# Thin service-worker branch closeout
+# Thin service-worker integration handoff
 
-## Status
+## State
 
-- Remote: `fork/architecture/execution-protocol`
-- Accepted architecture candidate: `a0df6d5bf6452f40f11f4ae2f25c870f59eda442`
-- The branch is merge-ready after the final closeout commit and normal CI review.
-- No architecture migration remains. Do not resume mechanical tool movement or byte chasing.
+- Delivery branch: `fork/architecture/execution-protocol`
+- Integration worktree branch: `fix/thin-sw-final-integration`
+- Architecture and production changes are complete. Final packaged-browser and release verification is in progress.
+- Do not resume mechanical tool migration or optimize byte counts for their own sake.
 
-## Product outcome
+## Durable architecture
 
-The extension now has two execution roots:
+The extension has two execution roots:
 
 - The sealed controller owns tool definitions, metadata, exposure, semantic dispatch, provider and turn semantics, result shaping, and feature planning.
-- The service worker is a stable authority kernel. It retains credentials and egress, browser and tab authority, storage and vault custody, engine custody, actor grants and lifecycle, confirmation, audit, replay classification, sessions, epochs, and finite exact effect handlers.
+- The service worker is the authority kernel. It owns credentials and egress, browser and tab authority, storage and vault custody, engines, actor grants and lifecycle, confirmation, audit, replay classification, sessions, epochs, and finite exact effect handlers.
 
-All production tools use the controller path. The legacy allowlist, service-worker tool registration and execution, `turn.tool.dispatch`, compatibility fallbacks, and superseded semantic aggregate roots are gone. Ordinary semantic feature additions are proven to add zero service-worker inputs, zero normalized authority bytes, and zero native bundle bytes.
+All production tools use the controller path. The legacy tool allowlist, service-worker registration/execution path, `turn.tool.dispatch`, compatibility fallbacks, and superseded semantic aggregates are gone. The feature-growth gate proves an ordinary controller-only tool adds no service-worker input or normalized authority code.
 
-The approved product cleanup is complete. Obsolete page-eval, page-exec, page-keys, toolbox, wait, guide, and review concepts were removed. Result spill paging is one session-bound `read_result` surface. Document reading includes PDF handling through the unified document path.
+Site-client tools remain strictly Web-actor capabilities. Tab Web actors may run, read, write, and capture. Origin-pinned API Web actors may run, read, and write but cannot capture. Main, spawned, and non-Web actors never receive them. Origin pinning, capture identity, confirmation, fencing, and network policy remain authoritative.
 
-Site clients remain a Web-actor capability. Tab Web actors may run, read, write, and capture. Origin-pinned API Web actors may run, read, and write but cannot capture. Main, spawned, and non-Web actors never receive these tools. Origin pinning, capture identity, confirmation, fencing, and network policy remain authoritative.
+Repository and App file operations run in a disposable offscreen module Worker per operation. The service worker transfers the exact operation channel end to end and holds its keyed lane until the matching Worker termination acknowledgement. A lost operation can retire only its own host epoch; it cannot kill a healthy successor. No generic proxy, operation selector, JSON tunnel, function bag, alias, or dual execution path exists.
 
-No generic privileged proxy, catch-all operation selector, JSON tunnel, function bag, alias path, or dual execution path was introduced.
+## Final hardening in this integration pass
 
-## Performance outcome
+- Browser-origin and denylist state now fail closed on malformed persisted snapshots while preserving valid first-run absence.
+- Keyed origin credentials rehydrate before actor/controller recovery after unlock.
+- Spend-limit authority failure cannot open provider custody.
+- A failed durable audit append latches the run or actor grant, preserves exact physical receipts and outcome knowledge, refuses later privileged effects, and prevents clean semantic finalization.
+- Result paging and attachment recovery messages describe retained data precisely and never suggest blindly replaying effectful work.
+- Proven dead helpers, fake configuration knobs, duplicate test-only mirrors, and an unused checkpoint manager were removed. Broader security-sensitive bridge duplication remains intentionally untouched.
 
-Historical measurements below are bound to the accepted candidate and the then-current `fork/main` base.
+## Product cleanup retained
 
-| Surface | Main | Branch | Change |
-|---|---:|---:|---:|
-| Store Chrome native service worker | 2,060,109 B | 1,338,125 B | 35.0% smaller |
-| Store Chrome authored authority graph | 4,704,518 B / 458 modules | 3,992,852 B / 410 modules | 711,666 B and 48 modules removed |
-| Store Chrome offscreen cold graph | 546,292 B | 19,676 B | 96.4% smaller |
-| Store Firefox service worker | 2,060,112 B / 458 modules | 406,651 B / 88 modules | 80.3% smaller and 370 modules removed |
+Obsolete page-eval, page-exec, page-keys, toolbox, wait, guide, and review concepts remain deleted. Result spill paging is one session-bound `read_result` surface. Document reading includes PDF support through the unified document path.
 
-Measured actionable startup stayed inside the accepted few-second envelope:
+## Acceptance still to record
 
-- Chrome: 1.630 seconds from fresh browser launch in the final exact-hash review, 699 ms from worker target, and 105 ms forced wake. An earlier accepted device run measured 2.368 seconds from full launch.
-- Firefox: 1.326 seconds for the full session, 152 ms install-to-ready, and 98 ms idle-discard wake.
-
-These are outcome measurements, not future byte targets. The no-growth architecture and its ratchets are the durable contract.
-
-## Acceptance evidence
-
-The accepted candidate passed:
-
-- the complete local preflight with the four-target package matrix;
-- the full Bun suite, strict typecheck, lint, complete `// @ts-check` coverage, source and copy hygiene, dweb boundary, import closure, vendor and action integrity, and security invariants;
-- Store and Preview packages for Chrome and Firefox, including Store posture and packaged-page boot;
-- Chrome Actor Fabric, the complete non-network functional matrix, lifecycle and controller-fault lanes, cold-start evidence, and controller feature-growth proof;
-- Firefox product, controller, cutover, Pod, event-page recovery, browser-shard, and cold-start lanes;
-- final adversarial reviews of architecture and security, correctness and lifecycle, maintainability, user and model behavior, dead concepts, and test honesty.
-
-The release gate now exercises packaged probes through their real owners: notebook remote imports, Options artifact import, Home repository operations, the singleton offscreen host, and the native side panel. Synthetic targets are closed rather than leaked. Timeout custody tests use deterministic clocks or exact packet settlement instead of millisecond sleeps.
-
-## Chrome network acceptance
-
-The two previously excluded Chrome network lanes now ran against the final branch harness:
-
-- `browser-network-rules`: every authored regex was accepted and the complete session-rule family installed.
-- `browser-network-floor`: all gating checks passed. Private, sensitive, and opaque children each ran through a separate browser-trusted click and remained contained and closed; every ordinary request vector used its own probe server and cleaned its DOM.
-
-The structured result records two accepted Chrome platform residuals without turning them into false product guarantees: service-worker-created WebSockets bypass DNR even under the unscoped diagnostic rule, and a blocked direct top-level private navigation can establish one TCP connection/preconnect while sending no HTTP request. Every vector now has a positive same-origin attempt receipt, so a skipped/no-op branch fails the lane. The red-team matrix reports scenario 07 as partial/platform-residual—not globally blocked—while its scoped rule-shape and enforceable-channel probes remain gated.
+Before landing, replace this section with the exact final commit, package measurements, Chrome/Firefox cold-start evidence, full suite results, and local/remote identity. The final candidate must have a clean worktree and no diagnostic tracing.
 
 ## Future change rule
 
-New tools and semantic features belong in the sealed controller. A change is acceptable only if it preserves the exact authority boundaries and passes the feature-growth proof without adding a new service-worker input or normalized authority byte. A genuinely new privileged capability requires its own named, bounded, run-scoped operation and explicit custody tests.
-
-Do not weaken sender provenance, vault or credential custody, browser or network authority, actor isolation, confirmation, audit, replay, or lifecycle fencing to make a feature easier to wire.
-
-## Resume point
-
-There is no remaining branch implementation task. The next action is normal PR and CI review. If CI finds an environment-specific issue, fix that concrete issue on the existing architecture and rerun its affected gate. Do not reopen the architecture unless new evidence disproves the feature-growth or cold-start contracts above.
+New semantic features belong in the sealed controller. A new privileged capability requires its own named, bounded, run-scoped authority operation and custody tests. Do not weaken sender provenance, vault or credential custody, browser or network authority, actor isolation, confirmation, audit, replay, or lifecycle fencing to simplify wiring.

@@ -38,6 +38,7 @@ import {
   parseRuntimeDispatch,
 } from '../shared/kernel-runtime-policy.js';
 import { TURN_COMPOSE_CAPABILITY } from '../shared/controller-turn-phase-policy.js';
+import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 
 export class ControllerChannelError extends Error {
   /** @param {string} message @param {string} code */
@@ -69,7 +70,8 @@ const controllerGenerationMustRetire = (/** @type {any} */ result) =>
  * @returns {T | null}
  */
 export const selectExactControllerHost = (candidates, expectedUrl) => {
-  const exact = candidates.filter((candidate) => candidate.url === expectedUrl);
+  const exact = candidates.filter((candidate) =>
+    sameDocumentUrlIgnoringHash(candidate.url, expectedUrl));
   return exact.length === 1 ? exact[0] : null;
 };
 
@@ -548,8 +550,6 @@ export const connectOffscreenController = async ({
     capabilities: [...activeCaps],
   });
 };
-
-const PROMPT_CAPABILITIES = Object.freeze(['prompt.render']);
 
 /**
  * @param {Object} deps

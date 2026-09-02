@@ -17,18 +17,17 @@ import { fileURLToPath } from 'node:url';
 import { ARTIFACTS_DIR, REPO_ROOT } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
-import { FEATURE_LEASE_HOST_PROTOCOL } from '../../extension/shared/feature-lease-protocol.js';
 import {
   digestTree, PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY, readChromeIdentity, readUi, sha256File,
 } from './passkey-signup-lane.mjs';
 import {
-  kernelIdentityFromReply, runPackagedAppGitProbe, verifyPackagedAcceptanceAppPayload,
+  kernelIdentityFromReply, readActiveFeatureLease, verifyPackagedAcceptanceAppPayload,
 } from './product-acceptance-probes.mjs';
 import {
   assertLiveKernelAssembly,
 } from '../acceptance/live-kernel-assembly.mjs';
 import {
-  evalIn, hostMonotonicMs, launchPeerd, rpc, unlockAndReady, waitFor,
+  evalIn, hostMonotonicMs, launchPeerd, openExtPage, rpc, unlockAndReady, waitFor,
 } from './e2e-harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -87,37 +86,28 @@ const offscreenContexts = (page) => evalIn(page, `(async () => {
   }));
 })()`, true);
 
-const hostStatus = (ctx) => {
-  if (!ctx.swConn) throw new Error('service-worker CDP connection unavailable');
-  return evalIn(ctx.swConn, `new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, error: 'host-status-timeout' }), 5000);
-    chrome.runtime.sendMessage({
-      type: 'feature-lease/host-status',
-      protocol: ${FEATURE_LEASE_HOST_PROTOCOL},
-    }, (reply) => {
-      clearTimeout(timer);
-      const error = chrome.runtime.lastError?.message;
-      resolve(error ? { ok: false, error } : reply);
-    });
-  })`, true);
-};
-
 const exactDwebHost = async (ctx) => {
-  const [contexts, status] = await Promise.all([
+  const [contexts, active] = await Promise.all([
     offscreenContexts(ctx.page),
-    hostStatus(ctx),
+    readActiveFeatureLease(ctx.page, 'dweb'),
   ]);
   if (contexts.length !== 1
-      || !String(contexts[0]?.documentUrl ?? '').endsWith('/offscreen/offscreen.html')) {
+      || !String(contexts[0]?.documentUrl ?? '').split('#', 1)[0]
+        .endsWith('/offscreen/offscreen.html')) {
     throw new Error(`expected one exact offscreen host: ${JSON.stringify(contexts)}`);
   }
-  const dweb = status?.leases?.filter((lease) => lease?.scope === 'dweb') ?? [];
-  if (status?.ok !== true || status.protocol !== FEATURE_LEASE_HOST_PROTOCOL
-      || typeof status.hostEpoch !== 'string' || dweb.length !== 1
-      || status.leases.length !== 1 || dweb[0].orphaned === true) {
-    throw new Error(`expected one exact active dweb lease: ${JSON.stringify(status)}`);
-  }
-  return { contexts, status, lease: dweb[0] };
+  const status = {
+    ok: true, hostEpoch: active.lease.hostEpoch,
+    leases: [{
+      schema: active.snapshot.schema,
+      buildId: active.snapshot.buildId,
+      bootId: active.snapshot.bootId,
+      kernelEpoch: active.snapshot.kernelEpoch,
+      scope: 'dweb',
+      ...active.lease,
+    }],
+  };
+  return { contexts, status, lease: status.leases[0] };
 };
 
 const closeOffscreenRenderer = async (ctx) => {
@@ -135,15 +125,46 @@ const closeOffscreenRenderer = async (ctx) => {
   return result;
 };
 
+let lastDwebStatus = null;
 const waitForDweb = (page) => waitFor(async () => {
   const result = await rpc(page, { type: 'dweb/base/status' }, { timeoutMs: 10_000 });
+  lastDwebStatus = result;
   return result?.ok === true && result.running === true && typeof result.did === 'string'
     ? result : null;
 }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.dwebMs, pollMs: 100 });
 
-const roomCall = (page, roomId, op, args = {}) => rpc(page, {
-  type: 'dweb/base/room', roomId, op, ...args,
-}, { timeoutMs: 30_000 });
+// This lane tests physical offscreen-host continuity, so use the same private
+// host route as the service worker. User/App admission is independently covered
+// at the public route and bridge layers; routing this oracle through Home would
+// correctly be refused because room membership is App-tab-only.
+const roomCall = (ctx, roomId, op, args = {}) => {
+  if (!ctx.swConn) throw new Error('service-worker CDP connection unavailable');
+  return rpc(ctx.swConn, {
+    type: 'dweb/base-host/room', roomId, op, ...args,
+  }, { timeoutMs: 30_000 });
+};
+
+const createDwebLifecycleApp = (page) => evalIn(page, `(async () => {
+  const seed = {
+      name: 'Feature Lease App',
+      entryFile: 'index.html',
+      tags: ['dweb'],
+      source: 'dweb',
+      dweb: {
+        uri: null, publisher: null, hash: null, seed: 'feature-lease-app',
+      },
+      files: {
+        'index.html': '<!doctype html><title>Cutover App</title><main>ready</main>',
+        'src/main.js': 'document.querySelector("main").dataset.ready = "true";',
+        'assets/raw.bin': { base64: 'AAECf4D/' },
+      },
+    };
+  const ensured = await chrome.runtime.sendMessage({ type: 'dweb/ensure-seed-app', seed });
+  if (ensured?.ok !== true) return ensured;
+  const listed = await chrome.runtime.sendMessage({ type: 'apps/list' });
+  const app = listed?.apps?.find((candidate) => candidate?.dweb?.seed === seed.dweb.seed);
+  return app ? { ok: true, appId: app.id } : { ok: false, error: 'seed-app-not-found' };
+})()`, true);
 
 const waitForAppReady = (page) => waitFor(async () => {
   const ui = await readUi(page);
@@ -227,7 +248,13 @@ export const assertFeatureLeaseDwebReport = (report) => {
   assert(renderer?.roomRejoined === true && renderer?.servedAppInstalled === true
     && renderer?.discoveryReadable === true,
   'renderer room/seed/discovery recovery');
-  assert(report?.observations?.teardown?.disabledContexts === 0
+  assert(report?.observations?.teardown?.disabledContexts === 1
+    && report?.observations?.teardown?.disabledDwebStatus === 'revoked'
+    && report?.observations?.teardown?.disabledVaultStatus === 'active'
+    && report?.observations?.teardown?.disabledDwebHostEpoch
+      === report?.observations?.continuity?.renderer?.hostEpoch
+    && report?.observations?.teardown?.disabledVaultHostEpoch
+      === report?.observations?.continuity?.renderer?.hostEpoch
     && report?.observations?.teardown?.lockedContexts === 0
     && report?.observations?.teardown?.vaultLocked === true, 'disable/lock teardown');
   assert(report?.observations?.worker?.newTarget === true
@@ -316,7 +343,8 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
   };
 
   let ctx = null;
-  let importedAppId = null;
+  let homePage = null;
+  let sourceAppId = null;
   let seededAppId = null;
   try {
     ctx = await launchPeerd({
@@ -338,18 +366,26 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
     if (!vault?.initialized || vault.locked !== false) {
       throw new Error(`vault did not initialize and unlock: ${JSON.stringify(vault)}`);
     }
-    const dwebBefore = await waitForDweb(ctx.page);
-    if (!dwebBefore) throw new Error('dweb base did not become ready');
+    // Dweb controls are deliberately Home-owned. The side panel remains the
+    // user-visible vault/agent oracle; exercise dweb through its real sender.
+    homePage = await openExtPage(ctx, 'home/home.html');
+    const dwebBefore = await waitForDweb(homePage);
+    if (!dwebBefore) {
+      throw new Error(`dweb base did not become ready: ${JSON.stringify(lastDwebStatus)}`);
+    }
     if (dwebBefore.meshGeneration !== 1) {
       throw new Error(`expected first mesh generation: ${JSON.stringify(dwebBefore)}`);
     }
     const dwebReadyMs = sinceLaunch();
     const hostBefore = await exactDwebHost(ctx);
 
-    const app = await runPackagedAppGitProbe(ctx.page, { retain: true });
-    importedAppId = app.appId;
-    const share = await rpc(ctx.page, {
-      type: 'dweb/base/share-app', appId: importedAppId, slug: 'feature-lease-physical',
+    const app = await createDwebLifecycleApp(homePage);
+    if (app?.ok !== true || typeof app.appId !== 'string') {
+      throw new Error(`dweb lifecycle App creation failed: ${JSON.stringify(app)}`);
+    }
+    sourceAppId = app.appId;
+    const share = await rpc(homePage, {
+      type: 'dweb/base/share-app', appId: sourceAppId, slug: 'feature-lease-physical',
     }, { timeoutMs: 60_000 });
     if (!share?.ok || typeof share.uri !== 'string' || typeof share.dwapp_id !== 'string') {
       throw new Error(`App share/seed failed: ${JSON.stringify(share)}`);
@@ -359,27 +395,26 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
     const roomClientId = 'physical-room-client-0001';
     const topic = 'continuity';
     const marker = `marker:${crypto.randomUUID()}`;
-    const joined = await roomCall(ctx.page, roomId, 'join', {
+    const joined = await roomCall(ctx, roomId, 'join', {
       name: 'lease oracle', roomClientId,
     });
     if (!joined?.ok || joined.joined !== roomId) {
       throw new Error(`room join failed: ${JSON.stringify(joined)}`);
     }
-    await roomCall(ctx.page, roomId, 'retain', { topic });
-    const published = await roomCall(ctx.page, roomId, 'publish', {
-      topic, data: { marker }, retain: true,
+    await roomCall(ctx, roomId, 'retain', { topic, roomClientId });
+    const published = await roomCall(ctx, roomId, 'publish', {
+      topic, data: { marker }, retain: true, roomClientId,
     });
     if (!published?.ok) throw new Error(`retained publish failed: ${JSON.stringify(published)}`);
-    const historyBefore = await roomCall(ctx.page, roomId, 'history', { topic });
+    const historyBefore = await roomCall(ctx, roomId, 'history', { topic, roomClientId });
     if (!historyBefore?.items?.some((item) => item?.data?.marker === marker)) {
       throw new Error(`retained room marker missing before recycle: ${JSON.stringify(historyBefore)}`);
     }
-    // Repository/controller work above must have released its bounded lease.
-    const settledHostBefore = await waitFor(async () => {
-      try { return await exactDwebHost(ctx); } catch { return null; }
-    }, { budgetMs: 10_000, pollMs: 50 });
-    if (!settledHostBefore) throw new Error('bounded leases did not settle before recycle');
-
+    // Home owns a reconnecting UI-state Port. Close that real client before
+    // asking Chrome to prove the worker physically stopped, then reopen it
+    // against the successor kernel.
+    await homePage.closeTarget();
+    homePage = null;
     const recycleStartedMs = sinceLaunch();
     const oldWorker = await ctx.stopServiceWorker();
     if (oldWorker.stoppedRunningStatus !== 'stopped') {
@@ -388,6 +423,7 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
       );
     }
     const newWorker = await ctx.restartServiceWorker(oldWorker);
+    homePage = await openExtPage(ctx, 'home/home.html');
     const uiAfter = await waitForAppReady(ctx.page);
     if (!uiAfter) throw new Error('Preview UI did not recover after worker recycle');
     const stateAfter = await waitFor(async () => {
@@ -399,7 +435,7 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
       } catch { return null; }
     }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.recycleMs, pollMs: 50 });
     if (!stateAfter) throw new Error('successor kernel generation was not observed');
-    const dwebAfter = await waitForDweb(ctx.page);
+    const dwebAfter = await waitForDweb(homePage);
     if (!dwebAfter) throw new Error('dweb base did not survive worker recycle');
     const recycleReadyMs = sinceLaunch();
     const hostAfter = await exactDwebHost(ctx);
@@ -411,15 +447,22 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
     }
     if (dwebAfter.did !== dwebBefore.did) throw new Error('dweb identity changed across recycle');
     if (dwebAfter.meshGeneration !== dwebBefore.meshGeneration) {
-      throw new Error('dweb mesh restarted instead of surviving kernel adoption');
+      throw new Error(`dweb mesh restarted instead of surviving kernel adoption: ${JSON.stringify({
+        before: dwebBefore, after: dwebAfter,
+        hostBefore: hostBefore.status, hostAfter: hostAfter.status,
+        targetEvents: ctx.extensionTargetEvents().map((entry) => ({
+          targetId: entry.targetId, retired: entry.retired === true,
+          events: entry.events.slice(-20),
+        })),
+      })}`);
     }
 
-    const historyAfter = await roomCall(ctx.page, roomId, 'history', { topic });
+    const historyAfter = await roomCall(ctx, roomId, 'history', { topic, roomClientId });
     const retainedRoom = historyAfter?.items?.some((item) => item?.data?.marker === marker) === true;
     if (!retainedRoom) {
       throw new Error(`retained room state was lost across recycle: ${JSON.stringify(historyAfter)}`);
     }
-    const discovered = await rpc(ctx.page, {
+    const discovered = await rpc(homePage, {
       type: 'dweb/base/find', dwappId: share.dwapp_id, publisherDid: share.publisher,
     }, { timeoutMs: 30_000 });
     const discoveryReadable = discovered?.ok === true && discovered.record != null;
@@ -438,23 +481,39 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
         return candidate.status.hostEpoch !== hostAfter.status.hostEpoch ? candidate : null;
       } catch { return null; }
     }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.rendererMs, pollMs: 50 });
-    if (!rendererHost) throw new Error('fresh dweb host was not observed after renderer close');
-    const rendererDweb = await waitForDweb(ctx.page);
+    if (!rendererHost) {
+      const [contexts, status, kernel] = await Promise.all([
+        offscreenContexts(ctx.page).catch((error) => ({ error: String(error) })),
+        readActiveFeatureLease(ctx.page, 'dweb').catch((error) => ({ error: String(error) })),
+        readKernel(ctx.page).catch((error) => ({ error: String(error) })),
+      ]);
+      throw new Error(`fresh dweb host was not observed after renderer close: ${JSON.stringify({
+        contexts, status, kernel,
+        workerEvents: ctx.swConn?.events?.slice(-40) ?? [],
+        targetEvents: ctx.extensionTargetEvents().map((entry) => ({
+          targetId: entry.targetId, retired: entry.retired === true,
+          events: entry.events.slice(-20),
+        })),
+      })}`);
+    }
+    const rendererDweb = await waitForDweb(homePage);
     if (!rendererDweb || rendererDweb.did !== dwebAfter.did
         || rendererDweb.meshGeneration !== 1) {
-      throw new Error(`renderer recovery changed identity or mesh count: ${JSON.stringify(rendererDweb)}`);
+      throw new Error(`renderer recovery changed identity or mesh count: ${JSON.stringify({
+        rendererDweb, lastDwebStatus, rendererHost: rendererHost.status,
+      })}`);
     }
     const rendererReadyMs = sinceLaunch();
     const rendererMarker = `renderer:${crypto.randomUUID()}`;
-    const rendererJoin = await roomCall(ctx.page, roomId, 'join', {
+    const rendererJoin = await roomCall(ctx, roomId, 'join', {
       name: 'lease oracle', roomClientId,
       expectedHostEpoch: rendererHost.status.hostEpoch,
     });
-    const rendererPublish = await roomCall(ctx.page, roomId, 'publish', {
+    const rendererPublish = await roomCall(ctx, roomId, 'publish', {
       topic, data: { marker: rendererMarker }, retain: true,
       roomClientId, expectedHostEpoch: rendererHost.status.hostEpoch,
     });
-    const rendererHistory = await roomCall(ctx.page, roomId, 'history', {
+    const rendererHistory = await roomCall(ctx, roomId, 'history', {
       topic, roomClientId, expectedHostEpoch: rendererHost.status.hostEpoch,
     });
     const roomRejoined = rendererJoin?.ok === true && rendererPublish?.ok === true
@@ -465,7 +524,7 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
       })}`);
     }
     const rendererDiscovery = await waitFor(async () => {
-      const result = await rpc(ctx.page, {
+      const result = await rpc(homePage, {
         type: 'dweb/base/find', dwappId: share.dwapp_id, publisherDid: share.publisher,
       }, { timeoutMs: 10_000 });
       return result?.ok === true && result.record != null ? result : null;
@@ -473,49 +532,91 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
     const rendererDiscoveryReadable = rendererDiscovery != null;
     if (!rendererDiscoveryReadable) throw new Error('shared App was not re-seeded after renderer replacement');
 
-    const installed = await roomCall(ctx.page, roomId, 'install-app', {
-      uri: share.uri, name: 'Feature Lease Seed Probe',
-      roomClientId, expectedHostEpoch: rendererHost.status.hostEpoch,
-    });
-    seededAppId = installed?.appId ?? null;
+    let lastInstall = null;
+    const installed = await waitFor(async () => {
+      const result = await rpc(homePage, {
+        type: 'dweb/base/install',
+        uri: share.uri, name: 'Feature Lease Seed Probe',
+        dwappId: share.dwapp_id, slug: share.slug, seq: share.seq,
+      }, { timeoutMs: 10_000 });
+      lastInstall = result;
+      const localReseedPending = result?.ok === false
+        && result.code === 'dweb-local-content-unavailable'
+        && result.performed === false
+        && result.outcomeKnown === true
+        && result.outcomeKind === 'pre-effect-failure'
+        && result.retryable === true;
+      return localReseedPending ? null : result;
+    }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.dwebMs, pollMs: 100 }) ?? lastInstall;
+    seededAppId = installed?.appId ?? installed?.app?.id ?? null;
     const installedPayload = installed?.ok === true && typeof seededAppId === 'string'
-      ? await verifyPackagedAcceptanceAppPayload(ctx.page, seededAppId)
+      ? await verifyPackagedAcceptanceAppPayload(homePage, seededAppId)
       : null;
     const servedAppInstalled = installedPayload?.ok === true;
     if (!servedAppInstalled) {
-      throw new Error(`served App bytes were lost across recycle: ${JSON.stringify(installed)}`);
+      const dwebStatus = await rpc(homePage, {
+        type: 'dweb/base/status',
+      }, { timeoutMs: 10_000 }).catch((error) => ({ error: String(error) }));
+      const featureSnapshot = await readActiveFeatureLease(homePage, 'dweb')
+        .catch((error) => ({ error: String(error) }));
+      throw new Error(`served App bytes were lost across recycle: ${JSON.stringify({
+        installed, dwebStatus, featureSnapshot,
+        swEvents: ctx.swConn?.events ?? [],
+        targetEvents: ctx.extensionTargetEvents(),
+      })}`);
     }
 
-    await roomCall(ctx.page, roomId, 'leave', {
+    await roomCall(ctx, roomId, 'leave', {
       roomClientId, expectedHostEpoch: rendererHost.status.hostEpoch,
     }).catch(() => null);
-    await rpc(ctx.page, { type: 'apps/delete', appId: seededAppId }, { timeoutMs: 30_000 });
+    await rpc(homePage, { type: 'apps/delete', appId: seededAppId }, { timeoutMs: 30_000 });
     seededAppId = null;
-    await rpc(ctx.page, { type: 'apps/delete', appId: importedAppId }, { timeoutMs: 30_000 });
-    importedAppId = null;
+    await rpc(homePage, { type: 'apps/delete', appId: sourceAppId }, { timeoutMs: 30_000 });
+    sourceAppId = null;
 
     const disableStartedMs = sinceLaunch();
-    const disabled = await rpc(ctx.page, {
+    const disabled = await rpc(homePage, {
       type: 'settings/update', patch: { dwebEnabled: false },
     }, { timeoutMs: 30_000 });
     if (!disabled?.ok) throw new Error(`dweb disable failed: ${JSON.stringify(disabled)}`);
-    const disabledCold = await waitFor(async () => {
-      const contexts = await offscreenContexts(ctx.page);
-      return contexts.length === 0 ? contexts : null;
+    let lastDisabledPosture = null;
+    const disabledOwned = await waitFor(async () => {
+      const [contexts, ready] = await Promise.all([
+        offscreenContexts(ctx.page),
+        rpc(homePage, { type: 'bootstrap/ready' }, { timeoutMs: 10_000 }),
+      ]);
+      const snapshot = ready?.featureLeases;
+      const dwebLease = snapshot?.leases?.dweb;
+      const vaultLease = snapshot?.leases?.['vault-authority'];
+      lastDisabledPosture = { contexts, snapshot };
+      const exactContext = contexts.length === 1
+        && String(contexts[0]?.documentUrl ?? '').split('#', 1)[0]
+          .endsWith('/offscreen/offscreen.html');
+      const dwebInactive = snapshot?.disabled?.includes?.('dweb')
+        && dwebLease?.status === 'revoked'
+        && dwebLease.durable === false
+        && dwebLease.poisonedHostEpoch === null;
+      const vaultOwnsSurvivor = vaultLease?.status === 'active'
+        && vaultLease.durable === true
+        && vaultLease.hostEpoch === rendererHost.status.hostEpoch;
+      return ready?.ok === true && exactContext && dwebInactive && vaultOwnsSurvivor
+        ? { contexts, dwebLease, vaultLease } : null;
     }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.teardownMs, pollMs: 50 });
-    if (!disabledCold) throw new Error('dweb disable left an offscreen context alive');
+    if (!disabledOwned) {
+      throw new Error(`dweb disable ownership did not settle: ${JSON.stringify(lastDisabledPosture)}`);
+    }
     const disableColdMs = sinceLaunch();
 
-    const enabled = await rpc(ctx.page, {
+    const enabled = await rpc(homePage, {
       type: 'settings/update', patch: { dwebEnabled: true },
     }, { timeoutMs: 30_000 });
-    if (!enabled?.ok || !await waitForDweb(ctx.page)) {
+    if (!enabled?.ok || !await waitForDweb(homePage)) {
       throw new Error(`dweb re-enable failed: ${JSON.stringify(enabled)}`);
     }
     await exactDwebHost(ctx);
     const reenabledReadyMs = sinceLaunch();
     const lockStartedMs = sinceLaunch();
-    const locked = await rpc(ctx.page, { type: 'vault/lock' }, { timeoutMs: 30_000 });
+    const locked = await rpc(homePage, { type: 'vault/lock' }, { timeoutMs: 30_000 });
     if (!locked?.ok) throw new Error(`vault lock failed: ${JSON.stringify(locked)}`);
     const lockedCold = await waitFor(async () => {
       const contexts = await offscreenContexts(ctx.page);
@@ -523,7 +624,7 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
     }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.teardownMs, pollMs: 50 });
     if (!lockedCold) throw new Error('vault lock left an offscreen context alive');
     const lockedState = await waitFor(async () => {
-      const reply = await rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 5_000 });
+      const reply = await rpc(homePage, { type: 'state/get' }, { timeoutMs: 5_000 });
       return reply?.state?.vault?.locked === true ? reply.state.vault : null;
     }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.teardownMs, pollMs: 50 });
     if (!lockedState) throw new Error('vault lock did not reach authoritative state');
@@ -598,7 +699,11 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
           },
         },
         teardown: {
-          disabledContexts: disabledCold.length,
+          disabledContexts: disabledOwned.contexts.length,
+          disabledDwebStatus: disabledOwned.dwebLease.status,
+          disabledDwebHostEpoch: disabledOwned.dwebLease.hostEpoch,
+          disabledVaultStatus: disabledOwned.vaultLease.status,
+          disabledVaultHostEpoch: disabledOwned.vaultLease.hostEpoch,
           lockedContexts: lockedCold.length,
           vaultLocked: lockedState.locked === true,
         },
@@ -610,9 +715,10 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
     writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
     return report;
   } finally {
-    if (ctx?.page) {
-      if (seededAppId) await rpc(ctx.page, { type: 'apps/delete', appId: seededAppId }).catch(() => {});
-      if (importedAppId) await rpc(ctx.page, { type: 'apps/delete', appId: importedAppId }).catch(() => {});
+    if (homePage) {
+      if (seededAppId) await rpc(homePage, { type: 'apps/delete', appId: seededAppId }).catch(() => {});
+      if (sourceAppId) await rpc(homePage, { type: 'apps/delete', appId: sourceAppId }).catch(() => {});
+      try { await homePage.closeTarget?.(); } catch { /* browser cleanup follows */ }
     }
     try { ctx?.close(); } catch { /* already closed */ }
   }

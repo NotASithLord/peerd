@@ -46,6 +46,24 @@ export const createKernelFeatureHost = ({
   if (!browser?.runtime || !browser?.storage?.session) {
     throw new TypeError('kernel-feature-browser-invalid');
   }
+  const offscreenUrl = browser.runtime.getURL(offscreenPath);
+  /** @type {{port:any,documentUrl:string,request:(message:any)=>Promise<any>}|null} */
+  let hostCommandChannel = null;
+  let nextChannelGeneration = 0;
+  let boundChannelGeneration = 0;
+  /** @param {{port:any,documentUrl:string}} channel */
+  const matchesCurrentHostContext = async (channel) => {
+    const contexts = await listContexts(browser);
+    return contexts.length === 1
+      && contexts[0]?.documentUrl === channel.documentUrl;
+  };
+  /** @param {{port:any,documentUrl:string}} channel */
+  const isCurrentHostChannel = async (channel) => {
+    if (hostCommandChannel?.port !== channel.port) return false;
+    const current = await matchesCurrentHostContext(channel);
+    return hostCommandChannel?.port === channel.port
+      && current;
+  };
 
   const ensureOffscreen = async () => {
     const offscreen = browser.offscreen;
@@ -55,7 +73,10 @@ export const createKernelFeatureHost = ({
     if ((await listContexts(browser)).length > 0) return;
     try {
       await offscreen.createDocument({
-        url: offscreenPath,
+        // why: Chrome omits documentId from offscreen runtime senders. A fresh
+        // fragment makes the browser-stamped sender URL equal to exactly one
+        // current getContexts document without becoming a shared secret.
+        url: `${offscreenPath}#${crypto.randomUUID()}`,
         reasons: ['WORKERS', 'USER_MEDIA'],
         justification: 'Demand-scoped feature Workers and local voice transcription.',
       });
@@ -81,31 +102,71 @@ export const createKernelFeatureHost = ({
         await browser.offscreen.closeDocument();
       }
     },
-    sendHostMessage: (message) => browser.runtime.sendMessage(message),
+    sendHostMessage: async (message) => {
+      const channel = hostCommandChannel;
+      if (!channel || !await isCurrentHostChannel(channel)) {
+        throw new Error('feature-lease-host-channel-unavailable');
+      }
+      return channel.request(message);
+    },
     wait,
     vaultUnlocked,
   });
 
   /** @type {string|null} */
   let authenticatedHostEpoch = null;
-  const handleKeepalive = (/** @type {any} */ port) => attachKeepalive({
-    port,
-    featureLeases: runtime,
-    identity: canonicalIdentity,
-    onAuthenticated: (/** @type {string} */ hostEpoch) => {
-      authenticatedHostEpoch = hostEpoch;
-    },
-    onLost: (/** @type {string} */ hostEpoch) => {
-      // why: Chrome may deliver an old Port's disconnect after its successor
-      // has authenticated. Only the current lifetime oracle may retire the
-      // controller; lease recovery below is independently epoch-fenced.
-      if (authenticatedHostEpoch !== hostEpoch) return;
-      authenticatedHostEpoch = null;
-      return onHostLost(hostEpoch);
-    },
-    onRecovered,
-    onError,
-  });
+  const handleKeepalive = (/** @type {any} */ port) => {
+    const documentUrl = port?.sender?.url;
+    /** @type {{port:any,documentUrl:string,request:(message:any)=>Promise<any>}|null} */
+    let channel = null;
+    let disconnected = false;
+    let ready = Promise.resolve(false);
+    const attached = attachKeepalive({
+      port,
+      featureLeases: runtime,
+      identity: canonicalIdentity,
+      authorize: () => ready.then((admitted) => admitted && channel !== null
+        && isCurrentHostChannel(channel)),
+      authorizeLoss: () => channel !== null && hostCommandChannel?.port === channel.port,
+      onAuthenticated: (/** @type {string} */ hostEpoch) => {
+        authenticatedHostEpoch = hostEpoch;
+      },
+      onLost: (/** @type {string} */ hostEpoch) => {
+        // why: Chrome may deliver an old Port's disconnect after its successor
+        // has authenticated. Only the current lifetime oracle may retire the
+        // controller; lease recovery below is independently epoch-fenced.
+        if (authenticatedHostEpoch !== hostEpoch) return;
+        authenticatedHostEpoch = null;
+        return onHostLost(hostEpoch);
+      },
+      onRecovered,
+      onError,
+    });
+    if (!attached?.request || typeof documentUrl !== 'string'
+        || documentUrl.split('#', 1)[0] !== offscreenUrl) return;
+    const generation = ++nextChannelGeneration;
+    channel = { port, documentUrl, request: attached.request };
+    ready = matchesCurrentHostContext(channel).then((current) => {
+      if (disconnected || !current || generation <= boundChannelGeneration) {
+        if (!current) try { port.disconnect(); } catch { /* already disconnected */ }
+        return false;
+      }
+      boundChannelGeneration = generation;
+      const previous = hostCommandChannel?.port;
+      hostCommandChannel = channel;
+      if (previous && previous !== port) {
+        try { previous.disconnect(); } catch { /* already disconnected */ }
+      }
+      return true;
+    }).catch(() => {
+      try { port.disconnect(); } catch { /* already disconnected */ }
+      return false;
+    });
+    port.onDisconnect.addListener(() => {
+      disconnected = true;
+      if (hostCommandChannel?.port === port) hostCommandChannel = null;
+    });
+  };
   const vaultAuthorityOffscreen = typeof browser.offscreen?.createDocument === 'function';
   const unavailable = async () => { throw new Error('vault-authority-storage-unavailable'); };
   const storage = vaultStorage ?? {
@@ -120,7 +181,7 @@ export const createKernelFeatureHost = ({
   ]);
   const vaultAuthority = makeVaultAuthorityClient({
     offscreen: vaultAuthorityOffscreen,
-    offscreenUrl: browser.runtime.getURL(offscreenPath),
+    offscreenUrl,
     workerUrl: browser.runtime.getURL('offscreen/vault-authority-worker.js'),
     kv: storage.kv,
     idb: storage.idb,

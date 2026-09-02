@@ -65,6 +65,24 @@ const PROTOCOL_SURFACE_NAMES = Object.freeze([
   'sessions', 'apps', 'workspaces', 'secrets',
 ]);
 
+/** Preserve only finite host-effect custody fields from an apply failure. */
+const applyFailureCustody = (/** @type {any} */ failure) => {
+  const source = [failure, failure?.cause].find((candidate) => candidate
+    && typeof candidate === 'object'
+    && (typeof candidate.performed === 'boolean'
+      || typeof candidate.outcomeKnown === 'boolean'
+      || typeof candidate.retryable === 'boolean'
+      || ['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+        .includes(candidate.outcomeKind))) ?? {};
+  return {
+    ...(typeof source.performed === 'boolean' ? { performed: source.performed } : {}),
+    ...(typeof source.outcomeKnown === 'boolean' ? { outcomeKnown: source.outcomeKnown } : {}),
+    ...(typeof source.retryable === 'boolean' ? { retryable: source.retryable } : {}),
+    ...(['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+      .includes(source.outcomeKind) ? { outcomeKind: source.outcomeKind } : {}),
+  };
+};
+
 /**
  * Deps (all injected, this module imports nothing):
  *   dwebReady           build + setting gate, awaited on every route
@@ -272,6 +290,7 @@ export const makeDwebSelfRoutes = (deps) => {
           ok: false,
           error: /** @type {{ message?: string }} */ (e)?.message ?? String(e),
           ...(partial && typeof partial === 'object' ? { partial } : {}),
+          ...applyFailureCustody(e),
         };
       }
     },
@@ -287,7 +306,12 @@ export const makeDwebSelfRoutes = (deps) => {
       try {
         return await callBaseHost('dweb/base-host/self-restore', { deviceDid, surfaces });
       } catch (e) {
-        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+        return {
+          ok: false,
+          error: /** @type {{ message?: string }} */ (e)?.message ?? String(e),
+          performed: true, outcomeKnown: false,
+          outcomeKind: 'transport-lost', retryable: false,
+        };
       }
     },
   };

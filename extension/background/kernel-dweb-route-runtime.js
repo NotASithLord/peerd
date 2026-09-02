@@ -147,8 +147,11 @@ export const createKernelDwebRouteOwner = (deps) => {
       DWEB_ENABLED: true,
       APP_TAB_GROUP_TITLE: 'peerd',
       disableDweb: async () => {
-        engine.invalidateDwebPublications();
-        return deps.disableDweb();
+        const patch = { dwebEnabled: false };
+        transfer.onSettingsChanging(patch);
+        await deps.settingsStore.update(patch);
+        await transfer.onSettingsChanged(patch);
+        return { ok: true, running: false };
       },
       withDwebPublication: engine.withDwebPublication,
       withAppLifecycle: engine.withAppLifecycle,

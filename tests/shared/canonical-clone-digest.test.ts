@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   canonicalCloneDigest,
   canonicalStructuredClone,
+  sameCanonicalStructuredClone,
 } from '../../extension/shared/canonical-clone-digest.js';
 import { structuredClonePayloadBytes } from '../../extension/shared/structured-clone-size.js';
 
@@ -10,6 +11,22 @@ describe('canonical structured-clone digest', () => {
     const left = { z: 1, nested: { b: true, a: 'x' } };
     const right = { nested: { a: 'x', b: true }, z: 1 };
     expect(await canonicalCloneDigest(left)).toBe(await canonicalCloneDigest(right));
+    expect(sameCanonicalStructuredClone(left, right)).toBe(true);
+  });
+
+  test('exact equality distinguishes values that JSON serialization aliases', () => {
+    expect(sameCanonicalStructuredClone({}, { omitted: undefined })).toBe(false);
+    expect(sameCanonicalStructuredClone({ value: Number.NaN }, { value: null })).toBe(false);
+    expect(sameCanonicalStructuredClone({ value: Infinity }, { value: null })).toBe(false);
+    expect(sameCanonicalStructuredClone(new Uint8Array([1]), new Uint8Array([2]))).toBe(false);
+    expect(sameCanonicalStructuredClone(new ArrayBuffer(0), new ArrayBuffer(1))).toBe(false);
+  });
+
+  test('exact equality fails closed outside its byte and clone-shape bounds', () => {
+    expect(sameCanonicalStructuredClone('abcd', 'abcd', { maxBytes: 1 })).toBe(false);
+    const cyclic: any = {};
+    cyclic.self = cyclic;
+    expect(sameCanonicalStructuredClone(cyclic, cyclic)).toBe(false);
   });
 
   test('typed views retain their exact type, window, and bytes', () => {

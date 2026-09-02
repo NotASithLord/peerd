@@ -49,13 +49,28 @@ const memoryRegistry = () => {
   };
 };
 
+/** @param {Record<string, any>} [overrides] */
+const testRepositories = (overrides = {}) => {
+  const tails = new Map();
+  return {
+    coordinate: async (/** @type {{kind:string,id:string}} */ ref, /** @type {() => Promise<any>} */ operation) => {
+      const key = `${ref.kind}:${ref.id}`;
+      const prior = tails.get(key) ?? Promise.resolve();
+      const current = prior.catch(() => {}).then(operation);
+      tails.set(key, current);
+      try { return await current; }
+      finally { if (tails.get(key) === current) tails.delete(key); }
+    },
+    ...overrides,
+  };
+};
+
 describe('App storage binary contract', () => {
   it('classifies a Git-imported working tree and keeps unknown binary assets byte-exact', async () => {
     const registry = memoryRegistry();
     /** @type {{ client: ReturnType<typeof createAppClient> | null }} */
     const holder = { client: null };
-    const repositories = {
-      coordinate: async (/** @type {any} */ _ref, /** @type {() => Promise<any>} */ operation) => operation(),
+    const repositories = testRepositories({
       clone: async (/** @type {any} */ ref, /** @type {any} */ options) => {
         const files = holder.client?.opfsForApp(ref.id);
         if (!files) throw new Error('App client is unavailable');
@@ -72,7 +87,7 @@ describe('App storage binary contract', () => {
         };
       },
       destroy: async () => {},
-    };
+    });
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
@@ -99,6 +114,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Binary storage',
@@ -122,6 +138,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     let failed = false;
     try {
@@ -143,6 +160,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Atomic', files: { 'index.html': 'old', 'app.js': 'old-js' }, entryFile: 'index.html',
@@ -188,6 +206,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Rollback loss', files: { 'index.html': 'old' }, entryFile: 'index.html',
@@ -215,6 +234,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Replace rollback', files: { 'index.html': 'old' }, entryFile: 'index.html',
@@ -250,6 +270,7 @@ describe('App storage binary contract', () => {
     const completed = createAppClient({
       registry: /** @type {any} */ (completedRegistry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const completedRecord = await completed.create({
       name: 'Delete rollback',
@@ -280,6 +301,7 @@ describe('App storage binary contract', () => {
     const incomplete = createAppClient({
       registry: /** @type {any} */ (incompleteRegistry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const incompleteRecord = await incomplete.create({
       name: 'Delete rollback loss',
@@ -307,6 +329,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Replace rollback loss', files: { 'index.html': 'old' }, entryFile: 'index.html',
@@ -336,6 +359,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Kinds',
@@ -355,6 +379,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     // Object.fromEntries creates own data properties, including this hostile
     // path, without invoking the legacy Object.prototype setter.
@@ -383,6 +408,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Snapshot', files: { 'index.html': 'old' }, entryFile: 'index.html',

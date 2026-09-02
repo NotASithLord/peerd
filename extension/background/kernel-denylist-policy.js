@@ -59,7 +59,8 @@ export const createKernelDenylistPolicy = ({
   const blocks = (/** @type {string} */ hostname) => !available
     || matchesDenylist(hostname, store.patterns());
   const snapshot = async () => {
-    await ready();
+    const status = await ready();
+    if (!status.ok) return status;
     const overlay = store.overlay();
     return Object.freeze({
       ok: true,
@@ -76,11 +77,13 @@ export const createKernelDenylistPolicy = ({
     patterns: store.patterns,
     snapshot,
     add: async (/** @type {unknown} */ pattern) => {
-      await ready();
+      const status = await ready();
+      if (!status.ok) return status;
       return store.add(pattern);
     },
     remove: async (/** @type {unknown} */ pattern) => {
-      await ready();
+      const status = await ready();
+      if (!status.ok) return status;
       return store.remove(pattern);
     },
   });

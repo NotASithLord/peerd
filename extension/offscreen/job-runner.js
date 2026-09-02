@@ -208,7 +208,7 @@ let activeJobs = 0;
  *   DIRECT-CALLER seam (tests) — offscreen.js never forwards it from a
  *   message, so the production budget cannot be picked over the wire.
  * @param {{ sendToSW: (type: string, payload: object) => Promise<any>, abortRun?: (runId: string, ownerSessionId?: string) => Promise<unknown>, extractMarkdown?: import('/shared/fetch-extract.js').ExtractMarkdownFn, opfsForRoot?: typeof opfsHelpers }} deps
- * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, usedApp?: boolean, appOutcomeUnknown?:boolean, appOutcomeError?:string, siteOutcomeUnknown?:boolean, siteOutcomeError?:string, outcomeKnown?:boolean, outcomeKind?:string, retryable?:boolean, hostOutcomeError?:string, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
+ * @returns {Promise<{ value: unknown, consoleOutput: {level:string,text:string}[], durationMs: number, error: string|null, errorCode?: string, endTurn?: boolean, endTurnContent?: string, endTurnOutcomeKind?: string, usedEgress?: boolean, usedRemoteModules?: boolean, usedActors?: boolean, usedApp?: boolean, appOutcomeUnknown?:boolean, appOutcomeError?:string, siteOutcomeUnknown?:boolean, siteOutcomeError?:string, performed?:boolean, outcomeKnown?:boolean, outcomeKind?:string, retryable?:boolean, hostOutcomeError?:string, actorDeliveryIds?: string[], browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>, usedWorkspace?: boolean, workspaceOverBudget?: boolean, actorsTrace?: Array<object>, codeTrace?: Array<object>, usedProvider?: boolean, providerCalls?: number, providerTokens?: number }>}
  */
 export const runJob = async (job, deps) => {
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
@@ -439,12 +439,19 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
     : {};
   let hostOutcomeUnknown = false;
   let hostOutcomeError = '';
+  let hostPerformed = false;
+  let hostPerformedOutcomeKind = 'effect-completed';
+  let hostPerformedRetryable = false;
   const hostCustody = () => hostOutcomeUnknown
     ? {
+        ...(hostPerformed ? { performed: true } : {}),
         outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
         hostOutcomeError: hostOutcomeError || 'A nested host operation outcome is unknown',
       }
-    : {};
+    : hostPerformed ? {
+        performed: true, outcomeKnown: true,
+        outcomeKind: hostPerformedOutcomeKind, retryable: hostPerformedRetryable,
+      } : {};
   /** @type {Array<{ data: string, mediaType: string }>} */
   let pageImages = [];
   /** @type {Array<{ reason: string, outcome: string, child: string, retryable: boolean }>} */
@@ -508,6 +515,13 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
   const runTrackedCodeOp = async (bridge, method, operation, succeeded) => {
     try {
       const value = await trackHostOperation(runCodeOp(bridge, method, operation, succeeded));
+      const custody = /** @type {any} */ (value);
+      if (custody?.performed === true) hostPerformed = true;
+      if (custody?.performed === true && custody?.outcomeKnown === true) {
+        hostPerformedOutcomeKind = typeof custody.outcomeKind === 'string'
+          ? custody.outcomeKind : 'effect-completed';
+        hostPerformedRetryable = custody.retryable === true;
+      }
       if (/** @type {any} */ (value)?.outcomeKnown === false) {
         hostOutcomeUnknown = true;
         hostOutcomeError = String(/** @type {any} */ (value)?.error
@@ -515,7 +529,14 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
       }
       return value;
     } catch (cause) {
-      if (/** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== true) {
+      const custody = /** @type {any} */ (cause);
+      if (custody?.performed === true) hostPerformed = true;
+      if (custody?.performed === true && custody?.outcomeKnown === true) {
+        hostPerformedOutcomeKind = typeof custody.outcomeKind === 'string'
+          ? custody.outcomeKind : 'effect-completed';
+        hostPerformedRetryable = custody.retryable === true;
+      }
+      if (custody?.outcomeKnown !== true) {
         hostOutcomeUnknown = true;
         hostOutcomeError = 'A nested host operation lost host custody';
       }

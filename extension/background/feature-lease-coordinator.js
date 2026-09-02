@@ -121,9 +121,10 @@ export const createFeatureLeaseCoordinator = ({
 
   const ready = store.get(FEATURE_LEASE_INTENT_KEY).then(async (stored) => {
     document = parseDocument(stored, canonicalIdentity);
-    if (!vaultUnlocked && document.intents.length > 0) {
-      document = { ...document, intents: [] };
-    }
+    // A successor starts provisionally locked until vault resume finishes.
+    // Preserve durable intent during that window so it can adopt a surviving
+    // dweb host. A real failed resume or user lock calls lock(), which clears
+    // the intent before stopping the orphan.
     await store.set(FEATURE_LEASE_INTENT_KEY, document);
     return true;
   });

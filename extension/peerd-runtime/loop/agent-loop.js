@@ -198,7 +198,7 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  * @param {AbortSignal} [ctx.signal]
  *   When fired, the loop stops at the next iteration boundary OR at
  *   the first stream chunk after abort.
- * @param {(value:{sessionId:string,messageId:string,content?:string,error?:string,code?:string,outcomeKnown?:false,retryable?:false})=>Promise<unknown>} [ctx.finalizeAbort]
+ * @param {(value:{sessionId:string,messageId:string,content?:string,error?:string,code?:string,outcomeKnown?:false,retryable?:false})=>Promise<{outcomeKnown?:boolean}|unknown>} [ctx.finalizeAbort]
  * @param {number} [ctx.maxSteps]
  *   Per-turn step cap. Defaults to MAX_STEPS. Actors pass a smaller
  *   value (default 20) so a runaway child can't burn the parent's whole
@@ -415,12 +415,17 @@ export async function* runUserTurn(ctx) {
       retryable: /** @type {false} */ (false),
     } : {};
     if (typeof ctx.finalizeAbort === 'function') {
-      await ctx.finalizeAbort({
+      const result = await ctx.finalizeAbort({
         sessionId, messageId,
         ...(content === undefined ? {} : { content }),
         ...unknownPatch,
       });
-      return true;
+      // A host may reconcile the loop's conservative abort race from an exact
+      // authority receipt. Ordinary abort finalization remains handled; only an
+      // outcome-unknown request requires explicit host proof to become known.
+      return outcomeUnknown
+        ? /** @type {{outcomeKnown?:boolean}|undefined} */ (result)?.outcomeKnown === true
+        : true;
     }
     await sessions.updateAssistantMessage(sessionId, messageId, {
       ...(content === undefined ? {} : { content }),
@@ -1188,13 +1193,12 @@ export async function* runUserTurn(ctx) {
     // demotion is the wire-side backstop for sessions already shaped that way).
     if (toolResults.length > 0 && wasAborted()) {
       // why: Stop does not prove an admitted side effect was cancelled.
-      if (!await finalizeAbort(assistantStub.id, undefined, true)) {
-        yield {
-          type: 'error', sessionId, messageId: assistantStub.id,
-          error: UNKNOWN_TURN_OUTCOME, code: 'tool-outcome-unknown',
-          outcomeKnown: false, retryable: false,
-        };
-      }
+      if (await finalizeAbort(assistantStub.id, undefined, true)) return;
+      yield {
+        type: 'error', sessionId, messageId: assistantStub.id,
+        error: UNKNOWN_TURN_OUTCOME, code: 'tool-outcome-unknown',
+        outcomeKnown: false, retryable: false,
+      };
       throw Object.assign(new Error(UNKNOWN_TURN_OUTCOME), {
         code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
       });
