@@ -51,6 +51,7 @@ describe('dispatcher lineage spine fields', () => {
     expect(r.meta.sideEffect).toBe('read');
     expect(r.meta.origins).toEqual(['https://example.com']);
     expect(typeof r.meta.durationMs).toBe('number');
+    expect(r.meta).not.toHaveProperty('dispatch');
   });
 
   test('failure (execute throws): spine fields still present', async () => {
@@ -154,6 +155,7 @@ describe('dispatcher lineage spine fields', () => {
     expect(failed.details.primitive).toBe('web');
     expect(failed.details.error).toBe('declined');
     expect(typeof failed.details.durationMs).toBe('number');
+    expect(failed.details).not.toHaveProperty('dispatch');
   });
 
   test('a browser policy failure audits only its fixed recovery fields', async () => {

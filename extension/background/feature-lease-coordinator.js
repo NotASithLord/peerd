@@ -10,9 +10,6 @@ export const FEATURE_LEASE_INTENT_KEY = 'feature-leases.intent.v1';
 export const FEATURE_LEASE_SCOPES = Object.freeze([
   'controller',
   'dweb',
-  'recovery',
-  'goal',
-  'schedule',
   'dom-host',
   'media-host',
   'model-host',
@@ -457,7 +454,7 @@ export const createFeatureLeaseCoordinator = ({
     unlock();
     const reason = transition === 'initialize'
       ? 'vault-initialize' : transition === 'unlock' ? 'vault-unlock' : 'vault-resume';
-    const plan = [...(dwebEnabled ? ['dweb'] : []), 'goal', 'recovery', 'schedule'];
+    const plan = dwebEnabled ? ['dweb'] : [];
     const results = [];
     for (const scope of plan) results.push(await acquire(scope, { reason, durable: true }));
     return results;

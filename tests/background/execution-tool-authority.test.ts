@@ -70,6 +70,63 @@ describe('exact execution creation rollback', () => {
     });
   });
 
+  test('Act revocation during clone confirmation removes the provisional Notebook without cloning', async () => {
+    const plan = planFor('notebook');
+    const deleted: string[] = [];
+    const destroyed: any[] = [];
+    let clones = 0;
+    let mode = 'act';
+    const authority = createExecutionToolAuthority({
+      binding: { operation: 'turn.execution.create-notebook', args: { plan } },
+      ctx: {
+        session: { sessionId: 'chat-1' },
+        jsRegistry: {
+          create: async () => ({ id: 'notebook-1', name: 'Work' }),
+          delete: async (id: string) => { deleted.push(id); return true; },
+        },
+        jsTabTracker: { ensureTab: async () => {} },
+        repositories: {
+          clone: async () => { clones += 1; return {}; },
+          destroy: async (...args: any[]) => { destroyed.push(args); },
+        },
+        confirm: async () => { mode = 'plan'; return 'yes_once'; },
+        readAuthorityPermission: async () => ({ mode }),
+      },
+    });
+    expect(await authority.createNotebook(plan)).toEqual({
+      ok: false, error: 'plan_mode_refused',
+    });
+    expect({ clones, deleted, destroyed }).toEqual({
+      clones: 0,
+      deleted: ['notebook-1'],
+      destroyed: [[{ kind: 'notebook', id: 'notebook-1' }, { worktree: true }]],
+    });
+  });
+
+  test('Act revocation during App Git confirmation prevents createFromGit', async () => {
+    const plan = {
+      kind: 'app', name: 'Work', gitUrl: 'https://github.com/example/work.git',
+    };
+    let imports = 0;
+    let mode = 'act';
+    const authority = createExecutionToolAuthority({
+      binding: { operation: 'turn.execution.create-app', args: { plan } },
+      ctx: {
+        session: { sessionId: 'chat-1' },
+        appClient: {
+          createFromGit: async () => { imports += 1; return { record: { id: 'app-1' } }; },
+        },
+        confirm: async () => { mode = 'plan'; return 'yes_once'; },
+        readAuthorityPermission: async () => ({ mode }),
+      },
+    });
+    expect(await authority.createApp(plan)).toEqual({
+      ok: false, code: 'plan_mode_refused', error: 'plan_mode_refused',
+      outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+    expect(imports).toBe(0);
+  });
+
   test.each(['notebook', 'pod'] as const)(
     '%s rollback requires the registry to attest that its provisional record was deleted',
     async (kind) => {

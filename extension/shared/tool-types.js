@@ -240,10 +240,6 @@
  * @property {Primitive} primitive    the RESOURCE/domain this tool exercises
  *   (tab / web / webvm / notebook / pod / app / memory / inspect / actor). Answers
  *   "what does it touch?".
- * @property {'inline'|'spawned'} [dispatch]   the EXECUTION mechanism —
- *   orthogonal to `primitive`. Absent/'inline' = runs in the dispatcher.
- *   'spawned' = carried out by a spawned child session. Lets the UI show the
- *   mechanism without conflating it into the primitive. Answers "how is it run?".
  * @property {Record<string, any>} schema           JSON Schema for args
  * @property {SideEffect} sideEffect
  * @property {'A'|'B'|'C'|'D'|'E'|'F'} [retryClass] optional explicit lifecycle retry class

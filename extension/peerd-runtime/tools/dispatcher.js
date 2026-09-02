@@ -225,12 +225,7 @@ const userHookContext = (ctx, tool) => freezePlainSnapshot(structuredClone({
  */
 
 /**
- * The dispatcher records the EXECUTION mechanism (`dispatch`) alongside the
- * lineage. The shared ToolMeta typedef doesn't carry `dispatch` yet (it's a
- * UI hint, off the wire), so we widen locally; the widened meta is still
- * structurally a ToolMeta where the result type needs one.
- *
- * @typedef {ToolMeta & { dispatch?: 'inline' | 'spawned',
+ * @typedef {ToolMeta & {
  *   browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }>,
  *   browserAsyncPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }} DispatchMeta
  */
@@ -284,7 +279,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
       ok: false,
       error: `tool_aborted:${call.name}:${stage}`,
       meta: /** @type {DispatchMeta} */ ({
-        toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        toolName: call.name, primitive: tool.primitive,
         gates: gateResults, hooks: hookOutcomes, durationMs: 0,
       }),
     };
@@ -305,7 +300,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
         content: AUTH_STATE_UNAVAILABLE_MESSAGE,
         endTurn: true,
         meta: /** @type {DispatchMeta} */ ({
-          toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+          toolName: call.name, primitive: tool.primitive,
           gates: gateResults, hooks: hookOutcomes, durationMs: 0,
         }),
       };
@@ -325,7 +320,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
         : AUTH_BOUNDARY_STOPPED_MESSAGE,
       endTurn: true,
       meta: /** @type {DispatchMeta} */ ({
-        toolName: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        toolName: call.name, primitive: tool.primitive,
         gates: gateResults, hooks: hookOutcomes, durationMs: 0,
       }),
     };
@@ -359,7 +354,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
         ...(authWait ? { content: AUTH_WAITING_FOR_USER_MESSAGE, endTurn: true } : {}),
         meta: /** @type {DispatchMeta} */ ({
           toolName: call.name,
-          primitive: tool.primitive, dispatch: tool.dispatch,
+          primitive: tool.primitive,
           gates: gateResults,
           hooks: hookOutcomes,
           durationMs: 0,
@@ -391,7 +386,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
       error: `hook_blocked:mandatory-pre-tool-use:${mandatoryPre.reason}`,
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
-        primitive: tool.primitive, dispatch: tool.dispatch,
+        primitive: tool.primitive,
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs: 0,
@@ -413,7 +408,7 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
       error: `hook_blocked:pre-tool-use:${pre.reason}`,
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
-        primitive: tool.primitive, dispatch: tool.dispatch,
+        primitive: tool.primitive,
         gates: gateResults,
         hooks: hookOutcomes,
         durationMs: 0,
@@ -650,14 +645,14 @@ export const settleToolCall = async (prepared, execution) => {
       ? {
         type: 'tool_failed',
         details: {
-          tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+          tool: call.name, primitive: tool.primitive,
           durationMs, error: result.error,
           ...(browserPolicy ? { browserPolicy } : {}),
         },
       }
       : {
         type: 'tool_executed',
-        details: { tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch, durationMs },
+        details: { tool: call.name, primitive: tool.primitive, durationMs },
       }).catch(() => {});
     // ---- Post-tool-use hooks --------------------------------------------
     // why: observe-only in V1. Post-hooks see the result but cannot
@@ -707,7 +702,7 @@ export const settleToolCall = async (prepared, execution) => {
       ...settled,
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
-        primitive: tool.primitive, dispatch: tool.dispatch,
+        primitive: tool.primitive,
         // why: sideEffect + origins complete the lineage spine on EXECUTED
         // results — the two fields lineage compaction reads to decide what to
         // compact (sideEffect class) and to render where it touched (origins).
@@ -744,9 +739,9 @@ export const settleToolCall = async (prepared, execution) => {
       type: 'tool_failed',
       // why: same rich shape as the returned-{ok:false} failure above so
       // BOTH failure sources are uniform — audit mining can group throws and
-      // returned failures by the same primitive/dispatch keys.
+      // returned failures by the same primitive key.
       details: {
-        tool: call.name, primitive: tool.primitive, dispatch: tool.dispatch,
+        tool: call.name, primitive: tool.primitive,
         error: exposedError?.error ?? message, durationMs,
         ...(browserPolicy ? { browserPolicy } : {}),
       },
@@ -775,7 +770,7 @@ export const settleToolCall = async (prepared, execution) => {
       } : {}),
       meta: /** @type {DispatchMeta} */ ({
         toolName: call.name,
-        primitive: tool.primitive, dispatch: tool.dispatch,
+        primitive: tool.primitive,
         // Same spine fields on the FAILED path — an errored result still has a
         // body and a lineage (the spine renders "… · error · N chars").
         sideEffect: tool.sideEffect,

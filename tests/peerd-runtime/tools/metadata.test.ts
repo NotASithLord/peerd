@@ -34,7 +34,7 @@ import {
 } from '../../../extension/peerd-runtime/controller-local-tools.js';
 const METADATA_KEYS = new Set([
   'name', 'primitive', 'description', 'schema', 'sideEffect',
-  'dispatch', 'retryClass', 'dweb', 'originRule',
+  'retryClass', 'dweb', 'originRule',
 ]);
 const ORIGIN_RULES = new Set([
   'none', 'active-tab', 'url-field', 'active-plus-url',

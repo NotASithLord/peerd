@@ -242,6 +242,48 @@ describe('sidepanel.attachments', () => {
     } finally { unmount(); }
   });
 
+  it('a settling send cannot clear another chat delivery fence', async () => {
+    for (const id of ['new', 'A', 'B']) {
+      localStorage.removeItem(`peerd.draft.${id}`);
+      localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+    }
+    let settleA = (/** @type {any} */ _reply) => {};
+    const send = () => new Promise((resolve) => { settleA = resolve; });
+    const state = baseState();
+    state.session = { sessionId: 'A' };
+    const { root, unmount } = await mountInputBar(state, send);
+    try {
+      const textarea = need(root, 'textarea', HTMLTextAreaElement);
+      textarea.value = 'send from A';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      need(root, 'form.input-bar')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await until(() => localStorage.getItem('peerd.unconfirmed-send.A'));
+
+      localStorage.setItem('peerd.unconfirmed-send.B', JSON.stringify({
+        operationId: 'send.from-b', text: 'send from B', goal: false,
+        sessionId: 'B', hadAttachments: false, source: 'composer',
+      }));
+      state.session = { sessionId: 'B' };
+      m.redraw.sync();
+      await flush();
+      expect(root.textContent).toContain('Check delivery');
+
+      settleA({ ok: true });
+      await until(() => localStorage.getItem('peerd.unconfirmed-send.A') === null);
+      await flush();
+      expect(localStorage.getItem('peerd.unconfirmed-send.B')).toContain('send.from-b');
+      expect(root.textContent).toContain('Check delivery');
+      expect(need(root, '.send-btn', HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      unmount();
+      for (const id of ['new', 'A', 'B']) {
+        localStorage.removeItem(`peerd.draft.${id}`);
+        localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+      }
+    }
+  });
+
   it('an unresolved delivery fence can be released only by an explicit bodyless acknowledgement', async () => {
     /** @type {(reason?: unknown) => void} */
     let rejectFirst = () => {};
