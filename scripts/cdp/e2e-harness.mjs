@@ -1097,7 +1097,11 @@ export async function reloadReadyPanel(ctx, {
   expectedSessionId = null, budgetMs = READY_BUDGET_MS,
 } = {}) {
   const priorTimeOrigin = await evalIn(ctx.page, 'performance.timeOrigin');
+  // why: Chrome may indefinitely throttle animation frames for a backgrounded
+  // extension page, while side-panel boot deliberately waits for two frames.
+  await ctx.page.send('Page.bringToFront').catch(() => {});
   await ctx.page.send('Page.reload', { ignoreCache: true });
+  await ctx.page.send('Page.bringToFront').catch(() => {});
   const ready = await waitFor(async () => {
     const view = await evalIn(ctx.page, `({
       timeOrigin: performance.timeOrigin,
@@ -1114,12 +1118,44 @@ export async function reloadReadyPanel(ctx, {
     return { view, state };
   }, { budgetMs, pollMs: 25 });
   if (ready) return ready;
-  const diagnostics = await evalIn(ctx.page, `({
-    timeOrigin: performance.timeOrigin,
-    readyState: document.readyState,
-    stage: document.documentElement.dataset.peerdBootStage ?? null,
-    body: document.body?.innerText?.slice(0, 500) ?? null,
-  })`).catch((error) => ({ error: String(error) }));
+  const diagnostics = await evalIn(ctx.page, `(() => {
+    const jsResource = (entry) => {
+      try { return new URL(entry.name).pathname.endsWith('.js'); }
+      catch { return false; }
+    };
+    return {
+      timeOrigin: performance.timeOrigin,
+      readyState: document.readyState,
+      bootModule: document.documentElement.dataset.peerdBootModule ?? null,
+      bootStage: document.documentElement.dataset.peerdBootStage ?? null,
+      bootError: document.documentElement.dataset.peerdBootError ?? null,
+      vaultPosture: document.documentElement.dataset.peerdVaultPosture ?? null,
+      body: document.body?.innerText?.slice(0, 500) ?? null,
+      scripts: [...document.scripts].map((script) => ({
+        src: script.src || null,
+        type: script.type || null,
+        async: script.async,
+        defer: script.defer,
+      })),
+      resources: performance.getEntriesByType('resource')
+        .filter((entry) => entry.initiatorType === 'script' || jsResource(entry))
+        .map((entry) => ({
+          name: entry.name,
+          initiatorType: entry.initiatorType,
+          fetchStart: entry.fetchStart,
+          responseEnd: entry.responseEnd,
+          duration: entry.duration,
+          transferSize: entry.transferSize,
+          encodedBodySize: entry.encodedBodySize,
+          decodedBodySize: entry.decodedBodySize,
+        })),
+    };
+  })()`).catch((error) => ({ diagnosticError: String(error) }));
+  diagnostics.pageEvents = ctx.page.events.slice(-24);
+  diagnostics.extensionTargetEvents = ctx.extensionTargetEvents().slice(-8).map((entry) => ({
+    ...entry,
+    events: entry.events.slice(-12),
+  }));
   throw new Error(`side panel reload did not reach a new ready document: ${JSON.stringify(diagnostics)}`);
 }
 

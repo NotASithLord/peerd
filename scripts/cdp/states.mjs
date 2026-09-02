@@ -5512,7 +5512,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
   // a component fixture, and catches indentation/connector/overflow failures.
   {
     name: 'actor-fabric-hierarchy', kind: 'functional', phase: 'post-unlock',
-    responder: (callIndex, request) => {
+    responder: async (callIndex, request) => {
       const body = (request && request.postData) || '';
       if (actorFabricHierarchyState.phase === 'prepare') {
         if (!actorFabricHierarchyState.targetOpened) {
@@ -5523,7 +5523,11 @@ document.querySelector('#refresh').addEventListener('click', async () => {
       }
       if (body.includes('kind: bound; type: web')) {
         actorFabricHierarchyState.webCalls += 1;
-        return { delayMs: 5_000, sse: sseText('NESTED-WEB-DONE') };
+        // why: the inspector is a live-state assertion. A fixed response delay
+        // races long single-Chrome runs and can settle the node before the
+        // harness clicks it, even though the complete topology rendered.
+        await actorFabricHierarchyState.inspectionGate;
+        return { sse: sseText('NESTED-WEB-DONE') };
       }
       if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         if (body.includes('inspect price through the web actor')) {
@@ -5559,9 +5563,14 @@ document.querySelector('#refresh').addEventListener('click', async () => {
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const fixtureUrl = `http://orders.peerd.test:${/** @type {{port:number}} */ (server.address()).port}/actor-fabric`;
       let fixtureTabId = null;
+      let releaseInspection = () => {};
+      const inspectionGate = new Promise((resolve) => {
+        releaseInspection = () => resolve(undefined);
+      });
       actorFabricHierarchyState = {
         phase: 'prepare', fixtureUrl, targetOpened: false,
         spawned: 0, nestedCalls: 0, siblingCalls: 0, webCalls: 0, nestedResults: [],
+        inspectionGate, releaseInspection,
       };
       try {
         // Generic `web` is intentionally unable to invent authority over an
@@ -5665,6 +5674,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           && inspected?.text.includes('one web tab')
           && inspected?.text.includes('Dedicated keyless worker'),
         JSON.stringify(inspected));
+      actorFabricHierarchyState.releaseInspection();
 
       const finished = await waitFor(
         () => evalIn(ctx.page, `(() => {
@@ -5685,6 +5695,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         JSON.stringify(finished));
       await evalIn(ctx.page, `document.querySelector('.input-bar textarea')?.focus()`);
       } finally {
+        releaseInspection();
         if (Number.isInteger(fixtureTabId)) {
           await evalIn(ctx.page, `chrome.tabs.remove(${fixtureTabId}).catch(() => {})`, true)
             .catch(() => {});
@@ -5750,7 +5761,10 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         `${alphaRoot} / ${betaRoot}`);
       if (!distinctRoots) return;
 
-      const page = await openWidePage(ctx, 'home/home.html#actors', { ready: '.actor-space' });
+      // Mount the monitor only after the authoritative topology is live. Its
+      // first automatic load still proves the live UI path without depending
+      // on a background interval that Chrome may heavily throttle in a long run.
+      const page = await openWidePage(ctx, 'home/home.html#library', { ready: '.home-shell' });
       try {
         await rpc(ctx.page, { type: 'session/switch', sessionId: alphaRoot });
         await rpc(ctx.page, { type: 'agent/send', text: 'ALPHA-ROOT research the launch risks' });
@@ -5781,6 +5795,8 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         rec.check('the server snapshot reports both roots without cross-session merging',
           bothLive?.roots?.length === 2,
           JSON.stringify(bothLive?.roots?.map((root) => root.session?.sessionId) ?? liveProbe));
+
+        await evalIn(page, `document.querySelector('[data-home-view="actors"]')?.click()`);
 
         const rendered = await waitFor(() => evalIn(page, `(() => {
           const space = document.querySelector('.actor-space');
@@ -5909,6 +5925,16 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           alphaStopped?.ok === true && betaStopped?.ok === true,
           JSON.stringify({ alphaStopped, betaStopped }));
         actorOverviewState.releaseLive();
+        await waitFor(async () => {
+          const overview = await rpc(page, { type: 'actors/overview' });
+          return overview?.roots?.length === 0 ? overview : null;
+        }, { budgetMs: 45_000, pollMs: 150 });
+        await waitFor(() => evalIn(page, `(() => {
+          const refresh = document.querySelector('.actor-space-refresh');
+          if (!(refresh instanceof HTMLButtonElement) || refresh.disabled) return false;
+          refresh.click();
+          return true;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
         let emptyProbe = /** @type {any} */ (null);
         const empty = await waitFor(async () => {
           const overview = await rpc(page, { type: 'actors/overview' });

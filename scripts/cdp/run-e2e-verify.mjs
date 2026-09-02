@@ -186,7 +186,15 @@ async function main() {
       await unlockAndReady(ctx.page);
       await freezeAnimations(ctx);
       for (const s of postUnlock) {
-        if (s.preserveFreshSession !== true) await resetSession(ctx);
+        if (s.preserveFreshSession !== true) {
+          try { await resetSession(ctx); }
+          catch (error) {
+            const rec = makeRecorder(ctx, s);
+            rec.check('state reset ran without throwing', false, error?.message || String(error));
+            results.push(rec.result());
+            break;
+          }
+        }
         await runState(ctx, s, results);
       }
     }
