@@ -1013,7 +1013,6 @@ const runChromeSample = async (prepared, sample, role = 'candidate') => {
       sample: sample + 1,
       elapsedMs: hostNowMs() - started,
       error: error?.message ?? String(error),
-      ...(hostQuiescence ? { hostQuiescence } : {}),
     };
     console.log(`  ${role} fresh profile ${sample + 1}/${chromeProcesses}: failed after ${round(failure.elapsedMs)}ms`);
     return { failure };
