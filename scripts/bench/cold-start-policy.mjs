@@ -353,7 +353,10 @@ export const assessColdStartPair = (browser, candidate, base, options = {}) => {
       ...Object.keys(base?.packagedGraphsByChannel?.[channel] ?? {}),
     ]);
     for (const name of names) {
-      for (const metric of ['graphModules', 'graphBytes', 'entryBytes']) {
+      // Package recipes may compact a graph into one native worker file. The
+      // entry alone is therefore not comparable to an unbundled historical
+      // root; total reachable bytes and modules are the common cold graph.
+      for (const metric of ['graphModules', 'graphBytes']) {
         const candidateValue = candidate?.packagedGraphsByChannel?.[channel]?.[name]?.[metric];
         const baseValue = base?.packagedGraphsByChannel?.[channel]?.[name]?.[metric];
         if (!Number.isInteger(candidateValue) || !Number.isInteger(baseValue)) continue;

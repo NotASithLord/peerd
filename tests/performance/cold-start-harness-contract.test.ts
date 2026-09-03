@@ -47,6 +47,21 @@ describe('cold-start browser harness contract', () => {
     expect(() => module.packagedBackgroundEntry(root, 'chrome')).toThrow();
   });
 
+  test('uses one visible actionable Home endpoint across historical and current builds', async () => {
+    const text = await Bun.file(harness).text();
+    expect(text).toContain('button instanceof HTMLButtonElement');
+    expect(text).toContain('button.isConnected && !button.disabled');
+    expect(text).toContain("label.startsWith('create vault')");
+    expect(text).toContain("style.pointerEvents !== 'none'");
+    expect(text.match(/HOME_ACTIONABLE_EXPRESSION, /g)).toHaveLength(4);
+    expect(text.match(/reply\.state\?\.vault\?\.initialized !== false/g)).toHaveLength(2);
+    expect(text).toContain("state.state?.vault?.initialized === false");
+    expect(text).toContain("state.state.vault.locked === true");
+    expect(text).not.toContain('peerdBootStage');
+    expect(text).not.toContain('peerdBootModule');
+    expect(text).not.toContain('peerdStaticShellPainted');
+  });
+
   test('does not silently switch a required lane onto the not-yet-required pair gate', () => {
     const run = spawnSync(process.execPath, [
       harness, '--lane=pr', '--comparison=interleaved-candidate-base', '--help',

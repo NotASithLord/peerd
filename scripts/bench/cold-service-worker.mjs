@@ -588,6 +588,29 @@ const waitChromeExpression = (page, expression, budgetMs = coldTimeoutMs) => wai
   return value === true;
 }, budgetMs, 20);
 
+// The field names still say "staticShell" for report-schema continuity. The
+// comparative milestone is the first visibly rendered Home root in either
+// the historical direct-module UI or the current staged shell.
+const HOME_VISIBLE_EXPRESSION = `(() => {
+  const node = document.querySelector('#app > *');
+  const rect = node?.getBoundingClientRect();
+  const style = node ? getComputedStyle(node) : null;
+  return !!node && node.isConnected && rect.width > 0 && rect.height > 0
+    && style.visibility !== 'hidden' && style.display !== 'none'
+    && style.pointerEvents !== 'none';
+})()`;
+const HOME_ACTIONABLE_EXPRESSION = `(() => {
+  return [...document.querySelectorAll('.gate-card button')].some((button) => {
+    const rect = button.getBoundingClientRect();
+    const style = getComputedStyle(button);
+    const label = (button.textContent || '').trim().replace(/\\s+/g, ' ').toLowerCase();
+    return button instanceof HTMLButtonElement && button.isConnected && !button.disabled
+      && label.startsWith('create vault') && rect.width > 0 && rect.height > 0
+      && style.visibility !== 'hidden' && style.display !== 'none'
+      && style.pointerEvents !== 'none';
+  });
+})()`;
+
 const enableChromePrfFixture = async (page) => {
   await page.send('WebAuthn.enable');
   const common = {
@@ -732,17 +755,12 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       return evaluated?.result?.value === true;
     }, remaining());
     if (!pageReady) throw new Error('Chrome extension surface did not load');
-    const shellPaintMarker = await waitChromeExpression(page,
-      `document.documentElement.dataset.peerdStaticShellPainted === 'true'`, remaining());
-    if (!shellPaintMarker) throw new Error('Chrome static vault shell did not paint');
+    const shellPaintMarker = await waitChromeExpression(
+      page, HOME_VISIBLE_EXPRESSION, remaining(),
+    );
+    if (!shellPaintMarker) throw new Error('Chrome Home surface did not render');
     const painted = await evaluateChrome(page, `new Promise((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const node = document.querySelector('#app > *');
-        const rect = node?.getBoundingClientRect();
-        const style = node ? getComputedStyle(node) : null;
-        resolve(!!node && rect.width > 0 && rect.height > 0
-          && style.visibility !== 'hidden' && style.display !== 'none');
-      }));
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve(${HOME_VISIBLE_EXPRESSION})));
     })`, remaining());
     if (!painted) throw new Error('Chrome extension shell was not visibly painted');
     const staticShellFromLaunchMs = hostNowMs() - launchStarted;
@@ -755,27 +773,20 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       });
     const statePromise = bootstrapPromise.then(async () => {
       const reply = await sendChromeRuntimeMessage(page, { type: 'state/get' }, remaining());
-      if (reply?.ok !== true || !reply.state) {
+      if (reply?.ok !== true || reply.state?.vault?.initialized !== false
+          || reply.state?.vault?.locked !== true) {
         throw new Error(`Chrome state/get failed: ${JSON.stringify(reply)}`);
       }
       return { reply, elapsedMs: hostNowMs() - launchStarted };
     });
-    const bootModulePromise = waitChromeExpression(page,
-      `document.documentElement.dataset.peerdBootModule === 'evaluated'`, remaining())
-      .then((ready) => {
-        if (!ready) throw new Error('Chrome vault boot module did not evaluate');
-        return hostNowMs() - launchStarted;
-      });
-    const vaultGatePromise = bootModulePromise.then(() => waitChromeExpression(page, `(() => {
-      if (document.documentElement.dataset.peerdBootStage !== 'vault-ready') return false;
-      return [...document.querySelectorAll('.gate-card button')].some((button) =>
-        !button.disabled && /create vault/i.test(button.textContent || ''));
-    })()`, remaining())).then((ready) => {
+    const vaultGatePromise = waitChromeExpression(
+      page, HOME_ACTIONABLE_EXPRESSION, remaining(),
+    ).then((ready) => {
         if (!ready) throw new Error('Chrome vault gate never became actionable');
         return hostNowMs() - launchStarted;
       });
-    const [bootstrap, state, bootModuleFromLaunchMs, vaultGateReadyFromLaunchMs] = await within(Promise.all([
-      bootstrapPromise, statePromise, bootModulePromise, vaultGatePromise,
+    const [bootstrap, state, vaultGateReadyFromLaunchMs] = await within(Promise.all([
+      bootstrapPromise, statePromise, vaultGatePromise,
     ]), remaining(), 'Chrome fresh sample');
     const vaultGateReadyFromWorkerTargetMs = Math.max(
       0, vaultGateReadyFromLaunchMs - workerTargetMs,
@@ -864,17 +875,12 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         return ready?.result?.value === true;
       }, wakeRemaining(), 10);
       if (!wakePageReady) throw new Error('Chrome wake panel did not load');
-      const wakeShellReady = await waitChromeExpression(page,
-        `document.documentElement.dataset.peerdStaticShellPainted === 'true'`, wakeRemaining());
-      if (!wakeShellReady) throw new Error('Chrome wake static vault shell did not paint');
+      const wakeShellReady = await waitChromeExpression(
+        page, HOME_VISIBLE_EXPRESSION, wakeRemaining(),
+      );
+      if (!wakeShellReady) throw new Error('Chrome wake Home surface did not render');
       const wakePainted = await evaluateChrome(page, `new Promise((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const node = document.querySelector('#app > *');
-          const rect = node?.getBoundingClientRect();
-          const style = node ? getComputedStyle(node) : null;
-          resolve(!!node && rect.width > 0 && rect.height > 0
-            && style.visibility !== 'hidden' && style.display !== 'none');
-        }));
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve(${HOME_VISIBLE_EXPRESSION})));
       })`, wakeRemaining());
       if (!wakePainted) throw new Error('Chrome wake extension shell was not visibly painted');
       const staticShellFromWakeMs = hostNowMs() - started;
@@ -886,27 +892,21 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           });
         const wakeStatePromise = wakeBootstrapPromise.then(async () => {
           const reply = await sendChromeRuntimeMessage(page, { type: 'state/get' }, wakeRemaining());
-          if (reply?.ok !== true || !reply.state) throw new Error(`Chrome wake state failed: ${JSON.stringify(reply)}`);
+          if (reply?.ok !== true || reply.state?.vault?.initialized !== false
+              || reply.state?.vault?.locked !== true) {
+            throw new Error(`Chrome wake state failed: ${JSON.stringify(reply)}`);
+          }
           return hostNowMs() - started;
         });
-        const wakeBootModulePromise = waitChromeExpression(page,
-          `document.documentElement.dataset.peerdBootModule === 'evaluated'`, wakeRemaining())
-          .then((ready) => {
-            if (!ready) throw new Error('Chrome wake vault boot module did not evaluate');
-            return hostNowMs() - started;
-          });
-        const wakeGatePromise = wakeBootModulePromise.then(() => waitChromeExpression(page, `(() => {
-          if (document.documentElement.dataset.peerdBootStage !== 'vault-ready') return false;
-          return [...document.querySelectorAll('.gate-card button')].some((button) =>
-            !button.disabled && /create vault/i.test(button.textContent || ''));
-        })()`, wakeRemaining())).then((ready) => {
+        const wakeGatePromise = waitChromeExpression(
+          page, HOME_ACTIONABLE_EXPRESSION, wakeRemaining(),
+        ).then((ready) => {
           if (!ready) throw new Error('Chrome wake vault gate never became actionable');
           return hostNowMs() - started;
         });
         const [targetResult, wakeBootstrap, stateFromWakeMs,
-          vaultGateReadyFromWakeMs, bootModuleFromWakeMs] = await within(Promise.all([
+          vaultGateReadyFromWakeMs] = await within(Promise.all([
           targetPromise, wakeBootstrapPromise, wakeStatePromise, wakeGatePromise,
-          wakeBootModulePromise,
         ]), wakeRemaining(), 'Chrome forced-wake sample');
         const { target, elapsedMs: workerTargetFromWakeMs } = targetResult;
         if (!target) throw new Error('Chrome wake produced no service-worker target');
@@ -932,7 +932,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           workerAgeAtProbeMs: wakeGraphReadyMs,
           workerTargetFromWakeMs,
           staticShellFromWakeMs,
-          bootModuleFromWakeMs,
           bootstrapFromWakeMs: wakeBootstrap.elapsedMs,
           stateFromWakeMs,
           vaultGateReadyFromWakeMs,
@@ -955,7 +954,7 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       browserProtocolVersion: version['Protocol-Version'] ?? 'unknown',
       cdpReadyMs, workerTargetMs, workerAgeAtProbeMs,
       navigationFromLaunchMs,
-      staticShellFromLaunchMs, bootModuleFromLaunchMs,
+      staticShellFromLaunchMs,
       bootstrapFromLaunchMs: bootstrap.elapsedMs,
       stateFromLaunchMs: state.elapsedMs,
       vaultGateReadyFromLaunchMs,
@@ -1213,7 +1212,8 @@ const wakeFirefoxAndBootstrap = async (driver) => {
 const readFirefoxState = (driver) => driver.executeAsync(`
   const done = arguments[arguments.length - 1];
   browser.runtime.sendMessage({ type: 'state/get' }).then(
-    (state) => done(state?.ok && state.state
+    (state) => done(state?.ok && state.state?.vault?.initialized === false
+        && state.state.vault.locked === true
       ? { ok: true }
       : { ok: false, error: 'state/get failed: ' + JSON.stringify(state) }),
     (error) => done({ ok: false, error: error?.message || String(error) }),
@@ -1246,28 +1246,21 @@ const runFirefoxProcess = async ({ binary, driverBinary, artifact, wake }) => {
     const userAgent = await driver.execute('return navigator.userAgent;');
     const version = String(userAgent).match(/Firefox\/([0-9.]+)/)?.[1] ?? 'unknown';
     await within(driver.navigate(`${FIREFOX_ORIGIN}/home/home.html`), remaining(), 'Firefox Home navigation');
-    const staticShellReady = await waitFirefoxExpression(driver,
-      `document.documentElement.dataset.peerdStaticShellPainted === 'true'`, remaining());
-    if (!staticShellReady) throw new Error('Firefox static vault shell did not paint');
+    const staticShellReady = await waitFirefoxExpression(
+      driver, HOME_VISIBLE_EXPRESSION, remaining(),
+    );
+    if (!staticShellReady) throw new Error('Firefox Home surface did not render');
     if (!await within(verifyFirefoxPaint(driver), remaining(), 'Firefox shell paint')) {
       throw new Error('Firefox vault shell was not visibly painted');
     }
     const staticShellFromInstallMs = hostNowMs() - installStarted;
-    const bootModuleReady = await waitFirefoxExpression(driver,
-      `document.documentElement.dataset.peerdBootModule === 'evaluated'`, remaining());
-    if (!bootModuleReady) throw new Error('Firefox vault boot module did not evaluate');
-    const bootModuleFromInstallMs = hostNowMs() - installStarted;
     const routes = await within(wakeFirefoxAndBootstrap(driver), remaining(), 'Firefox cold bootstrap');
     const bootstrapFromInstallMs = hostNowMs() - installStarted;
     if (!routes?.ok) throw new Error(`Firefox cold bootstrap failed: ${routes?.error ?? 'unknown error'}`);
     const state = await within(readFirefoxState(driver), remaining(), 'Firefox cold state');
     const stateFromInstallMs = hostNowMs() - installStarted;
     if (!state?.ok) throw new Error(`Firefox cold state failed: ${state?.error ?? 'unknown error'}`);
-    const gateReady = await waitFirefoxExpression(driver, `(() => {
-      if (document.documentElement.dataset.peerdBootStage !== 'vault-ready') return false;
-      return [...document.querySelectorAll('.gate-card button')].some((button) =>
-        !button.disabled && /create vault/i.test(button.textContent || ''));
-    })()`, remaining());
+    const gateReady = await waitFirefoxExpression(driver, HOME_ACTIONABLE_EXPRESSION, remaining());
     if (!gateReady) throw new Error('Firefox vault gate never became actionable');
     const fresh = {
       webdriverSessionMs,
@@ -1277,7 +1270,6 @@ const runFirefoxProcess = async ({ binary, driverBinary, artifact, wake }) => {
       bootstrapFromInstallMs,
       stateFromInstallMs,
       staticShellFromInstallMs,
-      bootModuleFromInstallMs,
       vaultGateReadyFromInstallMs: hostNowMs() - installStarted,
       vaultGateReadyFromSessionMs: hostNowMs() - sessionStarted,
     };
@@ -1297,17 +1289,14 @@ const runFirefoxProcess = async ({ binary, driverBinary, artifact, wake }) => {
       const wakeRemaining = () => Math.max(1, wakeDeadlineAt - hostNowMs());
       try {
         await within(driver.navigate(`${FIREFOX_ORIGIN}/home/home.html`), wakeRemaining(), 'Firefox wake Home navigation');
-        const wakeStaticShellReady = await waitFirefoxExpression(driver,
-          `document.documentElement.dataset.peerdStaticShellPainted === 'true'`, wakeRemaining());
-        if (!wakeStaticShellReady) throw new Error('Firefox wake static vault shell did not paint');
+        const wakeStaticShellReady = await waitFirefoxExpression(
+          driver, HOME_VISIBLE_EXPRESSION, wakeRemaining(),
+        );
+        if (!wakeStaticShellReady) throw new Error('Firefox wake Home surface did not render');
         if (!await within(verifyFirefoxPaint(driver), wakeRemaining(), 'Firefox wake shell paint')) {
           throw new Error('Firefox wake vault shell was not visibly painted');
         }
         const staticShellFromWakeMs = hostNowMs() - wakeStarted;
-        const wakeBootModuleReady = await waitFirefoxExpression(driver,
-          `document.documentElement.dataset.peerdBootModule === 'evaluated'`, wakeRemaining());
-        if (!wakeBootModuleReady) throw new Error('Firefox wake vault boot module did not evaluate');
-        const bootModuleFromWakeMs = hostNowMs() - wakeStarted;
         const wakeRoutes = await within(wakeFirefoxAndBootstrap(driver), wakeRemaining(), 'Firefox wake bootstrap');
         const bootstrapFromWakeMs = hostNowMs() - wakeStarted;
         if (!wakeRoutes?.ok) throw new Error(wakeRoutes?.error ?? 'Firefox wake bootstrap failed');
@@ -1315,17 +1304,14 @@ const runFirefoxProcess = async ({ binary, driverBinary, artifact, wake }) => {
         const wakeState = await within(readFirefoxState(driver), wakeRemaining(), 'Firefox wake state');
         const stateFromWakeMs = hostNowMs() - wakeStarted;
         if (!wakeState?.ok) throw new Error(wakeState?.error ?? 'Firefox wake state failed');
-        const wakeGateReady = await waitFirefoxExpression(driver, `(() => {
-          if (document.documentElement.dataset.peerdBootStage !== 'vault-ready') return false;
-          return [...document.querySelectorAll('.gate-card button')].some((button) =>
-            !button.disabled && /create vault/i.test(button.textContent || ''));
-        })()`, wakeRemaining());
+        const wakeGateReady = await waitFirefoxExpression(
+          driver, HOME_ACTIONABLE_EXPRESSION, wakeRemaining(),
+        );
         if (!wakeGateReady) throw new Error('Firefox wake vault gate never became actionable');
         wakeSample = {
           workerAgeAtProbeMs: wakeRoutes.workerAgeAtProbeMs,
           hostRoundTripMs: wakeRoutes.hostRoundTripMs,
           staticShellFromWakeMs,
-          bootModuleFromWakeMs,
           bootstrapFromWakeMs,
           stateFromWakeMs,
           vaultGateReadyFromWakeMs: hostNowMs() - wakeStarted,
@@ -1613,7 +1599,7 @@ export const main = async () => {
       mode: comparisonMode,
       reason: comparisonMode === 'absolute-ratchet'
         ? 'Required CI enforces absolute release ceilings; interleaved comparison remains separate cutover evidence.'
-        : 'Candidate and merge-base commits were packaged by the same candidate toolchain and alternated per sample on one host.',
+        : 'Candidate and merge-base commits were packaged by their own committed release recipes, then measured by one harness and browser binary in alternating order.',
       ...(comparisonSources ? { scheduleByBrowser: {} } : {}),
     },
     options: {
