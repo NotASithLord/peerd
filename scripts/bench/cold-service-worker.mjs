@@ -10,8 +10,8 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  rmSync, statSync, writeFileSync,
+  cpSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync,
+  readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { cpus, homedir, release as osRelease, tmpdir, totalmem } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -355,6 +355,50 @@ const prepareBrowserArtifacts = async (browser, {
     for (const artifact of Object.values(prepared)) {
       rmSync(artifact.extensionDir, { recursive: true, force: true });
     }
+    throw error;
+  }
+};
+
+// A historical tree must be packaged by its own committed release recipe.
+// Applying today's pruning/templates to yesterday's imports can create a
+// hybrid artifact that never shipped, or cannot even resolve. The browser and
+// timing harness remain current and identical for both sides; only artifact
+// construction follows the commit being measured.
+const prepareHistoricalBrowserArtifacts = async (browser, {
+  sourceRoot, artifactRoot, version,
+}) => {
+  const packageRoot = join(artifactRoot, 'historical-package-source');
+  rmSync(packageRoot, { recursive: true, force: true });
+  mkdirSync(artifactRoot, { recursive: true });
+  cpSync(sourceRoot, packageRoot, { recursive: true });
+  const dependencyRoot = join(ROOT, 'node_modules');
+  if (existsSync(dependencyRoot)) {
+    symlinkSync(dependencyRoot, join(packageRoot, 'node_modules'), 'dir');
+  }
+  const prepared = {};
+  try {
+    for (const channel of ['store', 'preview']) {
+      execFileSync(process.execPath, [
+        'packaging/package.ts', `--channel=${channel}`, `--browser=${browser}`,
+        '--no-sign', '--skip-verify',
+      ], { cwd: packageRoot, stdio: 'inherit' });
+      const extension = browser === 'firefox' ? 'xpi' : 'zip';
+      const archive = join(packageRoot, 'artifacts', `peerd-${channel}-${browser}.${extension}`);
+      if (!existsSync(archive)) throw new Error(`historical ${channel}/${browser} artifact missing`);
+      const extensionDir = unpackArtifact(archive, `historical-${channel}-${browser}`);
+      prepared[channel] = {
+        channel, archive, extensionDir, sourceRoot, artifactRoot,
+        coldBudgetMode: 'measure-only', verify: false, packageVersion: version,
+        removeArtifactRoot: true,
+      };
+      prepared[channel].archiveSha256 = await sha256File(archive);
+      prepared[channel].treeSha256 = treeSha256(extensionDir);
+      prepared[channel].graphs = (await packagedGraphStats(browser, extensionDir)).packagedGraphs;
+    }
+    return prepared;
+  } catch (error) {
+    cleanupPreparedArtifacts(prepared);
+    rmSync(artifactRoot, { recursive: true, force: true });
     throw error;
   }
 };
@@ -1059,13 +1103,9 @@ const prepareInterleavedPair = async (browser, comparisonSources) => {
       verify: true,
       version: comparisonSources.roles.candidate.packageVersion,
     });
-    prepared.base = await prepareBrowserArtifacts(browser, {
+    prepared.base = await prepareHistoricalBrowserArtifacts(browser, {
       sourceRoot: comparisonSources.roles.base.sourceRoot,
       artifactRoot: comparisonSources.roles.base.artifactRoot,
-      coldBudgetMode: 'measure-only',
-      // Historical sources are timing controls, not releasable artifacts;
-      // they may predate candidate-only Store semantic assertions.
-      verify: false,
       version: comparisonSources.roles.base.packageVersion,
     });
     return prepared;
