@@ -248,10 +248,10 @@ describe('cold-start policy', () => {
 
   test('requires every raw host-clock phase and recomputes every summary', () => {
     const result = chromeResult();
-    delete (result.freshProfile.rawSamples[0] as any).bootModuleFromLaunchMs;
+    delete (result.freshProfile.rawSamples[0] as any).stateFromLaunchMs;
     result.freshProfile.rawSamples[1].clock = 'page-performance';
     expect(assessChrome(result).failures).toEqual(expect.arrayContaining([
-      'chrome freshProfile.bootModuleFromLaunchMs is missing from a completed sample',
+      'chrome freshProfile.stateFromLaunchMs is missing from a completed sample',
       'chrome freshProfile sample 2 is not bound to the host-monotonic clock',
     ]));
   });
@@ -389,6 +389,24 @@ describe('cold-start policy', () => {
         'candidate/base host identities differ',
         'candidate/base source commits are identical',
     ]));
+  });
+
+  test('compares reachable cold graphs across bundled and unbundled package recipes', () => {
+    const base = chromeResult({ role: 'base', sourceCommitSha: '4'.repeat(40) });
+    const candidate = chromeResult();
+    for (const channel of ['store', 'preview'] as const) {
+      const candidateWorker = candidate.packagedGraphsByChannel[channel].serviceWorker;
+      const baseWorker = base.packagedGraphsByChannel[channel].serviceWorker;
+      candidateWorker.graphModules = 1;
+      candidateWorker.graphBytes = baseWorker.graphBytes - 1;
+      candidateWorker.entryBytes = candidateWorker.graphBytes;
+      baseWorker.graphModules = 400;
+      baseWorker.entryBytes = 1;
+    }
+    candidate.packagedGraphs = candidate.packagedGraphsByChannel.store;
+    base.packagedGraphs = base.packagedGraphsByChannel.store;
+    expect(assessColdStartPair('chrome', candidate, base, { lane: 'pr' }).failures)
+      .not.toEqual(expect.arrayContaining([expect.stringContaining('entryBytes regressed')]));
   });
 
   test('accepts complete device pairs without CI metadata and assesses each browser separately', () => {

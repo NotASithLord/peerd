@@ -49,7 +49,7 @@ export const COLD_START_PHASES = Object.freeze({
       metrics: Object.freeze([
         'cdpReadyMs', 'workerTargetMs', 'navigationFromLaunchMs',
         'staticShellFromLaunchMs',
-        'bootModuleFromLaunchMs', 'bootstrapFromLaunchMs',
+        'bootstrapFromLaunchMs',
         'stateFromLaunchMs', 'vaultGateReadyFromLaunchMs',
         'vaultGateReadyFromWorkerTargetMs', 'vaultGateReadyFromNavigationMs',
       ]),
@@ -58,7 +58,7 @@ export const COLD_START_PHASES = Object.freeze({
           'cdpReadyMs', 'workerTargetMs', 'navigationFromLaunchMs',
           'staticShellFromLaunchMs',
         ]),
-        Object.freeze(['staticShellFromLaunchMs', 'bootModuleFromLaunchMs', 'vaultGateReadyFromLaunchMs']),
+        Object.freeze(['staticShellFromLaunchMs', 'vaultGateReadyFromLaunchMs']),
         Object.freeze(['bootstrapFromLaunchMs', 'stateFromLaunchMs']),
       ]),
     }),
@@ -68,11 +68,11 @@ export const COLD_START_PHASES = Object.freeze({
       usableMetric: 'vaultGateReadyFromWakeMs',
       metrics: Object.freeze([
         'workerTargetFromWakeMs', 'staticShellFromWakeMs',
-        'bootModuleFromWakeMs', 'bootstrapFromWakeMs', 'stateFromWakeMs',
+        'bootstrapFromWakeMs', 'stateFromWakeMs',
         'vaultGateReadyFromWakeMs',
       ]),
       ordering: Object.freeze([
-        Object.freeze(['staticShellFromWakeMs', 'bootModuleFromWakeMs', 'vaultGateReadyFromWakeMs']),
+        Object.freeze(['staticShellFromWakeMs', 'vaultGateReadyFromWakeMs']),
         Object.freeze(['bootstrapFromWakeMs', 'stateFromWakeMs']),
       ]),
     }),
@@ -86,12 +86,12 @@ export const COLD_START_PHASES = Object.freeze({
       usableMetric: 'vaultGateReadyFromInstallMs',
       metrics: Object.freeze([
         'webdriverSessionMs', 'addonInstallMs', 'staticShellFromInstallMs',
-        'bootModuleFromInstallMs', 'bootstrapFromInstallMs',
+        'bootstrapFromInstallMs',
         'stateFromInstallMs', 'vaultGateReadyFromInstallMs',
         'vaultGateReadyFromSessionMs', 'hostRoundTripMs', 'workerAgeAtProbeMs',
       ]),
       ordering: Object.freeze([
-        Object.freeze(['staticShellFromInstallMs', 'bootModuleFromInstallMs', 'vaultGateReadyFromInstallMs']),
+        Object.freeze(['staticShellFromInstallMs', 'vaultGateReadyFromInstallMs']),
         Object.freeze(['bootstrapFromInstallMs', 'stateFromInstallMs']),
       ]),
     }),
@@ -100,13 +100,13 @@ export const COLD_START_PHASES = Object.freeze({
       boundary: 'post-idle-navigation-to-actionable-ui',
       usableMetric: 'vaultGateReadyFromWakeMs',
       metrics: Object.freeze([
-        'staticShellFromWakeMs', 'bootModuleFromWakeMs',
+        'staticShellFromWakeMs',
         'bootstrapFromWakeMs', 'stateFromWakeMs',
         'vaultGateReadyFromWakeMs', 'workerAgeAtProbeMs',
         'hostRoundTripMs',
       ]),
       ordering: Object.freeze([
-        Object.freeze(['staticShellFromWakeMs', 'bootModuleFromWakeMs', 'vaultGateReadyFromWakeMs']),
+        Object.freeze(['staticShellFromWakeMs', 'vaultGateReadyFromWakeMs']),
         Object.freeze(['bootstrapFromWakeMs', 'stateFromWakeMs']),
       ]),
     }),
