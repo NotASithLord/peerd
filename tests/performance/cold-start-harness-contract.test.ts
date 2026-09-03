@@ -122,6 +122,9 @@ describe('cold-start browser harness contract', () => {
   test('release runner binds two packaged graphs and the actionable Home surface', async () => {
     const text = await Bun.file(harness).text();
     expect(text).toContain("for (const channel of ['store', 'preview'])");
+    expect(text).toContain('prepareHistoricalBrowserArtifacts');
+    expect(text).toContain("'packaging/package.ts', `--channel=${channel}`");
+    expect(text).toContain("coldBudgetMode: 'measure-only'");
     expect(text).toContain("const runtimeSurface = 'home'");
     expect(text).toContain("const surfacePath = 'home/home.html'");
     expect(text).not.toContain("'sidepanel/sidepanel.html'");
