@@ -125,6 +125,7 @@ describe('cold-start browser harness contract', () => {
     expect(text).toContain('prepareHistoricalBrowserArtifacts');
     expect(text).toContain("'packaging/package.ts', `--channel=${channel}`");
     expect(text).toContain("coldBudgetMode: 'measure-only'");
+    expect(text).not.toContain('...(hostQuiescence');
     expect(text).toContain("const runtimeSurface = 'home'");
     expect(text).toContain("const surfacePath = 'home/home.html'");
     expect(text).not.toContain("'sidepanel/sidepanel.html'");
