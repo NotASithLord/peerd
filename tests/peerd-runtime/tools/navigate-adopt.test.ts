@@ -5,7 +5,16 @@
 // (a web ctx must NEVER fall back to the user's foreground tab).
 
 import { describe, test, expect } from 'bun:test';
-import { navigateTool } from '../../../extension/background/page-authority/navigate.js';
+import { navigateOwnedTabAuthority } from '../../../extension/background/page-authority/navigate.js';
+import { navigateTool as controllerNavigateTool } from '../../../extension/peerd-runtime/tools/defs/navigate.js';
+
+const fencedJson = (content: string) => JSON.parse(
+  content.slice(content.indexOf('\n') + 1, content.lastIndexOf('\n</untrusted_web_content>')),
+);
+
+const navigateTool = { execute: (args: any, ctx: any) => controllerNavigateTool.execute(args, {
+  ...ctx, pageAuthority: { navigateOwnedTab: () => navigateOwnedTabAuthority(args, ctx) },
+}) };
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 // A tabs mock whose update() resolves and fires the onUpdated 'complete' the
@@ -42,7 +51,7 @@ describe('navigate — web-actor lazy tab adoption', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error('expected ok');
     expect(adopted).toBe(true);
-    const out = JSON.parse(r.content!);
+    const out = fencedJson(r.content!);
     expect(out.tabId).toBe(100);
     // activeTab re-pinned IN PLACE to the adopted tab + the landed origin, so the rest
     // of the turn's DOM tools drive it (and the origin gate sees the live origin).

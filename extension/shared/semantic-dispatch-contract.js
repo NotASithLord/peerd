@@ -32,7 +32,6 @@ export const isSemanticRouteName = (value) => typeof value === 'string'
  * @typedef {{
  *   route: string,
  *   channels: readonly string[],
- *   source: string,
  * }} SemanticHostRoute
  */
 
@@ -49,7 +48,7 @@ export const compileSemanticHostRouteManifest = (value) => {
   for (const candidate of value) {
     if (!isPlainRecord(candidate)) throw new TypeError('semantic-route-row-invalid');
     const row = /** @type {Record<string, unknown>} */ (candidate);
-    if (!exactKeys(row, ['channels', 'route', 'source'])) {
+    if (!exactKeys(row, ['channels', 'route'])) {
       throw new TypeError('semantic-route-row-shape-invalid');
     }
     if (!isSemanticRouteName(row.route) || table.has(/** @type {string} */ (row.route))) {
@@ -58,14 +57,12 @@ export const compileSemanticHostRouteManifest = (value) => {
     if (!Array.isArray(row.channels) || row.channels.length === 0
         || row.channels.length > 3 || row.channels.some((channel) =>
           !['store', 'preview', 'dev'].includes(channel))
-        || new Set(row.channels).size !== row.channels.length
-        || typeof row.source !== 'string' || row.source.length === 0 || row.source.length > 256) {
+        || new Set(row.channels).size !== row.channels.length) {
       throw new TypeError('semantic-route-row-value-invalid');
     }
     const frozen = Object.freeze({
       route: /** @type {string} */ (row.route),
       channels: Object.freeze([...row.channels]),
-      source: /** @type {string} */ (row.source),
     });
     table.set(frozen.route, frozen);
   }

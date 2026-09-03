@@ -36,6 +36,111 @@ const KERNEL_TURN_LIFECYCLE_TARGETS = Object.freeze([
   './skills/registry.js', './tools/prompt-wrap.js',
 ]);
 
+const AUTHORITY_TOOL_ENTRIES = Object.freeze([
+  'background/kernel-turn-authority-adapter.js',
+  'background/controller-turn-bridge.js',
+  'background/offscreen-actor-client.js',
+]);
+
+const CONTROLLER_TOOL_ENTRIES = Object.freeze([
+  'offscreen/controller-turn-runtime.js',
+  'offscreen/actor-worker-runtime.js',
+]);
+
+const SEMANTIC_TOOL_FAMILIES = Object.freeze([
+  ['actor tool', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-actor-tools.js',
+    'peerd-runtime/tools/defs/actor-create.js',
+    'peerd-runtime/tools/defs/actor-tasks.js',
+    'peerd-runtime/tools/defs/actor-cancel.js',
+    'peerd-runtime/tools/defs/message-actor.js',
+  ]],
+  ['Pod command/file', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-pod-tools.js',
+    'peerd-runtime/tools/defs/pod-exec.js',
+    'peerd-runtime/tools/defs/pod-status.js',
+    'peerd-runtime/tools/defs/pod-cancel.js',
+    'peerd-runtime/tools/defs/pod-read.js',
+    'peerd-runtime/tools/defs/pod-write.js',
+  ]],
+  ['repository', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-repository-tools.js',
+    'peerd-runtime/tools/defs/pod-destroy.js',
+    'peerd-runtime/tools/defs/app-history.js',
+    'peerd-runtime/tools/defs/app-version.js',
+    'peerd-runtime/tools/defs/app-remote.js',
+  ]],
+  ['WebVM', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-vm-tools.js',
+    'peerd-runtime/tools/defs/vm-boot.js',
+    'peerd-runtime/tools/defs/vm-import.js',
+    'peerd-runtime/tools/defs/vm-write-file.js',
+    'peerd-runtime/tools/defs/vm-delete.js',
+  ]],
+  ['Notebook', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-notebook-tools.js',
+    'peerd-runtime/tools/defs/js-notebook.js',
+    'peerd-runtime/tools/defs/js-write-file.js',
+    'peerd-runtime/tools/defs/js-read-file.js',
+    'peerd-runtime/tools/defs/js-delete.js',
+  ]],
+  ['App', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-app-tools.js',
+    'peerd-runtime/tools/defs/app-update.js',
+    'peerd-runtime/tools/defs/app-open.js',
+    'peerd-runtime/tools/defs/app-search.js',
+    'peerd-runtime/tools/defs/app-delete.js',
+    'peerd-runtime/tools/defs/app-write-file.js',
+    'peerd-runtime/tools/defs/app-read-file.js',
+    'peerd-runtime/tools/defs/app-list-files.js',
+    'peerd-runtime/tools/defs/app-delete-file.js',
+    'peerd-runtime/tools/defs/app-observe.js',
+    'peerd-runtime/tools/defs/app-act.js',
+    'peerd-runtime/tools/defs/app-code.js',
+  ]],
+  ['memory and todo', ['background/vault-kernel.js', ...AUTHORITY_TOOL_ENTRIES], [
+    'peerd-runtime/controller-persistence-tools.js',
+    'peerd-runtime/tools/defs/read-memory.js',
+    'peerd-runtime/tools/defs/remember.js',
+    'peerd-runtime/tools/defs/todo.js',
+    'peerd-runtime/todo/core.js',
+  ]],
+  ['document, web and result', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-resource-tools.js',
+    'peerd-runtime/tools/defs/read-doc.js',
+    'peerd-runtime/tools/defs/fetch-url.js',
+    'peerd-runtime/tools/defs/read-result.js',
+  ]],
+  ['site-client definitions and result shaping', AUTHORITY_TOOL_ENTRIES, [
+    'peerd-runtime/controller-site-client-tools.js',
+    'peerd-runtime/tools/defs/site-client-run.js',
+    'peerd-runtime/tools/defs/site-client-read.js',
+    'peerd-runtime/tools/defs/site-client-write.js',
+    'peerd-runtime/tools/defs/site-capture.js',
+  ]],
+  ['introspection and skill', ['background/vault-kernel.js', ...AUTHORITY_TOOL_ENTRIES], [
+    'peerd-runtime/controller-introspection-tools.js',
+    'peerd-runtime/tools/defs/actor-list.js',
+    'peerd-runtime/tools/defs/inspect.js',
+    'peerd-runtime/skills/load-skill-tool.js',
+  ]],
+  ['scheduling tool', ['background/vault-kernel.js', ...AUTHORITY_TOOL_ENTRIES], [
+    'peerd-runtime/controller-schedule-tools.js',
+    'peerd-runtime/tools/defs/schedule-create.js',
+    'peerd-runtime/tools/defs/schedule-list.js',
+    'peerd-runtime/tools/defs/schedule-cancel.js',
+  ]],
+  ['dweb catalog', ['background/vault-kernel.js', ...AUTHORITY_TOOL_ENTRIES], [
+    'peerd-runtime/controller-dweb-tools.js',
+    'peerd-runtime/tools/defs/dweb-discover.js',
+    'peerd-runtime/tools/defs/dweb-share.js',
+    'peerd-runtime/tools/defs/dweb-install.js',
+    'peerd-runtime/tools/defs/dweb-peers.js',
+    'peerd-runtime/tools/defs/dweb-block.js',
+    'peerd-runtime/tools/defs/dweb-discovery.js',
+  ]],
+] as const);
+
 const exactReExports = (source: string) => [...source.matchAll(
   /export\s*\{([\s\S]*?)\}\s*from\s*['"]([^'"]+)['"];/g,
 )].map((match) => ({
@@ -84,7 +189,6 @@ describe('kernel turn ownership boundaries', () => {
     const modules = await modulesFor('background/vault-kernel.js');
     for (const module of [
       'peerd-runtime/authority.js',
-      'peerd-runtime/background.js',
       'peerd-runtime/kernel.js',
       'peerd-runtime/kernel-turn.js',
     ]) expect(modules.has(module), `service worker imports ${module}`).toBe(false);
@@ -261,10 +365,12 @@ describe('kernel turn ownership boundaries', () => {
 
     const controllerModules = await modulesFor('offscreen/controller-turn-runtime.js');
     for (const module of [
+      'peerd-engine/controller.js',
       'peerd-runtime/controller-tool-projection.js',
       'peerd-runtime/tools/metadata/authority.js',
       'peerd-runtime/tools/metadata/catalog.js',
     ]) expect(controllerModules.has(module), `controller graph omits ${module}`).toBe(true);
+    expect(controllerModules.has('peerd-engine/authority.js')).toBe(false);
 
     const driver = readFileSync(
       join(EXTENSION_ROOT, 'peerd-runtime/loop/turn-authority-driver.js'), 'utf8',
@@ -301,30 +407,25 @@ describe('kernel turn ownership boundaries', () => {
     expect(driver).not.toContain('REASONING_EFFORT_LEVELS');
   });
 
-  it('hosts actor tool semantics only in controller and isolated-worker graphs', async () => {
-    const actorSemanticModules = new Set([
-      'peerd-runtime/controller-actor-tools.js',
-      'peerd-runtime/tools/defs/actor-create.js',
-      'peerd-runtime/tools/defs/actor-tasks.js',
-      'peerd-runtime/tools/defs/actor-cancel.js',
-      'peerd-runtime/tools/defs/message-actor.js',
-    ]);
-    const authorityEntries = [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ];
-    for (const entry of authorityEntries) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => actorSemanticModules.has(module))).toEqual([]);
-    }
-
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      expect(modules.has('peerd-runtime/controller-actor-tools.js')).toBe(true);
-      for (const module of actorSemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
+  it.each(SEMANTIC_TOOL_FAMILIES)(
+    'hosts %s semantics only in controller and isolated-worker graphs',
+    async (family, authorityEntries, semanticModules) => {
+      const familyModules = new Set<string>(semanticModules);
+      for (const entry of authorityEntries) {
+        const modules = await modulesFor(entry);
+        expect(
+          [...modules].filter((module) => familyModules.has(module)),
+          `${entry} imports ${family}`,
+        ).toEqual([]);
+      }
+      for (const entry of CONTROLLER_TOOL_ENTRIES) {
+        const modules = await modulesFor(entry);
+        for (const module of semanticModules) {
+          expect(modules.has(module), `${entry} omits ${family} module ${module}`).toBe(true);
+        }
+      }
+    },
+  );
 
   it('keeps actor prompt, projection, and result shaping out of the orchestrator authority driver', async () => {
     const modules = await modulesFor('peerd-runtime/loop/turn-authority-driver.js');
@@ -359,31 +460,6 @@ describe('kernel turn ownership boundaries', () => {
     expect(driver).toContain('runtimeCapabilities');
   });
 
-  it('hosts Pod command/file semantics only in controller and isolated-worker graphs', async () => {
-    const podSemanticModules = new Set([
-      'peerd-runtime/controller-pod-tools.js',
-      'peerd-runtime/tools/defs/pod-exec.js',
-      'peerd-runtime/tools/defs/pod-status.js',
-      'peerd-runtime/tools/defs/pod-cancel.js',
-      'peerd-runtime/tools/defs/pod-read.js',
-      'peerd-runtime/tools/defs/pod-write.js',
-    ]);
-    const authorityEntries = [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ];
-    for (const entry of authorityEntries) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => podSemanticModules.has(module))).toEqual([]);
-    }
-
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of podSemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
   it('renders volatile temporal and foreground context only in the sealed controller', async () => {
     const authorityModules = await modulesFor('background/kernel-turn-authority-adapter.js');
     for (const module of [
@@ -405,140 +481,12 @@ describe('kernel turn ownership boundaries', () => {
     expect(driver).not.toContain('<active_tab>');
   });
 
-  it('hosts repository semantics only in controller and isolated-worker graphs', async () => {
-    const repositorySemanticModules = new Set([
-      'peerd-runtime/controller-repository-tools.js',
-      'peerd-runtime/tools/defs/pod-destroy.js',
-      'peerd-runtime/tools/defs/app-history.js',
-      'peerd-runtime/tools/defs/app-version.js',
-      'peerd-runtime/tools/defs/app-remote.js',
-    ]);
-    const authorityEntries = [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ];
-    for (const entry of authorityEntries) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => repositorySemanticModules.has(module))).toEqual([]);
-    }
-
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of repositorySemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
-  it('hosts WebVM semantics only in controller and isolated-worker graphs', async () => {
-    const vmSemanticModules = new Set([
-      'peerd-runtime/controller-vm-tools.js',
-      'peerd-runtime/tools/defs/vm-boot.js',
-      'peerd-runtime/tools/defs/vm-import.js',
-      'peerd-runtime/tools/defs/vm-write-file.js',
-      'peerd-runtime/tools/defs/vm-delete.js',
-    ]);
-    const authorityEntries = [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ];
-    for (const entry of authorityEntries) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => vmSemanticModules.has(module))).toEqual([]);
-    }
-
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of vmSemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
-  it('hosts Notebook semantics only in controller and isolated-worker graphs', async () => {
-    const notebookSemanticModules = new Set([
-      'peerd-runtime/controller-notebook-tools.js',
-      'peerd-runtime/tools/defs/js-notebook.js',
-      'peerd-runtime/tools/defs/js-write-file.js',
-      'peerd-runtime/tools/defs/js-read-file.js',
-      'peerd-runtime/tools/defs/js-delete.js',
-    ]);
-    const authorityEntries = [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ];
-    for (const entry of authorityEntries) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => notebookSemanticModules.has(module))).toEqual([]);
-    }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of notebookSemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
-  it('hosts App semantics only in controller and isolated-worker graphs', async () => {
-    const appSemanticModules = new Set([
-      'peerd-runtime/controller-app-tools.js',
-      'peerd-runtime/tools/defs/app-update.js',
-      'peerd-runtime/tools/defs/app-open.js',
-      'peerd-runtime/tools/defs/app-search.js',
-      'peerd-runtime/tools/defs/app-delete.js',
-      'peerd-runtime/tools/defs/app-write-file.js',
-      'peerd-runtime/tools/defs/app-read-file.js',
-      'peerd-runtime/tools/defs/app-list-files.js',
-      'peerd-runtime/tools/defs/app-delete-file.js',
-      'peerd-runtime/tools/defs/app-observe.js',
-      'peerd-runtime/tools/defs/app-act.js',
-      'peerd-runtime/tools/defs/app-code.js',
-    ]);
-    const authorityEntries = [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ];
-    for (const entry of authorityEntries) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => appSemanticModules.has(module))).toEqual([]);
-    }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of appSemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
-  it('hosts memory and todo semantics only in controller and isolated-worker graphs', async () => {
-    const persistenceSemanticModules = new Set([
-      'peerd-runtime/controller-persistence-tools.js',
-      'peerd-runtime/tools/defs/read-memory.js',
-      'peerd-runtime/tools/defs/remember.js',
-      'peerd-runtime/tools/defs/todo.js',
-      'peerd-runtime/todo/core.js',
-    ]);
-    for (const entry of [
-      'background/vault-kernel.js',
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ]) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => persistenceSemanticModules.has(module))).toEqual([]);
-    }
-    const authorityOwner = await modulesFor('background/kernel-turn-authority-adapter.js');
-    for (const module of [
-      'peerd-runtime/controller-persistence-tools.js',
-      'peerd-runtime/tools/defs/read-memory.js',
-      'peerd-runtime/tools/defs/remember.js',
-      'peerd-runtime/tools/defs/todo.js',
-    ]) expect(authorityOwner.has(module), `authority owner imports ${module}`).toBe(false);
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of persistenceSemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
   it('hosts page definitions only in controller and isolated-worker graphs', async () => {
     const pageSemanticModules = new Set([
       'peerd-runtime/controller-page-tools.js',
+      'peerd-runtime/tools/page-receipt.js',
+      'peerd-runtime/dom/action-result.js',
+      'peerd-runtime/dom/snapshot-diff.js',
       'peerd-runtime/tools/defs/open-tab.js',
       'peerd-runtime/tools/defs/read-page.js',
       'peerd-runtime/tools/defs/snapshot.js',
@@ -565,118 +513,32 @@ describe('kernel turn ownership boundaries', () => {
       const modules = await modulesFor(entry);
       for (const module of pageSemanticModules) expect(modules.has(module)).toBe(true);
     }
-  });
 
-  it('hosts document, web and result semantics only in controller graphs', async () => {
-    const resourceSemanticModules = new Set([
-      'peerd-runtime/controller-resource-tools.js',
-      'peerd-runtime/tools/defs/read-doc.js',
-      'peerd-runtime/tools/defs/fetch-url.js',
-      'peerd-runtime/tools/defs/read-result.js',
-    ]);
-    for (const entry of [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ]) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => resourceSemanticModules.has(module))).toEqual([]);
-    }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of resourceSemanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
+    const pageAuthorityPaths = [...new Bun.Glob('background/page-authority/*.js')
+      .scanSync({ cwd: EXTENSION_ROOT })];
+    const pageAuthoritySource = pageAuthorityPaths
+      .map((path) => readFileSync(join(EXTENSION_ROOT, path), 'utf8'))
+      .join('\n');
+    expect(pageAuthoritySource).not.toMatch(/export\s+const\s+\w+Tool\b/);
+    expect(pageAuthoritySource).not.toMatch(/Readonly<\{\s*execute\s*:/);
+    expect(pageAuthoritySource).not.toContain('content:');
+    for (const semanticPresenter of [
+      'composeTool(', 'wrapUntrusted(', 'excerptRelevant(', 'pagingFooter(',
+      'windowText(', 'formatPageBody(', 'diffSnapshots(', 'describeSource(',
+      'summarizeMutations(', 'loginGuidance(',
+    ]) expect(pageAuthoritySource, semanticPresenter).not.toContain(semanticPresenter);
 
-  it('hosts site-client definitions and result shaping only in controller graphs', async () => {
-    const semanticModules = new Set([
-      'peerd-runtime/controller-site-client-tools.js',
-      'peerd-runtime/tools/defs/site-client-run.js',
-      'peerd-runtime/tools/defs/site-client-read.js',
-      'peerd-runtime/tools/defs/site-client-write.js',
-      'peerd-runtime/tools/defs/site-capture.js',
-    ]);
-    for (const entry of [
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ]) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
-    }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of semanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
-  it('hosts introspection and skill semantics only in controller graphs', async () => {
-    const semanticModules = new Set([
-      'peerd-runtime/controller-introspection-tools.js',
-      'peerd-runtime/tools/defs/actor-list.js',
-      'peerd-runtime/tools/defs/inspect.js',
-      'peerd-runtime/skills/load-skill-tool.js',
-    ]);
-    for (const entry of [
-      'background/vault-kernel.js',
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ]) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
-    }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of semanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
-  it('keeps scheduling tool semantics out of authority graphs', async () => {
-    const semanticModules = new Set([
-      'peerd-runtime/controller-schedule-tools.js',
-      'peerd-runtime/tools/defs/schedule-create.js',
-      'peerd-runtime/tools/defs/schedule-list.js',
-      'peerd-runtime/tools/defs/schedule-cancel.js',
-    ]);
-    for (const entry of [
-      'background/vault-kernel.js',
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ]) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
-    }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of semanticModules) expect(modules.has(module)).toBe(true);
-    }
-  });
-
-  it('keeps dweb catalog semantics out of authority graphs', async () => {
-    const semanticModules = new Set([
-      'peerd-runtime/controller-dweb-tools.js',
-      'peerd-runtime/tools/defs/dweb-discover.js',
-      'peerd-runtime/tools/defs/dweb-share.js',
-      'peerd-runtime/tools/defs/dweb-install.js',
-      'peerd-runtime/tools/defs/dweb-peers.js',
-      'peerd-runtime/tools/defs/dweb-block.js',
-      'peerd-runtime/tools/defs/dweb-discovery.js',
-    ]);
-    for (const entry of [
-      'background/vault-kernel.js',
-      'background/kernel-turn-authority-adapter.js',
-      'background/controller-turn-bridge.js',
-      'background/offscreen-actor-client.js',
-    ]) {
-      const modules = await modulesFor(entry);
-      expect([...modules].filter((module) => semanticModules.has(module))).toEqual([]);
-    }
-    for (const entry of ['offscreen/controller-turn-runtime.js', 'offscreen/actor-worker-runtime.js']) {
-      const modules = await modulesFor(entry);
-      for (const module of semanticModules) expect(modules.has(module)).toBe(true);
-    }
+    const controllerPageSource = [
+      'peerd-runtime/tools/page-receipt.js',
+      ...[...new Bun.Glob('peerd-runtime/tools/defs/*.js').scanSync({ cwd: EXTENSION_ROOT })]
+        .filter((path) => pageSemanticModules.has(path)),
+      'peerd-runtime/tools/web/screenshot.js',
+      'peerd-runtime/tools/web/view.js',
+    ].map((path) => readFileSync(join(EXTENSION_ROOT, path), 'utf8')).join('\n');
+    for (const semanticPresenter of [
+      'wrapUntrusted', 'excerptRelevant', 'pagingFooter', 'diffSnapshots',
+      'describeSource', 'summarizeMutations', 'loginGuidance',
+    ]) expect(controllerPageSource, semanticPresenter).toContain(semanticPresenter);
   });
 
   it('keeps controller-local semantics out of authority graphs and has no generic effect lane', async () => {

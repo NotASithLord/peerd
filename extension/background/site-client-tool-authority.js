@@ -65,7 +65,9 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
   const readRecord = async (/** @type {string} */ origin) => {
     if (!await authorized(origin)) return { refused: true, record: null };
     if (!ctx?.siteClients?.get) return { unavailable: true, record: null };
-    const record = await ctx.siteClients.get(origin).catch(() => null);
+    let record;
+    try { record = await ctx.siteClients.get(origin); }
+    catch { return { unavailable: true, record: null }; }
     if (!await authorized(origin)) return { refused: true, record: null };
     return { record };
   };
@@ -75,7 +77,7 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
       requireOrigin(origin);
       const read = await readRecord(origin);
       if (read.refused) return refusal();
-      if (read.unavailable) return { ok: false, error: 'site_clients_unavailable' };
+      if (read.unavailable) return preEffectFailure('site_clients_unavailable');
       shared.priorForWrite = read.record;
       shared.priorLoaded = true;
       return { ok: true, record: read.record };
@@ -245,7 +247,9 @@ export const createSiteClientToolAuthority = ({ binding, ctx, signal, shared = {
         outcomeKind: 'pre-effect-failure',
       };
       if (!await authorized(origin)) return refusal();
-      const live = await ctx.siteClients.get(origin).catch(() => undefined);
+      let live;
+      try { live = await ctx.siteClients.get(origin); }
+      catch { return preEffectFailure('site_clients_unavailable'); }
       if (!await authorized(origin)) return refusal();
       if (!sameCanonicalStructuredClone(live ?? null, shared.priorForWrite ?? null, {
         maxBytes: 2 * 1024 * 1024,

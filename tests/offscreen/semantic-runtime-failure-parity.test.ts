@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
 import { semanticCallAuditEntry } from '../../extension/background/semantic-call-audit.js';
-import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
+import { createControllerTurnRuntime } from '../../extension/offscreen/controller-turn-runtime.js';
 import { startActorWorker } from '../../extension/offscreen/actor-worker-runtime.js';
 import { describeActorExecution } from '../../extension/offscreen/actor-runner.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
@@ -10,6 +10,7 @@ import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fi
 const projection: any = projectControllerToolSurface({
   surface: 'selection', toolNames: ['now'],
 });
+const turnRuntime = createControllerTurnRuntime();
 
 const makeModelCall = () => {
   let round = 0;
@@ -89,9 +90,9 @@ const runMain = async () => {
   const getClient = async () => ({
     call: async (capability: string, payload: any, options: any) => {
       const authority = bridge.authorize(payload);
-      return runControllerTurn(payload, {
+      return turnRuntime.runControllerTurn(payload, {
         signal: options.signal, authority,
-        kernelCall: (operation, value) => bridge.handleKernelCall(operation, value, {
+        kernelCall: (operation: string, value: any) => bridge.handleKernelCall(operation, value, {
           capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
         }),
       });

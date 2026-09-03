@@ -427,7 +427,6 @@ export {
   // Firefox-parity capture: CDP when the pool is wired, else the
   // chrome.scripting DOM-walk pseudo-snapshot. Same contract either way.
   captureSnapshot,
-  describeSource,
   domWalkInjected,
   activityOverlayInjected,
   clearActivityOverlayInjected,
@@ -441,7 +440,6 @@ export {
 // used by the background-owned activity overlay before it injects UI.
 export {
   browserNetworkGuardUnavailableResult,
-  browserNetworkGuardPostNavigationResult,
   classifyBrowserAutomationTarget,
   isAddressableBrowserTab,
 } from './tools/browser-automation-policy.js';

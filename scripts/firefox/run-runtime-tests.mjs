@@ -1477,11 +1477,13 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     && typeof message.content === 'string' && message.content.includes(FINAL_REPLY_CANARY)),
     'the parent chat receives the actor result and returns a final reply');
   const actorExecution = actorProof.state?.capabilities?.actorExecution;
-  assert(actorExecution?.status === 'temporarily_unavailable'
+  // why: this state is sampled after real actor demand verified the dedicated
+  // Worker. Only the pre-demand state/get probe below must stay cold/deferred.
+  assert(actorExecution?.status === 'available'
     && actorExecution?.host === 'background-page-worker'
-    && actorExecution?.reason === 'controller-not-ready'
-    && actorExecution?.retryable === true,
-  'the cold Firefox state route does not retain controller availability after actor demand',
+    && actorExecution?.reason === null
+    && actorExecution?.retryable === false,
+  'Firefox reports verified actor availability after real actor demand',
   JSON.stringify(actorExecution));
   for (const facility of [
     'sealedJobs', 'documentReader', 'pdfOcr', 'localWebGpuHost', 'dwebMesh',

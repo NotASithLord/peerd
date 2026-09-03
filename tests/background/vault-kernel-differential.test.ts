@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { makeVaultRoutes } from '../../extension/background/routes/vault.js';
 import {
   makeKernelRouteProvenance,
   makeVaultKernelMessageHandler,
@@ -23,23 +22,11 @@ import {
   VaultNotInitializedError,
   WrongPassphraseError,
 } from '../../extension/peerd-egress/vault/errors.js';
-import { base64ToBytes, bytesToBase64 } from '../../extension/shared/util.js';
+import { base64ToBytes } from '../../extension/shared/util.js';
 
-const PASS = 'correct-horse-battery-staple';
 const PRF = new Uint8Array(32).fill(0x51);
 const CREDENTIAL = new Uint8Array([1, 2, 3, 4]);
 const SALT = new Uint8Array(32).fill(0x72);
-
-const getVaultGateStatus = async (vault: any) => {
-  const [prf, hasRecovery] = await Promise.all([
-    vault.prfStatus(), vault.hasRecoveryPassphrase(),
-  ]);
-  return {
-    initialized: prf.enrolled || hasRecovery,
-    prfEnrolled: prf.enrolled,
-    hasRecovery,
-  };
-};
 
 const fakeArgon2 = async ({ passphrase, salt, memKiB, iters, parallelism }: any) => {
   const head = new TextEncoder().encode(`${passphrase}|${memKiB}|${iters}|${parallelism}|`);
@@ -90,7 +77,6 @@ const deferredVaultEffects = {
 };
 
 const makeLane = (
-  kind: 'legacy'|'kernel',
   vaultOver: Record<string, any> = {},
   depsOver: Record<string, any> = {},
 ) => {
@@ -118,27 +104,13 @@ const makeLane = (
     ...errors,
     ...depsOver,
   };
-  const routes = kind === 'kernel'
-    ? makeVaultKernelRoutes({ ready: Promise.resolve(), deps })
-    : makeVaultRoutes(deps);
+  const routes = makeVaultKernelRoutes({ ready: Promise.resolve(), deps });
   return { routes, vault, kv, sessionCache, audit, pushes };
-};
-
-const twin = () => ({ legacy: makeLane('legacy'), kernel: makeLane('kernel') });
-const both = async (
-  lanes: ReturnType<typeof twin>,
-  route: string,
-  message: Record<string, any> = {},
-) => {
-  const legacy = await lanes.legacy.routes[route](message);
-  const kernel = await lanes.kernel.routes[route](message);
-  expect(kernel).toEqual(legacy);
-  return kernel;
 };
 
 describe('vault authority kernel differential parity', () => {
   test('selects every vault lifecycle route and no confirmation/semantic route', () => {
-    const lane = makeLane('kernel');
+    const lane = makeLane();
     expect(Object.keys(lane.routes)).toEqual([...VAULT_KERNEL_ROUTE_NAMES]);
     expect(lane.routes['confirm/answer']).toBeUndefined();
     expect(lane.routes['agent/send']).toBeUndefined();
@@ -146,7 +118,7 @@ describe('vault authority kernel differential parity', () => {
 
   test('explicit kernel custody hooks replace only the deferred lifecycle seams', async () => {
     const calls: string[] = [];
-    const lane = makeLane('kernel', {}, {
+    const lane = makeLane({}, {
       onInitialized: async () => { calls.push('initialize'); },
       onUnlocked: async (reason: string) => { calls.push(reason); },
       onLocked: async () => { calls.push('lock'); },
@@ -159,87 +131,6 @@ describe('vault authority kernel differential parity', () => {
       .toEqual({ ok: true });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(calls).toEqual(['initialize', 'lock', 'unlock']);
-  });
-
-  test('passphrase first install, manual lock, errors, and unlock match legacy', async () => {
-    const lanes = twin();
-    await both(lanes, 'vault/initialize', { passphrase: PASS });
-    expect(lanes.kernel.audit).toEqual(lanes.legacy.audit);
-    expect(await getVaultGateStatus(lanes.kernel.vault))
-      .toEqual(await getVaultGateStatus(lanes.legacy.vault));
-    await both(lanes, 'vault/lock');
-    expect(lanes.kernel.vault.lockReason()).toBe('manual');
-    expect(lanes.kernel.pushes).toEqual(lanes.legacy.pushes);
-    await both(lanes, 'vault/unlock', { passphrase: 'wrong-passphrase' });
-    await both(lanes, 'vault/unlock', { passphrase: PASS });
-    expect(lanes.kernel.vault.isLocked()).toBe(false);
-    expect(lanes.kernel.audit).toEqual(lanes.legacy.audit);
-  });
-
-  test('passkey-only first install, PRF status, lock, and unlock match legacy', async () => {
-    const lanes = twin();
-    const enrollment = {
-      credentialId: bytesToBase64(CREDENTIAL),
-      prfSalt: bytesToBase64(SALT),
-      prfOutput: bytesToBase64(PRF),
-      transports: ['internal'],
-    };
-    await both(lanes, 'vault/initializeWithPasskey', enrollment);
-    await both(lanes, 'vault/prfStatus');
-    expect(lanes.kernel.audit).toEqual(lanes.legacy.audit);
-    expect(await getVaultGateStatus(lanes.kernel.vault)).toEqual({
-      initialized: true, prfEnrolled: true, hasRecovery: false,
-    });
-    await both(lanes, 'vault/lock');
-    await both(lanes, 'vault/unlockPrf', { prfOutput: bytesToBase64(new Uint8Array(32)) });
-    await both(lanes, 'vault/unlockPrf', { prfOutput: bytesToBase64(PRF) });
-    expect(lanes.kernel.vault.isLocked()).toBe(false);
-    expect(lanes.kernel.audit).toEqual(lanes.legacy.audit);
-  });
-
-  test('recovery, enroll, and disable operations retain exact legacy results/audit', async () => {
-    const lanes = twin();
-    await both(lanes, 'vault/initializeWithPasskey', {
-      credentialId: bytesToBase64(CREDENTIAL),
-      prfSalt: bytesToBase64(SALT),
-      prfOutput: bytesToBase64(PRF),
-    });
-    await both(lanes, 'vault/setRecoveryPassphrase', { passphrase: PASS });
-    await both(lanes, 'vault/disablePrf');
-    expect(await getVaultGateStatus(lanes.kernel.vault)).toEqual({
-      initialized: true, prfEnrolled: false, hasRecovery: true,
-    });
-    await both(lanes, 'vault/enrollPrf', {
-      credentialId: bytesToBase64(CREDENTIAL),
-      prfSalt: bytesToBase64(SALT),
-      prfOutput: bytesToBase64(PRF),
-    });
-    expect(lanes.kernel.audit).toEqual(lanes.legacy.audit);
-  });
-
-  test('failed passkey initialization locks and purges the exact partial token', async () => {
-    class HardwareFailure extends Error {}
-    const calls = { legacy: { lock: 0, purge: 0 }, kernel: { lock: 0, purge: 0 } };
-    const make = (kind: 'legacy'|'kernel') => {
-      const deps = {
-        vault: {
-          initializeWithPrfOnly: async () => { throw new HardwareFailure('hardware'); },
-          lock: () => { calls[kind].lock += 1; },
-        },
-        auditLog: { append: async () => {} },
-        kv: {}, idb: {}, base64ToBytes,
-        purgeVaultBlob: async () => { calls[kind].purge += 1; },
-        sessionCache: {}, pushState: () => {}, ...deferredVaultEffects, ...errors,
-      };
-      return kind === 'kernel'
-        ? makeVaultKernelRoutes({ ready: Promise.resolve(), deps })
-        : makeVaultRoutes(deps);
-    };
-    const message = { credentialId: 'AQ==', prfSalt: 'Ag==', prfOutput: 'Aw==' };
-    await expect(make('legacy')['vault/initializeWithPasskey'](message)).rejects.toThrow('hardware');
-    await expect(make('kernel')['vault/initializeWithPasskey'](message)).rejects.toThrow('hardware');
-    expect(calls.kernel).toEqual(calls.legacy);
-    expect(calls.kernel).toEqual({ lock: 1, purge: 1 });
   });
 });
 

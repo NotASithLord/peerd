@@ -4,12 +4,6 @@ import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
 import { PROVIDER_EGRESS_MANIFEST } from './provider-egress-manifest.js';
 
-const maskProviderKey = (/** @type {unknown} */ value) => {
-  const key = String(value ?? '');
-  return key.length <= 11 ? `${key.length} chars`
-    : `${key.slice(0, 7)}…${key.slice(-3)} · ${key.length} chars`;
-};
-
 const MUTATIONS = new Set([
   'semantic.memory.delete-all', 'semantic.memory.write', 'semantic.memory.delete',
   'semantic.memory.approve', 'semantic.memory.dismiss',
@@ -54,10 +48,9 @@ export const createKernelSemanticAuthority = ({
       .map(async ([provider, policy]) => {
         let key = null;
         try { if (policy.credential) key = await vault.getSecret(policy.credential); } catch {}
-        return [provider, {
-          hasKey: policy.credential === null || !!key,
-          keyPreview: key ? maskProviderKey(key) : null,
-        }];
+        // why: even masked fragments and length are properties of plaintext.
+        // The sealed semantic controller needs only credential readiness.
+        return [provider, { hasKey: policy.credential === null || !!key }];
       })));
   };
   const openApp = async (/** @type {any} */ payload) => {

@@ -72,9 +72,8 @@ const semanticHostRoutesFor = (channel) => {
   const rows = SEMANTIC_HOST_ROUTE_MANIFEST.filter((row) => row.channels.includes(channel));
   const routes = rows.map((row) => row.route);
   if (routes.length === 0 || new Set(routes).size !== routes.length
-      || rows.some((row) => !exactKeys(row, ['channels', 'route', 'source'])
+      || rows.some((row) => !exactKeys(row, ['channels', 'route'])
         || typeof row.route !== 'string' || row.route.length === 0
-        || typeof row.source !== 'string' || row.source.length === 0
         || !Array.isArray(row.channels) || row.channels.length === 0)) {
     fail('compact semantic host admission is invalid');
   }

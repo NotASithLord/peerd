@@ -130,8 +130,9 @@ the existing exact-tab, repository-coordinated editor verbs. This is the default
 extension pattern: feature validation and workflow belong in the lazy document
 that presents the feature, while the worker keeps only small reusable authority
 verbs. New App APIs should compose those verbs, not add worker controllers. Git
-import follows the same split: Library owns clone/open UX and the worker exposes
-only the vault-gated repository bootstrap operation.
+import follows the same split: Library owns clone/open UX, a disposable offscreen
+operation Worker owns repository and OPFS logic, and the service worker retains
+the keyed mutation, credential, network-policy, and lifecycle custody.
 
 This document editor is an example, not a special App kind. A game can expose
 lobby and movement actions; a diagrammer can expose nodes and layout commands;

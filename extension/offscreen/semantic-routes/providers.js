@@ -28,7 +28,6 @@ export const dispatchProviderSemanticRoute = async (route, _message, options) =>
         hasKey: key?.hasKey === true,
         keyless: provider.keyless,
         liveModels: provider.liveModels,
-        keyPreview: typeof key?.keyPreview === 'string' ? key.keyPreview : null,
       };
     }),
   };

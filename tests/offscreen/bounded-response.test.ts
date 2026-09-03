@@ -59,4 +59,50 @@ describe('bounded offscreen response reader', () => {
       headers: { get: () => null }, body: null,
     }, 10)).toEqual(new Uint8Array());
   });
+
+  test('cancels a pending stream read promptly when its exact signal aborts', async () => {
+    const controller = new AbortController();
+    let cancelled = false;
+    let releaseRead!: (value: any) => void;
+    const pending = readBoundedResponseBytes({
+      headers: { get: () => null },
+      body: {
+        getReader: () => ({
+          read: () => new Promise((resolve) => { releaseRead = resolve; }),
+          cancel: async () => { cancelled = true; },
+          releaseLock: () => {},
+        }),
+      },
+    }, 10, { signal: controller.signal });
+    controller.abort(new DOMException('stopped', 'AbortError'));
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', message: 'stopped' });
+    expect(cancelled).toBe(true);
+    releaseRead({ done: true });
+  });
+
+  test('Stop does not wait for a reader cancellation promise that never settles', async () => {
+    const controller = new AbortController();
+    let cancelObserved = false;
+    const pending = readBoundedResponseBytes({
+      headers: { get: () => null },
+      body: {
+        getReader: () => ({
+          read: () => new Promise(() => {}),
+          cancel: () => {
+            cancelObserved = true;
+            return new Promise(() => {});
+          },
+          releaseLock: () => {},
+        }),
+      },
+    }, 10, { signal: controller.signal });
+    let rejected = false;
+    pending.catch(() => { rejected = true; });
+    controller.abort(new DOMException('stopped now', 'AbortError'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(rejected).toBe(true);
+    expect(cancelObserved).toBe(true);
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', message: 'stopped now' });
+  });
 });

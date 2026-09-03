@@ -23,7 +23,7 @@
 // confirm. Nothing here executes anything — it only shapes values.
 
 import { wrapUntrusted } from '../tools/prompt-wrap.js';
-import { normalizeApiOrigin } from '../actor/web-actor.js';
+import { normalizeApiOrigin } from '/shared/api-origin.js';
 
 // The canonical owned-origin for a site client IS the API-actor origin: a public
 // dotted host, https-or-http, reduced to scheme://host[:port] — immune to

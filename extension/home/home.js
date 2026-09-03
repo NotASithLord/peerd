@@ -742,7 +742,7 @@ const HomeApp = {
     // latch flips on the next state push. It deliberately does NOT live in the
     // side panel, and the panel is a front door of its own, so the SW closes
     // the latch for any install that already has chat history
-    // (background/onboarding-reconcile.js). Net: the funnel only ever greets a
+    // (background/vault-kernel-core.js). Net: the funnel only ever greets a
     // genuinely fresh install; a panel-first user who clicks Home mid-use lands
     // on home, never on a surprise re-onboarding.
     if (needsOnboarding(currentState)) {

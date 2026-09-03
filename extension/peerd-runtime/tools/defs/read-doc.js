@@ -71,6 +71,34 @@ const boundedDocText = (/** @type {string} */ text) => {
   };
 };
 
+const DOCUMENT_FAILURE_GUIDANCE = Object.freeze({
+  doc_reader_unavailable: 'Document conversion is not available in this browser build. If the document has an HTML version, read that instead.',
+  legacy_binary_format: 'Legacy Office binary files are not supported. Ask for a modern .docx, .xlsx, or .pptx export, or convert the file in a WebVM.',
+  unsupported_format: 'This file format is not supported by read_doc. Ask for a PDF or modern structured-document export.',
+  unreadable_container: 'The document container is unreadable, encrypted, corrupt, or uses unsupported compression. Ask for an unencrypted modern export.',
+  parse_failed: 'The recognized document could not be parsed. Try a fresh export or another copy.',
+  fetch_failed: 'The document could not be fetched. Verify that the direct URL is reachable without a redirect or login wall.',
+  is_web_content: 'The URL served a web page or plain text, not a document file. Use fetch_url or open it in a tab.',
+  ocr_not_installed: 'OCR is not installed. Retry with the automatic or pdf.js engine, or install OCR support.',
+  pdf_extract_failed: 'The PDF could not be parsed. Try another copy or a fresh PDF export.',
+  doc_extract_aborted: 'Document extraction stopped.',
+  doc_extract_failed: 'Document extraction failed before any readable content was returned.',
+});
+
+/** @param {unknown} value */
+const stableDocumentFailure = (value) => {
+  const raw = typeof value === 'string' ? value : '';
+  const authorityCode = raw.startsWith('invalid_url') ? 'invalid_url'
+    : raw.startsWith('unsupported_scheme') ? 'unsupported_scheme' : raw;
+  if (!authorityCode || authorityCode === 'doc_read_failed') {
+    return { error: 'doc_extract_failed', content: DOCUMENT_FAILURE_GUIDANCE.doc_extract_failed };
+  }
+  const code = authorityCode.startsWith('pdf_extract_failed') ? 'pdf_extract_failed'
+    : authorityCode.startsWith('doc_extract_failed') ? 'doc_extract_failed' : authorityCode;
+  const content = DOCUMENT_FAILURE_GUIDANCE[/** @type {keyof typeof DOCUMENT_FAILURE_GUIDANCE} */ (code)];
+  return content ? { error: code, content } : { error: code };
+};
+
 /** @type {import('/shared/tool-types.js').Tool} */
 export const readDocTool = composeTool("read_doc", {
 
@@ -95,17 +123,10 @@ export const readDocTool = composeTool("read_doc", {
       });
     } catch (e) {
       const err = /** @type {{ code?: string, message?: string }} */ (e);
-      // The failures ARE the API here: each names the tool that will work
-      // instead, so a wrong first guess costs one turn rather than a dead end.
-      // The message already carries the specifics (from peerd-runtime/doc's
-      // typed errors); the code is what the agent can branch on.
-      return { ok: false, error: err?.code ?? 'doc_read_failed', content: err?.message ?? String(e) };
+      return { ok: false, ...stableDocumentFailure(err?.code) };
     }
     if (extracted?.ok !== true) {
-      return {
-        ok: false, error: extracted?.error ?? 'doc_read_failed',
-        ...(extracted?.content ? { content: extracted.content } : {}),
-      };
+      return { ok: false, ...stableDocumentFailure(extracted?.error) };
     }
     const target = extracted.target;
     const result = extracted.result;

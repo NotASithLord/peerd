@@ -27,13 +27,10 @@ import {
   originOfUrl,
   resolveTargetTab,
   scriptingTarget,
-  wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const queryDomTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const queryOwnedDomAuthority = async (args, ctx) => {
     if (!args?.selector || typeof args.selector !== 'string') {
       return { ok: false, error: 'selector_required' };
     }
@@ -62,14 +59,17 @@ export const queryDomTool = Object.freeze({
     const origin = originOfUrl(scriptResult.url || tab.url);
     return {
       ok: true,
-      content: wrapUntrusted({
+      receipt: {
         origin,
-        tool: 'query_dom',
-        body: formatBody(scriptResult, args.selector, includeHidden),
-      }),
+        selector: args.selector,
+        includeHidden,
+        url: scriptResult.url,
+        matches: scriptResult.matches,
+        totalMatches: scriptResult.totalMatches,
+        truncated: scriptResult.truncated,
+      },
     };
-  },
-});
+};
 
 /**
  * @typedef {Object} QueryMatch
@@ -94,38 +94,6 @@ export const queryDomTool = Object.freeze({
  * @property {number} totalMatches
  * @property {boolean} truncated
  */
-
-/**
- * @param {QueryResult} snap
- * @param {string} selector
- * @param {boolean} includeHidden
- */
-const formatBody = (snap, selector, includeHidden) => {
-  const lines = [
-    `Selector: ${selector}`,
-    `URL: ${snap.url}`,
-    `Total matches: ${snap.totalMatches}${snap.truncated ? ' (truncated)' : ''}`,
-    includeHidden ? 'Mode: including hidden elements' : 'Mode: visible only',
-    '',
-  ];
-  if (snap.matches.length === 0) {
-    lines.push('(no matches)');
-    return lines.join('\n');
-  }
-  snap.matches.forEach((m, i) => {
-    lines.push(`[${i}] <${m.tag}>${m.visible ? '' : ' (hidden)'}`);
-    if (m.label) lines.push(`    label: ${m.label}`);
-    if (m.role) lines.push(`    role: ${m.role}`);
-    if (m.href) lines.push(`    href: ${m.href}`);
-    if (m.type) lines.push(`    type: ${m.type}`);
-    if (m.name) lines.push(`    name: ${m.name}`);
-    if (m.testid) lines.push(`    data-testid: ${m.testid}`);
-    if (m.value) lines.push(`    value: ${m.value}`);
-    lines.push(`    bbox: ${m.bbox}`);
-    lines.push(`    selector: ${m.selector}`);
-  });
-  return lines.join('\n');
-};
 
 // ───────────────────────────────────────────────────────────────────────
 // Injected function: runs in the page world. Self-contained, strict.

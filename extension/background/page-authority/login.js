@@ -33,10 +33,10 @@ import {
 } from '/peerd-runtime/browser-authority.js';
 import { clickInjected } from './click.js';
 
-const beforeLoginEffect = (/** @type {string} */ error, /** @type {string} */ content = '') => ({
+const beforeLoginEffect = (/** @type {string} */ error, /** @type {any} */ structured = null) => ({
   ok: false,
   error,
-  ...(content ? { content } : {}),
+  ...(structured ? { structured } : {}),
   performed: false,
   outcomeKnown: true,
   outcomeKind: 'pre-effect-failure',
@@ -46,22 +46,18 @@ const beforeLoginEffect = (/** @type {string} */ error, /** @type {string} */ co
 // why: binding a roaming actor to its relying-site origin is itself a durable
 // authority mutation. Every later refusal must retain that custody even when
 // no login click occurred.
-const afterLoginBinding = (/** @type {string} */ error, /** @type {string} */ content = '') => ({
+const afterLoginBinding = (/** @type {string} */ error) => ({
   ok: false,
   error,
-  ...(content ? { content } : {}),
   performed: true,
   outcomeKnown: true,
   outcomeKind: 'effect-completed',
   retryable: false,
 });
 
-const afterLoginBindingUnknown = (
-  /** @type {string} */ error, /** @type {string} */ content = '',
-) => ({
+const afterLoginBindingUnknown = (/** @type {string} */ error) => ({
   ok: false,
   error,
-  ...(content ? { content } : {}),
   performed: true,
   outcomeKnown: false,
   outcomeKind: 'host-lost',
@@ -77,10 +73,8 @@ const afterLoginBindingUnknown = (
  * @typedef {{ domRefs?: DomRefs }} DomCtxExtras
  */
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const loginTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const performConfirmedOwnedLoginAuthority = async (args, ctx) => {
     // 1) Resolve the tab through the DOM chokepoint (runs the origin lock /
     //    judgeLanding, fails closed for a vanished actor tab).
     const tab = await resolveTargetTab(args, ctx);
@@ -118,12 +112,12 @@ export const loginTool = Object.freeze({
     //    input, so scripting is fine on every channel.
     const refStr = typeof args?.ref === 'string' && args.ref.trim() ? args.ref.trim() : null;
     const entry = refStr ? (domRefs?.resolve?.(tab.id, refStr) ?? null) : null;
-    if (refStr && !entry) return beforeLoginEffect(`stale_ref: ${refStr}: re-run snapshot on this tab first`);
+    if (refStr && !entry) return beforeLoginEffect('stale_ref', { ref: refStr });
     const walkId = entry?.walkId ?? null;
     const selector = typeof args?.selector === 'string' && args.selector.trim() ? args.selector : null;
     const nth = Number.isInteger(args?.nth) && args.nth >= 0 ? args.nth : 0;
     if (walkId == null && !selector) {
-      return beforeLoginEffect('login_target_not_found', 'Provide a snapshot {ref} (with a walk id) or a CSS {selector} for the sign-in element.');
+      return beforeLoginEffect('login_target_not_found');
     }
 
     let descriptor;
@@ -138,7 +132,7 @@ export const loginTool = Object.freeze({
       if (!r.ok) {
         // A resolution miss is "not found"; anything else surfaces its reason.
         if (/^no_match|^stale_ref|^nth_out_of_range|^selector_or_ref_required/.test(String(r.error))) {
-          return beforeLoginEffect('login_target_not_found', r.error);
+          return beforeLoginEffect('login_target_not_found');
         }
         return beforeLoginEffect(`login_read_failed: ${r.error}`);
       }
@@ -152,7 +146,7 @@ export const loginTool = Object.freeze({
     //    no click, and the user/actor learns exactly why.
     const v = classifyLoginAffordance(descriptor, { isKnownIdp });
     if (!v.supported) {
-      return beforeLoginEffect('login_unsupported', v.reason);
+      return beforeLoginEffect('login_unsupported', { reason: v.reason });
     }
 
     // 6) ALWAYS CONFIRM: UNCONDITIONAL. Call ctx.confirm DIRECTLY (like
@@ -161,7 +155,9 @@ export const loginTool = Object.freeze({
     //    verified classifier (step 5), so the summary cannot be spoofed by the model.
     const confirmAny = /** @type {((p: Record<string, unknown>, signal?: AbortSignal) => Promise<'yes_once'|'yes_session'|'no'|boolean>) | undefined} */ (
       /** @type {unknown} */ (ctx.confirm));
-    if (!confirmAny) return beforeLoginEffect('login_declined', 'No confirmation channel available for a sign-in.');
+    if (!confirmAny) {
+      return beforeLoginEffect('login_declined', { reason: 'confirmation_unavailable' });
+    }
     const summary = v.method === 'passkey'
       ? `Begin a passkey / security-key sign-in on ${origin}? You'll complete it with your device.`
       : v.verified === true && v.idpOrigin
@@ -184,7 +180,7 @@ export const loginTool = Object.freeze({
       sessionId: ctx.session?.sessionId ?? null,
     }, ctx.abortSignal);
     if (ans !== 'yes_once' && ans !== 'yes_session' && ans !== true) {
-      return beforeLoginEffect('login_declined', 'User declined the sign-in.');
+      return beforeLoginEffect('login_declined', { reason: 'declined' });
     }
     if (ctx.abortSignal?.aborted) return beforeLoginEffect('login_aborted');
     const livePermission = typeof ctx.readAuthorityPermission === 'function'
@@ -192,7 +188,6 @@ export const loginTool = Object.freeze({
       : ctx.permission;
     if (livePermission?.mode !== 'act') return {
       ok: false, error: 'plan_mode_refused',
-      content: 'Permission changed before the sign-in action could start.',
       outcomeKind: 'pre-effect-failure', retryable: false,
     };
 
@@ -204,16 +199,13 @@ export const loginTool = Object.freeze({
     if (!authorizedTab?.id) return beforeLoginEffect('login_target_gone');
     if (ctx.abortSignal?.aborted) return beforeLoginEffect('login_aborted');
     if (originOfUrl(authorizedTab.url) !== origin) {
-      return beforeLoginEffect('login_origin_changed', 'the page moved during the confirm; re-run login after a fresh snapshot.');
+      return beforeLoginEffect('login_origin_changed');
     }
     const originAuthorized = await ctx.authorizeSignInOrigin?.(origin, ctx.abortSignal);
     if (ctx.abortSignal?.aborted) return originAuthorized === true
       ? afterLoginBinding('login_aborted') : beforeLoginEffect('login_aborted');
     if (originAuthorized !== true) {
-      return beforeLoginEffect(
-        'login_origin_authority_refused',
-        'The relying-site boundary could not be verified after confirmation. Re-run login from a fresh page snapshot.',
-      );
+      return beforeLoginEffect('login_origin_authority_refused');
     }
 
     // 7) INITIATE. peerd AUTO-CLICKS only when it has (a) VERIFIED the destination is
@@ -239,10 +231,7 @@ export const loginTool = Object.freeze({
       if (v.method === 'passkey') {
         return {
           ok: true,
-          endTurn: true,
-          content: 'Finish signing in in the open tab. Click the passkey or security-key button and '
-            + 'complete the prompt on your device. peerd never sees your credential. When you are done, '
-            + 'tell peerd to continue.',
+          receipt: { kind: 'manual-passkey', origin },
         };
       }
       if (v.verified === true && v.idpOrigin) {
@@ -254,23 +243,19 @@ export const loginTool = Object.freeze({
             : afterLoginBindingUnknown('login_aborted');
         }
         if (armed !== true) {
-          return afterLoginBinding(
-            'login_excursion_authority_refused',
-            'The verified provider step could not be authorized. Finish signing in yourself, then tell peerd to continue.',
-          );
+          return afterLoginBinding('login_excursion_authority_refused');
         }
       }
       // SSO, not auto-clickable. Be non-committal about the destination when unverified
       // Peerd must NOT vouch for where the button leads.
-      const provider = v.provider || 'your provider';
-      const guidance = v.verified === true
-        ? `Click the ${provider} sign-in button. peerd cannot read or act on ${v.idpOrigin}. `
-          + `When this tab returns to ${origin}, tell peerd to continue. `
-        : `Click the sign-in button only if you trust this page. peerd could not verify that it leads to ${provider}, so peerd cannot follow the destination. When you are done, tell peerd to continue. `;
       return {
         ok: true,
-        endTurn: true,
-        content: `Finish signing in in the open tab. ${guidance}peerd never sees your credential.`,
+        receipt: {
+          kind: 'manual-sso', origin,
+          provider: v.provider || 'your provider',
+          verified: v.verified === true,
+          idpOrigin: v.verified === true ? v.idpOrigin ?? null : null,
+        },
       };
     }
 
@@ -281,13 +266,13 @@ export const loginTool = Object.freeze({
     const tab2 = await resolveTargetTab(args, ctx);
     if (!tab2?.id) return afterLoginBinding('login_target_gone');
     if (originOfUrl(tab2.url) !== origin) {
-      return afterLoginBinding('login_origin_changed', 'the page moved during the confirm; re-run login after a fresh snapshot.');
+      return afterLoginBinding('login_origin_changed');
     }
     let d2;
     try {
       const rr = await scripting.executeScript({ target: scriptingTarget(tab2), func: loginTargetReader, args: [null, 0, walkId] });
       const r2 = rr[0]?.result;
-      if (!r2 || !r2.ok) return afterLoginBinding('login_affordance_changed', 'the sign-in element changed after you approved; re-run.');
+      if (!r2 || !r2.ok) return afterLoginBinding('login_affordance_changed');
       d2 = r2.descriptor;
     } catch (e) {
       return afterLoginBinding(`login_affordance_changed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
@@ -295,12 +280,12 @@ export const loginTool = Object.freeze({
     const v2 = classifyLoginAffordance(d2, { isKnownIdp });
     if (!(v2.supported && v2.method === v.method && v2.verified === true
       && v2.provider === v.provider && v2.idpOrigin === v.idpOrigin)) {
-      return afterLoginBinding('login_affordance_changed', 'the sign-in element changed after you approved; re-run.');
+      return afterLoginBinding('login_affordance_changed');
     }
     if (ctx.abortSignal?.aborted) return afterLoginBinding('login_aborted');
     const idpOrigin = v2.idpOrigin;
     if (!idpOrigin) {
-      return afterLoginBinding('login_affordance_changed', 'the verified provider destination is no longer available; re-run.');
+      return afterLoginBinding('login_affordance_changed');
     }
 
     const armed = await ctx.authorizeSignInExcursion?.(idpOrigin, ctx.abortSignal);
@@ -310,10 +295,7 @@ export const loginTool = Object.freeze({
         : afterLoginBindingUnknown('login_aborted');
     }
     if (armed !== true) {
-      return afterLoginBinding(
-        'login_excursion_authority_refused',
-        'The verified provider step could not be authorized. Re-run login from a fresh page snapshot.',
-      );
+      return afterLoginBinding('login_excursion_authority_refused');
     }
 
     const permissionRefusal = await ctx.assertPageMutationPermission?.();
@@ -322,7 +304,6 @@ export const loginTool = Object.freeze({
       if (!revoked) return afterLoginBindingUnknown('login_excursion_cleanup_unverified');
       return afterLoginBinding(
         permissionRefusal.error ?? permissionRefusal.code ?? 'login_permission_refused',
-        permissionRefusal.content,
       );
     }
 
@@ -358,13 +339,10 @@ export const loginTool = Object.freeze({
       details: { origin, method: v.method, provider: v.provider, idpOrigin },
     }).catch(() => {});
 
-    // 9) RETURN a system-authored plain success. No untrusted page text is emitted,
-    //    so no fence is needed: keep the message peerd-authored.
+    // 9) Return only a raw authority receipt; controller-owned semantics add
+    // the system-authored handoff guidance.
     return {
       ok: true,
-      endTurn: true,
-      content: `Finish signing in in the open tab. peerd is paused and cannot read or act on ${idpOrigin}. `
-        + `When this tab returns to ${origin}, tell peerd to continue. peerd never sees your credential.`,
+      receipt: { kind: 'auto-sso', origin, idpOrigin },
     };
-  },
-});
+};

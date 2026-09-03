@@ -518,6 +518,10 @@ const stateSnapshot = async () => {
     actorHost: kernelFirefox ? 'background-page-worker' : 'offscreen-document-worker',
     runtimeCapabilities,
     actorProjection,
+    // why: once the demand plane is live, its actor host is the authority for
+    // isolation health. Retaining the cold-shell placeholder would tell users
+    // actor work is paused even while dedicated workers are actively running.
+    actorIsolation: controllerRelays()?.getActorIsolation?.() ?? null,
   });
 };
 
@@ -679,6 +683,7 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     vaultReady,
     kernelReady,
     providerProjection,
+    closePanel: closeKernelPanel,
     pushState,
     postChatNote,
     confirmation: confirmation.coordinator,

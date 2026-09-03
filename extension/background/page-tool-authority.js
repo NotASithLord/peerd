@@ -1,17 +1,17 @@
 // @ts-check
 
-import { openTabTool } from './page-authority/open-tab.js';
-import { readPageTool } from './page-authority/read-page.js';
-import { snapshotTool } from './page-authority/snapshot.js';
-import { readStateTool } from './page-authority/read-state.js';
-import { watchChangesTool } from './page-authority/watch-changes.js';
-import { queryDomTool } from './page-authority/query-dom.js';
-import { navigateTool } from './page-authority/navigate.js';
-import { typeTool } from './page-authority/type.js';
-import { clickTool } from './page-authority/click.js';
-import { loginTool } from './page-authority/login.js';
-import { captureTool } from './page-authority/capture.js';
-import { viewTool } from './page-authority/view.js';
+import { openProtectedBackgroundTabAuthority } from './page-authority/open-tab.js';
+import { readOwnedPageAuthority } from './page-authority/read-page.js';
+import { captureOwnedAccessibilityTreeAuthority } from './page-authority/snapshot.js';
+import { readOwnedFrameworkStateAuthority } from './page-authority/read-state.js';
+import { drainOwnedDomChangesAuthority } from './page-authority/watch-changes.js';
+import { queryOwnedDomAuthority } from './page-authority/query-dom.js';
+import { navigateOwnedTabAuthority } from './page-authority/navigate.js';
+import { fillOwnedTargetAuthority } from './page-authority/type.js';
+import { clickOwnedTargetAuthority } from './page-authority/click.js';
+import { performConfirmedOwnedLoginAuthority } from './page-authority/login.js';
+import { captureForegroundPixelsAuthority } from './page-authority/capture.js';
+import { captureOwnedTabPixelsAuthority } from './page-authority/view.js';
 import {
   browserDocumentIdentity,
   classifyUgcUrl,
@@ -20,8 +20,6 @@ import {
   inspectTabToolCall,
   normalizeBrowserChildPolicyNotices,
   resolveTargetTab,
-  withAsyncBrowserChildPolicyNotices,
-  withBrowserChildPolicyNotices,
 } from '/peerd-runtime/browser-authority.js';
 import { controllerOperationAllowedInPermissionMode } from '/shared/controller-kernel-quota.js';
 
@@ -202,8 +200,8 @@ export const createPageToolAuthority = ({
       ugcRuleId: ugc.zone === 'ugc' ? ugc.ruleId : undefined,
     };
   };
-  const run = async (/** @type {string} */ operation, /** @type {{execute:Function}} */ handler) => {
-    if (binding.operation !== operation || typeof handler?.execute !== 'function') throw mismatch();
+  const run = async (/** @type {string} */ operation, /** @type {Function} */ execute) => {
+    if (binding.operation !== operation || typeof execute !== 'function') throw mismatch();
     // why: credential ceremonies are forbidden for inbound turns before even
     // a browser target probe. The lower login handler repeats the rule, but
     // this outer authority edge ensures the defense is operational rather
@@ -324,7 +322,7 @@ export const createPageToolAuthority = ({
           retryable: false,
         };
       }
-      let result = await handler.execute(args, {
+      let result = await execute(args, {
         ...ctx, abortSignal,
         assertPageMutationPermission: () => pageMutationPermissionRefusal(operation),
         // why: bind only this exact page operation. A page program may
@@ -376,10 +374,18 @@ export const createPageToolAuthority = ({
             notices = normalizeBrowserChildPolicyNotices(consumeChildNotices(tabId));
           }
         }
-        const { browserChildPolicyNotices: _hostOnly, ...visibleResult } = result ?? {};
-        result = withBrowserChildPolicyNotices(visibleResult, [...embedded, ...notices]);
+        const { browserChildPolicyNotices: _hostOnly, ...authorityResult } = result ?? {};
+        const currentNotices = [...embedded, ...notices];
+        result = {
+          ...authorityResult,
+          ...(currentNotices.length > 0
+            ? { browserChildPolicyNotices: currentNotices }
+            : {}),
+        };
       }
-      result = withAsyncBrowserChildPolicyNotices(result, priorNotices);
+      if (priorNotices.length > 0) {
+        result = { ...result, browserAsyncPolicyNotices: priorNotices };
+      }
       if (typeof preflight.ugcRuleId !== 'string') return result;
       return {
         ...result,
@@ -392,20 +398,7 @@ export const createPageToolAuthority = ({
       }
     }
   };
-  return Object.freeze({
-    openProtectedBackgroundTab: () => run('turn.page.open-tab', openTabTool),
-    readOwnedPage: () => run('turn.page.read', readPageTool),
-    captureOwnedAccessibilityTree: () => run('turn.page.snapshot', snapshotTool),
-    readOwnedFrameworkState: () => run('turn.page.read-state', readStateTool),
-    drainOwnedDomChanges: () => run('turn.page.watch-changes', watchChangesTool),
-    queryOwnedDom: () => run('turn.page.query-dom', queryDomTool),
-    navigateOwnedTab: () => run('turn.page.navigate', navigateTool),
-    fillOwnedTarget: () => run('turn.page.fill', typeTool),
-    clickOwnedTarget: () => run('turn.page.click', clickTool),
-    performConfirmedOwnedLogin: () => run('turn.page.login', loginTool),
-    captureForegroundPixels: () => run('turn.page.capture-foreground', captureTool),
-    captureOwnedTabPixels: () => run('turn.page.capture-owned', viewTool),
-    runOwnedPageProgram: () => run('turn.page.run-program', { execute: async () => {
+  const runOwnedPageProgramAuthority = async () => {
       if (binding.operation !== 'turn.page.run-program') throw mismatch();
       if (typeof args.code !== 'string' || args.code.length === 0) {
         return { ok: false, error: 'code_required' };
@@ -443,7 +436,35 @@ export const createPageToolAuthority = ({
         runs.release(runId);
         if (onAbort && abortSignal) abortSignal.removeEventListener?.('abort', onAbort);
       }
-    } }),
+    };
+  return Object.freeze({
+    openProtectedBackgroundTab: () => run(
+      'turn.page.open-tab', openProtectedBackgroundTabAuthority,
+    ),
+    readOwnedPage: () => run('turn.page.read', readOwnedPageAuthority),
+    captureOwnedAccessibilityTree: () => run(
+      'turn.page.snapshot', captureOwnedAccessibilityTreeAuthority,
+    ),
+    readOwnedFrameworkState: () => run(
+      'turn.page.read-state', readOwnedFrameworkStateAuthority,
+    ),
+    drainOwnedDomChanges: () => run(
+      'turn.page.watch-changes', drainOwnedDomChangesAuthority,
+    ),
+    queryOwnedDom: () => run('turn.page.query-dom', queryOwnedDomAuthority),
+    navigateOwnedTab: () => run('turn.page.navigate', navigateOwnedTabAuthority),
+    fillOwnedTarget: () => run('turn.page.fill', fillOwnedTargetAuthority),
+    clickOwnedTarget: () => run('turn.page.click', clickOwnedTargetAuthority),
+    performConfirmedOwnedLogin: () => run(
+      'turn.page.login', performConfirmedOwnedLoginAuthority,
+    ),
+    captureForegroundPixels: () => run(
+      'turn.page.capture-foreground', captureForegroundPixelsAuthority,
+    ),
+    captureOwnedTabPixels: () => run(
+      'turn.page.capture-owned', captureOwnedTabPixelsAuthority,
+    ),
+    runOwnedPageProgram: () => run('turn.page.run-program', runOwnedPageProgramAuthority),
   });
 };
 

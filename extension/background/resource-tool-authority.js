@@ -262,10 +262,12 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
       try {
         const result = await client.extract(
           { url: target }, { format: request.format, engine: request.engine },
+          { signal: signal ?? ctx?.abortSignal },
         );
         return { ok: true, target, result };
       } catch (cause) {
-        const error = /** @type {{code?:string,message?:string}} */ (cause);
+        const error = /** @type {{code?:string,name?:string,message?:string}} */ (cause);
+        if (signal?.aborted || ctx?.abortSignal?.aborted || error?.name === 'AbortError') throw cause;
         return {
           ok: false, error: error?.code ?? 'doc_read_failed',
           content: error?.message ?? String(cause),

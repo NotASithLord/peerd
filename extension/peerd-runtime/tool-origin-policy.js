@@ -1,19 +1,8 @@
 // @ts-check
 
-const API_HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
+import { normalizeApiOrigin } from '/shared/api-origin.js';
 
-/** @param {unknown} value */
-export const normalizeSiteOrigin = (value) => {
-  let input = String(value ?? '').trim();
-  if (!input) return null;
-  if (!/^https?:\/\//i.test(input)) input = `https://${input}`;
-  try {
-    const url = new URL(input);
-    if (!['http:', 'https:'].includes(url.protocol)
-        || !API_HOSTNAME_RE.test(url.hostname)) return null;
-    return url.origin;
-  } catch { return null; }
-};
+export const normalizeSiteOrigin = normalizeApiOrigin;
 
 /** @param {unknown} value */
 export const originOfUrl = (value) => {

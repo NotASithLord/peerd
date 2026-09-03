@@ -3049,6 +3049,86 @@ describe('controller turn finite tool protocol', () => {
     await bridge.close();
   });
 
+  test('trim enrichment is exact-shape and pinned to the active run session', async () => {
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    const queued: any[] = [];
+    const replies: any[] = [];
+    const getClient = async () => ({
+      call: async (capability: string, payload: any, options: any) => {
+        const authority = bridge.authorize(payload);
+        const invoke = (value: any) => bridge.handleKernelCall(
+          'turn.trim.enrich', { runId: payload.runId, value }, {
+            capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+          },
+        );
+        replies.push(await invoke({ request: {
+          sessionId: 'session-tool-protocol', state: {}, newlyDropped: [],
+        } }));
+        replies.push(await invoke({ request: {
+          sessionId: 'session-foreign', state: {}, newlyDropped: [],
+        } }));
+        replies.push(await invoke({ request: {
+          sessionId: 'session-tool-protocol', state: {}, newlyDropped: [], extra: true,
+        } }));
+        return bridge.handleKernelCall('turn.finalize', {
+          runId: payload.runId, value: {},
+        }, {
+          capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+        });
+      },
+    });
+    bridge = makeControllerTurnBridge({ getClient });
+    for await (const _event of bridge.runUserTurn(withOperationSurface(context({
+      enrichTrimSummary: (request: any) => { queued.push(request); },
+    })))) { /* drain */ }
+    expect(replies.map((reply) => reply.ok)).toEqual([true, false, false]);
+    expect(queued).toEqual([{
+      sessionId: 'session-tool-protocol', state: {}, newlyDropped: [],
+    }]);
+    await bridge.close();
+  });
+
+  test('model tool observation refuses deltas and unbounded start metadata', async () => {
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    const replies: any[] = [];
+    const getClient = async () => ({
+      call: async (capability: string, payload: any, options: any) => {
+        const authority = bridge.authorize(payload);
+        const invoke = (value: any) => bridge.handleKernelCall(
+          'turn.model.observe-event', { runId: payload.runId, value }, {
+            capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+          },
+        );
+        replies.push(await invoke({
+          type: 'tool-use-delta', id: 'tool-1', partialJson: '{"x":',
+        }));
+        replies.push(await invoke({
+          type: 'tool-use-start', id: 'x'.repeat(513), name: 'now',
+        }));
+        replies.push(await invoke({
+          type: 'tool-use-start', id: 'tool-1', name: 'x'.repeat(129),
+        }));
+        replies.push(await invoke({
+          type: 'tool-use-start', id: 'tool-1', name: 'now', extra: true,
+        }));
+        return bridge.handleKernelCall('turn.finalize', {
+          runId: payload.runId, value: {},
+        }, {
+          capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+        });
+      },
+    });
+    bridge = makeControllerTurnBridge({ getClient });
+    for await (const _event of bridge.runUserTurn(withOperationSurface(context()))) { /* drain */ }
+    expect(replies).toEqual([
+      expect.objectContaining({ ok: false, outcomeKnown: true }),
+      expect.objectContaining({ ok: false, outcomeKnown: true }),
+      expect.objectContaining({ ok: false, outcomeKnown: true }),
+      expect.objectContaining({ ok: false, outcomeKnown: true }),
+    ]);
+    await bridge.close();
+  });
+
   test('rejects an unknown exact operation in the initial projection before startup', async () => {
     let clientStarts = 0;
     const bridge = makeControllerTurnBridge({

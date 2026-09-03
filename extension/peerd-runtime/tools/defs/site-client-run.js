@@ -36,8 +36,18 @@ export const siteClientRunTool = composeTool("site_client_run", {
       /** @type {any} */ (ctx).siteClientAuthority);
     if (!authority?.runStoredClient) return { ok: false, error: 'site_client_run_unavailable' };
     const executed = await authority.runStoredClient(origin, args.code, timeoutMs);
+    // why: the sealed stored client controls thrown exception text. Keep the
+    // trusted failure class and recovery path, but never promote those bytes
+    // into an unfenced model-facing error.
+    const storedClientFailed = typeof executed?.error === 'string'
+      && executed.error.startsWith('site_client_run_failed:');
     if (executed?.ok !== true) return {
-      ok: false, error: executed?.error ?? 'site_client_run_failed',
+      ok: false,
+      error: storedClientFailed ? 'site_client_run_failed'
+        : executed?.error ?? 'site_client_run_failed',
+      ...(storedClientFailed ? {
+        content: 'The stored site client failed. Drive the page to verify the live behavior, then use site_client_write if the client is stale.',
+      } : {}),
       ...(executed?.outcomeKind ? { outcomeKind: executed.outcomeKind } : {}),
     };
     return { ok: true, content: formatRunResult(origin, args.code, executed.result ?? {}) };

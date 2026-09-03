@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import { makeKernelGitCredentialRoutes } from '../../extension/background/kernel-credential-routes.js';
-import { makeGitCredentialRoutes } from '../../extension/peerd-engine/vm-net/git-credential-routes.js';
 
 const fixture = () => {
   const secrets = new Map<string, string>([['provider:anthropic', 'x']]);
@@ -15,23 +14,11 @@ const fixture = () => {
     vault, auditLog: { append: async (event: any) => { audit.push(event); } },
     isLockedError: (cause: any) => cause?.code === 'locked',
   });
-  const legacy = makeGitCredentialRoutes({
-    vault, isLockedError: (cause: any) => cause?.code === 'locked',
-    audit: (event: any) => audit.push(event),
-  });
-  return { native, legacy, secrets, audit };
+  return { native, secrets, audit };
 };
 
 describe('native Git credential custody', () => {
-  test('matches legacy validation and projects host names without secret values', async () => {
-    for (const route of ['git-cred/set', 'git-cred/list', 'git-cred/delete'] as const) {
-      const left = fixture();
-      const right = fixture();
-      const message = route === 'git-cred/set'
-        ? { host: 'https://WWW.GitHub.com/org/repo', token: 'secret-token-123' }
-        : route === 'git-cred/delete' ? { host: 'github.com' } : {};
-      expect(await left.native[route](message)).toEqual(await right.legacy[route](message));
-    }
+  test('validates writes and projects host names without secret values', async () => {
     const { native, secrets } = fixture();
     await native['git-cred/set']({ host: 'github.com', token: 'secret-token-123' });
     const listed = await native['git-cred/list']();
@@ -50,8 +37,7 @@ describe('native Git credential custody', () => {
     expect(JSON.stringify(audit)).not.toContain('secret-token-123');
   });
 
-  for (const implementation of ['native', 'legacy'] as const) {
-    test(`${implementation} treats commit-then-loss as unknown and exact replay as idempotent`, async () => {
+  test('treats commit-then-loss as unknown and exact replay as idempotent', async () => {
       const secrets = new Map<string, string>([['git:github.com', 'old-token-123']]);
       const audit: any[] = [];
       let writes = 0;
@@ -65,14 +51,10 @@ describe('native Git credential custody', () => {
         },
         deleteSecret: async (name: string) => { secrets.delete(name); },
       };
-      const routes = implementation === 'native'
-        ? makeKernelGitCredentialRoutes({
-            vault, auditLog: { append: async (event: any) => { audit.push(event); } },
-            isLockedError: () => false,
-          })
-        : makeGitCredentialRoutes({
-            vault, isLockedError: () => false, audit: (event: any) => audit.push(event),
-          });
+      const routes = makeKernelGitCredentialRoutes({
+        vault, auditLog: { append: async (event: any) => { audit.push(event); } },
+        isLockedError: () => false,
+      });
       const exact = { host: 'github.com', token: 'replacement-token-456' };
       expect(await routes['git-cred/set'](exact)).toMatchObject({
         ok: false, code: 'git-credential-outcome-unknown',
@@ -82,6 +64,5 @@ describe('native Git credential custody', () => {
       expect(await routes['git-cred/set'](exact)).toEqual({ ok: true, host: 'github.com' });
       expect(writes).toBe(1);
       expect(audit).toEqual([]);
-    });
-  }
+  });
 });

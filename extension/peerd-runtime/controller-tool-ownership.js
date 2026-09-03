@@ -149,7 +149,7 @@ const operationGrantRows = {
   todo_check: ['turn.todo.read', 'turn.todo.replace'],
   todo_add: ['turn.todo.read', 'turn.todo.replace'],
   open_tab: ['turn.page.open-tab'],
-  read_page: ['turn.page.read'],
+  read_page: ['turn.page.read', 'turn.resource.spill-result'],
   snapshot: ['turn.page.snapshot'],
   read_state: ['turn.page.read-state'],
   watch_changes: ['turn.page.watch-changes'],

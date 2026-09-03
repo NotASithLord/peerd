@@ -27,12 +27,16 @@ import {
 } from '../shared/feature-lease-protocol.js';
 import { base64ToBytes, bytesToBase64, withDeadline } from '../shared/cold-util.js';
 import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
+import {
+  gitRemoteOwnsRequest,
+  normalizeGitRemote,
+  smartHttpAuthHeader,
+} from '/peerd-engine/authority.js';
 export { decodeRepositoryRpcValue, encodeRepositoryRpcValue };
 
 const MAX_GIT_HTTP_BODY = 32 * 1024 * 1024;
 const MAX_GIT_HTTP_HEADERS = 64;
 const MAX_GIT_HTTP_HEADER_BYTES = 64 * 1024;
-const PUBLIC_GIT_HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
 /** @typedef {Error & {code?:string,outcomeKnown?:boolean,repositoryHostDispatched?:boolean}} RepositoryError */
 /** @returns {RepositoryError} */
 const repositoryError = (/** @type {string} */ message, /** @type {string} */ code,
@@ -41,42 +45,6 @@ const repositoryError = (/** @type {string} */ message, /** @type {string} */ co
   Object.assign(error, { code, outcomeKnown });
   if (dispatched !== undefined) error.repositoryHostDispatched = dispatched;
   return error;
-};
-const normalizeGitRemote = (/** @type {unknown} */ input) => {
-  let url;
-  try { url = new URL(String(input ?? '').trim()); }
-  catch { throw new Error('invalid git remote URL'); }
-  if (url.protocol !== 'https:' || url.username || url.password
-      || (url.port && url.port !== '443') || url.search || url.hash
-      || !PUBLIC_GIT_HOST.test(url.hostname) || /^[\d.]+$/.test(url.hostname)) {
-    throw new Error('invalid public HTTPS git remote');
-  }
-  let decoded;
-  try { decoded = decodeURIComponent(url.pathname); }
-  catch { throw new Error('git remote path is malformed'); }
-  const parts = decoded.split('/').filter(Boolean);
-  if (parts.length < 2 || parts.some((part) => part === '.' || part === '..' || part.includes('\\'))) {
-    throw new Error('git remote must name a repository path');
-  }
-  url.pathname = `/${parts.join('/')}${parts.at(-1)?.endsWith('.git') ? '' : '.git'}`;
-  return { url: url.toString(), host: url.hostname.toLowerCase() };
-};
-const gitRemoteOwnsRequest = (/** @type {{url:string}} */ remote, /** @type {unknown} */ input) => {
-  try {
-    const base = new URL(remote.url);
-    const request = new URL(String(input ?? ''));
-    const prefix = base.pathname.replace(/\/$/, '');
-    return request.protocol === 'https:' && request.origin === base.origin
-      && [`${prefix}/info/refs`, `${prefix}/git-upload-pack`, `${prefix}/git-receive-pack`]
-        .includes(request.pathname);
-  } catch { return false; }
-};
-const smartHttpAuthHeader = (/** @type {string} */ host, /** @type {string} */ token) => {
-  const user = host === 'github.com' ? 'x-access-token'
-    : host === 'gitlab.com' || host.endsWith('.gitlab.com') ? 'oauth2' : 'git';
-  let binary = '';
-  for (const byte of new TextEncoder().encode(`${user}:${token}`)) binary += String.fromCharCode(byte);
-  return `Basic ${btoa(binary)}`;
 };
 const boundedResponseBody = async (/** @type {Response} */ response,
   /** @type {AbortSignal|undefined} */ signal = undefined) => {

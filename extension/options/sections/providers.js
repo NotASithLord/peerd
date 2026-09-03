@@ -27,7 +27,7 @@ import {
 } from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
-/** @typedef {{ name: string, label: string, defaultModel?: string, defaultRunnerModel?: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean, keyPreview?: string }} ProviderRow */
+/** @typedef {{ name: string, label: string, defaultModel?: string, defaultRunnerModel?: string, hasKey?: boolean, keyless?: boolean, liveModels?: boolean }} ProviderRow */
 
 // ── Provider logos ──────────────────────────────────────────────────────
 // Inline SVG marks (no network, no external asset — same privacy posture
@@ -397,7 +397,7 @@ export const ProvidersSection = {
     const modelOpts = (ui.modelOptions ?? []).filter((/** @type {any} */ o) => o.provider === effectiveProvider);
 
     // One provider per card: logo, name, key status, and a slick inline
-    // key editor that stays collapsed to the masked badge until you hit
+    // key editor that stays collapsed to a saved-status badge until you hit
     // Replace — no permanent "paste a new key" field cluttering the row.
     // Keyless providers (Ollama) get a "no key needed" badge and only the
     // Test button — there is no key to save or replace.
@@ -427,7 +427,7 @@ export const ProvidersSection = {
                       ? m('span.key-badge.key-local', 'Not reachable')
                     : m('span.key-badge.key-local', 'No key needed'))
               : p.hasKey
-                ? m('span.key-badge.key-set', p.keyPreview ? `✓ ${p.keyPreview}` : '✓ Key saved')
+                ? m('span.key-badge.key-set', '✓ Key saved')
                 : m('span.key-badge.key-unset', 'No key set'),
           ]),
           ((p.hasKey || p.keyless) && !editing)

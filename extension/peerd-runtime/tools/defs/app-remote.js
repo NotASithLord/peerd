@@ -5,7 +5,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // receives a token or raw fetch; the trusted repository service binds vault
 // credentials to the normalized remote host.
 
-import { normalizeGitRemote } from '/peerd-engine/index.js';
+import { normalizeGitRemote } from '/peerd-engine/controller.js';
 import { repositoryToolFailure } from './app-history.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */

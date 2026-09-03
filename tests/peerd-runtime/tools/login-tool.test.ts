@@ -9,7 +9,15 @@
 // different nodes) and never a fake synthetic click.
 
 import { describe, test, expect } from 'bun:test';
-import { loginTool } from '../../../extension/background/page-authority/login.js';
+import { performConfirmedOwnedLoginAuthority } from '../../../extension/background/page-authority/login.js';
+import { loginTool as controllerLoginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+
+const loginTool = { execute: (args: any, ctx: any) => controllerLoginTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    performConfirmedOwnedLogin: () => performConfirmedOwnedLoginAuthority(args, ctx),
+  },
+}) };
 import { HOST_EFFECT_OUTCOME } from '../../../extension/background/host-effect-verdict.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 

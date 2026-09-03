@@ -14,22 +14,8 @@ import {
   collectArtifactTransferables,
   isArtifactChannelCancel,
   parseArtifactChannelOffer,
+  serializeArtifactError,
 } from '/shared/artifact-channel.js';
-
-/** @param {unknown} cause */
-const serializeError = (cause) => {
-  const error = /** @type {any} */ (cause);
-  return {
-    name: typeof error?.name === 'string' ? error.name : 'Error',
-    message: typeof error?.message === 'string' ? error.message : String(cause),
-    ...(Number.isFinite(error?.size) ? { size: error.size } : {}),
-    ...(Number.isFinite(error?.limit) ? { limit: error.limit } : {}),
-    ...(typeof error?.reason === 'string' ? { reason: error.reason } : {}),
-    ...(typeof error?.code === 'string' ? { code: error.code } : {}),
-    ...(typeof error?.outcomeKnown === 'boolean' ? { outcomeKnown: error.outcomeKnown } : {}),
-    ...(typeof error?.retryable === 'boolean' ? { retryable: error.retryable } : {}),
-  };
-};
 
 /** @param {MessagePort} port @param {unknown} value @param {Transferable[]} [transfer] */
 const post = (port, value, transfer = []) => {
@@ -104,7 +90,6 @@ const createWorkerRun = (offer) => {
  *   maxConcurrent?:number,
  *   maxActiveBytes?:number,
  *   createRun?:((offer:{channelId:string,operation:string,args:any[]})=>{promise:Promise<unknown>,cancel:()=>void}),
- *   runOperation?:((operation:string,args:any[])=>Promise<unknown>|unknown),
  * }} [options]
  */
 export const createArtifactOfferAcceptor = (options = {}) => {
@@ -113,7 +98,6 @@ export const createArtifactOfferAcceptor = (options = {}) => {
   const maxConcurrent = config.maxConcurrent ?? 2;
   const maxActiveBytes = config.maxActiveBytes ?? ARTIFACT_CHANNEL_MAX_BYTES;
   const createRun = config.createRun;
-  const runOperation = config.runOperation;
   /** @type {Set<string>} */
   const seen = new Set();
   /** @type {string[]} */
@@ -207,11 +191,6 @@ export const createArtifactOfferAcceptor = (options = {}) => {
     try {
       runner = createRun
         ? createRun(/** @type {any} */ (offer))
-        : runOperation
-        ? {
-            promise: Promise.resolve().then(() => runOperation(offer.operation, offer.args)),
-            cancel: () => {},
-          }
         : createWorkerRun(/** @type {any} */ (offer));
     } catch (cause) {
       runner = { promise: Promise.reject(cause), cancel: () => {} };
@@ -241,7 +220,7 @@ export const createArtifactOfferAcceptor = (options = {}) => {
         if (cancelled) return;
         post(port, {
           protocol: ARTIFACT_CHANNEL_PROTOCOL, channelId: offer.channelId,
-          ok: false, error: serializeError(cause),
+          ok: false, error: serializeArtifactError(cause),
         });
       },
     ).finally(() => {

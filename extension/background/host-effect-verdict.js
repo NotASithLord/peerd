@@ -188,6 +188,20 @@ const stripAuthorityVerdict = (/** @type {Record<string,any>} */ value) => {
   return clean;
 };
 
+// why: the host owns whether an exact effect was refused, but controller-owned
+// semantics own model-facing recovery guidance. A reviewed host message wins;
+// otherwise preserve the sealed controller's bounded presentation instead of
+// collapsing it to an opaque authority code.
+const refusalPresentation = (/** @type {any} */ refusal,
+  /** @type {Record<string,any>} */ semantic, /** @type {string} */ fallback) => (
+  typeof refusal?.content === 'string' && refusal.content
+    ? refusal.content
+    : (semantic?.ok === false || semantic?.is_error === true)
+        && typeof semantic?.content === 'string' && semantic.content
+      ? semantic.content
+      : refusal?.error ?? fallback
+);
+
 const aggregateAuthorityReceipts = (/** @type {any[]} */ receipts) => {
   // why: optimistic exact operations can return a retryable, proven no-effect
   // conflict and then succeed later in the same semantic call. Only the same
@@ -309,7 +323,9 @@ export const stampAuthorityToolResult = (
     ...stamped, ok: false, outcomeKnown: true, retryable: performed ? false : retryable,
     error: performed
       ? 'Authority host performed only part of the requested effects; do not retry the whole call.'
-      : refusal?.content ?? refusal?.error ?? 'Authority host did not perform the requested effect.',
+      : refusalPresentation(
+        refusal, clean, 'Authority host did not perform the requested effect.',
+      ),
     ...(typeof refusal?.code === 'string' ? { code: refusal.code } : {}),
   };
   if (clean.ok === false) return {
@@ -341,7 +357,9 @@ export const stampAuthorityToolResultBlock = (
     ...stamped, is_error: true, outcomeKnown: true, retryable: performed ? false : retryable,
     content: performed
       ? 'Authority host performed only part of the requested effects; do not retry the whole call.'
-      : refusal?.content ?? refusal?.error ?? 'Authority host did not perform the requested effect.',
+      : refusalPresentation(
+        refusal, clean, 'Authority host did not perform the requested effect.',
+      ),
     ...(typeof refusal?.code === 'string' ? { code: refusal.code } : {}),
   };
   if (clean.is_error === true) return {

@@ -21,6 +21,7 @@ import {
 
 const REPORT_PATH = join(ARTIFACTS_DIR, 'e2e', 'read-doc-store-evidence.json');
 const FIXTURE_URL = `https://${GIT_FIXTURE_HOST}/long.pdf`;
+const SLOW_FIXTURE_URL = `https://${GIT_FIXTURE_HOST}/slow.pdf`;
 const DOCX_FIXTURE_URL = `https://${GIT_FIXTURE_HOST}/report.docx`;
 const HEAD_SENTINEL = 'READ_DOC_HEAD_SENTINEL_ALPHA_4107';
 const LATER_SENTINEL = 'READ_DOC_LATER_PAGE_SENTINEL_OMEGA_9253';
@@ -28,6 +29,7 @@ const PRIMARY_PROMPT = 'Read the complete local PDF and report its later-page se
 const PRIMARY_REPLY = 'store read_doc lane complete';
 const DOCX_PROMPT = 'Read the local Word report and summarize its findings and table.';
 const DOCX_REPLY = 'store DOCX read_doc lane complete';
+const STOP_PROMPT = 'Start reading the slow local PDF and wait for it.';
 const SECONDARY_PROMPT = 'Try to page the prior document result from this new chat.';
 const SECONDARY_REPLY = 'cross-session read_result refusal observed';
 const REQUIRED_OPERATIONS = Object.freeze([
@@ -148,6 +150,9 @@ const makeResponder = () => {
     secondaryRefused: false,
     docxActorCalls: 0,
     docxDone: false,
+    stopDelegated: false,
+    stopActorCalls: 0,
+    stopLateResults: 0,
     actorBodies: [],
     toolResults: [],
     readResultPages: 0,
@@ -213,12 +218,25 @@ const makeResponder = () => {
         state.docxDone = latest.includes('Quarterly Report')
           && latest.includes('Findings')
           && latest.includes('Revenue')
-          && latest.includes('EMEA | North');
+          && latest.includes('1. First step')
+          && latest.includes('1. Second step')
+          && latest.includes('EMEA \\| North');
         if (!state.docxDone) {
           state.failure = `DOCX conversion omitted expected structure: ${latest.slice(0, 4000)}`;
           return { sse: sseText('actor DOCX lane failed') };
         }
         return { sse: sseText('actor read the complete Word report') };
+      }
+
+      if (state.phase === 'stop') {
+        state.stopActorCalls += 1;
+        if (state.stopActorCalls === 1) {
+          return { sse: sseToolCall('read_doc', {
+            url: SLOW_FIXTURE_URL, engine: 'pdfjs', maxChars: 800,
+          }) };
+        }
+        state.stopLateResults += 1;
+        return { sse: sseText('late document result should not run') };
       }
 
       state.secondaryActorCalls += 1;
@@ -255,6 +273,15 @@ const makeResponder = () => {
         }) };
       }
       return { sse: sseText('Word report work delegated') };
+    }
+    if (state.phase === 'stop') {
+      if (!state.stopDelegated) {
+        state.stopDelegated = true;
+        return { sse: sseToolCall('message_actor', {
+          to: 'web', message: `Read the slow PDF at ${SLOW_FIXTURE_URL}.`,
+        }) };
+      }
+      return { sse: sseText('slow document work delegated') };
     }
     if (actorReply) return { sse: sseText(SECONDARY_REPLY) };
     if (!state.secondaryDelegated) {
@@ -323,8 +350,10 @@ const attachOffscreenNetwork = async (port) => {
   return { connection, contextUrl: target.url, requests };
 };
 
-const runOne = async (treePath, iteration) => {
+const runOne = async (treePath, iteration, slowFixture) => {
   const scripted = makeResponder();
+  const slowStartedBefore = slowFixture.started;
+  const slowAbortedBefore = slowFixture.aborted;
   let ctx;
   let offscreen;
   try {
@@ -383,6 +412,46 @@ const runOne = async (treePath, iteration) => {
       && entry.details?.realmVerified === true);
     assert(isolatedActor, 'document tools did not originate from a verified sealed actor realm');
 
+    const spillEffectsBeforeStop = allPrimaryAudits.filter(
+      (entry) => entry.type === 'authority_effect'
+        && entry.details?.operation === 'turn.resource.spill-result',
+    ).length;
+    scripted.state.phase = 'stop';
+    await sendTurn(ctx.page, STOP_PROMPT);
+    assert(await waitFor(() => slowFixture.started > slowStartedBefore, {
+      budgetMs: 30_000, pollMs: 25,
+    }), `slow physical document response never started: ${JSON.stringify({
+      phase: scripted.state.phase,
+      stopDelegated: scripted.state.stopDelegated,
+      stopActorCalls: scripted.state.stopActorCalls,
+      stopLateResults: scripted.state.stopLateResults,
+      modelCalls: ctx.modelCallCount(),
+      lastToolResult: scripted.state.toolResults.at(-1)?.slice(0, 1000) ?? null,
+    })}`);
+    const callsAtStop = ctx.modelCallCount();
+    const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+    assert(stopped?.ok === true, `agent/stop failed: ${JSON.stringify(stopped)}`);
+    assert(await waitFor(async () => {
+      const value = await evalIn(ctx.page, `(() => ({
+        busy: !!document.querySelector('.message-assistant.streaming, form.input-bar button.stop'),
+      }))()`);
+      return !value?.busy;
+    }, { budgetMs: 10_000, pollMs: 25 }),
+    'Stop did not return the slow document turn to an idle stopped state');
+    assert(await waitFor(() => slowFixture.aborted > slowAbortedBefore, {
+      budgetMs: 10_000, pollMs: 25,
+    }), 'Stop did not cancel the physical slow response');
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    assert(ctx.modelCallCount() === callsAtStop && scripted.state.stopLateResults === 0,
+      'a cancelled document result re-entered the model or replayed');
+    const stopAudits = await audits(ctx.page);
+    const spillEffectsAfterStop = stopAudits.filter(
+      (entry) => entry.type === 'authority_effect'
+        && entry.details?.operation === 'turn.resource.spill-result',
+    ).length;
+    assert(spillEffectsAfterStop === spillEffectsBeforeStop,
+      'the cancelled document produced a spill result');
+
     scripted.state.phase = 'docx';
     await sendTurn(ctx.page, DOCX_PROMPT);
     const docxTerminal = await waitFor(
@@ -422,6 +491,13 @@ const runOne = async (treePath, iteration) => {
       readResultPages: scripted.state.readResultPages,
       laterSentinelObserved: scripted.state.primaryDone,
       docxStructureObserved: scripted.state.docxDone,
+      stoppedRead: {
+        requestStarted: slowFixture.started > slowStartedBefore,
+        requestAborted: slowFixture.aborted > slowAbortedBefore,
+        actorCalls: scripted.state.stopActorCalls,
+        lateResults: scripted.state.stopLateResults,
+        spillEffects: spillEffectsAfterStop - spillEffectsBeforeStop,
+      },
       crossSessionRefused: scripted.state.secondaryRefused,
       exactOperations: operations.sort(),
       sealedActor: {
@@ -449,14 +525,36 @@ export async function runReadDocStoreLane({ runs = 1 } = {}) {
   assert(Number.isInteger(runs) && runs > 0 && runs <= 5, 'runs must be an integer from 1 to 5');
   const pdf = makePdf();
   const docx = Buffer.from(await makeDocx());
-  const fixtureRequests = { pdf: 0, docx: 0 };
+  const fixtureRequests = { pdf: 0, docx: 0, slow: 0 };
+  const slowFixture = { started: 0, aborted: 0 };
   const server = createServer({
     key: GIT_FIXTURE_TLS_KEY,
     cert: GIT_FIXTURE_TLS_CERT,
   }, (request, response) => {
-    if (request.url !== '/long.pdf' && request.url !== '/report.docx') {
+    if (!['/long.pdf', '/report.docx', '/slow.pdf'].includes(request.url ?? '')) {
       response.writeHead(404, { 'content-type': 'text/plain' });
       response.end('not found');
+      return;
+    }
+    if (request.url === '/slow.pdf') {
+      fixtureRequests.slow += 1;
+      slowFixture.started += 1;
+      let completed = false;
+      let timer;
+      response.once('close', () => {
+        if (!completed) slowFixture.aborted += 1;
+        if (timer) clearTimeout(timer);
+      });
+      response.writeHead(200, {
+        'content-type': 'application/pdf',
+        'cache-control': 'no-store',
+        connection: 'close',
+      });
+      response.write(pdf.subarray(0, 512));
+      timer = setTimeout(() => {
+        completed = true;
+        response.end(pdf.subarray(512));
+      }, 15_000);
       return;
     }
     const isPdf = request.url === '/long.pdf';
@@ -490,9 +588,10 @@ export async function runReadDocStoreLane({ runs = 1 } = {}) {
 
     const iterations = [];
     for (let iteration = 1; iteration <= runs; iteration += 1) {
-      iterations.push(await runOne(treePath, iteration));
+      iterations.push(await runOne(treePath, iteration, slowFixture));
     }
-    assert(fixtureRequests.pdf === runs && fixtureRequests.docx === runs,
+    assert(fixtureRequests.pdf === runs && fixtureRequests.docx === runs
+      && fixtureRequests.slow === runs,
       `fixture expected ${runs} fetches per format, observed ${JSON.stringify(fixtureRequests)}`);
     const report = {
       ok: true,
@@ -504,6 +603,10 @@ export async function runReadDocStoreLane({ runs = 1 } = {}) {
         pdf: { url: FIXTURE_URL, bytes: pdf.byteLength, requests: fixtureRequests.pdf },
         docx: {
           url: DOCX_FIXTURE_URL, bytes: docx.byteLength, requests: fixtureRequests.docx,
+        },
+        slow: {
+          url: SLOW_FIXTURE_URL, requests: fixtureRequests.slow,
+          aborted: slowFixture.aborted,
         },
       },
       iterations,

@@ -17,6 +17,7 @@ import {
   artifactChannelResultAllowed,
   collectArtifactTransferables,
   parseArtifactWorkerRun,
+  serializeArtifactError,
 } from '/shared/artifact-channel.js';
 
 const OPERATIONS = Object.freeze({
@@ -27,20 +28,6 @@ const OPERATIONS = Object.freeze({
   inspectEnvelope,
   exportFilename,
 });
-
-/** @param {unknown} cause */
-const serializeError = (cause) => {
-  const error = /** @type {any} */ (cause);
-  return {
-    name: typeof error?.name === 'string' ? error.name : 'Error',
-    message: typeof error?.message === 'string' ? error.message : String(cause),
-    ...(Number.isFinite(error?.size) ? { size: error.size } : {}),
-    ...(Number.isFinite(error?.limit) ? { limit: error.limit } : {}),
-    ...(typeof error?.reason === 'string' ? { reason: error.reason } : {}),
-    ...(typeof error?.code === 'string' ? { code: error.code } : {}),
-    ...(typeof error?.outcomeKnown === 'boolean' ? { outcomeKnown: error.outcomeKnown } : {}),
-  };
-};
 
 self.onmessage = async (event) => {
   const request = parseArtifactWorkerRun(event.data);
@@ -75,7 +62,7 @@ self.onmessage = async (event) => {
       protocol: ARTIFACT_CHANNEL_PROTOCOL,
       channelId: request.channelId,
       ok: false,
-      error: serializeError(cause),
+      error: serializeArtifactError(cause),
     });
   } finally {
     self.close();

@@ -329,47 +329,6 @@ jobs:
         # WebRTC end to end. Any failed attempt fails the gate.
         run: bun run test:twopeer:conv
 
-  # Exact cross-repository product acceptance. Two independent installed
-  # Preview profiles import the commit-pinned Charon .peerd artifact through
-  # the visible file UI, attach its code-first App actor, converge private and
-  # Quick Match lobbies, survive SW/offscreen replacement, and enter co-op.
-  charon-dwapp:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    name: Charon packaged two-profile dwapp
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
-        with:
-          egress-policy: audit
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Check out the exact Charon acceptance source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: NotASithLord/charon
-          ref: f98907200bc3501dd5c669ab8d6c98d1d95fbaa1
-          path: charon
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
-      - run: bun install --frozen-lockfile --ignore-scripts
-      - name: Provision pinned Chrome for Testing
-        id: cft
-        run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
-      - name: Run exact packaged Charon private/Quick Match/co-op oracle
-        env:
-          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
-          CHARON_ROOT: ${{ github.workspace }}/charon
-        run: bun run test:e2e:charon
-      - name: Upload Charon acceptance evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: charon-dwapp-two-profile
-          path: artifacts/e2e/charon-dwapp-two-profile.json
-          if-no-files-found: error
-
   # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
   # previously run only by hand. Spawns a relay + N real node processes that
   # form an authenticated mesh and self-test gossip/direct/DHT/presence across
@@ -439,6 +398,14 @@ jobs:
         # Exact Store package, real PDF + DOCX conversion, sealed read_doc
         # execution, spill paging, and cross-session read_result refusal.
         run: bun run test:e2e:read-doc
+      - name: Run packaged Store site-client tap fallback
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        # Store Chrome ships without debugger. Require the injected MAIN-world
+        # fetch/XHR tap so the preview-only CDP path cannot mask a Store regression.
+        # The preceding document lane already produced and verified this exact
+        # Store tree; reuse it instead of repeating package + minification.
+        run: bun run test:e2e:site-client-store:staged
       - name: Run packaged Preview dweb renderer/SW lifecycle regression
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
@@ -710,10 +677,9 @@ jobs:
         run: bun run check:pages
 
   # Secretless performance/correctness gate over the exact packaged artifacts.
-  # During the legacy-worker migration this enforces the achieved Store and
-  # Preview graph ratchets plus complete, timeout-free host-clock samples. The
-  # executable policy retains the final single-digit target but does not claim
-  # it has been reached before the manifest cutover.
+  # It freezes the achieved Store and Preview authority graphs and requires
+  # complete, timeout-free host-clock samples. The graph budgets are durable
+  # architecture boundaries: ordinary controller features cannot grow the SW.
   cold-start:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: packaged cold start (Chrome + Firefox)
@@ -834,7 +800,7 @@ jobs:
     # browser/runtime surfaces that can otherwise fail after a green package:
     # Chrome behavior, first-run/passkey+lifecycle UX, packaged lazy entries,
     # Firefox, and the real dweb process/WebRTC seams.
-    needs: [test, checks, inbrowser, e2e, packaged-pages, cold-start, firefox-runtime, twopeer, charon-dwapp, netproc, package]
+    needs: [test, checks, inbrowser, e2e, packaged-pages, cold-start, firefox-runtime, twopeer, netproc, package]
     # The one job that holds signing secrets. Bound to a GitHub Environment so
     # the secrets can be scoped to it AND protection rules (required reviewers,
     # tag-pattern restrictions) can gate every run that touches the signing

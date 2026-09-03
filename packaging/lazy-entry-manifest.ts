@@ -61,6 +61,7 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'offscreen/local-model.js',
   'offscreen/pdf-extract.js',
   'offscreen/doc-extract.js',
+  'offscreen/document-conversion-worker.js',
   'offscreen/web-extract.js',
   // Preview Chrome's mesh lease starts this graph on demand.
   'offscreen/dweb-base.js',

@@ -16,14 +16,10 @@ import {
   originOfUrl,
   resolveTargetTab,
   scriptingTarget,
-  summarizeMutations,
-  wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const watchChangesTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const drainOwnedDomChangesAuthority = async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
     let res;
@@ -34,15 +30,11 @@ export const watchChangesTool = Object.freeze({
       return { ok: false, error: `watch_inject_failed: ${e?.message ?? String(e)}` };
     }
     if (!res) return { ok: false, error: 'watch_returned_nothing' };
-    const body = res.started
-      ? 'watching started: baseline set. Call watch_changes again to see what changed since now.'
-      : `changes since last look: ${summarizeMutations(res.changes) ?? 'no DOM change detected'}`;
     return {
       ok: true,
-      content: wrapUntrusted({ origin: originOfUrl(tab.url), tool: 'watch_changes', body }),
+      receipt: { origin: originOfUrl(tab.url), started: res.started === true, changes: res.changes },
     };
-  },
-});
+};
 
 // Runs in the page (ISOLATED world). Idempotent: creates the observer +
 // rolling delta sets on first call (stored on a window global so they

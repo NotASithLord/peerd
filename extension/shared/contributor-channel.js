@@ -26,6 +26,7 @@ export const CONTRIBUTOR_FAILURES = Object.freeze([
 export const CONTRIBUTOR_ACTION_KINDS = Object.freeze(['page_code', 'page_action']);
 export const CONTRIBUTOR_FEEDBACK = Object.freeze(['worked', 'didnt_work']);
 export const CONTRIBUTOR_CLASSIFICATION_CODE_MAX = 255;
+export const CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT = 128;
 const ROUTES = new Set([
   'contributor/settlement', 'contributor/feedback',
 ]);
@@ -91,7 +92,8 @@ export const parseContributorProjection = (value) => {
       || candidate.modelFamilyCode > CONTRIBUTOR_CLASSIFICATION_CODE_MAX
       || !CONTRIBUTOR_OUTCOMES.includes(candidate.outcome)
       || !CONTRIBUTOR_FAILURES.includes(candidate.failure)
-      || !Array.isArray(candidate.actions) || candidate.actions.length > 128
+      || !Array.isArray(candidate.actions)
+      || candidate.actions.length > CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT
       || candidate.actions.some((/** @type {unknown} */ action) =>
         !CONTRIBUTOR_ACTION_KINDS.includes(/** @type {any} */ (action)))) return null;
   return Object.freeze({ ...candidate, actions: Object.freeze([...candidate.actions]) });

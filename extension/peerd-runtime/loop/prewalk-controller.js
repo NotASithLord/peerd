@@ -47,7 +47,7 @@ import {
  * @property {(sessionId:string) => Promise<{ name?: string, defaultRunnerModel?: string }|null>} resolveProvider
  * @property {(name: string) => ({ sideEffect?: string } | undefined)} getTool
  * @property {(entry: { type: string, sessionId?: string, details?: object }) => unknown} [appendAudit]
- * @property {(text: string) => void} [postChatNote]
+ * @property {(text: string, action?: unknown, sessionId?: string|null) => void} [postChatNote]
  * @property {() => number} [now]
  */
 
@@ -118,7 +118,9 @@ export const makePrewalkController = ({
         && (session.provider !== pw.executorProvider || session.model !== pw.executorModel)) {
       const swapped = await sessions.update(sid, { provider: pw.executorProvider, model: pw.executorModel });
       audit('prewalk_swap_applied', sid, { executorProvider: pw.executorProvider, executorModel: pw.executorModel });
-      try { postChatNote(`Prewalk: plan landed — continuing on ${pw.executorModel}.`); } catch { /* UI-only */ }
+      try {
+        postChatNote(`Prewalk: plan landed; continuing on ${pw.executorModel}.`, null, sid);
+      } catch { /* UI-only */ }
       return swapped;
     }
     return session;

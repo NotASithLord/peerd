@@ -98,7 +98,6 @@ import './unit/background/app-tab-tracker.test.js';
 import './unit/background/notebook-tab-tracker.test.js';
 import './unit/background/pod-client.test.js';
 import './unit/background/state-get.test.js';
-import './unit/background/script-model-call.test.js';
 
 // --- peerd-distributed ---
 // (none yet — dweb surface reserved for V2+)

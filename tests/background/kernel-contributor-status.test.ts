@@ -45,9 +45,9 @@ const settlement = (operationKey = 'delivery-1', overrides: Record<string, any> 
 const storage = (initial: any) => {
   const values = new Map<string, any>();
   if (initial != null) {
-    values.set('contributor_metrics.aggregate.v1', structuredClone(initial));
-    values.set(CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
-      version: 1, generation: initial.consent.generation,
+    values.set(`${CONTRIBUTOR_STATE_PREFIX}seed`, {
+      version: 2, revision: 1, state: 'active',
+      record: structuredClone(initial), committed: true,
     });
   }
   return {
@@ -196,6 +196,22 @@ describe('Preview Contributor Metrics private channel', () => {
     } finally { live.restore(); }
   });
 
+  test('legacy consent fails off until the user explicitly re-enables it', async () => {
+    const state = storage(null);
+    const sender = {};
+    const record = enabledRecord();
+    await state.kv.set('contributor_metrics.aggregate.v1', record);
+    await state.kv.set(CONTRIBUTOR_ACTIVE_CONSENT_KEY, {
+      version: 1, generation: record.consent.generation,
+    });
+    const live = routesFor(state, sender, undefined, { scheduleDrain: () => {} });
+    try {
+      expect(await live.owner.arm()).toEqual({ enabled: false, generation: null });
+      expect(await live.routes['contributor/status']({ type: 'contributor/status' }, sender))
+        .toMatchObject({ ok: true, status: { enabled: false } });
+    } finally { live.restore(); }
+  });
+
   test('a stale consent generation cannot enter the durable receipt outbox', async () => {
     const state = storage(enabledRecord());
     const sender = {};
@@ -254,14 +270,14 @@ describe('Preview Contributor Metrics private channel', () => {
   test('a hung storage operation is bounded and cannot poison later settlements', async () => {
     const state = storage(enabledRecord());
     const sender = {};
-    const originalGet = state.kv.get;
-    let hangAggregateRead = true;
-    state.kv.get = async (key: string) => {
-      if (key === 'contributor_metrics.aggregate.v1' && hangAggregateRead) {
-        hangAggregateRead = false;
+    const originalList = state.kv.list;
+    let hangJournalRead = true;
+    state.kv.list = async (prefix: string) => {
+      if (prefix === CONTRIBUTOR_STATE_PREFIX && hangJournalRead) {
+        hangJournalRead = false;
         return new Promise(() => {});
       }
-      return originalGet(key);
+      return originalList(prefix);
     };
     const live = routesFor(state, sender, undefined, {
       scheduleDrain: () => {}, storageDeadlineMs: 5,
@@ -598,7 +614,10 @@ describe('Preview Contributor Metrics private channel', () => {
     }, sender)).toMatchObject({ ok: false, outcomeKnown: false });
     expect(await restarted.arm()).toEqual({ enabled: false, generation: null });
     expect(Object.values(state.listed(CONTRIBUTOR_STATE_PREFIX)))
-      .toEqual([expect.objectContaining({ state: 'revoked', committed: false })]);
+      .toEqual([
+        expect.objectContaining({ state: 'active', committed: true }),
+        expect.objectContaining({ state: 'revoked', committed: false }),
+      ]);
   });
 
   test('late snapshot cleanup never deletes a newer acknowledged generation', async () => {

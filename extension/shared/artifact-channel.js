@@ -136,3 +136,21 @@ export const collectArtifactTransferables = (value, out = [], seen = new Set()) 
   }
   return out;
 };
+
+/**
+ * Clone-safe error vocabulary shared by the operation Worker and its host.
+ * @param {unknown} cause
+ */
+export const serializeArtifactError = (cause) => {
+  const error = /** @type {any} */ (cause);
+  return {
+    name: typeof error?.name === 'string' ? error.name : 'Error',
+    message: typeof error?.message === 'string' ? error.message : String(cause),
+    ...(Number.isFinite(error?.size) ? { size: error.size } : {}),
+    ...(Number.isFinite(error?.limit) ? { limit: error.limit } : {}),
+    ...(typeof error?.reason === 'string' ? { reason: error.reason } : {}),
+    ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+    ...(typeof error?.outcomeKnown === 'boolean' ? { outcomeKnown: error.outcomeKnown } : {}),
+    ...(typeof error?.retryable === 'boolean' ? { retryable: error.retryable } : {}),
+  };
+};

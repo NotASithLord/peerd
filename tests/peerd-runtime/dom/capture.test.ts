@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { captureSnapshot, describeSource } from '../../../extension/peerd-runtime/dom/capture.js';
+import { captureSnapshot } from '../../../extension/peerd-runtime/dom/capture.js';
 import { domWalkInjected } from '../../../extension/peerd-runtime/dom/walk-injected.js';
 import { TEST_DOCUMENT_ID, TEST_TIME_ORIGIN } from '../../helpers/browser-scripting.ts';
 
@@ -124,13 +124,5 @@ describe('captureSnapshot — channel selection', () => {
     expect(cap.ok).toBe(false);
     if (cap.ok) throw new Error('expected error capture');
     expect(cap.error).toBe('dom_walk_failed: no body');
-  });
-});
-
-describe('describeSource', () => {
-  test('the fallback label says it is a fallback; CDP stays the plain label', () => {
-    expect(describeSource('dom-walk')).toContain('pseudo-a11y');
-    expect(describeSource('dom-walk')).toContain('fallback');
-    expect(describeSource('cdp')).toBe('a11y snapshot');
   });
 });

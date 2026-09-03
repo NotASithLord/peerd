@@ -27,12 +27,28 @@ export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze(
   'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status apps/repository/status apps/repository/history apps/repository/diff apps/repository/commit apps/repository/restore apps/repository/branch apps/repository/checkout apps/repository/link apps/repository/fetch apps/repository/push apps/import-git session/archive session/debugBundle session/reset session/switch'.split(' '),
 );
 
-export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze([
-  ...'pod/cancel-io pod/get-meta pod/git pod/web-fetch sw/web-fetch sw/web-fetch-abort export/artifact import/inspect import/apply apps/delete app/actor-chat a2a/call actors/list actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
-]);
+export const KERNEL_POD_ROUTE_NAMES = Object.freeze(
+  'pod/cancel-io pod/get-meta pod/git pod/web-fetch'.split(' '),
+);
+
+export const KERNEL_WEB_FETCH_ROUTE_NAMES = Object.freeze(
+  'sw/web-fetch sw/web-fetch-abort'.split(' '),
+);
+
+export const KERNEL_ARTIFACT_READ_ROUTE_NAMES = Object.freeze(
+  'export/artifact import/inspect'.split(' '),
+);
 
 export const KERNEL_RELAY_ROUTE_NAMES = Object.freeze([
   ...'a2a/call actors/list actors/call script/model-call script-run/abort site-fetch/call'.split(' '),
+]);
+
+export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze([
+  ...KERNEL_POD_ROUTE_NAMES,
+  ...KERNEL_WEB_FETCH_ROUTE_NAMES,
+  ...KERNEL_ARTIFACT_READ_ROUTE_NAMES,
+  ...'import/apply apps/delete app/actor-chat'.split(' '),
+  ...KERNEL_RELAY_ROUTE_NAMES,
 ]);
 
 export const KERNEL_ENGINE_ATTACH_ROUTE_NAMES = Object.freeze(

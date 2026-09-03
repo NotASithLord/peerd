@@ -50,6 +50,7 @@ const rig = (opts: { prewalkEnabled?: boolean; enginePrewalkEnabled?: boolean; e
   const persisted = new Set<string>();
   const settings = { prewalkEnabled: opts.prewalkEnabled ?? true, enginePrewalkEnabled: opts.enginePrewalkEnabled ?? true, prewalkExecutorModel: opts.executor ?? 'claude-haiku-4-5' };
   const audits: any[] = [];
+  const notes: any[][] = [];
   let clock = 1;
   const controller = makePrewalkController({
     sessions: store,
@@ -63,10 +64,10 @@ const rig = (opts: { prewalkEnabled?: boolean; enginePrewalkEnabled?: boolean; e
     }),
     getTool: (name: string) => TOOLS[name],
     appendAudit: (e: any) => { audits.push(e); },
-    postChatNote: () => {},
+    postChatNote: (...args: any[]) => { notes.push(args); },
     now: () => clock++,
   });
-  return { store, controller, active, persisted, settings, audits };
+  return { store, controller, active, persisted, settings, audits, notes };
 };
 
 const newChat = (store: ReturnType<typeof makeStore>) =>
@@ -100,7 +101,7 @@ describe('session store — setPrewalk', () => {
 
 describe('prewalk controller — the full lifecycle', () => {
   test('arm → commit plan → mutating call swaps phase → reconcile swaps model → restore', async () => {
-    const { store, controller, active } = rig();
+    const { store, controller, active, notes } = rig();
     const s = await newChat(store);
     active.add(s.sessionId);
 
@@ -125,6 +126,9 @@ describe('prewalk controller — the full lifecycle', () => {
     const swapped = await controller.reconcile(rec);
     expect(swapped.model).toBe('claude-haiku-4-5');
     expect((await store.get(s.sessionId))!.model).toBe('claude-haiku-4-5');
+    expect(notes).toEqual([[
+      'Prewalk: plan landed; continuing on claude-haiku-4-5.', null, s.sessionId,
+    ]]);
 
     // 5. Run end: restore planner + clear (run no longer active).
     active.delete(s.sessionId);

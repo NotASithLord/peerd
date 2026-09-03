@@ -3,8 +3,6 @@
 // Store Firefox omits this Preview-only owner.
 import './kernel-firefox-addon.js';
 
-const CONTRIBUTOR_RECORD_KEY = 'contributor_metrics.aggregate.v1';
-const CONTRIBUTOR_ACTIVE_CONSENT_KEY = 'contributor_metrics.active.v1';
 const CONTRIBUTOR_STATE_PREFIX = 'contributor_metrics.state.v2.';
 const CONTRIBUTOR_STORAGE_DEADLINE_MS = 750;
 const CONTRIBUTOR_MAX_STATE_SNAPSHOTS = 128;
@@ -13,8 +11,7 @@ const DISARMED = Object.freeze({ enabled: false, generation: null });
 const exactKeys = (/** @type {unknown} */ value, /** @type {string[]} */ keys) =>
   !!value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
-const armFromRecord = (/** @type {any} */ record,
-  /** @type {string|null} */ expectedGeneration = null) => {
+const armFromRecord = (/** @type {any} */ record) => {
   const consent = record?.consent;
   return Object.freeze(exactKeys(record, ['version', 'consent', 'aggregate'])
       && record.version === 1
@@ -22,7 +19,6 @@ const armFromRecord = (/** @type {any} */ record,
       && consent.enabled === true && consent.schemaVersion === 1
       && consent.disclosureVersion === 1 && typeof consent.generation === 'string'
       && consent.generation.length > 0 && consent.generation.length <= 200
-      && (expectedGeneration === null || consent.generation === expectedGeneration)
       && record.aggregate && typeof record.aggregate === 'object'
       && !Array.isArray(record.aggregate)
     ? { enabled: true, generation: consent.generation }
@@ -86,18 +82,11 @@ const firefoxContributorArm = async (/** @type {any} */ kv) => {
       && latestProposalRevision > 0) {
     return DISARMED;
   }
-  if (latest) return latest.value.state === 'active'
+  // why: v1 consent has no committed journal, so Firefox cannot distinguish
+  // an acknowledged grant from a torn write. Only an explicit v2 re-enable
+  // may restore contributor authority after restart.
+  return latest?.value.state === 'active'
     ? armFromRecord(latest.value.record) : DISARMED;
-  const active = /** @type {any} */ (
-    await bounded(() => kv.get(CONTRIBUTOR_ACTIVE_CONSENT_KEY))
-  );
-  if (active?.version !== 1 || typeof active.generation !== 'string'
-      || active.generation.length === 0 || active.generation.length > 200) {
-    return DISARMED;
-  }
-  return armFromRecord(
-    await bounded(() => kv.get(CONTRIBUTOR_RECORD_KEY)), active.generation,
-  );
 };
 
 /** @param {{contributorOwner?:()=>Promise<any>, contributorSemantic?:()=>Promise<any>}} [loaders] */

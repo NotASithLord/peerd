@@ -7,6 +7,8 @@ import {
   KERNEL_DWEB_ROUTE_NAMES,
   KERNEL_ENGINE_ATTACH_ROUTE_NAMES,
   KERNEL_EXECUTABLE_ROUTE_NAMES,
+  KERNEL_POD_ROUTE_NAMES,
+  KERNEL_RELAY_ROUTE_NAMES,
   KERNEL_TRANSFER_ROUTE_NAMES,
 } from '../shared/kernel-feature-route-inventory.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
@@ -30,13 +32,8 @@ const dispatchFailure = () => ({
   retryable: false,
 });
 
-const POD_ROUTES = new Set([
-  'pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch',
-]);
-const RELAY_ROUTES = new Set([
-  'a2a/call', 'actors/list', 'actors/call', 'script/model-call',
-  'script-run/abort', 'site-fetch/call',
-]);
+const POD_ROUTES = new Set(KERNEL_POD_ROUTE_NAMES);
+const RELAY_ROUTES = new Set(KERNEL_RELAY_ROUTE_NAMES);
 const ENGINE_ATTACH_ROUTES = new Set(KERNEL_ENGINE_ATTACH_ROUTE_NAMES);
 const DWEB_OFFSCREEN_ROUTES = new Set([
   'dweb/app-install', 'dweb/app-record-served', 'dweb/app-snapshot', 'dweb/app-update',

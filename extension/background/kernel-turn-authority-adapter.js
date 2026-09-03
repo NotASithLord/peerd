@@ -108,7 +108,10 @@ import {
   VaultLockedError,
   withSessionScopedCredentials,
 } from '/peerd-egress/background.js';
-import { projectSemanticHookManifest } from '/shared/semantic-hook-manifest.js';
+import {
+  projectSemanticHookManifest,
+  UNAVAILABLE_HOOK_RECORDS,
+} from '/shared/semantic-hook-manifest.js';
 import {
   bindCurrentChat, DEFAULT_CHAT_PERMISSION,
 } from '/shared/current-session-binding.js';
@@ -169,13 +172,6 @@ import {
   composerReferenceRequests,
 } from '../shared/composer-reference-policy.js';
 
-// why: silently replacing an unreadable enabled pre-hook policy with an empty
-// list fails open. The sealed semantic realm compiles this sentinel into a
-// deterministic blocking hook while ordinary empty storage remains `[]`.
-const HOOK_RECORDS_UNAVAILABLE = Object.freeze([Object.freeze({
-  id: 'user-hook-records-unavailable', event: 'pre-tool-use',
-  kind: 'unavailable', enabled: true,
-})]);
 const ACTOR_EXPOSURE = 'actor';
 
 /**
@@ -307,7 +303,8 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   if (!deps?.engine || !deps.browser || !deps.vault || !deps.settingsStore
       || !deps.seams || !deps.confirmation || !deps.denylist
       || !deps.scriptRuns || !deps.contextSnapshots
-      || !deps.providerEgress || typeof deps.resolveProviderSelection !== 'function') {
+      || !deps.providerEgress || typeof deps.resolveProviderSelection !== 'function'
+      || typeof deps.closePanel !== 'function') {
     throw new TypeError('kernel-turn-live-config-invalid');
   }
   // why: a fresh profile has no hook key and therefore an empty policy. Only
@@ -561,7 +558,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   const lifecycleBoot = makeLifecycleBoot({
     storage: deps.kv,
     appendAudit: (entry) => deps.auditLog.append({ type: entry.event, details: entry }),
-    notify: (_sessionId, text) => deps.postChatNote(text),
+    notify: (sessionId, text) => deps.postChatNote(text, null, sessionId),
     resolveNoticeSession: async (sessionId) => {
       let current = sessionId;
       for (let hops = 0; hops < 8; hops += 1) {
@@ -915,7 +912,11 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       hintPullIn: (/** @type {number} */ tabId, /** @type {string} */ url) =>
         live.tabAffordances.scheduleWebTabHint(tabId, url),
       ...(actorType === 'web' && actorBacking !== 'api'
-        ? { adoptWebTab: () => live.adoptWebTab(sessionId) } : {}),
+        ? {
+          adoptWebTab: () => live.adoptWebTab(sessionId),
+          releaseAdoptedWebTab: (/** @type {number} */ tabId) =>
+            live.releaseAdoptedWebTab(sessionId, tabId),
+        } : {}),
       noteLearnedOrigin: (/** @type {string} */ origin, /** @type {any} */ reason) =>
         learnedOrigins.note(origin, reason),
       listApiIntegrations: () => live.listApiIntegrations(sessionId),
@@ -1054,8 +1055,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     const sessionId = prompt.sessionId ?? null;
     if (prompt.oneShot !== true && prompt.tool === WEB_WRITE_CONFIRM_KEY
         && deps.settingsStore.get().confirmWebWrites === false) return 'yes_once';
-    const ephemeral = sessionId
-      ? (await live.shared.sessions.get(sessionId).catch(() => null))?.kind === 'actor' : false;
+    const confirmingSession = sessionId
+      ? await live.shared.sessions.get(sessionId).catch(() => null) : null;
+    // why: a helper must never gain a standing mutation grant merely because
+    // its durable identity could not be re-read at confirmation time.
+    const ephemeral = Boolean(sessionId) && (
+      !confirmingSession
+      || confirmingSession.kind === 'actor'
+      || confirmingSession.kind === 'spawned'
+    );
     const answer = await answerWithSessionConfirmGrant({
       prompt, sessionId, ephemeral, grants: sessionConfirmGrants,
       request: async () => {
@@ -2031,7 +2039,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       } : undefined;
       const userHookRecords = await readUserHookRecords()
         .then(projectSemanticHookManifest)
-        .catch(() => HOOK_RECORDS_UNAVAILABLE);
+        .catch(() => UNAVAILABLE_HOOK_RECORDS);
       const tabOrigin = kind === 'web' && record.backing !== 'api' && actorTabId != null
         ? safeWebActorSummaryOrigin(
           (await deps.browser.tabs.get(actorTabId).catch(() => null))?.url,
@@ -2226,22 +2234,9 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     const dispatchTabListeners = (/** @type {string} */ key, /** @type {any[]} */ args) => {
       for (const listener of tabListeners.get(key) ?? []) listener(...args);
     };
-    const closePanel = async () => {
-      if (deps.browser.sidebarAction?.close) {
-        await deps.browser.sidebarAction.close();
-        return { ok: true };
-      }
-      const sidePanel = deps.browser.sidePanel;
-      if (!sidePanel?.setOptions) return { ok: false, error: 'no-sidepanel' };
-      await sidePanel.setOptions({ enabled: false });
-      setTimeout(() => {
-        sidePanel.setOptions({ enabled: true, path: 'sidepanel/sidepanel.html' }).catch(() => {});
-      }, 250);
-      return { ok: true };
-    };
     const tabAffordances = makeTabAffordances({
       browser: deps.browser, uiPorts: shared.uiPorts,
-      denylistStore: deps.denylist, closeSidePanel: closePanel,
+      denylistStore: deps.denylist, closeSidePanel: deps.closePanel,
       isWatchOn: () => deps.settingsStore.get().watchAgentTab === true,
       getFrontDoorView: () => deps.settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel',
       coldEvent: (key) => captureTabListener(key),
@@ -2472,7 +2467,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         const childRecord = await shared.sessions.get(job.sessionId);
         const userHookRecords = await readUserHookRecords()
           .then(projectSemanticHookManifest)
-          .catch(() => HOOK_RECORDS_UNAVAILABLE);
+          .catch(() => UNAVAILABLE_HOOK_RECORDS);
         return live.runActorIsolated({
           actorSessionId: job.sessionId, message: job.task,
           systemPrompt: job.systemPrompt, provider: job.provider, model: job.model,
@@ -2625,6 +2620,20 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       await live.tabAffordances.noteAgentTab(tab.id, { kind: 'web', opened: true });
       return { tabId: tab.id, windowId: tab.windowId };
     };
+    const releaseAdoptedWebTab = async (/** @type {string} */ sessionId,
+      /** @type {number} */ tabId) => {
+      if (webActorTabBindings.resolve(tabId) !== sessionId) return false;
+      try { await deps.browser.tabs.remove(tabId); }
+      catch { return false; }
+      webActorTabBindings.drop(tabId);
+      try {
+        await persistWebBindings();
+        await deps.syncDenylistNetwork?.();
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const liveLandingFor = async (/** @type {string} */ sessionId) => {
       const tabId = webActorTabBindings.tabFor(sessionId);
       if (typeof tabId !== 'number') return { status: 'missing' };
@@ -2646,7 +2655,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     });
     Object.assign(live, {
       actorMessaging, spawnActor, scheduler, trimEnricher,
-      autoMemory, adoptWebTab, liveLandingFor, originLockFor,
+      autoMemory, adoptWebTab, releaseAdoptedWebTab, liveLandingFor, originLockFor,
       actorRecoveryGate, actorLifecycle: spawnActorCore,
     });
 
@@ -3243,6 +3252,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         projection.rootSessionIds()
           .map((rootSessionId) => [rootSessionId, projection.snapshot(rootSessionId)]),
       )),
+      getActorIsolation: () => live.actorIsolation,
       observeAppRuntime, actAppRuntime, appActorChat, engineTrackersHydrated, engineReady,
       relayRoutes, engineRoutes, eventOwners,
       dwebInbound: dwebAgentOwner.onMessage,
@@ -3282,10 +3292,14 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         void deps.sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ current) => {
           if (current !== sessionId) return;
           if (info?.phase === 'capped') {
-            deps.postChatNote(`Goal run stopped after reaching the ${GOAL_MAX_ITERATIONS}-turn limit.`);
+            deps.postChatNote(
+              `Goal run stopped after reaching the ${GOAL_MAX_ITERATIONS}-turn limit.`,
+              null,
+              sessionId,
+            );
           } else if (info?.phase === 'halted') {
             deps.postChatNote(info?.reason
-              ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.');
+              ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.', null, sessionId);
           }
         }).catch(() => {});
       },

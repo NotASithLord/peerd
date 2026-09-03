@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { createKernelTurnOwner } from '../../extension/background/kernel-turn-owner.js';
-import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
+import { createControllerTurnRuntime } from '../../extension/offscreen/controller-turn-runtime.js';
 import { makeAgentSendCustody } from '../../extension/peerd-egress/background.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
@@ -14,6 +14,7 @@ const until = async (predicate: () => boolean) => {
   }
   throw new Error('condition-not-met');
 };
+const turnRuntime = createControllerTurnRuntime();
 
 const makeCache = () => {
   const values: Record<string, any> = { currentSessionId: 'root' };
@@ -62,10 +63,10 @@ const makeControllerFactory = (calls: Record<string, any>, turnFailure: any = nu
         calls.turnCalls += 1;
         if (turnFailure) return turnFailure;
         const authority = authorizeTurnCall(payload);
-        return runControllerTurn(payload, {
+        return turnRuntime.runControllerTurn(payload, {
           signal: options.signal ?? new AbortController().signal,
           authority,
-          kernelCall: (operation, value) => handleTurnKernelCall(operation, value, {
+          kernelCall: (operation: string, value: any) => handleTurnKernelCall(operation, value, {
             capability: 'turn.run', authority,
             signal: options.signal ?? new AbortController().signal,
             deadlineAt: Date.now() + 60_000,

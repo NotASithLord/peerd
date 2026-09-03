@@ -1,8 +1,20 @@
 import { describe, expect, test } from 'bun:test';
-import { openTabTool } from '../../../extension/background/page-authority/open-tab.js';
+import { openProtectedBackgroundTabAuthority } from '../../../extension/background/page-authority/open-tab.js';
 import { siteCaptureTool } from '../../../extension/peerd-runtime/tools/defs/site-capture.js';
 import { executeSiteClientTool } from '../../helpers/site-client-tool.js';
-import { clickTool } from '../../../extension/background/page-authority/click.js';
+import { clickOwnedTargetAuthority } from '../../../extension/background/page-authority/click.js';
+import { openTabTool as controllerOpenTabTool } from '../../../extension/peerd-runtime/tools/defs/open-tab.js';
+import { clickTool as controllerClickTool } from '../../../extension/peerd-runtime/tools/defs/click.js';
+
+const openTabTool = { execute: (args: any, ctx: any) => controllerOpenTabTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    openProtectedBackgroundTab: () => openProtectedBackgroundTabAuthority(args, ctx),
+  },
+}) };
+const clickTool = { execute: (args: any, ctx: any) => controllerClickTool.execute(args, {
+  ...ctx, pageAuthority: { clickOwnedTarget: () => clickOwnedTargetAuthority(args, ctx) },
+}) };
 import {
   BrowserAutomationPolicyError,
   BrowserNetworkGuardUnavailableError,

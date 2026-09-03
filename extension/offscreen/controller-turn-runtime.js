@@ -305,10 +305,6 @@ const runControllerTurnWith = async (payload, options) => {
             await rpc('turn.model.observe-event', {
               type: event.type, id: event.id, name: event.name,
             });
-          } else if (event?.type === 'tool-use-delta') {
-            await rpc('turn.model.observe-event', {
-              type: event.type, id: event.id, partialJson: event.partialJson,
-            });
           }
           if (event?.type !== 'rate-limit-pause') streamedContent = true;
           const provider = providerMetadata(candidate.provider);
@@ -711,6 +707,8 @@ const runControllerTurnWith = async (payload, options) => {
               readOwnedPage: () => rpc('turn.page.read', {
                 ...binding(), args: prepared.args,
               }),
+              spillPageResult: (/** @type {any} */ record) =>
+                rpc('turn.resource.spill-result', { ...binding(), ...record }),
               captureOwnedAccessibilityTree: () => rpc('turn.page.snapshot', {
                 ...binding(), args: prepared.args,
               }),
@@ -979,10 +977,3 @@ export const createControllerTurnRuntime = () => Object.freeze({
   runControllerTurn: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
     runControllerTurnWith(payload, options),
 });
-
-export const runControllerTurn = (
-  /** @type {unknown} */ payload,
-  /** @type {{signal:AbortSignal,authority?:unknown,
-   * kernelCall?:(operation:string,payload:unknown)=>Promise<any>}} */ options,
-) =>
-  runControllerTurnWith(payload, options);

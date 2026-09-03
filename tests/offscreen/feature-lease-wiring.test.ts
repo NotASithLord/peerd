@@ -5,6 +5,12 @@ import { EXTENSION_DIR } from '../../packaging/lib.ts';
 import { createServiceWorkerChannels } from '../../extension/offscreen/supervisor-channels.js';
 import { backgroundScriptUrl } from '../../extension/offscreen/sender-checks.js';
 import {
+  beginDocumentExtraction,
+  MAX_CONCURRENT_DOCUMENT_EXTRACTIONS,
+  runLeasedDocumentExtraction,
+  stopDocumentExtractions,
+} from '../../extension/offscreen/document-extraction-lifecycle.js';
+import {
   FEATURE_LEASE_CLIENT_PROBE,
   FEATURE_LEASE_CLIENT_PROOF,
   FEATURE_LEASE_HOST_PROTOCOL,
@@ -60,6 +66,88 @@ describe('offscreen production feature-lease wiring', () => {
     expect(channels).toContain("ownsLease?.('controller', lease) === true");
     expect(shell).toContain("claimLease('dom-host'");
     expect(channels).toContain("ownsLease?.('media-host', offer.lease) === true");
+  });
+
+  test('document Stop is an exact request route behind sender and live lease custody', () => {
+    const shell = source('offscreen/offscreen.js');
+    const listener = shell.slice(shell.indexOf("const isDocumentAbort = msg?.type === 'doc/abort'"));
+    const senderGate = listener.indexOf('if (!isServiceWorkerSender(sender))');
+    const claimGate = listener.indexOf("claimLease('dom-host', sendResponse)");
+    const abortRoute = listener.indexOf('if (isDocumentAbort)');
+    expect(senderGate).toBeGreaterThanOrEqual(0);
+    expect(claimGate).toBeGreaterThan(senderGate);
+    expect(abortRoute).toBeGreaterThan(claimGate);
+    expect(listener).toContain('Object.keys(msg).length !== 2');
+    expect(listener).toContain("featureLeaseHost?.ownsLease('dom-host', entry.lease) !== true");
+    expect(listener).toContain('entry.controller.abort(');
+    expect(listener).not.toContain('abortAllDocument');
+  });
+
+  test('DOM-host stop aborts, clears, and refuses a late document success', async () => {
+    const first = { controller: new AbortController(), lease: {} };
+    const second = { controller: new AbortController(), lease: {} };
+    const pending = new Map([['first', first], ['second', second]]);
+    let release!: (value: any) => void;
+    const lateResult = new Promise<any>((resolve) => { release = resolve; });
+    const extraction = runLeasedDocumentExtraction({
+      handle: async () => lateResult,
+      message: { type: 'doc/extract' },
+      entry: first,
+      isCurrent: () => pending.get('first') === first && !first.controller.signal.aborted,
+    });
+
+    expect(stopDocumentExtractions(pending)).toBe(2);
+    expect(pending.size).toBe(0);
+    expect([first, second].map((entry) => ({
+      aborted: entry.controller.signal.aborted,
+      name: (entry.controller.signal.reason as Error)?.name,
+    }))).toEqual([
+      { aborted: true, name: 'AbortError' },
+      { aborted: true, name: 'AbortError' },
+    ]);
+    release({ ok: true, result: { format: 'pdf', late: true } });
+    await expect(extraction).resolves.toEqual({ ok: false, error: 'stale-document-extraction' });
+  });
+
+  test('document extraction capacity refuses N+1 and recovers after settlement', () => {
+    const pending = new Map();
+    for (let index = 0; index < MAX_CONCURRENT_DOCUMENT_EXTRACTIONS; index += 1) {
+      expect(beginDocumentExtraction(pending, `request-${index}`, {})).not.toBeNull();
+    }
+    expect(beginDocumentExtraction(pending, 'request-over-capacity', {})).toBeNull();
+    pending.delete('request-0');
+    expect(beginDocumentExtraction(pending, 'request-after-settlement', {})).not.toBeNull();
+    expect(pending.size).toBe(MAX_CONCURRENT_DOCUMENT_EXTRACTIONS);
+    stopDocumentExtractions(pending);
+  });
+
+  test('lease loss replaces a late document success with the exact refusal', async () => {
+    const oldLease = { leaseId: 'dom-old' };
+    const nextLease = { leaseId: 'dom-next' };
+    let currentLease = oldLease;
+    let release!: (value: any) => void;
+    const lateResult = new Promise<any>((resolve) => { release = resolve; });
+    const entry = { controller: new AbortController(), lease: oldLease };
+    const pending = runLeasedDocumentExtraction({
+      handle: async () => lateResult,
+      message: { type: 'doc/extract' },
+      entry,
+      isCurrent: () => !entry.controller.signal.aborted && currentLease === entry.lease,
+    });
+
+    currentLease = nextLease;
+    release({ ok: true, result: { format: 'pdf', late: true } });
+    await expect(pending).resolves.toEqual({ ok: false, error: 'stale-document-extraction' });
+  });
+
+  test('an unexpected parser rejection settles with stable document vocabulary', async () => {
+    const entry = { controller: new AbortController(), lease: {} };
+    await expect(runLeasedDocumentExtraction({
+      handle: async () => { throw new Error('hostile parser detail'); },
+      message: { type: 'doc/extract' },
+      entry,
+      isCurrent: () => true,
+    })).resolves.toEqual({ ok: false, error: 'doc_extract_failed' });
   });
 
   test('a revoked controller claim cannot escape a delayed bootstrap load', async () => {

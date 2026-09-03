@@ -26,13 +26,12 @@ boundary. Binary or cancellation-sensitive offscreen work should use a pinned
 exact OPFS root and writes reuse the existing repository-coordinated App file
 verbs. There are no `app/data/*` controllers in the service worker.
 
-Library owns Git-import input, progress, and open-after-import behavior. The
-worker exposes one vault-gated repository bootstrap command because the current
-repository engine also owns the shared mutation queue, storage write guard,
-credentialed transport, and immutable snapshots there. Do not move one Git
-operation into a second host and create two unsynchronized repository owners.
-When Git moves out of the worker, move the repository engine as one unit behind
-a pinned, binary-safe, abort-aware host channel.
+Library owns Git-import input, progress, and open-after-import behavior. A
+disposable offscreen operation Worker owns repository and OPFS logic behind one
+pinned, binary-safe, abort-aware channel. The service worker retains the keyed
+mutation lane, storage write guard, vault credential injection, network policy,
+and exact operation custody until that Worker acknowledges termination. Do not
+introduce a second repository engine or a parallel transport.
 
 ## Ratchets
 

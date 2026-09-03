@@ -993,6 +993,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           const pageAuthority = Object.freeze({
             openProtectedBackgroundTab: () => request('page-open-tab-request'),
             readOwnedPage: () => request('page-read-request'),
+            spillPageResult: (/** @type {any} */ record) => authorityValue(actorToolRequest(
+              'resource-spill-result-request', { ...effectBinding(), ...record },
+            )),
             captureOwnedAccessibilityTree: () => request('page-snapshot-request'),
             readOwnedFrameworkState: () => request('page-read-state-request'),
             drainOwnedDomChanges: () => request('page-watch-changes-request'),

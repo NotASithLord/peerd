@@ -100,7 +100,7 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(JSON.stringify(state)).not.toMatch(/credentialId|prfSalt|wrappedDK|secret|apiKey/);
   });
 
-  test('unlocked projection remains non-actionable until a controller commits', () => {
+  test('unlocked projection combines live actor isolation with provider readiness', () => {
     const runtimeCapabilities = {
       version: 1,
       pdfOcr: { status: 'available', host: 'offscreen-document' },
@@ -117,11 +117,19 @@ describe('minimal vault authority-kernel prototype', () => {
         credentialReady: false, localReady: true, canSend: false, reason: 'missing-key' },
       profile: { id: 'default', peerName: 'peerd', onboardingComplete: false },
       runtimeCapabilities,
+      actorIsolation: {
+        status: 'available', host: 'offscreen-document-worker',
+        reason: null, retryable: false,
+      },
     });
     expect(state.vault.locked).toBe(false);
     expect(state.vault.unlockedAt).toBe(123);
     expect(state.composer).toMatchObject({ canSend: false, reason: 'missing-key' });
     expect(state.capabilities).toMatchObject(runtimeCapabilities);
+    expect(state.capabilities.actorExecution).toEqual({
+      status: 'available', host: 'offscreen-document-worker',
+      reason: null, retryable: false,
+    });
     expect(state.projection.semanticController).toBe('required');
   });
 

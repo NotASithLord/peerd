@@ -14,35 +14,8 @@ describe('release feed publication hook', () => {
       workflow.indexOf('\n  notify-site:'),
     );
     expect(release).toContain(
-      'needs: [test, checks, inbrowser, e2e, packaged-pages, cold-start, firefox-runtime, twopeer, charon-dwapp, netproc, package]',
+      'needs: [test, checks, inbrowser, e2e, packaged-pages, cold-start, firefox-runtime, twopeer, netproc, package]',
     );
-  });
-
-  test('Charon package acceptance is pinned, physical, and precedes release credentials', () => {
-    const pin = JSON.parse(readFileSync(
-      join(import.meta.dir, '..', '..', 'scripts', 'cdp', 'charon-source.json'),
-      'utf8',
-    ));
-    const lane = workflow.slice(
-      workflow.indexOf('\n  charon-dwapp:'),
-      workflow.indexOf('\n  netproc:'),
-    );
-    expect(lane).toContain('name: Charon packaged two-profile dwapp');
-    expect(lane).toContain(`ref: ${pin.commit}`);
-    expect(lane).toContain('CHARON_ROOT: ${{ github.workspace }}/charon');
-    expect(lane).toContain('bun run test:e2e:charon');
-    expect(lane).toContain('charon-dwapp-two-profile.json');
-    expect(lane).toContain('if-no-files-found: error');
-
-    const localRelease = readFileSync(
-      join(import.meta.dir, '..', '..', 'packaging', 'release.ts'),
-      'utf8',
-    );
-    const charon = localRelease.indexOf("step('installed Chrome Preview Charon two-profile");
-    const credentials = localRelease.indexOf("step('signing credentials')");
-    expect(charon).toBeGreaterThan(0);
-    expect(charon).toBeLessThan(credentials);
-    expect(localRelease).toContain("die('CHARON_ROOT must point to the pinned clean Charon checkout");
   });
 
   test('cold-start is a secretless packaged-browser gate and local release runs it before signing', () => {
@@ -65,7 +38,7 @@ describe('release feed publication hook', () => {
       .toBeLessThan(localRelease.indexOf("step('signing credentials')"));
   });
 
-  test('release requires installed Chrome and Firefox secretless Smart HTTP Git acceptance', () => {
+  test('release requires packaged Chrome repository custody and Firefox Smart HTTP acceptance', () => {
     const chrome = workflow.slice(
       workflow.indexOf('\n  e2e:'),
       workflow.indexOf('\n  visual:'),
@@ -83,18 +56,20 @@ describe('release feed publication hook', () => {
       expect(lane).not.toContain('AMO_JWT_');
     }
     const chromeSource = readFileSync(
-      join(import.meta.dir, '..', '..', 'scripts', 'cdp', 'passkey-signup-lane.mjs'),
+      join(import.meta.dir, '..', '..', 'scripts', 'cdp', 'check-packaged-pages.mjs'),
       'utf8',
     );
     const firefoxSource = readFileSync(
       join(import.meta.dir, '..', '..', 'scripts', 'firefox', 'production-cutover-lane.mjs'),
       'utf8',
     );
-    for (const source of [chromeSource, firefoxSource]) {
-      expect(source).toContain('startGitSmartHttpFixture()');
-      expect(source).toContain('assertExactGitFixtureRequests');
-      expect(source).toContain('assertSecretlessGitReport');
-    }
+    expect(chromeSource).toContain("type: 'apps/repository/status'");
+    expect(chromeSource).toContain("type: 'apps/repository/branch'");
+    expect(chromeSource).toContain("type: 'import/apply'");
+    expect(firefoxSource).toContain('startGitSmartHttpFixture()');
+    expect(firefoxSource).toContain('assertExactGitFixtureRequests');
+    expect(firefoxSource).toContain('assertSecretlessGitReport');
+    expect(workflow).toContain('needs: [test, checks, inbrowser, e2e, packaged-pages, cold-start, firefox-runtime');
     const localRelease = readFileSync(
       join(import.meta.dir, '..', '..', 'packaging', 'release.ts'),
       'utf8',
@@ -120,6 +95,22 @@ describe('release feed publication hook', () => {
     const documentGate = localRelease.indexOf('scripts/cdp/read-doc-store-lane.mjs');
     expect(documentGate).toBeGreaterThan(0);
     expect(documentGate).toBeLessThan(localRelease.indexOf("step('signing credentials')"));
+  });
+
+  test('CI exercises site capture through the packaged Store tap fallback', () => {
+    const chrome = workflow.slice(
+      workflow.indexOf('\n  e2e:'),
+      workflow.indexOf('\n  visual:'),
+    );
+    const pkg = JSON.parse(readFileSync(
+      join(import.meta.dir, '..', '..', 'package.json'),
+      'utf8',
+    ));
+    expect(chrome).toContain('bun run test:e2e:site-client-store:staged');
+    expect(pkg.scripts['test:e2e:site-client-store']).toContain('--channel=store --browser=chrome');
+    expect(pkg.scripts['test:e2e:site-client-store']).toContain('test:e2e:site-client-store:staged');
+    expect(pkg.scripts['test:e2e:site-client-store:staged']).toContain('PEERD_REQUIRE_SITE_CAPTURE_TAP=1');
+    expect(pkg.scripts['test:e2e:site-client-store:staged']).toContain('--only=site-client-vertical');
   });
 
   test('dispatches the exact released tag from an isolated post-release job', () => {

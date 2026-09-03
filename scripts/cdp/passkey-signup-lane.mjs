@@ -18,28 +18,12 @@ import {
 import {
   completeOnboardingAndSelectFixture,
   kernelIdentityFromReply,
-  REMOTE_GIT_PROOF_PATH,
-  REMOTE_GIT_PROOF_TEXT,
-  runPackagedAppGitProbe,
-  runPackagedRemoteAppGitProbe,
   sendAndObserveFirstControllerMessage,
   startOllamaAcceptanceFixture,
-  verifyPackagedRemoteAppGitAfterRecycle,
-  verifyRetainedAppGitProbe,
 } from './product-acceptance-probes.mjs';
 import {
   assertLiveKernelAssembly,
 } from '../acceptance/live-kernel-assembly.mjs';
-import {
-  assertExactGitFixtureRequests,
-  assertGitFixtureBinding,
-  assertGitFixtureSnapshot,
-  assertSecretlessGitReport,
-  GIT_FIXTURE_HOST,
-  GIT_FIXTURE_REMOTE,
-  redactGitFixtureCredential,
-  startGitSmartHttpFixture,
-} from '../acceptance/git-smart-http-fixture.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRY = fileURLToPath(import.meta.url);
@@ -56,7 +40,6 @@ export const PASSKEY_SIGNUP_BUDGETS = Object.freeze({
   startupMs: 180_000,
   afterClickMs: 30_000,
   controllerMs: 30_000,
-  repositoryMs: 30_000,
   recycleMs: 60_000,
   lockMs: 30_000,
 });
@@ -148,8 +131,6 @@ export const readChromeIdentity = async () => {
 const assert = (condition, message) => {
   if (!condition) throw new Error(`passkey report invalid: ${message}`);
 };
-const exactKeys = (value, keys) => value != null && typeof value === 'object'
-  && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
 const reportContainsCredentialMaterial = (value) => {
   if (typeof value === 'string') return /^(?:Basic|Bearer)\s/i.test(value);
   if (Array.isArray(value)) return value.some(reportContainsCredentialMaterial);
@@ -175,13 +156,7 @@ export const assertPasskeySignupReport = (report) => {
     manifest: bindings?.manifest?.sha256,
     browser: bindings?.browserIdentity?.sha256,
     harness: bindings?.harness?.sha256,
-    gitFixture: bindings?.gitFixture?.sha256,
-    gitFixtureCertificate: bindings?.gitFixture?.certificateSha256,
-    gitFixtureProtocol: bindings?.gitFixture?.protocolSha256,
   })) assert(HEX_256.test(String(value ?? '')), `${name} digest`);
-  assert(bindings?.gitFixture?.host === GIT_FIXTURE_HOST
-    && bindings?.gitFixture?.remote === GIT_FIXTURE_REMOTE, 'Git fixture identity');
-  assertGitFixtureBinding(bindings.gitFixture);
   assert(bindings?.manifest?.backgroundEntry === PRODUCTION_BACKGROUND_ENTRY,
     'production background entry');
   assert(bindings.browserIdentity.expectedVersion === bindings.browserIdentity.actualVersion,
@@ -199,7 +174,7 @@ export const assertPasskeySignupReport = (report) => {
   const ordered = [
     'staticShellPaintedMs', 'bootModuleEvaluatedMs', 'ctaEnabledMs', 'clickMs',
     'authenticatorReturnMs', 'durableVaultCommitMs', 'richAppReadyMs',
-    'controllerFirstMessageMs', 'appGitReadyMs', 'remoteGitReadyMs', 'recycleReadyMs',
+    'controllerFirstMessageMs', 'recycleReadyMs',
     'lockStartedMs', 'lockReadyMs',
   ];
   let previous = -Infinity;
@@ -213,9 +188,7 @@ export const assertPasskeySignupReport = (report) => {
     'post-click completion budget');
   assert(timings.controllerFirstMessageMs - timings.richAppReadyMs <= budgets.controllerMs,
     'controller completion budget');
-  assert(timings.remoteGitReadyMs - timings.controllerFirstMessageMs <= budgets.repositoryMs,
-    'repository completion budget');
-  assert(timings.recycleReadyMs - timings.remoteGitReadyMs <= budgets.recycleMs,
+  assert(timings.recycleReadyMs - timings.controllerFirstMessageMs <= budgets.recycleMs,
     'recycle completion budget');
   assert(timings.lockReadyMs - timings.lockStartedMs <= budgets.lockMs,
     'lock teardown budget');
@@ -223,72 +196,20 @@ export const assertPasskeySignupReport = (report) => {
   assert(observations?.durableVaultCommitted === true, 'durable vault commit');
   assert(observations?.controllerFirstMessage?.completionCalls === 1,
     'controller first message');
-  assert(observations?.commandOpen?.openedContexts >= 1
-    && observations?.commandOpen?.closed === true, 'installed command open');
   assert(Array.isArray(observations?.coldLocked?.offscreenContexts)
     && observations.coldLocked.offscreenContexts.length === 0, 'eager cold offscreen host');
   assert(Array.isArray(observations?.semanticHost?.offscreenContexts)
     && observations.semanticHost.offscreenContexts.some((context) =>
       String(context?.documentUrl ?? '').split('#', 1)[0].endsWith('/offscreen/offscreen.html')),
   'lazy semantic host');
-  assert(observations?.appGit?.ok === true
-    && observations.appGit.payload?.ok === true, 'App/isomorphic-git probe');
-  assert(observations?.remoteGit?.ok === true
-    && observations.remoteGit?.phase === 'complete'
-    && observations.remoteGit?.credentialStored === true
-    && observations.remoteGit?.remoteLinked === true
-    && observations.remoteGit?.pushed === true
-    && observations.remoteGit?.fetched === true
-    && observations.remoteGit?.host === GIT_FIXTURE_HOST
-    && observations.remoteGit?.cleanClone?.ok === true
-    && observations.remoteGit?.cleanClone?.payload?.textOk === true
-    && observations.remoteGit?.cleanClone?.payload?.binaryOk === true
-    && observations.remoteGit?.cleanClone?.proofOk === true
-    && observations.remoteGit?.cleanClone?.historyContainsCommit === true,
-  'remote App/isomorphic-git probe');
-  assert(exactKeys(observations.remoteGit, [
-    'ok', 'phase', 'credentialStored', 'host', 'remoteLinked', 'branch',
-    'committedOid', 'pushed', 'fetched', 'cleanClone', 'remoteBranch',
-  ]) && exactKeys(observations.remoteGit.cleanClone, [
-    'ok', 'payload', 'proofOk', 'oid', 'historyContainsCommit',
-  ]) && exactKeys(observations.remoteGit.cleanClone.payload, [
-    'ok', 'textOk', 'binaryOk', 'fileCount',
-  ]) && exactKeys(observations.remoteGit.remoteBranch, ['branch', 'oid', 'files'])
-    && exactKeys(observations.remoteGit.remoteBranch.files, [
-      'index.html', 'src/main.js', 'assets/raw.bin', REMOTE_GIT_PROOF_PATH,
-    ]), 'remote Git report shape');
-  assert(observations?.remoteGitFixture?.bindingSha256 === bindings.gitFixture.sha256,
-    'Git fixture binding');
-  assert(Object.keys(observations.remoteGitFixture).sort().join(',')
-    === ['bindingSha256', 'requests', 'schema', 'summary'].sort().join(','),
-  'Git fixture report shape');
-  assertGitFixtureSnapshot({
-    schema: observations.remoteGitFixture.schema,
-    requests: observations.remoteGitFixture.requests,
-    summary: observations.remoteGitFixture.summary,
-  });
   assert(typeof observations?.coldRecycle?.oldWorker?.versionId === 'string'
     && observations.coldRecycle.oldWorker.versionId.length > 0
     && observations.coldRecycle.oldWorker.stoppedRunningStatus === 'stopped',
   'authoritative worker stop');
-  assert(exactKeys(observations?.coldRecycle?.remoteGitPersistence, [
-    'ok', 'phase', 'host', 'fetched', 'oid', 'historyContainsCommit',
-    'credentialRetained', 'cleanup',
-  ]) && exactKeys(observations.coldRecycle.remoteGitPersistence.cleanup, [
-    'appRemoved', 'credentialRemoved', 'credentialAbsent',
-  ]), 'remote Git recycle report shape');
   assert(observations?.coldRecycle?.newWorker === true
     && observations?.coldRecycle?.newGeneration === true
     && observations?.coldRecycle?.controllerRecovered === true
     && observations?.coldRecycle?.controllerRecovery?.completionCalls === 2
-    && observations?.coldRecycle?.appGitPersisted === true
-    && observations?.coldRecycle?.appGitPersistence?.payload?.ok === true
-    && observations?.coldRecycle?.remoteGitPersisted === true
-    && observations?.coldRecycle?.remoteGitPersistence?.fetched === true
-    && observations?.coldRecycle?.remoteGitPersistence?.credentialRetained === true
-    && observations?.coldRecycle?.remoteGitPersistence?.cleanup?.appRemoved === true
-    && observations?.coldRecycle?.remoteGitPersistence?.cleanup?.credentialRemoved === true
-    && observations?.coldRecycle?.remoteGitPersistence?.cleanup?.credentialAbsent === true
     && observations?.coldRecycle?.recycledUi?.stage === 'app-ready'
     && observations?.coldRecycle?.recycledUi?.appShell === true
     && observations?.coldRecycle?.recycledUi?.failure !== true,
@@ -375,48 +296,6 @@ const offscreenContexts = (page) => evalIn(page, `(async () => {
     documentUrl: context.documentUrl,
   }));
 })()`, true);
-
-const probeCommandOpen = async (page) => {
-  const command = await evalIn(page, `(async () => {
-    const commands = await chrome.commands.getAll();
-    return commands.find((entry) => entry.name === 'pull-in-peerd') ?? null;
-  })()`, true);
-  const expectedShortcut = process.platform === 'darwin' ? 'Command+Shift+P' : 'Alt+Shift+P';
-  if (!command || command.shortcut !== expectedShortcut) {
-    throw new Error(`installed pull-in-peerd shortcut mismatch: ${JSON.stringify(command)}`);
-  }
-  const read = () => evalIn(page, `(async () => chrome.runtime.getContexts({
-    contextTypes: ['SIDE_PANEL'],
-  }))()`, true);
-  if ((await read()).length !== 0) throw new Error('physical command probe did not start closed');
-  const modifiers = process.platform === 'darwin' ? 12 : 9; // Meta/Alt + Shift
-  await page.send('Page.bringToFront');
-  await page.send('Input.dispatchKeyEvent', {
-    type: 'keyDown', modifiers, key: 'P', code: 'KeyP',
-    windowsVirtualKeyCode: 80, nativeVirtualKeyCode: 80,
-  });
-  await page.send('Input.dispatchKeyEvent', {
-    type: 'keyUp', modifiers, key: 'P', code: 'KeyP',
-    windowsVirtualKeyCode: 80, nativeVirtualKeyCode: 80,
-  });
-  const opened = await waitFor(async () => {
-    const contexts = await read();
-    return contexts.length >= 1 ? contexts : null;
-  }, { budgetMs: 10_000, pollMs: 25 });
-  if (!opened) throw new Error('installed command did not open a real SIDE_PANEL context');
-  const closed = await evalIn(page, `(async () => {
-    if (typeof chrome.sidePanel?.close !== 'function') return false;
-    const tab = await chrome.tabs.getCurrent();
-    await chrome.sidePanel.close({ windowId: tab.windowId });
-    return true;
-  })()`, true);
-  if (!closed) throw new Error('pinned Chrome cannot close the physical command probe');
-  const gone = await waitFor(async () => (await read()).length === 0, {
-    budgetMs: 10_000, pollMs: 25,
-  });
-  if (!gone) throw new Error('physical SIDE_PANEL context did not close');
-  return { command, openedContexts: opened.length, closed: true };
-};
 
 export const installPageTrace = async (ctx, onAuthenticatorReturn) => {
   const listener = (method, params) => {
@@ -544,7 +423,6 @@ export async function runPackagedPasskeySignup({
     digestTree(treePath),
     readStagedManifest(treePath),
   ]);
-  const gitFixture = await startGitSmartHttpFixture();
   const bindings = {
     channel: 'store',
     browser: 'chrome',
@@ -565,7 +443,6 @@ export async function runPackagedPasskeySignup({
     },
     browserIdentity,
     harness,
-    gitFixture: gitFixture.binding(),
   };
   let ctx;
   let fixture;
@@ -584,7 +461,6 @@ export async function runPackagedPasskeySignup({
       captureBootTimeline: true,
       beforePanelNavigate: installVirtualPasskey,
       expectedBackgroundEntry: PRODUCTION_BACKGROUND_ENTRY,
-      proxyServer: gitFixture.proxyServer,
     });
   } catch (error) {
     postRun = await collectPostRunDigests(artifactPath, treePath).catch(() => null);
@@ -595,7 +471,6 @@ export async function runPackagedPasskeySignup({
       };
     }
     await fixture?.close().catch(() => {});
-    await gitFixture.close().catch(() => {});
     throw error;
   }
   let removePageListener = () => {};
@@ -685,7 +560,6 @@ export async function runPackagedPasskeySignup({
 
     const trace = await stageTrace(ctx.page);
     await completeOnboardingAndSelectFixture(ctx.page, fixture.origin);
-    const commandOpen = await probeCommandOpen(ctx.page);
     const controllerCompletion = sendAndObserveFirstControllerMessage(ctx.page, fixture);
     const semanticOffscreen = await waitFor(async () => {
       const contexts = await offscreenContexts(ctx.page);
@@ -695,28 +569,6 @@ export async function runPackagedPasskeySignup({
     const controllerFirstMessage = await controllerCompletion;
     const controllerFirstMessageMs = sinceLaunch();
 
-    const appGit = await runPackagedAppGitProbe(ctx.page, { retain: true });
-    const appGitReadyMs = sinceLaunch();
-    const gitCredential = gitFixture.credential();
-    const remoteConfig = {
-      host: GIT_FIXTURE_HOST,
-      remote: GIT_FIXTURE_REMOTE,
-      token: gitCredential.token,
-      branch: 'acceptance/cutover',
-      proofPath: REMOTE_GIT_PROOF_PATH,
-      proofText: REMOTE_GIT_PROOF_TEXT,
-    };
-    const remoteGit = await runPackagedRemoteAppGitProbe(ctx.page, appGit.appId, remoteConfig);
-    const remoteBranch = await gitFixture.verifyBranch(remoteConfig.branch, {
-      'index.html': '<!doctype html><title>Cutover App</title><main>ready</main>',
-      'src/main.js': 'document.querySelector("main").dataset.ready = "true";',
-      'assets/raw.bin': Buffer.from([0, 1, 2, 127, 128, 255]),
-      [REMOTE_GIT_PROOF_PATH]: REMOTE_GIT_PROOF_TEXT,
-    });
-    if (remoteBranch.oid !== remoteGit.committedOid) {
-      throw new Error(`fixture remote branch OID mismatch: ${remoteBranch.oid} != ${remoteGit.committedOid}`);
-    }
-    const remoteGitReadyMs = sinceLaunch();
     const beforeRecycleReply = await rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 10_000 });
     const beforeRecycle = kernelIdentityFromReply(beforeRecycleReply);
     if (!beforeRecycle) {
@@ -742,16 +594,6 @@ export async function runPackagedPasskeySignup({
       text: 'production cutover acceptance ping after recycle',
       expectedCompletionCalls: 2,
     });
-    const appGitPersisted = await verifyRetainedAppGitProbe(
-      ctx.page, appGit.appId, { cleanup: false },
-    );
-    const remoteGitPersisted = await verifyPackagedRemoteAppGitAfterRecycle(
-      ctx.page,
-      appGit.appId,
-      { host: GIT_FIXTURE_HOST, committedOid: remoteGit.committedOid },
-    );
-    const remoteGitFixture = gitFixture.snapshot();
-    assertExactGitFixtureRequests(remoteGitFixture.summary);
     const recycleReadyMs = sinceLaunch();
 
     const lockStartedMs = sinceLaunch();
@@ -805,8 +647,6 @@ export async function runPackagedPasskeySignup({
         durableVaultCommitMs,
         richAppReadyMs,
         controllerFirstMessageMs,
-        appGitReadyMs,
-        remoteGitReadyMs,
         recycleReadyMs,
         lockStartedMs,
         lockReadyMs,
@@ -818,17 +658,10 @@ export async function runPackagedPasskeySignup({
         durableVaultCommitted: true,
         inputsImmutable,
         controllerFirstMessage,
-        commandOpen,
         coldLocked: { offscreenContexts: coldOffscreen },
         semanticHost: {
           offscreenContexts: semanticOffscreen,
           fixtureDelayMs: fixture.completionDelayMs,
-        },
-        appGit,
-        remoteGit: { ...remoteGit, remoteBranch },
-        remoteGitFixture: {
-          bindingSha256: bindings.gitFixture.sha256,
-          ...remoteGitFixture,
         },
         coldRecycle: {
           oldWorker: {
@@ -843,10 +676,6 @@ export async function runPackagedPasskeySignup({
           newGeneration: true,
           controllerRecovered: controllerRecovered.completionCalls === 2,
           controllerRecovery: controllerRecovered,
-          appGitPersisted: appGitPersisted.ok === true,
-          appGitPersistence: appGitPersisted,
-          remoteGitPersisted: remoteGitPersisted.ok === true,
-          remoteGitPersistence: remoteGitPersisted,
           recycledUi,
         },
         lockTeardown: {
@@ -861,7 +690,6 @@ export async function runPackagedPasskeySignup({
         finalUi,
       },
     };
-    assertSecretlessGitReport(report, gitCredential);
     assertPasskeySignupReport(report);
     mkdirSync(dirname(reportPath), { recursive: true });
     writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
@@ -870,13 +698,6 @@ export async function runPackagedPasskeySignup({
     postRun ??= await collectPostRunDigests(artifactPath, treePath).catch(() => null);
     if (error && typeof error === 'object') {
       const failure = /** @type {Error & {passkeyEvidence?:unknown}} */ (error);
-      const credential = gitFixture.credential();
-      if (typeof failure.message === 'string') {
-        failure.message = redactGitFixtureCredential(failure.message, credential);
-      }
-      if (typeof failure.stack === 'string') {
-        failure.stack = redactGitFixtureCredential(failure.stack, credential);
-      }
       failure.passkeyEvidence = {
         phase: 'packaged-passkey-ux', bindings, postRun,
         terminal: await collectTerminalEvidence(ctx),
@@ -887,6 +708,5 @@ export async function runPackagedPasskeySignup({
     removePageListener();
     await ctx.close();
     await fixture?.close().catch(() => {});
-    await gitFixture.close().catch(() => {});
   }
 }

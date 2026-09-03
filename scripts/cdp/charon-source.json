@@ -1,9 +1,0 @@
-{
-  "schema": 1,
-  "repository": "NotASithLord/charon",
-  "commit": "f98907200bc3501dd5c669ab8d6c98d1d95fbaa1",
-  "sourceDirectory": "dwapp/hub",
-  "envelope": "dwapp/charon-app.peerd",
-  "bundle": "dwapp/hub/bundle.js",
-  "manifest": "dwapp/hub/peerd.json"
-}

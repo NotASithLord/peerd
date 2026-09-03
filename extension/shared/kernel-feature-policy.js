@@ -4,8 +4,6 @@ import { controllerPayloadBytes, parseControllerAuthority } from './structured-c
 import { isDefaultHookId } from './default-hook-manifest.js';
 import {
   KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
-  KERNEL_DWEB_ROUTE_NAMES,
-  KERNEL_EXECUTABLE_ROUTE_NAMES,
   KERNEL_LOCAL_ROUTE_NAMES,
   KERNEL_REPOSITORY_ROUTE_NAMES,
   KERNEL_SESSION_SUPPORT_ROUTE_NAMES,
@@ -21,24 +19,13 @@ const DISPATCH_ID = /^[A-Za-z0-9._-]{8,512}$/;
 export const KERNEL_FEATURE_DISPATCH_CAPABILITY = 'feature.dispatch';
 
 const READ_ROUTES = new Set([
-  'app/editor/read', 'app/editor/list', 'lifecycle/assert-opfs-writable',
-  'vm/get-meta', 'site-client/list', 'denylist/list', 'commands/list',
-  'composer/files', 'composer/tabs', 'session/list', 'session/get',
-  'session/contextSnapshots',
-  'pod/get-meta', 'export/artifact', 'import/inspect', 'hooks/list',
+  'session/list', 'session/get', 'session/contextSnapshots', 'hooks/list',
   'apps/repository/status', 'apps/repository/history', 'apps/repository/diff',
   'models/options', 'models/state-projection', 'openrouter/models', 'local-model/catalog',
   'local-model/probe', 'local-model/status',
-  'dweb/base/find', 'dweb/base/heard', 'dweb/base/status', 'dweb/base/updates',
-  'dweb/distributed/info', 'dweb/self-prepare-offer', 'dweb/self-read-surface',
-  'dweb/self-status',
 ]);
 const LARGE_ROUTES = new Set([
-  'app/editor/read', 'app/editor/list', 'app/editor/write', 'app/editor/delete',
-  'app/editor-write', 'app/editor-delete', 'composer/files',
   'session/list', 'session/get', 'session/contextSnapshots',
-  'export/artifact', 'import/inspect', 'import/apply',
-  'dweb/app-install', 'dweb/app-snapshot', 'dweb/app-update',
 ]);
 const effectPolicy = (/** @type {string[]} */ inputKeys, /** @type {number} */ calls = 1,
   /** @type {number} */ inputBytes = 256 * KIB,
@@ -387,8 +374,6 @@ const SUPPORT_EFFECTS = Object.freeze({
     ),
   }),
 });
-const routeOperation = (/** @type {string} */ cluster, /** @type {string} */ route) =>
-  `feature.${cluster}.${route.replaceAll('/', '.')}`;
 const routePolicy = (/** @type {string} */ cluster, /** @type {string} */ route) => {
   const administrative = cluster === 'administrative';
   const repository = cluster === 'repository';
@@ -398,7 +383,6 @@ const routePolicy = (/** @type {string} */ cluster, /** @type {string} */ route)
   const bytes = repository || support && large ? 8 * MIB
     : support ? MIB : large ? 4 * MIB : 256 * KIB;
   const resultBytes = support && route === 'session/get' ? SESSION_READ_BYTES : bytes;
-  const operation = routeOperation(cluster, route);
   return Object.freeze({
     inputBytes: bytes,
     resultBytes,
@@ -409,19 +393,15 @@ const routePolicy = (/** @type {string} */ cluster, /** @type {string} */ route)
     effects: administrative ? ADMINISTRATIVE_EFFECTS[/** @type {keyof typeof ADMINISTRATIVE_EFFECTS} */ (route)]
       : repository ? REPOSITORY_EFFECTS[/** @type {keyof typeof REPOSITORY_EFFECTS} */ (route)]
         : local ? LOCAL_EFFECTS[/** @type {keyof typeof LOCAL_EFFECTS} */ (route)]
-          : support ? SUPPORT_EFFECTS[/** @type {keyof typeof SUPPORT_EFFECTS} */ (route)] : Object.freeze({
-      [operation]: effectPolicy(['value'], 1, bytes, bytes),
-    }),
+          : SUPPORT_EFFECTS[/** @type {keyof typeof SUPPORT_EFFECTS} */ (route)],
   });
 };
 
 const routeEntries = [
   ['support', KERNEL_SESSION_SUPPORT_ROUTE_NAMES],
-  ['executable', KERNEL_EXECUTABLE_ROUTE_NAMES],
   ['administrative', KERNEL_ADMINISTRATIVE_ROUTE_NAMES],
   ['repository', KERNEL_REPOSITORY_ROUTE_NAMES],
   ['local', KERNEL_LOCAL_ROUTE_NAMES],
-  ['dweb', KERNEL_DWEB_ROUTE_NAMES],
 ].flatMap(([cluster, routes]) => /** @type {readonly string[]} */ (routes).map((route) => [
   `${cluster}\0${route}`, routePolicy(/** @type {string} */ (cluster), route),
 ]));

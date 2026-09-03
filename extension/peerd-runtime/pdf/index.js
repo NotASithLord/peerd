@@ -1,10 +1,11 @@
 // @ts-check
-// peerd-runtime/pdf — public surface of the PDF-reading subsystem.
+// peerd-runtime/pdf: public surface of the PDF-reading subsystem.
 //
 // Split across contexts, like voice:
-//   SW: read_doc dispatches to the offscreen document reader
-//   offscreen  — pdf.js parsing + (opt-in) OCR recognition (needs a Worker)
-//   side panel — Settings → Voice & OCR drives the opt-in OCR download
+//   controller: read_doc owns the model-facing semantics and formatting
+//   SW: exact extraction custody and the offscreen client
+//   offscreen: pdf.js parsing + (opt-in) OCR recognition (needs a Worker)
+//   side panel: Settings > Voice & OCR drives the opt-in OCR download
 //
 // The default engine (pdf.js text layer) is vendored and always available;
 // OCR is an opt-in runtime download (the Moonshine-voice pattern).

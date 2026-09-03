@@ -55,7 +55,7 @@ describe('native local authority boundary', () => {
     expect(compactIdb.contacts.get(did)).toEqual(expected);
   });
 
-  test('provider status reads only its fixed key posture and never exposes a secret', async () => {
+  test('provider status exposes only readiness, never secret-derived metadata', async () => {
     const reads: string[] = [];
     const authority = makeAuthority({
       vault: { isLocked: () => false, getSecret: async (name: string) => {
@@ -64,13 +64,16 @@ describe('native local authority boundary', () => {
       } },
     });
     const result = await call(authority, 'semantic.providers.key-status', 'provider/status');
-    expect(result.value.anthropic)
-      .toMatchObject({ hasKey: true, keyPreview: 'sk-ant-…lue · 19 chars' });
-    expect(result.value.openrouter).toEqual({ hasKey: false, keyPreview: null });
+    expect(result.value.anthropic).toEqual({ hasKey: true });
+    expect(result.value.openrouter).toEqual({ hasKey: false });
     expect(reads).toEqual([
       'anthropic_api_key', 'openrouter_api_key', 'openai_api_key', 'glm_api_key',
     ]);
     expect(JSON.stringify(result)).not.toContain('secret-value');
+    expect(JSON.stringify(result)).not.toContain('keyPreview');
+    for (const provider of Object.values(result.value)) {
+      expect(Object.keys(provider as Record<string, unknown>)).toEqual(['hasKey']);
+    }
   });
 
   test('admits contact storage only for its exact sealed route', async () => {

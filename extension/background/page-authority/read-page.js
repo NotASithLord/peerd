@@ -15,23 +15,12 @@
 
 import {
   disarmMarkup,
-  excerptFooter,
-  excerptRelevant,
-  originOfUrl,
-  pagingFooter,
   resolveTargetTab,
   scriptingTarget,
-  windowText,
-  wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
-// Content mode shares fetch_url's body budget: one read costs like one fetch.
-const CONTENT_BODY_CHARS = 16_000;
-
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const readPageTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const readOwnedPageAuthority = async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
 
@@ -58,53 +47,19 @@ export const readPageTool = Object.freeze({
             // Out: extraction PARSES that markup, decoding `&#8203;`: plain
             // ASCII the first sweep correctly left alone, into a literal
             // zero-width byte, so the second pass is what closes the entity
-            // channel. Both run BEFORE any windowing or caching below, because
-            // the paging footer reports character offsets into this string and
-            // resultStore keeps it for read_result to page back later.
+            // channel. Both run before the raw receipt crosses to the sealed
+            // controller, which owns windowing and any read_result spill.
             const ex = await webClient.extractMarkdown({ html: disarmMarkup(grabbed.html), url: grabbed.url || tab.url });
             const markdown = disarmMarkup(ex.markdown);
             if (ex.readerable && markdown.trim()) {
-              const origin = originOfUrl(grabbed.url || tab.url);
-              const resultStore = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
-                /** @type {any} */ (ctx).resultStore);
-              // Query-relevant excerpt when the caller named what it's after
-              // (markdown is always prose here); else the head+tail window. Same
-              // spill contract: full markdown stored + pageable either way.
-              const query = typeof args.query === 'string' ? args.query.trim() : '';
-              const excerpt = query ? excerptRelevant(markdown, query, CONTENT_BODY_CHARS) : null;
-              const win = windowText(markdown, CONTENT_BODY_CHARS);
-              let text = excerpt ? excerpt.excerpt : win.window;
-              const truncated = excerpt ? excerpt.excerpted : win.windowed;
-              /** @type {string | null} */
-              let footer = null;
-              if (truncated && resultStore?.key && resultStore?.put) {
-                const cacheKey = resultStore.key();
-                try {
-                  await resultStore.put({
-                    key: cacheKey, url: grabbed.url || tab.url, format: 'markdown', text: markdown,
-                    ownerSessionId: ctx.session?.sessionId ?? null,
-                    producer: 'read_page', fenced: true, originLabel: origin,
-                  });
-                  footer = excerpt
-                    ? excerptFooter({ key: cacheKey, total: excerpt.total, passagesShown: excerpt.passagesShown, passagesTotal: excerpt.passagesTotal, query })
-                    : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
-                } catch { /* spill failed: the window/excerpt (with its elision markers) still ships */ }
-              } else if (truncated && !resultStore) {
-                text = markdown.slice(0, CONTENT_BODY_CHARS);
-              }
-              const fenced = wrapUntrusted({
-                origin, tool: 'read_page',
-                body: JSON.stringify({
-                  mode: 'content', url: grabbed.url || tab.url,
-                  ...(ex.title ? { title: ex.title } : {}),
-                  format: 'markdown', truncated, body: text,
-                  // the RAW DOM was clipped at 2MB before extraction: the
-                  // readable core may be missing its tail (distinct from
-                  // `truncated`, which only means the markdown was windowed).
-                  ...(grabbed.htmlTruncated ? { htmlTruncated: true } : {}),
-                }, null, 2),
-              });
-              return { ok: true, content: footer ? `${fenced}\n${footer}` : fenced };
+              return {
+                ok: true,
+                receipt: {
+                  kind: 'content', url: grabbed.url || tab.url,
+                  title: ex.title ?? null, markdown,
+                  htmlTruncated: grabbed.htmlTruncated === true,
+                },
+              };
             }
           }
         } catch { /* fail-open to the snapshot below */ }
@@ -123,14 +78,11 @@ export const readPageTool = Object.freeze({
     }
     if (!scriptResult) return { ok: false, error: 'script_returned_nothing' };
 
-    const origin = originOfUrl(scriptResult.url || tab.url);
-    const body = formatPageBody(scriptResult);
     return {
       ok: true,
-      content: wrapUntrusted({ origin, tool: 'read_page', body }),
+      receipt: { kind: 'snapshot', url: scriptResult.url || tab.url, snapshot: scriptResult },
     };
-  },
-});
+};
 
 /**
  * @typedef {Object} PageInteractable
@@ -149,35 +101,6 @@ export const readPageTool = Object.freeze({
  * @property {string} text
  * @property {PageInteractable[]} interactables
  */
-
-// Stringify the snapshot for the model. Plain text with a few section
-// headers so the model can navigate it without parsing JSON.
-/** @param {PageSnapshot} snap */
-const formatPageBody = (snap) => {
-  const lines = [
-    `Title: ${snap.title}`,
-    `URL: ${snap.url}`,
-    '',
-    '[TEXT]',
-    snap.text || '(empty)',
-    '',
-    '[INTERACTABLES]',
-  ];
-  if (!snap.interactables || snap.interactables.length === 0) {
-    lines.push('(none detected)');
-  } else {
-    for (const el of snap.interactables) {
-      const parts = [el.kind];
-      if (el.label) parts.push(`label="${el.label}"`);
-      if (el.placeholder) parts.push(`placeholder="${el.placeholder}"`);
-      if (el.value) parts.push(`value="${el.value}"`);
-      if (el.href) parts.push(`href="${el.href}"`);
-      parts.push(`selector=${el.selector}`);
-      lines.push(`- ${parts.join(' ')}`);
-    }
-  }
-  return lines.join('\n');
-};
 
 // ───────────────────────────────────────────────────────────────────────
 // Injected functions: run in the page world. Self-contained.

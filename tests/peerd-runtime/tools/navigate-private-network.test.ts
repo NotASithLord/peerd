@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { navigateTool } from '../../../extension/background/page-authority/navigate.js';
+import { navigateOwnedTabAuthority } from '../../../extension/background/page-authority/navigate.js';
+import { HOST_EFFECT_OUTCOME } from '../../../extension/background/host-effect-verdict.js';
+import { navigateTool as controllerNavigateTool } from '../../../extension/peerd-runtime/tools/defs/navigate.js';
+
+const navigateTool = { execute: (args: any, ctx: any) => controllerNavigateTool.execute(args, {
+  ...ctx, pageAuthority: { navigateOwnedTab: () => navigateOwnedTabAuthority(args, ctx) },
+}) };
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 const directRefusalContext = () => {
@@ -23,6 +29,7 @@ type RedirectHarnessOptions = {
   denylist?: string[];
   landingUrl?: string;
   landingAction?: 'continue' | 'wait' | 'end';
+  releaseFails?: boolean;
 };
 
 const redirectContext = ({
@@ -31,12 +38,14 @@ const redirectContext = ({
   denylist = [],
   landingUrl = 'http://127.0.0.1/private?q=token#fragment',
   landingAction = 'continue',
+  releaseFails = false,
 }: RedirectHarnessOptions = {}) => {
   const publicUrl = 'https://example.com/start';
   const privateUrl = landingUrl;
   const pin = { id: 7, url: publicUrl, origin: 'https://example.com' };
   const updates: string[] = [];
   const judged: string[] = [];
+  const released: number[] = [];
   let listener: any = null;
   let currentUrl = publicUrl;
   const tabs = {
@@ -79,12 +88,93 @@ const redirectContext = ({
   };
   if (adopt) {
     ctx.adoptWebTab = async () => ({ tabId: 7, windowId: 1 });
+    ctx.releaseAdoptedWebTab = async (tabId: number) => {
+      released.push(tabId);
+      return !releaseFails;
+    };
     ctx.repinActiveTab = (next: any) => { ctx.activeTab = next; };
   }
-  return { ctx, judged, pin, privateUrl, publicUrl, updates };
+  return { ctx, judged, pin, privateUrl, publicUrl, released, updates };
 };
 
 describe('navigate private-network policy', () => {
+  test('Stop while the network guard arms prevents tab navigation', async () => {
+    let guardStarted!: () => void;
+    let releaseGuard!: () => void;
+    const started = new Promise<void>((resolve) => { guardStarted = resolve; });
+    const wait = new Promise<void>((resolve) => { releaseGuard = resolve; });
+    const controller = new AbortController();
+    const { ctx, publicUrl, updates } = redirectContext({ landingUrl: 'https://example.com/start' });
+    ctx.abortSignal = controller.signal;
+    ctx.ensureBrowserNetworkGuard = async () => {
+      guardStarted();
+      await wait;
+      return { ok: true };
+    };
+    const pending = navigateTool.execute({ url: publicUrl }, ctx);
+    await started;
+    controller.abort();
+    releaseGuard();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, error: 'page action was stopped', outcomeKind: 'pre-effect-failure',
+    });
+    expect(updates).toEqual([]);
+  });
+
+  test('Stop while the network guard arms releases a newly adopted tab', async () => {
+    let guardStarted!: () => void;
+    let releaseGuard!: () => void;
+    const started = new Promise<void>((resolve) => { guardStarted = resolve; });
+    const wait = new Promise<void>((resolve) => { releaseGuard = resolve; });
+    const controller = new AbortController();
+    const { ctx, publicUrl, released, updates } = redirectContext({
+      adopt: true, landingUrl: 'https://example.com/start',
+    });
+    ctx.abortSignal = controller.signal;
+    ctx.ensureBrowserNetworkGuard = async () => {
+      guardStarted();
+      await wait;
+      return { ok: true };
+    };
+    const pending = navigateTool.execute({ url: publicUrl }, ctx);
+    await started;
+    controller.abort();
+    releaseGuard();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, error: 'page action was stopped', outcomeKind: 'pre-effect-failure',
+    });
+    expect(released).toEqual([7]);
+    expect(ctx.activeTab).toBeNull();
+    expect(updates).toEqual([]);
+  });
+
+  test('Stop reports a performed effect when an adopted tab cannot be released', async () => {
+    let guardStarted!: () => void;
+    let releaseGuard!: () => void;
+    const started = new Promise<void>((resolve) => { guardStarted = resolve; });
+    const wait = new Promise<void>((resolve) => { releaseGuard = resolve; });
+    const controller = new AbortController();
+    const { ctx, publicUrl, released, updates } = redirectContext({
+      adopt: true, landingUrl: 'https://example.com/start', releaseFails: true,
+    });
+    ctx.abortSignal = controller.signal;
+    ctx.ensureBrowserNetworkGuard = async () => {
+      guardStarted();
+      await wait;
+      return { ok: true };
+    };
+    const pending = navigateTool.execute({ url: publicUrl }, ctx);
+    await started;
+    controller.abort();
+    releaseGuard();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, error: 'page action was stopped', outcomeKind: 'effect-completed',
+    });
+    expect(released).toEqual([7]);
+    expect(ctx.activeTab).toMatchObject({ id: 7 });
+    expect(updates).toEqual([]);
+  });
+
   test('arms child quarantine before loading the next public HTML', async () => {
     const { ctx, publicUrl, updates } = redirectContext({ landingUrl: 'https://example.com/start' });
     const order: string[] = [];
@@ -343,6 +433,56 @@ describe('navigate private-network policy', () => {
       [7, publicUrl],
       [7, publicUrl],
     ]);
+    expect(updates).toEqual([]);
+  });
+
+  test('records adoption when generic guard startup fails and release is refused', async () => {
+    const { ctx, publicUrl, released, updates } = redirectContext({
+      adopt: true,
+      landingUrl: 'https://example.com/start',
+      releaseFails: true,
+    });
+    ctx.ensureBrowserNetworkGuard = async () => ({
+      ok: false,
+      code: 'kernel-browser-network-ensure-load-timeout',
+      outcomeKnown: true,
+      retryable: true,
+      phase: 'startup',
+    });
+    const result = await navigateTool.execute({ url: publicUrl }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'kernel-browser-network-ensure-load-timeout',
+      outcomeKind: 'effect-completed',
+      performed: true,
+    });
+    expect(released).toEqual([7]);
+    expect(updates).toEqual([]);
+  });
+
+  test('preserves an unknown network-host outcome through the navigation receipt', async () => {
+    const { ctx, publicUrl, updates } = redirectContext();
+    let calls = 0;
+    ctx.ensureBrowserNetworkGuard = async () => {
+      calls += 1;
+      return calls === 1 ? { ok: true } : {
+        ok: false,
+        error: 'browser network host timed out',
+        code: 'kernel-browser-network-ensure-load-timeout',
+        outcomeKnown: false,
+        retryable: false,
+        phase: 'run',
+      };
+    };
+    const result = await navigateTool.execute({ url: publicUrl }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'kernel-browser-network-ensure-load-timeout',
+      outcomeKnown: false,
+      retryable: false,
+      phase: 'run',
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(result)).toBe('unknown');
     expect(updates).toEqual([]);
   });
 });

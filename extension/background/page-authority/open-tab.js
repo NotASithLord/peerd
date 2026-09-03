@@ -10,8 +10,9 @@
 
 import {
   BROWSER_TARGET_STAGES,
-  browserNetworkGuardPostNavigationResult,
-  browserTargetRefusalResult,
+  browserNetworkGuardPostNavigationReceipt,
+  browserTargetRefusalReceipt,
+  browserTargetRefusalReceiptFrom,
   classifyBrowserAutomationTarget,
   isDenylistedTab,
   resetToVerifiedBlank,
@@ -37,10 +38,12 @@ const NAV_TIMEOUT_MS = 30_000;
  * @property {string} [url]
  */
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const openTabTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const openProtectedBackgroundTabAuthority = async (args, ctx) => {
+    const stoppedResult = (performed = false) => ({
+      ok: false, error: 'page action was stopped',
+      outcomeKind: performed ? 'effect-completed' : 'pre-effect-failure', retryable: false,
+    });
     // why background, always: a tab peerd opens no longer steals the user away
     // (DESIGN-12, owner 2026-06-18). It opens quietly and ctx.announceTab drops a
     // "go there" card in the chat: the user's click focuses it AND opens the side
@@ -61,7 +64,7 @@ export const openTabTool = Object.freeze({
       const verdict = classifyBrowserAutomationTarget(args.url, {
         stage: BROWSER_TARGET_STAGES.PRE_NAVIGATION,
       });
-      if (!verdict.allowed) return browserTargetRefusalResult(verdict);
+      if (!verdict.allowed) return browserTargetRefusalReceipt(verdict);
       requestedUrl = new URL(String(args.url).trim()).toString();
       // why: creating the tab blank lets the same correlated observer used by
       // navigate own the requested transition from its first event.
@@ -75,24 +78,42 @@ export const openTabTool = Object.freeze({
     const ctxExtras = /** @type {{ noteTab?: (id: number | undefined, label?: string) => Promise<unknown>, hintPullIn?: (id: number | undefined, url: string) => unknown, judgeLanding?: (url: string) => Promise<unknown>, navigationTimeoutMs?: number, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult>, armBrowserChildQuarantine?: (tabId:number)=>Promise<import('/shared/tool-types.js').ToolResult>, updateBrowserNetworkGuardOrigin?: (tabId: number, rawUrl?: string) => Promise<import('/shared/tool-types.js').ToolResult> }} */ (ctx);
     /** @type {BrowserTab} */
     let tab;
+    if (ctx.abortSignal?.aborted) return stoppedResult();
     try { tab = await tabsApi.create(opts); }
     catch (e) {
       return { ok: false, error: `tabs_create_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
     if (!tab.id) return { ok: false, error: 'tabs_create_failed: browser returned no tab id' };
+    if (ctx.abortSignal?.aborted) {
+      return stoppedResult(!await closeCreatedTab(tabsApi, tab.id));
+    }
     if (typeof ctxExtras.ensureBrowserNetworkGuard === 'function') {
       const guarded = await ctxExtras.ensureBrowserNetworkGuard(tab.id, requestedUrl ?? tab.url);
       if (!guarded.ok) {
-        await tabsApi.remove?.(tab.id).catch(() => {});
-        return guarded;
+        const closed = await closeCreatedTab(tabsApi, tab.id);
+        const refusal = browserTargetRefusalReceiptFrom(guarded, {
+          effectCompleted: !closed,
+        });
+        const structured = /** @type {any} */ (refusal).structured;
+        return {
+          ...refusal,
+          structured: {
+            ...structured,
+            cleanup: closed ? 'new_tab_closed' : 'new_tab_close_failed',
+          },
+        };
       }
     }
     if (requestedUrl && typeof ctxExtras.armBrowserChildQuarantine === 'function') {
       const armed = await ctxExtras.armBrowserChildQuarantine(tab.id);
       if (!armed.ok) {
-        await tabsApi.remove?.(tab.id).catch(() => {});
-        return armed;
+        const closed = await closeCreatedTab(tabsApi, tab.id);
+        return closed || armed.outcomeKnown === false
+          ? armed : { ...armed, outcomeKind: 'effect-completed' };
       }
+    }
+    if (ctx.abortSignal?.aborted) {
+      return stoppedResult(!await closeCreatedTab(tabsApi, tab.id));
     }
 
     const navigationTimeoutMs = Number.isFinite(ctxExtras.navigationTimeoutMs)
@@ -115,9 +136,7 @@ export const openTabTool = Object.freeze({
           return {
             ok: false,
             error: 'navigation_final_url_unavailable',
-            content: neutralized
-              ? 'peerd could not verify the opened page. The new tab was reset to a verified blank page.'
-              : 'peerd could not verify the opened page or reset the new tab. Browser automation remains stopped for it.',
+            structured: { neutralized, phase: 'final_url_unavailable', target: 'new_tab' },
             outcomeKind: 'host-lost',
           };
         }
@@ -132,12 +151,13 @@ export const openTabTool = Object.freeze({
           const neutralized = await resetToVerifiedBlank(tabsApi, tab.id, {
             timeoutMs: navigationTimeoutMs,
           });
-          const refusal = browserTargetRefusalResult(committedVerdict, { neutralized });
+          const refusal = browserTargetRefusalReceipt(committedVerdict, { neutralized });
           return {
             ...refusal,
-            content: `${refusal.content} ${neutralized
-              ? 'The new tab was reset to a verified blank page.'
-              : 'The new tab could not be reset, so browser automation remains stopped for it.'}`,
+            structured: {
+              ...refusal.structured,
+              cleanup: neutralized ? 'new_tab_reset_verified_blank' : 'new_tab_reset_failed',
+            },
           };
         }
 
@@ -148,14 +168,15 @@ export const openTabTool = Object.freeze({
           const neutralized = await resetToVerifiedBlank(tabsApi, tab.id, {
             timeoutMs: navigationTimeoutMs,
           });
-          const refusal = browserTargetRefusalResult(sensitiveSiteBrowserTargetVerdict(), {
+          const refusal = browserTargetRefusalReceipt(sensitiveSiteBrowserTargetVerdict(), {
             neutralized,
           });
           return {
             ...refusal,
-            content: `${refusal.content} ${neutralized
-              ? 'The new tab was reset to a verified blank page.'
-              : 'The new tab could not be reset, so browser automation remains stopped for it.'}`,
+            structured: {
+              ...refusal.structured,
+              cleanup: neutralized ? 'new_tab_reset_verified_blank' : 'new_tab_reset_failed',
+            },
           };
         }
 
@@ -169,15 +190,16 @@ export const openTabTool = Object.freeze({
                 closed = true;
               } catch { /* the policy result below reports the failed cleanup */ }
             }
-            const refusal = browserNetworkGuardPostNavigationResult(
+            const refusal = browserNetworkGuardPostNavigationReceipt(
               guarded.structured?.reason,
             );
             return {
               ...refusal,
-              structured: { ...refusal.structured, neutralized: closed },
-              content: `${refusal.content} ${closed
-                ? 'The new tab was closed.'
-                : 'The new tab could not be closed, so browser automation remains stopped for it.'}`,
+              structured: {
+                ...refusal.structured,
+                neutralized: closed,
+                cleanup: closed ? 'new_tab_closed' : 'new_tab_close_failed',
+              },
             };
           }
         }
@@ -188,11 +210,11 @@ export const openTabTool = Object.freeze({
             error: navigation.status === 'timeout'
               ? 'navigation_timeout'
               : `navigation_failed: ${navigation.error ?? 'tabs.update was rejected'}`,
-            content: JSON.stringify({
+            structured: {
               tabId: tab.id,
               finalUrl: finalTab?.url ?? requestedUrl,
               timed_out: navigation.status === 'timeout',
-            }),
+            },
             outcomeKind: 'host-lost',
           };
         }
@@ -208,17 +230,13 @@ export const openTabTool = Object.freeze({
       if (requestedUrl) { try { ctxExtras.hintPullIn?.(tab.id, tab.url || requestedUrl); } catch (e) { console.debug('[open_tab] hintPullIn failed', e); } }
     return {
       ok: true,
-      content: JSON.stringify({
-        tabId: tab.id,
-        url: tab.url || tab.pendingUrl || requestedUrl || '',
-        networkGuard: {
-          scope: 'tab_and_visited_origin_workers',
-          lifetime: 'until_tab_closed',
-          blocks: ['private_network', 'sensitive_site_denylist'],
-          workerScope: 'private_network_fetch',
-          chromeWorkerWebSocket: 'not_covered_by_dnr',
-        },
-      }, null, 2),
+      receipt: { tabId: tab.id, url: tab.url || tab.pendingUrl || requestedUrl || '' },
     };
-  },
-});
+};
+
+/** @param {{remove?:(tabId:number)=>Promise<unknown>}} tabsApi @param {number} tabId */
+const closeCreatedTab = async (tabsApi, tabId) => {
+  if (typeof tabsApi.remove !== 'function') return false;
+  try { await tabsApi.remove(tabId); return true; }
+  catch { return false; }
+};

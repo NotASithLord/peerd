@@ -19,11 +19,6 @@ import {
 import {
   KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
 } from '../../extension/shared/kernel-feature-policy.js';
-import {
-  KERNEL_DWEB_ROUTE_NAMES,
-  KERNEL_EXECUTABLE_ROUTE_NAMES,
-} from '../../extension/shared/kernel-feature-route-inventory.js';
-import * as backgroundInventory from '../../extension/shared/kernel-feature-route-inventory.js';
 import { TEST_CONTROLLER_KERNEL_IDENTITY } from './controller-test-identity.ts';
 
 const BUILD_DIGEST = 'a'.repeat(64);
@@ -40,10 +35,7 @@ const options = (payload: unknown, overrides: Record<string, unknown> = {}) => (
 });
 
 describe('sealed kernel feature protocol', () => {
-  test('shares the executable and dweb route inventories with the live owners', () => {
-    expect(backgroundInventory.KERNEL_EXECUTABLE_ROUTE_NAMES)
-      .toBe(KERNEL_EXECUTABLE_ROUTE_NAMES);
-    expect(backgroundInventory.KERNEL_DWEB_ROUTE_NAMES).toBe(KERNEL_DWEB_ROUTE_NAMES);
+  test('pins the administrative routes exposed by this protocol', () => {
     expect(KERNEL_ADMINISTRATIVE_ROUTE_NAMES).toEqual([
       'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
       'memory/init', 'skills/installGit', 'skills/installLocal', 'skills/installManifest',

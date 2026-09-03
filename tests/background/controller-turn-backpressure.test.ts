@@ -1,13 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
 import { connectDirectController } from '../../extension/background/direct-controller-client.js';
-import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
+import { createControllerTurnRuntime } from '../../extension/offscreen/controller-turn-runtime.js';
 import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone-size.js';
 import { getToolAuthority } from '../../extension/peerd-runtime/tools/metadata/authority.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 
 const clone = <T>(value: T): T => structuredClone(value);
+const turnRuntime = createControllerTurnRuntime();
 
 const makeSessions = () => {
   let record: any = {
@@ -73,7 +74,7 @@ const connectHarness = async () => {
     loadController: async () => ({
       call: (capability: string, payload: unknown, options: any) => {
         expect(capability).toBe('turn.run');
-        return runControllerTurn(payload, options);
+        return turnRuntime.runControllerTurn(payload, options);
       },
     }),
     newId,

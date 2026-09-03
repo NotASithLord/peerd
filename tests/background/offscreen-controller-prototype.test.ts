@@ -1627,6 +1627,27 @@ describe('controller protocol pure validation', () => {
     });
   });
 
+  test('model tool-start observation has a small per-step and payload budget', () => {
+    const quota = createControllerKernelQuota('turn.run', { maxSteps: 1 });
+    for (let index = 0; index < 64; index += 1) {
+      expect(quota.admit('turn.model.observe-event', {
+        runId: 'bounded-tool-starts',
+        value: { type: 'tool-use-start', id: `call-${index}`, name: 'now' },
+      }).ok).toBe(true);
+    }
+    expect(quota.admit('turn.model.observe-event', {
+      runId: 'bounded-tool-starts',
+      value: { type: 'tool-use-start', id: 'call-overflow', name: 'now' },
+    })).toMatchObject({ ok: false, code: 'kernel-operation-budget-exhausted' });
+
+    expect(createControllerKernelQuota('turn.run', { maxSteps: 1 }).admit(
+      'turn.model.observe-event', {
+        runId: 'oversized-tool-start',
+        value: { type: 'tool-use-start', id: 'call', name: 'x'.repeat(3_000) },
+      },
+    )).toMatchObject({ ok: false, code: 'kernel-operation-payload-too-large' });
+  });
+
   test('more than 65,536 fragmented model chunks fit while the 8 MiB rail remains authoritative', () => {
     const quota = createControllerKernelQuota('turn.run', { maxSteps: 1 });
     const opened = { runId: 'fragmented-stream', value: {
