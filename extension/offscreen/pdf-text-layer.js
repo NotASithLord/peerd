@@ -1,5 +1,7 @@
 // @ts-check
 
+import { cancelBestEffort, readAbortableChunk, throwIfAborted } from '/shared/abort.js';
+
 // Metadata crosses the same structured-clone boundary as page text. pdf.js
 // returns producer-controlled strings, so keep those fields independently
 // bounded even when the document's text layer is empty.
@@ -19,10 +21,11 @@ export const boundedPdfInfo = (metadata) => ({
  * array or cross a MessagePort structured-clone boundary.
  *
  * @param {any} pdf
- * @param {{maxPages:number,maxChars:number}} limits
+ * @param {{maxPages:number,maxChars:number,signal?:AbortSignal}} limits
  * @returns {Promise<{pages:Array<{page:number,text:string}>,pageCount:number,info:object,chars:number,textCapped:boolean}>}
  */
-export const extractBoundedPdfTextLayer = async (pdf, { maxPages, maxChars }) => {
+export const extractBoundedPdfTextLayer = async (pdf, { maxPages, maxChars, signal }) => {
+  throwIfAborted(signal, 'PDF extraction stopped.');
   const pageCount = Number(pdf?.numPages) || 0;
   const limit = Math.min(pageCount, maxPages);
   const pages = [];
@@ -31,13 +34,14 @@ export const extractBoundedPdfTextLayer = async (pdf, { maxPages, maxChars }) =>
   let aggregateLimitReached = false;
 
   for (let n = 1; n <= limit && !aggregateLimitReached; n += 1) {
+    throwIfAborted(signal, 'PDF extraction stopped.');
     const page = await pdf.getPage(n);
     const reader = page.streamTextContent().getReader();
     let text = '';
     try {
       let stop = false;
       while (!stop) {
-        const chunk = await reader.read();
+        const chunk = await readAbortableChunk(reader, signal, 'PDF extraction stopped.');
         if (chunk.done) break;
         const items = Array.isArray(chunk.value?.items) ? chunk.value.items : [];
         for (let index = 0; index < items.length; index += 1) {
@@ -63,7 +67,7 @@ export const extractBoundedPdfTextLayer = async (pdf, { maxPages, maxChars }) =>
           }
         }
       }
-      if (aggregateLimitReached) await reader.cancel().catch(() => {});
+      if (aggregateLimitReached) cancelBestEffort(reader);
     } finally {
       try { reader.releaseLock(); } catch { /* released */ }
       page.cleanup();
@@ -71,7 +75,9 @@ export const extractBoundedPdfTextLayer = async (pdf, { maxPages, maxChars }) =>
     pages.push({ page: n, text });
   }
 
+  throwIfAborted(signal, 'PDF extraction stopped.');
   const meta = await pdf.getMetadata().catch(() => null);
+  throwIfAborted(signal, 'PDF extraction stopped.');
   return {
     pages,
     pageCount,

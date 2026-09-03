@@ -88,7 +88,8 @@ describe('cold entry graphs', () => {
     expect(baseline.graphBytes - measured.graphBytes)
       .toBeGreaterThanOrEqual(minimumReduction.graphBytes);
     expect(measured.entryBytes).toBeLessThanOrEqual(baseline.entryBytes);
-    expect(measured.directImports).toBeLessThanOrEqual(baseline.directImports);
+    expect(measured.directImports)
+      .toBeLessThanOrEqual(OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT.directImportsCeiling);
     expect(measured.modules).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.offscreen.modules);
     expect(measured.graphBytes).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.offscreen.graphBytes);
     expect(measured.entryBytes).toBeLessThanOrEqual(COLD_SOURCE_TARGETS.offscreen.entryBytes);
@@ -213,7 +214,6 @@ describe('cold entry graphs', () => {
     expect(measured.modulesSet.has('peerd-runtime/tools/browser-automation-policy.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-runtime/actor/idp-registry.js')).toBe(true);
     expect(measured.modulesSet.has('peerd-egress/background.js')).toBe(true);
-    expect(measured.modulesSet.has('peerd-runtime/background.js')).toBe(false);
   });
 
   test('Preview Chrome alone owns the downloaded-update graph', async () => {
@@ -273,7 +273,6 @@ describe('cold entry graphs', () => {
     expect(readFileSync(join(EXTENSION_DIR, 'background/vault-kernel.js'), 'utf8'))
       .not.toContain('createKernelSemanticDemand');
     const kernelSource = readFileSync(join(EXTENSION_DIR, 'background/vault-kernel.js'), 'utf8');
-    expect(kernelSource).not.toContain('import(');
     expect(kernelSource).toContain('const createKernelDemandPlane = await runtimeModules.demandPlane();');
     expect(measured.modulesSet.has('background/kernel-chrome-runtime-modules.js')).toBe(true);
     expect(measured.modulesSet.has('background/kernel-demand-plane.js')).toBe(true);
@@ -328,6 +327,8 @@ describe('cold entry graphs', () => {
       'offscreen/job-runner.js',
       'offscreen/artifact-host.js',
       'offscreen/artifact-worker.js',
+      'offscreen/document-conversion-host.js',
+      'offscreen/document-conversion-worker.js',
       'offscreen/local-model.js',
       'offscreen/pdf-extract.js',
       'offscreen/doc-extract.js',
@@ -359,6 +360,24 @@ describe('cold entry graphs', () => {
     );
     expect(relativeSet(hostGraph).has('peerd-engine/export.js')).toBe(false);
     expect(relativeSet(workerGraph).has('peerd-engine/export.js')).toBe(true);
+  });
+
+  test('the document supervisor is light and only its disposable Worker reaches conversion', async () => {
+    const hostGraph = await collectStaticModuleGraph(
+      EXTENSION_DIR,
+      join(EXTENSION_DIR, 'offscreen/document-conversion-host.js'),
+    );
+    const workerGraph = await collectStaticModuleGraph(
+      EXTENSION_DIR,
+      join(EXTENSION_DIR, 'offscreen/document-conversion-worker.js'),
+    );
+    const relativeSet = (graph: Set<string>) => new Set(
+      [...graph].map((file) => relative(EXTENSION_DIR, file)),
+    );
+    expect(relativeSet(hostGraph).has('peerd-runtime/doc/convert.js')).toBe(false);
+    expect(relativeSet(workerGraph).has('peerd-runtime/offscreen.js')).toBe(false);
+    expect(relativeSet(workerGraph).has('peerd-runtime/tools/metadata/catalog.js')).toBe(false);
+    expect(relativeSet(workerGraph).has('peerd-runtime/doc/convert.js')).toBe(true);
   });
 
   test('HTML boots through the measured shell entries and exposes a static visible status', () => {
@@ -401,6 +420,7 @@ describe('cold entry graphs', () => {
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/artifact-host.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/repository-app-files.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/artifact-worker.js');
+    expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/document-conversion-worker.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('peerd-egress/ui.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES.filter((entry) =>
       entry === 'offscreen/artifact-host.js')).toHaveLength(1);

@@ -4,6 +4,7 @@ import {
   CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_OFFER,
   CONTRIBUTOR_ACTION_KINDS, CONTRIBUTOR_BROWSERS, CONTRIBUTOR_CHANNELS,
   CONTRIBUTOR_CLASSIFICATION_CODE_MAX, CONTRIBUTOR_FAILURES, CONTRIBUTOR_FALLBACKS,
+  CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT,
   CONTRIBUTOR_OUTCOMES, CONTRIBUTOR_SURFACES,
   CONTRIBUTOR_CHANNEL_PROTOCOL, CONTRIBUTOR_CHANNEL_REPLY,
   CONTRIBUTOR_CHANNEL_RESULT, contributorPayloadFits, opaqueContributorToken,
@@ -23,7 +24,6 @@ const CONTRIBUTOR_MAX_STATE_SNAPSHOTS = 128;
 const CONTRIBUTOR_REVISION_SCALE = 1024;
 const CONTRIBUTOR_MAX_REVISION = 8_000_000_000_000_000;
 const CONTRIBUTOR_MAX_TEXT = 200;
-const CONTRIBUTOR_MAX_ACTIONS = 128;
 const CONTRIBUTOR_MAX_COUNTER = 1_000_000_000;
 const exactKeys = (/** @type {unknown} */ value, /** @type {string[]} */ keys) =>
   !!value && typeof value === 'object' && !Array.isArray(value)
@@ -72,7 +72,8 @@ const normalizeSettlementInput = (/** @type {any} */ value) => {
       || value.tokens > CONTRIBUTOR_MAX_COUNTER
       || !CONTRIBUTOR_OUTCOMES.includes(value.outcome)
       || !CONTRIBUTOR_FAILURES.includes(value.failure)
-      || !Array.isArray(value.actions) || value.actions.length > CONTRIBUTOR_MAX_ACTIONS
+      || !Array.isArray(value.actions)
+      || value.actions.length > CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT
       || value.actions.some((/** @type {unknown} */ action) =>
         !CONTRIBUTOR_ACTION_KINDS.includes(/** @type {any} */ (action)))) return null;
   return Object.freeze({
@@ -121,7 +122,8 @@ const normalizePendingReceipt = (/** @type {any} */ value) => {
       || value.tokens > CONTRIBUTOR_MAX_COUNTER
       || !CONTRIBUTOR_OUTCOMES.includes(value.outcome)
       || !CONTRIBUTOR_FAILURES.includes(value.failure)
-      || !Array.isArray(value.actions) || value.actions.length > CONTRIBUTOR_MAX_ACTIONS
+      || !Array.isArray(value.actions)
+      || value.actions.length > CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT
       || value.actions.some((/** @type {unknown} */ action) =>
         !CONTRIBUTOR_ACTION_KINDS.includes(/** @type {any} */ (action)))
       || !Number.isSafeInteger(value.attempts) || value.attempts < 0 || value.attempts > 2
@@ -213,19 +215,15 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
       }
     }
   };
-  const legacyRecord = async () => {
-    const marker = await get(CONTRIBUTOR_ACTIVE_CONSENT_KEY);
-    if (!exactKeys(marker, ['version', 'generation']) || marker.version !== 1
-        || boundedText(marker.generation) === undefined) return null;
-    const record = await get(CONTRIBUTOR_RECORD_KEY);
-    return armFromRecord(record).generation === marker.generation ? record : null;
-  };
   const readActiveRecord = async (allowUncertain = false) => {
     if (locallyRevoked) return null;
     const latest = await readLatestState();
     if (durableConsentUncertain && !allowUncertain) return null;
     if (latest) return latest.value.state === 'active' ? latest.value.record : null;
-    return legacyRecord();
+    // why: v1 consent lacks the committed journal needed to distinguish a
+    // completed grant from a torn write. Fail off and require the user to
+    // re-enable instead of preserving an indefinite alternate authority path.
+    return null;
   };
   const issueRevision = () => {
     const wall = Math.max(1, Math.floor(Number(now()))) * CONTRIBUTOR_REVISION_SCALE;

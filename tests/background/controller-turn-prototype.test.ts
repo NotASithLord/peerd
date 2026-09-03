@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
-import { runControllerTurn } from '../../extension/offscreen/controller-turn-runtime.js';
+import { createControllerTurnRuntime } from '../../extension/offscreen/controller-turn-runtime.js';
 import { createControllerModelEgress } from '../../extension/offscreen/model-egress-client.js';
 import { runUserTurn as runDirectTurn } from '../../extension/peerd-runtime/loop/agent-loop.js';
 import {
@@ -10,6 +10,7 @@ import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fi
 import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
 
 const clone = <T>(value: T): T => structuredClone(value);
+const turnRuntime = createControllerTurnRuntime();
 
 const makeSessions = () => {
   let record: any = {
@@ -95,10 +96,10 @@ const runPrototype = async ({
       }
       const authority = bridge.authorize(payload);
       if (!authority) return { ok: false, code: 'authority-invalid', outcomeKnown: true };
-      return runControllerTurn(payload, {
+      return turnRuntime.runControllerTurn(payload, {
         signal: options.signal ?? new AbortController().signal,
         authority,
-        kernelCall: (operation, kernelPayload) => {
+        kernelCall: (operation: string, kernelPayload: any) => {
           const invoke = (candidateOperation: string, candidatePayload: any) =>
             Promise.resolve(bridge.handleKernelCall(
               candidateOperation,
@@ -254,11 +255,13 @@ describe('orchestrator controller turn boundary', () => {
   test('captures and labels the actual fallback attempt separately', async () => {
     const ring = createContextSnapshots();
     const sessions = makeSessions();
+    const notes: any[][] = [];
     await runPrototype({
       ctx: {
         ...makeSimpleCtx(sessions, []),
         providerFailoverEnabled: true,
         providerFallbacks: ['local-webgpu'],
+        postChatNote: (...args: any[]) => { notes.push(args); },
       },
       providerEgress: makeFailoverProviderAuthority(),
       recordModelCall: ring.record,
@@ -273,6 +276,11 @@ describe('orchestrator controller turn boundary', () => {
     expect(sessions.snapshot().messages.at(-1)).toMatchObject({
       role: 'assistant', content: 'fallback reply', streaming: false,
     });
+    expect(notes).toEqual([[
+      'anthropic unavailable; switching to local-webgpu and continuing…',
+      null,
+      'session-1',
+    ]]);
   });
 
   test('ignores an advisory context-recorder exception and still completes inference', async () => {

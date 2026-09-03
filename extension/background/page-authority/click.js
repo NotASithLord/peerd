@@ -26,11 +26,10 @@
 
 import {
   browserDocumentIdentity,
-  browserDocumentRefusalFrom,
-  formSubmissionRefusalFrom,
+  browserDocumentRefusalReceiptFrom,
+  formSubmissionRefusalReceiptFrom,
   resolveTargetTab,
   scriptingTarget,
-  summarizeMutations,
 } from '/peerd-runtime/browser-authority.js';
 
 /**
@@ -46,10 +45,8 @@ import {
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const clickTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const clickOwnedTargetAuthority = async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
     if (!tab?.id) return { ok: false, error: 'no_target_tab', outcomeKind: 'pre-effect-failure' };
     if (ctx.abortSignal?.aborted) return {
@@ -95,7 +92,8 @@ export const clickTool = Object.freeze({
           };
           const r = await debuggerPool.clickBackendNode(
             tab.id, entry.backendDOMNodeId, browserDocumentIdentity(tab));
-          if (!r.ok) return formSubmissionRefusalFrom(r) ?? browserDocumentRefusalFrom(r) ?? {
+          if (!r.ok) return formSubmissionRefusalReceiptFrom(r)
+            ?? browserDocumentRefusalReceiptFrom(r) ?? {
             ok: false,
             error: r.error ?? 'ref_click_failed',
             outcomeKind: r.outcomeKind ?? 'host-lost',
@@ -103,16 +101,16 @@ export const clickTool = Object.freeze({
           };
           return {
             ok: true,
-            content: JSON.stringify({
+            receipt: {
+              channel: 'cdp-ref',
               clicked: true, ref, role: entry.role, name: entry.name, tag: r.tag, text: r.text, matchedCount: 1,
               ...(r.navigated ? { navigated: true } : {}),
-              // Action-result attribution: what the click changed on the page.
-              result: r.navigated ? 'page navigated' : summarizeMutations(r.mutations),
-            }, null, 2),
+              mutations: r.mutations,
+            },
           };
         } catch (e) {
           const outcomeKind = /** @type {{ outcomeKind?: import('/peerd-runtime/lifecycle/failure-taxonomy.js').FailureOutcomeKind }} */ (e)?.outcomeKind;
-          const refusal = browserDocumentRefusalFrom(e);
+          const refusal = browserDocumentRefusalReceiptFrom(e);
           if (refusal) return refusal;
           return {
             ok: false,
@@ -141,11 +139,12 @@ export const clickTool = Object.freeze({
           return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
         }
         if (!scriptResult) return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
-        if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
+        if (!scriptResult.ok) return formSubmissionRefusalReceiptFrom(scriptResult)
           ?? { ok: false, error: scriptResult.error ?? 'ref_click_failed' };
         return {
           ok: true,
-          content: JSON.stringify({
+          receipt: {
+            channel: 'walk-ref',
             clicked: true, ref, role: entry.role, name: entry.name,
             tag: scriptResult.tag, text: scriptResult.text,
             // why: keep matchedCount present on every success shape (selector
@@ -156,7 +155,7 @@ export const clickTool = Object.freeze({
             // (isTrusted=false): sites that gate on trusted input may
             // ignore it, and there is no fallback channel here.
             via: 'dom-walk',
-          }, null, 2),
+          },
         };
       }
 
@@ -197,21 +196,21 @@ export const clickTool = Object.freeze({
       return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
     }
     if (!scriptResult.ok) {
-      return formSubmissionRefusalFrom(scriptResult)
+      return formSubmissionRefusalReceiptFrom(scriptResult)
         ?? { ok: false, error: scriptResult.error ?? 'click_failed' };
     }
     return {
       ok: true,
-      content: JSON.stringify({
+      receipt: {
+        channel: 'selector',
         clicked: scriptResult.clicked,
         tag: scriptResult.tag,
         text: scriptResult.text,
         matchedCount: scriptResult.matchedCount,
         nth: scriptResult.nth,
-      }, null, 2),
+      },
     };
-  },
-});
+};
 
 /**
  * @param {string | null} selector

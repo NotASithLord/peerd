@@ -20,11 +20,7 @@
 
 import {
   captureSnapshot,
-  describeSource,
-  diffSnapshots,
-  originOfUrl,
   resolveTargetTab,
-  wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
 /** @typedef {import('/peerd-runtime/dom/snapshot-diff.js').SnapRef} SnapRef */
@@ -39,10 +35,8 @@ import {
  * @property {(tabId: number, ref: string) => ({ backendDOMNodeId: number|null, walkId?: number|null, role: string, name: string }) | null} [resolve]
  */
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const snapshotTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const captureOwnedAccessibilityTreeAuthority = async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
     const budget = Number.isFinite(args?.budget) && args.budget > 0
@@ -64,26 +58,13 @@ export const snapshotTool = Object.freeze({
     const refs = /** @type {SnapRef[]} */ (cap.refs);
     // Register the refs so a later click/type({ref}) on this tab resolves them.
     domRefs?.setSnapshot?.(tab.id, refs);
-    const origin = originOfUrl(tab.url);
-    // why: `capped` (DOM-walk node-count limit) is a DIFFERENT truncation
-    // from `truncated` (char budget): a capped tree stops mid-DOM, so the
-    // model must not read a missing element as "absent". Surface it always.
-    const cappedNote = capped
-      ? ' (node cap hit: page larger than the DOM-walk limit; focus a smaller region/tab to see the rest)'
-      : '';
-
-    if (args?.diff && prevRefs.length) {
-      const { text: diffText } = diffSnapshots(prevRefs, refs);
-      const header = `${describeSource(source)} diff since last snapshot: ${refCount} refs now`
-        + `${truncated ? ' (truncated)' : ''}${cappedNote}\n`;
-      return { ok: true, content: wrapUntrusted({ origin, tool: 'snapshot', body: header + diffText }) };
-    }
-
-    const header = `${describeSource(source)}: ${refCount} interactable refs`
-      + `${truncated ? ' (truncated; raise budget or focus a region)' : ''}${cappedNote}\n`;
     return {
       ok: true,
-      content: wrapUntrusted({ origin, tool: 'snapshot', body: header + text }),
+      receipt: {
+        url: tab.url ?? '', text, truncated, capped, refCount, source,
+        diff: args?.diff === true && prevRefs.length > 0,
+        prevRefs,
+        refs,
+      },
     };
-  },
-});
+};

@@ -910,8 +910,8 @@ export const InputBar = {
               type: 'button',
               disabled: !!ui.unconfirmedSend,
               title: documentReaderAvailable
-                ? 'Attach files — images, PDFs, office/e-book documents, or text (or paste an image)'
-                : 'Attach files — images, PDF, or text (or paste an image)',
+                ? 'Attach files: images, PDFs, office/e-book documents, or text (or paste an image)'
+                : 'Attach files: images, PDF, or text (or paste an image)',
               'aria-label': 'Attach files',
               onclick: () => ui.fileInputEl?.click(),
             }, PAPERCLIP_ICON()) : null,

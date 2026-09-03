@@ -7,7 +7,7 @@ import {
 } from '../../extension/background/kernel-firefox-contributor-addon.js';
 
 describe('kernel Firefox lazy addon', () => {
-  test('disabled contributor arm checks the journal and legacy marker without loading semantics', async () => {
+  test('disabled contributor arm checks only the committed journal without loading semantics', async () => {
     const loads: string[] = [];
     const contributorFactory = makeKernelFirefoxContributor({
       contributorOwner: async () => { loads.push('owner'); return {}; },
@@ -22,7 +22,33 @@ describe('kernel Firefox lazy addon', () => {
       },
     });
     expect(await contributor.arm()).toEqual({ enabled: false, generation: null });
-    expect({ reads, loads }).toEqual({ reads: 2, loads: [] });
+    expect({ reads, loads }).toEqual({ reads: 1, loads: [] });
+  });
+
+  test('legacy v1 consent cannot arm Firefox Preview until an explicit re-enable', async () => {
+    const legacyRecord = {
+      version: 1,
+      consent: {
+        enabled: true, schemaVersion: 1, disclosureVersion: 1,
+        generation: 'legacy-generation',
+      },
+      aggregate: { version: 1 },
+    };
+    const reads: string[] = [];
+    const contributor = makeKernelFirefoxContributor()({
+      kv: {
+        get: async (key: string) => {
+          reads.push(key);
+          return key === 'contributor_metrics.active.v1'
+            ? { version: 1, generation: 'legacy-generation' }
+            : legacyRecord;
+        },
+        set: async () => {}, delete: async () => {},
+        list: async () => ({}),
+      },
+    });
+    expect(await contributor.arm()).toEqual({ enabled: false, generation: null });
+    expect(reads).toEqual([]);
   });
 
   test('a malformed Preview journal cannot arm the Firefox actor path', async () => {

@@ -21,19 +21,15 @@ import { classifyBrowserAutomationTarget } from '../tools/browser-automation-pol
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import { makeTurnCostTracker } from '../cost/turn-tracker.js';
 import { detectInterruptedTurn } from './resume-detect.js';
-import { projectSemanticHookManifest } from '../../shared/semantic-hook-manifest.js';
+import {
+  projectSemanticHookManifest,
+  UNAVAILABLE_HOOK_RECORDS,
+} from '../../shared/semantic-hook-manifest.js';
 import {
   bindCurrentChat, DEFAULT_CHAT_PERMISSION,
 } from '../../shared/current-session-binding.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
-// why: an enabled pre-hook is a user policy veto. If durable hook state cannot
-// be read, the semantic realm receives a deliberately un-compilable enabled
-// record, which semanticHooksFor turns into a blocking sentinel.
-const HOOK_RECORDS_UNAVAILABLE = Object.freeze([Object.freeze({
-  id: 'user-hook-records-unavailable', event: 'pre-tool-use',
-  kind: 'unavailable', enabled: true,
-})]);
 const providerFailureFrom = (/** @type {unknown} */ value) => {
   if (typeof value !== 'string') return null;
   if (value === 'provider-key-missing' || value === 'unknown-provider'
@@ -335,7 +331,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
   const turnPermission = await resolvePermission(manifestSession);
   const userHookRecords = await Promise.resolve(getUserHookRecords())
     .then(projectSemanticHookManifest)
-    .catch(() => HOOK_RECORDS_UNAVAILABLE);
+    .catch(() => UNAVAILABLE_HOOK_RECORDS);
 
   const toolContextArgs = {
     exposure: 'main', sessionId, ...(activeTabSpecified ? { activeTabId } : {}), synthetic, trusted,

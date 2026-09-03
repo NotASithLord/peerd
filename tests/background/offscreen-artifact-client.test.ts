@@ -28,7 +28,14 @@ const runCodec = (operation: string, args: any[]) => {
   if (typeof fn !== 'function') throw new Error('artifact operation denied');
   return fn(...args);
 };
-const acceptArtifactOffer = createArtifactOfferAcceptor({ runOperation: runCodec });
+const createRunFrom = (run: (operation: string, args: any[]) => unknown) =>
+  (offer: { operation: string, args: any[] }) => ({
+    promise: Promise.resolve().then(() => run(offer.operation, offer.args)),
+    cancel: () => {},
+  });
+const acceptArtifactOffer = createArtifactOfferAcceptor({
+  createRun: createRunFrom(runCodec),
+});
 
 const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
 const target = {
@@ -286,7 +293,7 @@ describe('demand-only artifact codec channel', () => {
   });
 
   test('rejects duplicate channel IDs and ambiguous transferred ports', async () => {
-    const accept = createArtifactOfferAcceptor({ runOperation: runCodec });
+    const accept = createArtifactOfferAcceptor({ createRun: createRunFrom(runCodec) });
     const offer = {
       type: ARTIFACT_CHANNEL_OFFER,
       protocol: ARTIFACT_CHANNEL_PROTOCOL,
@@ -342,9 +349,9 @@ describe('demand-only artifact codec channel', () => {
     let releaseFirst!: (value: string) => void;
     const accept = createArtifactOfferAcceptor({
       maxConcurrent: 1,
-      runOperation: (operation) => operation === 'exportFilename'
+      createRun: createRunFrom((operation) => operation === 'exportFilename'
         ? new Promise((resolve) => { releaseFirst = resolve; })
-        : null,
+        : null),
     });
     const dispatch = (channelId: string) => {
       const { port1, port2 } = new MessageChannel();
@@ -371,7 +378,7 @@ describe('demand-only artifact codec channel', () => {
     await expect(first).resolves.toMatchObject({ ok: true, value: 'app.peerd' });
 
     const oversize = createArtifactOfferAcceptor({
-      runOperation: () => 'x'.repeat(20 * 1024),
+      createRun: createRunFrom(() => 'x'.repeat(20 * 1024)),
     });
     const { port1, port2 } = new MessageChannel();
     const reply = new Promise<any>((resolve) => {

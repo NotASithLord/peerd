@@ -16,15 +16,15 @@
 
 import {
   BrowserAutomationPolicyError,
-  browserTargetRefusalResult,
+  browserTargetRefusalReceipt,
+  browserTargetRefusalReceiptFrom,
   captureVisible,
-  originOfUrl,
   resolveTargetTab,
 } from '/peerd-runtime/browser-authority.js';
+import { CONTROLLER_PAGE_IMAGE_MAX_BASE64_CHARS } from '/shared/controller-kernel-quota.js';
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const captureTool = Object.freeze({
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const captureForegroundPixelsAuthority = async (args, ctx) => {
     /** @type {Map<number, { tabId?: number, token?: string }>} */
     const guardLeases = new Map();
     /** @type {ReturnType<typeof watchTabActivations>} */
@@ -53,7 +53,9 @@ export const captureTool = Object.freeze({
         return { ok: false, error: 'capture_failed: browser network guard lease is unavailable' };
       }
       const beforeGuard = await acquire(beforeForeground.id);
-      if (!beforeGuard?.ok) return beforeGuard;
+      if (!beforeGuard?.ok) {
+        return browserTargetRefusalReceiptFrom(beforeGuard, { effectCompleted: false });
+      }
       guardLeases.set(beforeForeground.id, beforeGuard.lease);
       const policyCtx = {
         ...ctx,
@@ -74,6 +76,11 @@ export const captureTool = Object.freeze({
       if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
         return { ok: false, error: 'capture_returned_unexpected_shape' };
       }
+      const comma = dataUrl.indexOf(',');
+      if (comma < 0) return { ok: false, error: 'capture_returned_unexpected_shape' };
+      if (dataUrl.length - comma - 1 > CONTROLLER_PAGE_IMAGE_MAX_BASE64_CHARS) {
+        return { ok: false, error: 'capture_screenshot_too_large' };
+      }
       if (activationWatch.changedIn(windowId)) {
         return { ok: false, error: 'capture_target_changed: screenshot discarded because the foreground tab changed' };
       }
@@ -86,7 +93,9 @@ export const captureTool = Object.freeze({
       }
       if (!guardLeases.has(afterForeground.id)) {
         const afterGuard = await acquire(afterForeground.id);
-        if (!afterGuard?.ok) return afterGuard;
+        if (!afterGuard?.ok) {
+          return browserTargetRefusalReceiptFrom(afterGuard, { effectCompleted: false });
+        }
         guardLeases.set(afterForeground.id, afterGuard.lease);
       }
       const afterTab = await resolveTargetTab({ tabId: afterForeground.id }, /** @type {any} */ (policyCtx));
@@ -100,16 +109,11 @@ export const captureTool = Object.freeze({
       }
       return {
         ok: true,
-        content: JSON.stringify({
-          format: 'png',
-          dataUrl,
-          bytes: estimateBase64Bytes(dataUrl),
-          origin: originOfUrl(tab.url) || null,
-        }, null, 2),
+        receipt: { format: 'png', dataUrl, url: tab.url ?? '' },
       };
     } catch (e) {
       if (e instanceof BrowserAutomationPolicyError) {
-        return browserTargetRefusalResult(e.structured, { effectCompleted: false });
+        return browserTargetRefusalReceipt(e.structured, { effectCompleted: false });
       }
       return { ok: false, error: `capture_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? e}` };
     } finally {
@@ -120,8 +124,7 @@ export const captureTool = Object.freeze({
         for (const lease of guardLeases.values()) await release(lease).catch(() => {});
       }
     }
-  },
-});
+};
 
 /**
  * Record every foreground activation while captureVisibleTab is in flight.
@@ -168,21 +171,4 @@ const foregroundTab = async (tabs, windowId) => {
     ? { active: true, currentWindow: true }
     : { active: true, windowId });
   return tab ?? null;
-};
-
-/**
- * Rough decode size from a "data:image/...;base64,XXXX" URL. Useful
- * for the side panel to decide whether to inline the image or show a
- * link.
- *
- * @param {string} dataUrl
- * @returns {number}
- */
-const estimateBase64Bytes = (dataUrl) => {
-  const idx = dataUrl.indexOf(',');
-  if (idx < 0) return 0;
-  const b64 = dataUrl.slice(idx + 1);
-  // why: every 4 base64 chars = 3 bytes, modulo padding. Close enough
-  // for a size hint.
-  return Math.floor((b64.length * 3) / 4);
 };

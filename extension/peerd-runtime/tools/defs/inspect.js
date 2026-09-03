@@ -14,7 +14,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 
 import { serializeListResult } from './columnar.js';
 import { executeByKind } from './kind-dispatch.js';
-import { originOfUrl } from '../../browser-authority/dom-helpers.js';
+import { originOfUrl } from '../../tool-origin-policy.js';
 import { wrapUntrusted, safeTitle } from '../prompt-wrap.js';
 import { clamp } from '/shared/util.js';
 // why the DEEP path (not the /peerd-egress/index.js barrel): the barrel pulls

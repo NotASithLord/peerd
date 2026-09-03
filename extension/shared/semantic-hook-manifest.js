@@ -5,6 +5,12 @@ import { structuredClonePayloadBytes } from './structured-clone-size.js';
 export const USER_HOOK_RECORDS_MAX_COUNT = 256;
 export const USER_HOOK_RECORDS_MAX_BYTES = 8 * 1024 * 1024;
 export const SEMANTIC_HOOK_MANIFEST_MAX_BYTES = 256 * 1024;
+// why: silently replacing unreadable enabled pre-hook policy with an empty
+// list fails open. Both turn hosts reuse this exact blocking record.
+export const UNAVAILABLE_HOOK_RECORDS = Object.freeze([Object.freeze({
+  id: 'user-hook-records-unavailable', event: 'pre-tool-use',
+  kind: 'unavailable', enabled: true,
+})]);
 
 export class HookRecordsLimitError extends Error {
   /** @param {string} message */

@@ -71,6 +71,51 @@ describe('site-client dispatch confirmation ordering', () => {
     expect(storeEffects).toBe(0);
   });
 
+  test('an initial durable read failure cannot open confirmation or mutate', async () => {
+    setFixtureTool(siteClientWriteTool);
+    let prompts = 0;
+    let mutations = 0;
+    const result = await dispatchToolCall(call as any, context({
+      authorizeSiteClientOrigin: async () => true,
+      confirm: async () => { prompts += 1; return 'yes_once'; },
+      siteClients: {
+        get: async () => { throw new Error('idb unavailable'); },
+        put: async () => { mutations += 1; return {}; },
+        remove: async () => { mutations += 1; },
+      },
+    }) as any);
+
+    expect(result).toMatchObject({
+      ok: false, error: 'site_clients_unavailable', outcomeKind: 'pre-effect-failure',
+    });
+    expect({ prompts, mutations }).toEqual({ prompts: 0, mutations: 0 });
+  });
+
+  test('a post-confirm durable read failure cannot mutate reviewed state', async () => {
+    setFixtureTool(siteClientWriteTool);
+    let reads = 0;
+    let prompts = 0;
+    let mutations = 0;
+    const result = await dispatchToolCall(call as any, context({
+      authorizeSiteClientOrigin: async () => true,
+      confirm: async () => { prompts += 1; return 'yes_once'; },
+      siteClients: {
+        get: async () => {
+          reads += 1;
+          if (reads === 1) return null;
+          throw new Error('idb unavailable after confirmation');
+        },
+        put: async () => { mutations += 1; return {}; },
+        remove: async () => { mutations += 1; },
+      },
+    }) as any);
+
+    expect(result).toMatchObject({
+      ok: false, error: 'site_clients_unavailable', outcomeKind: 'pre-effect-failure',
+    });
+    expect({ reads, prompts, mutations }).toEqual({ reads: 2, prompts: 1, mutations: 0 });
+  });
+
   test('an owned write receives exactly the detailed tool confirmation', async () => {
     setFixtureTool(siteClientWriteTool);
     const prompts: any[] = [];

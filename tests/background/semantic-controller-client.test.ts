@@ -301,11 +301,11 @@ describe('production semantic controller slice', () => {
       handleSemanticKernelCall: async (operation, payload, context) => {
         calls.push({ operation, payload, context });
         return { ok: true, value: {
-          anthropic: { hasKey: true, keyPreview: 'sk-ant-…test' },
-          openrouter: { hasKey: false, keyPreview: null },
-          openai: { hasKey: false, keyPreview: null },
-          glm: { hasKey: false, keyPreview: null },
-          ollama: { hasKey: true, keyPreview: null },
+          anthropic: { hasKey: true },
+          openrouter: { hasKey: false },
+          openai: { hasKey: false },
+          glm: { hasKey: false },
+          ollama: { hasKey: true },
         } };
       },
       fetchFn: (async () => new Response(TEMPLATE, { status: 200 })) as unknown as typeof fetch,
@@ -321,6 +321,7 @@ describe('production semantic controller slice', () => {
     });
     expect(result).toMatchObject({ ok: true });
     expect(result.providers[0]).toMatchObject({ name: 'anthropic', hasKey: true });
+    expect(JSON.stringify(result)).not.toContain('keyPreview');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       operation: 'semantic.providers.key-status', payload: {},
@@ -396,10 +397,11 @@ describe('production semantic controller slice', () => {
     let loaded: Promise<any> | null = null;
     const loadController = Object.assign(
       () => {
-        loaded ??= Promise.resolve(createController({ handlers: {
-          'prompt.render': async () => ({ ok: true, prompt: 'held prompt', outcomeKnown: true }),
-          'turn.run': async () => ({ ok: true, outcomeKnown: true }),
-        } })).then((controller) => {
+        loaded ??= Promise.resolve({
+          call: async (capability: string) => capability === 'prompt.render'
+            ? { ok: true, prompt: 'held prompt', outcomeKnown: true }
+            : { ok: true, outcomeKnown: true },
+        }).then((controller) => {
           loads += 1;
           return controller;
         });
@@ -475,9 +477,9 @@ describe('production semantic controller slice', () => {
     let loaded: Promise<any> | null = null;
     const loadController = Object.assign(
       () => {
-        loaded ??= Promise.resolve(createController({ handlers: {
-          'prompt.render': async () => ({ ok: true, prompt: 'held prompt', outcomeKnown: true }),
-        } })).then((controller) => {
+        loaded ??= Promise.resolve({
+          call: async () => ({ ok: true, prompt: 'held prompt', outcomeKnown: true }),
+        }).then((controller) => {
           loads += 1;
           return controller;
         });
@@ -742,6 +744,52 @@ describe('production semantic controller slice', () => {
     offerHandler.close();
   });
 
+  test('Chrome retries replay-safe tool projection after transient host startup loss', async () => {
+    const workerUrl = 'chrome-extension://test/background/service-worker.js';
+    const offscreenUrl = 'chrome-extension://test/offscreen/offscreen.html';
+    let discoveries = 0;
+    let leases = 0;
+    let calls = 0;
+    const offerHandler = makeControllerOfferHandler({
+      expectedWorkerUrl: workerUrl,
+      expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
+      supportedCaps: ['turn.tools.project'],
+      loadController: async () => ({
+        call: async () => {
+          calls += 1;
+          return { ok: true, tools: [{ name: 'script' }], operations: ['turn.execution.run-script'] };
+        },
+      }),
+    });
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl,
+      firefoxDirect: false, dwebEnabled: false,
+      withControllerLease: async (operation) => {
+        leases += 1;
+        return operation(nextTestControllerLease());
+      },
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+      listWindowClients: async () => {
+        discoveries += 1;
+        return discoveries === 1 ? [] : [{
+          url: offscreenUrl,
+          postMessage: (data: unknown, transfer: Transferable[]) => offerHandler({
+            isTrusted: true, source: { scriptURL: workerUrl }, data, ports: transfer,
+          } as unknown as MessageEvent),
+        }];
+      },
+    });
+
+    await expect(semantic.projectTurnTools({ surface: 'actor', actorType: 'web' }))
+      .resolves.toMatchObject({
+        ok: true, tools: [{ name: 'script' }], operations: ['turn.execution.run-script'],
+      });
+    expect({ discoveries, leases, calls }).toEqual({ discoveries: 2, leases: 2, calls: 1 });
+    semantic.close();
+    offerHandler.close();
+  });
+
   test('tool projection preserves an exact known host refusal without replay', async () => {
     let calls = 0;
     const semantic = makeSemanticControllerClient({
@@ -769,6 +817,32 @@ describe('production semantic controller slice', () => {
     semantic.close();
   });
 
+  test('tool projection preserves an exact known lease refusal without replay', async () => {
+    let leases = 0;
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: false, dwebEnabled: false,
+      withControllerLease: (async () => {
+        leases += 1;
+        return {
+          ok: false, code: 'controller-lease-policy-refused',
+          outcomeKnown: true,
+        };
+      }) as any,
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+      listWindowClients: async () => { throw new Error('must not discover a host'); },
+    });
+
+    await expect(semantic.projectTurnTools({ surface: 'actor', actorType: 'web' }))
+      .rejects.toMatchObject({
+        message: 'controller-lease-policy-refused',
+        code: 'controller-lease-policy-refused', outcomeKnown: true,
+      });
+    expect(leases).toBe(1);
+    semantic.close();
+  });
+
   test('tool projection forwards an already-aborted turn without opening a call', async () => {
     let calls = 0;
     const controller = new AbortController();
@@ -792,6 +866,37 @@ describe('production semantic controller slice', () => {
     )).rejects.toMatchObject({ name: 'AbortError' });
     expect(calls).toBe(0);
     semantic.close();
+  });
+
+  test('Stop releases tool projection while a shared controller connection is pending', async () => {
+    let resolveConnection!: (client: any) => void;
+    const pendingConnection = new Promise<any>((resolve) => { resolveConnection = resolve; });
+    let calls = 0;
+    let closes = 0;
+    const controller = new AbortController();
+    const semantic = makeSemanticControllerClient({
+      browser: { runtime: { getURL: (path: string) => `moz-extension://test/${path}` } },
+      ensureOffscreen: async () => {}, offscreenUrl: 'offscreen/offscreen.html',
+      firefoxDirect: true, dwebEnabled: false,
+      connectDirectController: async () => pendingConnection,
+      withDirectLifetime: (operation: () => Promise<any>) => operation(),
+      fetchFn: async () => new Response(TEMPLATE, { status: 200 }),
+    });
+    const projection = semantic.projectTurnTools(
+      { surface: 'actor' }, { signal: controller.signal },
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(projection).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(0);
+    semantic.close();
+    resolveConnection({
+      call: async () => { calls += 1; return { ok: true, tools: [], operations: [] }; },
+      close: () => { closes += 1; },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect({ calls, closes }).toEqual({ calls: 0, closes: 1 });
   });
 
   test('Firefox carries all session support routes through the sealed controller', async () => {
@@ -993,8 +1098,8 @@ describe('production semantic controller slice', () => {
       const offscreenUrl = `${scheme}://test/offscreen/offscreen.html`;
       let attempts = 0;
       let connections = 0;
-      const loadController = async () => createController({ handlers: {
-        'semantic.dispatch': async () => {
+      const loadController = async () => ({
+        call: async () => {
           attempts += 1;
           return attempts === 1
             ? {
@@ -1003,7 +1108,7 @@ describe('production semantic controller slice', () => {
             }
             : { ok: true, outcomeKnown: true, semanticResult: { ok: true, ready: true } };
         },
-      } });
+      });
       const offerHandler = firefoxDirect ? null : makeControllerOfferHandler({
         expectedWorkerUrl: workerUrl,
         expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
@@ -1231,11 +1336,11 @@ describe('production semantic controller slice', () => {
       expectedWorkerUrl: workerUrl,
       expectedBuildDigest: CONTROLLER_BUILD_DIGEST,
       supportedCaps: ['semantic.dispatch'],
-      loadController: async () => createController({ handlers: {
-        'semantic.dispatch': async () => ({
+      loadController: async () => ({
+        call: async () => ({
           ok: true, semanticResult: { ok: true, generation: 2 },
         }),
-      } }),
+      }),
     });
     const client = makeSemanticControllerClient({
       browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` } },

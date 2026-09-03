@@ -105,6 +105,7 @@ describe('sandbox_create App Git contract', () => {
       gitDepth: 900,
     }, executionToolContext({
       session: { sessionId: 's-git-app' },
+      permission: { mode: 'act' },
       abortSignal: controller.signal,
       confirm: async (prompt: any, signal: AbortSignal) => {
         confirmations.push({ prompt, signal });

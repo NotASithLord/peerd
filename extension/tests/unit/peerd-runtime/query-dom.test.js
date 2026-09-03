@@ -6,8 +6,12 @@
 // scripting plumbing, formatting of the returned matches.
 
 import { describe, it, expect } from '../../framework.js';
-import { queryDomTool } from '/background/page-authority/query-dom.js';
+import { queryOwnedDomAuthority } from '/background/page-authority/query-dom.js';
 import { queryDomTool as controllerQueryDomTool } from '/peerd-runtime/tools/defs/query-dom.js';
+
+const queryDomTool = { execute: (/** @type {any} */ args, /** @type {any} */ ctx) => controllerQueryDomTool.execute(args, {
+  ...ctx, pageAuthority: { queryOwnedDom: () => queryOwnedDomAuthority(args, ctx) },
+}) };
 import { controllerHostsPageTool } from '/peerd-runtime/controller-page-tools.js';
 import {
   browserProbeResult,

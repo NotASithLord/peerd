@@ -1,7 +1,8 @@
 // @ts-check
 // offscreen/doc-extract.js — convert an office/publishing document in the
-// OFFSCREEN document. The read_doc tool (SW) calls in via
-// background/offscreen-doc-client.js → a 'doc/extract' message → here.
+// OFFSCREEN document. The controller-owned read_doc tool requests an exact
+// extraction effect through background/offscreen-doc-client.js → a
+// 'doc/extract' message → here.
 //
 // Why here and not the SW: not because the conversion needs a DOM (it does not
 // — peerd-runtime/doc is pure and would run anywhere), but because of what
@@ -9,9 +10,9 @@
 // tens of megabytes; holding that in the service worker fights the MV3
 // lifecycle, and it is exactly the buffer the SW should not be sitting on when
 // it is also the context that holds the vault DK. The offscreen document is
-// where peerd already puts untrusted heavy parsing (pdf.js, Readability, the
-// sealed worker), so a hostile .docx lands in the same place a hostile PDF does
-// rather than in a new one.
+// where peerd already puts untrusted heavy parsing. Structured conversion then
+// enters a disposable Worker so a hostile .docx cannot stall this host's Stop
+// route or feature-lease lifecycle.
 //
 // SECURITY: the bytes are UNTRUSTED web content, and the conversion is entirely
 // declarative — a ZIP index read, an XML tokenizer, and string building. There
@@ -19,22 +20,25 @@
 // resolution (xml.js SKIPS doctypes and never resolves an entity it did not
 // define — so XXE and billion-laughs have no surface here). A hostile document
 // can at worst make the parse fail, which is surfaced as an error. The text
-// crosses back wrapped in <untrusted_web_content> by the read_doc tool.
+// crosses back as a raw bounded receipt; the sealed read_doc tool wraps it in
+// <untrusted_web_content> before exposing it to the model.
 
 import { base64ToBytes } from '/shared/util.js';
 import {
-  convertToDocument, sniffDocFormat,
-  DocFetchError, DocParseError, UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
+  sniffDocFormat, DocFetchError,
 } from '/peerd-runtime/offscreen.js';
 import { extractPdfBytes } from './pdf-extract.js';
 import { readBoundedResponseBytes, ResponseTooLargeError } from './bounded-response.js';
+import {
+  convertDocumentInWorker, MAX_DOCUMENT_CONVERSION_BYTES,
+} from './document-conversion-host.js';
+import { abortError, throwIfAborted } from '/shared/abort.js';
 
 // Fetch far enough to preserve the PDF reader's existing ceiling, then apply
 // the lower structured-document cap after content sniffing. A large PDF is
 // often image data; a same-sized OOXML archive is overwhelmingly discarded
 // media and makes the ZIP index needlessly expensive.
 const MAX_FETCH_BYTES = 75 * 1024 * 1024;
-const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
 
 /**
  * Fetch the document bytes. Mirrors offscreen/pdf-extract.js exactly, and the
@@ -45,9 +49,11 @@ const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
  * becomes an opaqueredirect we reject rather than follow.
  *
  * @param {{ url?: string, bytesB64?: string }} source
+ * @param {{signal?:AbortSignal,fetchImpl?:typeof fetch}} [options]
  * @returns {Promise<{ bytes: Uint8Array, contentType: string }>}
  */
-const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
+const fetchDocBytes = async ({ url, bytesB64 } = {}, { signal, fetchImpl = fetch } = {}) => {
+  throwIfAborted(signal, 'Document extraction stopped.');
   if (bytesB64) {
     // Reject obviously oversized inline input before decoding creates another
     // large buffer. The post-decode check remains authoritative around base64
@@ -67,18 +73,25 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
   }
   let res;
   try {
-    res = await fetch(url, { redirect: 'manual' });
+    res = await fetchImpl(url, { redirect: 'manual', signal });
   } catch (e) {
+    if (signal?.aborted || (/** @type {{name?:string}} */ (e))?.name === 'AbortError') {
+      throw abortError(signal, 'Document extraction stopped.');
+    }
     throw new DocFetchError(`could not fetch the document: ${(/** @type {{ message?: string }} */ (e))?.message ?? e}`);
   }
+  throwIfAborted(signal, 'Document extraction stopped.');
   if (res.type === 'opaqueredirect' || res.status === 0) {
     throw new DocFetchError('the URL redirected; redirects are refused to prevent SSRF to internal hosts');
   }
   if (!res.ok) throw new DocFetchError(`HTTP ${res.status} fetching the document`, { status: res.status });
   let bytes;
   try {
-    bytes = await readBoundedResponseBytes(res, MAX_FETCH_BYTES);
+    bytes = await readBoundedResponseBytes(res, MAX_FETCH_BYTES, { signal });
   } catch (error) {
+    if (signal?.aborted || (/** @type {{name?:string}} */ (error))?.name === 'AbortError') {
+      throw abortError(signal, 'Document extraction stopped.');
+    }
     if (error instanceof ResponseTooLargeError) {
       throw new DocFetchError(`document too large: ${error.bytes} bytes (limit ${MAX_FETCH_BYTES})`);
     }
@@ -89,15 +102,20 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
 
 /**
  * @param {{ source: any, opts?: { maxChars?: number, format?: string, engine?: string, dev?: boolean } }} msg
+ * @param {{signal?:AbortSignal,fetchImpl?:typeof fetch,createConversionWorker?:()=>Worker}} [options]
  */
-export const handleDocExtract = async ({ source, opts = {} }) => {
+export const handleDocExtract = async (
+  { source, opts = {} },
+  { signal, fetchImpl, createConversionWorker } = {},
+) => {
   // Stage rides every failure so the returned error pinpoints WHERE it broke.
   let stage = 'fetch';
   const where = source?.url ? String(source.url).slice(0, 120) : '(inline bytes)';
   try {
-    const { bytes, contentType } = await fetchDocBytes(source);
+    const { bytes, contentType } = await fetchDocBytes(source, { signal, fetchImpl });
 
     stage = 'sniff';
+    throwIfAborted(signal, 'Document extraction stopped.');
     const hints = {
       name: source?.name || source?.url || '',
       // An explicit content-type from the response beats the caller's guess.
@@ -114,7 +132,9 @@ export const handleDocExtract = async ({ source, opts = {} }) => {
         engine: opts.engine,
         dev: opts.dev,
         sourceLabel: where,
+        signal,
       });
+      throwIfAborted(signal, 'Document extraction stopped.');
       if (!extracted.ok) return extracted;
       return {
         ok: true,
@@ -133,22 +153,28 @@ export const handleDocExtract = async ({ source, opts = {} }) => {
     }
 
     stage = 'convert';
-    if (bytes.length > MAX_DOCUMENT_BYTES) {
-      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_DOCUMENT_BYTES})`);
+    if (bytes.length > MAX_DOCUMENT_CONVERSION_BYTES) {
+      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_DOCUMENT_CONVERSION_BYTES})`);
     }
-    const doc = await convertToDocument(bytes, hints);
-    console.debug(`[offscreen/doc-extract] ${where}: ${doc.format}, ${doc.blocks.length} blocks, ${bytes.length} bytes`);
-    return { ok: true, result: { format: doc.format, doc, bytes: bytes.length, sniffedVia: sniffed.via } };
+    const byteLength = bytes.length;
+    const converted = await convertDocumentInWorker(bytes, hints, {
+      signal, createWorker: createConversionWorker,
+    });
+    throwIfAborted(signal, 'Document extraction stopped.');
+    if ('ok' in converted && converted.ok === false) return converted;
+    const doc = /** @type {import('/peerd-runtime/doc/model.js').Document} */ (converted);
+    console.debug(`[offscreen/doc-extract] ${where}: ${doc.format}, ${doc.blocks.length} blocks, ${byteLength} bytes`);
+    return { ok: true, result: { format: doc.format, doc, bytes: byteLength, sniffedVia: sniffed.via } };
   } catch (e) {
     const err = /** @type {{ name?: string, message?: string, format?: string }} */ (e);
+    if (signal?.aborted || err?.name === 'AbortError') {
+      return { ok: false, error: 'doc_extract_aborted', detail: 'Document extraction stopped.' };
+    }
     console.error(`[offscreen/doc-extract] FAILED at stage=${stage} for ${where}:`, e);
-    // The typed errors carry the agent's next move, so they cross the wire as
-    // themselves rather than collapsing into one opaque failure string.
-    if (e instanceof LegacyDocFormatError) return { ok: false, error: 'legacy_binary_format', detail: err.message, format: err.format };
-    if (e instanceof UnsupportedDocFormatError) return { ok: false, error: 'unsupported_format', detail: err.message, format: err.format };
-    if (e instanceof ZipError) return { ok: false, error: 'unreadable_container', detail: err.message };
-    if (e instanceof DocParseError) return { ok: false, error: 'parse_failed', detail: err.message, format: err.format };
-    if (e instanceof DocFetchError) return { ok: false, error: 'fetch_failed', detail: err.message };
-    return { ok: false, error: `doc_extract_failed[${stage}]`, detail: `${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+    // why details do not cross the wire: archive member names and parser error
+    // messages are producer-controlled. The controller maps these stable codes
+    // to tool-authored recovery guidance outside the untrusted-content fence.
+    if (e instanceof DocFetchError) return { ok: false, error: 'fetch_failed' };
+    return { ok: false, error: 'doc_extract_failed' };
   }
 };

@@ -33,7 +33,7 @@ describe('digest-bound lazy semantic route clusters', () => {
     const routes = SEMANTIC_HOST_ROUTE_MANIFEST.map((row) => row.route);
     expect(new Set(routes).size).toBe(routes.length);
     expect(SEMANTIC_HOST_ROUTE_MANIFEST.every((row) =>
-      Object.keys(row).sort().join(',') === 'channels,route,source')).toBe(true);
+      Object.keys(row).sort().join(',') === 'channels,route')).toBe(true);
   });
 
   test('the Store host projects out Preview-only semantic routes', () => {

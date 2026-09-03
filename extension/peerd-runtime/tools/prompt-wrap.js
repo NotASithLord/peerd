@@ -83,7 +83,7 @@ export const neutralizeFence = (body) =>
 export const wrapUntrusted = ({ origin, tool, body, retrievedAt }) => {
   const ts = retrievedAt ?? new Date().toISOString();
   return (
-    `<untrusted_web_content origin="${escapeAttr(origin)}" ` +
+    `<untrusted_web_content origin="${escapeAttr(disarmText(origin))}" ` +
     `tool="${escapeAttr(tool)}" retrieved_at="${ts}">\n${neutralizeFence(disarmText(body))}\n` +
     `</untrusted_web_content>`
   );

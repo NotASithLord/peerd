@@ -15,9 +15,25 @@ import { describe, it, expect } from '../../framework.js';
 import { domWalkInjected, createRefRegistry } from '/peerd-runtime/index.js';
 import { hasPasswordFieldInjected } from '/peerd-runtime/dom/walk-injected.js';
 import { liveDocumentLocationInjected } from '/peerd-runtime/browser-authority/dom-helpers.js';
-import { snapshotTool } from '/background/page-authority/snapshot.js';
-import { clickTool, clickInjected } from '/background/page-authority/click.js';
-import { typeTool } from '/background/page-authority/type.js';
+import { captureOwnedAccessibilityTreeAuthority } from '/background/page-authority/snapshot.js';
+import { clickOwnedTargetAuthority, clickInjected } from '/background/page-authority/click.js';
+import { fillOwnedTargetAuthority } from '/background/page-authority/type.js';
+import { snapshotTool as controllerSnapshotTool } from '/peerd-runtime/tools/defs/snapshot.js';
+import { clickTool as controllerClickTool } from '/peerd-runtime/tools/defs/click.js';
+import { typeTool as controllerTypeTool } from '/peerd-runtime/tools/defs/type.js';
+
+const snapshotTool = { execute: (/** @type {any} */ args, /** @type {any} */ ctx) => controllerSnapshotTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    captureOwnedAccessibilityTree: () => captureOwnedAccessibilityTreeAuthority(args, ctx),
+  },
+}) };
+const clickTool = { execute: (/** @type {any} */ args, /** @type {any} */ ctx) => controllerClickTool.execute(args, {
+  ...ctx, pageAuthority: { clickOwnedTarget: () => clickOwnedTargetAuthority(args, ctx) },
+}) };
+const typeTool = { execute: (/** @type {any} */ args, /** @type {any} */ ctx) => controllerTypeTool.execute(args, {
+  ...ctx, pageAuthority: { fillOwnedTarget: () => fillOwnedTargetAuthority(args, ctx) },
+}) };
 import { TEST_TIME_ORIGIN } from '../../helpers/browser-scripting.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */

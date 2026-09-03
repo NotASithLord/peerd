@@ -146,7 +146,6 @@ export {
   runControlOp,
   makeVmHttpFetch,
   makeInjectGitAuth,
-  makeGitCredentialRoutes,
   WEB_WRITE_CONFIRM_KEY,
   bannerText,
   peerdNetBash,

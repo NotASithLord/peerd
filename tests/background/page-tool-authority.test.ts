@@ -273,10 +273,10 @@ describe('exact page authority', () => {
     });
     await expect(authority.clickOwnedTarget()).resolves.toMatchObject({
       ok: true,
-      structured: { browserPolicy: {
+      browserChildPolicyNotices: [{
         reason: 'protected_child_navigation', outcome: 'not_run',
         child: 'closed', retryable: false,
-      } },
+      }],
     });
   });
 
@@ -317,7 +317,7 @@ describe('exact page authority', () => {
     });
     await expect(authority.clickOwnedTarget()).resolves.toMatchObject({
       ok: true,
-      structured: { browserPolicies: [
+      browserChildPolicyNotices: [
         {
           reason: 'protected_child_navigation', outcome: 'not_run',
           child: 'closed', retryable: false,
@@ -326,7 +326,7 @@ describe('exact page authority', () => {
           reason: 'child_navigation_failed', outcome: 'unverified',
           child: 'left_blank', retryable: false,
         },
-      ] },
+      ],
     });
     expect(outcomes.consume(7)).toEqual([]);
   });

@@ -33,6 +33,12 @@ const PROMPT_OUTER_BYTES = 128 * KIB;
 const TOOL_PROJECTION_OUTER_BYTES = 64 * KIB;
 const GENERIC_OUTER_BYTES = SEMANTIC_DEMAND_MAX_BYTES;
 const TURN_VALUE_BYTES = 4 * MIB;
+const MODEL_TOOL_START_BYTES = 2 * KIB;
+const MODEL_TOOL_STARTS_PER_STEP = 64;
+// why: page screenshots cross the turn kernel as base64 inside a structured
+// receipt. Reserve a full envelope for operation metadata and lifecycle fields
+// so an authority-approved image cannot collapse into a transport-size error.
+export const CONTROLLER_PAGE_IMAGE_MAX_BASE64_CHARS = TURN_VALUE_BYTES - 256 * KIB;
 const MODEL_EVENT_BYTES = 256 * KIB;
 const MODEL_CONTEXT_OBSERVATION_BYTES = 128 * KIB;
 const MODEL_STREAM_BYTES = 8 * MIB;
@@ -416,6 +422,7 @@ export const createControllerKernelQuota = (
   const steps = safeSteps(outer?.maxSteps ?? ctx?.maxSteps);
   const toolBudget = 4_096 * steps;
   const streamBudget = MODEL_STREAM_EVENTS * steps;
+  const modelToolBudget = MODEL_TOOL_STARTS_PER_STEP * steps;
   /** @type {Map<string, number>} */
   const counts = new Map();
   const custody = makeCustody();
@@ -442,7 +449,7 @@ export const createControllerKernelQuota = (
     'turn.model.read-local': streamBudget,
     'turn.model.cancel-local': 32 * steps,
     'turn.model.observe-context': 32 * steps,
-    'turn.model.observe-event': streamBudget,
+    'turn.model.observe-event': modelToolBudget,
     'turn.model.observe-failover': 8 * steps,
     ...Object.fromEntries(Object.keys(CONTROLLER_DOMAIN_OPERATIONS).map((operation) => [
       operation, toolBudget,
@@ -457,6 +464,8 @@ export const createControllerKernelQuota = (
     if (!allowed.has(operation)) return refusal('kernel-operation-denied');
     const payloadCap = operation === 'turn.model.observe-context'
       ? MODEL_CONTEXT_OBSERVATION_BYTES
+      : operation === 'turn.model.observe-event'
+        ? MODEL_TOOL_START_BYTES
       : operation === 'turn.model.read-inference' || operation === 'turn.model.read-local'
         ? MODEL_EVENT_BYTES : TURN_VALUE_BYTES;
     if (!bounded(payload, payloadCap)) {

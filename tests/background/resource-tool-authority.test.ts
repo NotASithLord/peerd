@@ -216,3 +216,46 @@ describe('tab actor host egress tripwire', () => {
     expect(fetched).toBe(true);
   });
 });
+
+describe('document resource cancellation custody', () => {
+  test('threads the exact turn signal to the offscreen client', async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const args = { url: 'https://example.com/report.pdf', format: undefined };
+    const authority = createResourceToolAuthority({
+      binding: { operation: 'turn.resource.extract-document', args },
+      signal: controller.signal,
+      ctx: {
+        session: { sessionId: 'document-session' },
+        docOffscreenClient: {
+          extract: async (_source: any, _opts: any, options: any) => {
+            receivedSignal = options.signal;
+            return { format: 'pdf' };
+          },
+        },
+      },
+    });
+    await expect(authority.extractDocument({
+      url: args.url, format: undefined, engine: 'auto',
+    })).resolves.toMatchObject({ ok: true, target: args.url });
+    expect(receivedSignal).toBe(controller.signal);
+  });
+
+  test('does not convert an offscreen AbortError into an ordinary tool result', async () => {
+    const controller = new AbortController();
+    const args = { url: 'https://example.com/report.pdf', format: undefined };
+    const authority = createResourceToolAuthority({
+      binding: { operation: 'turn.resource.extract-document', args },
+      signal: controller.signal,
+      ctx: {
+        session: { sessionId: 'document-session' },
+        docOffscreenClient: {
+          extract: async () => { throw new DOMException('stopped', 'AbortError'); },
+        },
+      },
+    });
+    await expect(authority.extractDocument({
+      url: args.url, format: undefined, engine: 'auto',
+    })).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});

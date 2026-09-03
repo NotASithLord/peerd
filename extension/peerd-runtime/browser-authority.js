@@ -19,11 +19,14 @@ export {
 export {
   BROWSER_TARGET_STAGES,
   BrowserAutomationPolicyError,
-  browserDocumentRefusalFrom,
-  browserNetworkGuardPostNavigationResult,
+  browserDocumentRefusalReceiptFrom,
+  browserNetworkGuardPostNavigationReceipt,
+  browserTargetRefusalReceipt,
+  browserTargetRefusalReceiptFrom,
   browserTargetRefusalResult,
   classifyBrowserAutomationTarget,
-  formSubmissionRefusalFrom,
+  formSubmissionRefusalReceiptFrom,
+  CROSS_ORIGIN_FORM_SUBMISSION_MESSAGE,
   sensitiveSiteBrowserTargetVerdict,
   unverifiedBrowserTargetVerdict,
 } from './tools/browser-automation-policy.js';
@@ -41,7 +44,5 @@ export {
 export { wrapUntrusted } from './tools/prompt-wrap.js';
 export { disarmMarkup } from './dom/cdr.js';
 export { excerptFooter, excerptRelevant, pagingFooter, windowText } from './tools/web/spill.js';
-export { summarizeMutations } from './dom/action-result.js';
 export { readFrameworkStateInjected } from './dom/framework-state.js';
-export { captureSnapshot, describeSource } from './dom/capture.js';
-export { diffSnapshots } from './dom/snapshot-diff.js';
+export { captureSnapshot } from './dom/capture.js';

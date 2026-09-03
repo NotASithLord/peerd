@@ -1,7 +1,10 @@
 // @ts-check
 
 import { isCloudMetadataHost, isPrivateOrLocalHost } from '../../shared/private-network.js';
-import { FAILURE_OUTCOMES } from '../lifecycle/failure-taxonomy.js';
+import {
+  FAILURE_OUTCOMES,
+  isFailureOutcomeKind,
+} from '../lifecycle/failure-taxonomy.js';
 
 /** @typedef {'invalid_url' | 'unsupported_scheme' | 'private_network' | 'cloud_metadata' | 'sensitive_site' | 'unverified_target' | 'network_guard_unavailable' | 'network_guard_unsupported' | 'network_guard_install_failed'} BrowserTargetRefusalReason */
 /** @typedef {'pre_navigation' | 'committed_origin'} BrowserTargetStage */
@@ -27,11 +30,12 @@ export const FORM_SUBMISSION_CODES = Object.freeze({
   CROSS_ORIGIN: 'cross_origin_form_submission_blocked',
 });
 
-/** @returns {import('/shared/tool-types.js').ToolResultErr & {endTurn:true,structured:Record<string,unknown>}} */
-export const crossOriginFormSubmissionRefusalResult = () => ({
-  ok: false,
+export const CROSS_ORIGIN_FORM_SUBMISSION_MESSAGE =
+  'This form submits to another site. peerd did not click, type, or submit. Review and complete the form in the open tab, then submit it yourself if you want to continue. Do not retry with another click, selector, type submit, or page code.';
+
+const crossOriginFormSubmissionRefusalReceipt = () => ({
+  ok: /** @type {const} */ (false),
   error: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
-  content: 'This form submits to another site. peerd did not click, type, or submit. Review and complete the form in the open tab, then submit it yourself if you want to continue. Do not retry with another click, selector, type submit, or page code.',
   structured: {
     code: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
     reason: 'cross_origin_form_submission',
@@ -40,14 +44,17 @@ export const crossOriginFormSubmissionRefusalResult = () => ({
     retryable: false,
   },
   outcomeKind: FAILURE_OUTCOMES.PRE_EFFECT_FAILURE,
-  endTurn: true,
+  endTurn: /** @type {const} */ (true),
 });
 
 /** @param {unknown} carrier */
-export const formSubmissionRefusalFrom = (carrier) => {
-  const error = /** @type {{ error?: unknown }} */ (carrier)?.error;
-  return error === FORM_SUBMISSION_CODES.CROSS_ORIGIN
-    ? crossOriginFormSubmissionRefusalResult()
+const isCrossOriginFormSubmission = (carrier) =>
+  /** @type {{ error?: unknown }} */ (carrier)?.error === FORM_SUBMISSION_CODES.CROSS_ORIGIN;
+
+/** @param {unknown} carrier */
+export const formSubmissionRefusalReceiptFrom = (carrier) => {
+  return isCrossOriginFormSubmission(carrier)
+    ? crossOriginFormSubmissionRefusalReceipt()
     : null;
 };
 
@@ -115,12 +122,13 @@ export const unverifiedBrowserTargetVerdict = (overrides = {}) => ({
     ?? 'Wait for the page to finish loading, then retry once. If this continues, handle the page directly in the browser.',
 });
 
-/** @param {RefusedBrowserTarget} verdict @param {{effectCompleted?:boolean,neutralized?:boolean}} [options]
- * @returns {BrowserTargetRefusalResult} */
-export const browserTargetRefusalResult = (verdict, options = {}) => ({
-  ok: false,
+/**
+ * @param {RefusedBrowserTarget} verdict
+ * @param {{effectCompleted?:boolean,neutralized?:boolean}} [options]
+ */
+export const browserTargetRefusalReceipt = (verdict, options = {}) => ({
+  ok: /** @type {const} */ (false),
   error: verdict.code,
-  content: formatBrowserTargetRefusal(verdict, options.effectCompleted),
   structured: {
     ...verdict,
     ...(typeof options.neutralized === 'boolean' ? { neutralized: options.neutralized } : {}),
@@ -128,18 +136,62 @@ export const browserTargetRefusalResult = (verdict, options = {}) => ({
   outcomeKind: lifecycleOutcome(verdict, options.effectCompleted),
 });
 
-/** @param {unknown} carrier @returns {BrowserTargetRefusalResult|null} */
-export const browserDocumentRefusalFrom = (carrier) => {
+/** @param {RefusedBrowserTarget} verdict @param {{effectCompleted?:boolean,neutralized?:boolean}} [options]
+ * @returns {BrowserTargetRefusalResult} */
+export const browserTargetRefusalResult = (verdict, options = {}) => ({
+  ...browserTargetRefusalReceipt(verdict, options),
+  content: formatBrowserTargetRefusal(verdict, options.effectCompleted),
+});
+
+/** @param {any} carrier @param {{effectCompleted?:boolean}} [options] */
+export const browserTargetRefusalReceiptFrom = (carrier, options = {}) => {
+  if (carrier?.structured?.allowed === false) {
+    return browserTargetRefusalReceipt(carrier.structured, options);
+  }
+  const safeCode = (/** @type {unknown} */ value) => typeof value === 'string'
+    && /^[a-z0-9_-]{1,80}$/i.test(value) ? value : null;
+  const code = safeCode(carrier?.code);
+  // why: a generic kernel host may attach diagnostic prose to `error`. It is
+  // not reviewed controller presentation, so retain it only when it is itself
+  // a bounded machine code; otherwise surface the validated code or fallback.
+  const error = safeCode(carrier?.error) ?? code ?? 'browser_target_refused';
+  const outcomeKind = isFailureOutcomeKind(carrier?.outcomeKind)
+    ? carrier.outcomeKind : null;
+  const effectCompleted = options.effectCompleted === true;
+  const phase = carrier?.phase === 'startup' || carrier?.phase === 'run'
+    ? carrier.phase : null;
+  return {
+    ok: /** @type {const} */ (false),
+    error,
+    ...(code ? { code } : {}),
+    ...(typeof carrier?.outcomeKnown === 'boolean'
+      ? { outcomeKnown: carrier.outcomeKnown } : {}),
+    ...(effectCompleted
+      ? { outcomeKind: FAILURE_OUTCOMES.EFFECT_COMPLETED, performed: true }
+      : {
+        ...(outcomeKind ? { outcomeKind } : {}),
+        ...(typeof carrier?.performed === 'boolean' ? { performed: carrier.performed } : {}),
+      }),
+    ...(typeof carrier?.retryable === 'boolean' ? { retryable: carrier.retryable } : {}),
+    ...(phase ? { phase } : {}),
+  };
+};
+
+/** @param {unknown} carrier @returns {boolean} */
+const isBrowserDocumentRefusal = (carrier) => {
   const value = /** @type {{ outcomeKind?: unknown, error?: unknown, message?: unknown }} */ (carrier);
-  if (value?.outcomeKind !== FAILURE_OUTCOMES.PRE_EFFECT_FAILURE) return null;
+  if (value?.outcomeKind !== FAILURE_OUTCOMES.PRE_EFFECT_FAILURE) return false;
   const message = typeof value.error === 'string'
     ? value.error
     : typeof value.message === 'string' ? value.message : '';
-  if (!/browser_target_(?:changed|unverified)/i.test(message)) return null;
-  return browserTargetRefusalResult(unverifiedBrowserTargetVerdict(), {
-    effectCompleted: false,
-  });
+  return /browser_target_(?:changed|unverified)/i.test(message);
 };
+
+/** @param {unknown} carrier */
+export const browserDocumentRefusalReceiptFrom = (carrier) =>
+  isBrowserDocumentRefusal(carrier)
+    ? browserTargetRefusalReceipt(unverifiedBrowserTargetVerdict(), { effectCompleted: false })
+    : null;
 
 export class BrowserAutomationPolicyError extends Error {
   /** @param {RefusedBrowserTarget} verdict @param {{effectCompleted?:boolean,neutralized?:boolean}} [options] */
@@ -184,15 +236,22 @@ export const browserNetworkGuardUnavailableResult = (reason = 'network_guard_una
     effectCompleted: false,
   });
 
-/** @param {'network_guard_unavailable'|'network_guard_unsupported'|'network_guard_install_failed'} [reason] */
-export const browserNetworkGuardPostNavigationResult = (reason = 'network_guard_unavailable') => {
+/** @param {'network_guard_unavailable'|'network_guard_unsupported'|'network_guard_install_failed'} reason */
+const browserNetworkGuardPostNavigationVerdict = (reason) => {
   const base = browserNetworkGuardUnavailableVerdict(reason);
-  return browserTargetRefusalResult({
+  return {
     ...base,
     stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
-    outcome: 'page_loaded_not_automated',
+    outcome: /** @type {const} */ ('page_loaded_not_automated'),
     message: 'Navigation loaded a public page, but peerd stopped further browser automation because private-network request blocking could not be installed.',
-  }, { effectCompleted: true });
+  };
+};
+
+/** @param {'network_guard_unavailable'|'network_guard_unsupported'|'network_guard_install_failed'} [reason] */
+export const browserNetworkGuardPostNavigationReceipt = (reason = 'network_guard_unavailable') => {
+  return browserTargetRefusalReceipt(browserNetworkGuardPostNavigationVerdict(reason), {
+    effectCompleted: true,
+  });
 };
 
 /** @returns {RefusedBrowserTarget} */

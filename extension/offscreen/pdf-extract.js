@@ -32,6 +32,7 @@ import {
   PdfParseError, MAX_SPILL_TEXT_CHARS,
 } from '/peerd-runtime/offscreen.js';
 import { boundedPdfInfo, extractBoundedPdfTextLayer } from './pdf-text-layer.js';
+import { abortError, throwIfAborted } from '/shared/abort.js';
 
 // pdf.js is loaded LAZILY (dynamic import), not at module top level. The
 // offscreen document ALWAYS loads (voice + the SW keepalive port), but most
@@ -77,6 +78,24 @@ const loadTesseract = () => (tesseractPromise ??=
 const OCR_MAX_PAGES = 50;
 const OCR_RENDER_SCALE = 2;
 
+/** @param {any} task @param {AbortSignal|undefined} signal */
+const destroyTaskOnAbort = (task, signal) => {
+  /** @type {Promise<void>|null} */
+  let cleanup = null;
+  const destroy = () => (cleanup ??= Promise.resolve()
+    .then(() => task.destroy())
+    .then(() => undefined, () => undefined));
+  const abort = () => {
+    void destroy();
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  return Object.freeze({
+    destroy,
+    remove: () => signal?.removeEventListener('abort', abort),
+  });
+};
+
 /**
  * Wrap raw bytes in a blob: URL so tesseract's worker can fetch them as if they
  * were a CDN file. Caller revokes when done.
@@ -94,9 +113,11 @@ const blobUrlFor = (bytes, type) => URL.createObjectURL(new Blob([bytes], { type
  *
  * @param {any} page   a pdf.js PDFPageProxy
  * @param {number} scale
+ * @param {AbortSignal|undefined} signal
  * @returns {Promise<OffscreenCanvas>}
  */
-const renderPageToCanvas = async (page, scale) => {
+const renderPageToCanvas = async (page, scale, signal) => {
+  throwIfAborted(signal, 'PDF extraction stopped.');
   const viewport = page.getViewport({ scale });
   const canvas = new OffscreenCanvas(
     Math.max(1, Math.ceil(viewport.width)),
@@ -104,7 +125,18 @@ const renderPageToCanvas = async (page, scale) => {
   );
   const canvasContext = canvas.getContext('2d');
   if (!canvasContext) throw new Error('OffscreenCanvas 2D context unavailable');
-  await page.render({ canvasContext, viewport }).promise;
+  const rendering = page.render({ canvasContext, viewport });
+  const abort = () => {
+    try { rendering.cancel?.(); } catch { /* already settled */ }
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  try {
+    await rendering.promise;
+    throwIfAborted(signal, 'PDF extraction stopped.');
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
   return canvas;
 };
 
@@ -123,17 +155,21 @@ const renderPageToCanvas = async (page, scale) => {
  * ping on PR #76 and docs/PDF-READING.md.
  *
  * @param {Uint8Array} bytes
- * @param {{ dev?: boolean }} [opts]
+ * @param {{ dev?: boolean, signal?:AbortSignal }} [opts]
  * @returns {Promise<{ pages: Array<{page:number,text:string}>, pageCount:number, info:object, chars:number, textCapped:boolean }>}
  */
-const extractViaOcr = async (bytes, { dev = false } = {}) => {
+const extractViaOcr = async (bytes, { dev = false, signal } = {}) => {
+  throwIfAborted(signal, 'PDF extraction stopped.');
   const engine = await getOcrStore().getEngine({ dev });
+  throwIfAborted(signal, 'PDF extraction stopped.');
+  const pdfjsLib = await loadPdfjs();
+  throwIfAborted(signal, 'PDF extraction stopped.');
+  const Tesseract = await loadTesseract();
+  throwIfAborted(signal, 'PDF extraction stopped.');
+
   const corePath = blobUrlFor(engine.files['core-wasm'], 'application/wasm');
   const langPath = blobUrlFor(engine.files['lang-eng'], 'application/octet-stream');
   const workerPath = browser.runtime.getURL('vendor/tesseract/worker.min.js');
-
-  const pdfjsLib = await loadPdfjs();
-  const Tesseract = await loadTesseract();
 
   const task = pdfjsLib.getDocument({
     data: bytes,
@@ -142,9 +178,25 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
     disableFontFace: true,
   });
   let pdf;
+  /** @type {any} */
   let worker;
+  const taskAbort = destroyTaskOnAbort(task, signal);
+  /** @type {Promise<void>|null} */
+  let workerCleanup = null;
+  const terminateWorker = () => {
+    if (!worker) return Promise.resolve();
+    return workerCleanup ??= Promise.resolve()
+      .then(() => worker.terminate())
+      .then(() => undefined, () => undefined);
+  };
+  const abortWorker = () => {
+    void terminateWorker();
+  };
+  signal?.addEventListener('abort', abortWorker, { once: true });
+  if (signal?.aborted) abortWorker();
   try {
     pdf = await task.promise;
+    throwIfAborted(signal, 'PDF extraction stopped.');
     // createWorker spins up vendor/tesseract/worker.min.js, which loads the core
     // WASM (corePath) and the language model (langPath). cacheMethod:'none' — we
     // already cache the bytes in IDB (ocr-store), no second cache layer.
@@ -157,6 +209,7 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
     worker = await Tesseract.createWorker('eng', 1, {
       corePath, langPath, workerPath, gzip: true, cacheMethod: 'none', workerBlobURL: false,
     });
+    throwIfAborted(signal, 'PDF extraction stopped.');
 
     const pageCount = pdf.numPages;
     const limit = Math.min(pageCount, OCR_MAX_PAGES);
@@ -164,10 +217,17 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
     let chars = 0;
     let textCapped = pageCount > limit;
     for (let n = 1; n <= limit && chars < MAX_SPILL_TEXT_CHARS; n += 1) {
+      throwIfAborted(signal, 'PDF extraction stopped.');
       const page = await pdf.getPage(n);
-      const canvas = await renderPageToCanvas(page, OCR_RENDER_SCALE);
-      page.cleanup();
+      let canvas;
+      try {
+        canvas = await renderPageToCanvas(page, OCR_RENDER_SCALE, signal);
+      } finally {
+        page.cleanup();
+      }
+      throwIfAborted(signal, 'PDF extraction stopped.');
       const { data } = await worker.recognize(canvas);
+      throwIfAborted(signal, 'PDF extraction stopped.');
       const source = String(data?.text ?? '');
       const text = source.slice(0, MAX_SPILL_TEXT_CHARS - chars);
       chars += text.length;
@@ -176,12 +236,16 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
         textCapped = true;
       }
     }
+    throwIfAborted(signal, 'PDF extraction stopped.');
     const meta = await pdf.getMetadata().catch(() => null);
+    throwIfAborted(signal, 'PDF extraction stopped.');
     const info = boundedPdfInfo(meta);
     return { pages, pageCount, info, chars, textCapped };
   } finally {
-    try { if (worker) await worker.terminate(); } catch { /* best-effort */ }
-    try { await task.destroy(); } catch { /* best-effort */ }
+    taskAbort.remove();
+    signal?.removeEventListener('abort', abortWorker);
+    await terminateWorker();
+    await taskAbort.destroy();
     URL.revokeObjectURL(corePath);
     URL.revokeObjectURL(langPath);
   }
@@ -192,10 +256,13 @@ const extractViaOcr = async (bytes, { dev = false } = {}) => {
  * data + document info; the pure formatter (formatPdfBody) caps + renders it.
  *
  * @param {Uint8Array} bytes
+ * @param {AbortSignal|undefined} signal
  * @returns {Promise<{ pages: Array<{page:number,text:string}>, pageCount:number, info:object, chars:number, textCapped:boolean }>}
  */
-const extractTextLayer = async (bytes) => {
+const extractTextLayer = async (bytes, signal) => {
+  throwIfAborted(signal, 'PDF extraction stopped.');
   const pdfjsLib = await loadPdfjs();
+  throwIfAborted(signal, 'PDF extraction stopped.');
   // getDocument returns a LOADING TASK; teardown is task.destroy() (NOT
   // pdf.destroy(), which doesn't exist in pdf.js v6 — calling it leaks the
   // worker). We keep the task to destroy it in finally.
@@ -206,6 +273,7 @@ const extractTextLayer = async (bytes) => {
     disableAutoFetch: true,
     disableFontFace: true,
   });
+  const taskAbort = destroyTaskOnAbort(task, signal);
   let pdf;
   try {
     pdf = await task.promise;
@@ -214,7 +282,11 @@ const extractTextLayer = async (bytes) => {
     // loading (CSP, missing file, bad URL) — pdf.js then reports a generic
     // parse error. Naming the configured worker makes that diagnosable from
     // the offscreen DevTools console without guesswork.
-    try { await task.destroy(); } catch { /* best-effort */ }
+    await taskAbort.destroy();
+    taskAbort.remove();
+    if (signal?.aborted || (/** @type {{name?:string}} */ (e))?.name === 'AbortError') {
+      throw abortError(signal, 'PDF extraction stopped.');
+    }
     throw new PdfParseError(
       `pdf.js could not parse the document (pdf.js ${pdfjsLib.version}, `
       + `worker=${pdfjsLib.GlobalWorkerOptions.workerSrc || '(unset)'}): ${(/** @type {{ name?: string, message?: string }} */ (e))?.name ?? 'Error'}: ${(/** @type {{ message?: string }} */ (e))?.message ?? e}`,
@@ -225,9 +297,11 @@ const extractTextLayer = async (bytes) => {
     return await extractBoundedPdfTextLayer(pdf, {
       maxPages: MAX_PAGES,
       maxChars: MAX_SPILL_TEXT_CHARS,
+      signal,
     });
   } finally {
-    try { await task.destroy(); } catch { /* best-effort */ }
+    taskAbort.remove();
+    await taskAbort.destroy();
   }
 };
 
@@ -240,7 +314,7 @@ const extractTextLayer = async (bytes) => {
  * layer with a clear scanned note rather than crashing the read.
  *
  * @param {Uint8Array} bytes
- * @param {{ engine?: string, dev?: boolean, sourceLabel?: string }} [opts]
+ * @param {{ engine?: string, dev?: boolean, sourceLabel?: string, signal?:AbortSignal }} [opts]
  */
 export const extractPdfBytes = async (bytes, opts = {}) => {
   // Stage label rides every failure so a manual run pinpoints WHERE it broke.
@@ -249,7 +323,9 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
   const where = typeof opts.sourceLabel === 'string'
     ? opts.sourceLabel.slice(0, 120) : '(document bytes)';
   try {
+    throwIfAborted(opts.signal, 'PDF extraction stopped.');
     const ocrAvailable = await getOcrStore().isInstalled({ dev }).catch(() => false);
+    throwIfAborted(opts.signal, 'PDF extraction stopped.');
     const plan = chooseEngine({ engine: opts.engine ?? 'auto', ocrAvailable });
     if (plan.engine === null) {
       // Explicit engine:'ocr' but not installed.
@@ -259,7 +335,7 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
     // Forced engine:'ocr' (installed): OCR the whole document, no text-layer pass.
     if (plan.engine === 'ocr') {
       stage = 'ocr';
-      const ocr = await extractViaOcr(bytes, { dev });
+      const ocr = await extractViaOcr(bytes, { dev, signal: opts.signal });
       const scanned = looksScanned({ chars: ocr.chars, pages: ocr.pageCount });
       console.debug(`[offscreen/pdf-extract] ${where}: forced OCR, ${ocr.pageCount}p, ${ocr.chars} chars`);
       return {
@@ -273,7 +349,7 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
     }
 
     stage = 'parse';
-    const layer = await extractTextLayer(bytes);
+    const layer = await extractTextLayer(bytes, opts.signal);
     const scanned = looksScanned({ chars: layer.chars, pages: layer.pageCount });
     console.debug(
       `[offscreen/pdf-extract] ${where}: ${layer.pageCount}p, ${layer.chars} chars, `
@@ -287,7 +363,7 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
     if (plan.mayEscalate && scanned) {
       stage = 'ocr';
       try {
-        const ocr = await extractViaOcr(bytes, { dev });
+        const ocr = await extractViaOcr(bytes, { dev, signal: opts.signal });
         const ocrScanned = looksScanned({ chars: ocr.chars, pages: ocr.pageCount });
         console.debug(`[offscreen/pdf-extract] ${where}: OCR escalation recovered ${ocr.chars} chars`);
         return {
@@ -299,6 +375,9 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
           },
         };
       } catch (ocrErr) {
+        if (opts.signal?.aborted || (/** @type {{name?:string}} */ (ocrErr))?.name === 'AbortError') {
+          throw abortError(opts.signal, 'PDF extraction stopped.');
+        }
         console.warn(`[offscreen/pdf-extract] ${where}: OCR escalation failed, keeping text layer:`, ocrErr);
       }
     }
@@ -317,9 +396,12 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
       },
     };
   } catch (e) {
-    // Robust, debuggable failure: stage + typed name + message + the target.
-    const detail = `${(/** @type {{ name?: string, message?: string }} */ (e))?.name ?? 'Error'}: ${(/** @type {{ message?: string }} */ (e))?.message ?? String(e)}`;
+    if (opts.signal?.aborted || (/** @type {{name?:string}} */ (e))?.name === 'AbortError') {
+      throw abortError(opts.signal, 'PDF extraction stopped.');
+    }
     console.error(`[offscreen/pdf-extract] FAILED at stage=${stage} for ${where}:`, e);
-    return { ok: false, error: `pdf_extract_failed[${stage}]: ${detail}`, stage };
+    // Parser prose can contain producer-controlled PDF strings. Keep detail in
+    // DevTools and cross the authority boundary with a stable code only.
+    return { ok: false, error: 'pdf_extract_failed', stage };
   }
 };

@@ -21,7 +21,12 @@
 import { describe, test, expect } from 'bun:test';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 import { fetchUrlTool } from '../../../extension/peerd-runtime/tools/defs/fetch-url.js';
-import { readPageTool } from '../../../extension/background/page-authority/read-page.js';
+import { readOwnedPageAuthority } from '../../../extension/background/page-authority/read-page.js';
+import { readPageTool as controllerReadPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
+
+const readPageTool = { execute: (args: any, ctx: any) => controllerReadPageTool.execute(args, {
+  ...ctx, pageAuthority: { readOwnedPage: () => readOwnedPageAuthority(args, ctx) },
+}) };
 
 const ZW = '​';
 const SOFT_HYPHEN = '­';

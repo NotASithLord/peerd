@@ -264,6 +264,30 @@ for (const channel of ['preview', 'store']) {
       await closeProbePage(vaultPage);
     }
 
+    // Prove from the universally shipped Options page that a real first-party
+    // page still cannot enter the sealed job model relay in either channel;
+    // the pure owner tests cover the deeper run/grant matrix.
+    let provenancePage = null;
+    try {
+      provenancePage = await openExtPage(ctx, 'options/options.html');
+      const refused = await evalIn(provenancePage, `chrome.runtime.sendMessage({
+        type: 'script/model-call', ownerSessionId: 'forged', runId: 'forged',
+        args: { prompt: 'forged' },
+      })`, true);
+      const refusedExactly = refused?.ok === false
+        && refused.error === 'kernel-route-unauthorized'
+        && refused.outcomeKnown === true;
+      if (!refusedExactly) {
+        failed = true;
+        log(`  ✗ [${channel}] packaged model-relay provenance: ${JSON.stringify(refused)}`);
+      } else log(`  ✓ [${channel}] packaged model relay refuses an unauthorized page`);
+    } catch (error) {
+      failed = true;
+      log(`  ✗ [${channel}] packaged model-relay provenance failed: ${error?.message ?? error}`);
+    } finally {
+      await closeProbePage(provenancePage);
+    }
+
     // Browser-level package policy proof. CDP fulfills one HTTPS module URL at
     // the wire, so the fixture is deterministic and no public network is used.
     // Preview must execute it; Store must not request it.

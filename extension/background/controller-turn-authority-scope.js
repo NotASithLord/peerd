@@ -39,7 +39,7 @@ const CLASS_KEYS = Object.freeze({
     'session', 'activeTab', 'actorType', 'backing', 'inbound',
     'permission', 'readAuthorityPermission', 'confirm',
     ...BROWSER_TARGET_KEYS,
-    'acquireBrowserNetworkGuardLease', 'adoptWebTab', 'audit',
+    'acquireBrowserNetworkGuardLease', 'adoptWebTab', 'releaseAdoptedWebTab', 'audit',
     'armBrowserChildQuarantine', 'browserChildQuarantineRequired',
     'cdpUnavailableReason', 'consumeBrowserChildPolicyNotice', 'debuggerPool', 'domRefs',
     'hasPendingBrowserChildPolicy', 'hintPullIn', 'jsOffscreenClient', 'onToolActivity',

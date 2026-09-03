@@ -168,7 +168,7 @@ const relayOperation = (route: string) => ({
 }[route] ?? `turn.${route.replace('/', '.')}`);
 
 describe('finite controller authority-operation vocabulary', () => {
-  test('tool ownership and domain policy define the same exact operation set and class', () => {
+  test('tool ownership and domain policy define the same exact operation set', () => {
     const projected = controllerOperationsForTools(CONTROLLER_OWNED_TOOL_NAMES);
     expect(new Set(projected)).toEqual(domainOperationSet);
     expect(projected).toHaveLength(domainOperations.length);
@@ -176,10 +176,13 @@ describe('finite controller authority-operation vocabulary', () => {
     for (const [toolName, operations] of Object.entries(CONTROLLER_OPERATION_GRANTS)) {
       const authorityClass = controllerAuthorityClassForTool(toolName);
       if (!authorityClass) throw new TypeError(`missing authority class: ${toolName}`);
-      for (const operation of operations) {
-        expect(policyFor(operation).authorityClass, `${toolName} -> ${operation}`)
-          .toBe(authorityClass);
-      }
+      // A semantic tool may use a narrowly named support authority in addition
+      // to its primary domain (for example read_page stores an oversized result
+      // through the shared result resource). Every operation's exact domain is
+      // independently pinned below; require only that effectful tools retain a
+      // real edge to their declared primary owner.
+      if (operations.length > 0) expect(operations.some((operation) =>
+        policyFor(operation).authorityClass === authorityClass), toolName).toBe(true);
     }
   });
 

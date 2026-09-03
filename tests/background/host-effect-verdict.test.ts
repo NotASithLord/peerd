@@ -274,6 +274,28 @@ describe('exact host effect verdicts', () => {
     });
   });
 
+  test('a content-free host refusal preserves sealed controller recovery guidance', () => {
+    const receipt = {
+      effectId: 'page-call:1', operation: 'turn.page.navigate',
+      outcome: 'not-performed', outcomeKnown: true, performed: false,
+      refused: true, retryable: false, code: 'browser_private_network_blocked',
+      error: 'browser_private_network_blocked',
+    };
+    const guidance = 'Navigation was blocked before the page effect. Use a public HTTPS target.';
+    expect(stampAuthorityToolResult([receipt], {
+      ok: false, error: receipt.error, content: guidance,
+    })).toMatchObject({
+      ok: false, code: receipt.code, error: guidance,
+      outcomeKnown: true, retryable: false,
+    });
+    expect(stampAuthorityToolResultBlock([receipt], {
+      type: 'tool_result', is_error: true, content: guidance,
+    })).toMatchObject({
+      is_error: true, code: receipt.code, content: guidance,
+      outcomeKnown: true, retryable: false,
+    });
+  });
+
   test('an IdP transit refusal keeps internal custody but exposes no successor handle', () => {
     const receipt = {
       effectId: 'call-idp:1', operation: 'turn.actor.message',

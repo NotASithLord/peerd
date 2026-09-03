@@ -33,7 +33,6 @@ describe('sealed rich relay host', () => {
     expect(graph.has('peerd-runtime/controller-model.js')).toBe(true);
     expect(graph.has('peerd-runtime/actor/provider-call-api.js')).toBe(true);
     for (const module of [
-      'peerd-runtime/background.js',
       'peerd-runtime/tools/registry.js',
       'peerd-runtime/tools/metadata-registry.js',
       'peerd-runtime/controller-turn-semantics.js',
@@ -51,7 +50,6 @@ describe('sealed rich relay host', () => {
     ]);
     expect(relay).toContain("from '/peerd-provider/controller.js'");
     expect(relay).toContain("from '/peerd-runtime/controller-model.js'");
-    expect(relay).not.toContain("from '/peerd-runtime/background.js'");
     for (const forbidden of [
       '/peerd-provider/kernel.js', '/peerd-provider/background.js',
       'getSecret', 'safeFetch', 'rich.model.call',

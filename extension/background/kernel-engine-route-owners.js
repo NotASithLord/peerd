@@ -5,12 +5,11 @@ import {
   kernelUnknownOutcome, makeKernelEffectState, settleKernelEffect, trackKernelEffect,
 } from './kernel-route-effect.js';
 import { makeSerialLane } from '../shared/cold-util.js';
-
-const POD_ROUTES = Object.freeze([
-  'pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch',
-]);
-const WEB_FETCH_ROUTES = Object.freeze(['sw/web-fetch', 'sw/web-fetch-abort']);
-const ARTIFACT_READ_ROUTES = Object.freeze(['export/artifact', 'import/inspect']);
+import {
+  KERNEL_ARTIFACT_READ_ROUTE_NAMES,
+  KERNEL_POD_ROUTE_NAMES,
+  KERNEL_WEB_FETCH_ROUTE_NAMES,
+} from '../shared/kernel-feature-route-inventory.js';
 
 /** @param {Record<string,any>} deps @param {readonly string[]} names @param {string} refused
  * @param {(route:string,message:any,sender:any)=>boolean} admit
@@ -45,12 +44,12 @@ const preserveNetworkUnknown = (live) => ({
 
 /** @param {Record<string,any>} deps */
 export const makeKernelPodRoutes = (deps) => makeOwner(
-  deps, POD_ROUTES, 'pod-route-unauthorized', deps.isAllowed, preserveNetworkUnknown,
+  deps, KERNEL_POD_ROUTE_NAMES, 'pod-route-unauthorized', deps.isAllowed, preserveNetworkUnknown,
 );
 
 /** @param {Record<string,any>} deps */
 export const makeKernelWebFetchRoutes = (deps) => makeOwner(
-  deps, WEB_FETCH_ROUTES, 'web-fetch-route-unauthorized', deps.isAllowed,
+  deps, KERNEL_WEB_FETCH_ROUTE_NAMES, 'web-fetch-route-unauthorized', deps.isAllowed,
   preserveNetworkUnknown,
 );
 
@@ -58,7 +57,7 @@ export const makeKernelWebFetchRoutes = (deps) => makeOwner(
  * @returns {Readonly<Record<string,(message?:any,sender?:any)=>Promise<any>>>} */
 export const makeKernelArtifactRoutes = (deps) => {
   const read = makeOwner(
-    deps, ARTIFACT_READ_ROUTES, 'artifact-route-unauthorized', deps.isAllowed,
+    deps, KERNEL_ARTIFACT_READ_ROUTE_NAMES, 'artifact-route-unauthorized', deps.isAllowed,
   );
   const load = makeKernelLazyOwner(deps, (live) => live);
   const write = makeSerialLane();

@@ -11,7 +11,7 @@ const AUTHORITY = Object.freeze({
   origin: null, target: null, replayClass: 'E',
 });
 const manifestRow = (route: string) => ({
-  route, channels: ['store', 'preview'], source: 'test-fixture.js',
+  route, channels: ['store', 'preview'],
 });
 const request = (route = 'test/semantic', message: Record<string, unknown> = {}) => ({
   protocol: 1 as const, route, message: { type: route, ...message },

@@ -70,6 +70,70 @@ const actorIsolationEvidence = (entries) => {
   };
 };
 
+// Both physical site-client lanes use the same pinned TLS origin. Sharing the
+// fixture keeps differences in actor kind, not server behavior, as the variable.
+const startSiteClientFixture = async ({ value, onRead }) => {
+  const server = createHttpsServer({
+    cert: GIT_FIXTURE_TLS_CERT, key: GIT_FIXTURE_TLS_KEY,
+  }, (request, response) => {
+    if (request.url === '/api/status') {
+      onRead();
+      const origin = typeof request.headers.origin === 'string' && request.headers.origin
+        ? request.headers.origin : '*';
+      const cors = {
+        'access-control-allow-origin': origin,
+        'access-control-allow-credentials': 'true',
+        'access-control-allow-private-network': 'true',
+        vary: 'Origin',
+      };
+      if (request.method === 'OPTIONS') {
+        response.writeHead(204, {
+          ...cors,
+          'access-control-allow-methods': 'GET, OPTIONS',
+          'access-control-allow-headers': request.headers['access-control-request-headers'] ?? '*',
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, {
+        ...cors, 'content-type': 'application/json', 'cache-control': 'no-store',
+      });
+      response.end(JSON.stringify({ value }));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html><title>Site client fixture</title>
+<button id="refresh" type="button">Refresh status</button><output id="status">not loaded</output>
+<script>document.querySelector('#refresh').addEventListener('click', async () => {
+  const response = await fetch('/api/status', { cache: 'no-store' });
+  document.querySelector('#status').textContent = (await response.json()).value;
+});</script>`);
+  });
+  await new Promise((resolve) => server.listen(
+    SITE_CLIENT_FIXTURE_TLS_PORT, '127.0.0.1', resolve,
+  ));
+  const origin = `https://${GIT_FIXTURE_HOST}`;
+  return { server, origin, url: `${origin}/` };
+};
+
+const siteClientConfirmation = (page, budgetMs = 90_000) => waitFor(() => evalIn(page, `(() => {
+  const modal = document.querySelector('.confirm-modal');
+  if (modal?.querySelector('h3')?.textContent !== 'Confirm site client') return null;
+  return {
+    title: modal.querySelector('h3').textContent,
+    code: modal.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
+    endpoints: modal.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
+    buttons: [...modal.querySelectorAll('button')].map((button) => button.textContent.trim()),
+  };
+})()`), { budgetMs, pollMs: 80 });
+
+const approveSiteClient = (page) => evalIn(page, `(() => {
+  const button = [...document.querySelectorAll('.confirm-modal button')]
+    .find((candidate) => candidate.textContent.trim() === 'Save client');
+  button?.click();
+  return !!button;
+})()`);
+
 // Transfer routes require the exact options-page channel. Keep the live E2E on
 // that production boundary instead of calling the generic dispatcher.
 const privateTransferRpc = (page, message) => evalIn(page, `(async () => {
@@ -141,6 +205,9 @@ let actorFabricHierarchyState = {
 let actorOverviewState = {
   alphaSpawned: 0, betaSpawned: 0,
   liveGate: Promise.resolve(), releaseLive: () => {},
+};
+let actorOverviewVisualState = {
+  started: false, actorCalls: 0, liveGate: Promise.resolve(),
 };
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
@@ -251,29 +318,39 @@ let siteClientVerticalUrl = '';
 let siteClientVertical = {
   mainStage: 0, actorCalls: 0, mainRefusalBody: '', actorBodies: [], replyBody: '',
 };
+let siteClientApiOrigin = '';
+let siteClientApiState = {
+  delegated: false, actorCalls: 0, actorBody: '', sawLiveValue: false,
+  replySeen: false, replyReturned: false, apiReads: 0,
+};
 let lockActorTurn = 0;
 let lockDelegated = false;
 let lockReportBody = '';
 let lockFixtureUrl = '';
 
 const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false }) => {
-  const imported = await evalIn(ctx.page, `(async () => {
-    const { buildAppExport } = await import('/peerd-engine/index.js');
-    const envelope = await buildAppExport({
-      record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
-      files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
-    });
-    return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
-  })()`, true);
+  const options = await openExtPage(ctx, 'options/options.html');
+  let imported;
+  try {
+    imported = await evalIn(options, `(async () => {
+      const { buildAppExport } = await import('/peerd-engine/index.js');
+      const envelope = await buildAppExport({
+        record: { name: 'Versioned App', entryFile: 'index.html', tags: ['visual-fixture'] },
+        files: { 'index.html': '<!doctype html><title>Versioned App</title><main>Hello</main>' },
+      });
+      return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
+    })()`, true);
+  } finally {
+    await options.closeTarget();
+  }
   rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
   const appId = imported?.id ?? '';
   const cardSelector = `.library-card[data-app-id="${appId}"]`;
-  let page = null;
+  const page = await openWidePage(ctx, 'home/home.html#library', { metrics });
   try {
-    const branched = appId ? await evalIn(ctx.page,
+    const branched = appId ? await evalIn(page,
       `chrome.runtime.sendMessage({ type: 'apps/repository/branch', appId: ${JSON.stringify(appId)}, name: 'feature/visual', checkout: true })`, true) : null;
     rec.check('visual fixture exposes existing-branch switching', branched?.ok === true, JSON.stringify(branched));
-    page = await openWidePage(ctx, 'home/home.html#library', { metrics });
     const libraryReady = await waitFor(() => evalIn(page, `
       document.querySelector('[data-home-view="library"]')?.getAttribute('aria-current') === 'page'
         && !!document.querySelector('.library-grid')
@@ -367,13 +444,13 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
     };
     await rec.visualPage(visualName, page, { beforeShot });
   } finally {
-    try { page?.close(); } catch { /* */ }
     if (appId) {
-      const deleted = await evalIn(ctx.page,
+      const deleted = await evalIn(page,
         `chrome.runtime.sendMessage({ type: 'apps/delete', appId: ${JSON.stringify(appId)} })`, true)
         .catch(() => null);
       rec.check('visual fixture App removed after capture', deleted?.ok === true, JSON.stringify(deleted));
     }
+    page.close();
   }
 };
 
@@ -2522,52 +2599,11 @@ export const STATES = [
         mainStage: 0, actorCalls: 0, actorBodies: [], actorResults: [],
         replyBody: '', apiReads: 0,
       };
-      const server = createHttpsServer({
-        cert: GIT_FIXTURE_TLS_CERT, key: GIT_FIXTURE_TLS_KEY,
-      }, (request, response) => {
-        if (request.url === '/api/status') {
-          siteClientVertical.apiReads += 1;
-          const requestOrigin = request.headers.origin;
-          const corsOrigin = typeof requestOrigin === 'string' && requestOrigin
-            ? requestOrigin : '*';
-          if (request.method === 'OPTIONS') {
-            response.writeHead(204, {
-              'access-control-allow-origin': corsOrigin,
-              'access-control-allow-credentials': 'true',
-              'access-control-allow-private-network': 'true',
-              'access-control-allow-methods': 'GET, OPTIONS',
-              'access-control-allow-headers': request.headers['access-control-request-headers'] ?? '*',
-              vary: 'Origin',
-            });
-            response.end();
-            return;
-          }
-          response.writeHead(200, {
-            'content-type': 'application/json',
-            'cache-control': 'no-store',
-            'access-control-allow-origin': corsOrigin,
-            'access-control-allow-credentials': 'true',
-            'access-control-allow-private-network': 'true',
-            vary: 'Origin',
-          });
-          response.end(JSON.stringify({ value: 'live-42' }));
-          return;
-        }
-        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        response.end(`<!doctype html><html><head><title>Site client fixture</title></head><body>
-<h1>Site client fixture</h1><button id="refresh" type="button">Refresh status</button>
-<output id="status">not loaded</output><script>
-document.querySelector('#refresh').addEventListener('click', async () => {
-  const response = await fetch('/api/status', { cache: 'no-store' });
-  document.querySelector('#status').textContent = (await response.json()).value;
-});
-</script></body></html>`);
+      const fixture = await startSiteClientFixture({
+        value: 'live-42', onRead: () => { siteClientVertical.apiReads += 1; },
       });
-      await new Promise((resolve) => server.listen(
-        SITE_CLIENT_FIXTURE_TLS_PORT, '127.0.0.1', resolve,
-      ));
-      siteClientVerticalOrigin = `https://${GIT_FIXTURE_HOST}`;
-      siteClientVerticalUrl = `${siteClientVerticalOrigin}/`;
+      siteClientVerticalOrigin = fixture.origin;
+      siteClientVerticalUrl = fixture.url;
       try {
         const sent = await rpc(ctx.page, {
           type: 'agent/send',
@@ -2575,16 +2611,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         });
         rec.check('the single site-client turn was accepted', sent?.ok === true, JSON.stringify(sent));
 
-        const confirmation = await waitFor(() => evalIn(ctx.page, `(() => {
-          const modal = document.querySelector('.confirm-modal');
-          if (!modal || modal.querySelector('h3')?.textContent !== 'Confirm site client') return null;
-          return {
-            title: modal.querySelector('h3')?.textContent,
-            code: modal.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
-            endpoints: modal.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
-            buttons: [...modal.querySelectorAll('button')].map((button) => button.textContent.trim()),
-          };
-        })()`), { budgetMs: 90_000, pollMs: 100 });
+        const confirmation = await siteClientConfirmation(ctx.page);
         rec.check('the page request occurs only after the refused call delegated to the actor',
           siteClientVertical.apiReads >= 1,
           JSON.stringify({ apiReads: siteClientVertical.apiReads }));
@@ -2603,12 +2630,7 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           stillBlocked === true && siteClientVertical.actorCalls === callsAtConfirmation,
           JSON.stringify({ callsAtConfirmation, actorCalls: siteClientVertical.actorCalls }));
 
-        const answered = await evalIn(ctx.page, `(() => {
-          const button = [...document.querySelectorAll('.confirm-modal button')]
-            .find((candidate) => candidate.textContent.trim() === 'Save client');
-          button?.click();
-          return !!button;
-        })()`);
+        const answered = await approveSiteClient(ctx.page);
         rec.check('the user approved through the rendered production modal', answered === true);
 
         await waitFor(() => siteClientVertical.replyBody.length > 0,
@@ -2654,7 +2676,129 @@ document.querySelector('#refresh').addEventListener('click', async () => {
             && siteClientVertical.replyBody.includes('you messaged has replied'),
           siteClientVertical.replyBody.slice(-900));
       } finally {
-        server.close();
+        fixture.server.close();
+      }
+    },
+  },
+
+  // --- functional: origin-pinned API actor owns the site-client lifecycle ---
+  // A bare origin addresses the tab-free API actor (not `site:<origin>`). It
+  // writes, reads, and runs one confirmed client through the real sealed actor
+  // heap, then forges the tab-only capture name. The live controller must refuse
+  // that name without ever reaching capture/browser authority.
+  {
+    name: 'site-client-api-actor', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>') && body.includes('kind: bound; type: api')) {
+        siteClientApiState.actorCalls += 1;
+        siteClientApiState.actorBody = body;
+        const turn = siteClientApiState.actorCalls - 1;
+        siteClientApiState.sawLiveValue ||= (toolResultsIn(body).at(-1) ?? '')
+          .includes('api-live-42');
+        if (turn === 0) return { sse: sseToolCall('site_client_write', {
+          origin: siteClientApiOrigin,
+          summary: 'Read the live API actor fixture.',
+          endpoints: [{ method: 'GET', path: '/api/status', note: 'Current status' }],
+          auth: 'none', deriver: 'probe',
+          body: 'return { status: async () => site.fetch("/api/status") };',
+        }) };
+        if (turn === 1) return { sse: sseToolCall('site_client_read', {
+          origin: siteClientApiOrigin,
+        }) };
+        if (turn === 2) return { sse: sseToolCall('site_client_run', {
+          origin: siteClientApiOrigin,
+          code: 'const response = await client.status(); return { status: response.status, value: response.json?.value };',
+        }) };
+        if (turn === 3) return { sse: sseToolCall('site_capture', { action: 'start' }) };
+        return { sse: sseText('API-SITE-CLIENT-DONE') };
+      }
+      if (!siteClientApiState.delegated) {
+        siteClientApiState.delegated = true;
+        return { sse: sseToolCall('message_actor', {
+          to: siteClientApiOrigin,
+          message: 'Create, inspect, and run the client for your exact origin, then prove capture is unavailable.',
+        }) };
+      }
+      if (body.includes('you messaged has replied')
+          || body.includes('could not complete your request')) {
+        siteClientApiState.replySeen = true;
+        siteClientApiState.replyReturned = body.includes('you messaged has replied')
+          && body.includes('API-SITE-CLIENT-DONE');
+        return { sse: sseText('The API actor completed its origin-pinned client check.') };
+      }
+      return { sse: sseText('Delegated; awaiting the API actor result.') };
+    },
+    async run(ctx, rec) {
+      siteClientApiState = {
+        delegated: false, actorCalls: 0, actorBody: '', sawLiveValue: false,
+        replySeen: false, replyReturned: false, apiReads: 0,
+      };
+      const fixture = await startSiteClientFixture({
+        value: 'api-live-42', onRead: () => { siteClientApiState.apiReads += 1; },
+      });
+      siteClientApiOrigin = fixture.origin;
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      try {
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send', text: 'ask the exact API origin actor to exercise its stored client',
+        });
+        rec.check('the API actor turn was accepted', sent?.ok === true, JSON.stringify(sent));
+
+        const confirmation = await siteClientConfirmation(ctx.page, 60_000);
+        rec.check('the API actor write waits on the rendered confirmation channel',
+          confirmation?.code?.includes('/api/status')
+            && confirmation?.endpoints?.includes('GET /api/status'),
+          JSON.stringify(confirmation));
+        const answered = await approveSiteClient(ctx.page);
+        rec.check('the user approved the API client through production UI', answered === true);
+
+        await waitFor(() => siteClientApiState.replySeen,
+          { budgetMs: 90_000, pollMs: 100 });
+        const entries = await waitFor(async () => {
+          const fresh = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+          return fresh.some((entry) => entry.type === 'actor_ran_isolated') ? fresh : null;
+        }, { budgetMs: 10_000, pollMs: 50 }) ?? [];
+        const operations = entries.filter((entry) => entry.type === 'authority_effect')
+          .map((entry) => entry.details?.operation);
+        const siteEffects = entries.filter((entry) => entry.type === 'authority_effect'
+          && ['turn.site-client.read', 'turn.site-client.commit', 'turn.site-client.run']
+            .includes(entry.details?.operation));
+        const effectSessions = [...new Set(siteEffects.map((entry) => entry.sessionId))];
+        const isolation = actorIsolationEvidence(entries);
+        const actorEvidence = siteClientApiState.actorBody;
+        const captureRefusal = entries.find((entry) => entry.type === 'tool_failed'
+          && entry.details?.tool === 'site_capture');
+
+        rec.check('the live prompt is the bare-origin API actor with no tab or capture surface',
+          actorEvidence.includes('kind: bound; type: api')
+            && actorEvidence.includes(`scope: origin:${siteClientApiOrigin}`)
+            && actorEvidence.includes('site_client_run')
+            && !actorEvidence.includes('tools: site_capture'),
+          actorEvidence.slice(0, 1_800));
+        rec.check('confirmed write, read, and run used only their exact authority operations',
+          ['turn.site-client.read', 'turn.site-client.commit', 'turn.site-client.run']
+            .every((operation) => operations.includes(operation))
+            && siteEffects.every((entry) => entry.details?.outcomeKnown === true)
+            && effectSessions.length === 1,
+          JSON.stringify({ operations, effectSessions }));
+        rec.check('the stored client reached the real pinned endpoint from the sealed API actor',
+          siteClientApiState.apiReads >= 1
+            && siteClientApiState.sawLiveValue
+            && isolation.exactProof === true
+            && isolation.isolated.some((entry) =>
+              (entry.sessionId ?? entry.details?.actorSessionId) === effectSessions[0]),
+          JSON.stringify({ apiReads: siteClientApiState.apiReads, sawLiveValue: siteClientApiState.sawLiveValue }));
+        rec.check('forged capture was refused before any capture/browser authority',
+          captureRefusal?.details?.performed === false
+            && captureRefusal?.details?.outcomeKnown === true
+            && !operations.includes('turn.site-client.capture-start')
+            && !operations.includes('turn.site-client.capture-stop'),
+          JSON.stringify({ captureRefusal, operations }));
+        rec.check('the fenced API actor reply returned to the orchestrator',
+          siteClientApiState.replyReturned);
+      } finally {
+        fixture.server.close();
       }
     },
   },
@@ -3742,6 +3886,81 @@ document.querySelector('#refresh').addEventListener('click', async () => {
         };
         await rec.visualPage('home-fulltab', page, { beforeShot: pinQuietHome });
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): live Actor Space topology + boundary inspector --------
+  // Keep two real temporary workers blocked at the model wire while Home renders
+  // the authoritative cross-heap projection. No fixture-only UI or direct state
+  // injection: this is the same actor_create -> actors/overview path users see.
+  {
+    name: 'actor-space-live', kind: 'visual', phase: 'post-unlock',
+    responder: async (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>') && body.includes('visual isolated worker')) {
+        actorOverviewVisualState.actorCalls += 1;
+        await actorOverviewVisualState.liveGate;
+        return { sse: sseText('VISUAL-ACTOR-DONE') };
+      }
+      if (body.includes('ACTOR-SPACE-VISUAL-ROOT')) {
+        if (!actorOverviewVisualState.started) {
+          actorOverviewVisualState.started = true;
+          return { sse: sseToolCalls([1, 2].map((index) => ({
+            name: 'actor_create',
+            args: { task: `visual isolated worker ${index}: inspect release risk`, tools: [] },
+          }))) };
+        }
+        return { sse: sseText('Two isolated workers are active.') };
+      }
+      return { sse: sseText('noted') };
+    },
+    async run(ctx, rec) {
+      let releaseLive = () => {};
+      const liveGate = new Promise((resolve) => { releaseLive = resolve; });
+      actorOverviewVisualState = { started: false, actorCalls: 0, liveGate };
+      let page = null;
+      try {
+        const sent = await rpc(ctx.page, {
+          type: 'agent/send', text: 'ACTOR-SPACE-VISUAL-ROOT inspect the release risk',
+        });
+        rec.check('the visual actor topology turn was accepted', sent?.ok === true,
+          JSON.stringify(sent));
+        const live = await waitFor(() => actorOverviewVisualState.actorCalls >= 2,
+          { budgetMs: 20_000, pollMs: 80 });
+        rec.check('two real isolated workers reached their model wire for the camera',
+          !!live, `actorCalls=${actorOverviewVisualState.actorCalls}`);
+
+        page = await openWidePage(ctx, 'home/home.html#actors', { ready: '.home-shell' });
+        const rendered = await waitFor(() => evalIn(page, `(() => {
+          const space = document.querySelector('.actor-space');
+          const nodes = [...document.querySelectorAll('.actor-space-node')];
+          if (!space || nodes.length < 3) return null;
+          return { nodes: nodes.length, text: space.textContent ?? '' };
+        })()`), { budgetMs: 20_000, pollMs: 80 });
+        rec.check('the visual lane renders the live topology',
+          rendered?.nodes >= 3
+            && rendered?.text.includes('visual isolated worker 1')
+            && rendered?.text.includes('visual isolated worker 2'),
+          JSON.stringify(rendered));
+        const state = await rpc(page, { type: 'state/get' });
+        const isolation = state?.state?.capabilities?.actorExecution;
+        rec.check('Actor Space projects the live isolated-worker health',
+          isolation?.status === 'available'
+            && isolation?.host === 'offscreen-document-worker'
+            && await evalIn(page, `!document.querySelector('.actor-isolation-banner')`),
+          JSON.stringify(isolation));
+        await evalIn(page, `document.querySelector('.actor-space-node.is-subactor')?.click()`);
+        const inspectorReady = await waitFor(() => evalIn(page, `(() => {
+          const inspector = document.querySelector('.actor-space-inspector');
+          return inspector?.textContent?.includes('Dedicated keyless worker') === true;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the visual lane opens the physical boundary inspector', inspectorReady === true);
+        await rec.visualPage('actor-space-live', page);
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' }).catch(() => null);
+        releaseLive();
+        try { page?.close(); } catch { /* */ }
+      }
     },
   },
 
@@ -5389,36 +5608,51 @@ document.querySelector('#refresh').addEventListener('click', async () => {
     },
   },
 
-  // --- functional: a TOOL-BEARING actor runs in its OWN isolated heap ---
-  // Heap-split phase 4. The orchestrator spawns a sync actor GRANTED script;
-  // that child's loop runs in a dedicated Worker (its own heap, no key)
-  // and RELAYS its script call back to the SW, which rebuilds the child's restricted
-  // ctx from the persisted grantedTools and dispatches script in the offscreen
-  // job-runner. Proof: the child looped (two model calls: emit script, then answer),
-  // the actor_ran_isolated audit carries the dedicated-worker realm proof,
-  // AND a tool_executed audit for script is present (the relayed tool actually ran).
+  // --- functional: a TOOL-BEARING actor runs + pages in its isolated heap ---
+  // The child emits an oversized script value, receives the trusted spill note,
+  // and pages the late sentinel through read_result before it answers. This is the
+  // physical actor-worker -> controller -> SW -> result-store path; the unit tiers
+  // can prove its projected grant but cannot prove that the live actor owns the
+  // spill or that both exact authority operations share its session.
   {
     name: 'actor-tools-offscreen', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
-      // The CHILD's model calls (ephemeral-actor prompt). First call emits script;
-      // second call (after the tool result re-enters its heap) answers.
       if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorToolsState.childCalls += 1;
-        if (actorToolsState.childCalls === 1) return { sse: sseToolCall('script', { code: 'return 6 * 7;' }) };
-        return { sse: sseText('CHILD-RAN-JS') };
+        const latest = toolResultsIn(body).at(-1) ?? '';
+        if (actorToolsState.childCalls === 1) return { sse: sseToolCall('script', {
+          code: "return 'x'.repeat(24_000) + ['SPAWNED', 'PAGER', 'LATE', 'SENTINEL'].join('-');",
+        }) };
+        if (actorToolsState.childCalls === 2) {
+          actorToolsState.scriptResult = latest;
+          actorToolsState.spillKey = latest.match(
+            /Read more with read_result \{ "key": "([^"]+)"/,
+          )?.[1] ?? '';
+          return { sse: sseToolCall('read_result', {
+            key: actorToolsState.spillKey, offset: 16_000, limit: 16_000,
+          }) };
+        }
+        actorToolsState.pagedResult = latest;
+        return { sse: sseText('CHILD-PAGED-LATE-SENTINEL') };
       }
-      // ORCHESTRATOR — spawn ONE sync actor granted script, then answer.
       if (actorToolsState.spawned === 0) {
         actorToolsState.spawned += 1;
-        return { sse: sseToolCall('actor_create', { task: 'compute six times seven with script', tools: ['script'], sync: true }) };
+        return { sse: sseToolCall('actor_create', {
+          task: 'return an oversized value with script, page its late sentinel, and report it',
+          tools: ['script'], sync: true,
+        }) };
       }
-      return { sse: sseText('FINAL-WITH-CHILD') };
+      return { sse: sseText('FINAL-WITH-PAGED-CHILD') };
     },
     async run(ctx, rec) {
-      actorToolsState = { spawned: 0, childCalls: 0 };
+      actorToolsState = {
+        spawned: 0, childCalls: 0, spillKey: '', scriptResult: '', pagedResult: '',
+      };
       const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
-      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'use an actor to compute six times seven' });
+      const sent = await rpc(ctx.page, {
+        type: 'agent/send', text: 'use an actor to prove oversized script result paging',
+      });
       rec.check('agent/send accepted', !!sent?.ok, JSON.stringify(sent));
       let out = {};
       await waitFor(async () => {
@@ -5427,17 +5661,40 @@ document.querySelector('#refresh').addEventListener('click', async () => {
           const busy = !!document.querySelector('form.input-bar button.stop');
           return { bubbles, busy };
         })()`) || {};
-        return (out.bubbles || []).includes('FINAL-WITH-CHILD') && !out.busy;
-      }, { budgetMs: 30_000 });
+        return (out.bubbles || []).includes('FINAL-WITH-PAGED-CHILD') && !out.busy;
+      }, { budgetMs: 45_000 });
 
       const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
       const isolation = actorIsolationEvidence(entries);
-      const jsRan = entries.some((e) => e.type === 'tool_executed' && e.details && e.details.tool === 'script');
-      rec.check('the tool-bearing child looped in its heap (script emitted, then answered) — 2 child calls', actorToolsState.childCalls >= 2, `childCalls=${actorToolsState.childCalls}`);
+      const toolNames = entries.filter((entry) => entry.type === 'tool_executed')
+        .map((entry) => entry.details?.tool);
+      const exactEffects = entries.filter((entry) => entry.type === 'authority_effect'
+        && ['turn.execution.spill-script', 'turn.resource.read-result']
+          .includes(entry.details?.operation));
+      const effectSessions = [...new Set(exactEffects.map((entry) => entry.sessionId))];
+      const isolatedSameSession = effectSessions.length === 1
+        && isolation.isolated.some((entry) =>
+          (entry.sessionId ?? entry.details?.actorSessionId) === effectSessions[0]);
+      rec.check('the child looped in isolation through script, read_result, then answer',
+        actorToolsState.childCalls >= 3, `childCalls=${actorToolsState.childCalls}`);
       rec.check('the child ran in a dedicated Worker with a verified realm', isolation.exactProof === true, `isolated=${isolation.isolated.length}`);
-      rec.check('script actually executed via the SW-gated relay (tool_executed audit)', jsRan === true, `jsRan=${jsRan}`);
+      rec.check('the oversized script result emitted an opaque pager without leaking the late sentinel',
+        actorToolsState.spillKey.startsWith('result:')
+          && actorToolsState.scriptResult.includes('read_result')
+          && !actorToolsState.scriptResult.includes('SPAWNED-PAGER-LATE-SENTINEL'),
+        JSON.stringify({ key: actorToolsState.spillKey, initialChars: actorToolsState.scriptResult.length }));
+      rec.check('read_result returned the late sentinel inside the same actor heap',
+        actorToolsState.pagedResult.includes('SPAWNED-PAGER-LATE-SENTINEL'));
+      rec.check('script and read_result both executed through the live gated relay',
+        toolNames.includes('script') && toolNames.includes('read_result'), JSON.stringify(toolNames));
+      rec.check('spill and pager used exact authority operations under one actor session',
+        exactEffects.some((entry) => entry.details?.operation === 'turn.execution.spill-script')
+          && exactEffects.some((entry) => entry.details?.operation === 'turn.resource.read-result')
+          && exactEffects.every((entry) => entry.details?.outcomeKnown === true)
+          && isolatedSameSession,
+        JSON.stringify({ effects: exactEffects, effectSessions }));
       rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
-      rec.check('the child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-CHILD'));
+      rec.check('the paged child result round-tripped into the orchestrator final answer', (out.bubbles || []).includes('FINAL-WITH-PAGED-CHILD'));
       rec.check('the turn settles idle', out.busy === false);
     },
   },

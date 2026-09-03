@@ -15,14 +15,8 @@ import {
 import {
   completeLiveKernelAssemblyFixture,
 } from '../../scripts/acceptance/live-kernel-assembly.mjs';
-import { buildGitFixtureBinding } from '../../scripts/acceptance/git-smart-http-fixture.mjs';
 
 const digest = 'a'.repeat(64);
-const gitBinding = buildGitFixtureBinding({
-  gitVersion: 'git version 2.45.2',
-  certificateSha256: digest,
-  protocolSha256: digest,
-});
 const validReport = () => ({
   schema: 3,
   ok: true,
@@ -41,7 +35,6 @@ const validReport = () => ({
       actualVersion: '151.0.7922.47',
     },
     harness: { sha256: digest, files: 4 },
-    gitFixture: gitBinding,
   },
   postRun: {
     artifact: { sha256: digest, bytes: 10 },
@@ -49,7 +42,7 @@ const validReport = () => ({
   },
   budgets: {
     startupMs: 180_000, afterClickMs: 30_000, controllerMs: 30_000,
-    repositoryMs: 30_000, recycleMs: 60_000, lockMs: 30_000,
+    recycleMs: 60_000, lockMs: 30_000,
   },
   timings: {
     clock: 'host-monotonic-ms',
@@ -61,11 +54,9 @@ const validReport = () => ({
     durableVaultCommitMs: 150,
     richAppReadyMs: 160,
     controllerFirstMessageMs: 170,
-    appGitReadyMs: 180,
-    remoteGitReadyMs: 185,
-    recycleReadyMs: 190,
-    lockStartedMs: 195,
-    lockReadyMs: 200,
+    recycleReadyMs: 180,
+    lockStartedMs: 185,
+    lockReadyMs: 190,
   },
   observations: {
     cutover: completeLiveKernelAssemblyFixture('store-chrome'),
@@ -73,7 +64,6 @@ const validReport = () => ({
     durableVaultCommitted: true,
     inputsImmutable: true,
     controllerFirstMessage: { completionCalls: 1 },
-    commandOpen: { openedContexts: 1, closed: true },
     coldLocked: { offscreenContexts: [] },
     semanticHost: {
       offscreenContexts: [{
@@ -81,52 +71,10 @@ const validReport = () => ({
         documentUrl: `chrome-extension://${'a'.repeat(32)}/offscreen/offscreen.html`,
       }],
     },
-    appGit: { ok: true, payload: { ok: true } },
-    remoteGit: {
-      ok: true, phase: 'complete', credentialStored: true, remoteLinked: true,
-      pushed: true, fetched: true, host: 'git-fixture.peerd.test',
-      branch: 'acceptance/cutover', committedOid: 'a'.repeat(40),
-      cleanClone: {
-        ok: true,
-        payload: { ok: true, textOk: true, binaryOk: true, fileCount: 4 },
-        proofOk: true, oid: 'a'.repeat(40), historyContainsCommit: true,
-      },
-      remoteBranch: {
-        branch: 'acceptance/cutover', oid: 'a'.repeat(40),
-        files: {
-          'index.html': digest, 'src/main.js': digest, 'assets/raw.bin': digest,
-          'acceptance/remote-proof.txt': digest,
-        },
-      },
-    },
-    remoteGitFixture: {
-      bindingSha256: gitBinding.sha256, schema: 1,
-      summary: {
-        receiveInfoRefs: 1, receivePack: 1,
-        uploadInfoRefs: 3, uploadPack: 3, total: 8,
-      },
-      requests: [
-        ['GET', 'receive-info-refs'], ['POST', 'receive-pack'],
-        ['GET', 'upload-info-refs'], ['POST', 'upload-pack'],
-        ['GET', 'upload-info-refs'], ['POST', 'upload-pack'],
-        ['GET', 'upload-info-refs'], ['POST', 'upload-pack'],
-      ].map(([method, kind], index) => ({
-        sequence: index + 1, method, kind, authenticated: true,
-        path: `/acceptance/cutover.git/${kind.includes('info') ? 'info/refs' : `git-${kind}`}`,
-        requestBytes: method === 'POST' ? 10 : 0,
-      })),
-    },
     coldRecycle: {
       oldWorker: { versionId: 'version-1', stoppedRunningStatus: 'stopped' },
-      newWorker: true, newGeneration: true, controllerRecovered: true, appGitPersisted: true,
+      newWorker: true, newGeneration: true, controllerRecovered: true,
       controllerRecovery: { completionCalls: 2 },
-      appGitPersistence: { payload: { ok: true } },
-      remoteGitPersisted: true,
-      remoteGitPersistence: {
-        ok: true, phase: 'complete', host: 'git-fixture.peerd.test', fetched: true,
-        oid: 'a'.repeat(40), historyContainsCommit: true, credentialRetained: true,
-        cleanup: { appRemoved: true, credentialRemoved: true, credentialAbsent: true },
-      },
       recycledUi: { stage: 'app-ready', appShell: true, failure: false },
     },
     lockTeardown: {
@@ -187,34 +135,6 @@ describe('packaged first-install passkey lane', () => {
       /complete live kernel assembly/);
     rejects((report) => { report.observations.coldRecycle.recycledUi.appShell = false; },
       /cold recycle continuity/);
-    rejects((report) => { report.observations.appGit.payload.ok = false; },
-      /App\/isomorphic-git probe/);
-    rejects((report) => { report.observations.remoteGit.cleanClone.proofOk = false; },
-      /remote App\/isomorphic-git probe/);
-    rejects((report) => { report.observations.remoteGit.unreviewed = true; },
-      /remote Git report shape/);
-    rejects((report) => { report.observations.remoteGitFixture.summary.uploadPack = 2; },
-      /request cardinality/);
-    rejects((report) => { report.observations.remoteGitFixture.requests[0].authenticated = false; },
-      /request ledger/);
-    rejects((report) => {
-      [report.observations.remoteGitFixture.requests[0],
-        report.observations.remoteGitFixture.requests[1]] = [
-        report.observations.remoteGitFixture.requests[1],
-        report.observations.remoteGitFixture.requests[0],
-      ];
-      report.observations.remoteGitFixture.requests.forEach(
-        (entry: any, index: number) => { entry.sequence = index + 1; },
-      );
-    }, /request order/);
-    rejects((report) => {
-      report.bindings.gitFixture = { ...report.bindings.gitFixture, sha256: '' };
-    }, /gitFixture digest/);
-    rejects((report) => {
-      report.bindings.gitFixture = {
-        ...report.bindings.gitFixture, gitVersion: 'git version 9.9.9',
-      };
-    }, /binding digest mismatch/);
     rejects((report) => { report.observations.leak = { token: 'fixture-secret' }; },
       /credential material/);
     rejects((report) => { report.observations.coldRecycle.oldWorker.stoppedRunningStatus = 'running'; },
@@ -245,20 +165,16 @@ describe('packaged first-install passkey lane', () => {
       report.timings.durableVaultCommitMs = 180_004;
       report.timings.richAppReadyMs = 180_005;
       report.timings.controllerFirstMessageMs = 180_006;
-      report.timings.appGitReadyMs = 180_007;
-      report.timings.remoteGitReadyMs = 180_008;
-      report.timings.recycleReadyMs = 180_009;
-      report.timings.lockStartedMs = 180_010;
-      report.timings.lockReadyMs = 180_011;
+      report.timings.recycleReadyMs = 180_007;
+      report.timings.lockStartedMs = 180_008;
+      report.timings.lockReadyMs = 180_009;
     }, /CTA startup budget/);
     rejects((report) => {
       report.timings.richAppReadyMs = 40_131;
       report.timings.controllerFirstMessageMs = 40_141;
-      report.timings.appGitReadyMs = 40_151;
-      report.timings.remoteGitReadyMs = 40_156;
-      report.timings.recycleReadyMs = 40_161;
-      report.timings.lockStartedMs = 40_171;
-      report.timings.lockReadyMs = 40_181;
+      report.timings.recycleReadyMs = 40_151;
+      report.timings.lockStartedMs = 40_161;
+      report.timings.lockReadyMs = 40_171;
     }, /post-click completion budget/);
   });
 
@@ -274,9 +190,6 @@ describe('packaged first-install passkey lane', () => {
   test('source contract packages Store Chrome and uses exact UX markers', () => {
     const lane = readFileSync(join(REPO_ROOT, 'scripts/cdp/passkey-signup-lane.mjs'), 'utf8');
     const harness = readFileSync(join(REPO_ROOT, 'scripts/cdp/e2e-harness.mjs'), 'utf8');
-    const probes = readFileSync(join(
-      REPO_ROOT, 'scripts/cdp/product-acceptance-probes.mjs',
-    ), 'utf8');
     expect(lane).toContain("channel: 'store', browser: 'chrome'");
     expect(lane).toContain("peerdStaticShellPainted !== 'true'");
     expect(lane).toContain("peerdBootModule !== 'evaluated'");
@@ -296,11 +209,6 @@ describe('packaged first-install passkey lane', () => {
     expect(harness).toContain('browser-owned side panel target never appeared');
     expect(harness).toContain("method === 'Target.targetInfoChanged'");
     expect(harness).toContain('blob:chrome-extension://');
-    expect(probes).toContain("opened.files?.['assets/raw.bin']");
-    expect(probes).toContain('expectedBinary.every');
-    expect(probes).toContain("type: 'export/artifact', kind: 'app'");
-    expect(probes).toContain("type: 'apps/repository/push'");
-    expect(probes).toContain("type: 'apps/import-git'");
     expect(harness).not.toContain('extraChromeFlags');
   });
 

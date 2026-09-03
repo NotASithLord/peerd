@@ -380,13 +380,17 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       fenced: true, originLabel: 'script (workspace files)',
     });
     expect(seen.put.text.length).toBeGreaterThan(10_000);   // the FULL serialized value
-    if (r.ok) expect(r.content).toContain('read_result');
+    if (r.ok) {
+      expect(r.content).toContain('read_result');
+      expect(r.paged).toBe(true);
+    }
   });
 
   test('a small value does not spill', async () => {
     const { ctx, seen } = ctxWith();
-    await scriptTool.execute({ code: 'return 1' }, ctx as any);
+    const r = await scriptTool.execute({ code: 'return 1' }, ctx as any);
     expect(seen.put).toBeUndefined();
+    expect((r as { paged?: boolean }).paged).toBeUndefined();
   });
 
   test('a pure-compute overflow spills UNFENCED (the agent\'s own bytes)', async () => {

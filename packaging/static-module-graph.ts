@@ -2,8 +2,10 @@
 //
 // es-module-lexer is already part of the development toolchain. Using it here
 // avoids regex parsing, which becomes especially fragile after release staging
-// compacts a module onto one line. Dynamic import() is intentionally excluded:
-// it is a lazy boundary and does not participate in cold module registration.
+// compacts a module onto one line. Dynamic import() is intentionally excluded
+// from this static-link helper. Callers must separately account for or forbid
+// host-specific dynamic edges; Chrome MV3 service-worker packaging does not
+// treat import() as a cold-graph boundary.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';

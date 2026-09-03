@@ -6,7 +6,23 @@
 // default snapshot mode is untouched.
 
 import { describe, test, expect } from 'bun:test';
-import { readPageTool } from '../../../extension/background/page-authority/read-page.js';
+import { readOwnedPageAuthority } from '../../../extension/background/page-authority/read-page.js';
+import { readPageTool as controllerReadPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
+
+const readPageTool = { execute: (args: any, ctx: any) => controllerReadPageTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    readOwnedPage: () => readOwnedPageAuthority(args, ctx),
+    spillPageResult: async (record: any) => {
+      const key = ctx.resultStore?.key?.();
+      if (!key || !ctx.resultStore?.put) return null;
+      await ctx.resultStore.put({
+        ...record, key, ownerSessionId: ctx.session?.sessionId ?? null,
+      });
+      return key;
+    },
+  },
+}) };
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 const fencedBody = (content: string) =>

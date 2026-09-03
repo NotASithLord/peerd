@@ -12,10 +12,11 @@
 // origin so the denylist gate fires if either is denylisted.
 
 import {
-  AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
+  AUTH_WAITING_FOR_USER_CODE,
   BROWSER_TARGET_STAGES,
-  browserNetworkGuardPostNavigationResult,
-  browserTargetRefusalResult,
+  browserNetworkGuardPostNavigationReceipt,
+  browserTargetRefusalReceipt,
+  browserTargetRefusalReceiptFrom,
   classifyBrowserAutomationTarget,
   isDenylistedTab,
   originOfUrl,
@@ -42,6 +43,7 @@ const DOCUMENT_READY_WAIT_MS = 2_000;
  * @typedef {Object} TabsApi
  * @property {(tabId: number) => Promise<BrowserTab>} get
  * @property {(tabId: number, props: { url: string }) => Promise<BrowserTab | void>} update
+ * @property {(tabId: number) => Promise<unknown>} [remove]
  * @property {{ addListener: (l: NavListener) => void, removeListener: (l: NavListener) => void }} onUpdated
  */
 
@@ -52,21 +54,26 @@ const DOCUMENT_READY_WAIT_MS = 2_000;
  * @returns {void}
  */
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const navigateTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const navigateOwnedTabAuthority = async (args, ctx) => {
+    const stoppedResult = (performed = false) => ({
+      ok: false, error: 'page action was stopped',
+      outcomeKind: performed ? 'effect-completed' : 'pre-effect-failure', retryable: false,
+    });
     // why: classify before tab resolution because resolution can probe the
     // live page. A refused destination must not create, adopt, inspect, or
     // update any tab.
     const requestedVerdict = classifyBrowserAutomationTarget(args?.url, {
       stage: BROWSER_TARGET_STAGES.PRE_NAVIGATION,
     });
-    if (!requestedVerdict.allowed) return browserTargetRefusalResult(requestedVerdict);
+    if (!requestedVerdict.allowed) return browserTargetRefusalReceipt(requestedVerdict);
     const requestedUrl = String(args.url).trim();
 
     const c = /** @type {any} */ (ctx);
+    const tabsApi = /** @type {TabsApi} */ (ctx.tabs);
+    if (ctx.abortSignal?.aborted) return stoppedResult();
     let tab = await resolveTargetTab(args, ctx, { allowRestrictedSource: true });
+    if (ctx.abortSignal?.aborted) return stoppedResult();
     // DESIGN-17 lazy tab adoption: the web ACTOR (kind:'web') may own 0 tabs: a
     // pure-fetch task never rendered. navigate IS the render decision made concrete:
     // when it owns no tab, open + adopt one now (SW-side ctx.adoptWebTab). Only the web
@@ -97,6 +104,11 @@ export const navigateTool = Object.freeze({
       try { adopted = await c.adoptWebTab(); }
       catch (e) { return { ok: false, error: `tab_open_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? 'could not open a tab'}` }; }
       if (!adopted?.tabId) return { ok: false, error: 'tab_open_failed' };
+      if (ctx.abortSignal?.aborted) {
+        const released = typeof c.releaseAdoptedWebTab === 'function'
+          && await c.releaseAdoptedWebTab(adopted.tabId);
+        return stoppedResult(!released);
+      }
       // url/origin blank: freshly opened to about:blank; navigate drives it next and the
       // post-load block re-stamps the real origin on this same (shared) object.
       adoptedPin = { id: adopted.tabId, windowId: adopted.windowId, url: '', origin: '' };
@@ -106,21 +118,37 @@ export const navigateTool = Object.freeze({
     }
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
     const tabId = tab.id;
+    const releaseAdoptedTab = async () => {
+      if (!adoptedPin || typeof c.releaseAdoptedWebTab !== 'function') return false;
+      const released = await c.releaseAdoptedWebTab(tabId);
+      if (released && c.activeTab?.id === tabId) c.repinActiveTab?.(null);
+      return released;
+    };
 
     if (typeof c.ensureBrowserNetworkGuard === 'function') {
       const guarded = await c.ensureBrowserNetworkGuard(tabId, requestedUrl);
-      if (!guarded.ok) return guarded;
+      if (!guarded.ok) {
+        const released = !adoptedPin || await releaseAdoptedTab();
+        return browserTargetRefusalReceiptFrom(guarded, { effectCompleted: !released });
+      }
     }
     if (c.browserChildQuarantineArmedTabId !== tabId
         && typeof c.armBrowserChildQuarantine === 'function') {
       const armed = await c.armBrowserChildQuarantine(tabId);
-      if (!armed.ok) return armed;
+      if (!armed.ok) {
+        const released = !adoptedPin || await releaseAdoptedTab();
+        return released || armed.outcomeKnown === false
+          ? armed : { ...armed, outcomeKind: 'effect-completed' };
+      }
+    }
+    if (ctx.abortSignal?.aborted) {
+      if (!adoptedPin) return stoppedResult();
+      return stoppedResult(!await releaseAdoptedTab());
     }
 
     const navigationTimeoutMs = Number.isFinite(c.navigationTimeoutMs)
       ? Math.max(1, Number(c.navigationTimeoutMs))
       : NAV_TIMEOUT_MS;
-    const tabsApi = /** @type {TabsApi} */ (ctx.tabs);
     const navigation = await updateAndObserveCommittedNavigation(
       tabsApi,
       tabId,
@@ -143,9 +171,7 @@ export const navigateTool = Object.freeze({
       return {
         ok: false,
         error: 'navigation_final_url_unavailable: peerd could not verify where navigation landed.',
-        content: neutralized
-          ? 'peerd could not verify the final page. The tab was reset to a verified blank page.'
-          : 'peerd could not verify the final page or reset the tab. Browser automation remains stopped for it.',
+        structured: { neutralized, phase: 'final_url_unavailable', target: 'tab' },
         outcomeKind: 'host-lost',
       };
     }
@@ -203,12 +229,13 @@ export const navigateTool = Object.freeze({
         pin,
         navigationTimeoutMs,
       );
-      const refusal = browserTargetRefusalResult(committedVerdict, { neutralized });
+      const refusal = browserTargetRefusalReceipt(committedVerdict, { neutralized });
       return {
         ...refusal,
-        content: `${refusal.content} ${neutralized
-          ? 'The tab was reset to a blank page.'
-          : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
+        structured: {
+          ...refusal.structured,
+          cleanup: neutralized ? 'tab_reset_blank' : 'tab_reset_failed',
+        },
       };
     }
 
@@ -226,14 +253,15 @@ export const navigateTool = Object.freeze({
         pin,
         navigationTimeoutMs,
       );
-      const refusal = browserTargetRefusalResult(sensitiveSiteBrowserTargetVerdict(), {
+      const refusal = browserTargetRefusalReceipt(sensitiveSiteBrowserTargetVerdict(), {
         neutralized,
       });
       return {
         ...refusal,
-        content: `${refusal.content} ${neutralized
-          ? 'The tab was reset to a verified blank page.'
-          : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
+        structured: {
+          ...refusal.structured,
+          cleanup: neutralized ? 'tab_reset_verified_blank' : 'tab_reset_failed',
+        },
       };
     }
 
@@ -246,15 +274,16 @@ export const navigateTool = Object.freeze({
           pin,
           navigationTimeoutMs,
         );
-        const refusal = browserNetworkGuardPostNavigationResult(
+        const refusal = browserNetworkGuardPostNavigationReceipt(
           guarded.structured?.reason,
         );
         return {
           ...refusal,
-          structured: { ...refusal.structured, neutralized },
-          content: `${refusal.content} ${neutralized
-            ? 'The tab was reset to a verified blank page.'
-            : 'The tab could not be reset, so browser automation remains stopped for it.'}`,
+          structured: {
+            ...refusal.structured,
+            neutralized,
+            cleanup: neutralized ? 'tab_reset_verified_blank' : 'tab_reset_failed',
+          },
         };
       }
     }
@@ -269,12 +298,12 @@ export const navigateTool = Object.freeze({
         error: navigation.status === 'timeout'
           ? 'navigation_timeout'
           : `navigation_failed: ${navigation.error ?? 'tabs.update was rejected'}`,
-        content: JSON.stringify({
+        structured: {
           requested: requestedUrl,
           finalUrl: finalTab?.url ?? requestedUrl,
           tabId,
           timed_out: navigation.status === 'timeout',
-        }),
+        },
         outcomeKind: 'host-lost',
       };
     }
@@ -298,7 +327,6 @@ export const navigateTool = Object.freeze({
           return {
             ok: false,
             error: AUTH_WAITING_FOR_USER_CODE,
-            content: AUTH_WAITING_FOR_USER_MESSAGE,
             outcomeKind: 'effect-completed',
             endTurn: true,
           };
@@ -330,7 +358,7 @@ export const navigateTool = Object.freeze({
       }
     } while (Date.now() < readyDeadline);
     if (!verifiedTab) {
-      return browserTargetRefusalResult(unverifiedBrowserTargetVerdict(), {
+      return browserTargetRefusalReceipt(unverifiedBrowserTargetVerdict(), {
         effectCompleted: true,
       });
     }
@@ -345,14 +373,13 @@ export const navigateTool = Object.freeze({
 
     return {
       ok: true,
-      content: JSON.stringify({
+      receipt: {
         requested: requestedUrl,
         finalUrl: finalTab?.url ?? requestedUrl,
         tabId,
-      }, null, 2),
+      },
     };
-  },
-});
+};
 
 /**
  * Reset a refused committed page without claiming success until the browser

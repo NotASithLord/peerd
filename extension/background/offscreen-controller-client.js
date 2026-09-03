@@ -637,14 +637,10 @@ export const makeSemanticControllerClient = ({
   const hasRuntimeHandler = typeof handleRuntimeKernelCall === 'function';
   const hasFeatureAuthority = typeof authorizeFeatureCall === 'function'
     && typeof handleFeatureKernelCall === 'function';
-  const ownsLeaseBoundary = !firefoxDirect && typeof withLease === 'function';
-  /** @type {<T>(operation:()=>Promise<T>,options?:{outcomeKnownOnLoss?:boolean,code?:string,onLost?:(error:Error)=>void,lossGraceMs?:number})=>Promise<T>} */
   /** @type {<T>(operation:(lease?:unknown)=>Promise<T>,options?:any)=>Promise<T>} */
-  const withControllerLease = firefoxDirect && typeof withDirectLifetime === 'function'
-    ? withDirectLifetime
-    : ownsLeaseBoundary
-      ? (operation) => withLease(operation)
-      : (operation) => operation();
+  const withControllerLease = firefoxDirect
+    ? /** @type {NonNullable<typeof withDirectLifetime>} */ (withDirectLifetime)
+    : (operation) => /** @type {NonNullable<typeof withLease>} */ (withLease)(operation);
   const semanticCapabilities = Object.freeze([
     'prompt.render', 'turn.tools.project', 'turn.tools.command',
     ...(hasComposeAuthority ? [TURN_COMPOSE_CAPABILITY] : []),
@@ -936,34 +932,47 @@ export const makeSemanticControllerClient = ({
 
   const projectTurnTools = async (/** @type {Record<string, unknown>} */ input,
     /** @type {{signal?:AbortSignal}} */ options = {}) => {
-    if (options.signal?.aborted) {
-      throw options.signal.reason instanceof Error
-        ? options.signal.reason : new DOMException('The operation was aborted.', 'AbortError');
-    }
-    const projection = await withControllerLease(async (/** @type {unknown} */ lease) => {
-      let client = null;
-      try {
-        client = await getClient(lease);
-        const result = await client.call('turn.tools.project', input, {
-          timeoutMs: 15_000, signal: options.signal,
-        });
-        if (result?.ok === true && Array.isArray(result.tools)
-            && Array.isArray(result.operations)) return result;
-        if (result?.outcomeKnown === true) {
-          throw Object.assign(new Error(result.code ?? 'turn-tool-projection-failed'), result);
-        }
-      } catch (cause) {
-        if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
+    const assertLive = () => {
+      if (options.signal?.aborted) {
+        throw options.signal.reason instanceof Error
+          ? options.signal.reason : new DOMException('The operation was aborted.', 'AbortError');
       }
-      if (client) retire(client);
-      return null;
-    }, {
-      outcomeKnownOnLoss: true,
-      code: 'controller-firefox-tool-projection-lifetime-lost',
-      onLost: retireActiveOnLifetimeLoss,
-    });
-    if (projection?.ok === true && Array.isArray(projection.tools)
-        && Array.isArray(projection.operations)) return projection;
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      assertLive();
+      const projection = await withControllerLease(async (/** @type {unknown} */ lease) => {
+        let client = null;
+        try {
+          client = await getClientForTurn(lease, options.signal);
+          assertLive();
+          const result = await client.call('turn.tools.project', input, {
+            timeoutMs: 15_000, signal: options.signal,
+          });
+          if (result?.ok === true && Array.isArray(result.tools)
+              && Array.isArray(result.operations)) return result;
+          if (result?.outcomeKnown === true) {
+            throw Object.assign(new Error(result.code ?? 'turn-tool-projection-failed'), result);
+          }
+        } catch (cause) {
+          assertLive();
+          if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) throw cause;
+        }
+        if (client) retire(client);
+        return null;
+      }, {
+        outcomeKnownOnLoss: true,
+        code: 'controller-firefox-tool-projection-lifetime-lost',
+        onLost: retireActiveOnLifetimeLoss,
+      });
+      if (projection?.ok === true && Array.isArray(projection.tools)
+          && Array.isArray(projection.operations)) return projection;
+      if (projection?.outcomeKnown === true) {
+        throw Object.assign(
+          new Error(projection.code ?? 'turn-tool-projection-lifetime-refused'), projection,
+        );
+      }
+      assertLive();
+    }
     throw Object.assign(new Error(STARTUP_UNAVAILABLE_USER_FAILURE), {
       code: 'controller-tool-projection-startup-failed',
       outcomeKnown: true, phase: 'startup', retryable: true,

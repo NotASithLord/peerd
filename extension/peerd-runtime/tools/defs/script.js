@@ -158,7 +158,11 @@ export const scriptTool = composeTool("script", {
       )) {
         content += `\n\n${JS_PITFALLS_NOTE}\n\n${SCRIPT_BUILTINS_NOTE}`;
       }
-      return { ok: true, content, ...custody };
+      // why: the ordinary 8k tool-result cap can cut off the trusted paging
+      // footer that follows the bounded [VALUE] preview. Raise only results that
+      // actually reached the session-owned spill store; an ordinary large result
+      // still receives the conservative cap.
+      return { ok: true, content, ...(valueSpill ? { paged: true } : {}), ...custody };
   },
 });
 

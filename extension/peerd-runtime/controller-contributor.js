@@ -18,8 +18,7 @@ import {
   contributorProviderCode,
   contributorTurnResult,
 } from './observability/contributor-metrics.js';
-
-const CONTRIBUTOR_MAX_ACTIONS = 128;
+import { CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT } from '../shared/contributor-channel.js';
 
 /**
  * Project raw actor-loop state into the fixed, content-free contribution wire.
@@ -33,7 +32,7 @@ export const projectContributorSettlement = (result, provider, model) => {
       const action = contributorActionForTool(toolUse?.name);
       return action ? [action] : [];
     }) : []);
-  if (actions.length > CONTRIBUTOR_MAX_ACTIONS) return null;
+  if (actions.length > CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT) return null;
   if (result?.aborted === true) {
     return Object.freeze({
       providerCode: contributorProviderCode(provider),

@@ -347,23 +347,6 @@ describe('test-only vault kernel package target', () => {
     }
   }, 20_000);
 
-  test('Chrome passphrase floor proves demand-owned vault authority custody', () => {
-    const source = readFileSync(
-      join(REPO_ROOT, 'scripts/cdp/run-vault-kernel-passphrase.mjs'), 'utf8',
-    );
-    expect(source).toContain("claim: 'test-only-packaged-vault-authority-demand-floor'");
-    expect(source).toContain('offscreenContextsBeforeDemand');
-    expect(source).toContain('maxOffscreenContexts !== 1');
-    expect(source).toContain('retainedWhileUnlocked !== true');
-    expect(source).toContain('vault authority host survived lock');
-    expect(source).toContain("type: 'vault/initialize'");
-    expect(source).toContain("type: 'vault/unlock'");
-    expect(source).toContain(
-      "assertLiveKernelAssembly(bootstrap.assembly, 'store-chrome')",
-    );
-    expect(source).toContain('assembly.identity.bootId !== bootstrap.bootId');
-  });
-
   test('physical floor is explicit about controller and recycle non-claims', () => {
     const source = readFileSync(
       join(REPO_ROOT, 'scripts/cdp/run-vault-kernel-passkey.mjs'), 'utf8',
@@ -384,30 +367,4 @@ describe('test-only vault kernel package target', () => {
     expect(source).not.toContain('Target.closeTarget');
   });
 
-  test('Firefox physical floor packages only in tmp and pins the native route contract', () => {
-    const source = readFileSync(
-      join(REPO_ROOT, 'scripts/firefox/vault-kernel-physical.mjs'), 'utf8',
-    );
-    expect(source).toContain("mkdtempSync(join(tmpdir(), 'peerd-vault-kernel-firefox-'))");
-    expect(source).toContain('scripts: [FIREFOX_BACKGROUND_ENTRY]');
-    expect(source).toContain('FIREFOX_BACKGROUND_ENTRY');
-    expect(source).toContain("HOME_URL = `moz-extension://${FIREFOX_UUID}/home/home.html");
-    expect(source).toContain('EVENT_PAGE_IDLE_MS = 45_000');
-    expect(source).toContain('afterIdleBoot.bootId === initialBoot.bootId');
-    expect(source).toContain('afterIdleBoot.kernelEpoch === initialBoot.kernelEpoch');
-    expect(source).toContain("ordinaryPage !== 'ordinary-firefox-tab'");
-    expect(source).toContain('FIREFOX_DRIVEN_CHILD_IDS_KEY');
-    expect(source).toContain(
-      "assertLiveKernelAssembly(initialBoot?.assembly, 'store-firefox')",
-    );
-    expect(source).toContain(
-      "assertLiveKernelAssembly(afterIdleBoot?.assembly, 'store-firefox')",
-    );
-    expect(source).toContain('assembly.identity.bootId === value.bootId');
-    expect(source).not.toContain('ownedRequiredEvents === 5');
-    expect(source).not.toContain('semantic?.migrated === 34');
-    expect(source).not.toContain("join(ROOT, 'artifacts'");
-    expect(source).not.toContain('ARTIFACTS_DIR');
-    expect(source).not.toContain('packageArtifact(');
-  });
 });

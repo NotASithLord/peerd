@@ -14,7 +14,15 @@
 // run by `bun test ./tests` (CI).
 
 import { describe, it, expect } from '../../../framework.js';
-import { captureTool } from '/background/page-authority/capture.js';
+import { captureForegroundPixelsAuthority } from '/background/page-authority/capture.js';
+import { captureTool as controllerCaptureTool } from '/peerd-runtime/tools/web/screenshot.js';
+
+const captureTool = { execute: (/** @type {any} */ args, /** @type {any} */ ctx) => controllerCaptureTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    captureForegroundPixels: () => captureForegroundPixelsAuthority(args, ctx),
+  },
+}) };
 import { browserProbeResult } from '../../../helpers/browser-scripting.js';
 
 const makeActivationEvent = () => {

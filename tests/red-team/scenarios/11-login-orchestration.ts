@@ -28,7 +28,15 @@ import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
 import { classifyLoginAffordance } from '../../../extension/peerd-runtime/tools/login-affordance.js';
-import { loginTool } from '../../../extension/background/page-authority/login.js';
+import { performConfirmedOwnedLoginAuthority } from '../../../extension/background/page-authority/login.js';
+import { loginTool as controllerLoginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+
+const loginTool = { execute: (args: any, ctx: any) => controllerLoginTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    performConfirmedOwnedLogin: () => performConfirmedOwnedLoginAuthority(args, ctx),
+  },
+}) };
 import { isKnownIdp } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 

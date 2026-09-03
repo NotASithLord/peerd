@@ -246,7 +246,7 @@ export const defaults = {
   auditLogMaxEntries: { store: 20000, preview: 20000 },
 
   // ── preview-only keys ──────────────────────────────────────────────
-  // Self-update check at startup (background/update-check.js). Preview
+  // Self-update check at startup (background/kernel-preview-addon.js). Preview
   // installs are self-hosted (update_url → the peerd.ai feeds → GitHub
   // release artifacts), and peerd's offscreen keepalive holds the MV3 SW
   // alive - the exact state where Chrome parks a downloaded extension

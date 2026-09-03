@@ -26,7 +26,6 @@ export {
 export {
   makeVmHttpFetch, WEB_WRITE_CONFIRM_KEY,
 } from './vm-net/vm-http-fetch.js';
-export { makeGitCredentialRoutes } from './vm-net/git-credential-routes.js';
 export { needsWebWriteConfirm } from './vm-net/http-bridge.js';
 export { buildAppManifest, parseAppManifest } from './app-manifest.js';
 export {

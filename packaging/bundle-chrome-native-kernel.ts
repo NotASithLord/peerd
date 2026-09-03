@@ -24,14 +24,14 @@ export const NATIVE_CHROME_BUNDLE_RATCHETS = Object.freeze({
     // authority/policy inputs, not controller feature ownership.
     // Source-action child generations are fixed browser custody, not a
     // semantic feature surface.
-    bytes: 1_347_805,
-    inputs: 402,
-    inputSha256: 'c6861d3086c91f9e43f55588f6cb64dbfd2544832698c4257240a049f2ac631d',
+    bytes: 1_340_750,
+    inputs: 400,
+    inputSha256: '7b50f453b44f16ac1c81e04c8cfa1de8475ee30934ff9c117158e85f86c264cf',
   }),
   'background/vault-kernel-preview.js': Object.freeze({
-    bytes: 1_438_000,
-    inputs: 408,
-    inputSha256: '90c8c7887d5e297cc8e19e1de35ee078c3305a624cfd6612115e73130f2f243a',
+    bytes: 1_423_792,
+    inputs: 406,
+    inputSha256: 'f9ea6444ed31f052cf7f09936b4ecae14276b573b612fb0c981dd11d6c49d5fb',
   }),
 });
 
@@ -42,7 +42,9 @@ export const assertNativeChromeBundleRatchet = (
   const ratchet = NATIVE_CHROME_BUNDLE_RATCHETS[entryRelative as keyof typeof NATIVE_CHROME_BUNDLE_RATCHETS];
   if (!ratchet) throw new Error(`native Chrome bundle has no ratchet: ${entryRelative}`);
   if (result.inputs.length !== ratchet.inputs || result.inputSha256 !== ratchet.inputSha256) {
-    throw new Error(`native Chrome bundle input closure changed for ${entryRelative}`);
+    throw new Error(`native Chrome bundle input closure changed for ${entryRelative}: `
+      + `${result.bytes} bytes / ${result.inputs.length} inputs / ${result.inputSha256}; expected `
+      + `${ratchet.inputs} / ${ratchet.inputSha256}`);
   }
   if (result.bytes > ratchet.bytes) {
     throw new Error(`native Chrome bundle grew to ${result.bytes} bytes; ratchet is ${ratchet.bytes}`);

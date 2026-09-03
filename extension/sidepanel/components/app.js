@@ -285,7 +285,7 @@ export const NoticeBar = {
             }, n.action.label ?? 'Enable')
           : null,
         // open-url: the SW attaches an https link (e.g. the preview
-        // update's XPI - background/update-check.js). The click IS the user
+        // update's XPI - background/kernel-preview-addon.js). The click IS the user
         // gesture the target flow needs, so no SW round-trip: open the tab
         // from here. https only, checked again at render (defense in depth -
         // the SW already validates the feed's link).

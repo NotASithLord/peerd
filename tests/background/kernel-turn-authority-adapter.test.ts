@@ -4,7 +4,7 @@ import { createKernelTurnAuthorityAdapter } from '../../extension/background/ker
 import {
   actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
 } from '../../extension/background/kernel-turn-authority-adapter.js';
-import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime/background.js';
+import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime/kernel-custody.js';
 import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
 import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
@@ -118,11 +118,21 @@ const harness = async (
       sessionGet: (key: string) => Promise<any>,
       sessionSet: (key: string, value: any) => Promise<void>,
     },
+    sessionReadsUnavailable?: () => boolean,
   } = {},
 ) => {
   const toolProjections: any[] = [];
   const audits: any[] = [];
   const idb = memoryStore();
+  if (options.sessionReadsUnavailable) {
+    const read = idb.get;
+    idb.get = async (store: string, key: string) => {
+      if (store === 'sessions' && options.sessionReadsUnavailable?.()) {
+        throw new Error('session storage unavailable');
+      }
+      return read(store, key);
+    };
+  }
   let sessionSequence = 0;
   const sessions = createSessionStore({
     idb, now: () => 1_000, makeId: () => `session-${++sessionSequence}`,
@@ -335,6 +345,7 @@ const harness = async (
     scriptRuns,
     postChatNote: options.postChatNote ?? (() => {}),
     pushState: options.pushState ?? (async () => {}),
+    closePanel: async () => ({ ok: true }),
     dwebEnabled: options.dweb === true,
     ensureDwebFeature: async () => {},
     firefox: options.firefox === true,
@@ -442,6 +453,7 @@ const dependencies = () => ({
   contextSnapshots: createContextSnapshots(),
   scriptRuns: createScriptRunRegistry(),
   providerEgress: {},
+  closePanel: async () => ({ ok: true }),
   resolveProviderSelection: async () => ({
     ok: true, selected: 'anthropic::claude-sonnet-4-6',
   }),
@@ -1030,6 +1042,83 @@ describe('kernel turn authority adapter', () => {
       ownerSessionId: h.root.sessionId,
       ephemeral: true,
     })]);
+  });
+
+  test.each(['actor', 'spawned'] as const)(
+    'never reuses a standing mutation grant for a %s helper',
+    async (kind) => {
+      const prompts: any[] = [];
+      const h = await harness(undefined, {
+        firefox: true,
+        confirm: async (prompt) => { prompts.push(prompt); return 'yes_session'; },
+      });
+      const helper = await h.sessions.create({
+        kind, parentSessionId: h.root.sessionId,
+        provider: h.root.provider, model: h.root.model,
+        permissionMode: 'act', confirmActions: true, depth: 1,
+        ...(kind === 'actor'
+          ? { actorType: 'web', backing: 'tab', instanceId: 'web' }
+          : { task: 'schedule two exact mutations', grantedOperations: [] }),
+      });
+      const ctx: any = await h.factories.buildToolContext({
+        sessionId: helper.sessionId,
+        ...(kind === 'actor'
+          ? { exposure: 'actor', actorType: 'web', actorBacking: 'tab', actorInstanceId: 'web' }
+          : {}),
+      });
+      const mutation = {
+        tool: 'schedule_create', sessionId: helper.sessionId,
+        origins: [], summary: 'Create one scheduled task',
+      };
+
+      expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+      expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+      expect(prompts).toEqual([
+        expect.objectContaining({
+          tool: 'schedule_create', sessionId: helper.sessionId,
+          ownerSessionId: h.root.sessionId, ephemeral: true,
+        }),
+        expect.objectContaining({
+          tool: 'schedule_create', sessionId: helper.sessionId,
+          ownerSessionId: h.root.sessionId, ephemeral: true,
+        }),
+      ]);
+    },
+  );
+
+  test('does not cache a helper mutation when durable session identity is unavailable', async () => {
+    const prompts: any[] = [];
+    let readsUnavailable = false;
+    const h = await harness(undefined, {
+      firefox: true,
+      confirm: async (prompt) => { prompts.push(prompt); return 'yes_session'; },
+      sessionReadsUnavailable: () => readsUnavailable,
+    });
+    const helper = await h.sessions.create({
+      kind: 'spawned', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: true, depth: 1,
+      task: 'schedule two exact mutations', grantedOperations: [],
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: helper.sessionId });
+    readsUnavailable = true;
+    const mutation = {
+      tool: 'schedule_create', sessionId: helper.sessionId,
+      origins: [], summary: 'Create one scheduled task',
+    };
+
+    expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+    expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+    expect(prompts).toEqual([
+      expect.objectContaining({
+        tool: 'schedule_create', sessionId: helper.sessionId,
+        ownerSessionId: null, ephemeral: true,
+      }),
+      expect.objectContaining({
+        tool: 'schedule_create', sessionId: helper.sessionId,
+        ownerSessionId: null, ephemeral: true,
+      }),
+    ]);
   });
 
   test('restored App network admission waits only for hydrated trackers', async () => {

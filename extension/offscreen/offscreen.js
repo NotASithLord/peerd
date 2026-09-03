@@ -6,6 +6,11 @@ import {
   FEATURE_LEASE_KEEPALIVE_PORT,
 } from '/shared/feature-lease-protocol.js';
 import { makeBoundedModuleLoader } from '/shared/bounded-module-load.js';
+import {
+  beginDocumentExtraction,
+  runLeasedDocumentExtraction,
+  stopDocumentExtractions,
+} from './document-extraction-lifecycle.js';
 import { isServiceWorkerSender } from './sender-checks.js';
 
 /** @type {ReturnType<typeof import('./feature-lease-host.js').createOffscreenFeatureLeaseHost> | null} */
@@ -111,7 +116,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
   return true;
 }));
 
-/** @typedef {(message: any) => Promise<any>} ExtractionHandler */
+/** @typedef {(message: any, options?: {signal?:AbortSignal}) => Promise<any>} ExtractionHandler */
 /** @type {Readonly<Record<string, () => Promise<ExtractionHandler>>>} */
 const extractionLoaders = Object.freeze({
   'doc/extract': makeBoundedModuleLoader(() => import('./doc-extract.js')
@@ -119,19 +124,77 @@ const extractionLoaders = Object.freeze({
   'web/extract': makeBoundedModuleLoader(() => import('./web-extract.js')
     .then((module) => /** @type {ExtractionHandler} */ (module.handleWebExtract))),
 });
+/** @type {Map<string, {controller:AbortController,lease:unknown}>} */
+const documentExtractions = new Map();
+const validDocumentRequestId = (/** @type {unknown} */ value) => typeof value === 'string'
+  && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 browser.runtime.onMessage.addListener(/** @type {any} */ ((
   /** @type {any} */ msg,
   /** @type {any} */ sender,
   /** @type {(value:any)=>void} */ sendResponse,
 ) => {
+  const isDocumentAbort = msg?.type === 'doc/abort';
   const load = extractionLoaders[/** @type {keyof typeof extractionLoaders} */ (msg?.type)];
-  if (!load) return false;
+  if (!load && !isDocumentAbort) return false;
   if (!isServiceWorkerSender(sender)) {
     sendResponse({ ok: false, error: 'untrusted-sender' });
     return false;
   }
   const claim = claimLease('dom-host', sendResponse);
   if (!claim) return false;
+
+  if (isDocumentAbort) {
+    if (!validDocumentRequestId(msg.requestId) || Object.keys(msg).length !== 2) {
+      sendResponse({ ok: false, error: 'invalid-document-abort' });
+      return false;
+    }
+    const entry = documentExtractions.get(msg.requestId);
+    if (!entry) {
+      sendResponse({ ok: true, requestId: msg.requestId, aborted: false });
+      return false;
+    }
+    if (featureLeaseHost?.ownsLease('dom-host', entry.lease) !== true) {
+      sendResponse({ ok: false, error: 'stale-document-extraction' });
+      return false;
+    }
+    entry.controller.abort(new DOMException('Document extraction stopped.', 'AbortError'));
+    sendResponse({ ok: true, requestId: msg.requestId, aborted: true });
+    return false;
+  }
+
+  if (msg.type === 'doc/extract') {
+    if (!validDocumentRequestId(msg.requestId)) {
+      sendResponse({ ok: false, error: 'invalid-document-request-id' });
+      return false;
+    }
+    if (documentExtractions.has(msg.requestId)) {
+      sendResponse({ ok: false, error: 'duplicate-document-request-id' });
+      return false;
+    }
+    const entry = beginDocumentExtraction(documentExtractions, msg.requestId, claim);
+    if (!entry) {
+      sendResponse({ ok: false, error: 'document-extraction-capacity-reached' });
+      return false;
+    }
+    load().then(async (handle) => {
+      if (rejectStaleClaim('dom-host', claim, sendResponse)) return;
+      const result = await runLeasedDocumentExtraction({
+        handle,
+        message: msg,
+        entry,
+        isCurrent: () => entry.controller.signal.aborted !== true
+          && documentExtractions.get(msg.requestId) === entry
+          && featureLeaseHost?.ownsLease('dom-host', entry.lease) === true,
+      });
+      sendResponse(result);
+    }, (cause) => sendResponse(errorResponse(cause))).finally(() => {
+      if (documentExtractions.get(msg.requestId) === entry) {
+        documentExtractions.delete(msg.requestId);
+      }
+    });
+    return true;
+  }
+
   load().then((handle) => rejectStaleClaim('dom-host', claim, sendResponse)
     ? undefined : handle(msg)).then(
     sendResponse, (cause) => sendResponse(errorResponse(cause)),
@@ -366,6 +429,7 @@ const stopModelFeature = async () => {
 };
 
 const stopDomFeature = async () => {
+  stopDocumentExtractions(documentExtractions);
   let aborted = 0;
   try { aborted = jobHost?.abortAllJobs() ?? 0; } catch {}
   return { stopped: true, aborted };

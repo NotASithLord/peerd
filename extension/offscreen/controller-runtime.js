@@ -112,16 +112,12 @@ const makeDefaultHandlers = (/** @type {ReturnType<typeof createKernelFeatureHos
 });
 
 /**
- * @param {{ handlers?: Record<string, (payload: unknown, options: {
- *   signal: AbortSignal, authority?: unknown, deadlineAt?: number,
- *   kernelCall?: (operation:string, payload:unknown)=>Promise<any>,
- * }) => Promise<any>>, featureHost?:ReturnType<typeof createKernelFeatureHost>,
+ * @param {{ featureHost?:ReturnType<typeof createKernelFeatureHost>,
  * loadRuntimeHost?:()=>Promise<{
  *   createKernelRuntimeHost:(options?:any)=>{dispatch:(payload:unknown,options:any)=>Promise<any>}
  * }> }} [options]
  */
 export const createController = async ({
-  handlers,
   featureHost: injectedFeatureHost,
   loadRuntimeHost: runtimeHostLoader = loadKernelRuntimeHost,
 } = {}) => {
@@ -164,7 +160,6 @@ export const createController = async ({
   /** @type {Record<string, (payload:unknown, options:any)=>Promise<any>>} */
   const activeHandlers = Object.freeze({
     ...makeDefaultHandlers(featureHost),
-    ...handlers,
     [RUNTIME_DISPATCH_CAPABILITY]: runtimeDispatch,
   });
   return Object.freeze({

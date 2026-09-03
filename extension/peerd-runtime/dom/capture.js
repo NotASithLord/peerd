@@ -26,8 +26,8 @@ import { serializeAxTree } from './ax-serialize.js';
 import { domWalkInjected } from './walk-injected.js';
 import { browserDocumentIdentity, scriptingTarget } from '../browser-authority/dom-helpers.js';
 import {
-  browserDocumentRefusalFrom,
-  browserTargetRefusalResult,
+  browserDocumentRefusalReceiptFrom,
+  browserTargetRefusalReceipt,
   unverifiedBrowserTargetVerdict,
 } from '../tools/browser-automation-policy.js';
 
@@ -50,7 +50,7 @@ import {
  *   { ok: true, source: 'cdp'|'dom-walk', text: string, refs: object[],
  *     truncated: boolean, capped: boolean, nodeCount: number, refCount: number }
  *   | { ok: false, source: 'cdp'|'dom-walk'|'none', error: string,
- *       refusal?: ReturnType<typeof browserTargetRefusalResult> }>}
+ *       refusal?: ReturnType<typeof browserTargetRefusalReceipt> }>}
  */
 export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
   // why: debuggerPool / scripting are SW-injected IO not on the typed
@@ -62,7 +62,7 @@ export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
     try {
       nodes = await debuggerPool.getAxTree(tab.id, browserDocumentIdentity(tab));
     } catch (e) {
-      const refusal = browserDocumentRefusalFrom(e);
+      const refusal = browserDocumentRefusalReceiptFrom(e);
       if (refusal) return { ok: false, source: 'cdp', error: refusal.error, refusal };
       return { ok: false, source: 'cdp', error: `axtree_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
@@ -92,7 +92,7 @@ export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
   } catch (e) {
     // Pages the browser refuses to inject into (chrome:/about:, the
     // extension stores) land here — same class of refusal CDP attach has.
-    const refusal = browserTargetRefusalResult(unverifiedBrowserTargetVerdict(), {
+    const refusal = browserTargetRefusalReceipt(unverifiedBrowserTargetVerdict(), {
       effectCompleted: false,
     });
     return { ok: false, source: 'dom-walk', error: refusal.error, refusal };
@@ -111,15 +111,3 @@ export const captureSnapshot = async (tab, ctx, { budget = 8000 } = {}) => {
     ...serializeAxTree(walk.nodes, { budget }),
   };
 };
-
-/**
- * One-line, model-facing label for where a capture came from — used in
- * snapshot headers so a fallback capture SAYS it's a fallback (and names
- * its limits) instead of impersonating the real AX tree.
- * @param {'cdp'|'dom-walk'|'none'} source
- */
-export const describeSource = (source) => (
-  source === 'dom-walk'
-    ? 'pseudo-a11y snapshot (DOM-walk fallback — no CDP here; top frame only)'
-    : 'a11y snapshot'
-);

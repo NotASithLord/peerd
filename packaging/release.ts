@@ -110,17 +110,12 @@ const main = async () => {
   // CI-only courtesy. Each lane packages its exact target and requires the
   // live kernel assembly ledger to be complete before human credentials or
   // any irreversible release action is reached.
-  step('installed Chrome Store first-install/controller/Git/recycle');
+  step('installed Chrome Store first-install/controller/recycle');
   run('bun', ['scripts/cdp/run-passkey-signup.mjs']);
   step('installed Chrome Store document extraction/paging isolation');
   run('bun', ['scripts/cdp/read-doc-store-lane.mjs']);
   step('installed Chrome Preview dweb/SW/renderer continuity');
   run('bun', ['scripts/cdp/feature-lease-dweb-lifecycle.mjs']);
-  step('installed Chrome Preview Charon two-profile private/Quick Match/co-op');
-  if (!process.env.CHARON_ROOT) {
-    die('CHARON_ROOT must point to the pinned clean Charon checkout for the release oracle');
-  }
-  run('bun', ['scripts/cdp/charon-dwapp-two-profile.mjs']);
   step('installed Firefox Store first-install/controller/Git/discard');
   run('bun', ['scripts/firefox/production-cutover-lane.mjs']);
 

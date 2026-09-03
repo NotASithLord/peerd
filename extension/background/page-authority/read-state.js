@@ -17,12 +17,10 @@
 
 import {
   browserDocumentIdentity,
-  browserDocumentRefusalFrom,
-  originOfUrl,
+  browserDocumentRefusalReceiptFrom,
   readFrameworkStateInjected,
   resolveTargetTab,
   scriptingTarget,
-  wrapUntrusted,
 } from '/peerd-runtime/browser-authority.js';
 
 /**
@@ -35,10 +33,8 @@ import {
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const readStateTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const readOwnedFrameworkStateAuthority = async (args, ctx) => {
     const tab = await resolveTargetTab(args, ctx);
     if (!tab?.id) return { ok: false, error: 'no_target_tab' };
 
@@ -86,20 +82,19 @@ export const readStateTool = Object.freeze({
     try { r = await debuggerPool.readFrameworkState(
       tab.id, entry.backendDOMNodeId, browserDocumentIdentity(tab)); }
     catch (e) {
-      return browserDocumentRefusalFrom(e)
+      return browserDocumentRefusalReceiptFrom(e)
         ?? { ok: false, error: `read_state_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
     if (r.ok === false) {
-      return browserDocumentRefusalFrom(r)
+      return browserDocumentRefusalReceiptFrom(r)
         ?? { ok: false, error: r.error ?? 'read_state_failed' };
     }
     const { ok, ...payload } = r;
     return {
       ok: true,
-      content: wrapUntrusted({ origin: originOfUrl(tab.url), tool: 'read_state', body: JSON.stringify(payload, null, 2) }),
+      receipt: { url: tab.url ?? '', payload },
     };
-  },
-});
+};
 
 // Read framework state via chrome.scripting in the page's MAIN world. The
 // injected walk (readFrameworkStateInjected) is the no-CDP twin of
@@ -108,7 +103,7 @@ export const readStateTool = Object.freeze({
  * @param {{ id: number, url?: string }} tab
  * @param {string} selector
  * @param {import('/shared/tool-types.js').ToolContext} ctx
- * @returns {Promise<import('/shared/tool-types.js').ToolResult>}
+ * @returns {Promise<any>}
  */
 const readViaScripting = async (tab, selector, ctx) => {
   // why: ToolContext types `scripting` as the opaque chrome.scripting slot;
@@ -144,6 +139,6 @@ const readViaScripting = async (tab, selector, ctx) => {
   }
   return {
     ok: true,
-    content: wrapUntrusted({ origin: originOfUrl(tab.url), tool: 'read_state', body: JSON.stringify(result, null, 2) }),
+    receipt: { url: tab.url ?? '', payload: result },
   };
 };

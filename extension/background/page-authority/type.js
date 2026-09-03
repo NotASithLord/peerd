@@ -16,11 +16,10 @@
 
 import {
   browserDocumentIdentity,
-  browserDocumentRefusalFrom,
-  formSubmissionRefusalFrom,
+  browserDocumentRefusalReceiptFrom,
+  formSubmissionRefusalReceiptFrom,
   resolveTargetTab,
   scriptingTarget,
-  summarizeMutations,
 } from '/peerd-runtime/browser-authority.js';
 
 /**
@@ -36,10 +35,8 @@ import {
  * @typedef {{ domRefs?: DomRefs, debuggerPool?: DebuggerPool }} DomCtxExtras
  */
 
-/** @type {Readonly<{execute:(args:any,ctx:any)=>Promise<any>}>} */
-export const typeTool = Object.freeze({
-
-  execute: async (args, ctx) => {
+/** @param {any} args @param {any} ctx */
+export const fillOwnedTargetAuthority = async (args, ctx) => {
     if (typeof args?.text !== 'string') {
       return { ok: false, error: 'text_required', outcomeKind: 'pre-effect-failure' };
     }
@@ -86,7 +83,8 @@ export const typeTool = Object.freeze({
           };
           const r = await debuggerPool.setValueBackendNode(
             tab.id, entry.backendDOMNodeId, args.text, !!args.submit, browserDocumentIdentity(tab));
-          if (!r.ok) return formSubmissionRefusalFrom(r) ?? browserDocumentRefusalFrom(r) ?? {
+          if (!r.ok) return formSubmissionRefusalReceiptFrom(r)
+            ?? browserDocumentRefusalReceiptFrom(r) ?? {
             ok: false,
             error: r.error ?? 'ref_type_failed',
             outcomeKind: r.outcomeKind ?? 'host-lost',
@@ -94,17 +92,17 @@ export const typeTool = Object.freeze({
           };
           return {
             ok: true,
-            content: JSON.stringify({
+            receipt: {
+              channel: 'cdp-ref',
               typed: args.text.slice(0, 200), submitted: !!args.submit,
               ref, role: entry.role, name: entry.name, tag: r.tag, matchedCount: 1,
               ...(r.navigated ? { navigated: true } : {}),
-              // Action-result attribution: what typing changed on the page.
-              result: r.navigated ? 'page navigated' : summarizeMutations(r.mutations),
-            }, null, 2),
+              mutations: r.mutations,
+            },
           };
         } catch (e) {
           const outcomeKind = /** @type {{ outcomeKind?: import('/peerd-runtime/lifecycle/failure-taxonomy.js').FailureOutcomeKind }} */ (e)?.outcomeKind;
-          const refusal = browserDocumentRefusalFrom(e);
+          const refusal = browserDocumentRefusalReceiptFrom(e);
           if (refusal) return refusal;
           return {
             ok: false,
@@ -133,11 +131,12 @@ export const typeTool = Object.freeze({
           return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
         }
         if (!scriptResult) return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
-        if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
+        if (!scriptResult.ok) return formSubmissionRefusalReceiptFrom(scriptResult)
           ?? { ok: false, error: scriptResult.error ?? 'ref_type_failed' };
         return {
           ok: true,
-          content: JSON.stringify({
+          receipt: {
+            channel: 'walk-ref',
             typed: scriptResult.typed, submitted: scriptResult.submitted,
             ref, role: entry.role, name: entry.name, tag: scriptResult.tag,
             // why: keep matchedCount present on every success shape (selector
@@ -148,7 +147,7 @@ export const typeTool = Object.freeze({
             // (isTrusted=false); sites that gate on trusted keystrokes
             // may ignore it, and there is no fallback channel here.
             via: 'dom-walk',
-          }, null, 2),
+          },
         };
       }
 
@@ -184,20 +183,20 @@ export const typeTool = Object.freeze({
       return { ok: false, error: `script_inject_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
     }
     if (!scriptResult) return { ok: false, error: 'script_returned_nothing', outcomeKnown: false, outcomeKind: 'host-lost', retryable: false };
-    if (!scriptResult.ok) return formSubmissionRefusalFrom(scriptResult)
+    if (!scriptResult.ok) return formSubmissionRefusalReceiptFrom(scriptResult)
       ?? { ok: false, error: scriptResult.error ?? 'type_failed' };
 
     return {
       ok: true,
-      content: JSON.stringify({
+      receipt: {
+        channel: 'selector',
         typed: scriptResult.typed,
         submitted: scriptResult.submitted,
         tag: scriptResult.tag,
         matchedCount: scriptResult.matchedCount,
-      }, null, 2),
+      },
     };
-  },
-});
+};
 
 /**
  * @param {string | null} selector

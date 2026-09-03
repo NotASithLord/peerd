@@ -86,4 +86,61 @@ describe('bounded offscreen PDF text extraction', () => {
     });
     expect(structuredClone(result).info).toEqual(result.info);
   });
+
+  test('cancels and cleans up a pending page text stream on Stop', async () => {
+    const calls: string[] = [];
+    let releaseRead!: (value: any) => void;
+    const page = {
+      streamTextContent: () => ({
+        getReader: () => ({
+          read: () => new Promise((resolve) => { releaseRead = resolve; }),
+          cancel: async () => { calls.push('cancel'); },
+          releaseLock: () => { calls.push('release'); },
+        }),
+      }),
+      cleanup: () => { calls.push('cleanup'); },
+    };
+    const controller = new AbortController();
+    const pending = extractBoundedPdfTextLayer({
+      numPages: 1,
+      getPage: async () => page,
+      getMetadata: async () => null,
+    }, { maxPages: 1, maxChars: 100, signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(new DOMException('stopped', 'AbortError'));
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toEqual(['cancel', 'release', 'cleanup']);
+    releaseRead({ done: true });
+  });
+
+  test('Stop rejects while a page reader cancellation remains blocked', async () => {
+    const calls: string[] = [];
+    const controller = new AbortController();
+    const pending = extractBoundedPdfTextLayer({
+      numPages: 1,
+      getPage: async () => ({
+        streamTextContent: () => ({
+          getReader: () => ({
+            read: () => new Promise(() => {}),
+            cancel: () => {
+              calls.push('cancel');
+              return new Promise(() => {});
+            },
+            releaseLock: () => { calls.push('release'); },
+          }),
+        }),
+        cleanup: () => { calls.push('cleanup'); },
+      }),
+      getMetadata: async () => null,
+    }, { maxPages: 1, maxChars: 100, signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(new DOMException('stop without cleanup ack', 'AbortError'));
+    let rejected = false;
+    pending.catch(() => { rejected = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(rejected).toBe(true);
+    expect(calls).toEqual(['cancel', 'release', 'cleanup']);
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
 });

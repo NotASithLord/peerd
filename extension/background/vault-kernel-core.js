@@ -170,7 +170,7 @@ export const buildVaultKernelState = ({
   kernel, status, locked, unlockedAt, lockReason, autoLockMs,
   settings, session, providers, composer, profile = null,
   generation = 1, actorHost = 'offscreen-document-worker', runtimeCapabilities = {},
-  actorProjection = null,
+  actorProjection = null, actorIsolation = null,
 }) => {
   if (!locked && !profile) throw new TypeError('kernel-profile-required');
   const state = {
@@ -195,7 +195,7 @@ export const buildVaultKernelState = ({
     ...(!locked ? { profile } : {}),
     capabilities: {
       ...runtimeCapabilities,
-      actorExecution: {
+      actorExecution: actorIsolation ?? {
         status: 'temporarily_unavailable', host: actorHost,
         reason: 'controller-not-ready', retryable: true,
       },

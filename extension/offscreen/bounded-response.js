@@ -1,5 +1,9 @@
 // @ts-check
 
+import {
+  abortError, cancelBestEffort, readAbortableChunk, throwIfAborted,
+} from '/shared/abort.js';
+
 export class ResponseTooLargeError extends Error {
   /** @param {number} bytes @param {number} limit */
   constructor(bytes, limit) {
@@ -16,11 +20,13 @@ export class ResponseTooLargeError extends Error {
  *
  * @param {Response|any} response
  * @param {number} limit
+ * @param {{signal?:AbortSignal}} [options]
  */
-export const readBoundedResponseBytes = async (response, limit) => {
+export const readBoundedResponseBytes = async (response, limit, { signal } = {}) => {
+  throwIfAborted(signal, 'The response read was aborted.');
   const declared = Number(response.headers?.get?.('content-length'));
   if (Number.isFinite(declared) && declared > limit) {
-    try { await response.body?.cancel?.(); } catch { /* best-effort */ }
+    cancelBestEffort(response.body);
     throw new ResponseTooLargeError(declared, limit);
   }
   if (response.body === null) return new Uint8Array();
@@ -36,12 +42,14 @@ export const readBoundedResponseBytes = async (response, limit) => {
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readAbortableChunk(
+        reader, signal, 'The response read was aborted.',
+      );
       if (done) break;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value ?? 0);
       total += chunk.length;
       if (total > limit) {
-        try { await reader.cancel(); } catch { /* best-effort */ }
+        cancelBestEffort(reader);
         throw new ResponseTooLargeError(total, limit);
       }
       chunks.push(chunk);
@@ -49,6 +57,7 @@ export const readBoundedResponseBytes = async (response, limit) => {
   } finally {
     try { reader.releaseLock(); } catch { /* released */ }
   }
+  if (signal?.aborted) throw abortError(signal, 'The response read was aborted.');
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
