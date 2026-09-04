@@ -53,15 +53,49 @@ const afterTwoFramesOrTimeout = (done) => {
   requestAnimationFrame(() => requestAnimationFrame(finish));
 };
 
+/** @param {HTMLElement} root @param {unknown} [cause] */
+const renderVaultShellFailure = (root, cause = undefined) => {
+  document.documentElement.dataset.peerdBootStage = 'failed';
+  document.documentElement.dataset.peerdBootError = cause instanceof Error
+    ? `${cause.name}:${cause.message}`.slice(0, 512) : 'unknown';
+  m.mount(root, null);
+  root.innerHTML = '';
+  const shell = document.createElement('main');
+  shell.className = 'boot-shell';
+  shell.setAttribute('role', 'alert');
+  const title = document.createElement('div');
+  title.className = 'boot-shell__wordmark';
+  title.textContent = 'peerd';
+  const detail = document.createElement('p');
+  detail.textContent = 'Application unavailable.';
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.textContent = 'Retry';
+  retry.addEventListener('click', () => location.reload(), { once: true });
+  shell.append(title, detail, retry);
+  root.append(shell);
+};
+
+const vaultShellRoot = () => {
+  const existing = document.getElementById('app');
+  if (existing) return existing;
+  const root = document.createElement('div');
+  root.id = 'app';
+  document.body.append(root);
+  return root;
+};
+
 /** Keep the CSP-safe shell visible for two frames. @param {() => void} start */
 export const afterStaticShellPaint = (start) => {
   afterTwoFramesOrTimeout(() => {
-    const node = document.querySelector('#app > .boot-shell');
+    const root = vaultShellRoot();
+    const node = root.querySelector(':scope > .boot-shell');
     const rect = node?.getBoundingClientRect();
     const style = node ? getComputedStyle(node) : null;
     if (!node || !rect || rect.width <= 0 || rect.height <= 0
         || style?.visibility === 'hidden' || style?.display === 'none') {
-      throw new Error('static vault shell did not paint');
+      renderVaultShellFailure(root, new Error('static vault shell did not paint'));
+      return;
     }
     document.documentElement.dataset.peerdStaticShellPainted = 'true';
     start();
@@ -79,8 +113,7 @@ export const afterStaticShellPaint = (start) => {
 export const startVaultShell = ({
   portName, appSelector, loadApplication, appLoadTimeoutMs = 10_000,
 }) => {
-  const root = document.getElementById('app');
-  if (!root) throw new Error('vault shell mount is missing');
+  const root = vaultShellRoot();
 
   /** @type {VaultShellState} */
   let snapshot = { hydrated: false, vault: EMPTY_VAULT };
@@ -98,28 +131,6 @@ export const startVaultShell = ({
   let portRetryMs = 200;
   const uiRuntime = makeUiRuntimeClient({ browser });
   document.documentElement.dataset.peerdBootStage = 'vault-loading';
-
-  const renderFailure = (/** @type {unknown} */ cause = undefined) => {
-    document.documentElement.dataset.peerdBootStage = 'failed';
-    document.documentElement.dataset.peerdBootError = cause instanceof Error
-      ? `${cause.name}:${cause.message}`.slice(0, 512) : 'unknown';
-    m.mount(root, null);
-    root.innerHTML = '';
-    const shell = document.createElement('main');
-    shell.className = 'boot-shell';
-    shell.setAttribute('role', 'alert');
-    const title = document.createElement('div');
-    title.className = 'boot-shell__wordmark';
-    title.textContent = 'peerd';
-    const detail = document.createElement('p');
-    detail.textContent = 'Application unavailable.';
-    const retry = document.createElement('button');
-    retry.type = 'button';
-    retry.textContent = 'Retry';
-    retry.addEventListener('click', () => location.reload(), { once: true });
-    shell.append(title, detail, retry);
-    root.append(shell);
-  };
 
   const enterApplication = async () => {
     if (transitioning || stopped) return;
@@ -150,7 +161,7 @@ export const startVaultShell = ({
       }
       document.documentElement.dataset.peerdBootStage = 'app-ready';
     }
-    catch (cause) { applicationGeneration += 1; renderFailure(cause); }
+    catch (cause) { applicationGeneration += 1; renderVaultShellFailure(root, cause); }
   };
 
   /** @param {unknown} next @param {string|null} [replacementEpoch] */
@@ -279,7 +290,7 @@ export const startVaultShell = ({
         if (generation !== refreshGeneration || stopped) return;
         stopped = true;
         refreshGeneration += 1;
-        renderFailure();
+        renderVaultShellFailure(root);
       }, 60_000);
       try {
         let delay = 100;

@@ -16,8 +16,11 @@ const waitFor = async (/** @type {() => boolean} */ predicate) => {
   throw new Error('timeout');
 };
 
-/** @param {(frames: FrameRequestCallback[], timers: TimerHandler[]) => void} run */
-const withPaintGateFakes = (run) => {
+/**
+ * @param {(frames: FrameRequestCallback[], timers: TimerHandler[], root:HTMLElement) => void} run
+ * @param {string} [shell]
+ */
+const withPaintGateFakes = (run, shell = '<main class="boot-shell" style="width:1px;height:1px">peerd</main>') => {
   const windowApi = /** @type {any} */ (window);
   const prior = {
     requestAnimationFrame: window.requestAnimationFrame,
@@ -37,12 +40,14 @@ const withPaintGateFakes = (run) => {
   windowApi.clearTimeout = () => {};
   const root = document.createElement('div');
   root.id = 'app';
-  root.innerHTML = '<main class="boot-shell" style="width:1px;height:1px">peerd</main>';
+  root.innerHTML = shell;
   document.body.append(root);
-  try { run(frames, timers); }
+  try { run(frames, timers, root); }
   finally {
     root.remove();
     delete document.documentElement.dataset.peerdStaticShellPainted;
+    delete document.documentElement.dataset.peerdBootStage;
+    delete document.documentElement.dataset.peerdBootError;
     window.requestAnimationFrame = prior.requestAnimationFrame;
     window.setTimeout = prior.setTimeout;
     window.clearTimeout = prior.clearTimeout;
@@ -109,6 +114,33 @@ describe('vault shell static paint gate', () => {
       /** @type {() => void} */ (timers.shift())();
       expect(starts).toBe(1);
     });
+  });
+
+  it('renders a visible retry shell when the static boot node is missing', () => {
+    withPaintGateFakes((_frames, timers, root) => {
+      let starts = 0;
+      afterStaticShellPaint(() => { starts += 1; });
+      /** @type {() => void} */ (timers.shift())();
+      expect(starts).toBe(0);
+      expect(document.documentElement.dataset.peerdBootStage).toBe('failed');
+      expect(root.querySelector('[role="alert"]') !== null).toBe(true);
+      expect(root.textContent).toContain('Application unavailable.');
+      expect(root.textContent).toContain('Retry');
+    }, '');
+  });
+
+  it('replaces a hidden static boot node with a visible retry shell', () => {
+    withPaintGateFakes((_frames, timers, root) => {
+      let starts = 0;
+      afterStaticShellPaint(() => { starts += 1; });
+      /** @type {() => void} */ (timers.shift())();
+      expect(starts).toBe(0);
+      const failure = /** @type {HTMLElement} */ (root.querySelector('[role="alert"]'));
+      expect(failure !== null).toBe(true);
+      expect(getComputedStyle(failure).display === 'none').toBe(false);
+      expect(getComputedStyle(failure).visibility === 'hidden').toBe(false);
+      expect(root.textContent).toContain('Retry');
+    }, '<main class="boot-shell" style="display:none">peerd</main>');
   });
 });
 

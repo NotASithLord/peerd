@@ -109,7 +109,6 @@ describe('cold shell state contract', () => {
       source.indexOf('const refreshUntilChanged'));
     expect(disconnect).toContain('hydrated: false');
     expect(disconnect).toContain('void refreshUntilChanged()');
-    expect(source).toContain('renderFailure(cause);');
   });
 
   test('vault effects use bounded RPC and reconcile even when the receipt is lost', async () => {

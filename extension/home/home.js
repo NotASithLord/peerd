@@ -17,7 +17,7 @@ import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
 import { makeUiStatePort } from '/shared/cold-port-recovery.js';
 import {
-  makeReconciledUiSender, makeUiRuntimeClient, settleUiEffect,
+  makeReconciledUiSender, makeUiRuntimeClient, putUiEffectFailureNotice, settleUiEffect,
   redrawForRuntimeMessage,
 } from '/shared/ui-runtime-client.js';
 import { makeConfirmationAnswer } from '/sidepanel/confirmation-answer.js';
@@ -189,9 +189,18 @@ const statePort = makeUiStatePort({
   onStatusChange: () => m.redraw(),
 });
 const reconcileState = () => statePort.reconcile(() => uiRuntime.send({ type: 'state/get' }));
+/** @param {any} _message @param {unknown} cause */
+const showEffectFailure = (_message, cause) => {
+  currentState = {
+    ...currentState,
+    notices: putUiEffectFailureNotice(currentState.notices, cause),
+  };
+  m.redraw();
+};
 const send = makeReconciledUiSender({
   send: (/** @type {any} */ msg) => uiRuntime.send(msg),
   fold: () => {}, reconcile: reconcileState, afterReply: () => false,
+  onEffectFailure: showEffectFailure,
 });
 
 // ---- chat-component uiActions (the subset home needs; no voice) -----------

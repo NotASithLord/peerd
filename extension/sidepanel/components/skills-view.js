@@ -49,6 +49,15 @@ import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 /** @typedef {(msg: object) => Promise<any>} Send */
 /** @typedef {{ state: SkillsState, attrs: { send: Send } }} SkillsVnode */
 
+/** @param {SkillsVnode} vnode @param {object} message */
+const settleMutationAndRefresh = (vnode, message) => {
+  const effect = vnode.attrs.send(message);
+  settleUiEffect(effect);
+  // Keep the original reconciled promise intact so settleUiEffect can surface
+  // its failure; this continuation only refreshes the local skills list.
+  void effect.then(() => SkillsView.refresh(vnode)).catch(() => {});
+};
+
 export const SkillsView = {
   /** @param {SkillsVnode} vnode */
   oninit(vnode) {
@@ -112,9 +121,7 @@ export const SkillsView = {
    * @param {boolean} enabled
    */
   toggle(vnode, name, enabled) {
-    settleUiEffect(vnode.attrs.send({ type: 'skills/setEnabled', name, enabled }).then(() => {
-      SkillsView.refresh(vnode);
-    }));
+    settleMutationAndRefresh(vnode, { type: 'skills/setEnabled', name, enabled });
   },
 
   /**
@@ -122,9 +129,7 @@ export const SkillsView = {
    * @param {string} name
    */
   remove(vnode, name) {
-    settleUiEffect(vnode.attrs.send({ type: 'skills/remove', name }).then(() => {
-      SkillsView.refresh(vnode);
-    }));
+    settleMutationAndRefresh(vnode, { type: 'skills/remove', name });
   },
 
   /** @param {SkillsVnode} vnode */
