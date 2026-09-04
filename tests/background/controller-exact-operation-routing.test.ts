@@ -15,6 +15,7 @@ type Binding = {
 };
 type Step = { operation: string; value: Record<string, unknown> };
 type Spec = {
+  domain: string;
   method: string;
   value: Record<string, unknown>;
   actor?: { actorType: string; instanceId: string; backing?: string };
@@ -118,7 +119,7 @@ const op = (
   domain: string, name: string, method: string,
   value: Record<string, unknown> = {}, extra: Partial<Spec> = {},
 ) => [`turn.${name}`, {
-  method, value, ...extra,
+  method, value, ...extra, domain,
   ...(ORCHESTRATOR_OPERATION_GRANT.includes(`turn.${name}`)
     ? {} : { actor: actorFor(domain) }),
 }] as const;
@@ -318,8 +319,7 @@ const specs = Object.fromEntries([
 const domainFor = (operation: string) => CONTROLLER_DOMAIN_OPERATIONS[
   operation as keyof typeof CONTROLLER_DOMAIN_OPERATIONS
 ].authorityClass;
-const expectedCalls = (operation: string, spec: Spec) => spec.expected
-  ?? [`${domainFor(operation)}.${spec.method}`];
+const expectedCalls = (spec: Spec) => spec.expected ?? [`${spec.domain}.${spec.method}`];
 
 const METHOD_ARGUMENT_FIELDS = Object.freeze({
   'turn.repository.read-pod': ['podId'],
@@ -592,22 +592,23 @@ describe('controller exact-operation executable routing', () => {
 
   test.each(rows)('%s reaches only its exact domain dependency', async (operation, spec) => {
     expect(spec, `missing executable fixture for ${operation}`).toBeDefined();
+    expect(domainFor(operation), operation).toBe(spec.domain);
     const result = spec.actor
       ? await executeActor(operation, spec) : await executeMain(operation, spec);
     expect(result.operationResult, operation).toBeDefined();
     expect(result.calls.map(({ domain, method }) => `${domain}.${method}`), operation)
-      .toEqual(expectedCalls(operation, spec));
+      .toEqual(expectedCalls(spec));
     const sessionId = spec.actor ? `actor-${operation}` : `session-${operation}`;
     assertShapedArguments(operation, spec, result.calls, sessionId);
-    if (binderModules.some(([, , domain]) => domain === domainFor(operation))) {
+    if (binderModules.some(([, , domain]) => domain === spec.domain)) {
       const { appProgramSemanticToken: _appToken, pageProgramSemanticToken: _pageToken,
         ...ordinaryArgs } = spec.value;
-      const pageArgs = domainFor(operation) === 'page'
+      const pageArgs = spec.domain === 'page'
         ? spec.value.args as Record<string, unknown> : ordinaryArgs;
       const semanticToken = spec.value.appProgramSemanticToken
         ?? spec.value.pageProgramSemanticToken;
       expect(result.bindings, operation).toEqual([{
-        domain: domainFor(operation), operation, args: pageArgs,
+        domain: spec.domain, operation, args: pageArgs,
         ...(['turn.app.run-code', 'turn.page.run-program'].includes(operation)
           && typeof semanticToken === 'string' ? { semanticToken } : {}),
       }]);
