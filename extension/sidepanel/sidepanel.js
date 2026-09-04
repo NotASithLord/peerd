@@ -15,7 +15,8 @@ import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
 import { makeUiStatePort } from '/shared/cold-port-recovery.js';
 import {
-  makeReconciledUiSender, makeUiRuntimeClient, redrawForRuntimeMessage,
+  makeReconciledUiSender, makeUiRuntimeClient, putUiEffectFailureNotice,
+  redrawForRuntimeMessage,
 } from '/shared/ui-runtime-client.js';
 import { App } from './components/app.js';
 import { makeConfirmationAnswer } from './confirmation-answer.js';
@@ -80,9 +81,18 @@ const statePort = makeUiStatePort({
   onStatusChange: () => m.redraw(),
 });
 const reconcileState = () => statePort.reconcile(() => uiRuntime.send({ type: 'state/get' }));
+/** @param {any} _message @param {unknown} cause */
+const showEffectFailure = (_message, cause) => {
+  currentState = {
+    ...currentState,
+    notices: putUiEffectFailureNotice(currentState.notices, cause),
+  };
+  m.redraw();
+};
 const send = makeReconciledUiSender({
   send: (/** @type {any} */ msg) => uiRuntime.send(msg),
   fold: () => {}, reconcile: reconcileState, afterReply: () => false,
+  onEffectFailure: showEffectFailure,
 });
 
 // Lazy-load an actor session for a nested transcript. Used when the

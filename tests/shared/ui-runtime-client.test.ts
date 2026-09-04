@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   makeUiRuntimeClient,
+  makeReconciledUiSender,
+  putUiEffectFailureNotice,
   redrawForRuntimeMessage,
   settleUiEffect,
   uiMessageIsRead,
@@ -88,6 +90,74 @@ describe('bounded UI runtime client', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(caught).toBe(true);
+  });
+
+  test('a settled settings failure reports one bounded local notice', async () => {
+    let calls = 0;
+    let notices: any[] = [];
+    const send = makeReconciledUiSender({
+      send: async () => { calls += 1; return { ok: false, error: 'settings-refused' }; },
+      fold: () => {}, reconcile: async () => {}, afterReply: () => false,
+      onEffectFailure: (_message, cause) => {
+        notices = putUiEffectFailureNotice(notices, cause);
+      },
+    });
+    const effect = send({ type: 'settings/update', patch: { reasoningEffort: 'high' } });
+    settleUiEffect(effect);
+    await expect(effect).resolves.toMatchObject({ ok: false });
+    expect(calls).toBe(1);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].text).toBe('Peerd could not apply that change.');
+
+    notices = putUiEffectFailureNotice(notices, { ok: false, outcomeKnown: false });
+    expect(notices).toHaveLength(1);
+    expect(notices[0].text).toContain('Review the current state before trying again');
+  });
+
+  test('a settled rejected lock reconciles once before reporting and never replays', async () => {
+    const events: string[] = [];
+    let calls = 0;
+    const failure = Object.assign(new Error('lost'), { outcomeKnown: false });
+    const send = makeReconciledUiSender({
+      send: async () => { calls += 1; events.push('send'); throw failure; },
+      fold: () => { events.push('fold'); },
+      reconcile: async () => { events.push('reconcile'); },
+      afterReply: () => false,
+      onEffectFailure: () => { events.push('failure'); },
+    });
+    const effect = send({ type: 'vault/lock' });
+    settleUiEffect(effect);
+    await expect(effect).rejects.toBe(failure);
+    expect(calls).toBe(1);
+    expect(events).toEqual(['send', 'reconcile', 'failure']);
+  });
+
+  test('a resolved unknown effect reports only after reconciliation', async () => {
+    const events: string[] = [];
+    const send = makeReconciledUiSender({
+      send: async () => { events.push('send'); return { ok: false, outcomeKnown: false }; },
+      fold: () => { events.push('fold'); },
+      reconcile: async () => { events.push('reconcile'); },
+      afterReply: () => false,
+      onEffectFailure: () => { events.push('failure'); },
+    });
+    const effect = send({ type: 'settings/update', patch: {} });
+    settleUiEffect(effect);
+    await effect;
+    expect(events).toEqual(['send', 'fold', 'reconcile', 'failure']);
+  });
+
+  test('reads and explicitly handled effects do not emit duplicate notices', async () => {
+    const failures: unknown[] = [];
+    const send = makeReconciledUiSender({
+      send: async () => ({ ok: false, error: 'known' }),
+      fold: () => {}, reconcile: async () => {}, afterReply: () => false,
+      onEffectFailure: (_message, failure) => { failures.push(failure); },
+    });
+    await send({ type: 'settings/update', patch: {} });
+    settleUiEffect(send({ type: 'state/get' }));
+    await Promise.resolve();
+    expect(failures).toEqual([]);
   });
 
   test('only deltas use animation-frame redraws', () => {
