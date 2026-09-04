@@ -505,10 +505,11 @@ export const packagedBackgroundEntry = (extensionDir, browser = 'chrome') => {
   }
   return entry;
 };
-const findChromeWorker = async (port, backgroundEntry) => {
+const findChromeWorker = async (port, backgroundEntry, excludedTargetId = null) => {
   const suffix = `/${backgroundEntry}`;
   const targets = (await listTargets(port)).filter((candidate) =>
-    candidate.type === 'service_worker' && String(candidate.url).endsWith(suffix));
+    candidate.type === 'service_worker' && String(candidate.url).endsWith(suffix)
+      && candidate.id !== excludedTargetId);
   // A fresh benchmark profile should expose exactly the installed artifact's
   // worker. Never pick the first of an ambiguous set and accidentally time a
   // different extension that happens to use the same entry filename.
@@ -833,6 +834,9 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           serviceWorkerVersions.values(), expectedWorkerScriptURL, { runningStatus: 'running' },
         ), 8_000, 5);
         if (!currentVersion) throw new Error('Chrome ServiceWorker domain did not expose the running version');
+        if (!currentVersion.targetId || currentVersion.targetId !== current.targetId) {
+          throw new Error('Chrome ServiceWorker version was not bound to the discovered worker target');
+        }
         await page.send('Page.navigate', { url: 'about:blank' }, 5_000);
         const away = await waitFor(async () => {
           const reply = await page.send('Runtime.evaluate', {
@@ -847,10 +851,6 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           return row?.runningStatus === 'stopped' ? row : null;
         }, 8_000, 5);
         if (!stoppedVersion) throw new Error('Chrome ServiceWorker version remained running');
-        const gone = await waitFor(
-          async () => !(await findChromeWorker(port, backgroundEntry)), 8_000, 5,
-        );
-        if (!gone) throw new Error('Chrome service worker did not terminate');
       } catch (error) {
         wakeFailures.push({
           elapsedMs: hostNowMs() - retirementStarted,
@@ -865,8 +865,17 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
       const wakeRemaining = () => Math.max(1, wakeDeadlineAt - hostNowMs());
       const wakeNavigation = await page.send('Page.navigate', { url: panelUrl }, wakeRemaining());
       if (wakeNavigation?.errorText) throw new Error(`Chrome wake panel navigation failed: ${wakeNavigation.errorText}`);
-      const targetPromise = waitFor(() => findChromeWorker(port, backgroundEntry), wakeRemaining(), 2)
+      // Chrome can retain a stopped DevTools target in /json/list. The exact
+      // runningStatus above proves retirement; wake requires a distinct realm.
+      const targetPromise = waitFor(
+        () => findChromeWorker(port, backgroundEntry, current.targetId), wakeRemaining(), 2,
+      )
         .then((target) => ({ target, elapsedMs: hostNowMs() - started }));
+      const versionPromise = waitFor(() => {
+        const row = serviceWorkerVersions.get(stoppedVersion.versionId);
+        return row?.runningStatus === 'running' && row?.targetId
+          && row.targetId !== current.targetId ? row : null;
+      }, wakeRemaining(), 2);
       const wakePageReady = await waitFor(async () => {
         const ready = await page.send('Runtime.evaluate', {
           expression: `location.href === ${JSON.stringify(panelUrl)} && document.readyState !== 'loading'`,
@@ -904,13 +913,16 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
           if (!ready) throw new Error('Chrome wake vault gate never became actionable');
           return hostNowMs() - started;
         });
-        const [targetResult, wakeBootstrap, stateFromWakeMs,
+        const [targetResult, restartedVersion, wakeBootstrap, stateFromWakeMs,
           vaultGateReadyFromWakeMs] = await within(Promise.all([
-          targetPromise, wakeBootstrapPromise, wakeStatePromise, wakeGatePromise,
+          targetPromise, versionPromise, wakeBootstrapPromise, wakeStatePromise, wakeGatePromise,
         ]), wakeRemaining(), 'Chrome forced-wake sample');
         const { target, elapsedMs: workerTargetFromWakeMs } = targetResult;
         if (!target) throw new Error('Chrome wake produced no service-worker target');
         if (target.targetId === current.targetId) throw new Error('Chrome reused the terminated worker target');
+        if (!restartedVersion || restartedVersion.targetId !== target.targetId) {
+          throw new Error('Chrome restarted version was not bound to the replacement worker target');
+        }
         let wakeGraphReadyMs = null;
         if (diagnostic) {
           const wakeWorker = await within(
@@ -929,6 +941,10 @@ const runChromeProcess = async ({ extensionDir, wakeSamples }) => {
         }
         wakes.push({
           stoppedRunningStatus: stoppedVersion.runningStatus,
+          stoppedVersionId: stoppedVersion.versionId,
+          restartedVersionId: restartedVersion.versionId,
+          retiredTargetId: current.targetId,
+          replacementTargetId: target.targetId,
           workerAgeAtProbeMs: wakeGraphReadyMs,
           workerTargetFromWakeMs,
           staticShellFromWakeMs,
@@ -1582,6 +1598,11 @@ export const main = async () => {
         hostSha256,
       },
     };
+  const localSampleContract = (browser) => lane === 'local'
+    ? browser === 'chrome'
+      ? { fresh: chromeProcesses, wakes: chromeWakes }
+      : { fresh: firefoxProcesses, wakes: firefoxWakes, idleMs: firefoxIdleMs }
+    : undefined;
   try {
   const report = {
     schema: 3,
@@ -1634,7 +1655,7 @@ export const main = async () => {
       report.results.chrome = await benchmarkChrome(measurements.candidate);
     }
     report.results.chrome.assessment = assessColdStartResult('chrome', report.results.chrome, {
-      graphPolicy, requireTimingTargets, lane,
+      graphPolicy, requireTimingTargets, lane, sampleContract: localSampleContract('chrome'),
     });
     console.log(JSON.stringify(report.results.chrome, null, 2));
   }
@@ -1660,7 +1681,7 @@ export const main = async () => {
       };
     }
     report.results.firefox.assessment = assessColdStartResult('firefox', report.results.firefox, {
-      graphPolicy, requireTimingTargets, lane,
+      graphPolicy, requireTimingTargets, lane, sampleContract: localSampleContract('firefox'),
     });
     console.log(JSON.stringify(report.results.firefox, null, 2));
   }
@@ -1670,7 +1691,7 @@ export const main = async () => {
       if (!report.baseResults[browser]) continue;
       report.pairAssessments[browser] = assessColdStartPair(
         browser, report.results[browser], report.baseResults[browser], {
-          graphPolicy, requireTimingTargets, lane,
+          graphPolicy, requireTimingTargets, lane, sampleContract: localSampleContract(browser),
         },
       );
     }

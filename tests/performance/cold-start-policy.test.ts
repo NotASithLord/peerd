@@ -130,6 +130,10 @@ const chromeResult = ({
   };
   result.forcedColdWake.rawSamples.forEach((sample) => {
     sample.stoppedRunningStatus = 'stopped';
+    sample.stoppedVersionId = 'version-1';
+    sample.restartedVersionId = 'version-1';
+    sample.retiredTargetId = 'target-old';
+    sample.replacementTargetId = 'target-new';
   });
   return result;
 };
@@ -279,6 +283,15 @@ describe('cold-start policy', () => {
     transitional.forcedColdWake.rawSamples[0].stoppedRunningStatus = 'stopping';
     expect(assessChrome(transitional).failures)
       .toContain('chrome forcedColdWake sample 1 lacks authoritative stop state');
+
+    const differentVersion = chromeResult();
+    differentVersion.forcedColdWake.rawSamples[0].restartedVersionId = 'version-2';
+    expect(assessChrome(differentVersion).failures)
+      .toContain('chrome forcedColdWake sample 1 lacks same-version restart proof');
+    const reusedTarget = chromeResult();
+    reusedTarget.forcedColdWake.rawSamples[0].replacementTargetId = 'target-old';
+    expect(assessChrome(reusedTarget).failures)
+      .toContain('chrome forcedColdWake sample 1 lacks replacement-target proof');
   });
 
   test('fails one byte of growth in either shipped channel', () => {
@@ -407,6 +420,29 @@ describe('cold-start policy', () => {
     base.packagedGraphs = base.packagedGraphsByChannel.store;
     expect(assessColdStartPair('chrome', candidate, base, { lane: 'pr' }).failures)
       .not.toEqual(expect.arrayContaining([expect.stringContaining('entryBytes regressed')]));
+  });
+
+  test('honors explicit local sample cardinality without weakening fixed lanes', () => {
+    const contract = { fresh: 3, wakes: 3 };
+    const candidate = chromeResult({ lane: 'local' });
+    const base = chromeResult({ role: 'base', lane: 'local', sourceCommitSha: '4'.repeat(40) });
+    for (const result of [candidate, base]) {
+      result.freshProfile = summarizedGroup(COLD_START_PHASES.chrome.freshProfile, 3) as any;
+      result.forcedColdWake = summarizedGroup(COLD_START_PHASES.chrome.forcedColdWake, 3) as any;
+      result.forcedColdWake.rawSamples.forEach((sample) => {
+        sample.stoppedRunningStatus = 'stopped';
+        sample.stoppedVersionId = 'version-1';
+        sample.restartedVersionId = 'version-1';
+        sample.retiredTargetId = 'target-old';
+        sample.replacementTargetId = 'target-new';
+      });
+    }
+    expect(assessColdStartPair('chrome', candidate, base, {
+      lane: 'local', sampleContract: contract,
+    })).toEqual({ ok: true, failures: [] });
+    expect(assessColdStartPair('chrome', candidate, base, {
+      lane: 'pr', sampleContract: contract,
+    }).failures).toContain('chrome freshProfile sample set is incomplete');
   });
 
   test('accepts complete device pairs without CI metadata and assesses each browser separately', () => {
@@ -553,6 +589,7 @@ describe('cold-start policy', () => {
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
+        chromeProcesses: 1, chromeWakes: 1,
       },
       results: { chrome: result },
     };
@@ -583,6 +620,7 @@ describe('cold-start policy', () => {
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
+        chromeProcesses: 1, chromeWakes: 1,
       },
       results: { chrome: candidate },
       baseResults: { chrome: base },

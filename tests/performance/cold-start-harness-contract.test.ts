@@ -149,6 +149,8 @@ describe('cold-start browser harness contract', () => {
     expect(text).toContain('deadlineAt = hostNowMs() + coldTimeoutMs');
     expect(text).toContain('exactChromeWorkerVersion(');
     expect(text).toContain("{ runningStatus: 'running' }");
+    expect(text).toContain('findChromeWorker(port, backgroundEntry, current.targetId)');
+    expect(text).not.toContain('Chrome service worker did not terminate');
     expect(text).not.toContain("row.scriptURL.endsWith(backgroundEntry)");
     expect(text).not.toContain("worker.send('Runtime.runIfWaitingForDebugger'");
     expect(text).toContain("location.href === 'about:blank'");
