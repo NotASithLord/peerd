@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  readBoundedResponseBytes, ResponseTooLargeError,
-} from '../../extension/offscreen/bounded-response.js';
+  readBoundedResponseBytes, readBoundedResponseText, ResponseTooLargeError,
+} from '../../extension/shared/abort.js';
 
 const response = (chunks: Uint8Array[], declared: string | null = null) => {
   let index = 0;
@@ -22,7 +22,7 @@ const response = (chunks: Uint8Array[], declared: string | null = null) => {
   };
 };
 
-describe('bounded offscreen response reader', () => {
+describe('bounded response reader', () => {
   test('assembles streaming chunks within the limit', async () => {
     const source = response([new Uint8Array([1, 2]), new Uint8Array([3])]);
     expect(await readBoundedResponseBytes(source, 3)).toEqual(new Uint8Array([1, 2, 3]));
@@ -104,5 +104,48 @@ describe('bounded offscreen response reader', () => {
     expect(rejected).toBe(true);
     expect(cancelObserved).toBe(true);
     await expect(pending).rejects.toMatchObject({ name: 'AbortError', message: 'stopped now' });
+  });
+
+  test('retains the exact text prefix and cancels once truncation is proven', async () => {
+    const encoder = new TextEncoder();
+    const source = response([encoder.encode('abc'), encoder.encode('def')]);
+    expect(await readBoundedResponseText(source, 5)).toEqual({
+      text: 'abcde', truncated: true,
+    });
+    expect(source.cancelled()).toBe(true);
+  });
+
+  test('does not mark or cancel text whose decoded length exactly equals the cap', async () => {
+    const source = response([new TextEncoder().encode('abcde')]);
+    expect(await readBoundedResponseText(source, 5)).toEqual({
+      text: 'abcde', truncated: false,
+    });
+    expect(source.cancelled()).toBe(false);
+  });
+
+  test('decodes split UTF-8 exactly like Response.text before slicing', async () => {
+    const encoded = new TextEncoder().encode('aé😀z');
+    const source = response([
+      encoded.slice(0, 2), encoded.slice(2, 4), encoded.slice(4),
+    ]);
+    expect(await readBoundedResponseText(source, 4)).toEqual({
+      text: 'aé😀', truncated: true,
+    });
+  });
+
+  test('aborts a pending text read immediately and cancels its reader', async () => {
+    const controller = new AbortController();
+    let cancelled = false;
+    const pending = readBoundedResponseText({
+      headers: { get: () => null },
+      body: { getReader: () => ({
+        read: () => new Promise(() => {}),
+        cancel: () => { cancelled = true; },
+        releaseLock: () => {},
+      }) },
+    }, 10, { signal: controller.signal });
+    controller.abort(new DOMException('stopped text', 'AbortError'));
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', message: 'stopped text' });
+    expect(cancelled).toBe(true);
   });
 });

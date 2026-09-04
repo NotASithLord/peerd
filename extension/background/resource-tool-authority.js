@@ -11,6 +11,7 @@ import { ALLOWED_METHODS, needsWebWriteConfirm } from '/peerd-engine/authority.j
 import { finalWebRequestConfirmation } from '/shared/web-request-confirmation.js';
 import { normalizeApiOrigin } from '/shared/api-origin.js';
 import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
+import { readBoundedResponseText } from '/shared/abort.js';
 
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_WEB_TEXT_CHARS = 2_000_000;
@@ -203,9 +204,9 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
                 };
           }
         }
-        const responseText = await response.text();
-        const bodyTruncated = responseText.length > MAX_WEB_TEXT_CHARS;
-        const body = bodyTruncated ? responseText.slice(0, MAX_WEB_TEXT_CHARS) : responseText;
+        const { text: body, truncated: bodyTruncated } = await readBoundedResponseText(
+          response, MAX_WEB_TEXT_CHARS, { signal: controller.signal },
+        );
         /** @type {Record<string,string>} */
         const responseHeaders = {};
         response.headers.forEach((/** @type {string} */ value, /** @type {string} */ name) => {

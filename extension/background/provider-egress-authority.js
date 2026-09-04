@@ -9,6 +9,9 @@ import {
   providerEgressPolicy,
   resolveOllamaEgressUrl,
 } from './provider-egress-manifest.js';
+import {
+  cancelBestEffort, readBoundedResponseBytes, ResponseTooLargeError,
+} from '/shared/abort.js';
 
 const ALLOWED_RESPONSE_HEADERS = Object.freeze([
   'content-type', 'retry-after', 'anthropic-ratelimit-input-tokens-reset',
@@ -123,16 +126,6 @@ export const createProviderEgressAuthority = ({
   const pendingByOwner = new Map();
   /** @type {WeakSet<object>} */
   const retiredOwners = new WeakSet();
-  const cancelReader = (/** @type {ReadableStreamDefaultReader<Uint8Array>|null|undefined} */ reader,
-    /** @type {unknown} */ reason = undefined) => {
-    try { void Promise.resolve(reader?.cancel(reason)).catch(() => {}); }
-    catch { /* already detached */ }
-  };
-  const cancelResponse = (/** @type {Response|undefined} */ response,
-    /** @type {unknown} */ reason = undefined) => {
-    try { void Promise.resolve(response?.body?.cancel(reason)).catch(() => {}); }
-    catch { /* already locked or detached */ }
-  };
   const closeStream = (/** @type {string} */ streamId) => {
     const entry = streams.get(streamId);
     if (!entry) return;
@@ -142,7 +135,7 @@ export const createProviderEgressAuthority = ({
     // why: authority retirement is the map/abort transition above. A broken
     // transport must not keep owner cleanup (and therefore turn settlement)
     // pending forever while its reader ignores cancellation.
-    cancelReader(entry.reader, 'model-egress-owner-retired');
+    cancelBestEffort(entry.reader, 'model-egress-owner-retired');
   };
   const urlFor = (/** @type {any} */ policy, /** @type {'inference'|'inventory'|'context'} */ kind,
     /** @type {string} */ providerId, /** @type {string|null} */ modelId = null) => {
@@ -258,14 +251,14 @@ export const createProviderEgressAuthority = ({
     }
     clearTimeout(connectTimer);
     if (!ownerOperationLive(operation)) {
-      cancelResponse(response, 'model-egress-owner-retired');
+      cancelBestEffort(response.body, 'model-egress-owner-retired');
       releaseOwnerOperation(operation);
       return ownerOperationFailure(operation);
     }
     const streamId = newId();
     if (streams.has(streamId)) {
       abort.abort('model-egress-stream-collision');
-      cancelResponse(response, 'model-egress-stream-collision');
+      cancelBestEffort(response.body, 'model-egress-stream-collision');
       releaseOwnerOperation(operation);
       return knownFailure('model-egress-stream-collision');
     }
@@ -472,40 +465,24 @@ export const createProviderEgressAuthority = ({
       return aborted ? knownFailure('model-egress-aborted') : unknownFailure('model-egress-probe-failed');
     }
     if (!ownerOperationLive(operation)) {
-      cancelResponse(response, 'model-egress-owner-retired');
+      cancelBestEffort(response.body, 'model-egress-owner-retired');
       releaseOwnerOperation(operation);
       return knownFailure('model-egress-aborted');
     }
     const limit = Math.min(policy.responseBytes, 4 * 1024 * 1024);
-    const reader = response.body?.getReader();
-    /** @type {Uint8Array[]} */ const chunks = [];
-    let size = 0;
+    let bytes;
     try {
-      while (reader) {
-        const next = await reader.read();
-        if (!ownerOperationLive(operation)) {
-          cancelReader(reader, 'model-egress-owner-retired');
-          releaseOwnerOperation(operation);
-          return knownFailure('model-egress-aborted');
-        }
-        if (next.done) break;
-        size += next.value.byteLength;
-        if (size > limit) {
-          cancelReader(reader, 'model-egress-probe-response-too-large');
-          releaseOwnerOperation(operation);
-          return knownFailure('model-egress-probe-response-too-large');
-        }
-        chunks.push(next.value);
-      }
-    } catch {
+      bytes = await readBoundedResponseBytes(response, limit, {
+        signal: operation.abort.signal,
+      });
+    } catch (cause) {
       const aborted = !ownerOperationLive(operation);
       releaseOwnerOperation(operation);
       return aborted ? knownFailure('model-egress-aborted')
+        : cause instanceof ResponseTooLargeError
+          ? knownFailure('model-egress-probe-response-too-large')
         : unknownFailure('model-egress-probe-read-failed');
     }
-    const bytes = new Uint8Array(size);
-    let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     releaseOwnerOperation(operation);
     return {
       ok: true, outcomeKnown: true,

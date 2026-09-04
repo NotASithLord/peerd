@@ -4,6 +4,8 @@
 // SW-owned session/actor context are closed over, so the controller cannot
 // select another VM, URL, file, timeout, or destructive target after admission.
 
+import { readBoundedResponseBytes, ResponseTooLargeError } from '/shared/abort.js';
+
 const mismatch = () => Object.assign(new Error('VM authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
@@ -78,28 +80,28 @@ export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal,
         throw mismatch();
       }
       let response;
-      let buffer;
+      let bytes;
       try {
         response = await ctx.webFetch(url);
         if (!response.ok) throw Object.assign(new Error(`fetch_failed: HTTP ${response.status}`), {
           outcomeKnown: true, expectedFetchFailure: true,
         });
-        buffer = await response.arrayBuffer();
+        bytes = await readBoundedResponseBytes(response, maxBytes, { signal });
       }
       catch (cause) {
-        const detail = /** @type {{name?:string,message?:string,expectedFetchFailure?:boolean}} */ (cause);
+        const detail = /** @type {{name?:string,message?:string,bytes?:number,expectedFetchFailure?:boolean}} */ (cause);
         if (detail?.expectedFetchFailure) throw cause;
+        if (cause instanceof ResponseTooLargeError) throw Object.assign(
+          new Error(`payload_too_large: ${detail.bytes}B > ${maxBytes}B`),
+          { outcomeKnown: true },
+        );
         throw Object.assign(new Error(`fetch_threw: ${detail?.name ?? 'Error'}: ${detail?.message ?? String(cause)}`), {
           outcomeKnown: true,
         });
       }
-      if (buffer.byteLength > maxBytes) throw Object.assign(
-        new Error(`payload_too_large: ${buffer.byteLength}B > ${maxBytes}B`),
-        { outcomeKnown: true },
-      );
       try {
         requireLive();
-        await ctx.vm.writeFile(path, new Uint8Array(buffer), {
+        await ctx.vm.writeFile(path, bytes, {
           sessionId, ...(boundVmId ? { vmId: boundVmId } : {}),
         });
       }
@@ -108,7 +110,7 @@ export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal,
         throw new Error(`write_threw: ${detail?.name ?? 'Error'}: ${detail?.message ?? String(cause)}`);
       }
       return {
-        bytes: buffer.byteLength, status: response.status,
+        bytes: bytes.byteLength, status: response.status,
         contentType: response.headers.get('content-type') ?? '',
       };
     },
