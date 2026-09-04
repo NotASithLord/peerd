@@ -171,7 +171,7 @@ const validateOrdering = (failures, label, group, order) => {
   });
 };
 
-const completenessFailures = (browser, result, lane) => {
+const completenessFailures = (browser, result, lane, sampleContract) => {
   const failures = [];
   if (!result || result.unavailable) return [`${browser} is unavailable`];
   if (result.browser !== browser) failures.push(`${browser} result identity is invalid`);
@@ -237,7 +237,8 @@ const completenessFailures = (browser, result, lane) => {
   if (typeof result.measurement?.sourceDirty !== 'boolean') failures.push(`${browser} source dirty flag is missing`);
   if (!validSha256(result.measurement?.hostSha256)) failures.push(`${browser} host identity SHA-256 is missing`);
   if (!['candidate', 'base'].includes(result.measurement?.role)) failures.push(`${browser} measurement role is invalid`);
-  const contract = COLD_START_LANES[lane]?.[browser];
+  const contract = lane === 'local' && sampleContract
+    ? sampleContract : COLD_START_LANES[lane]?.[browser];
   if (!contract) return [...failures, `no sample contract for ${lane}/${browser}`];
   const phases = COLD_START_PHASES[browser];
   for (const [groupName, phase] of Object.entries(phases)) {
@@ -255,6 +256,15 @@ const completenessFailures = (browser, result, lane) => {
     result.forcedColdWake.rawSamples.forEach((sample, index) => {
       if (sample?.stoppedRunningStatus !== 'stopped') {
         failures.push(`chrome forcedColdWake sample ${index + 1} lacks authoritative stop state`);
+      }
+      if (typeof sample?.stoppedVersionId !== 'string' || sample.stoppedVersionId.length < 1
+          || sample?.restartedVersionId !== sample.stoppedVersionId) {
+        failures.push(`chrome forcedColdWake sample ${index + 1} lacks same-version restart proof`);
+      }
+      if (typeof sample?.retiredTargetId !== 'string' || sample.retiredTargetId.length < 1
+          || typeof sample?.replacementTargetId !== 'string' || sample.replacementTargetId.length < 1
+          || sample.replacementTargetId === sample.retiredTargetId) {
+        failures.push(`chrome forcedColdWake sample ${index + 1} lacks replacement-target proof`);
       }
     });
   }
@@ -285,7 +295,7 @@ export const assessColdStartResult = (browser, result, options = {}) => {
   if (!COLD_START_LANES[lane]) throw new Error(`unsupported cold-start lane: ${lane}`);
   const failures = [
     ...graphFailures(browser, result, graphPolicy),
-    ...completenessFailures(browser, result, lane),
+    ...completenessFailures(browser, result, lane, options.sampleContract),
     ...(requireTimingTargets ? timingFailures(browser, result) : []),
   ];
   return Object.freeze({ ok: failures.length === 0, failures: Object.freeze([...new Set(failures)]) });
@@ -296,7 +306,8 @@ export const assessColdStartPair = (browser, candidate, base, options = {}) => {
   const failures = [
     ...assessColdStartResult(browser, candidate, { ...options, lane }).failures,
     ...graphFailures(browser, base, 'integrity').map((failure) => `base: ${failure}`),
-    ...completenessFailures(browser, base, lane).map((failure) => `base: ${failure}`),
+    ...completenessFailures(browser, base, lane, options.sampleContract)
+      .map((failure) => `base: ${failure}`),
   ];
   if (candidate?.measurement?.role !== 'candidate') failures.push('candidate measurement role is invalid');
   if (base?.measurement?.role !== 'base') failures.push('base measurement role is invalid');
@@ -494,6 +505,15 @@ export const assessColdStartReport = (report, {
     : ['chrome', 'firefox'].includes(report?.options?.browser)
       ? [report.options.browser]
       : [];
+  const reportSampleContract = (browser) => report?.lane === 'local'
+    ? browser === 'chrome'
+      ? { fresh: report?.options?.chromeProcesses, wakes: report?.options?.chromeWakes }
+      : {
+          fresh: report?.options?.firefoxProcesses,
+          wakes: report?.options?.firefoxWakes,
+          idleMs: report?.options?.firefoxIdleMs,
+        }
+    : undefined;
   if (selectedBrowsers.length === 0) failures.push('report browser selection is invalid');
   for (const browser of selectedBrowsers) {
     const result = report?.results?.[browser];
@@ -529,6 +549,7 @@ export const assessColdStartReport = (report, {
       requireTimingTargets: requiredReport
         ? profile.requireTimingTargets
         : report?.options?.requireTimingTargets,
+      sampleContract: reportSampleContract(browser),
     }).failures) failures.push(`${browser}: ${failure}`);
 
     if (comparisonMode === 'interleaved-candidate-base') {
@@ -543,7 +564,8 @@ export const assessColdStartReport = (report, {
       if (base?.measurement?.hostSha256 !== report?.hostSha256) {
         failures.push(`${browser}: base measurement is not bound to the report host`);
       }
-      const requiredSamples = COLD_START_LANES[report?.lane]?.[browser]?.fresh;
+      const requiredSamples = reportSampleContract(browser)?.fresh
+        ?? COLD_START_LANES[report?.lane]?.[browser]?.fresh;
       const schedule = report?.comparison?.scheduleByBrowser?.[browser];
       if (!Array.isArray(schedule) || schedule.length !== requiredSamples) {
         failures.push(`${browser}: interleaved schedule cardinality is invalid`);
@@ -564,6 +586,7 @@ export const assessColdStartReport = (report, {
         requireTimingTargets: requiredReport
           ? profile.requireTimingTargets
           : report?.options?.requireTimingTargets,
+        sampleContract: reportSampleContract(browser),
       });
       if (JSON.stringify(report?.pairAssessments?.[browser]) !== JSON.stringify(pairAssessment)) {
         failures.push(`${browser}: recorded pair assessment does not match recomputed policy`);
