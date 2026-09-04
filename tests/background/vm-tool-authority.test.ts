@@ -114,6 +114,67 @@ describe('exact WebVM authority', () => {
     expect(result.content).toContain('"bytes": 7');
   });
 
+  test('rejects an oversized declared import before reading or writing', async () => {
+    let cancelled = false;
+    let written = false;
+    const authority = createVmToolAuthority({
+      binding: {
+        operation: 'turn.vm.import-file',
+        args: { url: 'https://example.com/large.bin', path: '/tmp/large.bin' },
+      },
+      ctx: context({
+        webFetch: async () => ({
+          ok: true, status: 200,
+          headers: new Headers({
+            'content-type': 'application/octet-stream',
+            'content-length': String(50 * 1024 * 1024 + 1),
+          }),
+          body: { cancel: () => { cancelled = true; } },
+        }),
+        vm: { writeFile: async () => { written = true; } },
+      }),
+    });
+    await expect(authority.importFile(
+      'https://example.com/large.bin', '/tmp/large.bin', 50 * 1024 * 1024,
+    )).rejects.toThrow(`payload_too_large: ${50 * 1024 * 1024 + 1}B > ${50 * 1024 * 1024}B`);
+    expect(cancelled).toBe(true);
+    expect(written).toBe(false);
+  });
+
+  test('rejects an oversized chunked import and cancels without writing', async () => {
+    const limit = 50 * 1024 * 1024;
+    let cancelled = false;
+    let written = false;
+    let sent = false;
+    const authority = createVmToolAuthority({
+      binding: {
+        operation: 'turn.vm.import-file',
+        args: { url: 'https://example.com/chunked.bin', path: '/tmp/chunked.bin' },
+      },
+      ctx: context({
+        webFetch: async () => ({
+          ok: true, status: 200,
+          headers: new Headers({ 'content-type': 'application/octet-stream' }),
+          body: { getReader: () => ({
+            read: async () => {
+              if (sent) return { done: true, value: undefined };
+              sent = true;
+              return { done: false, value: new Uint8Array(limit + 1) };
+            },
+            cancel: () => { cancelled = true; },
+            releaseLock: () => {},
+          }) },
+        }),
+        vm: { writeFile: async () => { written = true; } },
+      }),
+    });
+    await expect(authority.importFile(
+      'https://example.com/chunked.bin', '/tmp/chunked.bin', limit,
+    )).rejects.toThrow(`payload_too_large: ${limit + 1}B > ${limit}B`);
+    expect(cancelled).toBe(true);
+    expect(written).toBe(false);
+  });
+
   test('rechecks pin state immediately before destructive deletion', async () => {
     let reads = 0;
     let deleted = false;

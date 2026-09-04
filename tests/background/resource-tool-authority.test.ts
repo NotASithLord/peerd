@@ -1,11 +1,27 @@
 import { describe, expect, test } from 'bun:test';
 import { createResourceToolAuthority } from '../../extension/background/resource-tool-authority.js';
 
-const response = (url: string) => ({
-  status: 200, url,
-  headers: new Headers({ 'content-type': 'text/plain' }),
-  text: async () => 'ok',
-});
+const response = (
+  url: string, text = 'ok',
+  hooks: { read?: () => void; cancel?: () => void } = {},
+) => {
+  const bytes = new TextEncoder().encode(text);
+  let sent = false;
+  return {
+    status: 200, url,
+    headers: new Headers({ 'content-type': 'text/plain' }),
+    body: { getReader: () => ({
+      read: async () => {
+        hooks.read?.();
+        if (sent) return { done: true, value: undefined };
+        sent = true;
+        return { done: false, value: bytes };
+      },
+      cancel: () => { hooks.cancel?.(); },
+      releaseLock: () => {},
+    }) },
+  };
+};
 
 const authorityFor = (args: any, overrides: Record<string, any> = {}, shared: any = {}) =>
   createResourceToolAuthority({
@@ -64,15 +80,17 @@ describe('exact API actor web-resource scope', () => {
 
   test('marks and retains only the bounded prefix of an oversized response', async () => {
     const args = { url: 'https://api.example.com/v1/large', method: 'GET', headers: {} };
+    let cancelled = false;
     const result = await authorityFor(args, {
-      webFetch: async () => ({
-        ...response(args.url),
-        text: async () => `${'x'.repeat(2_000_000)}tail`,
-      }),
+      webFetch: async () => response(
+        args.url, `${'x'.repeat(2_000_000)}tail`,
+        { cancel: () => { cancelled = true; } },
+      ),
     }).requestWebText(args);
     expect(result).toMatchObject({ ok: true, bodyTruncated: true });
     expect(result.body).toHaveLength(2_000_000);
-    expect(result.body.endsWith('tail')).toBe(false);
+    expect(result.body?.endsWith('tail')).toBe(false);
+    expect(cancelled).toBe(true);
   });
 
   test('refuses cross-origin, suffix, userinfo, and port substitutions before fetch', async () => {
@@ -169,14 +187,43 @@ describe('exact API actor web-resource scope', () => {
     const args = { url: 'https://api.example.com/v1', method: 'GET', headers: {} };
     const result = await authorityFor(args, {
       webFetch: async () => ({
-        ...response('https://evil.test/redirected'),
-        text: async () => { bodyRead = true; return 'secret'; },
+        ...response('https://evil.test/redirected', 'secret', {
+          read: () => { bodyRead = true; },
+        }),
       }),
     }).requestWebText(args);
     expect(result).toMatchObject({
       ok: false, reason: 'api_origin_escape', performed: true, outcomeKnown: true,
     });
     expect(bodyRead).toBe(false);
+  });
+
+  test('Stop aborts a pending streamed body and cancels its reader', async () => {
+    const args = { url: 'https://api.example.com/v1/endless', method: 'GET', headers: {} };
+    const controller = new AbortController();
+    let cancelled = false;
+    const authority = createResourceToolAuthority({
+      binding: { operation: 'turn.resource.request-web-text', args },
+      signal: controller.signal,
+      ctx: {
+        session: { sessionId: 'api-actor' }, backing: 'api',
+        actorInstanceId: 'https://api.example.com',
+        webFetch: async () => ({
+          status: 200, url: args.url,
+          headers: new Headers({ 'content-type': 'text/plain' }),
+          body: { getReader: () => ({
+            read: () => new Promise(() => {}),
+            cancel: () => { cancelled = true; },
+            releaseLock: () => {},
+          }) },
+        }),
+      },
+    });
+    const pending = authority.requestWebText(args);
+    await Promise.resolve();
+    controller.abort(new DOMException('stopped', 'AbortError'));
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(cancelled).toBe(true);
   });
 });
 

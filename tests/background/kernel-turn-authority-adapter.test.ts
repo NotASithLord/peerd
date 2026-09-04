@@ -1636,6 +1636,85 @@ describe('kernel turn authority adapter', () => {
     expect(pushStarted).toBe(false);
   });
 
+  test.serial('site-client fetch keeps the exact bounded text prefix and cancels the body', async () => {
+    const previousFetch = globalThis.fetch;
+    const origin = 'https://api.example.test';
+    let cancelled = false;
+    try {
+      const bytes = new TextEncoder().encode(`${'x'.repeat(200_000)}tail`);
+      let sent = false;
+      globalThis.fetch = (async () => ({
+        status: 200, statusText: 'OK', type: 'basic', url: `${origin}/items`,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        body: { getReader: () => ({
+          read: async () => {
+            if (sent) return { done: true, value: undefined };
+            sent = true;
+            return { done: false, value: bytes };
+          },
+          cancel: () => { cancelled = true; },
+          releaseLock: () => {},
+        }) },
+      })) as any;
+      const h = await harness(undefined, { durableApiOrigin: origin });
+      const owner = h.durableApiActor;
+      if (!owner) throw new Error('API actor fixture was not created');
+      const runId = h.scriptRuns.mintRunId(owner.sessionId);
+      h.scriptRuns.register(runId, undefined, owner.sessionId, { site: true });
+      const result = await h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: owner.sessionId, siteOrigin: origin,
+        pathOrUrl: '/items', method: 'GET', headers: {}, runId,
+      }, {});
+      h.scriptRuns.release(runId);
+      expect(result).toMatchObject({
+        ok: true,
+        value: { status: 200, body: 'x'.repeat(200_000) },
+      });
+      expect(cancelled).toBe(true);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  test.serial('Stop interrupts an endless site-client response and cancels its reader', async () => {
+    const previousFetch = globalThis.fetch;
+    const origin = 'https://api.example.test';
+    let cancelled = false;
+    let reading!: () => void;
+    const readStarted = new Promise<void>((resolve) => { reading = resolve; });
+    try {
+      globalThis.fetch = (async () => ({
+        status: 200, statusText: 'OK', type: 'basic', url: `${origin}/endless`,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        body: { getReader: () => ({
+          read: () => {
+            reading();
+            return new Promise(() => {});
+          },
+          cancel: () => { cancelled = true; },
+          releaseLock: () => {},
+        }) },
+      })) as any;
+      const h = await harness(undefined, { durableApiOrigin: origin });
+      const owner = h.durableApiActor;
+      if (!owner) throw new Error('API actor fixture was not created');
+      const outer = new AbortController();
+      const runId = h.scriptRuns.mintRunId(owner.sessionId);
+      h.scriptRuns.register(runId, outer.signal, owner.sessionId, { site: true });
+      const pending = h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: owner.sessionId, siteOrigin: origin,
+        pathOrUrl: '/endless', method: 'GET', headers: {}, runId,
+      }, {});
+      await readStarted;
+      outer.abort();
+      await expect(pending).resolves.toMatchObject({ ok: false, outcomeKnown: true });
+      expect(cancelled).toBe(true);
+      h.scriptRuns.release(runId);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
   test('a lost a2a mutation response remains unknown through the SW relay', async () => {
     const h = await harness(undefined, {
       dweb: true,

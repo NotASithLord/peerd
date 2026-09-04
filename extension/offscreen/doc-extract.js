@@ -28,7 +28,9 @@ import {
   sniffDocFormat, DocFetchError,
 } from '/peerd-runtime/offscreen.js';
 import { extractPdfBytes } from './pdf-extract.js';
-import { readBoundedResponseBytes, ResponseTooLargeError } from './bounded-response.js';
+import {
+  readBoundedResponseBytes, ResponseTooLargeError,
+} from '/shared/abort.js';
 import {
   convertDocumentInWorker, MAX_DOCUMENT_CONVERSION_BYTES,
 } from './document-conversion-host.js';

@@ -112,6 +112,7 @@ import {
   projectSemanticHookManifest,
   UNAVAILABLE_HOOK_RECORDS,
 } from '/shared/semantic-hook-manifest.js';
+import { readBoundedResponseText } from '/shared/abort.js';
 import {
   bindCurrentChat, DEFAULT_CHAT_PERMISSION,
 } from '/shared/current-session-binding.js';
@@ -3205,7 +3206,9 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
             ...(signal ? { signal } : {}),
           });
           const contentType = response.headers.get('content-type') ?? '';
-          const text = (await response.text()).slice(0, 200_000);
+          const { text } = await readBoundedResponseText(
+            response, 200_000, { signal: /** @type {AbortSignal|undefined} */ (signal) },
+          );
           let json = null;
           if (/(json|graphql)/i.test(contentType)) {
             try { json = JSON.parse(text); } catch { json = null; }
