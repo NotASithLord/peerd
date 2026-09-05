@@ -69,6 +69,12 @@ export const createKernelDemandPlane = (deps) => {
     settingsStore: deps.settingsStore,
     localModelAuthority,
   });
+  const skillPersistence = createKernelSkillPersistence({
+    idbFactory: deps.idbFactory,
+    canWrite: () => deps.canWrite('skills'),
+    audit: deps.auditLog.append,
+    pushState: deps.pushState,
+  });
   const withRepositoryHost = async (/** @type {(lease:any)=>Promise<any>} */ operation) => {
     let entered = false;
     const result = await deps.featureHost.runtime.runWithLease('controller', async (
@@ -208,6 +214,7 @@ export const createKernelDemandPlane = (deps) => {
     if (controllerOwner) return controllerOwner;
     controllerOwner = createKernelSemanticRuntime({
       ...deps,
+      skillPersistence,
       authorityScheduler,
       ready: deps.vaultReady,
       appCatalog: support.appCatalog,
@@ -335,11 +342,6 @@ export const createKernelDemandPlane = (deps) => {
       pod: deps.podTabUrl,
       options: deps.optionsUrl,
     },
-  });
-  const skillPersistence = createKernelSkillPersistence({
-    canWrite: () => deps.canWrite('skills'),
-    audit: deps.auditLog.append,
-    pushState: deps.pushState,
   });
   const memoryInitProbe = createKernelMemoryInitProbe({
     tabs: deps.browser.tabs,

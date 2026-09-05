@@ -7,6 +7,10 @@ import {
   REPOSITORY_CHANNEL_RESULT,
   REPOSITORY_KERNEL_FETCH,
   REPOSITORY_KERNEL_FETCH_RESULT,
+  REPOSITORY_MAX_GIT_HTTP_BODY_BYTES,
+  REPOSITORY_MAX_GIT_HTTP_HEADER_BYTES,
+  REPOSITORY_MAX_GIT_HTTP_HEADER_VALUE_BYTES,
+  REPOSITORY_MAX_GIT_HTTP_HEADERS,
   REPOSITORY_MAX_KERNEL_FETCHES,
   decodeRepositoryRpcValue,
   encodeRepositoryRpcValue,
@@ -34,9 +38,6 @@ import {
 } from '/peerd-engine/authority.js';
 export { decodeRepositoryRpcValue, encodeRepositoryRpcValue };
 
-const MAX_GIT_HTTP_BODY = 32 * 1024 * 1024;
-const MAX_GIT_HTTP_HEADERS = 64;
-const MAX_GIT_HTTP_HEADER_BYTES = 64 * 1024;
 /** @typedef {Error & {code?:string,outcomeKnown?:boolean,repositoryHostDispatched?:boolean}} RepositoryError */
 /** @returns {RepositoryError} */
 const repositoryError = (/** @type {string} */ message, /** @type {string} */ code,
@@ -60,7 +61,7 @@ const boundedResponseBody = async (/** @type {Response} */ response,
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_GIT_HTTP_BODY) {
+      if (total > REPOSITORY_MAX_GIT_HTTP_BODY_BYTES) {
         await reader.cancel('Git response exceeds the kernel transfer ceiling').catch(() => {});
         throw new Error('Git response exceeds the kernel transfer ceiling');
       }
@@ -94,21 +95,29 @@ export const makeRepositoryKernelFetch = ({
   const url = String(message?.url ?? '');
   if (!gitRemoteOwnsRequest(remote, url)) throw new Error('Git request escaped its bound repository');
   const encodedBody = message?.bodyB64 == null ? null : String(message.bodyB64);
-  if (encodedBody && encodedBody.length > Math.ceil(MAX_GIT_HTTP_BODY * 4 / 3) + 4) {
+  if (encodedBody
+      && encodedBody.length > Math.ceil(REPOSITORY_MAX_GIT_HTTP_BODY_BYTES * 4 / 3) + 4) {
     throw new Error('Git request exceeds the kernel transfer ceiling');
   }
   const body = encodedBody == null ? undefined : base64ToBytes(encodedBody);
-  if (body && body.byteLength > MAX_GIT_HTTP_BODY) throw new Error('Git request exceeds the kernel transfer ceiling');
+  if (body && body.byteLength > REPOSITORY_MAX_GIT_HTTP_BODY_BYTES) {
+    throw new Error('Git request exceeds the kernel transfer ceiling');
+  }
   /** @type {Record<string,string>} */ const headers = {};
   const headerEntries = Object.entries(message?.headers ?? {});
-  if (headerEntries.length > 64) throw new Error('too many Git request headers');
+  if (headerEntries.length > REPOSITORY_MAX_GIT_HTTP_HEADERS) {
+    throw new Error('too many Git request headers');
+  }
   let headerBytes = 0;
   for (const [name, value] of headerEntries) {
     const lower = name.toLowerCase();
     headerBytes += name.length + (typeof value === 'string' ? value.length : 0);
-    if (headerBytes > 64 * 1024) throw new Error('Git request headers exceed the transfer ceiling');
+    if (headerBytes > REPOSITORY_MAX_GIT_HTTP_HEADER_BYTES) {
+      throw new Error('Git request headers exceed the transfer ceiling');
+    }
     if (!['authorization', 'cookie', 'proxy-authorization'].includes(lower)
-        && typeof value === 'string' && value.length <= 8_192) headers[name] = value;
+        && typeof value === 'string'
+        && value.length <= REPOSITORY_MAX_GIT_HTTP_HEADER_VALUE_BYTES) headers[name] = value;
   }
   let token = null;
   try { token = await getSecret(`git:${remote.host}`); } catch { /* anonymous */ }
@@ -129,8 +138,8 @@ export const makeRepositoryKernelFetch = ({
   for (const [name, value] of response.headers.entries()) {
     responseHeaderCount += 1;
     responseHeaderBytes += name.length + value.length;
-    if (responseHeaderCount > MAX_GIT_HTTP_HEADERS
-        || responseHeaderBytes > MAX_GIT_HTTP_HEADER_BYTES) {
+    if (responseHeaderCount > REPOSITORY_MAX_GIT_HTTP_HEADERS
+        || responseHeaderBytes > REPOSITORY_MAX_GIT_HTTP_HEADER_BYTES) {
       throw new Error('Git response headers exceed the transfer ceiling');
     }
     responseHeaders[name] = value;

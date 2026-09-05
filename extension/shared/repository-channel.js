@@ -11,6 +11,10 @@ export const REPOSITORY_CHANNEL_CANCELLED = 'repository/cancelled';
 export const REPOSITORY_WORKER_BOOTSTRAP = 'repository/worker-bootstrap';
 export const REPOSITORY_WORKER_SETTLED = 'repository/worker-settled';
 export const REPOSITORY_MAX_KERNEL_FETCHES = 8;
+export const REPOSITORY_MAX_GIT_HTTP_BODY_BYTES = 32 * 1024 * 1024;
+export const REPOSITORY_MAX_GIT_HTTP_HEADERS = 64;
+export const REPOSITORY_MAX_GIT_HTTP_HEADER_BYTES = 64 * 1024;
+export const REPOSITORY_MAX_GIT_HTTP_HEADER_VALUE_BYTES = 8 * 1024;
 export const GIT_SECRET_PREFIX = 'git:';
 const GIT_HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
 

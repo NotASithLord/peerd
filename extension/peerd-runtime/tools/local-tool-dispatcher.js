@@ -1,5 +1,5 @@
 // @ts-check
-// Controller/test-only adapter around the fixed authority lifecycle.
+// Sealed semantic-realm adapter around the fixed authority lifecycle.
 
 import {
   executePreparedToolCall,

@@ -11,6 +11,7 @@ import {
   REPOSITORY_CHANNEL_RESULT,
   REPOSITORY_KERNEL_FETCH,
   REPOSITORY_KERNEL_FETCH_RESULT,
+  REPOSITORY_MAX_GIT_HTTP_BODY_BYTES,
   REPOSITORY_WORKER_BOOTSTRAP,
   REPOSITORY_WORKER_SETTLED,
   decodeRepositoryRpcValue,
@@ -133,7 +134,9 @@ export const acceptRepositoryOffer = (event, {
       : init.body instanceof Uint8Array ? init.body
         : init.body instanceof ArrayBuffer ? new Uint8Array(init.body)
           : new Uint8Array(await new Response(init.body).arrayBuffer());
-    if (body && body.byteLength > 32 * 1024 * 1024) throw new Error('Git request exceeds the transfer ceiling');
+    if (body && body.byteLength > REPOSITORY_MAX_GIT_HTTP_BODY_BYTES) {
+      throw new Error('Git request exceeds the transfer ceiling');
+    }
     const fetchId = `${offer.channelId}:fetch:${++fetchSequence}`;
     const result = await new Promise((resolve, reject) => {
       fetches.set(fetchId, { resolve, reject });

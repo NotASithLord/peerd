@@ -12,8 +12,6 @@ const row = (/** @type {string} */ route,
 });
 
 export const SEMANTIC_HOST_ROUTE_MANIFEST = Object.freeze([
-  row('actors/count'),
-  row('actors/overview'),
   row('app/get-meta'),
   row('apps/favorite'),
   row('apps/open'),

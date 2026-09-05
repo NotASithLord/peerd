@@ -4,6 +4,7 @@ import {
   createGitHttpClient,
 } from '../../extension/peerd-engine/repository/remote.js';
 import { createRepositoryService } from '../../extension/peerd-engine/repository/repository-service.js';
+import { REPOSITORY_MAX_GIT_HTTP_BODY_BYTES } from '../../extension/shared/repository-channel.js';
 
 describe('browser Git remote boundary', () => {
   test('canonicalizes HTTPS repository URLs and rejects embedded authority', () => {
@@ -34,6 +35,7 @@ describe('browser Git remote boundary', () => {
     let seen: any = null;
     const http = createGitHttpClient({
       remote,
+      maxBodyBytes: REPOSITORY_MAX_GIT_HTTP_BODY_BYTES,
       getSecret: async (name) => name === 'git:github.com' ? 'fine-grained-token' : null,
       webFetch: async (url, init) => {
         seen = { url, init };

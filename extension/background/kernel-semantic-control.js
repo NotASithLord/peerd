@@ -8,6 +8,7 @@ const READS = new Set([
   'actors/count', 'actors/overview', 'contacts/list', 'memory/export',
   'memory/suggestions', 'provider/status', 'skills/list', 'contributor/status',
 ]);
+const KERNEL_ACTOR_ROUTES = Object.freeze(['actors/count', 'actors/overview']);
 
 const CONTRIBUTOR_OPERATIONS = new Set([
   'semantic.contributor.read',
@@ -39,6 +40,7 @@ export const createKernelSemanticControl = ({
   const ownedRoutes = routes ?? [...new Set([
     ...SEMANTIC_HOST_ROUTE_MANIFEST.filter((row) =>
       !row.route.startsWith('contributor/')).map((row) => row.route),
+    ...KERNEL_ACTOR_ROUTES,
     ...Object.keys(directRoutes),
   ])];
   const dispatch = (/** @type {string} */ route, /** @type {any} */ message,

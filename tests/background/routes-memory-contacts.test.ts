@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { makeContactsRoutes } from '../../extension/background/routes/contacts.js';
+import { dispatchContactSemanticRoute } from '../../extension/offscreen/semantic-routes/contacts.js';
 
 describe('contacts routes', () => {
   const deps = (over: any = {}) => ({
@@ -34,36 +35,41 @@ describe('contacts routes', () => {
     expect(received.installedApps).toEqual([{ id: 'app1', dweb: { publisher: 'd2' } }]);
     expect(received.auditEntries).toEqual([{ type: 'dweb_app_installed', details: { publisher: 'd3' } }]);
   });
-  test('set requires a did', async () => {
-    const r = makeContactsRoutes(deps());
-    expect(await r['contacts/set']({})).toEqual({ ok: false, error: 'did-required' });
+  test('sealed contact writes require a did', async () => {
+    expect(await dispatchContactSemanticRoute('contacts/set', {}, {
+      kernelCall: async () => ({ ok: true }),
+    })).toEqual({ ok: false, error: 'did-required' });
   });
-  test('set passes only present fields (omitted left untouched)', async () => {
+  test('sealed contact writes pass only present fields (omitted left untouched)', async () => {
     let received: any;
-    const r = makeContactsRoutes(deps({ contacts: { upsert: async (_d: string, patch: any) => { received = patch; return { ok: 1 }; } } }));
-    await r['contacts/set']({ did: 'd1', name: 'New' });
+    await dispatchContactSemanticRoute('contacts/set', { did: 'd1', name: 'New' }, {
+      kernelCall: async (_operation: string, payload: any) => {
+        received = payload.patch;
+        return { ok: true, value: { did: payload.did, ...payload.patch } };
+      },
+    });
     expect(received).toEqual({ name: 'New' });
   });
-  test('forget unknown contact → contact-not-found', async () => {
-    const r = makeContactsRoutes(deps());
-    expect(await r['contacts/forget']({ did: 'nope' })).toEqual({ ok: false, error: 'contact-not-found' });
+  test('sealed forget maps an unknown contact to contact-not-found', async () => {
+    expect(await dispatchContactSemanticRoute('contacts/forget', { did: 'nope' }, {
+      kernelCall: async () => ({ ok: true, value: false }),
+    })).toEqual({ ok: false, error: 'contact-not-found' });
   });
-  test('post-dispatch contact failures are unknown and never expose storage details', async () => {
+  test('lost sealed contact effects are unknown and never expose storage details', async () => {
     const raw = 'private-idb-transaction-42';
-    const set = makeContactsRoutes(deps({
-      contacts: { upsert: async () => { throw new Error(raw); } },
-    }));
-    const setReply = await set['contacts/set']({ did: 'd1', name: 'A' });
+    const kernelCall = async () => { throw new Error(raw); };
+    const setReply = await dispatchContactSemanticRoute(
+      'contacts/set', { did: 'd1', name: 'A' }, { kernelCall },
+    );
     expect(setReply).toMatchObject({
       ok: false, code: 'contact-set-outcome-unknown', outcomeKnown: false,
       outcomeKind: 'unknown', retryable: false,
     });
     expect(setReply.error).not.toContain(raw);
 
-    const forget = makeContactsRoutes(deps({
-      contacts: { remove: async () => { throw new Error(raw); } },
-    }));
-    const forgetReply = await forget['contacts/forget']({ did: 'd1' });
+    const forgetReply = await dispatchContactSemanticRoute(
+      'contacts/forget', { did: 'd1' }, { kernelCall },
+    );
     expect(forgetReply).toMatchObject({
       ok: false, code: 'contact-forget-outcome-unknown', outcomeKnown: false,
       retryable: false,
