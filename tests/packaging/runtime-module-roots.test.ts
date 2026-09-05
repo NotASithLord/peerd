@@ -55,6 +55,19 @@ describe('fixed runtime module roots', () => {
       .toContain("import('/vendor/tesseract/tesseract.esm.min.js')");
   });
 
+  test('the Notebook linker exposes its fixed Rollup root to packaging', async () => {
+    const file = join(EXTENSION, 'peerd-engine/single-module-linker.js');
+    const source = readFileSync(file, 'utf8');
+    const edges = await fixedRuntimeModuleEdges(source, 'peerd-engine/single-module-linker.js');
+    expect(edges).toContainEqual({
+      kind: 'dynamic-import', specifier: '/vendor/rollup/rollup.browser.js',
+      rootRelative: true,
+    });
+    expect(PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES)
+      .toContain('vendor/rollup/rollup.browser.js');
+    expect(source).not.toContain('import(rollupUrl)');
+  });
+
   test('target selection is mandatory plus Preview and Preview-Chrome additions', () => {
     const storeChrome = packagedLazyModuleEntries(false, false);
     const storeFirefox = packagedLazyModuleEntries(false, false);

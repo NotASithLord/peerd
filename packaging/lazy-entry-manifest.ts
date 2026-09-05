@@ -84,6 +84,7 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   'vendor/pdfjs/pdf.min.mjs',
   'vendor/readability/Readability-readerable.js',
   'vendor/readability/Readability.js',
+  'vendor/rollup/rollup.browser.js',
   'vendor/tesseract/tesseract.esm.min.js',
   'vendor/transformers/transformers.js',
   'vendor/turndown/turndown.browser.es.js',
