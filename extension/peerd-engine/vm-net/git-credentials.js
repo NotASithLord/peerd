@@ -3,7 +3,8 @@
 //
 // Security-critical, so it lives in ONE tested place. A git token is a bearer
 // secret (same class as a model API key): it's stored in the vault, decrypted
-// only in the SW at request time, and NEVER shown to the agent or the VM. This
+// only in the sealed vault Worker, and returned over its private channel to the
+// exact SW egress handler. It is NEVER shown to the agent or the VM. This
 // module owns the three pure decisions around it:
 //   1. naming      — host → vault secret name (`git:<host>`), and back
 //   2. validation  — is this a storable host? a plausible token?

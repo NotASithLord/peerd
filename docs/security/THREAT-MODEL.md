@@ -53,9 +53,10 @@ out of the privileged background heap.
 peerd runs across several browser execution contexts. Trust boundaries fall
 between them.
 
-| Surface | What runs there | Holds the key |
+| Surface | What runs there | Credential access |
 |---|---|---|
-| Privileged background (`background/`) | Authority kernel: vault and credential egress, browser/storage/engine custody, confirmation, audit, replay classification, sessions/lifecycle, finite controller effect handlers, and actor relays. Firefox starts controller and actor Workers from this page without running their reasoning in its privileged heap | Yes. Controller and actor loops run in separate keyless Worker heaps |
+| Privileged background (`background/`) | Authority kernel: vault and credential egress, browser/storage/engine custody, confirmation, audit, replay classification, sessions/lifecycle, finite controller effect handlers, and actor relays. Firefox starts controller and actor Workers from this page without running their reasoning in its privileged heap | Does not retain the live vault key handle. It brokers the bounded session-resume mirror and receives an exact requested plaintext secret only for its bounded egress handler |
+| Sealed vault Worker | Vault cryptography, data-key custody, and plaintext decryption. Chrome hosts it through the offscreen document; Firefox starts it from the extension background page | The only JavaScript realm retaining the live vault key handle; it returns only an explicitly requested secret over its private authority channel |
 | Sealed controller Worker | Orchestrator loop, tool metadata and projection, semantic dispatch and gates, provider/model shaping, and result semantics. Chrome hosts it through the offscreen document; Firefox hosts it from the extension background page | No |
 | Offscreen document (`offscreen/`, Chrome) | A thin host supervisor for the sealed controller and isolated actor Workers, plus headless `script`, voice, and the dweb base network | No. Hosted Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
@@ -133,7 +134,7 @@ malicious separate extension, and physical device access.
 
 | Asset | Where it lives | Primary protection |
 |---|---|---|
-| Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never handed to an actor loop, egress allowlist |
+| Model-provider API key | Encrypted in the vault; decrypted only in the sealed vault Worker. An explicitly requested secret crosses its private channel only to the service worker's exact egress handler | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never handed to an actor loop, egress allowlist |
 | Origin-bound API keys (per integration) | Vault, injected at the egress boundary only | `origin-credentials.js`. Sent only to the exact owned https origin |
 | Proof-of-possession key (DPoP, per origin — opt-in per integration) | A non-extractable `CryptoKey` handle in IndexedDB — the key material never leaves the browser's crypto implementation and peerd never holds it as bytes | Non-extractable by construction, checked at generate and on every load (`usableDpopPrivateKey`; `exportKey` rejects for every caller, including us); usable only at the audited egress boundary, which mints a fresh per-request proof and never exposes one to the agent. Minted when the user saves a DPoP credential, retired when they remove it (INV-15) |
 | The user's session cookies (logged-in tabs) | The browser's cookie jar. peerd never reads cookies | Sensitive-origin denylist, Plan and Act mode, confirm gate |
@@ -355,7 +356,7 @@ with the real-realm proof in
 
 <a id="inv-7"></a>
 ### INV-7. Peerd-controlled and browser-enforceable channels refuse private targets
-`webFetch` refuses a host classified as private, loopback, link-local, `.local`, or
+`webFetch` and the credential-bearing repository egress wrapper refuse a host classified as private, loopback, link-local, `.local`, or
 metadata by `isPrivateOrLocalHost`, across decimal, hex, octal, and short-form IPv4 and
 IPv4-mapped and NAT64 IPv6 encodings — plus the RFC 6598 shared/CGNAT (`100.64.0.0/10`),
 benchmarking (`198.18.0.0/15`), and reserved/broadcast (`240.0.0.0/4`) ranges that are
@@ -411,6 +412,7 @@ therefore not an absolute zero-transport or port-oracle defense. With native loc
 disabled, Chrome can also start an inherited about:blank child's immediate
 private request before the extension receives enough child identity to close it.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
+`background/kernel-demand-plane.js`,
 `peerd-egress/denylist/dnr-rules.js`, `background/denylist-net-guard.js`,
 `background/browser-origin-custody.js`,
 `background/driven-child-request-guard.js`, `background/startup-popup-network-guard.js`,

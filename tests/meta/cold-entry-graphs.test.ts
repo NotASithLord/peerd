@@ -47,18 +47,20 @@ const previewKernelEntry = 'background/vault-kernel-preview.js';
 // cold inputs whose sizes changed since it: the authority hosts gained
 // terminal outcome/audit and engine-loss custody, policy gained the Plan-safe
 // page-program subset, quota gained its matching bound, a2a shed a stale
-// prompt grant, and the final dead-surface cleanup narrowed the authority
-// graph without changing its module set.
+// prompt grant, the final dead-surface cleanup narrowed the authority graph,
+// and credentialed repository egress regained its private-host guard.
 // Computing from prior input sizes makes an unrelated offsetting edit fail too.
 const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
   baselineGraphBytes: 4_035_518,
   priorInputBytes: Object.freeze({
     'background/controller-turn-bridge.js': 145_646,
     'background/execution-tool-authority.js': 19_738,
+    'background/kernel-demand-plane.js': 18_505,
     'background/kernel-turn-authority-adapter.js': 170_225,
     'background/offscreen-actor-client.js': 162_659,
     'background/vault-kernel-core.js': 20_087,
     'background/vault-kernel.js': 45_777,
+    'peerd-egress/fetch/origin-credentials.js': 8_776,
     'peerd-runtime/actor/a2a-api.js': 8_997,
     'peerd-runtime/browser-authority/dom-helpers.js': 18_857,
     'peerd-runtime/contacts/aggregate.js': 5_310,
@@ -72,6 +74,7 @@ const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
     'shared/controller-kernel-quota.js': 31_640,
     'shared/kernel-feature-policy.js': 28_696,
     'shared/kernel-feature-route-inventory.js': 4_180,
+    'shared/util.js': 4_904,
   }),
 });
 
