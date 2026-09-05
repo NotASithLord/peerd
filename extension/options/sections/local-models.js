@@ -22,7 +22,9 @@
 // a hard "won't run here".
 
 import m from '/vendor/mithril/mithril.js';
-import { listLocalModelSpecs, probeLocalModelCapability, judgeModelCapability } from '/peerd-provider/index.js';
+import {
+  listLocalModelSpecs, probeLocalModelCapability, judgeModelCapability,
+} from '/peerd-provider/ui.js';
 import {
   isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,
 } from '../mutation-custody.js';

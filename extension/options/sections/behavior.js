@@ -17,7 +17,7 @@
 // redesign is how a page quietly starts lying about its own guarantees.
 
 import m from '/vendor/mithril/mithril.js';
-import { listProviders } from '/peerd-provider/index.js';
+import { listProviderMetadata } from '/peerd-provider/ui.js';
 import { resetRow } from './reset-row.js';
 import { settingsRow, settingsBand, toggleSwitch } from '../components/settings-row.js';
 
@@ -198,7 +198,8 @@ export const BehaviorSection = {
     const foOn = s.providerFailoverEnabled !== false;
     const activeProvider = s.providerName || 'anthropic';
     const fallbacks = Array.isArray(s.providerFallbacks) ? s.providerFallbacks : [];
-    const otherProviders = listProviders().map((p) => p.name).filter((n) => n !== activeProvider);
+    const otherProviders = listProviderMetadata()
+      .map((provider) => provider.name).filter((name) => name !== activeProvider);
 
     // Preview-only key: absent from store packages' CHANNEL_DEFAULTS, so the
     // row simply doesn't render there. Presence, not typeof: a crafted

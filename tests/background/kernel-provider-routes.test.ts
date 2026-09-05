@@ -5,8 +5,13 @@ import {
   PROVIDER_METADATA,
   listProviderMetadata,
 } from '../../extension/peerd-provider/metadata.js';
+import { listProviders } from '../../extension/peerd-provider/registry.js';
 
 describe('provider authority manifest', () => {
+  test('keeps document UI metadata identical to the executable provider registry', () => {
+    expect(JSON.stringify(listProviderMetadata())).toBe(JSON.stringify(listProviders()));
+  });
+
   test('pins every semantic provider to one compact authority entry', () => {
     expect(Object.keys(PROVIDER_EGRESS_MANIFEST)).toEqual(
       listProviderMetadata().map((provider) => provider.name),

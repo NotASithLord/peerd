@@ -18,7 +18,7 @@ import {
   PrfCancelledError,
   PrfNotSupportedError,
   PrfUnsupportedByAuthenticatorError,
-} from '/peerd-egress/index.js';
+} from '/peerd-egress/ui.js';
 import { bytesToBase64 } from '/shared/util.js';
 import {
   isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,

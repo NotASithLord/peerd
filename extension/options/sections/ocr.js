@@ -14,7 +14,7 @@
 // this build yet" — exactly how voice's Moonshine upgrade behaved pre-pinning.
 
 import m from '/vendor/mithril/mithril.js';
-import { createOcrStore, hasValidOcrSris, OCR_TOTAL_BYTES } from '/peerd-runtime/index.js';
+import { createOcrStore, hasValidOcrSris, OCR_TOTAL_BYTES } from '/peerd-runtime/ui.js';
 
 export const OcrSection = {
   oninit(/** @type {any} */ vnode) {

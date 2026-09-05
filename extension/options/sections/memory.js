@@ -15,7 +15,7 @@
 // peerd panel and watch the chat for the draft.
 
 import m from '/vendor/mithril/mithril.js';
-import { countLines, ALWAYS_LOADED_LINE_BUDGET } from '/peerd-runtime/index.js';
+import { countLines, ALWAYS_LOADED_LINE_BUDGET } from '/peerd-runtime/ui.js';
 import { mutationFailureCopy } from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
