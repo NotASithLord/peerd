@@ -183,6 +183,12 @@ export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
   'vendor/vad-web/silero_vad_legacy.onnx',
   'vendor/vad-web/silero_vad_v5.onnx',
   'vendor/pdfjs/pdf.worker.min.mjs',
+  // pdf.js selects these local decoders only when a scanned page uses the
+  // corresponding JBIG2 or JPX image filter.
+  'vendor/pdfjs/wasm/jbig2.wasm',
+  'vendor/pdfjs/wasm/jbig2_nowasm_fallback.js',
+  'vendor/pdfjs/wasm/openjpeg.wasm',
+  'vendor/pdfjs/wasm/openjpeg_nowasm_fallback.js',
   'vendor/tesseract/worker.min.js',
 ] as const);
 

@@ -104,11 +104,16 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}, { signal, fetchImpl = fetch
 
 /**
  * @param {{ source: any, opts?: { maxChars?: number, format?: string, engine?: string, dev?: boolean } }} msg
- * @param {{signal?:AbortSignal,fetchImpl?:typeof fetch,createConversionWorker?:()=>Worker}} [options]
+ * @param {{
+ *   signal?:AbortSignal,
+ *   fetchImpl?:typeof fetch,
+ *   createConversionWorker?:()=>Worker,
+ *   extractPdf?:(bytes:Uint8Array, opts:object)=>Promise<any>,
+ * }} [options]
  */
 export const handleDocExtract = async (
   { source, opts = {} },
-  { signal, fetchImpl, createConversionWorker } = {},
+  { signal, fetchImpl, createConversionWorker, extractPdf = extractPdfBytes } = {},
 ) => {
   // Stage rides every failure so the returned error pinpoints WHERE it broke.
   let stage = 'fetch';
@@ -130,7 +135,7 @@ export const handleDocExtract = async (
     // format still overrides a mistaken sniff, but PDF needs no public sibling:
     // it continues through the dedicated pdf.js/OCR engine behind read_doc.
     if (!opts.format && sniffed.format === 'pdf') {
-      const extracted = await extractPdfBytes(bytes, {
+      const extracted = await extractPdf(bytes, {
         engine: opts.engine,
         dev: opts.dev,
         sourceLabel: where,
