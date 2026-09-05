@@ -53,6 +53,20 @@ describe('fixed runtime module roots', () => {
     )).rejects.toThrow('relative string module Worker URL is document-relative');
   });
 
+  test('Node harness graphs may exclude external imports without weakening browser graphs', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-local-script-graph-'));
+    temporaryRoots.push(root);
+    writeFileSync(join(root, 'entry.mjs'), "import 'node:fs';\nimport './local.mjs';\n");
+    writeFileSync(join(root, 'local.mjs'), 'export const local = true;\n');
+    await expect(collectStaticModuleGraph(root, join(root, 'entry.mjs')))
+      .rejects.toThrow('unsupported static import specifier: node:fs');
+    const graph = await collectStaticModuleGraph(root, join(root, 'entry.mjs'), {
+      allowExternalSpecifiers: true,
+    });
+    expect([...graph].map((path) => basename(path)).sort())
+      .toEqual(['entry.mjs', 'local.mjs']);
+  });
+
   test('the source-wide inventory covers every authored fixed runtime edge', async () => {
     expect(await uninventoriedRuntimeModuleEdges(
       EXTENSION, PACKAGED_LAZY_MODULE_ENTRIES,

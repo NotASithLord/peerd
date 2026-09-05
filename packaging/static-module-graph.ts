@@ -70,6 +70,7 @@ export const exportedNames = async (
 export const collectStaticModuleGraph = async (
   root: string,
   entry: string,
+  { allowExternalSpecifiers = false }: { allowExternalSpecifiers?: boolean } = {},
 ): Promise<Set<string>> => {
   const absoluteRoot = resolve(root);
   const realRoot = realpathSync(absoluteRoot);
@@ -108,7 +109,16 @@ export const collectStaticModuleGraph = async (
     if (!['.js', '.mjs'].includes(extname(file))) continue;
     const source = readFileSync(file, 'utf8');
     for (const specifier of await staticImportSpecifiers(source, relative(absoluteRoot, file))) {
-      const target = resolveStaticSpecifier(specifier, file, absoluteRoot);
+      let target: string;
+      try {
+        target = resolveStaticSpecifier(specifier, file, absoluteRoot);
+      } catch (error) {
+        // why: acceptance harnesses bind their repository-local scripts while
+        // Node/Bun builtins and locked packages remain external. Browser and
+        // artifact graphs keep the strict default and reject every such edge.
+        if (allowExternalSpecifiers) continue;
+        throw error;
+      }
       if (!pathIsInside(absoluteRoot, target)) {
         throw new Error(
           `static import escapes artifact root: ${specifier} from ${relative(absoluteRoot, file)}`,
