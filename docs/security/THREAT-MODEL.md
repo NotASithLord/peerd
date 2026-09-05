@@ -441,7 +441,7 @@ strip runs at both read boundaries and inside the untrusted-data fence itself, s
 web-sourced tool cannot forget it, and it also runs at the two boundaries where
 page-derived text becomes DURABLE trusted context rather than a transient tool result:
 the `/init` active-tab probe that seeds always-loaded project memory
-(`memory/init-orchestrator.js`) and the skill descriptions rendered into the system
+(`background/kernel-memory-init-probe.js`) and the skill descriptions rendered into the system
 prompt at startup (`skills/registry.js`) — a covert channel there would persist,
 invisible at the approval gate, and it runs TWICE around HTML extraction, because
 extraction parses the document and turns `&#8203;` — seven ordinary ASCII characters
@@ -455,7 +455,7 @@ are ordinary visible characters. The comment-removal pass is applied
 only where a comment is genuinely a comment (markup), never to JSON or plain text
 where `<!--` is visible content.
 Code: `peerd-runtime/dom/cdr.js`, wired at `tools/prompt-wrap.js`,
-`tools/defs/fetch-url.js`, `tools/defs/read-page.js`, `memory/init-orchestrator.js`,
+`tools/defs/fetch-url.js`, `tools/defs/read-page.js`, `background/kernel-memory-init-probe.js`,
 `skills/registry.js`. Red-team: scenario 09.
 
 ### INV-13. Borrowing the user's identity on a page strangers wrote takes the user
@@ -838,14 +838,14 @@ evaluating peerd should know. Each cites where it lives in the code.
   attacker-paraphrased content, and an approved note persists into every future prompt.
   Approval is the trust boundary. A user who approves a poisoned note owns the
   consequence. Narrowed: the `/init` seed of always-loaded project memory now
-  CDR-strips its page-derived probe (`memory/init-orchestrator.js`, INV-12), so an
+  CDR-strips its page-derived probe (`background/kernel-memory-init-probe.js`, INV-12), so an
   INVISIBLE-Unicode instruction can no longer ride into durable memory beneath the
   approval gate — the note the user reviews is the note the model reads. The residual is
   the visible channel: content the model paraphrases into ordinary assistant text.
-  (`peerd-runtime/memory/auto-memory.js`, `memory/init-orchestrator.js`.)
-- R3 (narrowed). A skill body is trusted instructions by design. Skill install fetches
-  through `webFetch` (denylist and caps), and the frontmatter parser refuses unknown
-  keys, but the skill body loads into context as trusted instructions with no
+  (`peerd-runtime/memory/auto-memory.js`, `background/kernel-memory-init-probe.js`.)
+- R3 (narrowed). A skill body is trusted instructions by design. Installation accepts
+  only text the user pastes locally, and the frontmatter parser refuses unknown keys,
+  but the skill body loads into context as trusted instructions with no
   untrusted-content fence. A malicious shared skill is a direct instruction-injection
   vector. Installing a skill runs its author's prompt. Narrowed: the skill name and
   description rendered into the startup prompt — the one skill field shown before any

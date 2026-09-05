@@ -31,7 +31,7 @@ import { disarmText } from '../dom/cdr.js';
 // This is a STRUCTURAL break-out defense (attacker bytes can't forge the
 // delimiter), distinct from the soft "treat the inside as data" rule the
 // system prompt teaches the model.
-// peerd_file is the @-mention file fence (composer/resolvers.js): an inlined
+// peerd_file is the @-mention file fence: an inlined
 // App/Notebook file is reference DATA, and its body may itself be scraped web
 // text, so it gets the same structural break-out defense.
 const FENCE_TAGS = ['untrusted_web_content', 'peerd_file'];

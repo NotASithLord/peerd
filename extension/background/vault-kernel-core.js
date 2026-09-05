@@ -304,7 +304,7 @@ export const makeKernelRouteProvenance = ({
   ], humanUi);
   add([
     'skills/list', 'skills/setEnabled', 'skills/remove',
-    'skills/installGit', 'skills/installLocal', 'skills/installManifest',
+    'skills/installLocal',
     'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
   ], sidepanelUi);
   add(['agent/send'], (sender) => sidepanelUi(sender) || evalUi(sender));

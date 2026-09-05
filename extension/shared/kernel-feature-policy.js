@@ -121,7 +121,6 @@ const ADMINISTRATIVE_EFFECTS = Object.freeze({
       ['text'], 4, 32 * KIB, 16 * KIB, (input) => typeof input.text === 'string',
     ),
   }),
-  'skills/installGit': Object.freeze({}),
   'skills/installLocal': Object.freeze({
     'administrative.skills.commit': effectPolicy(
       ['text', 'origin', 'replace'], 1, 2 * MIB, 512 * KIB,
@@ -130,7 +129,6 @@ const ADMINISTRATIVE_EFFECTS = Object.freeze({
         && typeof input.replace === 'boolean',
     ),
   }),
-  'skills/installManifest': Object.freeze({}),
 });
 const string = (/** @type {unknown} */ value, /** @type {number} */ max = 4096) =>
   typeof value === 'string' && value.length > 0 && value.length <= max;

@@ -38,7 +38,7 @@
 // Deep import of the PURE matcher (not the /peerd-egress/index.js barrel,
 // which pulls in vault/storage + the browser polyfill and would make this
 // module unimportable under the bun test runner). Same pattern as
-// composer/resolvers.js and browser-authority/dom-helpers.js.
+// the composer-reference authority and browser-authority/dom-helpers.js.
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain,

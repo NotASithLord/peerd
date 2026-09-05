@@ -282,4 +282,35 @@ describe('fixed runtime module roots', () => {
     }
     expect(unbound).toEqual([]);
   });
+
+  test('runtime inventories omit static-descendant-only roots', async () => {
+    const runtimeTargets = new Set(
+      (await uninventoriedRuntimeModuleEdges(EXTENSION, [])).map((edge) => edge.target),
+    );
+    // why: these module URLs are emitted into Worker source rather than parsed
+    // as literal runtime edges, so they remain deliberate independent roots.
+    const generatedWorkerRoots = new Set([
+      'engine-tabs/notebook-tab/realm-seal.js',
+      'engine-tabs/notebook-tab/notebook-std.js',
+      'engine-tabs/notebook-tab/notebook-wasi.js',
+      'engine-tabs/pod-tab/pod-realm-seal.js',
+    ]);
+    const redundantStaticRoots = async (entries: readonly string[]) => {
+      const graphs = new Map<string, Set<string>>();
+      for (const entry of entries) {
+        const graph = await collectStaticModuleGraph(EXTENSION, join(EXTENSION, entry));
+        graphs.set(entry, new Set([...graph].map((file) =>
+          relative(EXTENSION, file).split('\\').join('/'))));
+      }
+      return entries.filter((entry) =>
+        !runtimeTargets.has(entry)
+        && !generatedWorkerRoots.has(entry)
+        && entries.some((owner) => owner !== entry && graphs.get(owner)?.has(entry)));
+    };
+
+    expect(await redundantStaticRoots(PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES)).toEqual([]);
+    expect(await redundantStaticRoots([
+      ...CONTROLLER_BUILD_ENTRIES, ...CONTROLLER_OPTIONAL_BUILD_ENTRIES,
+    ])).toEqual([]);
+  });
 });

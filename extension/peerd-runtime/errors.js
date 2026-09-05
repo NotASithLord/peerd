@@ -21,17 +21,6 @@ export class SessionNotFoundError extends TypedError {
   }
 }
 
-/** Profile id does not exist in the store (profiles/store.js). */
-export class ProfileNotFoundError extends TypedError {
-  static errorName = 'ProfileNotFoundError';
-
-  /** @param {string} profileId */
-  constructor(profileId) {
-    super(`Profile not found: ${profileId}`);
-    this.profileId = profileId;
-  }
-}
-
 /**
  * The agent loop was started without a fully wired runtime context.
  * Better to fail loudly than to invoke `undefined()` later. The error

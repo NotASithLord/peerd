@@ -38,7 +38,7 @@ describe('sealed kernel feature protocol', () => {
   test('pins the administrative routes exposed by this protocol', () => {
     expect(KERNEL_ADMINISTRATIVE_ROUTE_NAMES).toEqual([
       'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
-      'memory/init', 'skills/installGit', 'skills/installLocal', 'skills/installManifest',
+      'memory/init', 'skills/installLocal',
     ]);
   });
 

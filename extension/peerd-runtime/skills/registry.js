@@ -175,16 +175,15 @@ export const createSkillRegistry = ({ store, audit }) => {
   };
 
   /**
-   * Enabled skills surfaced as composer slash commands — the feature-04
-   * integration point (composer/command-sources.js skillRegistrySource
-   * depends only on this method; see docs/COMMANDS-DESIGN.md).
+   * Enabled skills surfaced as composer slash commands. The semantic
+   * composer depends only on this method; see docs/COMMANDS-DESIGN.md.
    *
    * why the body routes through load_skill instead of inlining the skill
-   * body: progressive disclosure is the whole point of the skills tier —
+   * body: progressive disclosure is the whole point of the skills tier;
    * the command stays cheap (one instruction line), and the full
    * instructions load only when the agent calls the tool. A local
-   * .peerd/commands/ entry of the same name shadows these (earlier source
-   * wins in mergeSources), so users can always override.
+   * .peerd/commands/ entry of the same name shadows these, so users can
+   * always override.
    *
    * @returns {Promise<Array<{ name: string, body: string, description: string }>>}
    */

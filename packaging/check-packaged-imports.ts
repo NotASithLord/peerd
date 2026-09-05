@@ -194,7 +194,7 @@ for (const channel of ['preview', 'store'] as const) {
 }
 
 if (failed) {
-  console.error('\nPACKAGED IMPORT CHECK FAILED — a shipped static or fixed runtime module graph is incomplete for its target.');
+  console.error('\nPACKAGED IMPORT CHECK FAILED: a shipped static or fixed runtime module graph is incomplete for its target.');
   process.exit(1);
 }
-console.log('packaged import check OK — every page\'s static import graph resolves in all channel×browser builds.');
+console.log('packaged import check OK: every page\'s static import graph resolves in all channel×browser builds.');
