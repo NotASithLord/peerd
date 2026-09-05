@@ -49,6 +49,7 @@ describe('cold-start browser harness contract', () => {
 
   test('uses one visible actionable Home endpoint across historical and current builds', async () => {
     const text = await Bun.file(harness).text();
+    expect(text).toContain('allowExternalSpecifiers: true');
     expect(text).toContain('button instanceof HTMLButtonElement');
     expect(text).toContain('button.isConnected && !button.disabled');
     expect(text).toContain("label.startsWith('create vault')");
