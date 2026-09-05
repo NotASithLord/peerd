@@ -65,7 +65,7 @@ const handlePortMessage = (raw) => {
 };
 
 const resetAfterDisconnect = () => {
-  console.warn('[sidepanel] SW port disconnected — reconnecting');
+  console.warn('[sidepanel] SW port disconnected; reconnecting');
   currentState = resetChatAfterRuntimeLoss(currentState);
   m.redraw();
   actorFetchInFlight.clear();

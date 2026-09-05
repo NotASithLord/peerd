@@ -87,8 +87,12 @@ export const collectStaticModuleGraph = async (
       throw new Error(`static module missing from artifact: ${relative(absoluteRoot, file)}`);
     }
     const relativeInput = relative(absoluteRoot, file);
-    if (lstatSync(file).isSymbolicLink()) {
+    const inputStat = lstatSync(file);
+    if (inputStat.isSymbolicLink()) {
       throw new Error(`static module graph input is symlinked: ${relativeInput}`);
+    }
+    if (!inputStat.isFile()) {
+      throw new Error(`static module graph input is not a regular file: ${relativeInput}`);
     }
     const realFile = realpathSync(file);
     if (!pathIsInside(realRoot, realFile)) {

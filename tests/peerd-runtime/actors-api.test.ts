@@ -82,7 +82,7 @@ describe('shapeActorsResult — system failures reject, actor failures return', 
       .toThrow(/in flight/);
   });
 
-  test('call shapes { reply, failed } — an actor-level failure RETURNS (script decides)', () => {
+  test('call shapes { reply, failed }; an actor-level failure RETURNS (script decides)', () => {
     expect(shapeActorsResult('call', { ok: true, reply: 'pass: 42 tests', failed: false }))
       .toEqual({ reply: 'pass: 42 tests', failed: false });
     // The actor's turn errored: not a system refusal, so the script gets the
@@ -101,7 +101,7 @@ describe('the ops trace — the observability contract', () => {
   const trace = [
     { seq: 1, method: 'list', ok: true, ms: 12, settled: true },
     { seq: 2, method: 'call', to: 'vm-9', goal: 'run the benchmark suite and return the JSON results table now', ok: true, ms: 2140, settled: true },
-    { seq: 3, method: 'call', to: 'web', goal: 'price?', ok: false, ms: 30_000, settled: true, error: 'call timed out — <possible page text>' },
+    { seq: 3, method: 'call', to: 'web', goal: 'price?', ok: false, ms: 30_000, settled: true, error: 'call timed out: <possible page text>' },
   ];
 
   test('the fence-safe lines carry NOTHING runtime-shaped: no goal, dynamic target, or error detail', () => {
