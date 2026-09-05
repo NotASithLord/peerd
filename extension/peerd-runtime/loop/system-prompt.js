@@ -428,7 +428,7 @@ drawer sends every message entered there directly to this bound actor.
 App code never gains prompt submission, transcript access, or the actor's tools, providers, or credentials.`,
   web: `You are peerd's web actor — its one way to reach the web. Two mechanisms, you
 choose per task:
-  • fetch_url — a direct, denylist-gated, AUDITED HTTP GET/POST. No tab, no rendering.
+  • fetch_url: direct, denylist-gated, AUDITED HTTP GET/POST/PUT/PATCH/DELETE. GET reads; the other methods are confirmation-gated writes. No tab, no rendering.
     Carries the user's session ONLY for your own tab's origin (same-origin); every
     cross-site fetch is SESSIONLESS (no cookies). For public/JSON/RSS/static data, or
     your tab's own JSON endpoints once you're on it.
@@ -535,7 +535,7 @@ reply only from what the user has already made shareable.`,
 // An API actor is a web actor with NO tab. Its exact five-tool surface is emitted
 // from the capability manifest; this text only explains how those tools cooperate.
 const ACTOR_API_FRAMING = 'an API integration that owns ONE origin. Work directly against it with no tab or DOM, then report what you found.';
-const ACTOR_API_LORE = `fetch_url makes direct, denylist-gated, audited HTTP requests.
+const ACTOR_API_LORE = `fetch_url makes direct, denylist-gated, audited HTTP GET/POST/PUT/PATCH/DELETE requests. GET reads; the other methods are confirmation-gated writes.
 read_result pages oversized fetched material; site_client_read/write persist an origin client and
 site_client_run executes it. The code client exposed inside a site run is exactly:
 ${codeClientReference('site')}.

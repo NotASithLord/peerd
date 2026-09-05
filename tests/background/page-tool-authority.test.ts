@@ -85,6 +85,109 @@ describe('exact page authority', () => {
     expect(observed[2].release).toEqual(['page-run-1']);
   });
 
+  test('Plan page code may compose a read without gaining page mutation authority', async () => {
+    let nested: any;
+    let runs = 0;
+    const page: any = pageContext({
+      permission: { mode: 'plan', confirmActions: true },
+      readAuthorityPermission: async () => ({ mode: 'plan', confirmActions: true }),
+      session: { sessionId: 'actor-web-plan' },
+      scriptRuns: { mintRunId: () => 'page-plan-read', register: () => {}, release: () => {} },
+    });
+    page.ctx.jsOffscreenClient = { execHeadless: async () => {
+      runs += 1;
+      nested = await createPageToolAuthority({
+        binding: { operation: 'turn.page.read', args: { tabId: 7 } },
+        ctx: page.ctx,
+      }).readOwnedPage();
+      return nested;
+    } };
+    const outer = createPageToolAuthority({
+      binding: { operation: 'turn.page.run-program', args: {
+        code: 'return await page.content()', tabId: 7,
+      } },
+      ctx: page.ctx,
+    });
+    await expect(outer.runOwnedPageProgram()).resolves.toMatchObject({ ok: true });
+    expect(nested).toMatchObject({ ok: true, receipt: { kind: 'snapshot' } });
+    expect({ runs, actions: page.actionCalls() }).toEqual({ runs: 1, actions: 0 });
+  });
+
+  for (const operation of ['click', 'fill'] as const) {
+    test(`Plan page code refuses nested ${operation} before any page effect`, async () => {
+      let nested: any;
+      let runs = 0;
+      const page: any = pageContext({
+        permission: { mode: 'plan', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'plan', confirmActions: false }),
+        session: { sessionId: 'actor-web-plan' },
+        scriptRuns: { mintRunId: () => 'page-plan-write', register: () => {}, release: () => {} },
+      });
+      page.ctx.jsOffscreenClient = { execHeadless: async () => {
+        runs += 1;
+        const authority = createPageToolAuthority({
+          binding: operation === 'click'
+            ? { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } }
+            : { operation: 'turn.page.fill', args: {
+                selector: '#comment', text: 'hello', tabId: 7,
+              } },
+          ctx: page.ctx,
+        });
+        nested = operation === 'click'
+          ? await authority.clickOwnedTarget() : await authority.fillOwnedTarget();
+        return nested;
+      } };
+      const outer = createPageToolAuthority({
+        binding: { operation: 'turn.page.run-program', args: {
+          code: `await page.${operation}()`, tabId: 7,
+        } },
+        ctx: page.ctx,
+      });
+      await expect(outer.runOwnedPageProgram()).resolves.toMatchObject({
+        ok: false, code: 'plan_mode_refused', outcomeKind: 'pre-effect-failure',
+      });
+      expect(nested).toMatchObject({ ok: false, code: 'plan_mode_refused' });
+      expect({ runs, actions: page.actionCalls() }).toEqual({ runs: 1, actions: 0 });
+    });
+  }
+
+  test('each nested page operation re-reads permission after the Plan wrapper starts', async () => {
+    let mode = 'plan';
+    let allowed: any;
+    let refused: any;
+    const page: any = pageContext({
+      permission: { mode, confirmActions: false },
+      readAuthorityPermission: async () => ({ mode, confirmActions: false }),
+      session: { sessionId: 'actor-web-plan' },
+      scriptRuns: { mintRunId: () => 'page-plan-flip', register: () => {}, release: () => {} },
+    });
+    page.ctx.jsOffscreenClient = { execHeadless: async () => {
+      mode = 'act';
+      allowed = await createPageToolAuthority({
+        binding: { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } },
+        ctx: page.ctx,
+      }).clickOwnedTarget();
+      mode = 'plan';
+      refused = await createPageToolAuthority({
+        binding: { operation: 'turn.page.fill', args: {
+          selector: '#comment', text: 'hello', tabId: 7,
+        } },
+        ctx: page.ctx,
+      }).fillOwnedTarget();
+      return { ok: true };
+    } };
+    const outer = createPageToolAuthority({
+      binding: { operation: 'turn.page.run-program', args: {
+        code: 'await page.click(); await page.fill()', tabId: 7,
+      } },
+      ctx: page.ctx,
+    });
+    await expect(outer.runOwnedPageProgram()).resolves.toMatchObject({ ok: true });
+    expect(allowed).toMatchObject({ ok: true });
+    expect(refused).toMatchObject({ ok: false, code: 'plan_mode_refused' });
+    expect(page.actionCalls()).toBe(1);
+  });
+
   test('refuses a handler that does not match the admitted tool', () => {
     const authority = createPageToolAuthority({
       binding: { operation: 'turn.page.snapshot', args: {} }, ctx: {},
@@ -543,7 +646,7 @@ describe('exact page authority', () => {
     expect(actions).toBe(0);
   });
 
-  for (const operation of ['click', 'fill', 'run-program'] as const) {
+  for (const operation of ['click', 'fill'] as const) {
     test(`${operation} rechecks Act at its final physical edge`, async () => {
       let mode = 'act';
       let permissionReads = 0;
@@ -551,10 +654,7 @@ describe('exact page authority', () => {
       let finalReadStarted!: () => void;
       const permissionGate = new Promise<void>((resolve) => { releasePermission = resolve; });
       const started = new Promise<void>((resolve) => { finalReadStarted = resolve; });
-      // page programs are composite containers: the outer authority does not
-      // resolve or confirm a target, while the exact nested mutation does.
-      const finalRead = operation === 'run-program' ? 1 : 4;
-      let runs = 0;
+      const finalRead = 4;
       const page = pageContext({
         readAuthorityPermission: async () => {
           permissionReads += 1;
@@ -564,32 +664,24 @@ describe('exact page authority', () => {
           }
           return { mode, confirmActions: false };
         },
-        session: { sessionId: 'actor-web-1' },
-        jsOffscreenClient: { execHeadless: async () => { runs += 1; return { ok: true }; } },
-        scriptRuns: { mintRunId: () => 'run-1', register: () => {}, release: () => {} },
       });
       const authority = createPageToolAuthority({
         binding: operation === 'click'
           ? { operation: 'turn.page.click', args: { selector: '#save', tabId: 7 } }
-          : operation === 'fill'
-            ? { operation: 'turn.page.fill', args: {
-                selector: '#comment', text: 'hello', tabId: 7,
-              } }
-            : { operation: 'turn.page.run-program', args: {
-                code: 'return 1', timeoutMs: 1_000, tabId: 7,
-              } },
+          : { operation: 'turn.page.fill', args: {
+              selector: '#comment', text: 'hello', tabId: 7,
+            } },
         ctx: page.ctx,
       });
       const pending = operation === 'click' ? authority.clickOwnedTarget()
-        : operation === 'fill' ? authority.fillOwnedTarget()
-          : authority.runOwnedPageProgram();
+        : authority.fillOwnedTarget();
       await started;
       mode = 'plan';
       releasePermission();
       await expect(pending).resolves.toMatchObject({
         ok: false, code: 'plan_mode_refused', outcomeKind: 'pre-effect-failure',
       });
-      expect({ actions: page.actionCalls(), runs }).toEqual({ actions: 0, runs: 0 });
+      expect(page.actionCalls()).toBe(0);
     });
   }
 

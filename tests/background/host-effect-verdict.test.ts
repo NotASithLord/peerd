@@ -12,7 +12,9 @@ import {
   strongestLifecycleRewrite,
 } from '../../extension/background/host-effect-verdict.js';
 import {
+  controllerDomainOperationPolicy, controllerOperationAllowedInPermissionMode,
   controllerOperationReplayableAfterSettlement, controllerOperationRequiresConfirmation,
+  controllerOperationSkipsConfirmationInPermissionMode,
 } from '../../extension/shared/controller-kernel-quota.js';
 
 describe('exact host effect verdicts', () => {
@@ -352,6 +354,30 @@ describe('exact host effect verdicts', () => {
     expect(controllerOperationReplayableAfterSettlement('turn.resource.spill-result')).toBe(false);
     expect(controllerOperationReplayableAfterSettlement('turn.repository.confirm-remote')).toBe(true);
     expect(controllerOperationReplayableAfterSettlement('turn.vm.read')).toBe(true);
+  });
+
+  test('Plan admits only the page program container, then rechecks every nested operation', () => {
+    expect(controllerDomainOperationPolicy('turn.page.run-program')).toMatchObject({
+      authorityClass: 'page', riskClass: 'resource', confirmation: 'self',
+    });
+    expect(controllerOperationAllowedInPermissionMode(
+      'turn.page.run-program', 'plan', {},
+    )).toBe(true);
+    expect(controllerOperationSkipsConfirmationInPermissionMode(
+      'turn.page.run-program', 'plan',
+    )).toBe(true);
+    expect(controllerOperationAllowedInPermissionMode('turn.page.read', 'plan', {})).toBe(true);
+    for (const operation of [
+      'turn.page.click', 'turn.page.fill', 'turn.site-client.commit',
+    ]) {
+      expect(controllerOperationAllowedInPermissionMode(operation, 'plan', {})).toBe(false);
+    }
+    expect(controllerOperationAllowedInPermissionMode(
+      'turn.resource.request-web-text', 'plan', { method: 'POST' },
+    )).toBe(false);
+    expect(controllerOperationAllowedInPermissionMode(
+      'turn.resource.request-web-text', 'plan', { method: 'GET' },
+    )).toBe(true);
   });
 
   test('only durable workspace scripts inherit the live permission confirmation toggle', () => {

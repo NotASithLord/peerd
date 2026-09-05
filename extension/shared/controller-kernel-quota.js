@@ -174,6 +174,9 @@ const PLAN_OPERATION_CARVE_OUTS = Object.freeze(new Set([
   // Pure URL loads and delegation are the operation-level equivalents of the
   // public Plan-mode carve-outs. The child receives the same live permission.
   'turn.page.open-tab', 'turn.page.navigate', 'turn.actor.message',
+  // A page program is authority-free composition. Every nested operation
+  // independently re-enters this live permission and confirmation boundary.
+  'turn.page.run-program',
   // Goal progress is session-local bookkeeping, not a world mutation. Plan
   // must be able to maintain its checklist and terminate the bounded run.
   'turn.goal.complete', 'turn.todo.replace',

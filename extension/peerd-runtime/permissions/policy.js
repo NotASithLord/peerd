@@ -179,6 +179,12 @@ export const PLAN_NAVIGATION_TOOLS = Object.freeze(new Set(['navigate', 'open_ta
 // read-only. (Act-mode confirmation is untouched — see #7.)
 export const PLAN_DELEGATION_TOOLS = Object.freeze(new Set(['message_actor']));
 
+// Plan-mode composition carve-out. why: page_code is only a sealed program
+// container; it has no browser authority of its own. Every page.* call it
+// emits crosses an exact SW operation that re-reads the live permission mode,
+// so Plan may compose reads without permitting click/type/client writes.
+const PLAN_COMPOSITION_TOOLS = Object.freeze(new Set(['page_code']));
+
 // --- The decision ----------------------------------------------------------
 
 /**
@@ -223,7 +229,8 @@ export const decideAction = ({ mode, confirmActions, tool }) => {
   }
 
   // PLAN mode blocks every non-read action — the read-only contract —
-  // with one carve-out: pure URL loads (see PLAN_NAVIGATION_TOOLS).
+  // with narrow carve-outs for pure URL loads, bounded delegation, and the
+  // authority-free page-code composition container.
   if (mode !== PERMISSION_MODES.ACT) {
     if (tool?.name && PLAN_NAVIGATION_TOOLS.has(tool.name)) {
       return {
@@ -239,6 +246,14 @@ export const decideAction = ({ mode, confirmActions, tool }) => {
         confirm: false,
         actionClass,
         reason: 'plan: delegation carve-out — the actor inherits Plan; its inner turn is the read-only barrier',
+      };
+    }
+    if (tool?.name && PLAN_COMPOSITION_TOOLS.has(tool.name)) {
+      return {
+        allowed: true,
+        confirm: false,
+        actionClass,
+        reason: 'plan: composition carve-out; every nested page operation rechecks live Plan authority',
       };
     }
     return {

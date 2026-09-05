@@ -111,6 +111,15 @@ describe('release feed publication hook', () => {
     expect(pkg.scripts['test:e2e:site-client-store']).toContain('test:e2e:site-client-store:staged');
     expect(pkg.scripts['test:e2e:site-client-store:staged']).toContain('PEERD_REQUIRE_SITE_CAPTURE_TAP=1');
     expect(pkg.scripts['test:e2e:site-client-store:staged']).toContain('--only=site-client-vertical');
+    const localRelease = readFileSync(
+      join(import.meta.dir, '..', '..', 'packaging', 'release.ts'),
+      'utf8',
+    );
+    const documentGate = localRelease.indexOf('scripts/cdp/read-doc-store-lane.mjs');
+    const siteClientGate = localRelease.indexOf("'test:e2e:site-client-store:staged'");
+    const dwebGate = localRelease.indexOf('scripts/cdp/feature-lease-dweb-lifecycle.mjs');
+    expect(siteClientGate).toBeGreaterThan(documentGate);
+    expect(siteClientGate).toBeLessThan(dwebGate);
   });
 
   test('dispatches the exact released tag from an isolated post-release job', () => {

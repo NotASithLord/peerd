@@ -98,6 +98,7 @@ export const TransferSection = {
     // separate state island: artifacts and settings never mix.
     vnode.state.artifactEnvelope = null;      // parsed .peerd envelope
     vnode.state.artifactSummary = null;       // import/inspect summary
+    vnode.state.artifactInspectGeneration = 0;
     vnode.state.artifactBusy = false;
     vnode.state.artifactMsg = null;           // { ok, text } | null
     // Debug bundle (the debug surface's options-page entry point): a session
@@ -273,6 +274,7 @@ export const TransferSection = {
     };
 
     const onArtifactFile = async (/** @type {{ target: HTMLInputElement }} */ e) => {
+      const generation = ++ui.artifactInspectGeneration;
       ui.artifactMsg = null;
       ui.artifactSummary = null;
       ui.artifactEnvelope = null;
@@ -282,11 +284,13 @@ export const TransferSection = {
       try {
         ({ EXPORT_FILE_LIMIT_BYTES: exportFileLimitBytes } = await import('/peerd-engine/artifact.js'));
       } catch {
+        if (generation !== ui.artifactInspectGeneration) return;
         ui.artifactMsg = { ok: false, text: 'Artifact import is unavailable in this build.' };
         e.target.value = '';
         m.redraw();
         return;
       }
+      if (generation !== ui.artifactInspectGeneration) return;
       if (file.size > exportFileLimitBytes) {
         ui.artifactMsg = {
           ok: false,
@@ -298,14 +302,18 @@ export const TransferSection = {
       }
       let envelope;
       try {
-        envelope = JSON.parse(await file.text());
+        const text = await file.text();
+        if (generation !== ui.artifactInspectGeneration) return;
+        envelope = JSON.parse(text);
       } catch {
+        if (generation !== ui.artifactInspectGeneration) return;
         ui.artifactMsg = { ok: false, text: 'Could not parse that file as a .peerd envelope.' };
         m.redraw();
         return;
       }
       try {
         const reply = await send({ type: 'import/inspect', envelope });
+        if (generation !== ui.artifactInspectGeneration) return;
         if (reply?.ok) {
           ui.artifactEnvelope = envelope;
           ui.artifactSummary = reply.summary;
@@ -313,9 +321,10 @@ export const TransferSection = {
           ui.artifactMsg = { ok: false, text: 'That artifact could not be inspected.' };
         }
       } catch {
+        if (generation !== ui.artifactInspectGeneration) return;
         ui.artifactMsg = { ok: false, text: 'peerd became unavailable while inspecting the artifact. Reopen peerd and retry.' };
       }
-      m.redraw();
+      if (generation === ui.artifactInspectGeneration) m.redraw();
     };
 
     const doArtifactApply = async () => {
@@ -729,7 +738,11 @@ export const TransferSection = {
             ui.artifactBusy ? '…' : 'Apply import'),
           m('button.secondary', {
             type: 'button',
-            onclick: () => { ui.artifactEnvelope = null; ui.artifactSummary = null; },
+            onclick: () => {
+              ui.artifactInspectGeneration += 1;
+              ui.artifactEnvelope = null;
+              ui.artifactSummary = null;
+            },
           }, 'Cancel'),
         ]),
       ]) : null,

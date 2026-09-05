@@ -38,7 +38,8 @@ const mount = async (importReply, inspectReply, stateOverrides = {}) => {
     identityConflict: null, replacementPending: false, importFileInput: null,
     importInspectGeneration: 0, restoreFocusToReview: false, focusImportFileOnUpdate: false,
     focusImportStatusOnUpdate: false,
-    artifactEnvelope: null, artifactSummary: null, artifactBusy: false, artifactMsg: null,
+    artifactEnvelope: null, artifactSummary: null, artifactInspectGeneration: 0,
+    artifactBusy: false, artifactMsg: null,
     debugSessions: [], debugSessionId: '', debugBusy: false, debugMsg: null,
     ...stateOverrides,
   };
@@ -112,6 +113,53 @@ describe('options.transfer: artifact import', () => {
       expect(root.textContent).toContain('96 MB maximum');
       expect(reads).toBe(0);
       expect(calls.some((call) => call.type === 'import/inspect')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('keeps the newer artifact when an older inspection resolves last', async () => {
+    /** @type {(value: any) => void} */ let resolveA = () => {};
+    const replyA = new Promise((resolve) => { resolveA = resolve; });
+    const applies = /** @type {any[]} */ ([]);
+    const inspections = /** @type {any[]} */ ([]);
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'session/list') return { ok: true, sessions: [] };
+      if (message.type === 'import/inspect') {
+        inspections.push(message.envelope);
+        return message.envelope.id === 'A' ? replyA : {
+          ok: true, summary: { kind: 'app', name: 'B', size: 12, fileCount: 1 },
+        };
+      }
+      if (message.type === 'import/apply') {
+        applies.push(message.envelope);
+        return { ok: true, kind: 'app', id: 'app-b' };
+      }
+      return { ok: true };
+    };
+    const { root, unmount } = await mountWhole(send);
+    try {
+      const input = /** @type {HTMLInputElement} */ (root.querySelector('#peerd-artifact-file'));
+      const select = (/** @type {string} */ id) => {
+        Object.defineProperty(input, 'files', {
+          configurable: true,
+          value: [{ size: 12, text: async () => JSON.stringify({ id }) }],
+        });
+        input.dispatchEvent(new Event('change'));
+      };
+      select('A');
+      await flushUntil(() => inspections.some((envelope) => envelope.id === 'A'));
+      select('B');
+      await flushUntil(() => root.textContent?.includes('Name: B') === true);
+      resolveA({
+        ok: true, summary: { kind: 'app', name: 'A', size: 12, fileCount: 1 },
+      });
+      await flush();
+      await flush();
+      expect(root.textContent).toContain('Name: B');
+      expect(root.textContent?.includes('Name: A')).toBe(false);
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Apply import')).click();
+      await flush();
+      expect(applies).toEqual([{ id: 'B' }]);
     } finally { unmount(); }
   });
 });

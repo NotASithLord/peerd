@@ -145,6 +145,10 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     // cross-site is sessionless. Both halves stated.
     expect(web.includes('same-origin')).toBe(true);
     expect(web.includes('SESSIONLESS')).toBe(true);
+    for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+      expect(web).toContain(method);
+    }
+    expect(web).toContain('confirmation-gated writes');
     // 0-or-1 tab lazy ownership + the fail-closed pin (never the user's foreground tab).
     expect(web.includes('0-OR-1 tab')).toBe(true);
     expect(web.includes('FAIL CLOSED')).toBe(true);
@@ -246,6 +250,10 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     expect(block.includes(codeClientReference('site'))).toBe(true);
     expect(block.includes('https://api.stripe.com')).toBe(true);   // it knows its lock
     expect(block.toLowerCase()).toContain('sessionless');
+    for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+      expect(block).toContain(method);
+    }
+    expect(block).toContain('confirmation-gated writes');
     // It must NOT get the tab/DOM web lore (it has no tab).
     expect(block.includes('snapshot')).toBe(false);
     expect(block.includes('YOUR TAB')).toBe(false);

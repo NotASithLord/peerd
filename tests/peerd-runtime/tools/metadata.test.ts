@@ -53,6 +53,17 @@ const sourceFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes:
     : entry.name.endsWith('.js') ? [join(dir, entry.name)] : []);
 
 describe('tool metadata authority', () => {
+  test('web capability copy names every supported fetch method and the site-capture sibling correctly', () => {
+    const fetchDescription = getToolMetadata('fetch_url').description;
+    for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+      expect(fetchDescription).toContain(method);
+    }
+    expect(fetchDescription).toContain('confirmation-gated');
+    const captureDescription = getToolMetadata('site_capture').description;
+    expect(captureDescription).toContain('common API sibling');
+    expect(captureDescription).not.toContain('api. sibling');
+  });
+
   test('covers the exact controller-owned catalog', () => {
     expect(new Set(CONTROLLER_OWNED_TOOL_NAMES)).toEqual(new Set(TOOL_METADATA_ORDER));
     expect(new Set(CONTROLLER_OWNED_TOOL_NAMES).size).toBe(CONTROLLER_OWNED_TOOL_NAMES.length);
