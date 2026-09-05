@@ -96,6 +96,11 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   // Fixed module Workers spawned by their owning engine tabs.
   'engine-tabs/notebook-tab/linker-worker.js',
   'engine-tabs/pod-tab/pod-job-worker.js',
+  // worker-source.js emits these URLs into generated module Worker source.
+  'engine-tabs/notebook-tab/realm-seal.js',
+  'engine-tabs/notebook-tab/notebook-std.js',
+  'engine-tabs/notebook-tab/notebook-wasi.js',
+  'engine-tabs/pod-tab/pod-realm-seal.js',
 ] as const);
 
 export const PACKAGED_PREVIEW_LAZY_MODULE_ENTRIES = Object.freeze([
@@ -115,13 +120,29 @@ export const PACKAGED_PREVIEW_CHROME_LAZY_MODULE_ENTRIES = Object.freeze([
   'peerd-distributed/index.js',
 ] as const);
 
-export const PACKAGED_STORE_UNAVAILABLE_RUNTIME_MODULE_ENTRIES = Object.freeze([
+export const PACKAGED_UNAVAILABLE_RUNTIME_MODULE_EDGES = Object.freeze([
   // The module remains so Home can catch its rejected import; its eval/ static
   // closure is intentionally pruned from Store and must never be seeded there.
-  'home/eval-section.js',
+  Object.freeze({
+    from: 'home/home.js', kind: 'dynamic-import' as const,
+    target: 'home/eval-section.js', targetCell: 'store/chrome',
+  }),
+  Object.freeze({
+    from: 'home/home.js', kind: 'dynamic-import' as const,
+    target: 'home/eval-section.js', targetCell: 'store/firefox',
+  }),
   // The shared offscreen broker keeps one channel-gated import spelling while
   // Store prunes the complete contributor owner.
-  'offscreen/contributor-channel-addon.js',
+  ...(['store/chrome', 'store/firefox'] as const).map((targetCell) => Object.freeze({
+    from: 'offscreen/offscreen.js', kind: 'dynamic-import' as const,
+    target: 'offscreen/contributor-channel-addon.js', targetCell,
+  })),
+  // Firefox has no mesh host; Store Chrome also ships without dweb.
+  ...(['store/chrome', 'store/firefox', 'preview/firefox'] as const)
+    .map((targetCell) => Object.freeze({
+      from: 'offscreen/offscreen.js', kind: 'dynamic-import' as const,
+      target: 'offscreen/dweb-base.js', targetCell,
+    })),
 ] as const);
 
 export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
@@ -130,10 +151,37 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   ...PACKAGED_PREVIEW_CHROME_LAZY_MODULE_ENTRIES,
 ] as const);
 
-// Fixed non-module worker assets selected by libraries at runtime. Their own
-// loaders are vendor-controlled, so packaging verifies byte presence rather
-// than attempting to parse them as Peerd ES-module graphs.
+// Fixed assets selected by runtime and vendor-controlled loaders outside Peerd's
+// static graph. Packaging verifies byte presence rather than treating opaque
+// vendor selection as an authored ES-module graph.
 export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
+  // CheerpX's vendored runtime selects these children internally rather than
+  // exposing browser-resolvable static imports.
+  'vendor/cheerpx/cheerpOS.js',
+  'vendor/cheerpx/cxbridge.js',
+  'vendor/cheerpx/cxcore.js',
+  'vendor/cheerpx/cxcore.wasm',
+  'vendor/cheerpx/cxcore-no-return-call.js',
+  'vendor/cheerpx/cxcore-no-return-call.wasm',
+  'vendor/cheerpx/workerclock.js',
+  // Linux.create requires these imports to resolve even though Peerd never
+  // initializes the optional Tailscale implementation behind the auto entry.
+  'vendor/cheerpx/tun/direct.js',
+  'vendor/cheerpx/tun/tailscale_tun_auto.js',
+  // Apps inline this packaged global build only when authored markup asks for it.
+  'vendor/mithril/mithril.global.js',
+  // Rollup resolves its WASM binding relative to the lazily imported module.
+  'vendor/rollup/bindings_wasm_bg.wasm',
+  // The local-model host points the embedded ORT loader at this directory.
+  'vendor/transformers/ort-wasm-simd-threaded.asyncify.mjs',
+  'vendor/transformers/ort-wasm-simd-threaded.asyncify.wasm',
+  // Moonshine selects these ORT and VAD children from extension-local bases.
+  'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs',
+  'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm',
+  'vendor/vad-web/vad.worklet.bundle.min.js',
+  // Moonshine's VAD selects one of these non-executable model-data variants.
+  'vendor/vad-web/silero_vad_legacy.onnx',
+  'vendor/vad-web/silero_vad_v5.onnx',
   'vendor/pdfjs/pdf.worker.min.mjs',
   'vendor/tesseract/worker.min.js',
 ] as const);
@@ -147,10 +195,8 @@ export const packagedLazyModuleEntries = (
   ...(dweb ? PACKAGED_PREVIEW_CHROME_LAZY_MODULE_ENTRIES : []),
 ]);
 
-export const packagedUnavailableRuntimeModuleEntries = (
-  dweb: boolean,
-  contributor = true,
-): readonly string[] => Object.freeze([
-  ...(!contributor ? PACKAGED_STORE_UNAVAILABLE_RUNTIME_MODULE_ENTRIES : []),
-  ...(!dweb ? ['offscreen/dweb-base.js'] : []),
-]);
+export const packagedUnavailableRuntimeModuleEdges = (
+  channel: 'preview' | 'store',
+  browser: 'chrome' | 'firefox',
+) => PACKAGED_UNAVAILABLE_RUNTIME_MODULE_EDGES.filter((edge) =>
+  edge.targetCell === `${channel}/${browser}`);

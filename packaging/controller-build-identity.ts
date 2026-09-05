@@ -25,6 +25,11 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'offscreen/voice-channel-host.js',
   'offscreen/local-model.js',
   'offscreen/job-runner.js',
+  // job-runner emits these imports into its generated sealed Worker source;
+  // they are executable custody roots rather than static graph children.
+  'engine-tabs/notebook-tab/realm-seal.js',
+  'engine-tabs/notebook-tab/notebook-std.js',
+  'engine-tabs/notebook-tab/notebook-wasi.js',
   'offscreen/doc-extract.js',
   'offscreen/web-extract-core.js',
   'offscreen/web-extract.js',
@@ -117,6 +122,13 @@ export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
 export const CONTROLLER_BUILD_ASSETS = Object.freeze([
   'peerd-provider/system-prompt.txt',
   'peerd-provider/system-prompt-dweb.txt',
+  // Runtime-selected executable children of the controller-owned local-model
+  // and voice hosts are not visible to the static module graph.
+  'vendor/transformers/ort-wasm-simd-threaded.asyncify.mjs',
+  'vendor/transformers/ort-wasm-simd-threaded.asyncify.wasm',
+  'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs',
+  'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm',
+  'vendor/vad-web/vad.worklet.bundle.min.js',
   // Document workers execute under the digest-custodied offscreen operation
   // but are selected by library URLs rather than authored module imports.
   'vendor/pdfjs/pdf.worker.min.mjs',
