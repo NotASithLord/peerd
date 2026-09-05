@@ -5,6 +5,12 @@ import { createKernelDwebRouteOwner } from './kernel-dweb-route-runtime.js';
 import { createKernelRichRuntime } from './kernel-rich-runtime.js';
 
 const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
+const REQUIRED_RELAY_NAMES = Object.freeze([
+  'archiveOrphanedActor', 'noteAgentTab', 'onEngineAdopt', 'onEngineDrop',
+  'onAppManifestMutation', 'resolveAppOwnerRoot', 'onAppDeleted', 'loadUserEndpoints',
+  'onSettingsChanged', 'syncDwebAgentRoom', 'beforeGoalStart',
+  'hasUnresolvedSideEffects', 'onGoalRunEnd', 'bindGoalRunner',
+]);
 
 /** @param {Record<string,any>} deps */
 export const createKernelProductionRuntime = async (deps) => {
@@ -24,21 +30,28 @@ export const createKernelProductionRuntime = async (deps) => {
       || (deps.dwebEnabled && typeof deps.ensureDwebFeature !== 'function')) {
     throw new TypeError('kernel-production-runtime-config-invalid');
   }
-  /** @type {Record<string,any>|null} */
-  let liveRelays = null;
   const makeRichRuntime = deps.makeRichRuntime ?? createKernelRichRuntime;
-  /** @type {Array<[string, any[]]>} */
-  const pendingRelays = [];
-  /** @param {string} name @param {...any} args */
-  const relay = (name, ...args) => {
-    const handler = liveRelays?.[name];
-    if (typeof handler === 'function') return handler(...args);
-    pendingRelays.push([name, args]);
-    return undefined;
-  };
+  /** @type {any} */
+  let liveRelays;
+  /** @type {Array<[string,string,number]>} */
+  const pendingAdoptions = [];
+  /** @type {any} */
+  let pendingGoal = null;
   const trackerNote = (/** @type {string} */ kind) => (
     /** @type {number} */ tabId, /** @type {any} */ value,
-  ) => relay('noteAgentTab', tabId, { kind, ...value });
+  ) => liveRelays.noteAgentTab(tabId, { kind, ...value });
+  const onEngineAdopt = (/** @type {string} */ kind, /** @type {string} */ id,
+    /** @type {number} */ tabId) => {
+    // why: tracker bootstrap runs before the turn owner exists.
+    if (liveRelays) return liveRelays.onEngineAdopt(kind, id, tabId);
+    pendingAdoptions.push([kind, id, tabId]);
+  };
+  const bindGoalRunner = (/** @type {any} */ runner) => {
+    // why: goal construction binds before the turn owner can be published.
+    if (liveRelays) return liveRelays.bindGoalRunner(runner);
+    if (pendingGoal) throw new Error('kernel-production-goal-runner-already-pending');
+    pendingGoal = runner;
+  };
   const engine = {
     idb: deps.idb,
     browser: deps.browser,
@@ -57,28 +70,29 @@ export const createKernelProductionRuntime = async (deps) => {
     confirm: deps.confirmation.confirm,
     fetchFn: globalThis.fetch.bind(globalThis),
     archiveOrphanedActor: (/** @type {string} */ sessionId) =>
-      relay('archiveOrphanedActor', sessionId),
+      liveRelays.archiveOrphanedActor(sessionId),
     noteVmTab: trackerNote('WebVM'),
     noteJsTab: trackerNote('Notebook'),
     notePodTab: trackerNote('Pod'),
     noteAppTab: trackerNote('App'),
     onVmTabAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) =>
-      relay('onEngineAdopt', 'vm', id, tabId),
+      onEngineAdopt('vm', id, tabId),
     onJsTabAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) =>
-      relay('onEngineAdopt', 'notebook', id, tabId),
+      onEngineAdopt('notebook', id, tabId),
     onPodTabAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) =>
-      relay('onEngineAdopt', 'pod', id, tabId),
+      onEngineAdopt('pod', id, tabId),
     onAppTabAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) =>
-      relay('onEngineAdopt', 'app', id, tabId),
-    onVmTabDrop: (/** @type {string} */ id) => relay('onEngineDrop', 'vm', id),
-    onJsTabDrop: (/** @type {string} */ id) => relay('onEngineDrop', 'notebook', id),
-    onPodTabDrop: (/** @type {string} */ id) => relay('onEngineDrop', 'pod', id),
-    onAppTabDrop: (/** @type {string} */ id) => relay('onEngineDrop', 'app', id),
+      onEngineAdopt('app', id, tabId),
+    onVmTabDrop: (/** @type {string} */ id) => liveRelays.onEngineDrop('vm', id),
+    onJsTabDrop: (/** @type {string} */ id) =>
+      liveRelays.onEngineDrop('notebook', id),
+    onPodTabDrop: (/** @type {string} */ id) => liveRelays.onEngineDrop('pod', id),
+    onAppTabDrop: (/** @type {string} */ id) => liveRelays.onEngineDrop('app', id),
     onAppManifestMutation: (/** @type {string} */ appId) =>
-      relay('onAppManifestMutation', appId),
+      liveRelays.onAppManifestMutation(appId),
     resolveAppOwnerRoot: (/** @type {string} */ appId) =>
-      relay('resolveAppOwnerRoot', appId),
-    onAppDeleted: (/** @type {string} */ appId) => relay('onAppDeleted', appId),
+      liveRelays.resolveAppOwnerRoot(appId),
+    onAppDeleted: (/** @type {string} */ appId) => liveRelays.onAppDeleted(appId),
     withArtifactLease: (/** @type {()=>Promise<any>} */ operation) =>
       deps.featureHost.runtime.runWithLease('dom-host', operation, {
         reason: 'artifact-codec-demand',
@@ -110,7 +124,7 @@ export const createKernelProductionRuntime = async (deps) => {
     channel: deps.channel,
     canWrite: deps.canWrite,
     ensureSettingsReady: () => deps.ready,
-    loadUserEndpoints: () => relay('loadUserEndpoints'),
+    loadUserEndpoints: () => liveRelays.loadUserEndpoints(),
     getDwebTransfer: async () => (await deps.getDwebLive?.())?.dwebTransfer ?? null,
     normalizeImportedSettings: (/** @type {any} */ patch) => deps.normalizeSettingsPatch(patch, {
       knownProviderNames: deps.knownProviderNames,
@@ -121,10 +135,10 @@ export const createKernelProductionRuntime = async (deps) => {
     onSettingsChanging: deps.onSettingsChanging,
     onSettingsChanged: async (/** @type {any} */ patch) => {
       await deps.onSettingsChanged?.(patch);
-      await relay('onSettingsChanged', patch);
+      await liveRelays.onSettingsChanged(patch);
       if (Object.hasOwn(patch ?? {}, 'dwebEnabled')
           || Object.hasOwn(patch ?? {}, 'dwebAgentEnabled')) {
-        await relay('syncDwebAgentRoom');
+        await liveRelays.syncDwebAgentRoom();
       }
     },
     onProviderConfigChanged: () => deps.providerProjection.bumpRevision(),
@@ -148,13 +162,14 @@ export const createKernelProductionRuntime = async (deps) => {
     onAbort: (/** @type {string} */ sessionId) => deps.confirmation.declineSession?.(sessionId),
     goal: {
       kv: deps.kv,
-      beforeStart: (/** @type {any} */ request) => relay('beforeGoalStart', request),
+      beforeStart: (/** @type {any} */ request) =>
+        liveRelays.beforeGoalStart(request),
       hasUnresolvedSideEffects: (/** @type {string} */ sessionId) =>
-        relay('hasUnresolvedSideEffects', sessionId),
+        liveRelays.hasUnresolvedSideEffects(sessionId),
       onEvent: (/** @type {any} */ event) => deps.uiPorts.broadcast(event),
       onRunEnd: (/** @type {string} */ sessionId, /** @type {any} */ info) =>
-        relay('onGoalRunEnd', sessionId, info),
-      bind: (/** @type {any} */ runner) => relay('bindGoalRunner', runner),
+        liveRelays.onGoalRunEnd(sessionId, info),
+      bind: bindGoalRunner,
     },
   };
   const rich = await makeRichRuntime({
@@ -196,11 +211,22 @@ export const createKernelProductionRuntime = async (deps) => {
     } : undefined,
   });
   liveRelays = rich.relays;
-  const settledRelays = /** @type {Record<string,any>} */ (liveRelays);
-  for (const [name, args] of pendingRelays.splice(0)) {
-    const handler = settledRelays[name];
-    if (typeof handler !== 'function') continue;
-    Promise.resolve(handler(...args)).catch(() => {});
+  const missingRelay = REQUIRED_RELAY_NAMES.find(
+    (name) => typeof liveRelays?.[name] !== 'function',
+  );
+  if (missingRelay) {
+    liveRelays = undefined;
+    try { await rich.close?.(); } catch { /* preserve the invalid relay diagnosis */ }
+    throw new TypeError(`kernel-production-relay-${missingRelay}-invalid`);
+  }
+  try {
+    for (const [kind, id, tabId] of pendingAdoptions) {
+      await liveRelays.onEngineAdopt(kind, id, tabId);
+    }
+    if (pendingGoal) await liveRelays.bindGoalRunner(pendingGoal);
+  } catch (cause) {
+    try { await rich.close?.(); } catch { /* preserve the assembly failure */ }
+    throw cause;
   }
   return rich;
 };
