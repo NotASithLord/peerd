@@ -94,6 +94,28 @@ describe('native preview update custody', () => {
     expect((h.values.get(KERNEL_UPDATE_CUSTODY_KEY) as any).pendingVersion).toBe('2.0.0');
   });
 
+  test('does not overwrite a newer update while the window oracle is suspended', async () => {
+    let resolveWindows!: (value: any[]) => void;
+    let observeWindowCheck!: () => void;
+    const checked = new Promise<void>((resolve) => { observeWindowCheck = resolve; });
+    const windowGate = new Promise<any[]>((resolve) => { resolveWindows = resolve; });
+    const h = harness({
+      deps: {
+        listWindowClients: () => { observeWindowCheck(); return windowGate; },
+      },
+    });
+    const first = h.custody.onUpdateAvailable({ version: '2.2.0' });
+    await checked;
+    const second = h.custody.onUpdateAvailable({ version: '2.3.0' });
+    for (let attempt = 0; attempt < 20
+      && (h.values.get(KERNEL_UPDATE_CUSTODY_KEY) as any)?.pendingVersion !== '2.3.0';
+    attempt += 1) await Promise.resolve();
+    resolveWindows([]);
+    await Promise.all([first, second]);
+    expect(h.calls.reload).toBe(1);
+    expect((h.values.get(KERNEL_UPDATE_CUSTODY_KEY) as any).pendingVersion).toBe('2.3.0');
+  });
+
   test('captures before readiness but cannot reload a surviving realm before reconciliation', async () => {
     let releaseReady!: () => void;
     const ready = new Promise<void>((resolve) => { releaseReady = resolve; });

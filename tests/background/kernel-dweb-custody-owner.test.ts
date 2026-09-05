@@ -153,6 +153,69 @@ describe('kernel dweb custody owner', () => {
     expect(ran).toBe(true);
   });
 
+  test('rejects malformed effect arguments without retaining or executing them', async () => {
+    let reads = 0;
+    const runtime = owner({
+      vault: {
+        isLocked: () => false,
+        getSecret: async () => { reads += 1; return null; },
+        setSecret: async () => {},
+      },
+    });
+    const live = port();
+    runtime.attachDwebCustody(live);
+    live.onMessage.emit({ type: 'custody/ready', authorityId: 'authority:malformed' });
+    const cyclic: any = {};
+    cyclic.self = cyclic;
+    for (const [requestId, operation, args] of [
+      ['malformed:cycle', 'identity/read', cyclic],
+      ['malformed:bigint', 'identity/policy', { incomingDid: 1n }],
+      ['malformed:large', 'identity/create', { value: 'x'.repeat(256 * 1024 + 513) }],
+    ] as const) {
+      live.onMessage.emit({ type: 'custody/effect-request', requestId, operation, args });
+    }
+    await nextTask();
+    for (const requestId of ['malformed:cycle', 'malformed:bigint', 'malformed:large']) {
+      expect(live.sent.find((message) => message.requestId === requestId))
+        .toMatchObject({ result: { ok: false, error: 'identity-effect-args-invalid' } });
+    }
+    expect({ reads, disconnected: live.disconnected }).toEqual({ reads: 0, disconnected: 0 });
+  });
+
+  test('allows each exact transfer effect once and refuses further request ids', async () => {
+    let reads = 0;
+    const runtime = owner({
+      vault: {
+        isLocked: () => false,
+        getSecret: async () => { reads += 1; return null; },
+        setSecret: async () => {},
+      },
+    });
+    const live = port();
+    runtime.attachDwebCustody(live);
+    live.onMessage.emit({ type: 'custody/ready', authorityId: 'authority:budget' });
+    const transfer = (await runtime.getDwebTransfer())!.exportRecord('passphrase');
+    const request = await waitForPacket(live, 'custody/request');
+    live.onMessage.emit({
+      type: 'custody/effect-request', requestId: 'export:read:first',
+      parentOperationId: request.operationId, operation: 'identity/read', args: {},
+    });
+    live.onMessage.emit({
+      type: 'custody/effect-request', requestId: 'export:read:second',
+      parentOperationId: request.operationId, operation: 'identity/read', args: {},
+    });
+    await nextTask();
+    expect(reads).toBe(1);
+    expect(live.sent.find((message) => message.requestId === 'export:read:second'))
+      .toMatchObject({ result: { ok: false, error: 'identity-effect-budget-exhausted' } });
+    live.onMessage.emit({
+      type: 'custody/response', requestId: request.requestId,
+      operationId: request.operationId, authorityId: 'authority:budget',
+      ok: true, result: null,
+    });
+    await expect(transfer).resolves.toBeNull();
+  });
+
   test('disconnect releases a transfer with no issued effect', async () => {
     const runtime = owner();
     const live = port();

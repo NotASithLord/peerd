@@ -84,7 +84,22 @@ describe('cold-start browser harness contract', () => {
     const run = spawnSync(process.execPath, [harness, '--help'], { encoding: 'utf8' });
     expect(run.status).toBe(0);
     expect(run.stdout).toContain('usage: bun run bench:cold-sw');
+    expect(run.stdout).toContain('--runtime-channel=<store|preview>');
     expect(run.stderr).toBe('');
+  });
+
+  test('allows Preview timing locally but keeps fixed lanes on Store', () => {
+    const local = spawnSync(process.execPath, [
+      harness, '--lane=local', '--runtime-channel=preview', '--help',
+    ], { encoding: 'utf8' });
+    expect(local.status).toBe(0);
+    expect(local.stderr).toBe('');
+
+    const fixed = spawnSync(process.execPath, [
+      harness, '--lane=pr', '--runtime-channel=preview', '--help',
+    ], { encoding: 'utf8' });
+    expect(fixed.status).not.toBe(0);
+    expect(fixed.stderr).toContain('--runtime-channel is local-only');
   });
 
   test('required lane cardinality cannot be weakened or inflated', () => {
@@ -138,6 +153,9 @@ describe('cold-start browser harness contract', () => {
   test('release runner binds two packaged graphs and the actionable Home surface', async () => {
     const text = await Bun.file(harness).text();
     expect(text).toContain("for (const channel of ['store', 'preview'])");
+    expect(text).toContain('extensionDir: selectedRuntimeArtifact(prepared).extensionDir');
+    expect(text).toContain('artifact: selectedRuntimeArtifact(prepared).archive');
+    expect(text).toContain('packagedGraphs: runtimeArtifact.graphs');
     expect(text).toContain('prepareHistoricalBrowserArtifacts');
     expect(text).toContain("'packaging/package.ts', `--channel=${channel}`");
     expect(text).toContain("coldBudgetMode: 'measure-only'");

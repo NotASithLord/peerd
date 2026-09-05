@@ -88,8 +88,11 @@ describe('options.activity: host-derived semantic verdicts', () => {
 
     const entries = await log.list();
     expect(entries.length).toBe(6);
-    expect(entries[0].type).toBe('semantic_report');
-    expect(entries[0].details.outcome).toBe('semantic-success');
+    // UUIDv7 preserves millisecond order, but entries created inside the same
+    // millisecond retain random suffixes and may enumerate in either order.
+    const semanticOnly = entries.find((entry) => entry.details?.callId === 'semantic-only');
+    expect(semanticOnly?.type).toBe('semantic_report');
+    expect(semanticOnly?.details.outcome).toBe('semantic-success');
 
     const { root, unmount } = mount(async (msg) => (msg.type === 'audit/list'
       ? { ok: true, entries, total: entries.length }

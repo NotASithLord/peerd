@@ -63,7 +63,7 @@ const allowedOptions = new Set([
   'help', 'browser', 'lane', 'chrome-wakes', 'chrome-processes',
   'firefox-wakes', 'firefox-processes', 'firefox-idle-ms',
   'cold-timeout-ms', 'diagnostic', 'allow-failures', 'no-sandbox',
-  'graph-policy', 'require-timing-targets', 'comparison',
+  'graph-policy', 'require-timing-targets', 'comparison', 'runtime-channel',
 ]);
 const unknownOption = Object.keys(options).find((name) => !allowedOptions.has(name));
 if (unknownOption) throw new Error(`unknown cold-start option --${unknownOption}`);
@@ -91,6 +91,13 @@ const boolOption = (name, fallback = false) => {
 const lane = String(options.lane ?? 'local');
 const laneContract = COLD_START_LANES[lane];
 if (!laneContract) throw new Error('--lane must be local, device, pr, main, or release');
+const runtimeChannel = String(options['runtime-channel'] ?? 'store');
+if (!['store', 'preview'].includes(runtimeChannel)) {
+  throw new Error('--runtime-channel must be store or preview');
+}
+if (lane !== 'local' && options['runtime-channel'] !== undefined) {
+  throw new Error('--runtime-channel is local-only');
+}
 const chromeWakes = intOption('chrome-wakes', laneContract.chrome.wakes, 0);
 const chromeProcesses = intOption('chrome-processes', laneContract.chrome.fresh, 1);
 const firefoxProcesses = intOption('firefox-processes', laneContract.firefox.fresh ?? 1, 1);
@@ -141,6 +148,9 @@ if (lane !== 'local') {
 if (chromeWakes > chromeProcesses || firefoxWakes > firefoxProcesses) {
   throw new Error('cold-wake samples must use independent fresh browser processes');
 }
+// why: One selector keeps browser launch, artifact identity and runtime graph
+// evidence on the same packaged channel without forking either benchmark.
+const selectedRuntimeArtifact = (prepared) => prepared[runtimeChannel];
 
 const sha256File = (path) => new Promise((resolveDigest, rejectDigest) => {
   const digest = createHash('sha256');
@@ -1011,7 +1021,7 @@ const runChromeSample = async (prepared, sample, role = 'candidate') => {
   const started = hostNowMs();
   try {
     const processResult = await runChromeProcess({
-      extensionDir: prepared.store.extensionDir,
+      extensionDir: selectedRuntimeArtifact(prepared).extensionDir,
       wakeSamples: sample < chromeWakes ? 1 : 0,
     });
     processResult.sampleIndex = sample + 1;
@@ -1038,7 +1048,7 @@ const runChromeSample = async (prepared, sample, role = 'candidate') => {
 
 const buildChromeResult = async (measurement, prepared, processes, processFailures) => {
   const binary = chromeBinary();
-  const store = prepared.store;
+  const runtimeArtifact = selectedRuntimeArtifact(prepared);
   const wakes = processes.flatMap((processResult) => processResult.wakes);
   const wakeFailures = processes.flatMap((processResult) => processResult.wakeFailures);
   const freshMetrics = COLD_START_PHASES.chrome.freshProfile.metrics;
@@ -1064,11 +1074,11 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
     version: processes[0]?.browserProduct ?? 'unknown',
     measurement,
     artifact: {
-      channel: 'store',
+      channel: runtimeChannel,
       runtimeTarget,
       runtimeSurface,
-      archiveSha256: store.archiveSha256,
-      treeSha256: store.treeSha256,
+      archiveSha256: runtimeArtifact.archiveSha256,
+      treeSha256: runtimeArtifact.treeSha256,
       channels: Object.fromEntries(['store', 'preview'].map((channel) => [channel, {
         channel,
         archiveSha256: prepared[channel].archiveSha256,
@@ -1077,12 +1087,12 @@ const buildChromeResult = async (measurement, prepared, processes, processFailur
       browserBinarySha256: await sha256File(binary),
       browserPin: CHROME_PIN,
       harnessSha256: await harnessSha256(),
-      coldBudgetMode: store.coldBudgetMode,
-      packageVersion: store.packageVersion,
+      coldBudgetMode: runtimeArtifact.coldBudgetMode,
+      packageVersion: runtimeArtifact.packageVersion,
       sourceCommitSha: measurement.sourceCommitSha,
       sourceDirty: measurement.sourceDirty,
     },
-    packagedGraphs: store.graphs,
+    packagedGraphs: runtimeArtifact.graphs,
     packagedGraphsByChannel: Object.fromEntries(['store', 'preview']
       .map((channel) => [channel, prepared[channel].graphs])),
     freshProfile,
@@ -1361,7 +1371,8 @@ const runFirefoxSample = async (
   const started = hostNowMs();
   try {
     const processResult = await runFirefoxProcess({
-      binary, driverBinary, artifact: prepared.store.archive, wake: sample < firefoxWakes,
+      binary, driverBinary, artifact: selectedRuntimeArtifact(prepared).archive,
+      wake: sample < firefoxWakes,
     });
     processResult.fresh.sampleIndex = sample + 1;
     processResult.fresh.clock = 'host-monotonic';
@@ -1388,7 +1399,7 @@ const runFirefoxSample = async (
 const buildFirefoxResult = async (
   measurement, prepared, processes, failures, binary, driverBinary,
 ) => {
-  const store = prepared.store;
+  const runtimeArtifact = selectedRuntimeArtifact(prepared);
   const freshSamples = processes.map((row) => row.fresh);
   const wakeSamples = processes.flatMap((row) => row.wakeSample ? [row.wakeSample] : []);
   const wakeFailures = processes.flatMap((row) => row.wakeFailure ? [row.wakeFailure] : []);
@@ -1416,11 +1427,11 @@ const buildFirefoxResult = async (
     runtimeIdentity: processes[0]?.runtimeIdentity ?? null,
     measurement,
     artifact: {
-      channel: 'store',
+      channel: runtimeChannel,
       runtimeTarget,
       runtimeSurface,
-      archiveSha256: store.archiveSha256,
-      treeSha256: store.treeSha256,
+      archiveSha256: runtimeArtifact.archiveSha256,
+      treeSha256: runtimeArtifact.treeSha256,
       channels: Object.fromEntries(['store', 'preview'].map((channel) => [channel, {
         channel,
         archiveSha256: prepared[channel].archiveSha256,
@@ -1434,12 +1445,12 @@ const buildFirefoxResult = async (
       browserPin: FIREFOX_PIN,
       driverPin: GECKODRIVER_PIN,
       harnessSha256: await harnessSha256(),
-      coldBudgetMode: store.coldBudgetMode,
-      packageVersion: store.packageVersion,
+      coldBudgetMode: runtimeArtifact.coldBudgetMode,
+      packageVersion: runtimeArtifact.packageVersion,
       sourceCommitSha: measurement.sourceCommitSha,
       sourceDirty: measurement.sourceDirty,
     },
-    packagedGraphs: store.graphs,
+    packagedGraphs: runtimeArtifact.graphs,
     packagedGraphsByChannel: Object.fromEntries(['store', 'preview']
       .map((channel) => [channel, prepared[channel].graphs])),
     freshProfile,
@@ -1522,8 +1533,9 @@ const benchmarkFirefoxPair = async (measurements, comparisonSources) => {
 
 export const main = async () => {
   if (options.help === true || options.help === 'true') {
-    console.log('usage: bun run bench:cold-sw -- --lane=<local|device|pr|main|release> [--browser=<all|chrome|firefox>] [--comparison=<absolute-ratchet|interleaved-candidate-base>]');
+    console.log('usage: bun run bench:cold-sw -- --lane=<local|device|pr|main|release> [--browser=<all|chrome|firefox>] [--runtime-channel=<store|preview>] [--comparison=<absolute-ratchet|interleaved-candidate-base>]');
     console.log('Fixed lanes use the exact checked-in sample, timeout, graph, and timing profile.');
+    console.log('Runtime-channel selection is local-only; fixed lanes always run Store.');
     return;
   }
   if (!['all', 'chrome', 'firefox'].includes(browserChoice)) {
@@ -1574,6 +1586,7 @@ export const main = async () => {
         role,
         clock: 'host-monotonic:node-hrtime',
         lane,
+        runtimeChannel,
         runtimeTarget,
         runtimeSurface,
         coldBudgetMode: role === 'candidate' ? coldBudgetMode : 'measure-only',
@@ -1591,6 +1604,7 @@ export const main = async () => {
         role: 'candidate',
         clock: 'host-monotonic:node-hrtime',
         lane,
+        runtimeChannel,
         runtimeTarget,
         runtimeSurface,
         coldBudgetMode,
@@ -1611,6 +1625,7 @@ export const main = async () => {
     measuredAt: new Date().toISOString(),
     packageVersion: VERSION,
     lane,
+    runtimeChannel,
     runtimeTarget,
     runtimeSurface,
     coldBudgetMode,
@@ -1627,6 +1642,7 @@ export const main = async () => {
     },
     options: {
       browser: browserChoice,
+      runtimeChannel,
       runtimeTarget,
       runtimeSurface,
       coldBudgetMode,
@@ -1643,7 +1659,7 @@ export const main = async () => {
       unsafeNoSandbox,
     },
     host,
-    note: 'Every browser runs the exact unsigned Store artifact named by archiveSha256 and records both Store and Preview cold graphs against their own immutable archive/tree digests. Browser launch/install to visible shell, bootstrap, state and actionable-vault clocks are host-monotonic; page/worker clocks are diagnostic only and no benchmark source is injected into the extension.',
+    note: `Every browser runs the exact unsigned ${runtimeChannel} artifact named by archiveSha256 and records both Store and Preview cold graphs against their own immutable archive/tree digests. Browser launch/install to visible shell, bootstrap, state and actionable-vault clocks are host-monotonic; page/worker clocks are diagnostic only and no benchmark source is injected into the extension.`,
     results: {},
     ...(comparisonSources ? { baseResults: {}, pairAssessments: {} } : {}),
   };
