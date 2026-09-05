@@ -24,6 +24,7 @@ import {
 const entries = {
   sidepanel: 'sidepanel/boot.js',
   home: 'home/boot.js',
+  options: 'options/options.js',
   offscreen: 'offscreen/offscreen.js',
 } as const;
 
@@ -61,6 +62,31 @@ const nativeKernelStats = async (entryName = nativeKernelEntry) => {
 };
 
 describe('cold entry graphs', () => {
+  test('Options links only document UI policy, never universal or execution owners', async () => {
+    const measured = await stats('options');
+    const modules = [...measured.modulesSet];
+    const forbidden = modules.filter((module) =>
+      [
+        'peerd-runtime/index.js',
+        'peerd-provider/index.js',
+        'peerd-egress/index.js',
+        'peerd-engine/index.js',
+        'peerd-runtime/loop/agent-loop.js',
+        'peerd-runtime/tools/metadata/catalog.js',
+        'peerd-egress/vault/vault.js',
+        'peerd-egress/vault/argon2.js',
+        'peerd-engine/editor.js',
+        'peerd-engine/repository/repository-service.js',
+        'vendor/codemirror/cm.js',
+        'vendor/acorn/acorn.mjs',
+      ].includes(module)
+      || module.startsWith('peerd-runtime/controller')
+      || module.startsWith('peerd-provider/adapters/')
+      || module.startsWith('peerd-egress/storage/')
+      || module.startsWith('peerd-egress/fetch/'));
+    expect(forbidden, 'Options acquired execution or authority modules').toEqual([]);
+  });
+
   test('every cold graph stays at or below its achieved no-growth ratchet', async () => {
     const kernel = await nativeKernelStats();
     expect(kernel.modules, 'kernel modules')

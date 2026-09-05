@@ -7,8 +7,9 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { CHANNEL } from '/shared/channel-config.js';
-import { bundleToOtlp, EXPORT_PASSPHRASE_MIN_LENGTH } from '/peerd-runtime/index.js';
-import { EXPORT_FILE_LIMIT_BYTES } from '/peerd-engine/index.js';
+import { bundleToOtlp } from '/peerd-runtime/ui.js';
+import { EXPORT_PASSPHRASE_MIN_LENGTH } from '/peerd-runtime/transfer/transfer.js';
+import { EXPORT_FILE_LIMIT_BYTES } from '/peerd-engine/artifact.js';
 import { PrivateTransferPortError } from '../private-transfer-client.js';
 import {
   isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,

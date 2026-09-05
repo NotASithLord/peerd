@@ -7,6 +7,7 @@ export {
   buildAppExport,
   buildNotebookExport,
   buildVmRecipeExport,
+  EXPORT_FILE_LIMIT_BYTES,
   exportFilename,
   inspectEnvelope,
   openEnvelope,

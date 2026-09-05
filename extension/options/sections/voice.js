@@ -19,7 +19,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
-import { createVoiceManager, detectVoiceCapability } from '/peerd-runtime/index.js';
+import { createVoiceManager, detectVoiceCapability } from '/peerd-runtime/ui.js';
 import { mutationFailureCopy } from '../mutation-custody.js';
 import { resetRow } from './reset-row.js';
 // OCR shares this tab (both are heavy on-device model downloads), but lives in

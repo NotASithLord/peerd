@@ -5,7 +5,7 @@
 import m from '/vendor/mithril/mithril.js';
 import {
   CONTRIBUTOR_DISCLOSURE_VERSION, CONTRIBUTOR_SCHEMA_VERSION,
-} from '/peerd-runtime/controller-contributor.js';
+} from '/peerd-runtime/observability/contributor-metrics.js';
 import { mutationFailureCopy, unknownMutationCopy } from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
