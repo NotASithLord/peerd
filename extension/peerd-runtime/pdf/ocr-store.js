@@ -3,10 +3,9 @@
 //
 // This is the Moonshine-voice download pattern (peerd-runtime/voice/
 // model-store.js), applied to OCR: the heavy engine for scanned PDFs is NOT
-// shipped in the box. The user opts in from Settings → Voice & OCR; we
-// stream the assets down with progress, SHA-384 SRI-verify each one, and
-// cache it in IndexedDB. The offscreen extractor then reads the cached bytes
-// (a cache hit) when it needs to OCR a page.
+// shipped in the box. The download remains fail-closed until the browser
+// loader can consume verified cached bytes under the extension CSP. Null SRIs
+// keep production from offering or entering the unsupported path.
 //
 // Lifecycle (per asset): IDB lookup → SRI match → return cached, else
 // download → verify → cache. SRI mismatch throws and does NOT cache.
@@ -43,11 +42,10 @@ const DB_VERSION = 1;
 
 // The OCR engine assets. peerd's OCR path renders a page to a bitmap and
 // recognizes glyphs with a vendored WASM recognizer (Tesseract — its core
-// WASM + a language model). These URLs are commit-pinned; the SRIs are pinned
-// by running scripts/compute-ocr-sri.sh and pasting the result. Until they're
-// pinned, every `sri` is null and PRODUCTION REFUSES to download (fail-closed),
-// exactly like voice shipped before its hashes were computed — the engine
-// picker reports "OCR unavailable" instead of offering a button that throws.
+// WASM + a language model). These URLs are commit-pinned. SRIs remain null
+// until both integrity and the actual loader contract are proven in an
+// installed extension; production refuses to download or trust older cached
+// entries while either condition is unmet.
 //
 // why English only to start: the traineddata is ~per-language and large; we
 // ship the one most-requested model and add a language picker later (the
@@ -57,22 +55,24 @@ export const OCR_ASSETS = Object.freeze([
   // URLs are EXACT-version-pinned (not @6/@1) so the SRI stays valid — a
   // range URL would drift to a new upstream build and break verification.
   // To bump: edit the version, re-run scripts/compute-ocr-sri.sh, paste both.
-  { name: 'core-wasm', url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.1.2/tesseract-core-simd.wasm', sri: 'sha384-3KUztdriXAMWnnOO86COcQ5Zc5fInO+vnpQux5nZqGa6xgZGOv6povhaewDn1/8G', sizeBytes: 3_469_078 },
-  { name: 'lang-eng',  url: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz', sri: 'sha384-JI+fraGAoc5GBGIliuqzHRnP1nJyrukg5ggNSBv/TO+YOVj+6Te6XXQOx7ia10xq', sizeBytes: 2_952_873 },
+  // OCR stays unavailable until its worker consumes verified cached bytes
+  // without treating these object URLs as directory/script roots. Nulling both
+  // hashes also invalidates older cached entries in production.
+  { name: 'core-wasm', url: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.1.2/tesseract-core-simd.wasm', sri: null, sizeBytes: 3_469_078 },
+  { name: 'lang-eng',  url: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz', sri: null, sizeBytes: 2_952_873 },
 ]);
 
 export const OCR_TOTAL_BYTES = OCR_ASSETS.reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
 
 /**
- * Are the OCR SRIs pinned (i.e. is OCR actually shippable)? Until
- * scripts/compute-ocr-sri.sh is run and the hashes pasted into OCR_ASSETS,
- * every `sri` is null and production refuses the download. The settings UI
- * uses this to hide the download button (vs. offering one that throws).
- * Flips automatically once SRIs are pinned. Pure.
+ * Is every OCR runtime asset admitted for production? The settings UI uses
+ * this to disable the download action rather than offering a path whose
+ * browser loader has not passed physical acceptance. Pure.
  *
  * @returns {boolean}
  */
-export const hasValidOcrSris = () => OCR_ASSETS.some((a) => a.sri != null);
+export const hasValidOcrSris = () => OCR_ASSETS.length > 0
+  && OCR_ASSETS.every((asset) => asset.sri != null);
 
 /**
  * Factory mirroring voice's createModelStore: production calls createOcrStore()

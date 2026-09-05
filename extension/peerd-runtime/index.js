@@ -483,8 +483,6 @@ export {
 // override table, then the sideEffect/primitive taxonomy, failing closed
 // to E. The inventory test asserts totality over the live tool set.
 export { retryClassForTool, RETRY_CLASS_OVERRIDES } from './lifecycle/tool-retry-class.js';
-// §9: passive, bounded reports for engine resources the live boot sweep lost.
-export { groupResourceLossNotices } from './lifecycle/resource-recovery.js';
 // §11.1/§12: independent per-store schema versions + durability tiers.
 export {
   DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
@@ -496,7 +494,9 @@ export {
 export { makeWriteGuard, StoreReadOnlyError } from './lifecycle/write-guard.js';
 // §9: the durable engine-liveness ledger the tab trackers feed and the
 // boot sweep reaps orphans from.
-export { makeEngineLiveness, ENGINE_LIVENESS_KEY } from './lifecycle/engine-liveness.js';
+export {
+  makeEngineLiveness, groupResourceLossNotices, ENGINE_LIVENESS_KEY,
+} from './lifecycle/engine-liveness.js';
 // The wiring shells: dispatch tracking (the dispatcher consumes it via
 // ctx.lifecycle) and the SW boot sequence (generation + reconcile +
 // notices).

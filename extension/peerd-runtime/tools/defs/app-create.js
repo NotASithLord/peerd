@@ -97,6 +97,6 @@ export const createAppSandbox = async (args, ctx) => {
         content: `${summary}\n\n${opened ? note : `The App was saved, but the browser could not establish its isolation floor: ${openError}. It cannot run safely here.\n\n${note}`}`,
       };
     } catch (e) {
-      return { ok: false, error: `app_create_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
+      return { ok: false, error: `sandbox_create_failed: app: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   };

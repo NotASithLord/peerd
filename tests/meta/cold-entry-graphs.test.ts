@@ -44,16 +44,21 @@ const nativeKernelEntry = 'background/vault-kernel-chrome.js';
 const previewKernelEntry = 'background/vault-kernel-preview.js';
 
 // The prior exact ratchet remains a diagnostic baseline. These are the only
-// cold inputs whose sizes changed since it: the two authority hosts gained
-// terminal outcome/audit custody, policy gained the Plan-safe page-program
-// subset, quota gained its matching bound, and a2a shed a stale prompt grant.
+// cold inputs whose sizes changed since it: the authority hosts gained
+// terminal outcome/audit and engine-loss custody, policy gained the Plan-safe
+// page-program subset, quota gained its matching bound, and a2a shed a stale
+// prompt grant.
 // Computing from prior input sizes makes an unrelated offsetting edit fail too.
 const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
   baselineGraphBytes: 4_035_518,
   priorInputBytes: Object.freeze({
     'background/controller-turn-bridge.js': 145_646,
+    'background/execution-tool-authority.js': 19_738,
+    'background/kernel-turn-authority-adapter.js': 170_225,
     'background/offscreen-actor-client.js': 162_659,
     'peerd-runtime/actor/a2a-api.js': 8_997,
+    'peerd-runtime/kernel-turn-authority.js': 3_002,
+    'peerd-runtime/lifecycle/engine-liveness.js': 3_997,
     'peerd-runtime/permissions/policy.js': 14_942,
     'shared/controller-kernel-quota.js': 31_640,
   }),

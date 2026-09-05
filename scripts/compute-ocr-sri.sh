@@ -6,9 +6,9 @@
 #   scripts/compute-ocr-sri.sh            # uses the URLs baked into OCR_ASSETS
 #
 # For each URL, downloads the bytes, computes SHA-384, and prints a base64
-# SRI hash in the form `sha384-<base64>` plus the byte size. Paste each
-# into the matching asset in
-# peerd-runtime/pdf/ocr-store.js OCR_ASSETS (the `sri` / `sizeBytes` fields).
+# SRI hash in the form `sha384-<base64>` plus the byte size. Paste hashes into
+# OCR_ASSETS only after the actual browser loader passes installed-extension
+# acceptance; hashes alone do not enable OCR.
 #
 # Why this matters
 # ----------------

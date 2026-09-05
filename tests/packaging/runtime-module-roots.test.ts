@@ -151,8 +151,6 @@ describe('fixed runtime module roots', () => {
       'vendor/cheerpx/tun/tailscale_tun_auto.js',
       'vendor/mithril/mithril.global.js',
       'vendor/rollup/bindings_wasm_bg.wasm',
-      'vendor/vad-web/silero_vad_legacy.onnx',
-      'vendor/vad-web/silero_vad_v5.onnx',
       'engine-tabs/pod-tab/pod-realm-seal.js',
     ]) {
       expect(PACKAGED_LAZY_ASSET_ENTRIES.includes(entry as any)

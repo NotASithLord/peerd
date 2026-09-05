@@ -39,7 +39,7 @@ export class OcrUnavailableError extends TypedError {
 
   /** @param {string} [message] */
   constructor(message) {
-    super(message ?? 'OCR engine is not installed. Enable it in Settings → Voice & OCR.');
+    super(message ?? 'OCR is unavailable in this build. Use a searchable PDF or page images.');
   }
 }
 
