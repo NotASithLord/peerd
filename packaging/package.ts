@@ -14,10 +14,9 @@
 //   4. generate the manifest for (channel, browser)
 //   5. compact authored modules in the static SW/offscreen cold graphs
 //      (module graph/names/vendor bytes preserved; staging copy only)
-//   6. bundle an already-selected native Chrome kernel into one import-free file
-//   7. zip to artifacts/peerd-<channel>-<browser>.{zip,xpi}
-//   8. store artifacts: run the no-dweb-strings verifier
-//   9. preview artifacts: sign when credentials are present (packaging/sign.ts)
+//   6. zip to artifacts/peerd-<channel>-<browser>.{zip,xpi}
+//   7. store artifacts: run the no-dweb-strings verifier
+//   8. preview artifacts: sign when credentials are present (packaging/sign.ts)
 //
 // Invocation:
 //   bun run package -- --channel=store --browser=chrome
@@ -56,11 +55,6 @@ import {
   CONTROLLER_BUILD_ENTRIES,
   writeControllerBuildIdentity,
 } from './controller-build-identity.ts';
-import {
-  assertNativeChromeBundleRatchet,
-  bundleChromeNativeKernel,
-  isChromeNativeKernelEntry,
-} from './bundle-chrome-native-kernel.ts';
 
 // Paths (relative to extension/) that never ship in ANY artifact.
 // why eval/ is NOT here: the home page's Lab (home/eval-section.js) imports
@@ -306,17 +300,13 @@ export const packageArtifact = async (
   );
   writeFileSync(join(staging, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 
-  const chromeBackgroundEntry = browser === 'chrome'
-    ? manifest.background?.service_worker : null;
-  const nativeChromeKernel = isChromeNativeKernelEntry(chromeBackgroundEntry);
-
   if (minify) {
     const report = await minifyColdArtifactModules(staging, browser, channel);
     if (coldBudgetMode === 'enforce') {
       assertColdArtifactBudgets(report);
     }
     console.log(formatArtifactMinifyReport(report));
-    if (coldBudgetMode === 'enforce' && nativeChromeKernel) {
+    if (coldBudgetMode === 'enforce') {
       console.log('cold graph budget: package no-growth ratchet');
     }
     if (coldBudgetMode === 'measure-only') {
@@ -335,14 +325,6 @@ export const packageArtifact = async (
     console.log('controller build identity: absent from historical base; no candidate stamp injected');
   } else {
     throw new Error('candidate artifact is missing the complete controller build-identity graph');
-  }
-
-  if (minify && nativeChromeKernel) {
-    const bundled = await bundleChromeNativeKernel(staging, chromeBackgroundEntry);
-    if (coldBudgetMode === 'enforce') {
-      assertNativeChromeBundleRatchet(chromeBackgroundEntry, bundled);
-    }
-    console.log(`bundled native Chrome kernel ${bundled.bytes} bytes (${bundled.inputs.length} staged inputs; ${bundled.inputSha256})`);
   }
 
   // Package. AMO takes .xpi (a zip); Chrome Web Store takes .zip; the

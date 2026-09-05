@@ -88,19 +88,13 @@ const graphFailures = (browser, result, policy) => {
       }
       if (!validSha256(graph.graphSha256)) failures.push(`${label}.graphSha256 is missing`);
       if (!validSha256(graph.entrySha256)) failures.push(`${label}.entrySha256 is missing`);
-      const bundledChromeWorker = browser === 'chrome'
-        && name === 'serviceWorker' && graph.graphModules === 1;
-      if (bundledChromeWorker && graph.entryBytes !== graph.graphBytes) {
-        failures.push(`${label} bundled entry does not equal its static graph`);
-      }
       for (const metric of ['modules', 'graphBytes', 'entryBytes']) {
         const key = metric === 'modules' ? 'graphModules' : metric;
         const value = graph[key];
         if (!Number.isInteger(value) || value <= 0) {
           failures.push(`${label}.${key} is missing or invalid`);
         } else {
-          const limit = bundledChromeWorker && metric === 'entryBytes'
-            ? ceiling?.graphBytes : ceiling?.[metric];
+          const limit = ceiling?.[metric];
           if (limit && value > limit) {
             failures.push(`${label}.${key} ${value} exceeds ${limit}`);
           }
@@ -364,9 +358,8 @@ export const assessColdStartPair = (browser, candidate, base, options = {}) => {
       ...Object.keys(base?.packagedGraphsByChannel?.[channel] ?? {}),
     ]);
     for (const name of names) {
-      // Package recipes may compact a graph into one native worker file. The
-      // entry alone is therefore not comparable to an unbundled historical
-      // root; total reachable bytes and modules are the common cold graph.
+      // Entry formatting is not a stable comparison across revisions; total
+      // reachable bytes and modules are the durable cold-graph contract.
       for (const metric of ['graphModules', 'graphBytes']) {
         const candidateValue = candidate?.packagedGraphsByChannel?.[channel]?.[name]?.[metric];
         const baseValue = base?.packagedGraphsByChannel?.[channel]?.[name]?.[metric];

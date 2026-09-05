@@ -18,7 +18,6 @@ import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { dwebEnabledForTarget } from '../../packaging/gen-channel-config.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import { writeControllerBuildIdentity } from '../../packaging/controller-build-identity.ts';
-import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
 import {
   NATIVE_BACKGROUND_ENTRY,
   targetBackgroundEntry,
@@ -40,16 +39,9 @@ export const vaultKernelManifest = (manifest, browser, channel = 'store') => ({
     : { service_worker: nativeEntry(browser, channel), type: 'module' },
 });
 
-export const assertVaultKernelArtifactShape = ({
-  modules, graphBytes, entryBytes, bundled = false,
-}) => {
+export const assertVaultKernelArtifactShape = ({ modules, graphBytes, entryBytes }) => {
   for (const [name, value] of Object.entries({ modules, graphBytes, entryBytes })) {
     if (!Number.isInteger(value) || value <= 0) throw new Error(`invalid native ${name}: ${value}`);
-  }
-  if (bundled) {
-    if (modules !== 1 || entryBytes !== graphBytes) {
-      throw new Error('native Chrome bundle must be exactly one static module');
-    }
   }
 };
 
@@ -63,7 +55,7 @@ export async function buildVaultKernelArtifact({
   await packageArtifact({
     // Start from the readable target package, then transform only this copied
     // isolated diagnostic when releaseMinify is requested. The live artifact and its
-    // legacy ratchet remain untouched.
+    // release ratchet remain untouched.
     channel, browser, version, sign: false, verify: channel === 'store', minify: false,
     artifactRoot,
   });
@@ -86,9 +78,6 @@ export async function buildVaultKernelArtifact({
   );
   if (releaseMinify) await minifyColdArtifactModules(staging, browser, channel);
   await writeControllerBuildIdentity(staging);
-  if (releaseMinify && browser === 'chrome') {
-    await bundleChromeNativeKernel(staging, nativeEntry(browser, channel));
-  }
 
   const entry = join(staging, nativeEntry(browser, channel));
   const graph = [...await collectStaticModuleGraph(staging, entry)].sort();
@@ -121,10 +110,7 @@ export async function buildVaultKernelArtifact({
   const bytes = graph.reduce((total, path) => total + statSync(path).size, 0);
   const entryBytes = statSync(entry).size;
   if (releaseMinify) {
-    assertVaultKernelArtifactShape({
-      modules: graph.length, graphBytes: bytes, entryBytes,
-      bundled: browser === 'chrome',
-    });
+    assertVaultKernelArtifactShape({ modules: graph.length, graphBytes: bytes, entryBytes });
   }
   const sha256 = createHash('sha256').update(readFileSync(artifact)).digest('hex');
   return Object.freeze({

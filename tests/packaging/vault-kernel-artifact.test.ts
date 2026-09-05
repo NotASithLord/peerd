@@ -4,15 +4,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { genBuildConfigSource } from '../../packaging/gen-build-config.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
-import {
-  assertNativeChromeBundleRatchet,
-  bundleChromeNativeKernel,
-  isChromeNativeKernelEntry,
-  NATIVE_CHROME_BUNDLE_RATCHETS,
-  NATIVE_CHROME_PRUNED_IMPORTS,
-} from '../../packaging/bundle-chrome-native-kernel.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { FIREFOX_BACKGROUND_ENTRY } from '../../packaging/gen-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
@@ -22,34 +14,6 @@ import {
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
 describe('test-only vault kernel package target', () => {
-  test('release bundling recognizes only the two native Chrome entries', () => {
-    expect(isChromeNativeKernelEntry('background/vault-kernel-chrome.js')).toBe(true);
-    expect(isChromeNativeKernelEntry('background/vault-kernel-preview.js')).toBe(true);
-    expect(isChromeNativeKernelEntry('background/service-worker.js')).toBe(false);
-    expect(isChromeNativeKernelEntry('background/vault-kernel-chrome.js?forged')).toBe(false);
-  });
-
-  test('release bundling pins the exact staged input closure and byte ceiling', () => {
-    const ratchet = NATIVE_CHROME_BUNDLE_RATCHETS['background/vault-kernel-chrome.js'];
-    const inputs = Object.freeze(Array.from(
-      { length: ratchet.inputs }, (_, index) => `input-${index}.js`,
-    ));
-    const exact = {
-      bytes: ratchet.bytes,
-      inputs,
-      inputSha256: ratchet.inputSha256,
-    };
-    expect(() => assertNativeChromeBundleRatchet(
-      'background/vault-kernel-chrome.js', exact,
-    )).not.toThrow();
-    expect(() => assertNativeChromeBundleRatchet(
-      'background/vault-kernel-chrome.js', { ...exact, bytes: exact.bytes + 1 },
-    )).toThrow('native Chrome bundle grew');
-    expect(() => assertNativeChromeBundleRatchet(
-      'background/vault-kernel-chrome.js', { ...exact, inputSha256: '0'.repeat(64) },
-    )).toThrow('input closure changed');
-  });
-
   test('changes only the copied background entry for each browser', () => {
     const source = {
       manifest_version: 3,
@@ -76,167 +40,13 @@ describe('test-only vault kernel package target', () => {
     expect(source.background.service_worker).toBe('background/service-worker.js');
   });
 
-  test('release-minified floor validates metrics and the bundled module shape', () => {
+  test('release-minified floor validates positive graph metrics', () => {
     expect(() => assertVaultKernelArtifactShape({
       modules: 76, graphBytes: 900_000, entryBytes: 30_000,
     })).not.toThrow();
     expect(() => assertVaultKernelArtifactShape({
       modules: 0, graphBytes: 1, entryBytes: 1,
     })).toThrow('invalid native modules');
-    expect(() => assertVaultKernelArtifactShape({
-      modules: 1, graphBytes: 1_300_000, entryBytes: 1_300_000,
-      bundled: true,
-    })).not.toThrow();
-    expect(() => assertVaultKernelArtifactShape({
-      modules: 2, graphBytes: 190_000, entryBytes: 190_000,
-      bundled: true,
-    })).toThrow('exactly one static module');
-    expect(() => assertVaultKernelArtifactShape({
-      modules: 1, graphBytes: 1_300_000, entryBytes: 1_299_999,
-      bundled: true,
-    })).toThrow('exactly one static module');
-  });
-
-  test('Chrome ships one module bundle and prunes both Firefox runtime edges', async () => {
-    const staging = mkdtempSync(join(tmpdir(), 'peerd-native-kernel-bundle-'));
-    const background = join(staging, 'background');
-    mkdirSync(background, { recursive: true });
-    writeFileSync(join(background, 'dep.js'), 'export const answer = 42;\n');
-    writeFileSync(join(background, 'vault-kernel-chrome.js'), [
-      "import { answer } from './dep.js';",
-      "const kernelFirefox = 'chrome' === 'firefox';",
-      "class ExactNamedError extends Error { constructor() { super(); this.name = 'ExactNamedError'; } }",
-      'globalThis.__peerdBundleErrorName = new ExactNamedError().name;',
-      'globalThis.__peerdBundleValue = answer;',
-      "globalThis.__peerdBundleFirefox = kernelFirefox ? () => import('./firefox-storage-keepalive.js') : undefined;",
-      "globalThis.__peerdBundleRepository = kernelFirefox ? () => import('./repository-local-client.js') : undefined;",
-      "globalThis.__peerdBundleActor = kernelFirefox ? () => import('./direct-actor-host.js') : undefined;",
-      '',
-    ].join('\n'));
-    try {
-      const result = await bundleChromeNativeKernel(staging, 'background/vault-kernel-chrome.js');
-      const output = readFileSync(join(background, 'vault-kernel-chrome.js'), 'utf8');
-      expect(NATIVE_CHROME_PRUNED_IMPORTS).toHaveLength(3);
-      expect(result.inputs).toEqual([
-        'background/dep.js',
-        'background/vault-kernel-chrome.js',
-      ]);
-      expect(output).toContain('peerd.kernel.bundle-start.v1');
-      expect(output.trimStart().startsWith('(()=>')).toBe(false);
-      expect(output).not.toContain('export{');
-      expect(output).not.toContain("from'./dep.js'");
-      expect(output).not.toContain('from"./dep.js"');
-      expect([...output.matchAll(/\bimport\((['"])([^'"]+)\1\)/g)]
-        .map((match) => match[2]).sort()).toEqual([]);
-      Function(output)();
-      expect((globalThis as any).__peerdBundleErrorName).toBe('ExactNamedError');
-      expect((globalThis as any).__peerdBundleValue).toBe(42);
-      expect((globalThis as any)[Symbol.for('peerd.kernel.bundle-start.v1')])
-        .toBeGreaterThanOrEqual(0);
-      delete (globalThis as any).__peerdBundleErrorName;
-      delete (globalThis as any).__peerdBundleValue;
-      delete (globalThis as any).__peerdBundleFirefox;
-      delete (globalThis as any).__peerdBundleRepository;
-      delete (globalThis as any).__peerdBundleActor;
-      delete (globalThis as any)[Symbol.for('peerd.kernel.bundle-start.v1')];
-      expect(result.bytes).toBeLessThan(2_000);
-    } finally {
-      rmSync(staging, { recursive: true, force: true });
-    }
-  });
-
-  test('Chrome rejects a distributed implementation edge in the worker bundle', async () => {
-    const staging = mkdtempSync(join(tmpdir(), 'peerd-native-kernel-dweb-'));
-    mkdirSync(join(staging, 'background'), { recursive: true });
-    mkdirSync(join(staging, 'shared'), { recursive: true });
-    mkdirSync(join(staging, 'peerd-distributed'), { recursive: true });
-    writeFileSync(
-      join(staging, 'background', 'vault-kernel-preview.js'),
-      "void import('/shared/dweb-loader.js');\n",
-    );
-    writeFileSync(
-      join(staging, 'shared', 'dweb-loader.js'),
-      "export const loadDweb = () => import('/peerd-distributed/index.js');\n",
-    );
-    writeFileSync(join(staging, 'peerd-distributed', 'index.js'), 'export const live = true;\n');
-    try {
-      await expect(bundleChromeNativeKernel(
-        staging, 'background/vault-kernel-preview.js',
-      )).rejects.toThrow('native Chrome kernel hosted distributed inputs');
-    } finally {
-      rmSync(staging, { recursive: true, force: true });
-    }
-  });
-
-  test('Chrome bundles only staged Store and Preview target identity', async () => {
-    const targets = [
-      {
-        channel: 'store' as const,
-        entry: 'background/vault-kernel-chrome.js',
-        digest: 'a'.repeat(64),
-        dwebEnabled: false,
-        advancedAutomationEnabled: false,
-        webActorActionSurface: 'tools',
-      },
-      {
-        channel: 'preview' as const,
-        entry: 'background/vault-kernel-preview.js',
-        digest: 'b'.repeat(64),
-        dwebEnabled: true,
-        advancedAutomationEnabled: true,
-        webActorActionSurface: 'code',
-      },
-    ];
-    for (const target of targets) {
-      const staging = mkdtempSync(join(tmpdir(), `peerd-native-${target.channel}-bundle-`));
-      const background = join(staging, 'background');
-      const shared = join(staging, 'shared');
-      mkdirSync(background, { recursive: true });
-      mkdirSync(shared, { recursive: true });
-      const manifest = {
-        version: '0.7.3',
-        background: { service_worker: target.entry, type: 'module' },
-      };
-      const buildConfig = genBuildConfigSource(manifest, {
-        browser: 'chrome', channel: target.channel,
-        dwebEnabled: target.dwebEnabled,
-      }).replace('0'.repeat(64), target.digest);
-      writeFileSync(join(shared, 'build-config.js'), buildConfig);
-      writeFileSync(join(staging, target.entry), [
-        'import {',
-        '  BACKGROUND_MODULE_PATH, BROWSER, CHANNEL, CHANNEL_DEFAULTS,',
-        '  CONTROLLER_BUILD_DIGEST, DWEB_ENABLED,',
-        "} from '/shared/build-config.js';",
-        'globalThis.__peerdNativeBundleTarget = {',
-        '  background: BACKGROUND_MODULE_PATH, browser: BROWSER, channel: CHANNEL,',
-        '  digest: CONTROLLER_BUILD_DIGEST, dwebEnabled: DWEB_ENABLED,',
-        '  advancedAutomationEnabled: CHANNEL_DEFAULTS.advancedAutomationEnabled,',
-        '  webActorActionSurface: CHANNEL_DEFAULTS.webActorActionSurface,',
-        '};',
-        '',
-      ].join('\n'));
-      try {
-        const result = await bundleChromeNativeKernel(staging, target.entry);
-        expect(result.inputs).toEqual([
-          target.entry,
-          'shared/build-config.js',
-        ].sort());
-        Function(readFileSync(join(staging, target.entry), 'utf8'))();
-        expect((globalThis as any).__peerdNativeBundleTarget).toEqual({
-          background: target.entry,
-          browser: 'chrome',
-          channel: target.channel,
-          digest: target.digest,
-          dwebEnabled: target.dwebEnabled,
-          advancedAutomationEnabled: target.advancedAutomationEnabled,
-          webActorActionSurface: target.webActorActionSurface,
-        });
-      } finally {
-        delete (globalThis as any).__peerdNativeBundleTarget;
-        delete (globalThis as any)[Symbol.for('peerd.kernel.bundle-start.v1')];
-        rmSync(staging, { recursive: true, force: true });
-      }
-    }
   });
 
   test('live manifest owns the native kernel entry', () => {
@@ -260,14 +70,13 @@ describe('test-only vault kernel package target', () => {
     expect(source).toContain("`peerd-vault-kernel-${channel}-${browser}.${extension}`");
     expect(source).toContain("verify: channel === 'store', minify: false");
     expect(source).toContain('minifyColdArtifactModules(staging, browser, channel)');
-    expect(source).toContain('bundleChromeNativeKernel(staging, nativeEntry(browser, channel))');
     expect(source).toContain('assertVaultKernelArtifactShape({');
     expect(source).toContain('dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser');
     expect(source).toContain('writeControllerBuildIdentity(staging)');
     expect(source).not.toContain('generateManifest(');
   });
 
-  test('bundled kernel timing keeps the worker-origin reply marker', () => {
+  test('kernel timing keeps the worker-origin reply marker', () => {
     const source = readFileSync(
       join(REPO_ROOT, 'extension/background/vault-kernel.js'), 'utf8',
     );
@@ -283,19 +92,14 @@ describe('test-only vault kernel package target', () => {
     expect(stampGuard).toContain("join(staging, 'shared', 'controller-build.js')");
     expect(stampGuard).not.toContain("join(staging, 'shared', 'structured-clone-size.js')");
     const stampAt = source.indexOf('await writeControllerBuildIdentity(staging)');
-    const bundleAt = source.indexOf('await bundleChromeNativeKernel(staging, chromeBackgroundEntry)');
     const packageAt = source.indexOf('// Package. AMO takes .xpi');
-    expect(source).toContain(
-      'const nativeChromeKernel = isChromeNativeKernelEntry(chromeBackgroundEntry)',
-    );
-    expect(source).toContain('if (minify && nativeChromeKernel)');
     expect(source).toContain('assertColdArtifactBudgets(report)');
+    expect(source).not.toContain('bundleChromeNativeKernel');
     expect(stampAt).toBeGreaterThan(0);
-    expect(bundleAt).toBeGreaterThan(stampAt);
-    expect(packageAt).toBeGreaterThan(bundleAt);
+    expect(packageAt).toBeGreaterThan(stampAt);
   });
 
-  test('release packaging bundles native Chrome and leaves native Firefox modular', async () => {
+  test('release packaging preserves modular Chrome and Firefox entries', async () => {
     const root = mkdtempSync(join(tmpdir(), 'peerd-native-package-path-'));
     const sourceRoot = join(root, 'source');
     const artifactRoot = join(root, 'artifacts');
@@ -325,9 +129,8 @@ describe('test-only vault kernel package target', () => {
         const graph = await collectStaticModuleGraph(staging, join(staging, entryRelative));
         expect(entryRelative).toBe(browser === 'firefox'
           ? FIREFOX_BACKGROUND_ENTRY : 'background/vault-kernel-chrome.js');
-        expect(graph.size > 1).toBe(browser === 'firefox');
+        expect(graph.size).toBeGreaterThan(1);
         if (browser === 'chrome') {
-          expect(graph.size).toBe(1);
           expect(statSync(join(staging, entryRelative)).size).toBeGreaterThan(0);
         } else {
           expect(graph.has(join(staging, 'background/driven-child-request-guard.js'))).toBe(true);
