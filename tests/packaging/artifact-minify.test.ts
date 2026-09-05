@@ -306,7 +306,10 @@ describe('release artifact JavaScript minification', () => {
       serviceWorker: {
         modules: 1, graphBytes: 2, entryBytes: 1, inputSha256: 'b'.repeat(64),
       },
-    })).toThrow(/input closure changed/);
+    })).toThrow(
+      `store/chrome serviceWorker cold input closure changed `
+      + `(actual ${'a'.repeat(64)}; expected ${'b'.repeat(64)})`,
+    );
     expect(() => assertColdArtifactBudgets({ ...report, browser: 'firefox' }, {
       serviceWorker: { modules: 1, graphBytes: 2, entryBytes: 1 },
     })).not.toThrow();
