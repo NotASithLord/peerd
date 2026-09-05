@@ -379,11 +379,27 @@ const METHOD_ARGUMENT_FIELDS = Object.freeze({
 } as Record<string, string[]>);
 
 const assertShapedArguments = (
-  operation: string, spec: Spec, observed: Call[], sessionId: string,
+  operation: string, spec: Spec, observed: Call[], sessionId: string, callId: string,
 ) => {
   for (const call of observed) {
     const label = `${call.domain}.${call.method}`;
-    if (label === 'pod.resolveId') {
+    if (label === 'actor.spawnSync' || label === 'actor.spawnAsync') {
+      expect(call.args, operation).toEqual([{
+        ...spec.value,
+        parentSessionId: sessionId, parentDepth: sessionId.startsWith('actor-') ? 1 : 0,
+        parentInbound: false, parentToolUseId: callId,
+      }]);
+    } else if (label === 'actor.listTasks') {
+      expect(call.args, operation).toEqual([]);
+    } else if (label === 'actor.cancelTask') {
+      expect(call.args, operation).toEqual([spec.value.taskId]);
+    } else if (label === 'actor.deliverMessage') {
+      expect(call.args[0], operation).toEqual({
+        ...spec.value, senderSessionId: sessionId, inbound: false,
+        toolUseId: callId, awaitSignal: expect.any(AbortSignal),
+      });
+      expect(call.args, operation).toHaveLength(1);
+    } else if (label === 'pod.resolveId') {
       expect(call.args, operation).toEqual([{ sessionId, podId }]);
     } else if (label === 'pod.getRemote') {
       expect(call.args, operation).toEqual([{ kind: 'pod', id: podId }]);
@@ -417,8 +433,32 @@ const assertShapedArguments = (
   }
 };
 
+const assertExactExecution = (
+  operation: string, spec: Spec,
+  result: { operationResult: unknown; calls: Call[]; bindings: Binding[] },
+  sessionId: string, callId: string,
+) => {
+  expect(result.operationResult, operation).toBeDefined();
+  expect(result.calls.map(({ domain, method }) => `${domain}.${method}`), operation)
+    .toEqual(expectedCalls(spec));
+  assertShapedArguments(operation, spec, result.calls, sessionId, callId);
+  if (!binderModules.some(([, , domain]) => domain === spec.domain)) return;
+  const { appProgramSemanticToken: _appToken, pageProgramSemanticToken: _pageToken,
+    ...ordinaryArgs } = spec.value;
+  const pageArgs = spec.domain === 'page'
+    ? spec.value.args as Record<string, unknown> : ordinaryArgs;
+  const semanticToken = spec.value.appProgramSemanticToken
+    ?? spec.value.pageProgramSemanticToken;
+  expect(result.bindings, operation).toEqual([{
+    domain: spec.domain, operation, args: pageArgs,
+    ...(['turn.app.run-code', 'turn.page.run-program'].includes(operation)
+      && typeof semanticToken === 'string' ? { semanticToken } : {}),
+  }]);
+};
+
 const context = () => ({
   permission: { mode: 'act', confirmActions: false },
+  inbound: false,
   readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
   appendAudit: async () => {},
   lifecycle: {
@@ -507,7 +547,11 @@ const executeMain = async (operation: string, spec: Spec, includeUnknown = false
   return { operationResult, unknownResult, calls: [...calls], bindings: [...bindings] };
 };
 
-const actorRoute = (operation: string) => operation.slice('turn.'.length).replace('.', '/');
+const actorRoute = (operation: string) => ({
+  'turn.actor.tasks': 'actor/tasks-read',
+  'turn.actor.cancel': 'actor/task-cancel',
+  'turn.actor.message': 'actor/message-deliver',
+}[operation] ?? operation.slice('turn.'.length).replace('.', '/'));
 const durableMessages = (callId: string) => [{
   role: 'assistant', content: '', toolUses: [{ id: callId, name: 'inspect', input: {} }],
 }, {
@@ -516,24 +560,38 @@ const durableMessages = (callId: string) => [{
 }];
 
 const executeActor = async (operation: string, spec: Spec, includeUnknown = false) => {
+  return executeActorWithIdentity(operation, spec, includeUnknown, false);
+};
+
+const executeActorWithIdentity = async (
+  operation: string, spec: Spec, includeUnknown = false, spawned = false,
+) => {
   calls = [];
   bindings = [];
-  if (!spec.actor) throw new TypeError(`missing actor for ${operation}`);
+  if (!spawned && !spec.actor) throw new TypeError(`missing actor for ${operation}`);
   const steps = [...(spec.prelude ?? []), { operation, value: spec.value }];
-  const child = {
-    kind: 'actor', sessionId: `actor-${operation}`,
-    actorType: spec.actor.actorType, instanceId: spec.actor.instanceId,
-    ...(spec.actor.backing ? { backing: spec.actor.backing } : {}),
+  const actorSessionId = `actor-${operation}`;
+  const parentSessionId = `parent-${operation}`;
+  const child = spawned ? {
+    kind: 'spawned', sessionId: actorSessionId, parentSessionId,
+    depth: 1, spawnedTrusted: true,
+    grantedOperations: [...new Set(steps.map((step) => step.operation))],
+  } : {
+    kind: 'actor', sessionId: actorSessionId,
+    actorType: spec.actor?.actorType, instanceId: spec.actor?.instanceId,
+    ...(spec.actor?.backing ? { backing: spec.actor.backing } : {}),
   };
+  const parent = { kind: 'chat', sessionId: parentSessionId };
   let operationResult: any = null;
   let unknownResult: any = null;
   const client = makeOffscreenActorClient({
     ensureHost: async () => {}, sendMessage: async () => ({ ok: true }),
     spendRefusalFor: async () => null,
     settlementCleanupMs: 10,
-    sessions: { get: async (id: string) => id === child.sessionId ? structuredClone(child) : null },
+    sessions: { get: async (id: string) => id === child.sessionId
+      ? structuredClone(child) : id === parentSessionId ? structuredClone(parent) : null },
     buildToolContext: async () => ({
-      session: { sessionId: child.sessionId, kind: 'actor' },
+      session: { sessionId: child.sessionId, kind: child.kind, depth: child.depth ?? 0 },
       actorType: spec.actor?.actorType, actorInstanceId: spec.actor?.instanceId,
       ...(spec.actor?.backing ? { backing: spec.actor.backing } : {}),
       ...context(),
@@ -575,14 +633,17 @@ const executeActor = async (operation: string, spec: Spec, includeUnknown = fals
     actorSessionId: child.sessionId, message: 'matrix', systemPrompt: 'system',
     provider: 'anthropic', model: 'model-1', tools: [{ name: 'inspect' }],
     allowedOperations: [...new Set(steps.map((step) => step.operation))],
-    actorType: spec.actor.actorType,
-    ...(spec.actor.backing ? { backing: spec.actor.backing } : {}),
+    ...(spawned ? {} : { actorType: spec.actor?.actorType }),
+    ...(spec.actor?.backing ? { backing: spec.actor.backing } : {}),
   } as any);
   return { operationResult, unknownResult, calls: [...calls], bindings: [...bindings] };
 };
 
 const operations = Object.keys(CONTROLLER_DOMAIN_OPERATIONS);
 const rows = operations.map((operation) => [operation, specs[operation]] as const);
+const spawnedSharedRows = ORCHESTRATOR_OPERATION_GRANT
+  .filter((operation) => domainFor(operation) !== 'local')
+  .map((operation) => [operation, specs[operation]] as const);
 
 describe('controller exact-operation executable routing', () => {
   test('the executable matrix is exhaustive over the canonical fixed vocabulary', () => {
@@ -595,25 +656,21 @@ describe('controller exact-operation executable routing', () => {
     expect(domainFor(operation), operation).toBe(spec.domain);
     const result = spec.actor
       ? await executeActor(operation, spec) : await executeMain(operation, spec);
-    expect(result.operationResult, operation).toBeDefined();
-    expect(result.calls.map(({ domain, method }) => `${domain}.${method}`), operation)
-      .toEqual(expectedCalls(spec));
     const sessionId = spec.actor ? `actor-${operation}` : `session-${operation}`;
-    assertShapedArguments(operation, spec, result.calls, sessionId);
-    if (binderModules.some(([, , domain]) => domain === spec.domain)) {
-      const { appProgramSemanticToken: _appToken, pageProgramSemanticToken: _pageToken,
-        ...ordinaryArgs } = spec.value;
-      const pageArgs = spec.domain === 'page'
-        ? spec.value.args as Record<string, unknown> : ordinaryArgs;
-      const semanticToken = spec.value.appProgramSemanticToken
-        ?? spec.value.pageProgramSemanticToken;
-      expect(result.bindings, operation).toEqual([{
-        domain: spec.domain, operation, args: pageArgs,
-        ...(['turn.app.run-code', 'turn.page.run-program'].includes(operation)
-          && typeof semanticToken === 'string' ? { semanticToken } : {}),
-      }]);
-    }
+    const callId = spec.actor ? `actor-call-${operation}` : `call-${operation}`;
+    assertExactExecution(operation, spec, result, sessionId, callId);
   });
+
+  test.each(spawnedSharedRows)(
+    '%s reaches the same exact dependency through a tool-bearing spawned actor',
+    async (operation, spec) => {
+      expect(spec, `missing executable fixture for ${operation}`).toBeDefined();
+      const result = await executeActorWithIdentity(operation, spec, false, true);
+      assertExactExecution(
+        operation, spec, result, `actor-${operation}`, `actor-call-${operation}`,
+      );
+    },
+  );
 
   test('an unknown main operation reaches no domain dependency', async () => {
     const result = await executeMain('turn.actor.tasks', specs['turn.actor.tasks'], true);
@@ -632,6 +689,16 @@ describe('controller exact-operation executable routing', () => {
     });
     expect(result.calls.map(({ domain, method }) => `${domain}.${method}`))
       .toEqual(['vm.listVms']);
+  });
+
+  test('a tool-bearing spawned actor cannot invent an authority route', async () => {
+    const operation = 'turn.resource.read-result';
+    const result = await executeActorWithIdentity(operation, specs[operation], true, true);
+    expect(result.unknownResult).toEqual({
+      ok: false, error: 'unknown actor relay: future/generic',
+    });
+    expect(result.calls.map(({ domain, method }) => `${domain}.${method}`))
+      .toEqual(['resource.readResult']);
   });
 
   test('a refused Pod binding releases its reserved claim before call settlement', async () => {
