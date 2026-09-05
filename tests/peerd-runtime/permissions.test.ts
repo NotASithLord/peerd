@@ -36,6 +36,7 @@ const TOOLS = {
   open_tab:      { name: 'open_tab',      sideEffect: 'mutate_external',  primitive: 'tab' },
   vm_delete:     { name: 'vm_delete',     sideEffect: 'destructive',      primitive: 'webvm' },
   message_actor: { name: 'message_actor', sideEffect: 'write',            primitive: 'spawned' },
+  page_code:     { name: 'page_code',     sideEffect: 'write',            primitive: 'web' },
 } as const; // why: keep sideEffect as the SideEffect literal union, not string
 
 // ---- classifyAction: the taxonomy --------------------------------------
@@ -136,6 +137,19 @@ describe('PLAN mode is read-only (plus the navigation carve-out)', () => {
     const v = decideAction({ mode: PERMISSION_MODES.ACT, confirmActions: true, tool: TOOLS.message_actor });
     expect(v.allowed).toBe(true);
     expect(v.confirm).toBe(true);
+  });
+
+  test('allows page_code composition in Plan while retaining its external write classification', () => {
+    const plan = decideAction({
+      mode: PERMISSION_MODES.PLAN, confirmActions: true, tool: TOOLS.page_code,
+    });
+    expect(plan).toMatchObject({
+      allowed: true, confirm: false, actionClass: ACTION_CLASSES.EXTERNAL,
+    });
+    expect(plan.reason).toContain('composition carve-out');
+    expect(decideAction({
+      mode: PERMISSION_MODES.ACT, confirmActions: true, tool: TOOLS.page_code,
+    })).toMatchObject({ allowed: true, confirm: true, actionClass: ACTION_CLASSES.EXTERNAL });
   });
 });
 

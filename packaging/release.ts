@@ -114,6 +114,8 @@ const main = async () => {
   run('bun', ['scripts/cdp/run-passkey-signup.mjs']);
   step('installed Chrome Store document extraction/paging isolation');
   run('bun', ['scripts/cdp/read-doc-store-lane.mjs']);
+  step('installed Chrome Store site-client/capture fallback');
+  run('bun', ['run', 'test:e2e:site-client-store:staged']);
   step('installed Chrome Preview dweb/SW/renderer continuity');
   run('bun', ['scripts/cdp/feature-lease-dweb-lifecycle.mjs']);
   step('installed Firefox Store first-install/controller/Git/discard');
