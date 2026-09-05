@@ -18,11 +18,14 @@ import { REPO_ROOT } from './lib.ts';
 import { GECKO_BADGE } from './gen-gecko-test-badge.ts';
 import { INBROWSER_CHROME_BADGE } from './gen-inbrowser-test-badge.ts';
 import { E2E_BADGE } from './gen-e2e-badge.ts';
-import { RED_TEAM_BADGE } from './gen-red-team-badge.ts';
 import {
   ACTIONS_BADGE, BUILD_STEP_BADGE, VENDOR_BADGE,
 } from './gen-supply-chain-badges.ts';
 import { laneCountProblem, type ShieldsBadge } from './test-badges.ts';
+
+// why: the structural badge check must not evaluate the red-team catalog and
+// its browser-root imports merely to learn this committed artifact name.
+const RED_TEAM_BADGE = 'red-team.json';
 
 /** Badges whose message is a "N/M passing" browser-lane count. */
 const LANE_BADGES = [INBROWSER_CHROME_BADGE, GECKO_BADGE];
