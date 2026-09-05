@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -74,6 +75,13 @@ describe('release artifact JavaScript minification', () => {
     expect(report.graphs.serviceWorker.afterBytes).toBeLessThan(report.graphs.serviceWorker.beforeBytes);
     expect(report.graphs.offscreen?.afterBytes).toBeLessThan(report.graphs.offscreen!.beforeBytes);
     expect(report.transformedModules).toBeGreaterThan(0);
+    expect(report.graphs.serviceWorker.inputSha256).toBe(createHash('sha256').update([
+      'background/helper.js',
+      'background/service-worker.js',
+      'shared/channel-config.js',
+      'shared/dweb-loader.js',
+      'vendor/library.js',
+    ].map((input) => `input\0${input}\0`).join('')).digest('hex'));
     expect(swAfter.length).toBeLessThan(swBefore.length);
     expect(swAfter).toContain('keepReadableName');
     expect(swAfter).not.toContain('removed from the staged artifact');
@@ -231,6 +239,7 @@ describe('release artifact JavaScript minification', () => {
           modules: 1,
           beforeBytes: budget + 2,
           afterBytes: budget + 1,
+          inputSha256: '0'.repeat(64),
         },
       },
     })).toThrow(/budget/);
@@ -252,6 +261,7 @@ describe('release artifact JavaScript minification', () => {
           modules: Number(budget.modules),
           beforeBytes: budget.graphBytes,
           afterBytes: budget.graphBytes - 1,
+          inputSha256: budget.inputSha256 ?? '0'.repeat(64),
         },
       },
     };
@@ -275,9 +285,30 @@ describe('release artifact JavaScript minification', () => {
           entry: 'background/vault-kernel-chrome.js', entryBytes: budget.entryBytes,
           modules: budget.modules,
           beforeBytes: budget.graphBytes + 1, afterBytes: budget.graphBytes,
+          inputSha256: budget.inputSha256 ?? '0'.repeat(64),
         },
       },
     };
     expect(() => assertColdArtifactBudgets(report)).not.toThrow();
+  });
+
+  test('rejects a changed pinned input closure without imposing one on Firefox', () => {
+    const stats = {
+      entry: 'background/service-worker.js', entryBytes: 1, modules: 1,
+      beforeBytes: 3, afterBytes: 2, inputSha256: 'a'.repeat(64),
+    };
+    const report = {
+      browser: 'chrome' as const, channel: 'store' as const,
+      transformedModules: 1, preservedModules: 0, beforeBytes: 3, afterBytes: 2,
+      graphs: { serviceWorker: stats },
+    };
+    expect(() => assertColdArtifactBudgets(report, {
+      serviceWorker: {
+        modules: 1, graphBytes: 2, entryBytes: 1, inputSha256: 'b'.repeat(64),
+      },
+    })).toThrow(/input closure changed/);
+    expect(() => assertColdArtifactBudgets({ ...report, browser: 'firefox' }, {
+      serviceWorker: { modules: 1, graphBytes: 2, entryBytes: 1 },
+    })).not.toThrow();
   });
 });

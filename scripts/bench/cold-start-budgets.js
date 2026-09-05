@@ -201,7 +201,10 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // generation and bounded hostile-response reads are fixed browser custody
     // and do not grow with tool count. Finite relay validation is fixed owner
     // assembly, not a feature-selected dispatcher.
-    serviceWorker: Object.freeze({ modules: 400, graphBytes: 2_032_382, entryBytes: 173 }),
+    serviceWorker: Object.freeze({
+      modules: 400, graphBytes: 2_032_382, entryBytes: 173,
+      inputSha256: '7b50f453b44f16ac1c81e04c8cfa1de8475ee30934ff9c117158e85f86c264cf',
+    }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
     sidepanel: Object.freeze({ modules: 11, graphBytes: 135_725, entryBytes: 396 }),
@@ -230,7 +233,10 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   store: COLD_GRAPH_RATCHETS,
   preview: Object.freeze({
     chrome: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 406, graphBytes: 2_146_323, entryBytes: 207 }),
+      serviceWorker: Object.freeze({
+        modules: 406, graphBytes: 2_146_323, entryBytes: 207,
+        inputSha256: 'f9ea6444ed31f052cf7f09936b4ecae14276b573b612fb0c981dd11d6c49d5fb',
+      }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 135_725, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 135_893, entryBytes: 564 }),
       offscreen: Object.freeze({ modules: 7, graphBytes: 22_080, entryBytes: 13_355 }),
