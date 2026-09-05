@@ -29,7 +29,7 @@ import { OcrSection } from './ocr.js';
 /** @typedef {import('./reset-row.js').Send} Send */
 
 export const VoiceSection = {
-  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send, voiceManager?: any } }} vnode */
   oninit(vnode) {
     vnode.state.voiceConfirmOpen = false;     // Moonshine download confirmation modal
     vnode.state.voiceBusy = false;
@@ -38,7 +38,7 @@ export const VoiceSection = {
     vnode.state.runtimeState = vnode.attrs.state;
     // why the no-op onMessage: SW voice pushes ride the panel port only;
     // this page never listens, so there is nothing to subscribe to.
-    vnode.state.mgr = createVoiceManager({
+    vnode.state.mgr = vnode.attrs.voiceManager ?? createVoiceManager({
       send: vnode.attrs.send,
       onMessage: () => () => {},
       moonshineHostAvailable: () => vnode.state.runtimeState?.capabilities?.moonshineVoiceHost?.status === 'available',
@@ -236,10 +236,28 @@ export const VoiceSection = {
             min: 500, max: 5000, step: 100,
             value: voiceSilenceMs,
             disabled: ui.voiceBusy,
-            oninput: (/** @type {{ target: HTMLInputElement }} */ e) => {
+            onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+              if (ui.voiceBusy) return;
               const ms = Number(e.target.value);
-              send({ type: 'settings/update', patch: { voiceSilenceMs: ms } });
+              ui.voiceBusy = true;
+              ui.voiceError = null;
               voiceManager?.setSilenceThreshold?.(ms);
+              m.redraw();
+              try {
+                const reply = await send({
+                  type: 'settings/update', patch: { voiceSilenceMs: ms },
+                });
+                if (!reply?.ok) throw reply;
+              } catch (cause) {
+                voiceManager?.setSilenceThreshold?.(voiceSilenceMs);
+                ui.voiceError = mutationFailureCopy(cause, {
+                  action: 'changing the silence threshold',
+                  fallback: 'The silence threshold could not be changed. Try again.',
+                });
+              } finally {
+                ui.voiceBusy = false;
+                m.redraw();
+              }
             },
           }),
         ]) : null,

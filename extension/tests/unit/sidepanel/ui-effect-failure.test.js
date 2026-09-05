@@ -3,13 +3,15 @@
 import { describe, it, expect } from '../../framework.js';
 import m from '/vendor/mithril/mithril.js';
 import { NoticeBar } from '/sidepanel/components/app.js';
+import { ChatView } from '/sidepanel/components/chat-view.js';
+import { InputBar } from '/sidepanel/components/input-bar.js';
 import { SkillsView } from '/sidepanel/components/skills-view.js';
 import {
   makeReconciledUiSender, putUiEffectFailureNotice, settleUiEffect,
 } from '/shared/ui-effects.js';
 
-/** @param {(message:any)=>Promise<any>} runtimeSend */
-const mount = (runtimeSend) => {
+/** @param {(message:any)=>Promise<any>} runtimeSend @param {(send:any)=>any} [render] */
+const mount = (runtimeSend, render = () => null) => {
   const root = document.createElement('div');
   document.body.append(root);
   /** @type {any[]} */
@@ -32,12 +34,32 @@ const mount = (runtimeSend) => {
       m.redraw.sync();
     },
   });
-  m.mount(root, { view: () => m(NoticeBar, { notices }) });
+  m.mount(root, { view: () => [render(send), m(NoticeBar, { notices })] });
   m.redraw.sync();
   return {
     root, send, events, calls: () => calls,
     unmount: () => { m.mount(root, null); root.remove(); },
   };
+};
+
+const flush = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  m.redraw.sync();
+};
+
+/** @param {string} selector @param {any} message @param {(send:any)=>any} render */
+const expectSettledFailure = async (selector, message, render) => {
+  /** @type {any[]} */
+  const sent = [];
+  const failure = Object.assign(new Error('lost effect receipt'), { outcomeKnown: false });
+  const harness = mount(async (value) => { sent.push(value); throw failure; }, render);
+  try {
+    /** @type {HTMLButtonElement} */ (harness.root.querySelector(selector)).click();
+    await flush();
+    expect(sent).toEqual([message]);
+    expect(harness.events).toEqual(['send', 'reconcile', 'notice']);
+    expect(harness.root.querySelectorAll('.notice').length).toBe(1);
+  } finally { harness.unmount(); }
 };
 
 describe('sidepanel fire-and-forget effect failures', () => {
@@ -105,5 +127,52 @@ describe('sidepanel fire-and-forget effect failures', () => {
       expect(reconciles).toBe(rejected ? 1 : 0);
       expect(notices.length).toBe(1);
     }
+  });
+
+  it('settles both rendered goal Stop surfaces once without replay', async () => {
+    const state = /** @type {any} */ ({
+      vault: { locked: true },
+      session: { sessionId: 'goal-stop', messages: [], permission: { mode: 'act' } },
+      providers: { hasKey: false },
+      settings: { voiceOnboardingDismissed: true, voiceEnabled: false },
+      capabilities: {},
+      goalRuns: {
+        'goal-stop': { active: true, iteration: 2, maxIterations: 10, goal: 'finish' },
+      },
+    });
+    /** @type {(send:any)=>any} */
+    const render = (send) => m(ChatView, {
+      state, send, voiceManager: null, uiActions: {},
+    });
+    for (const selector of ['.goal-toggle', '.goal-bar-stop']) {
+      await expectSettledFailure(selector, { type: 'agent/stop' }, render);
+    }
+  });
+
+  it('settles the composer Stop once without replay', async () => {
+    const state = /** @type {any} */ ({
+      streaming: true,
+      session: { sessionId: 'composer-stop', provider: 'anthropic' },
+      providers: { hasKey: false, current: 'anthropic' },
+      composer: { provider: 'anthropic', model: '', canSend: false, reason: 'missing-key' },
+      capabilities: {},
+    });
+    await expectSettledFailure('button.stop', { type: 'agent/stop' },
+      (send) => m(InputBar, { state, send, voiceManager: null }));
+  });
+
+  it('settles the voice-onboarding dismissal once without replay', async () => {
+    const state = /** @type {any} */ ({
+      vault: { locked: true },
+      session: { sessionId: 'voice-dismiss', messages: [], permission: { mode: 'act' } },
+      providers: { hasKey: true, current: 'anthropic' },
+      composer: { provider: 'anthropic', model: 'claude', canSend: true, reason: null },
+      settings: { voiceOnboardingDismissed: false, voiceEnabled: false },
+      capabilities: { moonshineVoiceHost: { status: 'available' } },
+      goalRuns: {},
+    });
+    await expectSettledFailure('.onboarding-card button.secondary', {
+      type: 'settings/update', patch: { voiceOnboardingDismissed: true },
+    }, (send) => m(ChatView, { state, send, voiceManager: null, uiActions: {} }));
   });
 });

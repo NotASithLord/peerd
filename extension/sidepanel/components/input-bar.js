@@ -38,6 +38,7 @@ import {
 } from '/peerd-runtime/ui.js';
 import { CommandPalette, visibleCandidates, PALETTE_OPTION_ID } from './command-palette.js';
 import { CostChip } from './cost-meter.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 import {
   composerForState, composerUnavailableCopy, composerWarningCopy,
 } from '../provider-readiness.js';
@@ -657,9 +658,9 @@ export const InputBar = {
     };
 
     /** @param {Event} [e] */
-    const stop = async (e) => {
+    const stop = (e) => {
       e?.preventDefault?.();
-      await send({ type: 'agent/stop' });
+      settleUiEffect(send({ type: 'agent/stop' }));
     };
 
     // Re-derive the trigger from the textarea's value + caret. Called on

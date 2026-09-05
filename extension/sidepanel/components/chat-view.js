@@ -11,6 +11,7 @@ import m from '/vendor/mithril/mithril.js';
 import { LINUX_PATH, HTML5_PATH } from '/vendor/simple-icons/brand-paths.js';
 import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runtime/ui.js';
 import { openOptions } from '/shared/open-options.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
 import { hasUnconfirmedAgentSend, InputBar, sendAgentWithCustody } from './input-bar.js';
@@ -253,7 +254,7 @@ export const ChatView = {
           run: state.goalRuns?.[sid ?? ''] ?? null,
           disabled: !canSend,
           onToggle: (/** @type {boolean} */ next) => { ui.goalArmed = next; },
-          onStop: () => send({ type: 'agent/stop' }),
+          onStop: () => settleUiEffect(send({ type: 'agent/stop' })),
         }),
         m('.spacer'),
         // /system presence chip — the session's custom instructions
@@ -519,10 +520,10 @@ const VoiceOnboardingCard = {
         onclick: () => openOptions('voice'),
       }, 'Set up voice'),
       m('button.secondary', {
-        onclick: () => send({
+        onclick: () => settleUiEffect(send({
           type: 'settings/update',
           patch: { voiceOnboardingDismissed: true },
-        }),
+        })),
       }, 'Maybe later'),
     ]),
   ]),
