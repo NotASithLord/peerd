@@ -64,11 +64,14 @@ import { createReadOnlyOperationGrant } from './controller-turn-authority-scope.
 
 const PAGE_PROGRAM_EXACT_OPERATION_SET = new Set(PAGE_PROGRAM_EXACT_OPERATIONS);
 const APP_PROGRAM_EXACT_OPERATION_SET = new Set(APP_PROGRAM_EXACT_OPERATIONS);
-const auditUnavailableResult = (/** @type {any} */ receipt = null) => ({
+const auditUnavailableResult = (
+  /** @type {any} */ receipt = null,
+  /** @type {boolean} */ outcomeKnown = receipt?.outcomeKnown !== false,
+) => ({
   ok: false,
   code: 'audit_unavailable',
   error: 'Authority audit persistence is unavailable.',
-  outcomeKnown: receipt?.outcomeKnown !== false,
+  outcomeKnown,
   retryable: false,
   ...(receipt ? { authorityReceipt: receipt } : {}),
 });
@@ -1109,13 +1112,35 @@ export const makeOffscreenActorClient = ({
     if (entry.grant.auditUnavailable || entry.grant.authorityOutcomeUnknown) {
       const code = entry.grant.auditUnavailable
         ? 'audit_unavailable' : 'authority_outcome_unknown';
+      const error = entry.grant.auditUnavailable
+        ? 'Authority audit persistence is unavailable.'
+        : 'A prior authority effect has an unknown outcome.';
       const receipt = Object.freeze({
         ...receiptFor(entry, 'not-performed', true, false, false, target),
         refused: true, code,
       });
       recordAuthorityReceipt(entry, receipt);
-      return entry.grant.auditUnavailable ? auditUnavailableResult(receipt) : {
-        ok: false, code, error: 'A prior authority effect has an unknown outcome.',
+      const recoveryRewrite = await settleAuthorityTracking(
+        entry, tracking,
+        { ok: false, error, outcomeKind: 'pre-effect-failure' },
+        { ...receipt, callId: entry.effect.callId }, receipt,
+      );
+      // why: a sibling mutation may have opened lifecycle tracking before the
+      // preceding audit established this terminal latch. Close that record as
+      // known-unperformed, and persist the refusal while audit remains usable.
+      if (!entry.grant.auditUnavailable) {
+        const auditPersisted = await appendAuthorityAudit(
+          entry, receipt, true, recoveryRewrite,
+        );
+        if (!auditPersisted) return auditUnavailableResult(
+          receipt, entry.grant.authorityOutcomeUnknown !== true,
+        );
+      }
+      return entry.grant.auditUnavailable
+        ? auditUnavailableResult(
+          receipt, entry.grant.authorityOutcomeUnknown !== true,
+        ) : {
+        ok: false, code, error,
         outcomeKnown: false, retryable: false, authorityReceipt: receipt,
       };
     }
