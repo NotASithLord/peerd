@@ -5,7 +5,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  EXPORT_FORMAT, EXPORT_VERSION,
+  EXPORT_FORMAT, EXPORT_PASSPHRASE_MIN_LENGTH, EXPORT_VERSION,
   buildExport, inspectImport, applyImport,
   encryptWithPassphrase, decryptWithPassphrase,
   ExportPassphraseError,
@@ -19,6 +19,12 @@ const KNOWN_KEYS = ['devMode', 'reasoningEnabled', 'providerName', 'spendLimitUs
 // the timeout local to the genuinely KDF-heavy cases; benchmark policy owns
 // latency assertions separately.
 const KDF_TEST_TIMEOUT_MS = 30_000;
+
+test('Options passphrase copy matches the authority rail', async () => {
+  const source = await Bun.file('extension/options/sections/transfer.js').text();
+  const uiRail = source.match(/const EXPORT_PASSPHRASE_MIN_LENGTH = (\d+);/);
+  expect(Number(uiRail?.[1])).toBe(EXPORT_PASSPHRASE_MIN_LENGTH);
+});
 
 const bytesToB64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const makeLegacySecretsBox = async (passphrase: string, value: unknown) => {

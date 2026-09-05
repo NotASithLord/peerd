@@ -3,9 +3,6 @@
 // preview; issue #345 intentionally has no upload action or collector origin.
 
 import m from '/vendor/mithril/mithril.js';
-import {
-  CONTRIBUTOR_DISCLOSURE_VERSION, CONTRIBUTOR_SCHEMA_VERSION,
-} from '/peerd-runtime/observability/contributor-metrics.js';
 import { mutationFailureCopy, unknownMutationCopy } from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
@@ -94,6 +91,10 @@ export const ContributorMetricsSection = {
     const status = ui.status;
     if (!status && !ui.error) return m('p.muted', 'Loading contributor status…');
     const enabled = status?.enabled === true;
+    const disclosureVersion = Number.isSafeInteger(status?.disclosureVersion)
+      ? status.disclosureVersion : 'unknown';
+    const schemaVersion = Number.isSafeInteger(status?.schemaVersion)
+      ? status.schemaVersion : 'unknown';
     const action = ui.uncertain ? ui.pendingAction
       : enabled || status?.diagnostic ? 'disable' : 'enable';
     return m('.contributor-metrics', [
@@ -123,8 +124,8 @@ export const ContributorMetricsSection = {
               ? 'Local state needs attention'
               : enabled ? 'Enabled locally' : 'Disabled'),
             m('.hint', [
-              `Disclosure version ${status?.disclosureVersion ?? CONTRIBUTOR_DISCLOSURE_VERSION}; `,
-              `payload schema version ${CONTRIBUTOR_SCHEMA_VERSION}.`,
+              `Disclosure version ${disclosureVersion}; `,
+              `payload schema version ${schemaVersion}.`,
             ]),
           ]),
         ]),

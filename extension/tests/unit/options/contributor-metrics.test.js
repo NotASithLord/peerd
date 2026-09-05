@@ -30,7 +30,7 @@ describe('Contributor Metrics human UI', () => {
       return {
         ok: true,
         status: {
-          enabled, disclosureVersion: 1, diagnostic: null,
+          enabled, disclosureVersion: 1, schemaVersion: 1, diagnostic: null,
           rowCount: 0, bytes: enabled ? exactBytes : null,
         },
       };
@@ -120,6 +120,7 @@ describe('Contributor Metrics human UI', () => {
     m.mount(root, { view: () => m(ContributorMetricsSection, { send }) });
     try {
       await settle();
+      expect(root.textContent).toContain('payload schema version unknown');
       button(root, 'Enable Contributor Metrics').click();
       await settle();
       await settle();
