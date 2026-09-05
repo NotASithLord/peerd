@@ -14,7 +14,7 @@ import { ActorIsolationBanner } from './actor-isolation-banner.js';
 import { openOptions } from '/shared/open-options.js';
 import { openHome } from '/shared/open-home.js';
 import { CHANNEL } from '/shared/channel-config.js';
-import { settleUiEffect } from '/shared/ui-runtime-client.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -201,9 +201,10 @@ const TopBar = {
         m('button.icon', {
           'aria-label': 'New chat',
           title: 'New chat',
-          onclick: async () => {
-            await send({ type: 'session/reset' });
-            m.route.set('/chat');
+          onclick: () => {
+            const effect = send({ type: 'session/reset' });
+            settleUiEffect(effect);
+            void effect.then((reply) => { if (reply?.ok) m.route.set('/chat'); }).catch(() => {});
           },
         }, icon('plus')),
         // Home — opens the full-tab HOME page (a primary surface, distinct from

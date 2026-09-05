@@ -16,10 +16,10 @@
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
 import { makeUiStatePort } from '/shared/cold-port-recovery.js';
+import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import {
-  makeReconciledUiSender, makeUiRuntimeClient, putUiEffectFailureNotice, settleUiEffect,
-  redrawForRuntimeMessage,
-} from '/shared/ui-runtime-client.js';
+  makeReconciledUiSender, putUiEffectFailureNotice, settleUiEffect, redrawForRuntimeMessage,
+} from '/shared/ui-effects.js';
 import { makeConfirmationAnswer } from '/sidepanel/confirmation-answer.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
@@ -202,6 +202,12 @@ const send = makeReconciledUiSender({
   fold: () => {}, reconcile: reconcileState, afterReply: () => false,
   onEffectFailure: showEffectFailure,
 });
+/** @param {object} message @param {()=>unknown} [onSuccess] */
+const settleSessionEffect = (message, onSuccess = () => {}) => {
+  const effect = send(message);
+  settleUiEffect(effect);
+  void effect.then((reply) => { if (reply?.ok) onSuccess(); }).catch(() => {});
+};
 
 // ---- chat-component uiActions (the subset home needs; no voice) -----------
 /** @type {Set<string>} */
@@ -323,13 +329,14 @@ const bringChatHome = () => settleUiEffect(send({ type: 'sidepanel/close' }));
 // concrete chat. When home owns chat, navigate there; when the side panel owns
 // it, switching the shared session is enough; the visible panel updates live.
 /** @param {string} sessionId */
-const openActorSession = async (sessionId) => {
-  const result = await send({ type: 'session/switch', sessionId });
-  if (!result?.ok) return;
-  if (!sidePanelOpen) setView('chat');
-  m.redraw();
-  if (!sidePanelOpen) focusActiveContent();
-};
+const openActorSession = (sessionId) => settleSessionEffect(
+  { type: 'session/switch', sessionId },
+  () => {
+    if (!sidePanelOpen) setView('chat');
+    m.redraw();
+    if (!sidePanelOpen) focusActiveContent();
+  },
+);
 
 // Auto-close the side panel when the user RETURNS to the home tab (a hidden →
 // visible transition) — UNLESS they explicitly popped it (sticky). So a card-
@@ -568,11 +575,19 @@ const ChatListPanel = () => {
     m.redraw();
     setTimeout(async () => {
       try {
-        await send({ type: 'session/archive', sessionId });
-        if (isCurrent) await send({ type: 'session/reset' });
+        const archive = send({ type: 'session/archive', sessionId });
+        settleUiEffect(archive);
+        if (!(await archive)?.ok) return;
+        if (isCurrent) {
+          const reset = send({ type: 'session/reset' });
+          settleUiEffect(reset);
+          if (!(await reset)?.ok) return;
+        }
       } catch (e) { console.warn('[home] delete chat failed', e); }
-      deletingId = null;
-      load();
+      finally {
+        deletingId = null;
+        load();
+      }
     }, 340);   // ≈ the reverse-type backspace (190ms) + row collapse (130ms)
   };
   return {
@@ -602,7 +617,9 @@ const ChatListPanel = () => {
           m('span.chat-list-head-title', 'Chats'),
           m('button.chat-list-toggle', { title: 'Hide chats', 'aria-label': 'Hide chats', onclick: toggleChatList }, '«'),
         ]),
-        m('button.chat-list-new', { onclick: async () => { await send({ type: 'session/reset' }); load(); } }, '＋ New chat'),
+        m('button.chat-list-new', {
+          onclick: () => settleSessionEffect({ type: 'session/reset' }, load),
+        }, '＋ New chat'),
         m('.chat-list-items', error
           ? m('button.chat-list-empty.muted', { type: 'button', onclick: load }, error)
           : sessions === null
@@ -612,7 +629,10 @@ const ChatListPanel = () => {
               key: s.sessionId,
               class: [s.sessionId === cur ? 'is-active' : '', deletingId === s.sessionId ? 'is-deleting' : ''].filter(Boolean).join(' '),
               role: 'button', tabindex: '0',
-              onclick: () => { if (deletingId || s.sessionId === cur) return; send({ type: 'session/switch', sessionId: s.sessionId }).then(load); },
+              onclick: () => {
+                if (deletingId || s.sessionId === cur) return;
+                settleSessionEffect({ type: 'session/switch', sessionId: s.sessionId }, load);
+              },
             }, [
               m('.chat-list-item-title', (s.title && s.title.trim()) || 'New chat'),
               m('.chat-list-item-meta', fmtAgo(s.lastMessageAt ?? s.createdAt)),
@@ -693,7 +713,10 @@ const content = (showDweb) => {
       chatListCollapsed
         ? m('.chat-list.is-collapsed', [
             m('button.chat-list-toggle', { title: 'Show chats', 'aria-label': 'Show chats', onclick: toggleChatList }, '»'),
-            m('button.chat-list-toggle', { title: 'New chat', 'aria-label': 'New chat', onclick: async () => { await send({ type: 'session/reset' }); } }, '＋'),
+            m('button.chat-list-toggle', {
+              title: 'New chat', 'aria-label': 'New chat',
+              onclick: () => settleSessionEffect({ type: 'session/reset' }),
+            }, '＋'),
           ])
         : m(ChatListPanel, { state: currentState }),
       m('.home-chat', [

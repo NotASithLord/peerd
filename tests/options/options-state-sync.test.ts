@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { makeReconciledUiSender } from '../../extension/shared/ui-runtime-client.js';
+import { makeReconciledUiSender } from '../../extension/shared/ui-effects.js';
 
 const makeHarness = (reply: any) => {
   const events: string[] = [];

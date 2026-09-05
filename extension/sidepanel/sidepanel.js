@@ -14,10 +14,10 @@
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
 import { makeUiStatePort } from '/shared/cold-port-recovery.js';
+import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import {
-  makeReconciledUiSender, makeUiRuntimeClient, putUiEffectFailureNotice,
-  redrawForRuntimeMessage,
-} from '/shared/ui-runtime-client.js';
+  makeReconciledUiSender, putUiEffectFailureNotice, redrawForRuntimeMessage,
+} from '/shared/ui-effects.js';
 import { App } from './components/app.js';
 import { makeConfirmationAnswer } from './confirmation-answer.js';
 import { classifyBrowserAutomationTarget, createVoiceManager } from '/peerd-runtime/ui.js';
