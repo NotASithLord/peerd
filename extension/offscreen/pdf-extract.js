@@ -60,17 +60,11 @@ const getOcrStore = () => (ocrStore ??= createOcrStore());
 // model — ARE the opt-in, SRI-pinned runtime download (peerd-runtime/pdf/
 // ocr-store.js). Lazy like pdf.js: most sessions never OCR, so the driver stays
 // off the offscreen startup path and is paid once, on the first scanned PDF.
-// The import will REJECT until the driver is vendored — extractViaOcr's caller
-// catches that and falls back to the honest "looks scanned" signal.
+// A load failure remains caught by extractViaOcr's caller and falls back to the
+// honest "looks scanned" signal.
 let tesseractPromise = null;
-// why the indirection: the driver isn't vendored yet (see vendor/tesseract/
-// SOURCE.txt), so a literal import() specifier wouldn't resolve under tsc.
-// Routing the path through a variable keeps this a runtime-only dynamic import
-// (Promise<any>) — it resolves the moment the file is committed, and rejects
-// (caught by extractViaOcr's caller) until then.
-const TESSERACT_DRIVER = '/vendor/tesseract/tesseract.esm.min.js';
 const loadTesseract = () => (tesseractPromise ??=
-  import(TESSERACT_DRIVER).then((m) => m.default ?? m));
+  import('/vendor/tesseract/tesseract.esm.min.js').then((m) => m.default ?? m));
 
 // OCR is expensive — a full raster + glyph recognition per page. Cap the page
 // count and fix a render scale so a giant scan can't wedge the offscreen

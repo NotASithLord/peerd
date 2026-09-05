@@ -650,6 +650,9 @@ export const makeControllerTurnBridge = ({
         physical: receipt,
         outcome: { ok: false, error, outcomeKind: 'pre-effect-failure' },
       });
+      if (recoveryRewrite?.recovery?.state === 'outcome_unknown') {
+        latchAuthorityOutcomeUnknown(run);
+      }
       // why: lifecycle admission can complete before the preceding mutation's
       // audit. Closing that known-unperformed record is not enough by itself;
       // when audit still works, durably record why the physical dispatch was
