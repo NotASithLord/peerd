@@ -129,9 +129,15 @@ export const CONTROLLER_BUILD_ASSETS = Object.freeze([
   'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs',
   'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm',
   'vendor/vad-web/vad.worklet.bundle.min.js',
+  'vendor/vad-web/silero_vad_legacy.onnx',
+  'vendor/vad-web/silero_vad_v5.onnx',
   // Document workers execute under the digest-custodied offscreen operation
   // but are selected by library URLs rather than authored module imports.
   'vendor/pdfjs/pdf.worker.min.mjs',
+  'vendor/pdfjs/wasm/jbig2.wasm',
+  'vendor/pdfjs/wasm/jbig2_nowasm_fallback.js',
+  'vendor/pdfjs/wasm/openjpeg.wasm',
+  'vendor/pdfjs/wasm/openjpeg_nowasm_fallback.js',
   'vendor/tesseract/worker.min.js',
 ] as const);
 

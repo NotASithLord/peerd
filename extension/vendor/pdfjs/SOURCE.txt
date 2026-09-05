@@ -18,29 +18,49 @@ cannot host. The heavier OCR path for scanned PDFs is a separate, opt-in
 runtime download (peerd-runtime/pdf/ocr-store.js), the Moonshine-voice
 pattern.
 
-Files committed (the npm `build/` minified ESM build)
------------------------------------------------------
+Files committed
+---------------
   pdf.min.mjs           — the main API (getDocument, getTextContent, …)
   pdf.worker.min.mjs    — the parser worker; loaded via GlobalWorkerOptions
                           .workerSrc as an extension URL ('self' under the
                           offscreen CSP). Module worker (type:'module').
+  wasm/jbig2.wasm       — JBIG2 image decoder selected by the parser worker
+  wasm/jbig2_nowasm_fallback.js
+                        — exact upstream no-WASM fallback for JBIG2
+  wasm/openjpeg.wasm    — JPEG 2000 / JPX image decoder selected by the worker
+  wasm/openjpeg_nowasm_fallback.js
+                        — exact upstream no-WASM fallback for JPEG 2000 / JPX
+  wasm/LICENSE_*        — upstream decoder and pdf.js integration licenses
 
-We commit ONLY these two minified files (mirrors moonshine-js: the runtime
-JS is committed, large optional assets are not). The .map files, the
-unminified builds, pdf.sandbox.* (form-scripting; unused), the viewer, and
-the cmaps/standard_fonts asset dirs are intentionally omitted — text
-extraction needs none of them. CJK cmaps / non-embedded standard fonts are
-a known follow-up if a PDF needs them (getDocument cMapUrl/standardFontDataUrl).
+We commit the minified `build/` API and worker plus only the `wasm/` children
+that worker selects for scanned JBIG2/JPX pages. The .map files, unminified
+builds, pdf.sandbox.* (form-scripting; unused), viewer, qcms, QuickJS, and
+cmaps/standard_fonts are intentionally omitted. CJK cmaps / non-embedded
+standard fonts are a known follow-up if a PDF needs them (getDocument
+cMapUrl/standardFontDataUrl). All decoder URLs are fixed extension URLs;
+document extraction never fetches code from the network.
 
 Subresource Integrity (SHA-384, as committed)
 ---------------------------------------------
   pdf.min.mjs         sha384-lBfr/FNW1mXKELYviKVk014iBHkr5qVisfo70s4UlFayazfihJ53HIsFh+haYlPV
   pdf.worker.min.mjs  sha384-BINwIY89cgeAzLWGw817ZEBG52TiK/0x8q453MGZowyzHvxL/sYlC5V34FcZR8vy
+  wasm/jbig2.wasm     sha384-nVJ0bJYJhgC6vo7Y6goEatPrdXAhgoPUdwWUgMPXoBPFpOPS/JgEPUkDwOO6Yor5
+  wasm/jbig2_nowasm_fallback.js
+                      sha384-d9gZIyKWjLmWrU8ta5pBTNRM4tt+4VcSyTV1vrVV7BFCCtiWuo5IexS9wSSaHjL3
+  wasm/openjpeg.wasm  sha384-W0sz7j4uZ//LBLZ4exfTLRUAgo01H8wlXYFnM1/RlxLDylgXiOS9ZA+7Pv2CI4Md
+  wasm/openjpeg_nowasm_fallback.js
+                      sha384-0VtzfcmGK61Azf0fRt+1gB59/3f3Cu+9SUXqWkBOE7IFRj78qorSBpQOFCfXwpVz
 
 SHA-256 (as committed)
 ----------------------
   pdf.min.mjs         71ab6d3ace0b285cc1feaf88f943b84238bf875f7a005674ac448a78940913bd
   pdf.worker.min.mjs  9e3b3b7da0760e8468f4b20490cceab481a96b700803a96c46b0bb00d2e3741e
+  wasm/jbig2.wasm     e6bee67724a7b5436fe8162638e3708cfc8d52b6342db69a49715e30ff27cfdc
+  wasm/jbig2_nowasm_fallback.js
+                      04c795a6657a4553a64b781ea3e85256203d913c3b71b72b85fa3ce00622f458
+  wasm/openjpeg.wasm  004a0e62db930ba9ff2a22212f4554d0bb57a0635a8287caf70f98117cee14ba
+  wasm/openjpeg_nowasm_fallback.js
+                      0f998419819da4491d8302222aa9e2ff2494685641aa2a6c21c3760c29f3e319
 
 Upstream tarball SHA-256
 ------------------------
@@ -53,8 +73,8 @@ Update procedure
   1. Pick the target version V from https://registry.npmjs.org/pdfjs-dist
   2. curl -sSL "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-V.tgz" -o pdfjs.tgz
   3. tar -xzf pdfjs.tgz
-  4. cp package/build/pdf.min.mjs package/build/pdf.worker.min.mjs \
-       extension/vendor/pdfjs/
+  4. Copy package/build/{pdf.min.mjs,pdf.worker.min.mjs} and the four named
+     package/wasm decoder files plus their LICENSE_* files above.
   5. Recompute SHA-384/256 and paste them above:
        openssl dgst -sha384 -binary FILE | openssl base64 -A
   6. Update the Version / Source URL / tarball SHA lines.

@@ -91,6 +91,7 @@ import './unit/offscreen/job-runner.test.js';
 import './unit/offscreen/job-runner-workspace.test.js';
 import './unit/offscreen/controller-worker.test.js';
 import './unit/offscreen/actor-worker.test.js';
+import './unit/offscreen/pdf-ocr-decode.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';

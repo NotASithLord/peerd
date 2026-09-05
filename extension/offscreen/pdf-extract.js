@@ -46,6 +46,18 @@ const loadPdfjs = () => (pdfjsPromise ??= import('/vendor/pdfjs/pdf.min.mjs').th
   return lib;
 }));
 
+// pdf.js loads its JBIG2/JPX decoders relative to wasmUrl only when a page
+// actually contains those image filters. Keep the URL fixed to packaged,
+// extension-local bytes: scanned documents never acquire a network edge.
+/** @param {Uint8Array} bytes */
+const pdfDocumentOptions = (bytes) => ({
+  data: bytes,
+  wasmUrl: browser.runtime.getURL('vendor/pdfjs/wasm/'),
+  isEvalSupported: false,
+  disableAutoFetch: true,
+  disableFontFace: true,
+});
+
 // Hard caps so a pathological PDF cannot wedge the offscreen renderer or build
 // an unbounded pages array before the result crosses a MessagePort.
 const MAX_PAGES = 500;
@@ -152,25 +164,24 @@ const renderPageToCanvas = async (page, scale, signal) => {
  * @param {{ dev?: boolean, signal?:AbortSignal }} [opts]
  * @returns {Promise<{ pages: Array<{page:number,text:string}>, pageCount:number, info:object, chars:number, textCapped:boolean }>}
  */
-const extractViaOcr = async (bytes, { dev = false, signal } = {}) => {
+const extractViaOcr = async (
+  bytes,
+  { dev = false, signal } = {},
+  { resolveOcrStore = getOcrStore, loadRecognizer = loadTesseract } = {},
+) => {
   throwIfAborted(signal, 'PDF extraction stopped.');
-  const engine = await getOcrStore().getEngine({ dev });
+  const engine = await resolveOcrStore().getEngine({ dev });
   throwIfAborted(signal, 'PDF extraction stopped.');
   const pdfjsLib = await loadPdfjs();
   throwIfAborted(signal, 'PDF extraction stopped.');
-  const Tesseract = await loadTesseract();
+  const Tesseract = await loadRecognizer();
   throwIfAborted(signal, 'PDF extraction stopped.');
 
   const corePath = blobUrlFor(engine.files['core-wasm'], 'application/wasm');
   const langPath = blobUrlFor(engine.files['lang-eng'], 'application/octet-stream');
   const workerPath = browser.runtime.getURL('vendor/tesseract/worker.min.js');
 
-  const task = pdfjsLib.getDocument({
-    data: bytes,
-    isEvalSupported: false,
-    disableAutoFetch: true,
-    disableFontFace: true,
-  });
+  const task = pdfjsLib.getDocument(pdfDocumentOptions(bytes));
   let pdf;
   /** @type {any} */
   let worker;
@@ -260,13 +271,8 @@ const extractTextLayer = async (bytes, signal) => {
   // getDocument returns a LOADING TASK; teardown is task.destroy() (NOT
   // pdf.destroy(), which doesn't exist in pdf.js v6 — calling it leaks the
   // worker). We keep the task to destroy it in finally.
-  const task = pdfjsLib.getDocument({
-    data: bytes,
-    // Hostile-content posture: no PDF JS, no eval, no auto font fetch.
-    isEvalSupported: false,
-    disableAutoFetch: true,
-    disableFontFace: true,
-  });
+  // Hostile-content posture: no PDF JS, no eval, no auto font fetch.
+  const task = pdfjsLib.getDocument(pdfDocumentOptions(bytes));
   const taskAbort = destroyTaskOnAbort(task, signal);
   let pdf;
   try {
@@ -309,8 +315,16 @@ const extractTextLayer = async (bytes, signal) => {
  *
  * @param {Uint8Array} bytes
  * @param {{ engine?: string, dev?: boolean, sourceLabel?: string, signal?:AbortSignal }} [opts]
+ * @param {{
+ *   ocrStore?: ReturnType<typeof createOcrStore>,
+ *   loadRecognizer?: () => Promise<any>,
+ * }} [dependencies]
  */
-export const extractPdfBytes = async (bytes, opts = {}) => {
+export const extractPdfBytes = async (bytes, opts = {}, {
+  ocrStore: suppliedOcrStore,
+  loadRecognizer = loadTesseract,
+} = {}) => {
+  const resolveOcrStore = () => suppliedOcrStore ?? getOcrStore();
   // Stage label rides every failure so a manual run pinpoints WHERE it broke.
   let stage = 'plan';
   const dev = !!opts.dev;
@@ -318,7 +332,7 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
     ? opts.sourceLabel.slice(0, 120) : '(document bytes)';
   try {
     throwIfAborted(opts.signal, 'PDF extraction stopped.');
-    const ocrAvailable = await getOcrStore().isInstalled({ dev }).catch(() => false);
+    const ocrAvailable = await resolveOcrStore().isInstalled({ dev }).catch(() => false);
     throwIfAborted(opts.signal, 'PDF extraction stopped.');
     const plan = chooseEngine({ engine: opts.engine ?? 'auto', ocrAvailable });
     if (plan.engine === null) {
@@ -329,7 +343,9 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
     // Forced engine:'ocr' (installed): OCR the whole document, no text-layer pass.
     if (plan.engine === 'ocr') {
       stage = 'ocr';
-      const ocr = await extractViaOcr(bytes, { dev, signal: opts.signal });
+      const ocr = await extractViaOcr(
+        bytes, { dev, signal: opts.signal }, { resolveOcrStore, loadRecognizer },
+      );
       const scanned = looksScanned({ chars: ocr.chars, pages: ocr.pageCount });
       console.debug(`[offscreen/pdf-extract] ${where}: forced OCR, ${ocr.pageCount}p, ${ocr.chars} chars`);
       return {
@@ -357,7 +373,9 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
     if (plan.mayEscalate && scanned) {
       stage = 'ocr';
       try {
-        const ocr = await extractViaOcr(bytes, { dev, signal: opts.signal });
+        const ocr = await extractViaOcr(
+          bytes, { dev, signal: opts.signal }, { resolveOcrStore, loadRecognizer },
+        );
         const ocrScanned = looksScanned({ chars: ocr.chars, pages: ocr.pageCount });
         console.debug(`[offscreen/pdf-extract] ${where}: OCR escalation recovered ${ocr.chars} chars`);
         return {
