@@ -1309,11 +1309,21 @@ describe('exact semantic effect claim atomicity', () => {
         },
         appendAudit: async () => {},
         confirm: async () => { confirmations += 1; return true; },
-        webFetch: async (url: string) => ({
-          status: 200, url,
-          headers: { forEach: (fn: (value: string, name: string) => void) => fn('text/html', 'content-type') },
-          text: async () => '<main><h1>Nested result</h1></main>',
-        }),
+        webFetch: async (url: string) => {
+          const bytes = new TextEncoder().encode('<main><h1>Nested result</h1></main>');
+          let sent = false;
+          return {
+            status: 200, url, headers: new Headers({ 'content-type': 'text/html' }),
+            body: { getReader: () => ({
+              read: async () => {
+                if (sent) return { done: true, value: undefined };
+                sent = true;
+                return { done: false, value: bytes };
+              },
+              cancel: () => {}, releaseLock: () => {},
+            }) },
+          };
+        },
         webOffscreenClient: {
           extractMarkdown: async () => ({ readerable: true, markdown: '# Nested result' }),
         },
@@ -1379,7 +1389,10 @@ describe('exact semantic effect claim atomicity', () => {
               turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
               ...webRequest,
             });
-            expect(fetched).toMatchObject({ ok: true });
+            expect(fetched).toMatchObject({
+              ok: true,
+              value: { authorityValue: { ok: true, status: 200, bodyTruncated: false } },
+            });
             const extracted = await channelRelay('resource/extract-markdown', {
               operation: 'turn.resource.extract-markdown', callId: nestedFetchCall,
               effectId: `${nestedFetchCall}:3`, effectSequence: 3,
