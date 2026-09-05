@@ -46,7 +46,9 @@ const unresolved = async (
   root: string,
 ): Promise<Array<{ spec: string; from: string }>> => {
   const miss: Array<{ spec: string; from: string }> = [];
-  if (!existsSync(entry)) return [{ spec: relative(root, entry), from: '(html entry)' }];
+  if (!existsSync(entry) || !statSync(entry).isFile()) {
+    return [{ spec: relative(root, entry), from: '(html entry)' }];
+  }
   const seen = new Set<string>([entry]);
   const queue: string[] = [entry];
   while (queue.length) {
@@ -55,7 +57,7 @@ const unresolved = async (
     try { src = readFileSync(file, 'utf8'); } catch { continue; }
     for (const spec of await staticImportSpecifiers(src, relative(root, file))) {
       const r = resolveStaticSpecifier(spec, file, root);
-      if (!pathIsInside(root, r) || !existsSync(r)) {
+      if (!pathIsInside(root, r) || !existsSync(r) || !statSync(r).isFile()) {
         miss.push({ spec, from: relative(root, file) });
         continue;
       }

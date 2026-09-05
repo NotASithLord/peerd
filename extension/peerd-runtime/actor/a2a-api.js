@@ -22,7 +22,7 @@
 
 import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
 
-/** A failed mesh op REJECTS like a thrown call — so `await mesh.call(...)` throws. */
+/** A failed mesh op REJECTS like a thrown call, so `await mesh.call(...)` throws. */
 export class MeshApiError extends Error {
   /** @param {string} message */
   constructor(message) { super(message); this.name = 'MeshApiError'; }
@@ -43,7 +43,7 @@ const nonEmptyString = (v, what) => {
  */
 
 // The method table. `signs:true` marks an op that SIGNS AS THE USER + emits onto
-// the mesh (cast/call/publishCard) — the SW route holds those behind the
+// the mesh (cast/call/publishCard); the SW route holds those behind the
 // first-contact consent gate (the notWired boundary: reads wire freely, writes
 // need a grant). Reads (peers/card/inbox) are side-effect-free.
 /** @type {Record<string, MeshMethodSpec>} */
@@ -111,7 +111,7 @@ const MESH_METHODS = {
     toArgs: () => ({}),
     shape: (c) => Array.isArray(c?.messages) ? c.messages : [],
   },
-  // CONVERSE — open a STANDING conversation with a peer: like call, but the SW
+  // CONVERSE: open a STANDING conversation with a peer like call, but the SW
   // mints a convId and remembers the thread, so a later peer message continues
   // it (waking the dweb actor with the prior turns as context) and the actor's
   // answers go back to the peer under per-conversation consent. Returns the
@@ -146,7 +146,7 @@ const MESH_METHODS = {
 /** The method names — drives the worker stub + the lore. */
 export const MESH_API_METHODS = Object.freeze(codeClientMethods('mesh'));
 
-/** Names of the SIGNING methods — the SW gates these. */
+/** Names of the SIGNING methods; the SW gates these. */
 export const MESH_SIGNING_METHODS = Object.freeze(
   codeClientMethods('mesh').filter((name) => MESH_METHODS[name]?.signs === true),
 );

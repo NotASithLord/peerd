@@ -63,7 +63,7 @@ const flushUntil = async (/** @type {() => boolean} */ ready) => {
   }
 };
 
-describe('options.transfer — artifact import', () => {
+describe('options.transfer: artifact import', () => {
   it('loads the artifact rail on demand and inspects a small selected file', async () => {
     const calls = /** @type {any[]} */ ([]);
     let reads = 0;

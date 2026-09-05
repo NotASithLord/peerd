@@ -148,6 +148,15 @@ describe('release artifact JavaScript minification', () => {
     }
   });
 
+  test('rejects a directory used as a static module', async () => {
+    const root = makeRoot();
+    write(root, 'entry.js', 'import "./support";\n');
+    mkdirSync(join(root, 'support'));
+
+    await expect(collectStaticModuleGraph(root, join(root, 'entry.js')))
+      .rejects.toThrow('static module graph input is not a regular file: support');
+  });
+
   test('detects an equal-count, equal-byte dependency substitution', async () => {
     const build = async (suffix: 'a' | 'b') => {
       const root = makeRoot();

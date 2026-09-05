@@ -75,7 +75,7 @@ const actorAddress = (v, what) => {
 // work, then retain only smaller bounded trace projections in each host.
 // One run may compose many calls, but it is not an unbounded actor-message
 // pump. Shared by the SW admission meter and the offscreen trace ring.
-// The worker-side bridge guard — sits ABOVE the call cap so the SW's timeout
+// The worker-side bridge guard sits ABOVE the call cap so the SW's timeout
 // (a handleable rejection) always fires before the bridge gives up.
 export const ACTORS_BRIDGE_GUARD_MS = ACTORS_CALL_MAX_TIMEOUT_MS + 10_000;
 // The job wall-clock for a delegating run — sits ABOVE the bridge guard.
@@ -99,7 +99,7 @@ const ACTORS_METHODS = {
     toArgs: () => ({}),
     shape: (c) => ({ refs: Array.isArray(c?.refs) ? c.refs : [] }),
   },
-  // CALL — delegate a goal and await the actor's ONE reply within this run.
+  // CALL: delegate a goal and await the actor's ONE reply within this run.
   // Returns { reply, failed } (failed:true = the actor's turn errored/aborted;
   // the reply text then describes the failure). A timeout REJECTS (throws).
   call: {
