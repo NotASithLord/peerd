@@ -488,6 +488,7 @@ describe('cold entry graphs', () => {
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/artifact-host.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/repository-app-files.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/artifact-worker.js');
+    expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('peerd-engine/artifact.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/document-conversion-worker.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('peerd-egress/ui.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES.filter((entry) =>

@@ -58,6 +58,7 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
   'offscreen/web-extract-core.js',
   'offscreen/artifact-host.js',
   'offscreen/artifact-worker.js',
+  'peerd-engine/artifact.js',
   'offscreen/local-model.js',
   'offscreen/pdf-extract.js',
   'offscreen/doc-extract.js',

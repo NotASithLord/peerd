@@ -47,6 +47,75 @@ const mount = async (importReply, inspectReply, stateOverrides = {}) => {
   return { root, calls, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
+/** @param {(msg: any) => Promise<any>} send */
+const mountWhole = async (send) => {
+  const root = document.createElement('div');
+  document.body.appendChild(root);
+  m.mount(root, { view: () => m(TransferSection, { send }) });
+  await flush();
+  return { root, unmount: () => { m.mount(root, null); root.remove(); } };
+};
+
+const flushUntil = async (/** @type {() => boolean} */ ready) => {
+  for (const _attempt of Array.from({ length: 20 })) {
+    await flush();
+    if (ready()) return;
+  }
+};
+
+describe('options.transfer — artifact import', () => {
+  it('loads the artifact rail on demand and inspects a small selected file', async () => {
+    const calls = /** @type {any[]} */ ([]);
+    let reads = 0;
+    const send = async (/** @type {any} */ message) => {
+      calls.push(message);
+      if (message.type === 'session/list') return { ok: true, sessions: [] };
+      if (message.type === 'import/inspect') return {
+        ok: true,
+        summary: { kind: 'app', name: 'Fixture', size: 12, fileCount: 1 },
+      };
+      return { ok: true };
+    };
+    const { root, unmount } = await mountWhole(send);
+    try {
+      const input = /** @type {HTMLInputElement} */ (root.querySelector('#peerd-artifact-file'));
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [{ size: 12, text: async () => { reads += 1; return '{"fixture":true}'; } }],
+      });
+      input.dispatchEvent(new Event('change'));
+      await flushUntil(() => calls.some((call) => call.type === 'import/inspect'));
+      expect(reads).toBe(1);
+      expect(calls.filter((call) => call.type === 'import/inspect')).toEqual([
+        { type: 'import/inspect', envelope: { fixture: true } },
+      ]);
+      expect(root.textContent).toContain('Name: Fixture');
+    } finally { unmount(); }
+  });
+
+  it('rejects an oversized artifact before reading or sending it', async () => {
+    const calls = /** @type {any[]} */ ([]);
+    let reads = 0;
+    const send = async (/** @type {any} */ message) => {
+      calls.push(message);
+      return message.type === 'session/list' ? { ok: true, sessions: [] } : { ok: true };
+    };
+    const { root, unmount } = await mountWhole(send);
+    try {
+      const input = /** @type {HTMLInputElement} */ (root.querySelector('#peerd-artifact-file'));
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [{ size: Number.MAX_SAFE_INTEGER, text: async () => { reads += 1; return '{}'; } }],
+      });
+      input.dispatchEvent(new Event('change'));
+      await flushUntil(() => root.textContent?.includes('too large to import safely') === true);
+      expect(root.textContent).toContain('96 MB maximum');
+      expect(reads).toBe(0);
+      expect(calls.some((call) => call.type === 'import/inspect')).toBe(false);
+    } finally { unmount(); }
+  });
+});
+
 describe('options.transfer — portable identity restore', () => {
   it('shows and retries a chat-list startup failure', async () => {
     let attempts = 0;
