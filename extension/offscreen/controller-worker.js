@@ -107,8 +107,6 @@ const realm = () => ({
   importScripts: !sealedThroughPrototype(globalThis, 'importScripts', denied),
 });
 
-const CONTROLLER_RUNTIME_URL = '/offscreen/controller-runtime.js';
-
 const onBootstrap = async (/** @type {MessageEvent} */ event) => {
   if (event.data?.type !== 'controller-worker/bootstrap' || event.ports?.length !== 1) return;
   removeEventListener('message', onBootstrap);
@@ -140,7 +138,7 @@ const onBootstrap = async (/** @type {MessageEvent} */ event) => {
     }
     // Fixed packaged module, never a host-provided URL. The future controller
     // receives only audited kernel RPC and explicitly cloned directory handles.
-    const module = await import(CONTROLLER_RUNTIME_URL);
+    const module = await import('/offscreen/controller-runtime.js');
     const controller = await module.createController();
     /** @type {Map<string, {
      *   abort: AbortController,

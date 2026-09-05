@@ -101,13 +101,18 @@ describe('controller runtime build identity', () => {
     }
   });
 
-  test('binds the PDF and OCR worker assets executed by the document host', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-document-assets-'));
+  test('binds every runtime-selected executable asset owned by controller hosts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-runtime-assets-'));
     roots.push(root);
     const extension = join(root, 'extension');
     cpSync(join(process.cwd(), 'extension'), extension, { recursive: true });
     let prior = await controllerBuildDigest(extension);
     for (const asset of [
+      'vendor/transformers/ort-wasm-simd-threaded.asyncify.mjs',
+      'vendor/transformers/ort-wasm-simd-threaded.asyncify.wasm',
+      'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs',
+      'vendor/onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm',
+      'vendor/vad-web/vad.worklet.bundle.min.js',
       'vendor/pdfjs/pdf.worker.min.mjs',
       'vendor/tesseract/worker.min.js',
     ]) {
@@ -118,6 +123,28 @@ describe('controller runtime build identity', () => {
       expect(next, asset).not.toBe(prior);
       prior = next;
     }
+    expect(CONTROLLER_BUILD_ASSETS).not.toContain('vendor/rollup/bindings_wasm_bg.wasm' as any);
+  });
+
+  test('binds every module emitted into the headless sealed Worker source', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-generated-worker-roots-'));
+    roots.push(root);
+    const extension = join(root, 'extension');
+    cpSync(join(process.cwd(), 'extension'), extension, { recursive: true });
+    let prior = await controllerBuildDigest(extension);
+    for (const entry of [
+      'engine-tabs/notebook-tab/realm-seal.js',
+      'engine-tabs/notebook-tab/notebook-std.js',
+      'engine-tabs/notebook-tab/notebook-wasi.js',
+    ]) {
+      expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
+      const path = join(extension, entry);
+      writeFileSync(path, `${readFileSync(path, 'utf8')}\n`);
+      const next = await controllerBuildDigest(extension);
+      expect(next, entry).not.toBe(prior);
+      prior = next;
+    }
+    expect(CONTROLLER_BUILD_ENTRIES).not.toContain('engine-tabs/pod-tab/pod-realm-seal.js' as any);
   });
 
   test('controller-only feature growth leaves every normalized SW authority target unchanged', async () => {

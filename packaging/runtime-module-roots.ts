@@ -30,7 +30,14 @@ const workerSpecifier = (
   node: ts.Expression,
 ): Readonly<{ specifier: string; rootRelative: boolean }> | null => {
   const direct = literalText(node);
-  if (direct !== null) return { specifier: direct, rootRelative: direct.startsWith('/') };
+  if (direct !== null) {
+    if (!direct.startsWith('/')) {
+      throw new Error(
+        `relative string module Worker URL is document-relative: ${direct}; use new URL(..., import.meta.url) or runtime.getURL(...)`,
+      );
+    }
+    return { specifier: direct, rootRelative: true };
+  }
   if (ts.isNewExpression(node) && node.expression.getText() === 'URL') {
     const specifier = literalText(node.arguments?.[0]);
     if (specifier !== null && node.arguments?.[1]?.getText() === 'import.meta.url') {
@@ -122,20 +129,25 @@ export type RuntimeModuleInventoryIssue = Readonly<{
   target: string;
 }>;
 
+export type RuntimeModuleUnavailableEdge = RuntimeModuleInventoryIssue & Readonly<{
+  targetCell: string;
+}>;
+
 export const uninventoriedRuntimeModuleEdges = async (
   root: string,
   inventory: readonly string[],
-  intentionallyUnavailable: readonly string[] = [],
+  intentionallyUnavailable: readonly RuntimeModuleUnavailableEdge[] = [],
 ): Promise<readonly RuntimeModuleInventoryIssue[]> => {
   const absoluteRoot = resolve(root);
   const selected = new Set(inventory);
-  const unavailable = new Set(intentionallyUnavailable);
+  const unavailable = new Set(intentionallyUnavailable.map((edge) =>
+    `${edge.from}\0${edge.kind}\0${edge.target}`));
   const issues: RuntimeModuleInventoryIssue[] = [];
   for (const file of authoredModuleFiles(absoluteRoot)) {
     const from = relative(absoluteRoot, file).split('\\').join('/');
     for (const edge of await fixedRuntimeModuleEdges(readFileSync(file, 'utf8'), from)) {
       const target = relativeRuntimeModuleTarget(edge, file, absoluteRoot);
-      if (!selected.has(target) && !unavailable.has(target)) {
+      if (!selected.has(target) && !unavailable.has(`${from}\0${edge.kind}\0${target}`)) {
         issues.push(Object.freeze({ from, kind: edge.kind, target }));
       }
     }
@@ -147,7 +159,7 @@ export const uninventoriedRuntimeModuleEdges = async (
 export const assertPackagedRuntimeModuleRoots = async (
   root: string,
   inventory: readonly string[],
-  intentionallyUnavailable: readonly string[] = [],
+  intentionallyUnavailable: readonly RuntimeModuleUnavailableEdge[] = [],
 ): Promise<void> => {
   const issues = await uninventoriedRuntimeModuleEdges(
     root, inventory, intentionallyUnavailable,

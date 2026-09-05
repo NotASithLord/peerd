@@ -1426,7 +1426,7 @@ describe('Chrome lazy controller private channel prototype', () => {
   test('sealed Worker disables ambient network/storage before dynamic import', () => {
     const source = readFileSync(join(process.cwd(), 'extension/offscreen/controller-worker.js'), 'utf8');
     const sealAt = source.indexOf("for (const name of [");
-    const importAt = source.indexOf('await import(CONTROLLER_RUNTIME_URL)');
+    const importAt = source.indexOf("await import('/offscreen/controller-runtime.js')");
     expect(sealAt).toBeGreaterThan(-1);
     expect(importAt).toBeGreaterThan(sealAt);
     for (const name of [

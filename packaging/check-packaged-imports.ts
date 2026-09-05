@@ -25,7 +25,7 @@ import {
 import {
   PACKAGED_LAZY_ASSET_ENTRIES,
   packagedLazyModuleEntries,
-  packagedUnavailableRuntimeModuleEntries,
+  packagedUnavailableRuntimeModuleEdges,
 } from './lazy-entry-manifest.ts';
 import { uninventoriedRuntimeModuleEdges } from './runtime-module-roots.ts';
 import { dwebEnabledForTarget } from './gen-channel-config.ts';
@@ -181,7 +181,7 @@ for (const channel of ['preview', 'store'] as const) {
     const lazyAssetMiss = missingLazyAssets(root);
     for (const a of lazyAssetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] lazy asset missing: ${a}`); }
     const runtimeMiss = await uninventoriedRuntimeModuleEdges(
-      root, runtimeEntries, packagedUnavailableRuntimeModuleEntries(dweb, contributor),
+      root, runtimeEntries, packagedUnavailableRuntimeModuleEdges(channel, browser),
     );
     for (const edge of runtimeMiss) {
       failed = true;
