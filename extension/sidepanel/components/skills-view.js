@@ -18,7 +18,7 @@
 // line; no animation, so prefers-reduced-motion is moot here.
 
 import m from '/vendor/mithril/mithril.js';
-import { settleUiEffect } from '/shared/ui-runtime-client.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 
 /**
@@ -53,9 +53,10 @@ import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 const settleMutationAndRefresh = (vnode, message) => {
   const effect = vnode.attrs.send(message);
   settleUiEffect(effect);
-  // Keep the original reconciled promise intact so settleUiEffect can surface
-  // its failure; this continuation only refreshes the local skills list.
-  void effect.then(() => SkillsView.refresh(vnode)).catch(() => {});
+  void effect.then(
+    () => SkillsView.refresh(vnode),
+    () => SkillsView.refresh(vnode),
+  ).catch(() => {});
 };
 
 export const SkillsView = {

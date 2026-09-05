@@ -173,9 +173,10 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // code and these achieved values contain no headroom.
   // Two renderer frames separate module registration from the visible rich-app
   // postcondition, preventing a healthy Mithril mount from being replaced by a
-  // false terminal failure. Exact shared-shell delta, no reserved headroom.
-  sidepanel: Object.freeze({ modules: 11, graphBytes: 144_688, entryBytes: 396, directImports: 1 }),
-  home: Object.freeze({ modules: 11, graphBytes: 144_856, entryBytes: 564, directImports: 1 }),
+  // false terminal failure. Rich-app effect policy stays outside the transport-
+  // only vault shell graph. Exact shared-shell values, no reserved headroom.
+  sidepanel: Object.freeze({ modules: 11, graphBytes: 143_624, entryBytes: 396, directImports: 1 }),
+  home: Object.freeze({ modules: 11, graphBytes: 143_792, entryBytes: 564, directImports: 1 }),
 });
 
 // Cold-start is an observed user-visible outcome, not a bundle-size contest.
@@ -200,8 +201,8 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     serviceWorker: Object.freeze({ modules: 400, graphBytes: 2_033_811, entryBytes: 173 }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
-    sidepanel: Object.freeze({ modules: 11, graphBytes: 136_954, entryBytes: 396 }),
-    home: Object.freeze({ modules: 11, graphBytes: 137_122, entryBytes: 564 }),
+    sidepanel: Object.freeze({ modules: 11, graphBytes: 135_725, entryBytes: 396 }),
+    home: Object.freeze({ modules: 11, graphBytes: 135_893, entryBytes: 564 }),
     // The feature-lease supervisor owns only broker/lifecycle code; controller,
     // repository, model, job and dweb owners remain fixed lazy entries. The
     // stamped build identity replaces runtime.getManifest, which Chrome does
@@ -212,8 +213,8 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
   }),
   firefox: Object.freeze({
     serviceWorker: Object.freeze({ modules: 87, graphBytes: 416_499, entryBytes: 210 }),
-    sidepanel: Object.freeze({ modules: 11, graphBytes: 140_678, entryBytes: 396 }),
-    home: Object.freeze({ modules: 11, graphBytes: 140_846, entryBytes: 564 }),
+    sidepanel: Object.freeze({ modules: 11, graphBytes: 139_449, entryBytes: 396 }),
+    home: Object.freeze({ modules: 11, graphBytes: 139_617, entryBytes: 564 }),
   }),
 });
 
@@ -227,16 +228,16 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({ modules: 406, graphBytes: 2_147_752, entryBytes: 207 }),
-      sidepanel: Object.freeze({ modules: 11, graphBytes: 136_954, entryBytes: 396 }),
-      home: Object.freeze({ modules: 11, graphBytes: 137_122, entryBytes: 564 }),
+      sidepanel: Object.freeze({ modules: 11, graphBytes: 135_725, entryBytes: 396 }),
+      home: Object.freeze({ modules: 11, graphBytes: 135_893, entryBytes: 564 }),
       offscreen: Object.freeze({ modules: 7, graphBytes: 22_080, entryBytes: 13_355 }),
     }),
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
       serviceWorker: Object.freeze({ modules: 89, graphBytes: 421_898, entryBytes: 81 }),
-      sidepanel: Object.freeze({ modules: 11, graphBytes: 140_678, entryBytes: 396 }),
-      home: Object.freeze({ modules: 11, graphBytes: 140_846, entryBytes: 564 }),
+      sidepanel: Object.freeze({ modules: 11, graphBytes: 139_449, entryBytes: 396 }),
+      home: Object.freeze({ modules: 11, graphBytes: 139_617, entryBytes: 564 }),
     }),
   }),
 });

@@ -18,7 +18,7 @@
 //                   a change applies from the next message.
 
 import m from '/vendor/mithril/mithril.js';
-import { settleUiEffect } from '/shared/ui-runtime-client.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 
 /**
  * Typed message sender — posts to the SW and resolves with its reply.

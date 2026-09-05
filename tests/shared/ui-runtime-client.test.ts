@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import {
   makeUiRuntimeClient,
+  uiMessageIsRead,
+} from '../../extension/shared/ui-runtime-client.js';
+import {
   makeReconciledUiSender,
   putUiEffectFailureNotice,
   redrawForRuntimeMessage,
   settleUiEffect,
-  uiMessageIsRead,
-} from '../../extension/shared/ui-runtime-client.js';
+} from '../../extension/shared/ui-effects.js';
 
 describe('bounded UI runtime client', () => {
   test('classifies reads without granting mutations replay safety', () => {
@@ -132,18 +134,19 @@ describe('bounded UI runtime client', () => {
     expect(events).toEqual(['send', 'reconcile', 'failure']);
   });
 
-  test('a resolved unknown effect reports only after reconciliation', async () => {
+  test('a resolved unknown effect survives failed reconciliation and reports once', async () => {
     const events: string[] = [];
+    const reply = { ok: false, outcomeKnown: false };
     const send = makeReconciledUiSender({
-      send: async () => { events.push('send'); return { ok: false, outcomeKnown: false }; },
+      send: async () => { events.push('send'); return reply; },
       fold: () => { events.push('fold'); },
-      reconcile: async () => { events.push('reconcile'); },
+      reconcile: async () => { events.push('reconcile'); throw new Error('read lost'); },
       afterReply: () => false,
       onEffectFailure: () => { events.push('failure'); },
     });
     const effect = send({ type: 'settings/update', patch: {} });
     settleUiEffect(effect);
-    await effect;
+    await expect(effect).resolves.toBe(reply);
     expect(events).toEqual(['send', 'fold', 'reconcile', 'failure']);
   });
 

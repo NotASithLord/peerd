@@ -6,7 +6,7 @@ import { NoticeBar } from '/sidepanel/components/app.js';
 import { SkillsView } from '/sidepanel/components/skills-view.js';
 import {
   makeReconciledUiSender, putUiEffectFailureNotice, settleUiEffect,
-} from '/shared/ui-runtime-client.js';
+} from '/shared/ui-effects.js';
 
 /** @param {(message:any)=>Promise<any>} runtimeSend */
 const mount = (runtimeSend) => {
@@ -71,28 +71,39 @@ describe('sidepanel fire-and-forget effect failures', () => {
     } finally { harness.unmount(); }
   });
 
-  it('surfaces rejected skill toggles and removals without replay', async () => {
-    const failure = Object.assign(new Error('transport detail'), { outcomeKnown: false });
-    /** @type {string[]} */
-    const messages = [];
-    /** @type {any[]} */
-    let notices = [];
-    const send = makeReconciledUiSender({
-      send: async (message) => { messages.push(message.type); throw failure; },
-      fold: () => {}, reconcile: async () => {}, afterReply: () => false,
-      onEffectFailure: (_message, cause) => {
-        notices = putUiEffectFailureNotice(notices, cause);
-      },
-    });
-    const vnode = /** @type {any} */ ({ attrs: { send }, state: {} });
+  it('reconciles each failed skill mutation with one list read and one notice', async () => {
+    for (const rejected of [true, false]) {
+      const failure = Object.assign(new Error('transport detail'), { outcomeKnown: false });
+      /** @type {string[]} */
+      const messages = [];
+      /** @type {any[]} */
+      let notices = [];
+      let reconciles = 0;
+      const send = makeReconciledUiSender({
+        send: async (message) => {
+          messages.push(message.type);
+          if (message.type === 'skills/list') return { ok: true, skills: [] };
+          if (rejected) throw failure;
+          return { ok: false, error: 'refused' };
+        },
+        fold: () => {},
+        reconcile: async () => { reconciles += 1; },
+        afterReply: () => false,
+        onEffectFailure: (_message, cause) => {
+          notices = putUiEffectFailureNotice(notices, cause);
+        },
+      });
+      const vnode = /** @type {any} */ ({ attrs: { send }, state: {} });
 
-    SkillsView.toggle(vnode, 'reader', false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    SkillsView.remove(vnode, 'reader');
-    await new Promise((resolve) => setTimeout(resolve, 0));
+      if (rejected) SkillsView.toggle(vnode, 'reader', false);
+      else SkillsView.remove(vnode, 'reader');
+      await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(messages).toEqual(['skills/setEnabled', 'skills/remove']);
-    expect(notices.length).toBe(1);
-    expect(notices[0].text).toContain('could not confirm whether that change finished');
+      expect(messages).toEqual([
+        rejected ? 'skills/setEnabled' : 'skills/remove', 'skills/list',
+      ]);
+      expect(reconciles).toBe(rejected ? 1 : 0);
+      expect(notices.length).toBe(1);
+    }
   });
 });
