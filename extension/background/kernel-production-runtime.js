@@ -11,6 +11,9 @@ const REQUIRED_RELAY_NAMES = Object.freeze([
   'onSettingsChanged', 'syncDwebAgentRoom', 'beforeGoalStart',
   'hasUnresolvedSideEffects', 'onGoalRunEnd', 'bindGoalRunner',
 ]);
+/** @typedef {'vm'|'notebook'|'pod'|'app'} EngineKind */
+/** @typedef {{action:'adopt',kind:EngineKind,id:string,tabId:number}
+ *   | {action:'drop',kind:EngineKind,id:string}} PendingLiveness */
 
 /** @param {Record<string,any>} deps */
 export const createKernelProductionRuntime = async (deps) => {
@@ -33,18 +36,23 @@ export const createKernelProductionRuntime = async (deps) => {
   const makeRichRuntime = deps.makeRichRuntime ?? createKernelRichRuntime;
   /** @type {any} */
   let liveRelays;
-  /** @type {Array<[string,string,number]>} */
-  const pendingAdoptions = [];
+  /** @type {PendingLiveness[]} */
+  const pendingLiveness = [];
   /** @type {any} */
   let pendingGoal = null;
   const trackerNote = (/** @type {string} */ kind) => (
     /** @type {number} */ tabId, /** @type {any} */ value,
   ) => liveRelays.noteAgentTab(tabId, { kind, ...value });
-  const onEngineAdopt = (/** @type {string} */ kind, /** @type {string} */ id,
+  const onEngineAdopt = (/** @type {EngineKind} */ kind, /** @type {string} */ id,
     /** @type {number} */ tabId) => {
     // why: tracker bootstrap runs before the turn owner exists.
     if (liveRelays) return liveRelays.onEngineAdopt(kind, id, tabId);
-    pendingAdoptions.push([kind, id, tabId]);
+    pendingLiveness.push({ action: 'adopt', kind, id, tabId });
+  };
+  const onEngineDrop = (/** @type {EngineKind} */ kind, /** @type {string} */ id) => {
+    // why: an App can fail after its pre-bind pending adoption.
+    if (liveRelays) return liveRelays.onEngineDrop(kind, id);
+    pendingLiveness.push({ action: 'drop', kind, id });
   };
   const bindGoalRunner = (/** @type {any} */ runner) => {
     // why: goal construction binds before the turn owner can be published.
@@ -83,11 +91,10 @@ export const createKernelProductionRuntime = async (deps) => {
       onEngineAdopt('pod', id, tabId),
     onAppTabAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) =>
       onEngineAdopt('app', id, tabId),
-    onVmTabDrop: (/** @type {string} */ id) => liveRelays.onEngineDrop('vm', id),
-    onJsTabDrop: (/** @type {string} */ id) =>
-      liveRelays.onEngineDrop('notebook', id),
-    onPodTabDrop: (/** @type {string} */ id) => liveRelays.onEngineDrop('pod', id),
-    onAppTabDrop: (/** @type {string} */ id) => liveRelays.onEngineDrop('app', id),
+    onVmTabDrop: (/** @type {string} */ id) => onEngineDrop('vm', id),
+    onJsTabDrop: (/** @type {string} */ id) => onEngineDrop('notebook', id),
+    onPodTabDrop: (/** @type {string} */ id) => onEngineDrop('pod', id),
+    onAppTabDrop: (/** @type {string} */ id) => onEngineDrop('app', id),
     onAppManifestMutation: (/** @type {string} */ appId) =>
       liveRelays.onAppManifestMutation(appId),
     resolveAppOwnerRoot: (/** @type {string} */ appId) =>
@@ -210,22 +217,33 @@ export const createKernelProductionRuntime = async (deps) => {
       });
     } : undefined,
   });
-  liveRelays = rich.relays;
+  const candidateRelays = rich.relays;
   const missingRelay = REQUIRED_RELAY_NAMES.find(
-    (name) => typeof liveRelays?.[name] !== 'function',
+    (name) => typeof candidateRelays?.[name] !== 'function',
   );
-  if (missingRelay) {
-    liveRelays = undefined;
-    try { await rich.close?.(); } catch { /* preserve the invalid relay diagnosis */ }
-    throw new TypeError(`kernel-production-relay-${missingRelay}-invalid`);
-  }
   try {
-    for (const [kind, id, tabId] of pendingAdoptions) {
-      await liveRelays.onEngineAdopt(kind, id, tabId);
-    }
-    if (pendingGoal) await liveRelays.bindGoalRunner(pendingGoal);
+    if (missingRelay) throw new TypeError(`kernel-production-relay-${missingRelay}-invalid`);
+    let nextLiveness = 0;
+    const drainLiveness = async (/** @type {boolean} */ publish = false) => {
+      while (nextLiveness < pendingLiveness.length) {
+        const transition = pendingLiveness[nextLiveness++];
+        if (transition.action === 'adopt') {
+          await candidateRelays.onEngineAdopt(
+            transition.kind, transition.id, transition.tabId,
+          );
+        } else {
+          await candidateRelays.onEngineDrop(transition.kind, transition.id);
+        }
+      }
+      // why: publish before this async frame resolves, leaving no microtask
+      // gap in which one last transition could enter the drained queue.
+      if (publish) liveRelays = candidateRelays;
+    };
+    await drainLiveness();
+    if (pendingGoal) await candidateRelays.bindGoalRunner(pendingGoal);
+    await drainLiveness(true);
   } catch (cause) {
-    try { await rich.close?.(); } catch { /* preserve the assembly failure */ }
+    try { await rich.close?.(); } catch { /* preserve the binding failure */ }
     throw cause;
   }
   return rich;
