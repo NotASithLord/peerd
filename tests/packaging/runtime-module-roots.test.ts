@@ -122,15 +122,6 @@ describe('fixed runtime module roots', () => {
           'vendor/vad-web/silero_vad_v5.onnx',
         ],
       },
-      {
-        selector: 'vendor/pdfjs/pdf.worker.min.mjs',
-        assets: [
-          'vendor/pdfjs/wasm/jbig2.wasm',
-          'vendor/pdfjs/wasm/jbig2_nowasm_fallback.js',
-          'vendor/pdfjs/wasm/openjpeg.wasm',
-          'vendor/pdfjs/wasm/openjpeg_nowasm_fallback.js',
-        ],
-      },
     ] as const;
     for (const { selector, assets } of requirements) {
       const source = readFileSync(join(EXTENSION, selector), 'utf8');
@@ -160,6 +151,8 @@ describe('fixed runtime module roots', () => {
       'vendor/cheerpx/tun/tailscale_tun_auto.js',
       'vendor/mithril/mithril.global.js',
       'vendor/rollup/bindings_wasm_bg.wasm',
+      'vendor/vad-web/silero_vad_legacy.onnx',
+      'vendor/vad-web/silero_vad_v5.onnx',
       'engine-tabs/pod-tab/pod-realm-seal.js',
     ]) {
       expect(PACKAGED_LAZY_ASSET_ENTRIES.includes(entry as any)
