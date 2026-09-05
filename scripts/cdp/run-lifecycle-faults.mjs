@@ -8,7 +8,6 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import puppeteer from 'puppeteer-core';
-import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { readVersion } from '../../packaging/lib.ts';
 import { resolveChrome } from './e2e-harness.mjs';
@@ -280,7 +279,6 @@ const makeSourceFaultExtension = async () => {
   if (typeof backgroundEntry !== 'string') {
     throw new Error('source lifecycle target has no service worker entry');
   }
-  await bundleChromeNativeKernel(extension, backgroundEntry);
   return {
     directory, extension, backgroundEntry,
   };

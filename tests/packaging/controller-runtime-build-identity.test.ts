@@ -13,7 +13,6 @@ import {
   controllerBuildDigest,
   writeControllerBuildIdentity,
 } from '../../packaging/controller-build-identity.ts';
-import { bundleChromeNativeKernel } from '../../packaging/bundle-chrome-native-kernel.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
@@ -177,10 +176,8 @@ describe('controller runtime build identity', () => {
     const candidateDigest = await writeControllerBuildIdentity(candidate);
     expect(candidateDigest).not.toBe(baselineDigest);
 
-    // why: normalize only the authored identity leaves before comparing or
-    // bundling. Bun's identifier allocation may change when a literal changes,
-    // even though no authority source or input changed; the invariant excludes
-    // exactly that build-identity-only churn and nothing else.
+    // why: normalize only the authored identity leaves before comparing. The
+    // invariant excludes exactly build-identity-only churn and nothing else.
     for (const extension of [baseline, candidate]) {
       normalizeControllerBuildIdentity(extension);
     }
@@ -193,19 +190,15 @@ describe('controller runtime build identity', () => {
     const targets = [
       {
         label: 'native Chrome', entry: 'background/vault-kernel-chrome.js',
-        chromeBundle: true,
       },
       {
         label: 'native Firefox', entry: 'background/vault-kernel-firefox.js',
-        chromeBundle: false,
       },
       {
         label: 'Preview Chrome', entry: 'background/vault-kernel-preview.js',
-        chromeBundle: true,
       },
       {
         label: 'Preview Firefox', entry: 'background/vault-kernel-firefox-preview.js',
-        chromeBundle: false,
       },
     ] as const;
     for (const target of targets) {
@@ -216,15 +209,6 @@ describe('controller runtime build identity', () => {
       expect(candidateGraph.inputSha256, target.label).toBe(baselineGraph.inputSha256);
       expect(candidateGraph.inputs, target.label)
         .not.toContain('peerd-runtime/controller-feature-fixture.js');
-      if (target.chromeBundle) {
-        const baselineBundle = await bundleChromeNativeKernel(baseline, target.entry);
-        const candidateBundle = await bundleChromeNativeKernel(candidate, target.entry);
-        expect(candidateBundle.inputs, target.label).toEqual(baselineBundle.inputs);
-        expect(candidateBundle.inputSha256, target.label).toBe(baselineBundle.inputSha256);
-        expect(candidateBundle.bytes, target.label).toBe(baselineBundle.bytes);
-        expect(candidateBundle.inputs, target.label)
-          .not.toContain('peerd-runtime/controller-feature-fixture.js');
-      }
     }
 
     const controllerGraph = await collectStaticModuleGraph(
@@ -257,9 +241,8 @@ describe('controller runtime build identity', () => {
     const baselineStaging = join(baselineArtifacts, 'staging/store-chrome');
     const candidateStaging = join(candidateArtifacts, 'staging/store-chrome');
     // packageArtifact produced the exact Store-pruned/generated staging trees.
-    // Re-run the remaining real release order under a normalized identity:
-    // compact static cold modules, stamp the target controller, normalize only
-    // that stamp, then build the import-free native Chrome worker.
+    // Re-run the real release order under a normalized identity: compact static
+    // cold modules, stamp the target controller, then normalize only that stamp.
     for (const staging of [baselineStaging, candidateStaging]) {
       normalizeControllerBuildIdentity(staging);
     }
@@ -287,17 +270,6 @@ describe('controller runtime build identity', () => {
     );
     expect(candidateStagedGraph).toEqual(baselineStagedGraph);
     expect(candidateStagedGraph.inputs)
-      .not.toContain('peerd-runtime/controller-feature-fixture.js');
-    const baselineStagedBundle = await bundleChromeNativeKernel(
-      baselineStaging, 'background/vault-kernel-chrome.js',
-    );
-    const candidateStagedBundle = await bundleChromeNativeKernel(
-      candidateStaging, 'background/vault-kernel-chrome.js',
-    );
-    expect(candidateStagedBundle.inputs).toEqual(baselineStagedBundle.inputs);
-    expect(candidateStagedBundle.inputSha256).toBe(baselineStagedBundle.inputSha256);
-    expect(candidateStagedBundle.bytes).toBe(baselineStagedBundle.bytes);
-    expect(candidateStagedBundle.inputs)
       .not.toContain('peerd-runtime/controller-feature-fixture.js');
     const stagedControllerGraph = await collectStaticModuleGraph(
       candidateStaging, join(candidateStaging, 'offscreen/controller-turn-runtime.js'),

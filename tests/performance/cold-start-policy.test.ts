@@ -328,30 +328,6 @@ describe('cold-start policy', () => {
     );
   });
 
-  test('integrity policy validates a genuine one-module Chrome worker without a byte ceiling', () => {
-    const result = useReviewedGraphs('chrome', chromeResult());
-    for (const channel of ['store', 'preview'] as const) {
-      result.packagedGraphsByChannel[channel].serviceWorker = graph({
-        modules: 1, graphBytes: 1_300_000, entryBytes: 1_300_000,
-      });
-    }
-    result.packagedGraphs = result.packagedGraphsByChannel.store;
-    expect(assessChrome(result, {
-      graphPolicy: 'integrity', requireTimingTargets: true,
-    })).toEqual({ ok: true, failures: [] });
-
-    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 1_299_999;
-    expect(assessChrome(result, {
-      graphPolicy: 'integrity', requireTimingTargets: true,
-    }).failures).toContain('preview.serviceWorker bundled entry does not equal its static graph');
-
-    result.packagedGraphsByChannel.preview.serviceWorker.entryBytes = 9_000_000;
-    result.packagedGraphsByChannel.preview.serviceWorker.graphBytes = 9_000_000;
-    expect(assessChrome(result, {
-      graphPolicy: 'integrity', requireTimingTargets: true,
-    })).toEqual({ ok: true, failures: [] });
-  });
-
   test('a required lane defaults to the package ratchet and three-second readiness gate', () => {
     const result = chromeResult();
     result.packagedGraphsByChannel.store.serviceWorker.graphBytes += 1;
@@ -402,24 +378,6 @@ describe('cold-start policy', () => {
         'candidate/base host identities differ',
         'candidate/base source commits are identical',
     ]));
-  });
-
-  test('compares reachable cold graphs across bundled and unbundled package recipes', () => {
-    const base = chromeResult({ role: 'base', sourceCommitSha: '4'.repeat(40) });
-    const candidate = chromeResult();
-    for (const channel of ['store', 'preview'] as const) {
-      const candidateWorker = candidate.packagedGraphsByChannel[channel].serviceWorker;
-      const baseWorker = base.packagedGraphsByChannel[channel].serviceWorker;
-      candidateWorker.graphModules = 1;
-      candidateWorker.graphBytes = baseWorker.graphBytes - 1;
-      candidateWorker.entryBytes = candidateWorker.graphBytes;
-      baseWorker.graphModules = 400;
-      baseWorker.entryBytes = 1;
-    }
-    candidate.packagedGraphs = candidate.packagedGraphsByChannel.store;
-    base.packagedGraphs = base.packagedGraphsByChannel.store;
-    expect(assessColdStartPair('chrome', candidate, base, { lane: 'pr' }).failures)
-      .not.toEqual(expect.arrayContaining([expect.stringContaining('entryBytes regressed')]));
   });
 
   test('honors explicit local sample cardinality without weakening fixed lanes', () => {

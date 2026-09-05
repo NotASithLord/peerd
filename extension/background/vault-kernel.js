@@ -130,9 +130,6 @@ if (runtimeModuleKeys.length !== requiredRuntimeModuleKeys.length
   throw new TypeError('kernel-runtime-module-owner-invalid');
 }
 const kernelClockNow = () => globalThis.performance?.now?.() ?? Date.now();
-const kernelBundleStartedAt = Number(
-  /** @type {any} */ (globalThis)[Symbol.for('peerd.kernel.bundle-start.v1')],
-);
 const kernelModuleEvaluatedAt = kernelClockNow();
 /** @type {number|null} */
 let kernelVaultReadyAt = null;
@@ -1021,15 +1018,11 @@ const routes = {
       timing: Object.freeze({
         clock: 'worker-performance-now-diagnostic',
         moduleEvaluationMs: Math.max(0, kernelModuleEvaluatedAt),
-        bundleExecutionBeforeKernelMs: Number.isFinite(kernelBundleStartedAt)
-          ? Math.max(0, kernelModuleEvaluatedAt - kernelBundleStartedAt) : null,
         vaultReadyAfterModuleMs: kernelVaultReadyAt === null
           ? null : Math.max(0, kernelVaultReadyAt - kernelModuleEvaluatedAt),
         kernelReadyAfterModuleMs: kernelReadyAt === null
           ? null : Math.max(0, kernelReadyAt - kernelModuleEvaluatedAt),
         replyAfterModuleMs: Math.max(0, replyFromWorkerTimeOriginMs - kernelModuleEvaluatedAt),
-        replyAfterBundleStartMs: Number.isFinite(kernelBundleStartedAt)
-          ? Math.max(0, replyFromWorkerTimeOriginMs - kernelBundleStartedAt) : null,
         replyFromWorkerTimeOriginMs: Math.max(0, replyFromWorkerTimeOriginMs),
       }),
     };

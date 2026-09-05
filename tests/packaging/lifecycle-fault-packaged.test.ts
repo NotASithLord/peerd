@@ -71,8 +71,8 @@ describe('packaged Chrome lifecycle fault lane', () => {
       harness.indexOf('const makeSourceFaultExtension ='),
       harness.indexOf('const makePackagedFaultExtension ='),
     );
-    expect(sourceLane.indexOf('injectLifecycleFaultTree(extension);'))
-      .toBeLessThan(sourceLane.indexOf('await bundleChromeNativeKernel(extension, backgroundEntry);'));
+    expect(sourceLane).toContain('injectLifecycleFaultTree(extension);');
+    expect(sourceLane).not.toContain('packageArtifact({');
     const storeLane = harness.slice(
       harness.indexOf('const makePackagedFaultExtension ='),
       harness.indexOf('const waitFor =', harness.indexOf('const makePackagedFaultExtension =')),
