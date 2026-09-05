@@ -109,8 +109,12 @@ const jsonUnwire = (/** @type {unknown} */ value, /** @type {string} */ label) =
   try { return JSON.parse(value); }
   catch { throw new Error(`${label} wire payload is invalid`); }
 };
-const unknown = (/** @type {any} */ run, /** @type {unknown} */ cause) => {
+const latchAuthorityOutcomeUnknown = (/** @type {any} */ run) => {
   run.nestedUnknown = true;
+  run.authorityOutcomeUnknown = true;
+};
+const unknown = (/** @type {any} */ run, /** @type {unknown} */ cause) => {
+  latchAuthorityOutcomeUnknown(run);
   return { ...failed(cause, false), retryable: false };
 };
 const auditUnavailable = (
@@ -458,7 +462,7 @@ export const makeControllerTurnBridge = ({
       const claimed = run.claimedEffectsByCall.get(callId) ?? new Map();
       for (const [effectId, operation] of claimed) {
         if (run.effectReceipts.has(effectId)) continue;
-        run.nestedUnknown = true;
+        latchAuthorityOutcomeUnknown(run);
         run.effectReceipts.set(effectId, Object.freeze({
           callId, effectId, operation, outcome: 'unknown', outcomeKnown: false,
           performed: false, retryable: false, code: 'authority_receipt_missing',
@@ -610,7 +614,7 @@ export const makeControllerTurnBridge = ({
     }));
     return rewrite;
   };
-  const performSemanticEffect = async (
+  const performSemanticEffectNow = async (
     /** @type {any} */ run,
     /** @type {{callId:string,effectId:string}} */ effect,
     /** @type {string} */ operation,
@@ -629,20 +633,33 @@ export const makeControllerTurnBridge = ({
         || typeof effectOutcome?.rejected !== 'function')) {
       return failed('domain effect verdict contract is unavailable', true);
     }
-    if (run.auditUnavailable) {
+    if (run.auditUnavailable || run.authorityOutcomeUnknown) {
+      const code = run.auditUnavailable ? 'audit_unavailable' : 'authority_outcome_unknown';
       const receipt = Object.freeze({
         effectId: effect.effectId, operation, outcome: 'not-performed',
         outcomeKnown: true, performed: false, refused: true, retryable: false,
-        code: 'audit_unavailable', ...(target ? { target } : {}),
+        code, ...(target ? { target } : {}),
       });
       run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
-      return auditUnavailable(receipt);
+      return run.auditUnavailable ? auditUnavailable(receipt) : {
+        ok: false, code, error: 'A prior authority effect has an unknown outcome.',
+        outcomeKnown: false, retryable: false, authorityReceipt: receipt,
+      };
     }
     try {
       const result = await authorityScheduler.run({
         read: policy?.riskClass === 'read', target: schedulerTarget ?? operation,
         signal: run.signal,
       }, async () => {
+        if (run.authorityOutcomeUnknown || run.auditUnavailable) throw Object.assign(
+          new Error(run.auditUnavailable
+            ? 'authority audit persistence is unavailable'
+            : 'a prior authority effect has an unknown outcome'),
+          {
+            code: run.auditUnavailable ? 'audit_unavailable' : 'authority_outcome_unknown',
+            outcomeKnown: true, retryable: false,
+          },
+        );
         if (!runIsLive(run)) throw Object.assign(
           new Error('authority effect stopped before host dispatch'),
           { outcomeKnown: true, retryable: false },
@@ -688,7 +705,9 @@ export const makeControllerTurnBridge = ({
         || verdict === 'unknown' && result?.performed === true);
       const receiptOutcome = confirmationStage && verdict === 'performed'
         ? 'observed' : replayable && effectOutcome === null ? 'observed' : verdict;
-      if (!replayable && verdict === 'unknown') run.nestedUnknown = true;
+      if (!replayable && verdict === 'unknown') {
+        latchAuthorityOutcomeUnknown(run);
+      }
       const receipt = Object.freeze({
         effectId: effect.effectId, operation,
         outcome: receiptOutcome,
@@ -712,7 +731,9 @@ export const makeControllerTurnBridge = ({
               : refusal ? 'pre-effect-failure' : undefined,
         },
       });
-      if (recoveryRewrite?.recovery?.state === 'outcome_unknown') run.nestedUnknown = true;
+      if (recoveryRewrite?.recovery?.state === 'outcome_unknown') {
+        latchAuthorityOutcomeUnknown(run);
+      }
       // A message can be durably admitted (the outer receipt is performed)
       // while its actor later stops with a host-known empty effect ledger. Keep
       // that narrower host result beside the exact effect id; semantic result
@@ -751,7 +772,9 @@ export const makeControllerTurnBridge = ({
         ? normalizeExactEffectOutcome(effectOutcome.rejected(cause))
         : 'not-performed';
       const outcomeKnown = replayable || verdict !== 'unknown';
-      if (!outcomeKnown) run.nestedUnknown = true;
+      if (!outcomeKnown) {
+        latchAuthorityOutcomeUnknown(run);
+      }
       const detail = /** @type {{retryable?:boolean,aborted?:boolean,actorAborted?:boolean}} */ (cause);
       const failure = safeHostEffectFailure(cause);
       const performed = verdict === 'performed'
@@ -785,7 +808,9 @@ export const makeControllerTurnBridge = ({
               : verdict === 'unknown' ? 'host-lost' : 'pre-effect-failure',
           },
         });
-        if (recoveryRewrite?.recovery?.state === 'outcome_unknown') run.nestedUnknown = true;
+        if (recoveryRewrite?.recovery?.state === 'outcome_unknown') {
+          latchAuthorityOutcomeUnknown(run);
+        }
         await appendRunAudit(run, {
           type: 'authority_effect_failed', sessionId: run.sessionId,
           details: {
@@ -856,6 +881,29 @@ export const makeControllerTurnBridge = ({
         authorityReceipt: receipt,
       };
     }
+  };
+  const performSemanticEffect = async (
+    /** @type {any} */ run,
+    /** @type {{callId:string,effectId:string}} */ effect,
+    /** @type {string} */ operation,
+    /** @type {string|null} */ target,
+    /** @type {()=>Promise<any>|any} */ execute,
+    /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome = null,
+    /** @type {any} */ tracking = null,
+    /** @type {string|null} */ schedulerTarget = target,
+    /** @type {{args:unknown,confirmed:boolean,confirmedIntentRequired:boolean}|null} */ dispatchAdmission = null,
+  ) => {
+    const policy = controllerDomainOperationPolicy(operation);
+    if (policy?.riskClass === 'read') return performSemanticEffectNow(
+      run, effect, operation, target, execute, effectOutcome,
+      tracking, schedulerTarget, dispatchAdmission,
+    );
+    return run.mutationAuditScheduler.run({
+      read: false, target: 'run-mutation-audit',
+    }, () => performSemanticEffectNow(
+      run, effect, operation, target, execute, effectOutcome,
+      tracking, schedulerTarget, dispatchAdmission,
+    ));
   };
   const runSemanticEffect = async (
     /** @type {any} */ run,
@@ -1125,6 +1173,7 @@ export const makeControllerTurnBridge = ({
     && !run.completedSemanticCalls.has(value.callId)
     && !run.closingSemanticCalls.has(value.callId)
     && run.finalizing !== true
+    && run.authorityOutcomeUnknown !== true
     && run.modelToolCalls.has(value.callId);
   const claimSemanticEffect = (
     /** @type {any} */ run,
@@ -1486,6 +1535,11 @@ export const makeControllerTurnBridge = ({
     try {
       try {
         const domainPolicy = controllerDomainOperationPolicy(operation);
+        if (domainPolicy && run.authorityOutcomeUnknown) return {
+          ok: false, code: 'authority_outcome_unknown',
+          error: 'A prior authority effect has an unknown outcome.',
+          outcomeKnown: false, retryable: false,
+        };
         if (domainPolicy && !run.allowedOperations.has(operation)) {
           return failed('domain authority operation is not granted', true);
         }
@@ -2776,7 +2830,9 @@ export const makeControllerTurnBridge = ({
             ? exactStoppedActorCancellations(run) : [];
           const outcomeUnknown = hostOutcomeUnknown
             || controllerOutcomeUnknown && actorCancellations.length === 0;
-          if (hostOutcomeUnknown) run.nestedUnknown = true;
+          if (hostOutcomeUnknown) {
+            latchAuthorityOutcomeUnknown(run);
+          }
           run.abortFinalized = true;
           run.currentAssistantId = null;
           try {
@@ -2943,7 +2999,11 @@ export const makeControllerTurnBridge = ({
       providerClose: null,
       providerCustodyGeneration: 0, providerCloseGeneration: -1,
       tools: [], system: null,
-      nestedUnknown: false, auditUnavailable: false, abortFinalized: false,
+      nestedUnknown: false, authorityOutcomeUnknown: false,
+      auditUnavailable: false, abortFinalized: false,
+      // why: physical resources serialize independently, but every mutation in
+      // one run must cross its predecessor's durable audit before dispatch.
+      mutationAuditScheduler: createAuthorityEffectScheduler(),
       currentAssistantId: null, resumeAssistantId: null,
       activeDispatches: new Set(), activeSafeDispatches: new Set(),
       activeKernelCalls: new Set(),

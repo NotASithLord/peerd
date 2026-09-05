@@ -395,12 +395,30 @@ describe('controller turn finite tool protocol', () => {
   test('audit rejection preserves main receipts and prevents later effects or clean finalization', async () => {
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let removals = 0;
+    let authorityAudits = 0;
+    let markAuditStarted = () => {};
+    const auditStarted = new Promise<void>((resolve) => { markAuditStarted = resolve; });
+    let releaseAudit = () => {};
+    const auditReleased = new Promise<void>((resolve) => { releaseAudit = resolve; });
+    let markSecondRemoval = () => {};
+    const secondRemoval = new Promise<void>((resolve) => { markSecondRemoval = resolve; });
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     const ctx = context({
       tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
       allowedOperations: ['turn.schedule.cancel-routine'],
-      appendAudit: async () => { throw new Error('audit offline'); },
-      scheduleRemove: async () => { removals += 1; return true; },
+      appendAudit: async (entry: any) => {
+        if (entry?.type !== 'authority_effect') return;
+        authorityAudits += 1;
+        if (authorityAudits !== 1) return;
+        markAuditStarted();
+        await auditReleased;
+        throw new Error('audit offline');
+      },
+      scheduleRemove: async () => {
+        removals += 1;
+        if (removals === 2) markSecondRemoval();
+        return true;
+      },
     });
     const replies: any[] = [];
     const getClient = async () => ({
@@ -416,14 +434,21 @@ describe('controller turn finite tool protocol', () => {
             type: 'tool-use-start', id: callId, name: 'schedule_cancel',
           });
         }
-        replies.push(await invoke('turn.schedule.cancel-routine', {
+        const first = invoke('turn.schedule.cancel-routine', {
           callId: 'audit-call-1', effectId: 'audit-call-1:1', effectSequence: 1,
           turnGeneration: payload.turnGeneration, id: 'routine-1',
-        }));
-        replies.push(await invoke('turn.schedule.cancel-routine', {
+        });
+        await auditStarted;
+        const second = invoke('turn.schedule.cancel-routine', {
           callId: 'audit-call-2', effectId: 'audit-call-2:1', effectSequence: 1,
           turnGeneration: payload.turnGeneration, id: 'routine-2',
-        }));
+        });
+        await Promise.race([
+          secondRemoval,
+          new Promise<void>((resolve) => setTimeout(resolve, 50)),
+        ]);
+        releaseAudit();
+        replies.push(...await Promise.all([first, second]));
         replies.push(await invoke('turn.session.append', {
           sessionId: payload.sessionId,
           messageJson: JSON.stringify({
@@ -458,6 +483,55 @@ describe('controller turn finite tool protocol', () => {
     expect(failure).toMatchObject({
       code: 'audit_unavailable', outcomeKnown: true, retryable: false,
     });
+  });
+
+  test('an unknown main authority effect refuses every later domain mutation', async () => {
+    const scheduleDescriptor = authorityDescriptor('schedule_cancel');
+    let removals = 0;
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    const ctx = context({
+      tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+      allowedOperations: ['turn.schedule.cancel-routine'],
+      scheduleRemove: async () => {
+        removals += 1;
+        return removals === 1
+          ? { performed: true, outcomeKnown: false, outcomeKind: 'transport-lost' }
+          : true;
+      },
+    });
+    const replies: any[] = [];
+    const getClient = async () => ({
+      call: async (capability: string, payload: any, options: any) => {
+        const authority = bridge.authorize(payload);
+        const invoke = (operation: string, value: any) => bridge.handleKernelCall(
+          operation, { runId: payload.runId, value }, {
+            capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+          },
+        );
+        for (const callId of ['unknown-call-1', 'unknown-call-2']) {
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-start', id: callId, name: 'schedule_cancel',
+          });
+        }
+        replies.push(await invoke('turn.schedule.cancel-routine', {
+          callId: 'unknown-call-1', effectId: 'unknown-call-1:1', effectSequence: 1,
+          turnGeneration: payload.turnGeneration, id: 'routine-1',
+        }));
+        replies.push(await invoke('turn.schedule.cancel-routine', {
+          callId: 'unknown-call-2', effectId: 'unknown-call-2:1', effectSequence: 1,
+          turnGeneration: payload.turnGeneration, id: 'routine-2',
+        }));
+        return invoke('turn.finalize', {});
+      },
+    });
+    bridge = makeControllerTurnBridge({ getClient, newId: () => 'unknown-terminal-run' });
+    try {
+      for await (const _event of bridge.runUserTurn(withOperationSurface(ctx))) { /* drain */ }
+    } catch { /* the first unknown receipt makes finalization terminal */ }
+
+    expect(removals).toBe(1);
+    expect(replies[0]).toMatchObject({ outcomeKnown: false, retryable: false });
+    expect(replies[1]).toMatchObject({ ok: false });
   });
 
   test('audit rejection cannot make an unknown receipt known during abort finalization', async () => {

@@ -482,7 +482,10 @@ export const makeOffscreenActorClient = ({
       semanticCallState: new Map(), effectReceipts: new Map(), lifecycleRewrites: new Map(),
       claimedEffectsByCall: new Map(),
       closingCalls: new Set(), completedCalls: new Set(),
-      finalizing: false, auditUnavailable: false,
+      finalizing: false, authorityOutcomeUnknown: false, auditUnavailable: false,
+      // why: target lanes preserve global concurrency; this grant-local lane
+      // only prevents its next mutation outrunning durable audit settlement.
+      mutationAuditScheduler: createAuthorityEffectScheduler(),
       pendingClaimsByCall: new Map(),
       nestedCallIds: new Set(),
       openEffects: new Map(),
@@ -835,6 +838,7 @@ export const makeOffscreenActorClient = ({
         || msg.turnGeneration !== grant.turnGeneration
         || grant.closingCalls.has(msg.callId) || grant.completedCalls.has(msg.callId)
         || grant.finalizing === true
+        || grant.authorityOutcomeUnknown === true
         || grant.semanticEffectIds.has(msg.effectId)
         || msg.effectSequence !== (grant.semanticEffectSequences.get(msg.callId) ?? 0) + 1
         || grant.toolRelays >= grant.effectRelayLimit || !runIsLive(grant)) return null;
@@ -890,6 +894,7 @@ export const makeOffscreenActorClient = ({
     try {
       const ctx = await contextForOperation(grant, operation);
       if (!ctx || !runIsLive(grant) || grant.finalizing === true
+          || grant.authorityOutcomeUnknown === true
           || grant.closingCalls.has(msg.callId) || grant.completedCalls.has(msg.callId)) return null;
       const args = /** @type {Readonly<Record<string, any>>} */ (Object.freeze(
         Object.fromEntries([...fields, ...optionalFields]
@@ -1020,6 +1025,7 @@ export const makeOffscreenActorClient = ({
     /** @type {any} */ entry,
     /** @type {any} */ receipt,
   ) => {
+    if (receipt.outcomeKnown === false) entry.grant.authorityOutcomeUnknown = true;
     entry.grant.effectReceipts.set(entry.effect.effectId, {
       ...receipt, callId: entry.effect.callId,
     });
@@ -1076,9 +1082,12 @@ export const makeOffscreenActorClient = ({
       callId: receipt.callId, rewrite,
       physical: isRecord(physical) ? Object.freeze({ ...physical }) : Object.freeze({}),
     }));
+    if (rewrite.recovery?.state === 'outcome_unknown') {
+      entry.grant.authorityOutcomeUnknown = true;
+    }
     return rewrite;
   };
-  const performSemanticEffect = async (
+  const performSemanticEffectNow = async (
     /** @type {any} */ entry,
     /** @type {string|null} */ target,
     /** @type {()=>Promise<any>|any} */ execute,
@@ -1086,6 +1095,7 @@ export const makeOffscreenActorClient = ({
     /** @type {any} */ tracking = null,
     /** @type {string|null} */ schedulerTarget = target,
     /** @type {{confirmed:boolean,confirmedIntentRequired:boolean}|null} */ dispatchAdmission = null,
+    /** @type {object|null} */ auditLease = null,
   ) => {
     const policy = controllerDomainOperationPolicy(entry.operation);
     const replayable = policy?.riskClass === 'read';
@@ -1096,13 +1106,18 @@ export const makeOffscreenActorClient = ({
         outcomeKnown: true, retryable: false,
       };
     }
-    if (entry.grant.auditUnavailable) {
+    if (entry.grant.auditUnavailable || entry.grant.authorityOutcomeUnknown) {
+      const code = entry.grant.auditUnavailable
+        ? 'audit_unavailable' : 'authority_outcome_unknown';
       const receipt = Object.freeze({
         ...receiptFor(entry, 'not-performed', true, false, false, target),
-        refused: true, code: 'audit_unavailable',
+        refused: true, code,
       });
       recordAuthorityReceipt(entry, receipt);
-      return auditUnavailableResult(receipt);
+      return entry.grant.auditUnavailable ? auditUnavailableResult(receipt) : {
+        ok: false, code, error: 'A prior authority effect has an unknown outcome.',
+        outcomeKnown: false, retryable: false, authorityReceipt: receipt,
+      };
     }
     try {
       const parentLease = entry.effect.parentEffect?.lease ?? null;
@@ -1116,6 +1131,15 @@ export const makeOffscreenActorClient = ({
         scopeOnly: entry.operation === 'turn.page.run-program',
         signal: entry.grant.relaySignal,
       }, async (lease) => {
+        if (entry.grant.authorityOutcomeUnknown || entry.grant.auditUnavailable) {
+          throw Object.assign(new Error(entry.grant.auditUnavailable
+            ? 'authority audit persistence is unavailable'
+            : 'a prior authority effect has an unknown outcome'), {
+            code: entry.grant.auditUnavailable
+              ? 'audit_unavailable' : 'authority_outcome_unknown',
+            outcomeKnown: true, retryable: false,
+          });
+        }
         if (!runIsLive(entry.grant) || entry.grant.closingCalls.has(entry.effect.callId)
             || entry.grant.completedCalls.has(entry.effect.callId)) {
           throw Object.assign(new Error('actor authority stopped before host dispatch'), {
@@ -1150,7 +1174,7 @@ export const makeOffscreenActorClient = ({
           }
         }
         entry.grant.openEffects.set(entry.effect.effectId, {
-          callId: entry.effect.callId, operation: entry.operation, lease,
+          callId: entry.effect.callId, operation: entry.operation, lease, auditLease,
         });
         try { return await execute(); }
         finally { entry.grant.openEffects.delete(entry.effect.effectId); }
@@ -1208,7 +1232,8 @@ export const makeOffscreenActorClient = ({
       if (!Number.isFinite(resultBytes) || resultBytes > ACTOR_AUTHORITY_RESULT_CAP) {
         return {
           ok: false, error: 'authority result exceeds its fixed byte cap',
-          outcomeKnown: true, retryable: false, authorityReceipt: stampedReceipt,
+          outcomeKnown: stampedReceipt.outcomeKnown === true,
+          retryable: false, authorityReceipt: stampedReceipt,
         };
       }
       return verdict === 'unknown'
@@ -1265,6 +1290,27 @@ export const makeOffscreenActorClient = ({
         outcomeKnown, retryable: stampedReceipt.retryable, authorityReceipt: stampedReceipt,
       };
     }
+  };
+  const performSemanticEffect = async (
+    /** @type {any} */ entry,
+    /** @type {string|null} */ target,
+    /** @type {()=>Promise<any>|any} */ execute,
+    /** @type {{fulfilled?:(value:any)=>unknown,rejected?:(cause:unknown)=>unknown}|null} */ effectOutcome,
+    /** @type {any} */ tracking = null,
+    /** @type {string|null} */ schedulerTarget = target,
+    /** @type {{confirmed:boolean,confirmedIntentRequired:boolean}|null} */ dispatchAdmission = null,
+  ) => {
+    const policy = controllerDomainOperationPolicy(entry.operation);
+    if (policy?.riskClass === 'read') return performSemanticEffectNow(
+      entry, target, execute, effectOutcome, tracking, schedulerTarget, dispatchAdmission,
+    );
+    return entry.grant.mutationAuditScheduler.run({
+      read: false, target: 'grant-mutation-audit',
+      parentLease: entry.effect.parentEffect?.auditLease ?? null,
+    }, (/** @type {object} */ auditLease) => performSemanticEffectNow(
+      entry, target, execute, effectOutcome, tracking,
+      schedulerTarget, dispatchAdmission, auditLease,
+    ));
   };
   const beginAuthorityTracking = async (
     /** @type {any} */ entry,
@@ -3043,6 +3089,7 @@ export const makeOffscreenActorClient = ({
       const claimed = grant.claimedEffectsByCall.get(msg.callId) ?? new Map();
       for (const [effectId, operation] of claimed) {
         if (grant.effectReceipts.has(effectId)) continue;
+        grant.authorityOutcomeUnknown = true;
         grant.effectReceipts.set(effectId, Object.freeze({
           callId: msg.callId, effectId, operation,
           outcome: 'unknown', outcomeKnown: false, performed: false, retryable: false,
