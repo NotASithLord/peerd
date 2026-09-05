@@ -830,7 +830,9 @@ const verifyAppGit = async (driver, appId, { cleanup = true } = {}) => {
 };
 
 const digestHarness = async () => {
-  const graph = [...await collectStaticModuleGraph(REPO_ROOT, ENTRY)];
+  const graph = [...await collectStaticModuleGraph(REPO_ROOT, ENTRY, {
+    allowExternalSpecifiers: true,
+  })];
   const inputs = [...new Set([
     ...graph,
     resolve(import.meta.dir, 'firefox-version.txt'),

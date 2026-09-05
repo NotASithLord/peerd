@@ -53,7 +53,9 @@ const sourceVersion = (root) => String(JSON.parse(
 ).version);
 
 const digestHarness = async (sourceRoot) => {
-  const graph = [...await collectStaticModuleGraph(sourceRoot, ENTRY)].sort();
+  const graph = [...await collectStaticModuleGraph(sourceRoot, ENTRY, {
+    allowExternalSpecifiers: true,
+  })].sort();
   const inputs = [...new Set([
     ...graph,
     join(sourceRoot, 'package.json'),

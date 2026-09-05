@@ -52,7 +52,9 @@ const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 const sourceVersion = (root) => String(readJson(join(root, 'package.json')).version);
 
 const digestHarness = async (sourceRoot) => {
-  const graph = [...await collectStaticModuleGraph(sourceRoot, ENTRY)].sort();
+  const graph = [...await collectStaticModuleGraph(sourceRoot, ENTRY, {
+    allowExternalSpecifiers: true,
+  })].sort();
   const files = [...new Set([
     ...graph,
     join(sourceRoot, 'package.json'),

@@ -89,7 +89,9 @@ export const digestTree = async (root) => {
 };
 
 export const digestHarness = async () => {
-  const graph = [...await collectStaticModuleGraph(REPO_ROOT, ENTRY)].sort();
+  const graph = [...await collectStaticModuleGraph(REPO_ROOT, ENTRY, {
+    allowExternalSpecifiers: true,
+  })].sort();
   const inputs = [...new Set([
     ...graph,
     join(__dirname, 'run-passkey-signup.mjs'),
