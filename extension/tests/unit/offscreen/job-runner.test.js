@@ -941,7 +941,7 @@ throw new Error('unrelated failure');`,
     const trace = /** @type {any[]} */ (r.actorsTrace);
     expect(trace.length).toBe(2);
     expect(trace[0].seq).toBe(1);
-    expect(trace[0].method).toBe('ask');
+    expect(trace[0].method).toBe('call');
     expect(trace[0].to).toBe('vm-9');
     expect(trace[0].goal).toBe('one');
     expect(trace[0].ok).toBe(true);

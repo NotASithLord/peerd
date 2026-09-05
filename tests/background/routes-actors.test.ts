@@ -85,18 +85,7 @@ const makeHarness = ({
     isOffscreenSender: (sender: unknown) => sender === OFFSCREEN,
   });
   const callFrom = async (sender: unknown, method: string, args: any = {}) => {
-    let translated;
-    try { translated = actorsCallToOp({ method, args }); }
-    catch {
-      // Send malformed worker bytes through the SW wall to prove it repeats
-      // validation independently of the sealed host.
-      translated = method === 'list'
-        ? { op: 'list', args: {} }
-        : { op: 'call', args: {
-          to: args.address ?? args.to, goal: args.message ?? args.goal,
-          timeoutMs: args.timeoutMs, oneShot: args.oneShot,
-        } };
-    }
+    const translated = actorsCallToOp({ method, args });
     const response: any = await (routes as any)[translated.op === 'list' ? 'actors/list' : 'actors/call']({
       args: translated.args, ownerSessionId: owner?.sessionId ?? 'missing',
       ownerToolUseId: 'tu-1', runId: 'run-1', seq: 1,
@@ -112,13 +101,17 @@ const makeHarness = ({
     return { ...custody, value: shapeActorsResult(method, { ok: true, reply, failed }) };
   };
   const call = (method: string, args: any = {}) => callFrom(OFFSCREEN, method, args);
-  return { call, callFrom, calls, broadcasts, mirrored, runController };
+  const rawCall = (args: any = {}) => (routes as any)['actors/call']({
+    args, ownerSessionId: owner?.sessionId ?? 'missing',
+    ownerToolUseId: 'tu-1', runId: 'run-1', seq: 1,
+  }, OFFSCREEN);
+  return { call, callFrom, rawCall, calls, broadcasts, mirrored, runController };
 };
 
 describe('actors/call — owner and grant walls', () => {
   test('a chat with no manifest keeps the historical delegation surface', async () => {
     const h = makeHarness();
-    expect(await h.call('ask', { to: 'web', goal: 'find it' }))
+    expect(await h.call('call', { address: 'web', message: 'find it' }))
       .toEqual({ ok: true, value: { reply: 'done', failed: false } });
     expect(h.calls[0].req.senderSessionId).toBe('chat-1');
     expect(h.calls[0].req.via).toBe('script');
@@ -129,7 +122,7 @@ describe('actors/call — owner and grant walls', () => {
       owner: { sessionId: 'chat-1', toolManifest: { allow: ['script'] } },
       allowedOperations: [],
     });
-    const result = await h.call('ask', { to: 'web', goal: 'find it' });
+    const result = await h.call('call', { address: 'web', message: 'find it' });
     expect(result.ok).toBe(false);
     expect(result.error).toContain('operation is not granted');
     expect(h.calls).toEqual([]);
@@ -142,7 +135,7 @@ describe('actors/call — owner and grant walls', () => {
         grantedOperations: ['turn.actor.message'],
       },
     });
-    expect(await h.call('ask', { to: 'vm-1', goal: 'run tests' }))
+    expect(await h.call('call', { address: 'vm-1', message: 'run tests' }))
       .toEqual({ ok: true, value: { reply: 'done', failed: false } });
     const req = h.calls[0].req;
     expect(req.senderSessionId).toBe('spawn-1');
@@ -156,7 +149,7 @@ describe('actors/call — owner and grant walls', () => {
       owner: { sessionId: 'spawn-1', kind: 'spawned', grantedOperations: [] },
       allowedOperations: [],
     });
-    const result = await h.call('ask', { to: 'vm-1', goal: 'run tests' });
+    const result = await h.call('call', { address: 'vm-1', message: 'run tests' });
     expect(result.ok).toBe(false);
     expect(result.error).toContain('operation is not granted');
     expect(h.calls).toEqual([]);
@@ -166,7 +159,7 @@ describe('actors/call — owner and grant walls', () => {
     const h = makeHarness({
       owner: { sessionId: 'bound-1', kind: 'actor' },
     });
-    const result = await h.call('ask', { to: 'web', goal: 'escape the pin' });
+    const result = await h.call('call', { address: 'web', message: 'escape the pin' });
     expect(result.ok).toBe(false);
     expect(result.error).toContain('chat session or a granted spawned actor');
     expect(h.calls).toEqual([]);
@@ -174,37 +167,44 @@ describe('actors/call — owner and grant walls', () => {
 
   test('a missing, finished, or foreign run id buys no delegation', async () => {
     const h = makeHarness({ runOwner: 'other-session' });
-    const result = await h.call('ask', { to: 'web', goal: 'find it' });
+    const result = await h.call('call', { address: 'web', message: 'find it' });
     expect(result).toEqual({ ok: false, error: 'actors: unknown, finished, or foreign script run' });
     expect(h.calls).toEqual([]);
   });
 
   test('only the offscreen job host may redeem a live actors run', async () => {
     const h = makeHarness();
-    expect(await h.callFrom(ENGINE_TAB, 'ask', { to: 'web', goal: 'find it' }))
+    expect(await h.callFrom(ENGINE_TAB, 'call', { address: 'web', message: 'find it' }))
       .toEqual({ ok: false, error: 'actors: unauthorized relay' });
-    expect(await h.callFrom(undefined, 'ask', { to: 'web', goal: 'find it' }))
+    expect(await h.callFrom(undefined, 'call', { address: 'web', message: 'find it' }))
       .toEqual({ ok: false, error: 'actors: unauthorized relay' });
     expect(h.calls).toEqual([]);
   });
 
   test('an owner-bound non-actors run id buys no delegation', async () => {
     const h = makeHarness({ actorsAllowed: false });
-    expect(await h.call('ask', { to: 'web', goal: 'find it' }))
+    expect(await h.call('call', { address: 'web', message: 'find it' }))
       .toEqual({ ok: false, error: 'actors: unknown, finished, or foreign script run' });
     expect(h.calls).toEqual([]);
   });
 });
 
 describe('actors/call — per-operation authority', () => {
-  test('oversized addresses and goals stop before actor dispatch, UI broadcast, or trace retention', async () => {
+  test('oversized addresses and goals stop at both canonical translation and the independent SW wall', async () => {
     const cases = [
-      { address: 'a'.repeat(ACTORS_ADDRESS_MAX_CHARS + 1), message: 'x' },
-      { address: 'web', message: 'g'.repeat(ACTORS_GOAL_MAX_CHARS + 1) },
+      {
+        client: { address: 'a'.repeat(ACTORS_ADDRESS_MAX_CHARS + 1), message: 'x' },
+        wire: { to: 'a'.repeat(ACTORS_ADDRESS_MAX_CHARS + 1), goal: 'x' },
+      },
+      {
+        client: { address: 'web', message: 'g'.repeat(ACTORS_GOAL_MAX_CHARS + 1) },
+        wire: { to: 'web', goal: 'g'.repeat(ACTORS_GOAL_MAX_CHARS + 1) },
+      },
     ];
-    for (const args of cases) {
+    for (const { client, wire } of cases) {
       const h = makeHarness();
-      const result = await h.call('call', args);
+      expect(() => actorsCallToOp({ method: 'call', args: client })).toThrow('at most');
+      const result = await h.rawCall(wire);
       expect(result.ok).toBe(false);
       expect(result.error).toContain('at most');
       expect(h.calls).toEqual([]);
@@ -278,7 +278,7 @@ describe('actors/call — per-operation authority', () => {
 
   test('the SW-side run ceiling refuses work before dispatch', async () => {
     const h = makeHarness({ actorOpAllowed: false });
-    expect(await h.call('ask', { to: 'web', goal: 'find it' }))
+    expect(await h.call('call', { address: 'web', message: 'find it' }))
       .toEqual({ ok: false, error: 'actors: this script run reached its delegation-operation limit' });
     expect(h.calls).toEqual([]);
   });
@@ -333,7 +333,7 @@ describe('actors/call — per-operation authority', () => {
     const h = makeHarness({
       getOwner: () => new Promise((resolve) => { finishOwnerLookup = resolve; }),
     });
-    const pending = h.call('ask', { to: 'web', goal: 'do not start' });
+    const pending = h.call('call', { address: 'web', message: 'do not start' });
     await Promise.resolve();
     h.runController.abort();
     finishOwnerLookup({ sessionId: 'chat-1' });
@@ -356,7 +356,7 @@ describe('actors/call — per-operation authority', () => {
       },
       messageActor: async () => ({ ok: false, error: refusal }),
     });
-    expect(await h.call('ask', { to: 'web', goal: 'find it' }))
+    expect(await h.call('call', { address: 'web', message: 'find it' }))
       .toEqual({ ok: false, error: refusal });
   });
 
@@ -372,7 +372,7 @@ describe('actors/call — per-operation authority', () => {
         else req.awaitSignal.addEventListener('abort', settle, { once: true });
       }),
     });
-    const pending = h.call('ask', { to: 'vm-1', goal: 'long task', timeoutMs: 5_000 });
+    const pending = h.call('call', { address: 'vm-1', message: 'long task', timeoutMs: 5_000 });
     for (let attempt = 0; attempt < 10 && h.calls.length === 0; attempt += 1) {
       await Promise.resolve();
     }

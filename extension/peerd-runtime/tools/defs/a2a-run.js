@@ -16,12 +16,12 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // The mesh client the code drives (see worker-source.js a2a bridge):
 //   await mesh.peers()                     // [{ did, name }] — who's present
 //   await mesh.card(did)                   // a peer's Agent Card, or null
-//   await mesh.call(did, "…", { timeoutMs })// send + await ONE reply (needs consent)
+//   await mesh.call(did, "…", { timeoutMs })// request + await ONE reply (needs consent)
 //   await mesh.cast(did, "…")              // fire-and-forget (needs consent)
 //   await mesh.publishCard({ name, … })    // advertise MY card (needs consent)
 //   await mesh.inbox()                     // drain DMs received during this run
 //   await mesh.converse(did, "…", {timeoutMs}) // open a STANDING conversation:
-//                                          // like ask, but returns { convId } so a
+//                                          // like call, but returns { convId } so a
 //                                          // LATER peer message continues the thread
 //   await mesh.say(convId, "…", {timeoutMs})   // send the next turn on a convId
 

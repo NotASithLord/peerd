@@ -182,7 +182,12 @@ describe('kernel turn ownership boundaries', () => {
       expect(manifestMigration.match(new RegExp(retired, 'g')), retired).toHaveLength(1);
     }
     expect(source.match(/toolbox/g)).toHaveLength(1);
-    expect(source).toContain("RETIRED_DATABASE_NAMES = Object.freeze(['peerd-toolbox'");
+    const retiredDatabases = readFileSync(
+      join(EXTENSION_ROOT, 'peerd-egress/storage/idb.js'), 'utf8',
+    );
+    for (const name of ['peerd-toolbox', 'peerd-run-cache', 'peerd-checkpoints']) {
+      expect(retiredDatabases.match(new RegExp(name, 'g')), name).toHaveLength(1);
+    }
   });
 
   it('keeps semantic aggregate barrels out of the service-worker graph', async () => {

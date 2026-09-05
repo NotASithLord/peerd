@@ -7,7 +7,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   actorsCallToOp, shapeActorsResult,
-  ACTORS_API_METHODS, ACTORS_ASK_MAX_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
+  ACTORS_API_METHODS, ACTORS_CALL_MAX_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
   ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
   ACTORS_JOB_DEFAULT_TIMEOUT_MS, ACTORS_JOB_MAX_TIMEOUT_MS, ActorsApiError,
   renderTraceLines, traceGoalLines, traceErrorDetails,
@@ -36,7 +36,7 @@ describe('the method table', () => {
 describe('actorsCallToOp — validation', () => {
   test('call requires address + message, clamps timeoutMs, passes oneShot through', () => {
     const r = actorsCallToOp({ method: 'call', args: { address: 'vm-9', message: 'run pytest', timeoutMs: 999_999, oneShot: true } });
-    expect(r).toEqual({ op: 'call', args: { to: 'vm-9', goal: 'run pytest', timeoutMs: ACTORS_ASK_MAX_TIMEOUT_MS, oneShot: true }, delegates: true });
+    expect(r).toEqual({ op: 'call', args: { to: 'vm-9', goal: 'run pytest', timeoutMs: ACTORS_CALL_MAX_TIMEOUT_MS, oneShot: true }, delegates: true });
     expect(() => actorsCallToOp({ method: 'call', args: { message: 'x' } })).toThrow(/address/);
     expect(() => actorsCallToOp({ method: 'call', args: { address: 'vm-9', message: '  ' } })).toThrow(/message/);
   });
@@ -189,7 +189,7 @@ describe('the ops trace — the observability contract', () => {
 
 describe('the timeout tower derives from one ceiling', () => {
   test('job > bridge guard > per-call cap, by construction', () => {
-    expect(ACTORS_BRIDGE_GUARD_MS).toBeGreaterThan(ACTORS_ASK_MAX_TIMEOUT_MS);
+    expect(ACTORS_BRIDGE_GUARD_MS).toBeGreaterThan(ACTORS_CALL_MAX_TIMEOUT_MS);
     expect(ACTORS_JOB_DEFAULT_TIMEOUT_MS).toBeGreaterThan(ACTORS_BRIDGE_GUARD_MS);
     expect(ACTORS_JOB_MAX_TIMEOUT_MS).toBeGreaterThan(ACTORS_JOB_DEFAULT_TIMEOUT_MS);
   });

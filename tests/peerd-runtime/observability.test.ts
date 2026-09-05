@@ -55,7 +55,7 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
     ['The webvm actor builder (vm-9) could not complete your request:', 'agent'],
     // agent beats timeout: the actor REPORTED failure; the timeout detail
     // inside its account must not reclassify who failed
-    ['The web actor could not complete your request: the ask timed out after 120000ms', 'agent'],
+    ['The web actor could not complete your request: the call timed out after 120000ms', 'agent'],
     ['Failed to fetch', 'provider'],
     ['the actor turn failed: pytest exited 1', 'agent'],
     ['(the actor produced no text reply)', 'agent'],

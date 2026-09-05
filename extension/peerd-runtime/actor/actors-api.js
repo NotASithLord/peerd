@@ -27,15 +27,15 @@
 import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
 import {
   ACTORS_ADDRESS_MAX_CHARS,
-  ACTORS_ASK_MAX_TIMEOUT_MS,
+  ACTORS_CALL_MAX_TIMEOUT_MS,
   ACTORS_GOAL_MAX_CHARS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
 } from '../../shared/actor-code-authority.js';
 
 export {
   ACTORS_ADDRESS_MAX_CHARS,
-  ACTORS_ASK_DEFAULT_TIMEOUT_MS,
-  ACTORS_ASK_MAX_TIMEOUT_MS,
+  ACTORS_CALL_DEFAULT_TIMEOUT_MS,
+  ACTORS_CALL_MAX_TIMEOUT_MS,
   ACTORS_GOAL_MAX_CHARS,
   ACTORS_RUN_MAX_OPS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
@@ -77,7 +77,7 @@ const actorAddress = (v, what) => {
 // pump. Shared by the SW admission meter and the offscreen trace ring.
 // The worker-side bridge guard — sits ABOVE the call cap so the SW's timeout
 // (a handleable rejection) always fires before the bridge gives up.
-export const ACTORS_BRIDGE_GUARD_MS = ACTORS_ASK_MAX_TIMEOUT_MS + 10_000;
+export const ACTORS_BRIDGE_GUARD_MS = ACTORS_CALL_MAX_TIMEOUT_MS + 10_000;
 // The job wall-clock for a delegating run — sits ABOVE the bridge guard.
 export const ACTORS_JOB_DEFAULT_TIMEOUT_MS = ACTORS_BRIDGE_GUARD_MS + 20_000;
 export const ACTORS_JOB_MAX_TIMEOUT_MS = ACTORS_BRIDGE_GUARD_MS + 50_000;
@@ -112,7 +112,7 @@ const ACTORS_METHODS = {
         ACTORS_GOAL_MAX_CHARS,
       );
       const timeoutMs = typeof a?.timeoutMs === 'number' && a.timeoutMs > 0
-        ? Math.min(a.timeoutMs, ACTORS_ASK_MAX_TIMEOUT_MS) : undefined;
+        ? Math.min(a.timeoutMs, ACTORS_CALL_MAX_TIMEOUT_MS) : undefined;
       const oneShot = a?.oneShot === true ? true : undefined;
       return { to, goal, ...(timeoutMs ? { timeoutMs } : {}), ...(oneShot ? { oneShot } : {}) };
     },
