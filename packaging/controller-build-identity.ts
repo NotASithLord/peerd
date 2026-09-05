@@ -37,34 +37,21 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   // Per-offer module Workers are selected through new URL(), which the static
   // graph intentionally does not follow. Bind their executable bytes directly.
   'offscreen/repository-worker.js',
-  // Name the App-file policy as an operation root in its own right. It is
-  // currently a static child of repository-worker, but keeping the root explicit
-  // prevents a later lazy-load refactor from silently dropping digest custody.
+  // Firefox also imports the App-file policy directly rather than through the
+  // Worker graph, so its independently selected bytes need an explicit root.
   'offscreen/repository-app-files.js',
   'offscreen/artifact-host.js',
   'offscreen/artifact-worker.js',
-  'background/offscreen-artifact-client.js',
-  'background/repository-client.js',
   'background/offscreen-controller-client.js',
   'background/direct-controller-client.js',
   'background/direct-actor-host.js',
   'background/firefox-storage-keepalive.js',
   'background/repository-local-client.js',
-  // Kernel-side reverse authority for turn.run is not a child of a controller
-  // client, so bind it as an explicit root rather than letting authority drift
-  // behind a stale host.
-  'background/controller-turn-bridge.js',
   'background/kernel-demand-plane.js',
   'background/kernel-production-runtime.js',
   'background/kernel-turn-authority-adapter.js',
-  'background/kernel-semantic-authority.js',
-  'background/kernel-semantic-control.js',
-  'background/kernel-administrative-control.js',
   'background/kernel-support-control.js',
   'background/kernel-session-authority.js',
-  'background/kernel-repository-control.js',
-  'background/kernel-local-control.js',
-  'offscreen/controller-shell.js',
   'offscreen/controller-bootstrap.js',
   'offscreen/controller-worker.js',
   'offscreen/controller-runtime.js',
@@ -105,8 +92,6 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
 
 export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
   'offscreen/dweb-base.js',
-  'offscreen/dweb-custody-host.js',
-  'offscreen/dweb-transfer-host.js',
   'background/kernel-preview-addon.js',
   // Firefox preview/dev owns its contributor registration in a distinct
   // background entry, so bind that channel-specific authority shell too.

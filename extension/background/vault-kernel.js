@@ -80,6 +80,7 @@ import {
 } from './kernel-tab-events.js';
 import { makePrivateTransferOpenRoute, makePrivateTransferPort } from './private-transfer-port.js';
 import { createKernelProviderProjection } from './kernel-provider-projection.js';
+import { PROVIDER_EGRESS_MANIFEST } from './provider-egress-manifest.js';
 import { createKernelRecoveryCustody } from './kernel-recovery-custody.js';
 import { createKernelVoiceCustody } from './kernel-voice-custody.js';
 import { createContextSnapshots } from '../shared/model-context-snapshot.js';
@@ -534,9 +535,6 @@ const pushState = async () => {
 
 const normalizeVoiceEngine = (/** @type {string} */ value) =>
   ['auto', 'web-speech', 'moonshine'].includes(value) ? value : 'auto';
-const knownProviderNames = Object.freeze([
-  'anthropic', 'openai', 'openrouter', 'ollama', 'glm', 'local-webgpu',
-]);
 const onKernelSettingsChanging = (/** @type {Record<string,any>} */ patch) => {
   if (patch.dwebEnabled === false) {
     demandPlane?.invalidateDwebPublications?.();
@@ -686,7 +684,7 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
     confirmation: confirmation.coordinator,
     isLockedError: (/** @type {unknown} */ cause) => cause instanceof VaultLockedError,
     settingsDefaults: CHANNEL_DEFAULTS,
-    knownProviderNames: [...knownProviderNames],
+    knownProviderNames: Object.keys(PROVIDER_EGRESS_MANIFEST),
     normalizeVariant: () => 'base',
     normalizeEngine: normalizeVoiceEngine,
     onSettingsChanging: onKernelSettingsChanging,

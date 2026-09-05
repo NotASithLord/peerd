@@ -73,18 +73,16 @@ export { createSessionStore } from './sessions/store.js';
 // --- profiles (default-profile shape; ROADMAP "Profiles" deprioritized) --
 // One 'default' record carrying peerName (the AI peer's display name —
 // chat-transcript label only) + the first-run onboarding latch. The
-// store API is already multi-profile shaped; nothing is namespaced yet.
+// nothing is namespaced yet.
 export {
-  createProfileStore,
   DEFAULT_PROFILE_ID, DEFAULT_PEER_NAME, PEER_NAME_MAX,
   normalizePeerName, defaultProfileRecord,
 } from './profiles/index.js';
 
 // --- contacts: the per-peer overlay (user name/notes/tags) keyed by did,
-// plus the read-time "known peers + activity" aggregation. The store is core
-// (a did is just an identity string); activity is derived from the App catalog
-// + the audit log, so it stays correct whether or not the mesh is up.
-export { createContactsStore, InvalidDidError } from './contacts/store.js';
+// plus the read-time "known peers + activity" aggregation. Storage custody is
+// owned by the background kernel; activity is derived from the App catalog +
+// the audit log, so it stays correct whether or not the mesh is up.
 export { mergeContacts } from './contacts/aggregate.js';
 export {
   isPeerDid, peerDidFromUri, normalizeContactName,
@@ -284,10 +282,6 @@ export {
   parseComposer, parseCommandName, parseCommandArgs, parseRefs, activeTrigger,
   score, filterCandidates,
   createCommandStore, isValidCommandName, COMMAND_KEY_PREFIX,
-  localStoreSource, skillRegistrySource, mergeSources,
-  decideTabGate, buildTabPayload, buildFilePayload,
-  resolveTabRef, resolveFileRef, resolveAllRefs,
-  applyComposer,
 } from './composer/index.js';
 // --- memory (V1.5 — file-based AGENTS.md, hierarchical scope) ------------
 // Public store + pure core + /init drafter. Foundational for skills (07)
@@ -303,7 +297,6 @@ export {
   ALWAYS_LOADED_LINE_BUDGET, MAX_DOC_CHARS, INITIALIZER_SUBPATH,
 } from './memory/memory.js';
 export { draftAgentsMd, deriveChecklist, resolveWorkspaceKey } from './memory/initializer.js';
-export { makeInitOrchestrator } from './memory/init-orchestrator.js';
 export { USER_DOC_SCOPE, seedUserDocBody } from './memory/user-doc.js';
 // Auto-memory: wrap-up extraction → pending suggestions → user
 // approval into the user doc. See memory/auto-memory.js.
@@ -355,11 +348,6 @@ export {
   encodeSurface, decodeSurface,
 } from './transfer/self-sync-surfaces.js';
 
-// The "Use my existing Peerd" flow, as a pure reducer + its copy table.
-export {
-  STEP_COPY, initialEnrollmentState, enrollmentStep, describeSurfaces, diagnostics,
-} from './transfer/enrollment-flow.js';
-
 // --- permissions (Plan/Act mode + confirm-actions toggle; Feature 03) ---
 // The foundational write-authorization policy. Other features route every
 // write through decideAction. Pure function — see permissions/policy.js.
@@ -374,7 +362,6 @@ export {
   parseSkillMd, normalizeName, SkillParseError,
   createSkillStore,
   createSkillRegistry, SkillExistsError, SkillNotFoundError,
-  installFromLocal, installFromGit, installFromManifest, resolveGitRawUrl, SkillInstallError,
   loadSkillTool,
 } from './skills/index.js';
 

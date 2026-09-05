@@ -9,6 +9,7 @@ import {
   controllerBuildDigest,
   writeControllerBuildIdentity,
 } from '../../packaging/controller-build-identity.ts';
+import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
   makeSemanticControllerClient as makeSemanticControllerClientBase,
 } from '../../extension/background/offscreen-controller-client.js';
@@ -135,7 +136,15 @@ describe('production semantic controller slice', () => {
       'offscreen/kernel-support-host.js',
       'offscreen/controller-turn-runtime.js',
     ];
-    for (const entry of governed) expect(CONTROLLER_BUILD_ENTRIES).toContain(entry as any);
+    const identityGraph = new Set<string>();
+    for (const root of CONTROLLER_BUILD_ENTRIES) {
+      for (const file of await collectStaticModuleGraph(
+        EXTENSION_DIR, join(EXTENSION_DIR, root),
+      )) identityGraph.add(file);
+    }
+    for (const entry of governed) {
+      expect(identityGraph, entry).toContain(join(EXTENSION_DIR, entry));
+    }
 
     const root = mkdtempSync(join(tmpdir(), 'peerd-controller-identity-'));
     try {

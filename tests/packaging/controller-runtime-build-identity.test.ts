@@ -347,13 +347,24 @@ describe('controller runtime build identity', () => {
   }, 120_000);
 
   test('binds the distributed custody protocol', async () => {
-    for (const entry of [
+    const governed = [
       'offscreen/dweb-base.js',
       'offscreen/dweb-custody-host.js',
       'offscreen/dweb-transfer-host.js',
       'background/kernel-preview-addon.js',
       'background/vault-kernel-firefox-preview.js',
-    ]) expect(CONTROLLER_OPTIONAL_BUILD_ENTRIES).toContain(entry as any);
+    ];
+    const identityGraph = new Set<string>();
+    for (const root of [
+      ...CONTROLLER_BUILD_ENTRIES, ...CONTROLLER_OPTIONAL_BUILD_ENTRIES,
+    ]) {
+      for (const file of await collectStaticModuleGraph(
+        join(process.cwd(), 'extension'), join(process.cwd(), 'extension', root),
+      )) identityGraph.add(file);
+    }
+    for (const entry of governed) {
+      expect(identityGraph, entry).toContain(join(process.cwd(), 'extension', entry));
+    }
     const root = mkdtempSync(join(tmpdir(), 'peerd-dweb-runtime-digest-'));
     roots.push(root);
     const extension = join(root, 'extension');

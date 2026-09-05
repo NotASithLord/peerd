@@ -132,8 +132,6 @@ describe('sealed administrative root cutover', () => {
       'administrative.hooks.remove',
     ]));
 
-    expect(await control.routes['skills/installGit']({ url: 'https://example.test' }))
-      .toEqual({ ok: false, error: 'remote-install-disabled' });
     const skill = [
       '---', 'name: skill-one', 'description: One skill', '---', '', '# One', 'Body.',
     ].join('\n');
@@ -496,8 +494,6 @@ describe('sealed administrative root cutover', () => {
     expect([...hostGraph].some((path) => path.endsWith('/peerd-runtime/administrative.js')))
       .toBe(false);
     expect([...hostGraph].some((path) => path.endsWith('/memory/store.js'))).toBe(false);
-    expect([...hostGraph].some((path) => path.endsWith('/memory/init-orchestrator.js')))
-      .toBe(false);
     expect([...hostGraph].some((path) => path.includes('/tools/hooks/defaults/'))).toBe(false);
     expect([...kernelGraph].some((path) => path.endsWith('/skills/parse.js'))).toBe(false);
     expect([...kernelGraph].some((path) => path.includes('browser-automation-policy'))).toBe(false);

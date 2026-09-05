@@ -2,7 +2,7 @@
 
 export const KERNEL_ADMINISTRATIVE_ROUTE_NAMES = Object.freeze([
   'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
-  'memory/init', 'skills/installGit', 'skills/installLocal', 'skills/installManifest',
+  'memory/init', 'skills/installLocal',
 ]);
 
 export const KERNEL_DEMAND_SUPPORT_ROUTE_NAMES = Object.freeze([

@@ -199,7 +199,5 @@ export const routes = Object.freeze({
       return { ok: false, error: 'init-failed', code: 'init-failed', outcomeKnown: false };
     }
   },
-  'skills/installGit': async () => ({ ok: false, error: 'remote-install-disabled' }),
   'skills/installLocal': installLocalSkill,
-  'skills/installManifest': async () => ({ ok: false, error: 'remote-install-disabled' }),
 });

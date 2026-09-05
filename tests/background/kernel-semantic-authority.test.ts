@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelSemanticAuthority } from '../../extension/background/kernel-semantic-authority.js';
 import { createKernelContactsAuthority } from '../../extension/background/kernel-contacts-authority.js';
-import { createContactsStore } from '../../extension/peerd-runtime/contacts/store.js';
 
 describe('native local authority boundary', () => {
   const makeAuthority = (overrides: Record<string, any> = {}) =>
@@ -29,7 +28,7 @@ describe('native local authority boundary', () => {
     expect(Object.keys(authority)).toEqual(['handle']);
   });
 
-  test('compact contact custody is byte-for-byte canonical', async () => {
+  test('compact contact custody normalizes and persists the canonical shape', async () => {
     const makeIdb = () => {
       const contacts = new Map<string, any>();
       return {
@@ -40,17 +39,18 @@ describe('native local authority boundary', () => {
         del: async (_store: string, key: string) => { contacts.delete(key); },
       };
     };
-    const canonicalIdb = makeIdb();
     const compactIdb = makeIdb();
     const now = () => 42;
-    const canonical = createContactsStore({ idb: canonicalIdb, now });
     const compact = createKernelContactsAuthority({ idb: compactIdb, now });
     const did = 'did:key:z6MkCanonicalPeer';
     const patch = {
       name: '  Alice   Example  ', notes: 'n'.repeat(1_100),
       tags: [' one ', 'one', 'two'], favorite: true,
     };
-    const expected = await canonical.upsert(did, patch);
+    const expected = {
+      did, name: 'Alice Example', notes: 'n'.repeat(1_000),
+      tags: ['one', 'two'], favorite: true, createdAt: 42, updatedAt: 42,
+    };
     await expect(compact.upsert(did, patch)).resolves.toEqual(expected);
     expect(compactIdb.contacts.get(did)).toEqual(expected);
   });

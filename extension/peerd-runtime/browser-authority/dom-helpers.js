@@ -10,7 +10,7 @@
 
 // Deep import of the PURE matcher (not the /peerd-egress/index.js barrel):
 // the barrel pulls in vault/storage, which load the browser polyfill and
-// break this module's unit tests. composer/resolvers.js imports it the
+// break this module's unit tests. The composer-reference authority imports it the
 // same way for the same reason.
 import { originOfUrl } from '../tool-origin-policy.js';
 import {
