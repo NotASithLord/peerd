@@ -60,7 +60,6 @@ export {
   inferAppFileKind,
   isLosslessUtf8Text,
   MAX_MODEL_APP_FILE_BYTES,
-  appFileCheckpointContent,
 } from './app-assets.js';
 
 // --- App composition (multi-file → single HTML body for the runner) ---

@@ -144,7 +144,7 @@ export const createKernelDwebAgentOwner = (deps) => {
                   appendAudit({
                     type: 'a2a_reply_failed',
                     details: {
-                      did, convId: id, error: sent?.error ?? 'mesh send failed',
+                      did, convId: id, error: sent?.error ?? 'mesh reply failed',
                       ...(typeof sent?.performed === 'boolean'
                         ? { performed: sent.performed } : {}),
                       ...(typeof sent?.outcomeKnown === 'boolean'

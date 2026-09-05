@@ -74,11 +74,9 @@ export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
  * @param {boolean} [opts.a2a]   expose the `mesh` agent-to-agent client (capability-gated; the host relays a2a-request → SW a2a/call). Off by default.
  * @param {boolean} [opts.actors] expose the `actors` delegation client (capability-gated; the host relays actors-request → SW actors/call). Off by default.
  * @param {string} [opts.siteFetch] DESIGN-19: expose the `site` client PINNED to this origin (site.fetch → the host site-fetch-request relay → SW site-fetch/call). Off by default; when set, egress/opfs/subagent/page are all off (a site-client run's ONLY outward edge is the pinned fetch).
- * @param {number} [opts.actorsGuardMs] the actors bridge guard — passed from the timeout tower (actors-api.js ACTORS_BRIDGE_GUARD_MS) so it cannot drift below the per-ask cap.
  * @param {{ actors?: string, page?: string, app?: string, mesh?: string, provider?: string, site?: string }} [opts.clientSources]
  *   Trusted client installers generated from the runtime capability manifest.
- *   Fallback installers below preserve direct engine tests/Notebook embedding;
- *   production headless runs always pass the generated sources.
+ *   Actor and mesh clients are required when enabled; there is no second API.
  * @param {{ page?: boolean, app?: boolean, egress?: boolean, subagent?: boolean, opfs?: boolean, provider?: boolean, distributed?: boolean }} [opts.caps]
  * @param {{args?:string[],stdin?:string,env?:Record<string,string>,cwd?:string}} [opts.podCommand]
  *   Pod's restricted JS command profile. It swaps in the stricter Pod seal and
@@ -94,7 +92,7 @@ export const REMOTE_MODULE_WORKER_CAPS = Object.freeze({
  */
 export const buildWorkerSource = async (userCode, {
   entryPath = 'notebook.js', notebookId, resolverDeps, a2a = false, actors = false,
-  actorsGuardMs = 250000, caps, siteFetch = '', clientSources = {}, podCommand,
+  caps, siteFetch = '', clientSources = {}, podCommand,
 }) => {
   const { imports, body, cache } = await buildEntry(userCode, entryPath, {
     ...resolverDeps,
@@ -103,9 +101,15 @@ export const buildWorkerSource = async (userCode, {
   const usedRemoteModules = [...cache.keys()].some(isRemoteSpecifier);
   // why whole-run restriction: imported code and entry code execute in one
   // module graph. A stack-based distinction would be forgeable and incomplete.
-  const profile = usedRemoteModules
+ const profile = usedRemoteModules
     ? REMOTE_MODULE_WORKER_CAPS
     : { ...DEFAULT_WORKER_CAPS, ...(caps ?? {}) };
+  if (!usedRemoteModules && actors && !clientSources.actors) {
+    throw new Error('actors worker client source is required');
+  }
+  if (!usedRemoteModules && a2a && !clientSources.mesh) {
+    throw new Error('mesh worker client source is required');
+  }
   /** @param {string} capability */
   const capabilityBlocked = (capability) => remoteModuleCapabilityBlockedMessage(capability);
   const source = `${podCommand
@@ -310,41 +314,17 @@ const distributedInfo = () => distributedRelay({});
 // The code the dweb actor writes drives peers through this client; each call
 // leaves the sealed realm as an a2a-request the host relays to the SW a2a/call
 // route (consent + gated mesh op). Signing calls (call/cast/publishCard) the SW
-// gates; a reply/timeout comes back as a2a-response. why a 130s timeout: an ask
-// awaits a peer's reply (the SW caps it at 120s), so the worker guard must sit
-// ABOVE that, else the worker rejects a still-valid ask.
-${a2a && !usedRemoteModules ? (clientSources.mesh || `
-const meshRelay = makeBridge('a2a', { timeoutMs: 130000, timeoutMessage: (p) => 'mesh.' + p.method + ' timed out' });
-const meshCall = (method, args) => meshRelay({ method, args });
-const __mesh = {
-  peers:       () => meshCall('peers', {}),
-  card:        (did) => meshCall('card', { did }),
-  ask:         (did, message, opts) => meshCall('ask', { did, message, timeoutMs: opts && opts.timeoutMs }),
-  send:        (did, message) => meshCall('send', { did, message }),
-  publishCard: (card) => meshCall('publishCard', { card }),
-  inbox:       () => meshCall('inbox', {}),
-  converse:    (did, message, opts) => meshCall('converse', { did, message, timeoutMs: opts && opts.timeoutMs }),
-  say:         (convId, message, opts) => meshCall('say', { convId, message, timeoutMs: opts && opts.timeoutMs }),
-};
-globalThis.mesh = __mesh;
-`) : ''}
+// gates; a reply/timeout comes back as a2a-response. The generated client takes
+// its guard from the run's timeout tower so it cannot drift into a second API.
+${a2a && !usedRemoteModules ? clientSources.mesh : ''}
 
 // --- actors.* (the trusted caller's actors) proxy — capability-gated ---
-// The script tool's delegation client: ask hands a GOAL to a local actor
+// The script tool's delegation client: call hands a GOAL to a local actor
 // (vm/notebook/app instance, "web", an API origin) through the SW actors/call
 // route — the full message_actor gate chain runs per call. The guard value is
 // INTERPOLATED from the timeout tower (actors-api.js): it sits above the
-// per-ask cap by construction, and the job wall-clock sits above it.
-${actors && !usedRemoteModules ? (clientSources.actors || `
-const actorsRelay = makeBridge('actors', { timeoutMs: ${JSON.stringify(actorsGuardMs)}, timeoutMessage: (p) => 'actors.' + p.method + ' timed out' });
-const actorsCall = (method, args) => actorsRelay({ method, args });
-const __actors = {
-  list: () => actorsCall('list', {}),
-  call: (address, message, options) => actorsCall('call', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot }),
-  ask:  (address, message, options) => actorsCall('ask', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot }),
-};
-globalThis.actors = __actors;
-`) : ''}
+// per-call cap by construction, and the job wall-clock sits above it.
+${actors && !usedRemoteModules ? clientSources.actors : ''}
 
 // --- peerd.provider.call (sub-model text call) — capability-gated (caps.provider) ---
 // Design 5: a pure text transform mid-script ({ system?, prompt | messages,

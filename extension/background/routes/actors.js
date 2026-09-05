@@ -3,7 +3,7 @@
 
 import { createIntrospectionToolAuthority } from '../introspection-tool-authority.js';
 import {
-  ACTORS_ASK_DEFAULT_TIMEOUT_MS,
+  ACTORS_CALL_DEFAULT_TIMEOUT_MS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
   ACTORS_TRACE_TARGET_MAX_CHARS,
   settleActorCodeCall,
@@ -150,29 +150,29 @@ export const makeActorsRoutes = (deps) => {
         settleOperation = mirror;
         pushOp('sent', { to: traceTarget, goalPreview });
 
-        const askTimeoutMs = target.timeoutMs ?? ACTORS_ASK_DEFAULT_TIMEOUT_MS;
-        const askController = new AbortController();
+        const callTimeoutMs = target.timeoutMs ?? ACTORS_CALL_DEFAULT_TIMEOUT_MS;
+        const callController = new AbortController();
         let timedOut = false;
-        const timer = setTimeout(() => { timedOut = true; askController.abort(); }, askTimeoutMs);
-        const onRunAbort = () => askController.abort();
-        if (runSignal.aborted) askController.abort();
+        const timer = setTimeout(() => { timedOut = true; callController.abort(); }, callTimeoutMs);
+        const onRunAbort = () => callController.abort();
+        if (runSignal.aborted) callController.abort();
         else runSignal.addEventListener('abort', onRunAbort, { once: true });
         try {
           const startedAt = Date.now();
           const result = await actorMessaging.messageActor({
             to: target.to, message: target.goal, senderSessionId: msg.ownerSessionId,
             toolUseId: msg.ownerToolUseId, oneShot: target.oneShot === true,
-            via: 'script', awaitReply: true, awaitSignal: askController.signal,
+            via: 'script', awaitReply: true, awaitSignal: callController.signal,
           });
           const actorDeliveryId = typeof result?.actorDeliveryId === 'string'
             ? result.actorDeliveryId : undefined;
           const ms = Date.now() - startedAt;
           const outcome = settleActorCodeCall(result, {
-            timedOut, aborted: !timedOut && askController.signal.aborted,
-            timeoutMs: askTimeoutMs, to: target.to,
+            timedOut, aborted: !timedOut && callController.signal.aborted,
+            timeoutMs: callTimeoutMs, to: target.to,
           });
           if (!outcome.ok) {
-            const cancelled = !timedOut && askController.signal.aborted;
+            const cancelled = !timedOut && callController.signal.aborted;
             pushOp(cancelled ? 'cancelled' : 'failed', {
               ms, ...(cancelled ? { cancelled: true } : {}),
               error: timedOut ? 'timeout' : cancelled ? 'aborted' : 'refused',

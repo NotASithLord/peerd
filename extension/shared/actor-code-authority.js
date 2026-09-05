@@ -1,8 +1,8 @@
 // @ts-check
 // Fixed limits and validation for the one actors.call authority operation.
 
-export const ACTORS_ASK_MAX_TIMEOUT_MS = 240_000;
-export const ACTORS_ASK_DEFAULT_TIMEOUT_MS = 120_000;
+export const ACTORS_CALL_MAX_TIMEOUT_MS = 240_000;
+export const ACTORS_CALL_DEFAULT_TIMEOUT_MS = 120_000;
 export const ACTORS_ADDRESS_MAX_CHARS = 2_048;
 export const ACTORS_GOAL_MAX_CHARS = 32_768;
 export const ACTORS_TRACE_TARGET_MAX_CHARS = 256;
@@ -32,7 +32,7 @@ export const validateActorCodeCall = (/** @type {unknown} */ value) => {
   const to = bounded(request.to, 'actors.call address', ACTORS_ADDRESS_MAX_CHARS);
   const goal = bounded(request.goal, 'actors.call message', ACTORS_GOAL_MAX_CHARS);
   const timeoutMs = typeof request.timeoutMs === 'number' && request.timeoutMs > 0
-    ? Math.min(request.timeoutMs, ACTORS_ASK_MAX_TIMEOUT_MS)
+    ? Math.min(request.timeoutMs, ACTORS_CALL_MAX_TIMEOUT_MS)
     : undefined;
   return Object.freeze({
     to, goal,
@@ -53,7 +53,7 @@ export const settleActorCodeCall = (
     ok: /** @type {const} */ (false), error: `actors.call: aborted (Stop) while awaiting '${state.to}'`,
   };
   if (result.ok) return { ok: /** @type {const} */ (true), reply: result.content ?? null, failed: false };
-  const error = String(result.error ?? 'ask failed');
+  const error = String(result.error ?? 'actor call failed');
   if (error.startsWith('message_actor:')) return { ok: /** @type {const} */ (false), error };
   return { ok: /** @type {const} */ (true), reply: error, failed: true };
 };

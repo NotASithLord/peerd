@@ -158,7 +158,7 @@ describe('ask / reply correlation', () => {
       'ask', { did: DID, message: 'long request' },
       { signs: true, allowed: () => true, signal: controller.signal },
     )).toEqual({
-      ok: false, error: 'a2a: aborted after send',
+      ok: false, error: 'a2a: aborted after peer request',
       performed: true, outcomeKnown: true,
       outcomeKind: 'effect-completed', retryable: false,
     });

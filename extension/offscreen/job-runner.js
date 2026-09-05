@@ -633,7 +633,7 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
       }
       buildWorkerSource(/** @type {string} */ (execution.program.source), {
         entryPath: 'job.js', notebookId: jobId, resolverDeps, a2a, actors,
-        actorsGuardMs: ACTORS_BRIDGE_GUARD_MS, caps: profile, siteFetch,
+        caps: profile, siteFetch,
         // Generated from the same declarative manifest that drives prompt lore
         // and host validation. Outer termination still owns the absolute wall;
         // these guards only make an unanswered bridge fail no later than it.
