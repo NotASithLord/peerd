@@ -49,6 +49,17 @@ const probe = (ctx) => evalIn(ctx.page, `(() => {
   };
 })()`);
 
+// why: long, tab-heavy headless runs can defer Mithril's scheduled redraw
+// after a real click. Commit that redraw before asserting the resulting DOM.
+const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
+  const element = document.querySelector(${JSON.stringify(selector)});
+  if (!(element instanceof HTMLElement)) return false;
+  element.click();
+  const { default: m } = await import('/vendor/mithril/mithril.js');
+  m.redraw.sync();
+  return true;
+})()`, true);
+
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
 const REQUIRE_SITE_CAPTURE_TAP = process.env.PEERD_REQUIRE_SITE_CAPTURE_TAP === '1';
@@ -5285,14 +5296,15 @@ export const STATES = [
         () => evalIn(ctx.page, `!!document.querySelector('.tool-call.tool-actor.tool-not-run')`),
         { budgetMs: 25_000, pollMs: 100 });
       rec.check('the live actor card settles as Not run', !!notRun);
-      await evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.click()`);
+      await clickAndSyncRedraw(ctx.page,
+        '.tool-call.tool-actor.tool-not-run .tool-call-header');
       const expanded = await waitFor(
         () => evalIn(ctx.page, `document.querySelector('.tool-actor .tool-call-header')?.getAttribute('aria-expanded') === 'true'
           && !!document.querySelector('.tool-actor .actor-body')`),
         { budgetMs: 5_000, pollMs: 50 });
       rec.check('the live actor card expands', !!expanded);
       const out = await evalIn(ctx.page, `(() => {
-        const card = document.querySelector('.tool-call.tool-actor');
+        const card = document.querySelector('.tool-call.tool-actor.tool-not-run');
         return {
           label: card?.querySelector('.tool-duration')?.textContent || '',
           body: card?.querySelector('.actor-body')?.textContent || '',
@@ -5910,8 +5922,8 @@ export const STATES = [
           && hierarchy?.text.includes('compare warranty terms independently'),
         JSON.stringify(hierarchy?.text));
 
-      await evalIn(ctx.page, `document.querySelector(
-        '.actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound')?.click()`);
+      await clickAndSyncRedraw(ctx.page,
+        '.actor-fabric:not(.is-settled) .actor-fabric-branch .actor-fabric-branch .actor-fabric-node.is-bound');
       const inspected = await waitFor(
         () => evalIn(ctx.page, `(() => {
           const detail = document.querySelector('.actor-fabric-detail');
