@@ -26,7 +26,7 @@
 
 import {
   cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync, existsSync,
-  readdirSync, statSync, utimesSync, chmodSync, realpathSync,
+  readdirSync, lstatSync, statSync, utimesSync, chmodSync, realpathSync,
 } from 'node:fs';
 import { join, relative, basename, dirname, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -125,7 +125,33 @@ const listEntriesSorted = (root: string): string[] =>
     .map((p) => p.split('\\').join('/'))
     .sort();
 
+/**
+ * Refuse filesystem indirection and special nodes anywhere in a release tree.
+ * why: cpSync preserves a symlink and Info-ZIP follows it by default, so even
+ * an unreferenced asset link can copy bytes from outside extension/ into the
+ * signed artifact. lstat + an explicit walk must run before any stat/chmod.
+ */
+export const assertRegularPackageTree = (root: string, label: string): void => {
+  const visit = (absolute: string, relativePath: string): void => {
+    const entry = lstatSync(absolute);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${label} contains a symbolic link: ${relativePath}`);
+    }
+    if (entry.isDirectory()) {
+      for (const name of readdirSync(absolute).sort()) {
+        visit(join(absolute, name), relativePath === '.' ? name : join(relativePath, name));
+      }
+      return;
+    }
+    if (!entry.isFile()) {
+      throw new Error(`${label} contains a non-regular entry: ${relativePath}`);
+    }
+  };
+  visit(root, '.');
+};
+
 const normalizeStagingForZip = (staging: string): string[] => {
+  assertRegularPackageTree(staging, 'package staging tree');
   const entries = listEntriesSorted(staging);
   const stamp = new Date(SOURCE_DATE_EPOCH * 1000);
   for (const rel of ['.', ...entries]) {
@@ -232,6 +258,7 @@ export const packageArtifact = async (
   for (const required of [extensionDir, manifestsDir, defaultSettingsFile]) {
     if (!existsSync(required)) throw new Error(`package source root is incomplete: missing ${required}`);
   }
+  assertRegularPackageTree(extensionDir, 'package source extension tree');
   if (!['enforce', 'measure-only'].includes(coldBudgetMode)) {
     throw new Error(`unknown coldBudgetMode ${coldBudgetMode}`);
   }
