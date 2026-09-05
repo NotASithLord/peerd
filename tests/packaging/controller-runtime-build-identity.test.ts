@@ -318,6 +318,9 @@ describe('controller runtime build identity', () => {
         channel: 'store', browser: 'chrome', entry: 'background/vault-kernel-chrome.js',
       },
       {
+        channel: 'store', browser: 'firefox', entry: 'background/vault-kernel-firefox.js',
+      },
+      {
         channel: 'preview', browser: 'chrome', entry: 'background/vault-kernel-preview.js',
       },
       {

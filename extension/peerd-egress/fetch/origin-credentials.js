@@ -3,8 +3,8 @@
 //
 // DESIGN-18 P1. An API integration (a `backing:'api'` web actor) owns ONE origin
 // and may authenticate to it WITHOUT ever holding the key: the key is stored in the
-// vault, decrypted only in the SW at request time, and injected at the egress
-// BOUNDARY — never on the keyless actor's ctx. This is the `origin:<origin>` analog
+// vault, decrypted only in the sealed vault Worker, and returned over its private
+// channel to the exact SW egress handler — never on the keyless actor's ctx. This is the `origin:<origin>` analog
 // of the shipped `git:<host>` injection (peerd-engine/vm-net/git-credentials.js);
 // it copies that battle-tested shape exactly. This module owns the pure decisions;
 // the boundary wrapper (web-fetch.js withApiCredentials) composes it over the vault.

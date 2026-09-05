@@ -63,6 +63,8 @@ describe('kernel production runtime', () => {
     expect(production).not.toContain('createKernelDemandPlane');
     expect(production).toContain('deps.createTurnFactories({ ...deps, engine: sharedEngine })');
     expect(demand).toContain('liveProduction?.executableLive?.invalidateDwebPublications?.()');
+    expect(demand).toContain('if (isPrivateOrLocalHost(target.hostname))');
+    expect(demand).toContain('Git network request is blocked by the private-network policy');
     expect(kernel.match(/demandPlane\?\.invalidateDwebPublications\?\.\(\)/g)).toHaveLength(2);
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('background/kernel-demand-plane.js');
   });

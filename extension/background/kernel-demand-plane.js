@@ -1,6 +1,7 @@
 // @ts-check
 
 import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
+import { isPrivateOrLocalHost } from '../shared/private-network.js';
 import {
   KERNEL_ADMINISTRATIVE_ROUTE_NAMES,
   KERNEL_CREDENTIAL_ROUTE_NAMES,
@@ -99,6 +100,12 @@ export const createKernelDemandPlane = (deps) => {
     /** @type {RequestInit} */ init = {}) => {
     const policy = await deps.denylist.ready();
     const target = new URL(url);
+    // why: repository remotes are controller-selected and may carry a bound
+    // credential. The authority edge must reject LAN and metadata targets even
+    // when the user confirms and the sensitive-origin denylist permits them.
+    if (isPrivateOrLocalHost(target.hostname)) {
+      throw new Error('Git network request is blocked by the private-network policy');
+    }
     if (!policy.ok || deps.denylist.blocks(target.hostname)) {
       throw new Error('Git network request is blocked by the sensitive-origin policy');
     }
