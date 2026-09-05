@@ -66,16 +66,6 @@ export class ResponseTooLargeError extends Error {
   }
 }
 
-const responseReader = (/** @type {Response|any} */ response) => {
-  if (response.body === null) return null;
-  if (typeof response.body?.getReader !== 'function') {
-    // why: text()/arrayBuffer() would materialize attacker-sized input before
-    // the caller's cap. Real extension fetch Responses are stream-readable.
-    throw new TypeError('response body is not stream-readable');
-  }
-  return response.body.getReader();
-};
-
 const readBoundedResponse = async (
   /** @type {Response|any} */ response, /** @type {number} */ limit,
   /** @type {AbortSignal|undefined} */ signal, /** @type {boolean} */ asText,
@@ -89,8 +79,15 @@ const readBoundedResponse = async (
     cancelBestEffort(response.body);
     throw new ResponseTooLargeError(declared, limit);
   }
-  const reader = responseReader(response);
-  if (!reader) return asText ? { text: '', truncated: false } : new Uint8Array();
+  if (response.body === null) {
+    return asText ? { text: '', truncated: false } : new Uint8Array();
+  }
+  if (typeof response.body?.getReader !== 'function') {
+    // why: text()/arrayBuffer() would materialize attacker-sized input before
+    // the caller's cap. Real extension fetch Responses are stream-readable.
+    throw new TypeError('response body is not stream-readable');
+  }
+  const reader = response.body.getReader();
   /** @type {Uint8Array[]} */ const chunks = [];
   const decoder = asText ? new TextDecoder() : null;
   let text = '';

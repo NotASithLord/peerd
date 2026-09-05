@@ -22,6 +22,7 @@ const options = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const DIRECT_KERNEL_ROUTES = [
+  'actors/count', 'actors/overview',
   'contacts/list', 'memory/export', 'skills/list', 'skills/remove', 'skills/setEnabled',
 ];
 

@@ -7,9 +7,11 @@ import {
 import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../../extension/shared/semantic-host-route-manifest.js';
 import { createKernelControllerGateway } from '../../extension/background/kernel-controller-gateway.js';
 import { createPreviewContributorRoutes } from '../../extension/background/kernel-contributor-owner.js';
+import { createKernelSkillPersistence } from '../../extension/background/kernel-skill-persistence.js';
 import { dispatchSemanticRoute } from '../../extension/offscreen/semantic-route-host.js';
 
 await useFakeIndexedDB();
+const skillPersistence = createKernelSkillPersistence({ idbFactory: indexedDB });
 
 const controller = (overrides: Record<string, any> = {}) => ({
   callSemantic: async () => ({ ok: true }),
@@ -42,6 +44,7 @@ const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
   });
   const runtime = createKernelSemanticRuntime({
     controllerGateway,
+    skillPersistence,
     idbFactory: indexedDB,
     idb: {
       get: async () => { io += 1; return undefined; },
@@ -159,6 +162,7 @@ describe('kernel semantic runtime', () => {
     }));
     runtime = createKernelSemanticRuntime({
       controllerGateway,
+      skillPersistence,
       contributorAuthority: contributor.handleKernelCall,
       idbFactory: indexedDB,
       idb: {
@@ -203,6 +207,7 @@ describe('kernel semantic runtime', () => {
     });
     const runtime = createKernelSemanticRuntime({
       controllerGateway,
+      skillPersistence,
       idbFactory: indexedDB,
       idb: {
         get: async () => undefined, getAll: async () => [], put: async () => {},
@@ -250,6 +255,7 @@ describe('kernel semantic runtime', () => {
       });
       const state = createKernelSemanticRuntime({
         controllerGateway,
+        skillPersistence,
         idbFactory: indexedDB,
         idb: {
           get: async () => undefined, getAll: async () => [], put: async () => {},
@@ -330,6 +336,7 @@ describe('kernel semantic runtime', () => {
     });
     const runtime = createKernelSemanticRuntime({
       controllerGateway,
+      skillPersistence,
       idbFactory: indexedDB,
       idb: {
         get: async () => undefined, getAll: async () => [], put: async () => {},

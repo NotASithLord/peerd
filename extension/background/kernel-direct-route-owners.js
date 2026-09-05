@@ -1,5 +1,4 @@
 // @ts-check
-import { makeAppActorChatHandler } from './app-actor-chat.js';
 import { makeKernelLazyOwner } from './kernel-lazy-owner.js';
 
 /** @param {Record<string,any>} deps */
@@ -7,8 +6,12 @@ export const makeKernelAppActorChatRoutes = (deps) => {
   if (typeof deps.isAllowed !== 'function') {
     throw new TypeError('kernel-app-actor-chat-provenance-required');
   }
-  const load = makeKernelLazyOwner(deps, (live) => typeof live.appActorChat === 'function'
-    ? live.appActorChat : makeAppActorChatHandler(live));
+  const load = makeKernelLazyOwner(deps, (live) => {
+    if (typeof live.appActorChat !== 'function') {
+      throw new TypeError('kernel-app-actor-chat-handler-invalid');
+    }
+    return live.appActorChat;
+  });
   return Object.freeze({
     'app/actor-chat': async (
       /** @type {any} */ message = {}, /** @type {any} */ sender = undefined,

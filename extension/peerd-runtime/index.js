@@ -252,7 +252,6 @@ export {
   defaultWritePermissions, resolveCanWrite,
 } from './edit/permissions-adapter.js';
 // --- tools --------------------------------------------------------------
-export { dispatchToolCall } from './tools/local-tool-dispatcher.js';
 export { GATES } from './tools/gates.js';
 export {
   mainAgentDescriptors, isHiddenFromMain, MAIN_AGENT_HIDDEN_TOOLS,

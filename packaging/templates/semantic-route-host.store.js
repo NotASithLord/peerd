@@ -6,7 +6,6 @@ import { SEMANTIC_HOST_ROUTE_MANIFEST } from '../shared/semantic-host-route-mani
 import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
 import { createSemanticDispatchRuntime } from './semantic-dispatch-runtime.js';
 
-const actorRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/actors.js'));
 const appRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/apps.js'));
 const contactRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/contacts.js'));
 const providerRoutes = makeBoundedModuleLoader(() => import('./semantic-routes/providers.js'));
@@ -29,7 +28,6 @@ const routeHandler = (/** @type {()=>Promise<any>} */ load, /** @type {string} *
   }
   return routes[method](route, message, options);
 };
-const actor = routeHandler(actorRoutes, 'dispatchActorSemanticRoute');
 const apps = routeHandler(appRoutes, 'dispatchAppSemanticRoute');
 const contacts = routeHandler(contactRoutes, 'dispatchContactSemanticRoute');
 const providers = routeHandler(providerRoutes, 'dispatchProviderSemanticRoute');
@@ -40,8 +38,6 @@ const storeManifest = SEMANTIC_HOST_ROUTE_MANIFEST.filter(
 const runtime = createSemanticDispatchRuntime({
   manifest: storeManifest,
   handlers: {
-    'actors/overview': actor('actors/overview'),
-    'actors/count': actor('actors/count'),
     'app/get-meta': apps('app/get-meta'),
     'apps/favorite': apps('apps/favorite'),
     'apps/open': apps('apps/open'),

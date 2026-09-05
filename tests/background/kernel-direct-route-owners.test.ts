@@ -20,7 +20,7 @@ describe('kernel direct route owners', () => {
       .toEqual({ ok: true });
     expect(seen).toHaveLength(1);
   });
-  test('App-native chat refuses provenance before loading and preserves exact tab ownership', async () => {
+  test('App-native chat refuses provenance before loading', async () => {
     let loads = 0;
     const blocked = makeKernelAppActorChatRoutes({
       isAllowed: () => false,
@@ -29,25 +29,14 @@ describe('kernel direct route owners', () => {
     expect(await blocked['app/actor-chat']({ type: 'app/actor-chat' }, {}))
       .toEqual({ ok: false, error: 'app_actor_chat_unauthorized', outcomeKnown: true });
     expect(loads).toBe(0);
-
-    const sender = { tab: { id: 7, url: 'app://owned' } };
-    const delivered: any[] = [];
+  });
+  test('App-native chat fails closed when the loaded runtime omits its owner', async () => {
     const routes = makeKernelAppActorChatRoutes({
-      isAllowed: (candidate: any) => candidate === sender,
-      isTrustedSender: (candidate: any) => candidate === sender,
-      appTabTracker: {
-        parseIdFromUrl: () => 'app-1', parseOwnerFromUrl: () => 'root-1',
-        getTabId: () => 7, getOwnedTabId: () => 7,
-      },
-      ensureAppActorBinding: async () => 'actor-1',
-      sessions: { get: async () => ({ parentSessionId: 'root-1' }) },
-      messageActor: async (request: any) => { delivered.push(request); return { ok: true }; },
+      isAllowed: () => true,
+      load: async () => ({}),
     });
-    expect(await routes['app/actor-chat']({
-      type: 'app/actor-chat', appId: 'app-1', message: ' help ',
-    }, sender)).toEqual({ ok: true });
-    expect(delivered[0]).toMatchObject({
-      to: 'app-1', message: 'help', senderSessionId: 'root-1', trustedAppTab: true,
+    await expect(routes['app/actor-chat']({}, {})).rejects.toMatchObject({
+      code: 'kernel-route-owner-load-failed', outcomeKnown: true, phase: 'startup',
     });
   });
 });

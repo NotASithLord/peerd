@@ -11,6 +11,7 @@ import {
   PACKAGED_LAZY_ASSET_ENTRIES,
   PACKAGED_LAZY_MODULE_ENTRIES,
 } from '../../packaging/lazy-entry-manifest.ts';
+import { SEMANTIC_HOST_CLUSTER_ENTRIES } from '../../packaging/semantic-host-entries.ts';
 import {
   COLD_SOURCE_TARGETS,
   FIREFOX_KERNEL_SOURCE_CONTRACT,
@@ -413,9 +414,8 @@ describe('cold entry graphs', () => {
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/kernel-runtime-host.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/controller-turn-runtime.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/semantic-route-host.js');
-    for (const cluster of ['actors', 'contributor', 'memory', 'providers'] as const) {
-      expect(PACKAGED_LAZY_MODULE_ENTRIES)
-        .toContain(`offscreen/semantic-routes/${cluster}.js`);
+    for (const entry of SEMANTIC_HOST_CLUSTER_ENTRIES) {
+      expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain(entry);
     }
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/artifact-host.js');
     expect(PACKAGED_LAZY_MODULE_ENTRIES).toContain('offscreen/repository-app-files.js');

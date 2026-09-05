@@ -111,19 +111,18 @@ export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal,
       let response;
       let bytes;
       try {
-        requireLive();
         response = await fetchForImport(ctx.webFetch, url, signal);
-        if (!response.ok) throw Object.assign(new Error(`fetch_failed: HTTP ${response.status}`), {
-          outcomeKnown: true, expectedFetchFailure: true,
-        });
+        if (!response.ok) {
+          cancelBestEffort(response.body, `HTTP ${response.status}`);
+          throw Object.assign(new Error(`fetch_failed: HTTP ${response.status}`), {
+            outcomeKnown: true, expectedFetchFailure: true,
+          });
+        }
         bytes = await readBoundedResponseBytes(response, maxBytes, { signal });
       }
       catch (cause) {
         const detail = /** @type {{name?:string,message?:string,bytes?:number,expectedFetchFailure?:boolean}} */ (cause);
-        if (signal?.aborted) {
-          cancelBestEffort(response?.body, signal.reason);
-          requireLive();
-        }
+        if (signal?.aborted) requireLive();
         if (detail?.expectedFetchFailure) throw cause;
         if (cause instanceof ResponseTooLargeError) throw Object.assign(
           new Error(`payload_too_large: ${detail.bytes}B > ${maxBytes}B`),
