@@ -65,9 +65,20 @@ plugin({
       // through untouched.
       const marker = `${sep}extension${sep}`;
       const markerAt = args.path.lastIndexOf(marker);
+      // Store verification evaluates a disposable package root whose files sit
+      // directly below `peerd-verify-*` (there is no `extension/` segment).
+      // Bun can cache that resolved absolute form after the verifier deletes
+      // the directory, so recover its extension-local suffix too.
+      const verifyMarker = `${sep}peerd-verify-`;
+      const verifyAt = args.path.lastIndexOf(verifyMarker);
+      const verifySuffixAt = verifyAt < 0
+        ? -1
+        : args.path.indexOf(sep, verifyAt + verifyMarker.length);
       const relativePath = markerAt >= 0
         ? args.path.slice(markerAt + marker.length)
-        : args.path.slice(1);
+        : verifySuffixAt >= 0
+          ? args.path.slice(verifySuffixAt + 1)
+          : args.path.slice(1);
       const candidate = join(extensionRoot, relativePath);
       return existsSync(candidate) ? { path: candidate } : undefined;
     });
