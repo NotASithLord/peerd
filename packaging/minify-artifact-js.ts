@@ -1,6 +1,7 @@
 // Release-artifact-only JavaScript optimization. Modules stay separate and
 // imports stay exact; lazy, vendor, and generated policy bytes stay untouched.
 
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
 import type { Browser, Channel } from './lib.ts';
@@ -18,6 +19,7 @@ export interface ColdGraphStats {
   modules: number;
   beforeBytes: number;
   afterBytes: number;
+  inputSha256: string;
 }
 
 export interface ArtifactMinifyReport {
@@ -37,6 +39,7 @@ export type ColdGraphBudgets = Partial<Record<'serviceWorker' | 'offscreen', Rea
   modules: number;
   graphBytes: number;
   entryBytes: number;
+  inputSha256?: string;
 }>>>;
 
 // These are artifact byte budgets for the complete static graphs, including
@@ -87,13 +90,22 @@ const graphStats = (
   graph: Set<string>,
   beforeSizes: Map<string, number>,
   afterSizes: Map<string, number>,
-): ColdGraphStats => ({
-  entry: relative(staging, entry).split('\\').join('/'),
-  entryBytes: afterSizes.get(entry) ?? 0,
-  modules: graph.size,
-  beforeBytes: [...graph].reduce((total, file) => total + (beforeSizes.get(file) ?? 0), 0),
-  afterBytes: [...graph].reduce((total, file) => total + (afterSizes.get(file) ?? 0), 0),
-});
+): ColdGraphStats => {
+  const inputs = [...graph]
+    .map((file) => relative(staging, file).split('\\').join('/'))
+    .sort();
+  return {
+    entry: relative(staging, entry).split('\\').join('/'),
+    entryBytes: afterSizes.get(entry) ?? 0,
+    modules: graph.size,
+    beforeBytes: [...graph].reduce((total, file) => total + (beforeSizes.get(file) ?? 0), 0),
+    afterBytes: [...graph].reduce((total, file) => total + (afterSizes.get(file) ?? 0), 0),
+    // why: bytes and module counts cannot detect a same-sized dependency swap.
+    inputSha256: createHash('sha256')
+      .update(inputs.map((input) => `input\0${input}\0`).join(''))
+      .digest('hex'),
+  };
+};
 
 export const minifyColdArtifactModules = async (
   staging: string,
@@ -249,6 +261,11 @@ export const assertColdArtifactBudgets = (
     if (stats.entryBytes > budget.entryBytes) {
       throw new Error(
         `${name} cold entry is ${stats.entryBytes} bytes after release minification; budget is ${budget.entryBytes}`,
+      );
+    }
+    if (budget.inputSha256 && stats.inputSha256 !== budget.inputSha256) {
+      throw new Error(
+        `${name} cold input closure changed (${stats.inputSha256}; expected ${budget.inputSha256})`,
       );
     }
   }
