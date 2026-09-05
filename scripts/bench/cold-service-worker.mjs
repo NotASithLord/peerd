@@ -155,7 +155,9 @@ const gitValue = (args) => {
 };
 const harnessSha256 = async () => {
   const digest = createHash('sha256');
-  const graph = await collectStaticModuleGraph(ROOT, fileURLToPath(import.meta.url));
+  const graph = await collectStaticModuleGraph(ROOT, fileURLToPath(import.meta.url), {
+    allowExternalSpecifiers: true,
+  });
   const extras = ['bun.lock', 'package.json',
     'scripts/cdp/chrome-version.txt',
     'scripts/firefox/firefox-version.txt',
