@@ -113,7 +113,7 @@ export const clamp = (n, lo, hi) => Math.min(Math.max(n, lo), hi);
 
 /**
  * SHA-256 of a UTF-8 string, hex-encoded. Used for stable digests at authority
- * and sharing boundaries without exposing the underlying value.
+ * and sharing boundaries without exposing the source value.
  *
  * Uses Web Crypto's subtle.digest, which is present in the SW, workers,
  * and Bun's test runtime alike — no polyfill needed. Async because
