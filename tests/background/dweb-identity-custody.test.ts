@@ -23,7 +23,9 @@ const makeFixture = (overrides: any = {}) => {
   });
   const custody = {
     handle: (operation: string, args: any = {}) => effects.handle(
-      operation === 'get' ? 'identity/read' : 'identity/create', args,
+      operation === 'get' ? 'identity/read'
+        : operation === 'set' ? 'identity/create' : operation,
+      args,
     ),
   };
   return { custody, audits, get stored() { return stored; }, get writes() { return writes; } };
@@ -45,6 +47,20 @@ describe('dweb identity custody', () => {
     expect(await locked.custody.handle('get')).toEqual({ ok: false, error: 'vault-locked' });
     const fixture = makeFixture();
     expect(await fixture.custody.handle('set', { value: 3 })).toEqual({ ok: false, error: 'value-required' });
+  });
+
+  test('refuses oversized identity material before vault access', async () => {
+    let reads = 0;
+    const fixture = makeFixture({
+      vault: { getSecret: async () => { reads += 1; return null; } },
+    });
+    expect(await fixture.custody.handle('set', { value: 'x'.repeat(64 * 1024 + 1) }))
+      .toEqual({ ok: false, error: 'value-too-large' });
+    expect(await fixture.custody.handle('identity/commit', {
+      value: 'x'.repeat(64 * 1024 + 1), incomingDid: 'did:key:zIncoming',
+      expectedExistingDid: null,
+    })).toEqual({ ok: false, error: 'value-too-large' });
+    expect(reads).toBe(0);
   });
 
   test('rechecks inside the mutation lane and never overwrites a recovered root', async () => {

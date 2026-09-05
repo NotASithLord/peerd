@@ -155,6 +155,16 @@ describe('controller runtime build identity', () => {
     cpSync(join(process.cwd(), 'extension'), baseline, { recursive: true });
     cpSync(join(process.cwd(), 'extension'), candidate, { recursive: true });
 
+    const previewController = join(candidate, 'peerd-runtime/controller-contributor.js');
+    writeFileSync(previewController, [
+      readFileSync(previewController, 'utf8'),
+      '// Representative Preview-only semantic growth in the sealed controller.',
+      'export const previewFeatureGrowthFixture = (value) => Object.freeze({',
+      "  surface: 'contributor', value: String(value),",
+      '});',
+      '',
+    ].join('\n'));
+
     writeFileSync(join(candidate, 'peerd-runtime/controller-feature-fixture.js'), [
       '// Representative catalog-registered semantic feature reusing one exact read authority.',
       "export const CONTROLLER_FEATURE_TOOL_NAME = 'fixture_feature';",
@@ -229,6 +239,12 @@ describe('controller runtime build identity', () => {
     expect(candidateOwnership.controllerOperationsForTools(['fixture_feature']))
       .toEqual(['turn.introspection.provider-posture']);
 
+    const candidatePreviewController = await import(
+      `${pathToFileURL(previewController).href}?fixture=${Date.now()}`
+    );
+    expect(candidatePreviewController.previewFeatureGrowthFixture('preview'))
+      .toEqual({ surface: 'contributor', value: 'preview' });
+
     const candidateProjection = await import(
       `${pathToFileURL(join(candidate, 'peerd-runtime/controller-tool-projection.js')).href}?fixture=${Date.now()}`
     );
@@ -250,10 +266,10 @@ describe('controller runtime build identity', () => {
       normalizeControllerBuildIdentity(extension);
     }
 
-    const baselineStoreSource = join(root, 'baseline-store-source');
-    const candidateStoreSource = join(root, 'candidate-store-source');
-    copyPackageSource(baselineStoreSource, baseline);
-    copyPackageSource(candidateStoreSource, candidate);
+    const baselinePackageSource = join(root, 'baseline-package-source');
+    const candidatePackageSource = join(root, 'candidate-package-source');
+    copyPackageSource(baselinePackageSource, baseline);
+    copyPackageSource(candidatePackageSource, candidate);
 
     const targets = [
       {
@@ -290,60 +306,93 @@ describe('controller runtime build identity', () => {
     );
     expect(readFileSync(catalog, 'utf8')).toContain('"fixture_feature"');
     expect(fixture).toContain('controllerFeatureTool');
+    expect(readFileSync(previewController, 'utf8')).toContain('previewFeatureGrowthFixture');
 
     expect(readFileSync(join(candidate, 'background/vault-kernel.js'), 'utf8'))
       .toBe(readFileSync(join(baseline, 'background/vault-kernel.js'), 'utf8'));
 
     const baselineArtifacts = join(root, 'baseline-artifacts');
     const candidateArtifacts = join(root, 'candidate-artifacts');
-    for (const [sourceRoot, artifactRoot] of [
-      [baselineStoreSource, baselineArtifacts],
-      [candidateStoreSource, candidateArtifacts],
-    ]) {
-      await packageArtifact({
-        sourceRoot, artifactRoot, channel: 'store', browser: 'chrome',
-        version: '0.0.0', sign: false, verify: false, minify: false,
-        coldBudgetMode: 'measure-only',
-      });
+    const packageTargets = [
+      {
+        channel: 'store', browser: 'chrome', entry: 'background/vault-kernel-chrome.js',
+      },
+      {
+        channel: 'preview', browser: 'chrome', entry: 'background/vault-kernel-preview.js',
+      },
+      {
+        channel: 'preview', browser: 'firefox',
+        entry: 'background/vault-kernel-firefox-preview.js',
+      },
+    ] as const;
+    for (const target of packageTargets) {
+      for (const [sourceRoot, artifactRoot] of [
+        [baselinePackageSource, baselineArtifacts],
+        [candidatePackageSource, candidateArtifacts],
+      ]) {
+        await packageArtifact({
+          sourceRoot, artifactRoot, channel: target.channel, browser: target.browser,
+          version: '0.0.0', sign: false, verify: false, minify: false,
+          coldBudgetMode: 'measure-only',
+        });
+      }
+      const stagingName = `${target.channel}-${target.browser}`;
+      const baselineStaging = join(baselineArtifacts, 'staging', stagingName);
+      const candidateStaging = join(candidateArtifacts, 'staging', stagingName);
+      // packageArtifact produced exact target-pruned/generated trees. Re-run
+      // release ordering with only the build-identity literals normalized.
+      for (const staging of [baselineStaging, candidateStaging]) {
+        normalizeControllerBuildIdentity(staging);
+      }
+      const baselineReport = await minifyColdArtifactModules(
+        baselineStaging, target.browser, target.channel,
+      );
+      const candidateReport = await minifyColdArtifactModules(
+        candidateStaging, target.browser, target.channel,
+      );
+      const baselineStagedDigest = await writeControllerBuildIdentity(baselineStaging);
+      const candidateStagedDigest = await writeControllerBuildIdentity(candidateStaging);
+      expect(candidateStagedDigest, stagingName).not.toBe(baselineStagedDigest);
+      for (const staging of [baselineStaging, candidateStaging]) {
+        normalizeControllerBuildIdentity(staging);
+      }
+      expect(candidateReport.graphs.serviceWorker.modules, stagingName)
+        .toBe(baselineReport.graphs.serviceWorker.modules);
+      expect(candidateReport.graphs.serviceWorker.afterBytes, stagingName)
+        .toBe(baselineReport.graphs.serviceWorker.afterBytes);
+      const baselineStagedGraph = await authorityGraphFingerprint(
+        baselineStaging, target.entry,
+      );
+      const candidateStagedGraph = await authorityGraphFingerprint(
+        candidateStaging, target.entry,
+      );
+      expect(candidateStagedGraph, stagingName).toEqual(baselineStagedGraph);
+      expect(candidateStagedGraph.inputs, stagingName)
+        .not.toContain('peerd-runtime/controller-feature-fixture.js');
+      expect(candidateStagedGraph.inputs, stagingName)
+        .not.toContain('peerd-runtime/controller-contributor.js');
+
+      if (target.channel === 'store') {
+        const stagedControllerGraph = await collectStaticModuleGraph(
+          candidateStaging, join(candidateStaging, 'offscreen/controller-turn-runtime.js'),
+        );
+        expect([...stagedControllerGraph].some((path) =>
+          path.endsWith('/peerd-runtime/controller-feature-fixture.js'))).toBe(true);
+      } else {
+        const baselineSemanticGraph = await authorityGraphFingerprint(
+          baselineStaging, 'offscreen/semantic-routes/contributor.js',
+        );
+        const candidateSemanticGraph = await authorityGraphFingerprint(
+          candidateStaging, 'offscreen/semantic-routes/contributor.js',
+        );
+        expect(candidateSemanticGraph.inputs, stagingName)
+          .toEqual(baselineSemanticGraph.inputs);
+        expect(candidateSemanticGraph.bytes, stagingName)
+          .toBeGreaterThan(baselineSemanticGraph.bytes);
+        expect(candidateSemanticGraph.inputSha256, stagingName)
+          .not.toBe(baselineSemanticGraph.inputSha256);
+      }
     }
-    const baselineStaging = join(baselineArtifacts, 'staging/store-chrome');
-    const candidateStaging = join(candidateArtifacts, 'staging/store-chrome');
-    // packageArtifact produced the exact Store-pruned/generated staging trees.
-    // Re-run the real release order under a normalized identity: compact static
-    // cold modules, stamp the target controller, then normalize only that stamp.
-    for (const staging of [baselineStaging, candidateStaging]) {
-      normalizeControllerBuildIdentity(staging);
-    }
-    const baselineReport = await minifyColdArtifactModules(
-      baselineStaging, 'chrome', 'store',
-    );
-    const candidateReport = await minifyColdArtifactModules(
-      candidateStaging, 'chrome', 'store',
-    );
-    const baselineStagedDigest = await writeControllerBuildIdentity(baselineStaging);
-    const candidateStagedDigest = await writeControllerBuildIdentity(candidateStaging);
-    expect(candidateStagedDigest).not.toBe(baselineStagedDigest);
-    for (const staging of [baselineStaging, candidateStaging]) {
-      normalizeControllerBuildIdentity(staging);
-    }
-    expect(candidateReport.graphs.serviceWorker.modules)
-      .toBe(baselineReport.graphs.serviceWorker.modules);
-    expect(candidateReport.graphs.serviceWorker.afterBytes)
-      .toBe(baselineReport.graphs.serviceWorker.afterBytes);
-    const baselineStagedGraph = await authorityGraphFingerprint(
-      baselineStaging, 'background/vault-kernel-chrome.js',
-    );
-    const candidateStagedGraph = await authorityGraphFingerprint(
-      candidateStaging, 'background/vault-kernel-chrome.js',
-    );
-    expect(candidateStagedGraph).toEqual(baselineStagedGraph);
-    expect(candidateStagedGraph.inputs)
-      .not.toContain('peerd-runtime/controller-feature-fixture.js');
-    const stagedControllerGraph = await collectStaticModuleGraph(
-      candidateStaging, join(candidateStaging, 'offscreen/controller-turn-runtime.js'),
-    );
-    expect([...stagedControllerGraph].some((path) =>
-      path.endsWith('/peerd-runtime/controller-feature-fixture.js'))).toBe(true);
   }, 120_000);
 
   test('binds the distributed custody protocol', async () => {

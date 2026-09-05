@@ -102,8 +102,10 @@ const graphFailures = (browser, result, policy) => {
       }
     }
   }
-  if (result?.packagedGraphs && !sameSummary(result.packagedGraphs, result?.packagedGraphsByChannel?.store)) {
-    failures.push('runtime packagedGraphs do not match the measured Store graph set');
+  const runtimeChannel = result?.measurement?.runtimeChannel;
+  if (result?.packagedGraphs && ['store', 'preview'].includes(runtimeChannel)
+      && !sameSummary(result.packagedGraphs, result?.packagedGraphsByChannel?.[runtimeChannel])) {
+    failures.push(`runtime packagedGraphs do not match the measured ${runtimeChannel} graph set`);
   }
   return failures;
 };
@@ -172,7 +174,16 @@ const completenessFailures = (browser, result, lane, sampleContract) => {
   if (typeof result.version !== 'string' || result.version.length < 1) failures.push(`${browser} version is missing`);
   if (result.failed) failures.push(`${browser} reported a failed sample`);
   if (result.failed !== false) failures.push(`${browser} failed flag is missing or invalid`);
-  if (result.artifact?.channel !== 'store') failures.push(`${browser} runtime artifact channel is not store`);
+  const runtimeChannel = result.measurement?.runtimeChannel;
+  if (!['store', 'preview'].includes(runtimeChannel)) {
+    failures.push(`${browser} runtime channel is missing or invalid`);
+  }
+  if (lane !== 'local' && runtimeChannel !== 'store') {
+    failures.push(`${browser} ${lane} lane runtime channel must be store`);
+  }
+  if (result.artifact?.channel !== runtimeChannel) {
+    failures.push(`${browser} runtime artifact channel binding is invalid`);
+  }
   if (!validSha256(result.artifact?.archiveSha256)) failures.push(`${browser} artifact SHA-256 is missing`);
   if (!validSha256(result.artifact?.treeSha256)) failures.push(`${browser} artifact tree SHA-256 is missing`);
   if (!validSha256(result.artifact?.browserBinarySha256)) failures.push(`${browser} browser binary SHA-256 is missing`);
@@ -203,9 +214,10 @@ const completenessFailures = (browser, result, lane, sampleContract) => {
     if (!validSha256(channelArtifact?.archiveSha256)) failures.push(`${browser} ${channel} archive SHA-256 is missing`);
     if (!validSha256(channelArtifact?.treeSha256)) failures.push(`${browser} ${channel} tree SHA-256 is missing`);
   }
-  if (result.artifact?.archiveSha256 !== result.artifact?.channels?.store?.archiveSha256
-      || result.artifact?.treeSha256 !== result.artifact?.channels?.store?.treeSha256) {
-    failures.push(`${browser} runtime artifact is not bound to the measured Store artifact`);
+  const runtimeArtifact = result.artifact?.channels?.[runtimeChannel];
+  if (result.artifact?.archiveSha256 !== runtimeArtifact?.archiveSha256
+      || result.artifact?.treeSha256 !== runtimeArtifact?.treeSha256) {
+    failures.push(`${browser} runtime artifact is not bound to the measured ${runtimeChannel} artifact`);
   }
   if (result.measurement?.clock !== 'host-monotonic:node-hrtime') {
     failures.push(`${browser} measurement clock is not host-monotonic`);
@@ -342,6 +354,9 @@ export const assessColdStartPair = (browser, candidate, base, options = {}) => {
   if (candidate?.measurement?.lane !== base?.measurement?.lane) {
     failures.push('candidate/base lane profiles differ');
   }
+  if (candidate?.measurement?.runtimeChannel !== base?.measurement?.runtimeChannel) {
+    failures.push('candidate/base runtime channels differ');
+  }
   if (candidate?.artifact?.harnessSha256 !== base?.artifact?.harnessSha256) {
     failures.push('candidate/base harness digests differ');
   }
@@ -415,6 +430,13 @@ export const assessColdStartReport = (report, {
 } = {}) => {
   const failures = [];
   if (report?.schema !== 3) failures.push('report schema is unsupported');
+  if (!['store', 'preview'].includes(report?.runtimeChannel)
+      || report?.options?.runtimeChannel !== report?.runtimeChannel) {
+    failures.push('report runtime channel binding is invalid');
+  }
+  if (report?.lane !== 'local' && report?.runtimeChannel !== 'store') {
+    failures.push('fixed-lane report runtime channel must be store');
+  }
   if (report?.runtimeTarget !== 'release'
       || report?.options?.runtimeTarget !== report?.runtimeTarget) {
     failures.push('report runtime target binding is invalid');
@@ -482,6 +504,7 @@ export const assessColdStartReport = (report, {
       firefoxProcesses: profile?.firefox?.fresh,
       firefoxWakes: profile?.firefox?.wakes,
       firefoxIdleMs: profile?.firefox?.idleMs,
+      runtimeChannel: 'store',
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
@@ -530,6 +553,8 @@ export const assessColdStartReport = (report, {
     }
     if (result?.measurement?.runtimeTarget !== report?.runtimeTarget
         || result?.artifact?.runtimeTarget !== report?.runtimeTarget
+        || result?.measurement?.runtimeChannel !== report?.runtimeChannel
+        || result?.artifact?.channel !== report?.runtimeChannel
         || result?.measurement?.runtimeSurface !== report?.runtimeSurface
         || result?.artifact?.runtimeSurface !== report?.runtimeSurface
         || result?.measurement?.coldBudgetMode !== report?.coldBudgetMode
@@ -556,6 +581,10 @@ export const assessColdStartReport = (report, {
       }
       if (base?.measurement?.hostSha256 !== report?.hostSha256) {
         failures.push(`${browser}: base measurement is not bound to the report host`);
+      }
+      if (base?.measurement?.runtimeChannel !== report?.runtimeChannel
+          || base?.artifact?.channel !== report?.runtimeChannel) {
+        failures.push(`${browser}: base runtime evidence is not bound to the report channel`);
       }
       const requiredSamples = reportSampleContract(browser)?.fresh
         ?? COLD_START_LANES[report?.lane]?.[browser]?.fresh;

@@ -71,7 +71,13 @@ const summarizedGroup = (
 
 const chromeResult = ({
   role = 'candidate', sourceCommitSha = '3'.repeat(40), lane = 'pr',
-}: { role?: 'candidate' | 'base'; sourceCommitSha?: string; lane?: keyof typeof COLD_START_LANES } = {}) => {
+  runtimeChannel = 'store',
+}: {
+  role?: 'candidate' | 'base';
+  sourceCommitSha?: string;
+  lane?: keyof typeof COLD_START_LANES;
+  runtimeChannel?: 'store' | 'preview';
+} = {}) => {
   const contract = COLD_START_LANES[lane].chrome;
   const packagedGraphsByChannel = { store: graphsFor('store'), preview: graphsFor('preview') };
   const result = {
@@ -82,6 +88,7 @@ const chromeResult = ({
       role,
       clock: 'host-monotonic:node-hrtime',
       lane,
+      runtimeChannel,
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
@@ -95,11 +102,11 @@ const chromeResult = ({
       hostSha256: HASH.host,
     },
     artifact: {
-      channel: 'store',
+      channel: runtimeChannel,
       runtimeTarget: 'release',
       runtimeSurface: 'home',
-      archiveSha256: HASH.archive,
-      treeSha256: HASH.tree,
+      archiveSha256: runtimeChannel === 'store' ? HASH.archive : HASH.previewArchive,
+      treeSha256: runtimeChannel === 'store' ? HASH.tree : HASH.previewTree,
       channels: {
         store: { channel: 'store', archiveSha256: HASH.archive, treeSha256: HASH.tree },
         preview: { channel: 'preview', archiveSha256: HASH.previewArchive, treeSha256: HASH.previewTree },
@@ -112,7 +119,7 @@ const chromeResult = ({
       sourceCommitSha,
       sourceDirty: false,
     },
-    packagedGraphs: packagedGraphsByChannel.store,
+    packagedGraphs: packagedGraphsByChannel[runtimeChannel],
     packagedGraphsByChannel,
     freshProfile: summarizedGroup(
       COLD_START_PHASES.chrome.freshProfile,
@@ -140,7 +147,13 @@ const chromeResult = ({
 
 const firefoxResult = ({
   role = 'candidate', sourceCommitSha = '3'.repeat(40), lane = 'pr',
-}: { role?: 'candidate' | 'base'; sourceCommitSha?: string; lane?: keyof typeof COLD_START_LANES } = {}) => {
+  runtimeChannel = 'store',
+}: {
+  role?: 'candidate' | 'base';
+  sourceCommitSha?: string;
+  lane?: keyof typeof COLD_START_LANES;
+  runtimeChannel?: 'store' | 'preview';
+} = {}) => {
   const contract = COLD_START_LANES[lane].firefox;
   const packagedGraphsByChannel = {
     store: graphsFor('store', 'firefox'), preview: graphsFor('preview', 'firefox'),
@@ -158,6 +171,7 @@ const firefoxResult = ({
       role,
       clock: 'host-monotonic:node-hrtime',
       lane,
+      runtimeChannel,
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: role === 'candidate' ? 'enforce' : 'measure-only',
@@ -171,11 +185,11 @@ const firefoxResult = ({
       hostSha256: HASH.host,
     },
     artifact: {
-      channel: 'store',
+      channel: runtimeChannel,
       runtimeTarget: 'release',
       runtimeSurface: 'home',
-      archiveSha256: HASH.archive,
-      treeSha256: HASH.tree,
+      archiveSha256: runtimeChannel === 'store' ? HASH.archive : HASH.previewArchive,
+      treeSha256: runtimeChannel === 'store' ? HASH.tree : HASH.previewTree,
       channels: {
         store: { channel: 'store', archiveSha256: HASH.archive, treeSha256: HASH.tree },
         preview: { channel: 'preview', archiveSha256: HASH.previewArchive, treeSha256: HASH.previewTree },
@@ -191,7 +205,7 @@ const firefoxResult = ({
       sourceCommitSha,
       sourceDirty: false,
     },
-    packagedGraphs: packagedGraphsByChannel.store,
+    packagedGraphs: packagedGraphsByChannel[runtimeChannel],
     packagedGraphsByChannel,
     freshProfile: summarizedGroup(
       COLD_START_PHASES.firefox.freshProfile, contract.fresh,
@@ -201,13 +215,14 @@ const firefoxResult = ({
 };
 
 const useReviewedGraphs = <T extends {
+  artifact: { channel: 'store' | 'preview' };
   packagedGraphs: unknown;
   packagedGraphsByChannel: Record<string, unknown>;
 }>(browser: 'chrome' | 'firefox', result: T): T => {
   result.packagedGraphsByChannel = {
     store: graphsFor('store', browser), preview: graphsFor('preview', browser),
   };
-  result.packagedGraphs = result.packagedGraphsByChannel.store;
+  result.packagedGraphs = result.packagedGraphsByChannel[result.artifact.channel];
   return result;
 };
 
@@ -302,14 +317,25 @@ describe('cold-start policy', () => {
       .toContain(`preview.serviceWorker.graphBytes ${ceiling + 1} exceeds ${ceiling}`);
   });
 
-  test('binds runtime bytes to Store while requiring separate Preview artifact evidence', () => {
+  test('binds runtime bytes to the selected channel while retaining both artifacts', () => {
     const result = chromeResult();
     result.artifact.channels.preview.archiveSha256 = 'not-a-hash';
     result.artifact.archiveSha256 = '4'.repeat(64);
     expect(assessChrome(result).failures).toEqual(expect.arrayContaining([
       'chrome preview archive SHA-256 is missing',
-      'chrome runtime artifact is not bound to the measured Store artifact',
+      'chrome runtime artifact is not bound to the measured store artifact',
     ]));
+  });
+
+  test('accepts local Preview timing but refuses Preview on a fixed lane', () => {
+    const local = chromeResult({ lane: 'local', runtimeChannel: 'preview' });
+    expect(assessColdStartResult('chrome', local, {
+      lane: 'local', sampleContract: { fresh: 1, wakes: 1 },
+    })).toEqual({ ok: true, failures: [] });
+
+    const fixed = chromeResult({ runtimeChannel: 'preview' });
+    expect(assessChrome(fixed).failures)
+      .toContain('chrome pr lane runtime channel must be store');
   });
 
   test('enforces graph integrity and real usable timing when explicitly selected', () => {
@@ -439,6 +465,7 @@ describe('cold-start policy', () => {
       measuredAt: new Date(now - 1_000).toISOString(),
       lane: 'device',
       packageVersion: '0.7.3',
+      runtimeChannel: 'store',
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
@@ -456,6 +483,7 @@ describe('cold-start policy', () => {
       },
       options: {
         browser: 'all', allowFailures: false, unsafeNoSandbox: false,
+        runtimeChannel: 'store',
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
         enforcement: profile.enforcement,
         graphPolicy: profile.graphPolicy,
@@ -487,6 +515,7 @@ describe('cold-start policy', () => {
       measuredAt: new Date(now - 1_000).toISOString(),
       lane: 'release',
       packageVersion: '0.7.3',
+      runtimeChannel: 'store',
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
@@ -501,6 +530,7 @@ describe('cold-start policy', () => {
       comparison: { mode: 'absolute-ratchet' },
       options: {
         browser: 'all', allowFailures: false, unsafeNoSandbox: false,
+        runtimeChannel: 'store',
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
         enforcement: profile.enforcement,
         graphPolicy: profile.graphPolicy,
@@ -536,6 +566,7 @@ describe('cold-start policy', () => {
       measuredAt: new Date(now - 1_000).toISOString(),
       lane: 'local',
       packageVersion: '0.7.3',
+      runtimeChannel: 'store',
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
@@ -546,6 +577,7 @@ describe('cold-start policy', () => {
       comparison: { mode: 'absolute-ratchet' },
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
+        runtimeChannel: 'store',
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
         chromeProcesses: 1, chromeWakes: 1,
       },
@@ -557,13 +589,18 @@ describe('cold-start policy', () => {
 
   test('accepts only a hash-bound, alternating, clean local candidate/base report', () => {
     const now = Date.UTC(2026, 7, 20, 12);
-    const candidate = chromeResult({ lane: 'local', sourceCommitSha: '3'.repeat(40) });
-    const base = chromeResult({ role: 'base', lane: 'local', sourceCommitSha: '4'.repeat(40) });
+    const candidate = chromeResult({
+      lane: 'local', runtimeChannel: 'preview', sourceCommitSha: '3'.repeat(40),
+    });
+    const base = chromeResult({
+      role: 'base', lane: 'local', runtimeChannel: 'preview', sourceCommitSha: '4'.repeat(40),
+    });
     const report = {
       schema: 3,
       measuredAt: new Date(now - 1_000).toISOString(),
       lane: 'local',
       packageVersion: '0.7.3',
+      runtimeChannel: 'preview',
       runtimeTarget: 'release',
       runtimeSurface: 'home',
       coldBudgetMode: 'enforce',
@@ -577,6 +614,7 @@ describe('cold-start policy', () => {
       },
       options: {
         browser: 'chrome', graphPolicy: 'ratchet', requireTimingTargets: false,
+        runtimeChannel: 'preview',
         runtimeTarget: 'release', runtimeSurface: 'home', coldBudgetMode: 'enforce',
         chromeProcesses: 1, chromeWakes: 1,
       },

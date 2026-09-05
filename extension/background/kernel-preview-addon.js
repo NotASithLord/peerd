@@ -2,6 +2,7 @@
 
 import { withDeadline } from '../shared/cold-util.js';
 import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
+import { structuredClonePayloadFits } from '../shared/structured-clone-size.js';
 import { createPreviewContributorRoutes } from './kernel-contributor-owner.js';
 export {
   CONTRIBUTOR_ACTIVE_CONSENT_KEY, CONTRIBUTOR_PENDING_RECEIPTS_KEY,
@@ -94,7 +95,6 @@ export const createKernelUpdateCustody = (/** @type {any} */ {
     if (!Array.isArray(windows) || windows.some(isBlockingWindow) || isBusy()) {
       await notePending(version); retry(); return false;
     }
-    await update((latest) => ({ ...latest, pendingVersion: version }));
     clear();
     runtime.reload();
     return true;
@@ -161,7 +161,11 @@ const DWEB_SELF_SECRETS = Object.freeze([
   DWEB_SELF_DISCOVERY_SECRET,
   DWEB_SELF_RECORDS_SECRET,
 ]);
+// why: custody accepts only fixed identity records and the existing bounded
+// self-secret surfaces; larger wire values are invalid before vault work.
+const MAX_DWEB_IDENTITY_BYTES = 64 * 1024;
 const MAX_DWEB_SELF_SECRET_BYTES = 256 * 1024;
+const MAX_DWEB_EFFECT_ARGUMENT_BYTES = MAX_DWEB_SELF_SECRET_BYTES + 512;
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const DWEB_EFFECT_OPERATIONS = new Set([
   'identity/read', 'identity/create', 'identity/policy', 'identity/commit',
@@ -170,6 +174,9 @@ const DWEB_EFFECT_OPERATIONS = new Set([
 const safeDwebId = (/** @type {unknown} */ value) => typeof value === 'string'
   && value.length >= 3 && value.length <= 256
   && !/[\u0000-\u001f\u007f]/.test(value);
+const dwebTextFits = (/** @type {unknown} */ value, /** @type {number} */ maxBytes) =>
+  typeof value === 'string' && value.length <= maxBytes
+  && new TextEncoder().encode(value).byteLength <= maxBytes;
 const dwebEffectFailure = (/** @type {string} */ error,
   /** @type {boolean} */ outcomeKnown = true) => outcomeKnown
   ? ({ ok: false, error }) : ({ ok: false, error, outcomeKnown: false });
@@ -257,6 +264,9 @@ export const createKernelDwebVaultEffects = ({
     }
     if (operation === 'identity/create') {
       if (typeof args?.value !== 'string') return dwebEffectFailure('value-required');
+      if (!dwebTextFits(args.value, MAX_DWEB_IDENTITY_BYTES)) {
+        return dwebEffectFailure('value-too-large');
+      }
       try {
         const existing = await vault.getSecret(DWEB_IDENTITY_SECRET);
         if (existing === args.value) return { ok: true };
@@ -276,6 +286,9 @@ export const createKernelDwebVaultEffects = ({
     if (operation === 'identity/commit') {
       if (typeof args?.value !== 'string' || typeof args?.incomingDid !== 'string') {
         return dwebEffectFailure('identity-commit-invalid');
+      }
+      if (!dwebTextFits(args.value, MAX_DWEB_IDENTITY_BYTES)) {
+        return dwebEffectFailure('value-too-large');
       }
       if (typeof args.expectedExistingRevision !== 'string'
           && !Object.hasOwn(args, 'expectedExistingDid')) {
@@ -440,10 +453,14 @@ const makeIdentityLane = () => {
   return Object.freeze({ withMutation, withRead, beginRecovery, endRecovery });
 };
 
-const TRANSFER_EFFECTS = Object.freeze({
-  export: new Set(['identity/read']),
-  prepare: new Set(['identity/read', 'identity/policy']),
-  adopt: new Set(['identity/read', 'identity/policy', 'identity/commit']),
+// why: a transfer's algorithm has one call site per exact effect. A second
+// request id is new authority, not an idempotent replay.
+const TRANSFER_EFFECT_LIMITS = Object.freeze({
+  export: Object.freeze({ 'identity/read': 1 }),
+  prepare: Object.freeze({ 'identity/read': 1, 'identity/policy': 1 }),
+  adopt: Object.freeze({
+    'identity/read': 1, 'identity/policy': 1, 'identity/commit': 1,
+  }),
 });
 const LOCAL_EFFECTS = new Set(['identity/read', 'identity/create', 'self/read', 'self/write']);
 
@@ -531,12 +548,16 @@ export const createKernelDwebCustodyOwner = ({
     if (!grant || message.parentOperationId !== grant.operationId) {
       return dwebEffectFailure('identity-grant-invalid');
     }
-    const allowed = TRANSFER_EFFECTS[
+    const limits = TRANSFER_EFFECT_LIMITS[
       /** @type {'export'|'prepare'|'adopt'} */ (grant.operation)
     ];
-    if (!allowed.has(message.operation)) {
+    const limit = limits[/** @type {keyof typeof limits} */ (message.operation)];
+    if (!limit) {
       return dwebEffectFailure('identity-effect-not-granted');
     }
+    const used = [...grant.effectCalls.values()]
+      .filter((/** @type {any} */ call) => call.operation === message.operation).length;
+    if (used >= limit) return dwebEffectFailure('identity-effect-budget-exhausted');
     if (message.operation === 'identity/policy' && grant.operation === 'adopt'
         && message.args?.incomingDid !== grant.args.options?.expectedIncomingDid) {
       return dwebEffectFailure('identity-incoming-mismatch');
@@ -567,8 +588,20 @@ export const createKernelDwebCustodyOwner = ({
     if (!safeDwebId(message.requestId) || !DWEB_EFFECT_OPERATIONS.has(message.operation)) return;
     const hasParent = message.parentOperationId !== undefined;
     const grant = hasParent && activeGrant?.port === port ? activeGrant : null;
-    const key = JSON.stringify([message.operation, message.args ?? {}]);
     const prior = grant?.effectCalls.get(message.requestId);
+    let key = null;
+    if (structuredClonePayloadFits(message.args ?? {}, MAX_DWEB_EFFECT_ARGUMENT_BYTES)) {
+      try { key = JSON.stringify([message.operation, message.args ?? {}]); }
+      catch { /* BigInt and other non-JSON wire values are not custody arguments. */ }
+    }
+    if (key === null) {
+      if (prior) { disconnect(port); return; }
+      respond(port, {
+        type: 'custody/effect-response', requestId: message.requestId,
+        ok: true, result: dwebEffectFailure('identity-effect-args-invalid'),
+      });
+      return;
+    }
     if (prior) {
       if (prior.key !== key) { disconnect(port); return; }
       void prior.promise.then(
@@ -602,7 +635,9 @@ export const createKernelDwebCustodyOwner = ({
         : lane.withMutation(run);
     if (grant) {
       grant.pendingEffects.add(operation);
-      grant.effectCalls.set(message.requestId, { key, promise: operation });
+      grant.effectCalls.set(message.requestId, {
+        key, operation: message.operation, promise: operation,
+      });
       void operation.finally(() => { grant.pendingEffects.delete(operation); }).catch(() => {});
     }
     void operation.then(
