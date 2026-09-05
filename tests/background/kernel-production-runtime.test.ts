@@ -4,6 +4,24 @@ import { join } from 'node:path';
 import { PACKAGED_LAZY_MODULE_ENTRIES } from '../../packaging/lazy-entry-manifest.ts';
 import { createKernelProductionRuntime } from '../../extension/background/kernel-production-runtime.js';
 
+const relayHandlers = (over: Record<string, (...args: any[]) => any> = {}) => ({
+  archiveOrphanedActor: () => {},
+  noteAgentTab: () => {},
+  onEngineAdopt: () => {},
+  onEngineDrop: () => {},
+  onAppManifestMutation: () => {},
+  resolveAppOwnerRoot: () => null,
+  onAppDeleted: () => {},
+  loadUserEndpoints: () => [],
+  onSettingsChanged: () => {},
+  syncDwebAgentRoom: () => {},
+  beforeGoalStart: () => {},
+  hasUnresolvedSideEffects: () => false,
+  onGoalRunEnd: () => {},
+  bindGoalRunner: () => {},
+  ...over,
+});
+
 const base = (makeRichRuntime: (deps: any) => any) => ({
   seams: {},
   browser: {},
@@ -51,7 +69,7 @@ describe('kernel production runtime', () => {
   test('passes one engine bag through the rich owner and returns it unchanged', async () => {
     let assembly: any;
     const expected = Object.freeze({
-      turnRuntime: {}, executableLive: {}, transferLive: {}, relays: {},
+      turnRuntime: {}, executableLive: {}, transferLive: {}, relays: relayHandlers(),
       relayRoutes: {}, dwebRoutes: {}, close: () => {},
     });
     const result = await createKernelProductionRuntime(base((deps) => {
@@ -65,6 +83,112 @@ describe('kernel production runtime', () => {
     expect(assembly.turn.goal.beforeStart).toBeFunction();
     expect(assembly.transfer.onProviderConfigChanged).toBeFunction();
     expect(assembly.createTurnFactories).toBeFunction();
+  });
+
+  test('replays only the two exact callbacks required during owner assembly', async () => {
+    const events: any[] = [];
+    const goalRunner = {};
+    const runtime = await createKernelProductionRuntime(base(async ({ engine, turn }) => {
+      engine.onVmTabAdopt('vm-1', 17);
+      engine.onAppTabAdopt('app-1', 23);
+      turn.goal.bind(goalRunner);
+      expect(events).toEqual([]);
+      return {
+        relays: relayHandlers({
+          onEngineAdopt: (...args) => { events.push(['adopt', ...args]); },
+          bindGoalRunner: (runner) => { events.push(['bind', runner]); },
+        }),
+        close: () => {},
+      };
+    }));
+    expect(runtime).toBeDefined();
+    expect(events).toEqual([
+      ['adopt', 'vm', 'vm-1', 17],
+      ['adopt', 'app', 'app-1', 23],
+      ['bind', goalRunner],
+    ]);
+  });
+
+  test('returns post-bind request values through exact named closures', async () => {
+    let assembly: any;
+    await createKernelProductionRuntime(base(async (deps) => {
+      assembly = deps;
+      return {
+        relays: relayHandlers({
+          resolveAppOwnerRoot: (sessionId) => `root:${sessionId}`,
+          loadUserEndpoints: () => ['https://api.test'],
+          hasUnresolvedSideEffects: (sessionId) => sessionId === 'unknown',
+        }),
+        close: () => {},
+      };
+    }));
+    expect(await assembly.engine.resolveAppOwnerRoot('child')).toBe('root:child');
+    expect(await assembly.transfer.loadUserEndpoints()).toEqual(['https://api.test']);
+    expect(await assembly.turn.goal.hasUnresolvedSideEffects('unknown')).toBe(true);
+  });
+
+  test('fails every non-deferred callback when invoked before relay binding', async () => {
+    await createKernelProductionRuntime(base(async ({ engine, transfer, turn }) => {
+      for (const call of [
+        () => engine.archiveOrphanedActor('actor'),
+        () => engine.noteVmTab(1, {}),
+        () => engine.onVmTabDrop('vm'),
+        () => engine.onAppManifestMutation('app'),
+        () => engine.resolveAppOwnerRoot('actor'),
+        () => engine.onAppDeleted('app'),
+        () => transfer.loadUserEndpoints(),
+        () => turn.goal.beforeStart({ sessionId: 'session' }),
+        () => turn.goal.hasUnresolvedSideEffects('session'),
+        () => turn.goal.onRunEnd('session', {}),
+      ]) expect(call).toThrow();
+      await expect(transfer.onSettingsChanged({ dwebEnabled: true })).rejects.toThrow();
+      return { relays: relayHandlers(), close: () => {} };
+    }));
+  });
+
+  test('surfaces missing, pre-bind, and post-bind relay failures', async () => {
+    let closed = 0;
+    const missing = relayHandlers();
+    delete (missing as any).resolveAppOwnerRoot;
+    await expect(createKernelProductionRuntime(base(async () => ({
+      relays: missing, close: () => { closed += 1; },
+    })))).rejects.toThrow('kernel-production-relay-resolveAppOwnerRoot-invalid');
+    expect(closed).toBe(1);
+
+    await expect(createKernelProductionRuntime(base(async ({ engine }) => {
+      engine.onVmTabAdopt('vm-1', 17);
+      return {
+        relays: relayHandlers({
+          onEngineAdopt: async () => { throw new Error('adopt-failed'); },
+        }),
+        close: () => { closed += 1; },
+      };
+    }))).rejects.toThrow('adopt-failed');
+    expect(closed).toBe(2);
+
+    let assembly: any;
+    await createKernelProductionRuntime(base(async (deps) => {
+      assembly = deps;
+      return {
+        relays: relayHandlers({
+          loadUserEndpoints: async () => { throw new Error('endpoint-load-failed'); },
+        }),
+        close: () => {},
+      };
+    }));
+    await expect(assembly.transfer.loadUserEndpoints()).rejects.toThrow('endpoint-load-failed');
+  });
+
+  test('contains no open-ended deferred relay selector', () => {
+    const source = readFileSync(join(
+      import.meta.dir, '../../extension/background/kernel-production-runtime.js',
+    ), 'utf8');
+    expect(source).not.toContain('pendingRelays');
+    expect(source).not.toMatch(/relay\(['"]/);
+    expect(source.match(/liveRelays\?\.\[name\]/g)).toHaveLength(1);
+    expect(source).not.toMatch(/liveRelays\[(?!name\])/);
+    expect(source).toContain('pendingAdoptions');
+    expect(source).toContain('pendingGoal');
   });
 
   test('refuses a rich graph without exact browser-network custody', async () => {
