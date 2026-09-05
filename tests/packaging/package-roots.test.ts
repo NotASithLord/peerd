@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { genChannelConfigSource } from '../../packaging/gen-channel-config.ts';
 import { generateManifest } from '../../packaging/gen-manifest.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
-import { packageArtifact } from '../../packaging/package.ts';
+import { assertRegularPackageTree, packageArtifact } from '../../packaging/package.ts';
 
 const roots: string[] = [];
 const temporaryRoot = (): string => {
@@ -90,5 +93,35 @@ describe('isolated package source and artifact roots', () => {
       artifactRoot: artifactAlias,
       sign: false, verify: false, minify: false,
     })).rejects.toThrow('must be disjoint');
+  });
+
+  test('an unreferenced asset symlink cannot escape into a release archive', async () => {
+    const sourceRoot = temporaryRoot();
+    const artifactRoot = temporaryRoot();
+    const outsideRoot = temporaryRoot();
+    mkdirSync(join(sourceRoot, 'extension', 'assets'), { recursive: true });
+    mkdirSync(join(sourceRoot, 'manifests'), { recursive: true });
+    mkdirSync(join(sourceRoot, 'packaging'), { recursive: true });
+    writeFileSync(join(sourceRoot, 'packaging', 'default-settings.mjs'), 'export const defaults = {};\n');
+    const outside = join(outsideRoot, 'vault-plaintext.txt');
+    writeFileSync(outside, 'must never enter an extension archive\n');
+    symlinkSync(outside, join(sourceRoot, 'extension', 'assets', 'unreferenced.txt'));
+
+    await expect(packageArtifact({
+      channel: 'preview', browser: 'chrome', version: '0.0.0',
+      sourceRoot, artifactRoot, sign: false, verify: false, minify: false,
+      coldBudgetMode: 'measure-only',
+    })).rejects.toThrow(
+      'package source extension tree contains a symbolic link: assets/unreferenced.txt',
+    );
+  });
+
+  test('release trees reject special filesystem nodes', () => {
+    const root = temporaryRoot();
+    const fifo = join(root, 'unreferenced.pipe');
+    execFileSync('mkfifo', [fifo]);
+
+    expect(() => assertRegularPackageTree(root, 'fixture tree'))
+      .toThrow('fixture tree contains a non-regular entry: unreferenced.pipe');
   });
 });
