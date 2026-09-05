@@ -398,7 +398,7 @@ gotchas to know going in:
   audit. The legacy permission-mode axis was REMOVED
   2026-06-12 — Plan/Act + the denylist carry the safety weight; Plan
   permits pure URL loads only, never clicks (enforced in `gates.js`).
-- The feature buildout — memory, edit + checkpoints, Plan/Act,
+- The feature buildout — memory, edit + browser-native Git, Plan/Act,
   composer (slash commands + @-refs), goal mode (autonomous loop), cost
   telemetry, skills, and hooks — all integrated.
   (do/get/check was CULLED: the web actor drives pages directly, so one
@@ -437,7 +437,7 @@ gotchas to know going in:
   is on another machine.
 - **Agent-to-agent (A2A) over the mesh** — the dweb actor talks to other
   agents by WRITING CODE, the #119 bet applied to p2p: `a2a_run` runs JS
-  against a `mesh` client (peers/card/ask/send/publishCard/inbox) in the SAME
+  against a `mesh` client (peers/card/call/cast/publishCard/inbox) in the SAME
   sealed keyless worker as `script`, plus ONE capability — the mesh bridge —
   and nothing else (the host denies egress + actor-spawn for an a2a run;
   see `offscreen/job-runner.js`). The pure translation core is
@@ -449,7 +449,7 @@ gotchas to know going in:
   model (`peerd-distributed/agent-card.js` — Agent Card, message shape) for
   future interop, but REJECT its HTTP+SSE transport: the mesh is the
   transport, did:key the address, the fenced inbound wake the stream. Signing
-  ops (ask/send/publishCard) need per-target user consent, remembered and
+  ops (call/cast/publishCard) need per-target user consent, remembered and
   revocable via `dweb_block`; peer bytes are `wrapUntrusted`-fenced by
   construction. Dweb-actor-only and Chrome-preview-only.
 

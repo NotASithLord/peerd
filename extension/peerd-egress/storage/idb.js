@@ -4,12 +4,14 @@ const DB_NAME = 'peerd';
 const DB_VERSION = 14;
 const OPEN_TIMEOUT_MS = 8_000;
 const TX_TIMEOUT_MS = 15_000;
-const RETIRED_DATABASE_NAMES = Object.freeze(['peerd-toolbox', 'peerd-run-cache']);
+const RETIRED_DATABASE_NAMES = Object.freeze([
+  'peerd-toolbox', 'peerd-run-cache', 'peerd-checkpoints',
+]);
 
 /**
  * Remove exact databases owned only by retired product surfaces. Failure is
  * intentionally non-fatal: an old extension page may still hold a connection
- * during update, and the next service-worker boot retries the same two names.
+ * during update; the next service-worker boot retries.
  * @param {IDBFactory | undefined} [idbFactory]
  * @returns {Promise<void>}
  */

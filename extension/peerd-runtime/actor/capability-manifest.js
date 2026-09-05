@@ -12,7 +12,7 @@
 // against this data.
 
 /** @typedef {'read'|'write'|'delegate'|'spend'} CodeEffect */
-/** @typedef {{ op: string, signature: string, effect: CodeEffect, tool?: string, canonical?: boolean, worker?: string }} CodeMethod */
+/** @typedef {{ op: string, signature: string, effect: CodeEffect, tool?: string, worker?: string }} CodeMethod */
 /** @typedef {{ global: string, bridge: string, methods: Readonly<Record<string, CodeMethod>>, maxTraceOps: number }} CodeClientManifest */
 
 // One cap for every inner-op trace ring, irrespective of client. The authority
@@ -27,73 +27,65 @@ const client = (global, bridge, methods) => Object.freeze({
 
 /** @type {Readonly<Record<string, CodeClientManifest>>} */
 export const CODE_CLIENT_MANIFESTS = Object.freeze({
-  // Elixir/OTP-shaped local process messaging. `call` is the canonical awaited
-  // request/reply primitive. `ask` remains a non-advertised compatibility alias
-  // for scripts written during the #327 rollout; there is deliberately no
-  // `cast` until the host can provide a genuine no-reply mailbox send.
+  // Elixir/OTP-shaped local process messaging. `call` is the awaited
+  // request/reply primitive; there is deliberately no `cast` until the host
+  // can provide a genuine no-reply mailbox send.
   actors: client('actors', 'actors', {
-    list: { op: 'list', signature: 'list()', effect: 'read', tool: 'actor_list', canonical: true, worker: "() => actorsCall('list', {})" },
-    call: { op: 'call', signature: 'call(address, message, options?)', effect: 'delegate', tool: 'message_actor', canonical: true, worker: "(address, message, options) => actorsCall('call', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot })" },
-    ask: { op: 'call', signature: 'ask(address, message, options?)', effect: 'delegate', tool: 'message_actor', worker: "(address, message, options) => actorsCall('ask', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot })" },
+    list: { op: 'list', signature: 'list()', effect: 'read', tool: 'actor_list', worker: "() => actorsCall('list', {})" },
+    call: { op: 'call', signature: 'call(address, message, options?)', effect: 'delegate', tool: 'message_actor', worker: "(address, message, options) => actorsCall('call', { address, message, timeoutMs: options && options.timeoutMs, oneShot: options && options.oneShot })" },
   }),
   // Playwright-shaped control plus the tab web actor's non-DOM facilities.
   // Every method maps to an existing gated tool; the bridge itself owns no new
   // browser or network authority.
   page: client('page', 'page', {
-    goto: { op: 'goto', signature: 'goto(url)', effect: 'write', tool: 'navigate', canonical: true, worker: "(url) => pageCall('goto', { url })" },
-    click: { op: 'click', signature: 'click(selectorOrRef, options?)', effect: 'write', tool: 'click', canonical: true, worker: "(target, options) => pageCall('click', { target, nth: options && options.nth })" },
-    fill: { op: 'fill', signature: 'fill(selectorOrRef, text, options?)', effect: 'write', tool: 'type', canonical: true, worker: "(target, text, options) => pageCall('fill', { target, text, submit: options && options.submit })" },
-    snapshot: { op: 'snapshot', signature: 'snapshot()', effect: 'read', tool: 'snapshot', canonical: true, worker: "() => pageCall('snapshot', {})" },
-    content: { op: 'content', signature: 'content()', effect: 'read', tool: 'read_page', canonical: true, worker: "() => pageCall('content', {})" },
-    readState: { op: 'readState', signature: 'readState(selectorOrRef)', effect: 'read', tool: 'read_state', canonical: true, worker: "(target) => pageCall('readState', { target })" },
-    watchChanges: { op: 'watchChanges', signature: 'watchChanges()', effect: 'read', tool: 'watch_changes', canonical: true, worker: "() => pageCall('watchChanges', {})" },
-    query: { op: 'query', signature: 'query(selector, options?)', effect: 'read', tool: 'query_dom', canonical: true, worker: "(selector, options) => pageCall('query', { selector, options })" },
-    view: { op: 'view', signature: 'view()', effect: 'read', tool: 'view', canonical: true, worker: "() => pageCall('view', {})" },
-    fetch: { op: 'fetch', signature: 'fetch(url, options?)', effect: 'read', tool: 'fetch_url', canonical: true, worker: "(url, options) => pageCall('fetch', { url, options })" },
-    readDocument: { op: 'readDocument', signature: 'readDocument(url?, options?)', effect: 'read', tool: 'read_doc', canonical: true, worker: "(url, options) => pageCall('readDocument', { url, options })" },
-    readResult: { op: 'readResult', signature: 'readResult(key, options?)', effect: 'read', tool: 'read_result', canonical: true, worker: "(key, options) => pageCall('readResult', { key, options })" },
-    readSiteClient: { op: 'readSiteClient', signature: 'readSiteClient(origin)', effect: 'read', tool: 'site_client_read', canonical: true, worker: "(origin) => pageCall('readSiteClient', { origin })" },
-    writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})', effect: 'write', tool: 'site_client_write', canonical: true, worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
-    captureSite: { op: 'captureSite', signature: 'captureSite("start"|"stop")', effect: 'read', tool: 'site_capture', canonical: true, worker: "(action) => pageCall('captureSite', { action })" },
-    login: { op: 'login', signature: 'login(selectorOrRef, options?)', effect: 'write', tool: 'login', canonical: true, worker: "(target, options) => pageCall('login', { target, options })" },
+    goto: { op: 'goto', signature: 'goto(url)', effect: 'write', tool: 'navigate', worker: "(url) => pageCall('goto', { url })" },
+    click: { op: 'click', signature: 'click(selectorOrRef, options?)', effect: 'write', tool: 'click', worker: "(target, options) => pageCall('click', { target, nth: options && options.nth })" },
+    fill: { op: 'fill', signature: 'fill(selectorOrRef, text, options?)', effect: 'write', tool: 'type', worker: "(target, text, options) => pageCall('fill', { target, text, submit: options && options.submit })" },
+    snapshot: { op: 'snapshot', signature: 'snapshot()', effect: 'read', tool: 'snapshot', worker: "() => pageCall('snapshot', {})" },
+    content: { op: 'content', signature: 'content()', effect: 'read', tool: 'read_page', worker: "() => pageCall('content', {})" },
+    readState: { op: 'readState', signature: 'readState(selectorOrRef)', effect: 'read', tool: 'read_state', worker: "(target) => pageCall('readState', { target })" },
+    watchChanges: { op: 'watchChanges', signature: 'watchChanges()', effect: 'read', tool: 'watch_changes', worker: "() => pageCall('watchChanges', {})" },
+    query: { op: 'query', signature: 'query(selector, options?)', effect: 'read', tool: 'query_dom', worker: "(selector, options) => pageCall('query', { selector, options })" },
+    view: { op: 'view', signature: 'view()', effect: 'read', tool: 'view', worker: "() => pageCall('view', {})" },
+    fetch: { op: 'fetch', signature: 'fetch(url, options?)', effect: 'read', tool: 'fetch_url', worker: "(url, options) => pageCall('fetch', { url, options })" },
+    readDocument: { op: 'readDocument', signature: 'readDocument(url?, options?)', effect: 'read', tool: 'read_doc', worker: "(url, options) => pageCall('readDocument', { url, options })" },
+    readResult: { op: 'readResult', signature: 'readResult(key, options?)', effect: 'read', tool: 'read_result', worker: "(key, options) => pageCall('readResult', { key, options })" },
+    readSiteClient: { op: 'readSiteClient', signature: 'readSiteClient(origin)', effect: 'read', tool: 'site_client_read', worker: "(origin) => pageCall('readSiteClient', { origin })" },
+    writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})', effect: 'write', tool: 'site_client_write', worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
+    captureSite: { op: 'captureSite', signature: 'captureSite("start"|"stop")', effect: 'read', tool: 'site_capture', worker: "(action) => pageCall('captureSite', { action })" },
+    login: { op: 'login', signature: 'login(selectorOrRef, options?)', effect: 'write', tool: 'login', worker: "(target, options) => pageCall('login', { target, options })" },
   }),
   // The bound App actor's playtest hand. These methods map to the same
   // exact-instance runtime gates as the direct primitives; app_code merely lets
   // the actor compose an observe/act feedback loop in one sealed JS run.
   app: client('app', 'app', {
-    observe: { op: 'observe', signature: 'observe()', effect: 'read', tool: 'app_observe', canonical: true, worker: "() => appCall('observe', {})" },
-    act: { op: 'act', signature: 'act(action, params?)', effect: 'write', tool: 'app_act', canonical: true, worker: "(action, params) => appCall('act', { action, params: params ?? {} })" },
-    wait: { op: 'wait', signature: 'wait(ms)', effect: 'read', canonical: true, worker: "(ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(5000, Number(ms) || 0))))" },
+    observe: { op: 'observe', signature: 'observe()', effect: 'read', tool: 'app_observe', worker: "() => appCall('observe', {})" },
+    act: { op: 'act', signature: 'act(action, params?)', effect: 'write', tool: 'app_act', worker: "(action, params) => appCall('act', { action, params: params ?? {} })" },
+    wait: { op: 'wait', signature: 'wait(ms)', effect: 'read', worker: "(ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(5000, Number(ms) || 0))))" },
   }),
   mesh: client('mesh', 'a2a', {
-    peers: { op: 'peers', signature: 'peers()', effect: 'read', canonical: true, worker: "() => meshCall('peers', {})" },
-    card: { op: 'card', signature: 'card(did)', effect: 'read', canonical: true, worker: "(did) => meshCall('card', { did })" },
-    publishCard: { op: 'publishCard', signature: 'publishCard(card)', effect: 'write', canonical: true, worker: "(card) => meshCall('publishCard', { card })" },
-    call: { op: 'ask', signature: 'call(did, message, options?)', effect: 'write', canonical: true, worker: "(did, message, options) => meshCall('call', { did, message, timeoutMs: options && options.timeoutMs })" },
-    cast: { op: 'send', signature: 'cast(did, message)', effect: 'write', canonical: true, worker: "(did, message) => meshCall('cast', { did, message })" },
-    // Compatibility aliases for pre-#326 scripts. New model output sees the
-    // same call/cast vocabulary locally and over the mesh.
-    ask: { op: 'ask', signature: 'ask(did, message, options?)', effect: 'write', worker: "(did, message, options) => meshCall('ask', { did, message, timeoutMs: options && options.timeoutMs })" },
-    send: { op: 'send', signature: 'send(did, message)', effect: 'write', worker: "(did, message) => meshCall('send', { did, message })" },
-    inbox: { op: 'inbox', signature: 'inbox()', effect: 'read', canonical: true, worker: "() => meshCall('inbox', {})" },
-    converse: { op: 'converse', signature: 'converse(did, message, options?)', effect: 'write', canonical: true, worker: "(did, message, options) => meshCall('converse', { did, message, timeoutMs: options && options.timeoutMs })" },
-    say: { op: 'say', signature: 'say(conversationId, message, options?)', effect: 'write', canonical: true, worker: "(conversationId, message, options) => meshCall('say', { convId: conversationId, message, timeoutMs: options && options.timeoutMs })" },
+    peers: { op: 'peers', signature: 'peers()', effect: 'read', worker: "() => meshCall('peers', {})" },
+    card: { op: 'card', signature: 'card(did)', effect: 'read', worker: "(did) => meshCall('card', { did })" },
+    publishCard: { op: 'publishCard', signature: 'publishCard(card)', effect: 'write', worker: "(card) => meshCall('publishCard', { card })" },
+    call: { op: 'ask', signature: 'call(did, message, options?)', effect: 'write', worker: "(did, message, options) => meshCall('call', { did, message, timeoutMs: options && options.timeoutMs })" },
+    cast: { op: 'send', signature: 'cast(did, message)', effect: 'write', worker: "(did, message) => meshCall('cast', { did, message })" },
+    inbox: { op: 'inbox', signature: 'inbox()', effect: 'read', worker: "() => meshCall('inbox', {})" },
+    converse: { op: 'converse', signature: 'converse(did, message, options?)', effect: 'write', worker: "(did, message, options) => meshCall('converse', { did, message, timeoutMs: options && options.timeoutMs })" },
+    say: { op: 'say', signature: 'say(conversationId, message, options?)', effect: 'write', worker: "(conversationId, message, options) => meshCall('say', { convId: conversationId, message, timeoutMs: options && options.timeoutMs })" },
   }),
   provider: client('peerd.provider', 'provider', {
-    call: { op: 'call', signature: 'call({ prompt|messages, system?, model?, maxTokens? })', effect: 'spend', canonical: true },
+    call: { op: 'call', signature: 'call({ prompt|messages, system?, model?, maxTokens? })', effect: 'spend' },
   }),
   site: client('site', 'site-fetch', {
-    fetch: { op: 'fetch', signature: 'fetch(pathOrUrl, options?)', effect: 'write', canonical: true },
+    fetch: { op: 'fetch', signature: 'fetch(pathOrUrl, options?)', effect: 'write' },
   }),
 });
 
-/** @param {string} clientName @param {boolean} [includeCompatibility] */
-export const codeClientMethods = (clientName, includeCompatibility = false) => {
+/** @param {string} clientName */
+export const codeClientMethods = (clientName) => {
   const manifest = CODE_CLIENT_MANIFESTS[clientName];
   if (!manifest) return [];
-  return Object.entries(manifest.methods)
-    .filter(([, method]) => includeCompatibility || method.canonical === true)
-    .map(([name]) => name);
+  return Object.keys(manifest.methods);
 };
 
 /** @param {string} clientName @param {string} method */
@@ -115,18 +107,17 @@ export const codeClientReference = (clientName, allowedTools = null) => {
   if (!manifest) return '';
   const allowed = Array.isArray(allowedTools) ? new Set(allowedTools) : null;
   return Object.entries(manifest.methods)
-    .filter(([, method]) => method.canonical === true
-      && (!allowed || !method.tool || allowed.has(method.tool)))
+    .filter(([, method]) => !allowed || !method.tool || allowed.has(method.tool))
     .map(([name, method]) => `${manifest.global}.${method.signature || `${name}()`}`)
     .join(', ');
 };
 
 const TRACE_METHODS = Object.freeze({
   actor: Object.freeze(new Set(['spawn'])),
-  actors: Object.freeze(new Set(codeClientMethods('actors', true))),
-  a2a: Object.freeze(new Set(codeClientMethods('mesh', true))),
-  page: Object.freeze(new Set(codeClientMethods('page', true))),
-  app: Object.freeze(new Set(codeClientMethods('app', true))),
+  actors: Object.freeze(new Set(codeClientMethods('actors'))),
+  a2a: Object.freeze(new Set(codeClientMethods('mesh'))),
+  page: Object.freeze(new Set(codeClientMethods('page'))),
+  app: Object.freeze(new Set(codeClientMethods('app'))),
   provider: Object.freeze(new Set(['call'])),
   opfs: Object.freeze(new Set(['read', 'write', 'delete', 'list', 'compose-module'])),
   fetch: Object.freeze(new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])),
