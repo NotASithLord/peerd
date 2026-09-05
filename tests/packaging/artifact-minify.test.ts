@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,6 +12,7 @@ import {
   minifyColdArtifactModules,
 } from '../../packaging/minify-artifact-js.ts';
 import {
+  collectStaticModuleGraph,
   exportedNames,
   moduleImportSpecifiers,
   staticImportSpecifiers,
@@ -114,6 +117,79 @@ describe('release artifact JavaScript minification', () => {
 
     expect(report.graphs.offscreen).toBeUndefined();
     expect(readFileSync(join(root, 'offscreen/offscreen.js'), 'utf8')).toBe(offscreen);
+  });
+
+  test('rejects an outside-stage symlink before the minifier reads its target', async () => {
+    const root = makeRoot();
+    const outside = makeRoot();
+    write(root, 'manifest.json', JSON.stringify({
+      background: { service_worker: 'background/service-worker.js', type: 'module' },
+    }));
+    write(root, 'background/service-worker.js', 'import "./outside.js";\n');
+    const outsideSource = '// must never be staged or rewritten\nexport const escaped = true;\n';
+    write(outside, 'outside.js', outsideSource);
+    symlinkSync(join(outside, 'outside.js'), join(root, 'background', 'outside.js'));
+
+    await expect(minifyColdArtifactModules(root, 'firefox', 'store'))
+      .rejects.toThrow('static module graph input is symlinked: background/outside.js');
+    expect(readFileSync(join(outside, 'outside.js'), 'utf8')).toBe(outsideSource);
+  });
+
+  test('rejects bare, remote, and data static imports while ignoring dynamic imports', async () => {
+    for (const specifier of [
+      'unmapped-package',
+      'https://modules.example/support.js',
+      'data:text/javascript,export default 1',
+    ]) {
+      const root = makeRoot();
+      write(root, 'entry.js', `import ${JSON.stringify(specifier)};\nimport("./lazy.js");\n`);
+      await expect(collectStaticModuleGraph(root, join(root, 'entry.js')))
+        .rejects.toThrow(`unsupported static import specifier: ${specifier} from entry.js`);
+    }
+  });
+
+  test('detects an equal-count, equal-byte dependency substitution', async () => {
+    const build = async (suffix: 'a' | 'b') => {
+      const root = makeRoot();
+      write(root, 'manifest.json', JSON.stringify({
+        background: { service_worker: 'background/service-worker.js', type: 'module' },
+      }));
+      write(root, 'background/service-worker.js', `
+        // equal-sized fixture entry
+        import { value } from './helper-${suffix}.js';
+        export const result = value;
+      `);
+      write(root, `background/helper-${suffix}.js`, `
+        // equal-sized fixture helper
+        export const value = 1;
+      `);
+      return minifyColdArtifactModules(root, 'firefox', 'store');
+    };
+    const first = await build('a');
+    const second = await build('b');
+    const firstGraph = first.graphs.serviceWorker;
+    const secondGraph = second.graphs.serviceWorker;
+
+    expect({
+      modules: secondGraph.modules,
+      beforeBytes: secondGraph.beforeBytes,
+      afterBytes: secondGraph.afterBytes,
+      entryBytes: secondGraph.entryBytes,
+    }).toEqual({
+      modules: firstGraph.modules,
+      beforeBytes: firstGraph.beforeBytes,
+      afterBytes: firstGraph.afterBytes,
+      entryBytes: firstGraph.entryBytes,
+    });
+    expect(secondGraph.inputSha256).not.toBe(firstGraph.inputSha256);
+    expect(() => assertColdArtifactBudgets({ ...second, browser: 'chrome' }, {
+      serviceWorker: {
+        modules: firstGraph.modules,
+        graphBytes: firstGraph.afterBytes,
+        entryBytes: firstGraph.entryBytes,
+        inputSha256: firstGraph.inputSha256,
+      },
+    })).toThrow(/store\/chrome serviceWorker cold input closure changed/);
   });
 
   test('keeps exported names and runtime behavior', async () => {

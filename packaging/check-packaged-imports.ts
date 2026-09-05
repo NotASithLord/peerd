@@ -55,7 +55,6 @@ const unresolved = async (
     try { src = readFileSync(file, 'utf8'); } catch { continue; }
     for (const spec of await staticImportSpecifiers(src, relative(root, file))) {
       const r = resolveStaticSpecifier(spec, file, root);
-      if (!r) continue;
       if (!pathIsInside(root, r) || !existsSync(r)) {
         miss.push({ spec, from: relative(root, file) });
         continue;

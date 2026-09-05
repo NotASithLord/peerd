@@ -7,7 +7,7 @@
 // host-specific dynamic edges; Chrome MV3 service-worker packaging does not
 // treat import() as a cold-graph boundary.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { init, parse } from 'es-module-lexer';
 
@@ -16,16 +16,18 @@ export const pathIsInside = (root: string, candidate: string): boolean => {
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
 };
 
-/** Resolve a browser module specifier. Bare/URL-like specifiers return null. */
+/** Resolve a local browser module specifier and reject every other static edge. */
 export const resolveStaticSpecifier = (
   specifier: string,
   fromFile: string,
   root: string,
-): string | null => {
+): string => {
   const clean = specifier.split(/[?#]/, 1)[0];
-  if (clean.startsWith('/')) return resolve(root, `.${clean}`);
-  if (clean.startsWith('.')) return resolve(dirname(fromFile), clean);
-  return null;
+  if (clean.startsWith('/') && !clean.startsWith('//')) return resolve(root, `.${clean}`);
+  if (clean.startsWith('./') || clean.startsWith('../')) return resolve(dirname(fromFile), clean);
+  throw new Error(
+    `unsupported static import specifier: ${specifier} from ${relative(root, fromFile)}`,
+  );
 };
 
 /** Parse only statically linked import/export-from specifiers. */
@@ -70,6 +72,7 @@ export const collectStaticModuleGraph = async (
   entry: string,
 ): Promise<Set<string>> => {
   const absoluteRoot = resolve(root);
+  const realRoot = realpathSync(absoluteRoot);
   const first = resolve(entry);
   const graph = new Set<string>();
   const queue = [first];
@@ -83,13 +86,25 @@ export const collectStaticModuleGraph = async (
     if (!existsSync(file)) {
       throw new Error(`static module missing from artifact: ${relative(absoluteRoot, file)}`);
     }
+    const relativeInput = relative(absoluteRoot, file);
+    if (lstatSync(file).isSymbolicLink()) {
+      throw new Error(`static module graph input is symlinked: ${relativeInput}`);
+    }
+    const realFile = realpathSync(file);
+    if (!pathIsInside(realRoot, realFile)) {
+      throw new Error(`static module graph input escapes real artifact root: ${relativeInput}`);
+    }
+    // why: a symlinked parent can redirect reads and writes even when the final
+    // directory entry is a regular file and its lexical path stays in staging.
+    if (realFile !== resolve(realRoot, relativeInput)) {
+      throw new Error(`static module graph input traverses a symlink: ${relativeInput}`);
+    }
     graph.add(file);
 
     if (!['.js', '.mjs'].includes(extname(file))) continue;
     const source = readFileSync(file, 'utf8');
     for (const specifier of await staticImportSpecifiers(source, relative(absoluteRoot, file))) {
       const target = resolveStaticSpecifier(specifier, file, absoluteRoot);
-      if (target === null) continue;
       if (!pathIsInside(absoluteRoot, target)) {
         throw new Error(
           `static import escapes artifact root: ${specifier} from ${relative(absoluteRoot, file)}`,
