@@ -44,7 +44,7 @@ const nativeKernelEntry = 'background/vault-kernel-chrome.js';
 const previewKernelEntry = 'background/vault-kernel-preview.js';
 
 // The prior exact ratchet remains a diagnostic baseline. These are the only
-// cold inputs intentionally changed since it: the two authority hosts gained
+// cold inputs whose sizes changed since it: the two authority hosts gained
 // terminal outcome/audit custody, policy gained the Plan-safe page-program
 // subset, quota gained its matching bound, and a2a shed a stale prompt grant.
 // Computing from prior input sizes makes an unrelated offsetting edit fail too.

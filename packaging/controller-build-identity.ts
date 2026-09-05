@@ -17,6 +17,17 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   // any of these bytes change, not only when the sealed controller changes.
   'offscreen/offscreen.js',
   'offscreen/feature-lease-host.js',
+  'offscreen/supervisor-channels.js',
+  'offscreen/actor-channel-host.js',
+  'offscreen/actor-runner.js',
+  'offscreen/actor-worker.js',
+  'offscreen/actor-worker-runtime.js',
+  'offscreen/voice-channel-host.js',
+  'offscreen/local-model.js',
+  'offscreen/job-runner.js',
+  'offscreen/doc-extract.js',
+  'offscreen/web-extract-core.js',
+  'offscreen/web-extract.js',
   'offscreen/repository-host.js',
   // Per-offer module Workers are selected through new URL(), which the static
   // graph intentionally does not follow. Bind their executable bytes directly.
@@ -31,10 +42,16 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'background/repository-client.js',
   'background/offscreen-controller-client.js',
   'background/direct-controller-client.js',
+  'background/direct-actor-host.js',
+  'background/firefox-storage-keepalive.js',
+  'background/repository-local-client.js',
   // Kernel-side reverse authority for turn.run is not a child of a controller
   // client, so bind it as an explicit root rather than letting authority drift
   // behind a stale host.
   'background/controller-turn-bridge.js',
+  'background/kernel-demand-plane.js',
+  'background/kernel-production-runtime.js',
+  'background/kernel-turn-authority-adapter.js',
   'background/kernel-semantic-authority.js',
   'background/kernel-semantic-control.js',
   'background/kernel-administrative-control.js',
@@ -46,6 +63,7 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   'offscreen/controller-bootstrap.js',
   'offscreen/controller-worker.js',
   'offscreen/controller-runtime.js',
+  'offscreen/controller-compose-runtime.js',
   'offscreen/kernel-runtime-host.js',
   'offscreen/kernel-administrative-host.js',
   'offscreen/kernel-support-host.js',
@@ -57,6 +75,21 @@ export const CONTROLLER_BUILD_ENTRIES = Object.freeze([
   // edges, so bind the fixed runtime graph explicitly.
   'offscreen/vault-authority-worker.js',
   'offscreen/vault-authority-runtime.js',
+  'offscreen/document-conversion-worker.js',
+  // Runtime-selected repository/model/document/voice implementations remain
+  // part of the same host identity even though they stay off the cold graph.
+  'peerd-engine/export.js',
+  'peerd-engine/repository.js',
+  'peerd-runtime/offscreen.js',
+  'peerd-runtime/voice/transcriber-picker.js',
+  'vendor/isomorphic-git/index.js',
+  'vendor/muse-glimmer/muse-glimmer.js',
+  'vendor/pdfjs/pdf.min.mjs',
+  'vendor/readability/Readability-readerable.js',
+  'vendor/readability/Readability.js',
+  'vendor/tesseract/tesseract.esm.min.js',
+  'vendor/transformers/transformers.js',
+  'vendor/turndown/turndown.browser.es.js',
   // Fixed-literal dynamic import evaluated only after a committed turn. It is
   // digest-bound separately so the prompt controller stays cold-small.
   'offscreen/controller-turn-runtime.js',
@@ -73,6 +106,11 @@ export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
   // Firefox preview/dev owns its contributor registration in a distinct
   // background entry, so bind that channel-specific authority shell too.
   'background/vault-kernel-firefox-preview.js',
+  'background/kernel-contributor-owner.js',
+  'offscreen/contributor-channel-addon.js',
+  'peerd-runtime/controller-contributor.js',
+  'shared/contributor-channel.js',
+  'peerd-distributed/index.js',
   'offscreen/semantic-routes/contributor.js',
 ] as const);
 

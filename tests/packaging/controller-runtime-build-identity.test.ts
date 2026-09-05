@@ -79,6 +79,27 @@ describe('controller runtime build identity', () => {
     expect(await controllerBuildDigest(extension)).not.toBe(before);
   });
 
+  test('binds representative compose, lease, actor, voice, and contributor demand hosts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-demand-digest-'));
+    roots.push(root);
+    const extension = join(root, 'extension');
+    cpSync(join(process.cwd(), 'extension'), extension, { recursive: true });
+    let prior = await controllerBuildDigest(extension);
+    for (const entry of [
+      'offscreen/controller-compose-runtime.js',
+      'offscreen/supervisor-channels.js',
+      'offscreen/actor-runner.js',
+      'offscreen/voice-channel-host.js',
+      'offscreen/contributor-channel-addon.js',
+    ]) {
+      const path = join(extension, entry);
+      writeFileSync(path, `${readFileSync(path, 'utf8')}\n`);
+      const next = await controllerBuildDigest(extension);
+      expect(next, entry).not.toBe(prior);
+      prior = next;
+    }
+  });
+
   test('controller-only feature growth leaves every normalized SW authority target unchanged', async () => {
     const root = mkdtempSync(join(tmpdir(), 'peerd-controller-feature-growth-'));
     roots.push(root);

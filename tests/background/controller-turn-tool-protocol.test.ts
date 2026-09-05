@@ -413,6 +413,12 @@ describe('controller turn finite tool protocol', () => {
         beginTracking: async () => ({ handle: { sequence: ++trackingBegins } }),
         settleTracking: async (handle: any, outcome: any) => {
           trackingSettlements.push({ handle, outcome });
+          if (handle?.sequence === 2) return {
+            error: 'outcome_unknown: verify the refused routine before retrying',
+            recovery: {
+              category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+            },
+          };
         },
       },
       appendAudit: async (entry: any) => {
@@ -489,7 +495,7 @@ describe('controller turn finite tool protocol', () => {
       authorityReceipt: { outcome: 'performed', performed: true, outcomeKnown: true },
     });
     expect(replies[1]).toMatchObject({
-      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      ok: false, code: 'audit_unavailable', outcomeKnown: false,
       authorityReceipt: {
         outcome: 'not-performed', performed: false, outcomeKnown: true,
         refused: true, code: 'audit_unavailable',
@@ -497,8 +503,9 @@ describe('controller turn finite tool protocol', () => {
     });
     expect(replies[2]).toMatchObject({ ok: false, code: 'audit_unavailable' });
     expect(failure).toMatchObject({
-      code: 'audit_unavailable', outcomeKnown: true, retryable: false,
+      code: 'turn-kernel-call-failed', outcomeKnown: false, retryable: false,
     });
+    expect(failure?.message).toContain('crossed dispatch without a known outcome');
   });
 
   test('an unknown main authority effect refuses every later domain mutation', async () => {
