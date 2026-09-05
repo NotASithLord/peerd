@@ -16,6 +16,8 @@ import { makeSessionRoutes } from '../../extension/background/routes/sessions.js
 import { composeTurn } from '../../extension/offscreen/controller-compose-runtime.js';
 import { browserProbeResult, TEST_DOCUMENT_ID } from '../helpers/browser-scripting.ts';
 import { ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
+import { ENGINE_LIVENESS_KEY } from '../../extension/peerd-runtime/lifecycle/engine-liveness.js';
+import { PENDING_NOTICES_KEY } from '../../extension/peerd-runtime/lifecycle/boot.js';
 
 const event = () => {
   const listeners = new Set<(...args: any[]) => void>();
@@ -53,6 +55,7 @@ const registry = (records: any[]) => {
     list: async () => [...byId.values()],
     create: async (record: any) => { byId.set(record.id, record); return record; },
     remove: async (id: string) => byId.delete(id),
+    delete: async (id: string) => byId.delete(id),
     getActorSession: async (id: string) => actorSessions.get(id) ?? null,
     setActorSession: async (id: string, sessionId: string) => { actorSessions.set(id, sessionId); },
     getDefaultForSession: async (sessionId: string) => defaults.get(sessionId) ?? null,
@@ -119,6 +122,7 @@ const harness = async (
       sessionSet: (key: string, value: any) => Promise<void>,
     },
     sessionReadsUnavailable?: () => boolean,
+    engineRecovery?: boolean,
   } = {},
 ) => {
   const toolProjections: any[] = [];
@@ -176,9 +180,17 @@ const harness = async (
   });
   const appNetworkAdmissions: [number, string][] = [];
   const appNetworkTabs = new Set<number>();
-  const vmRegistry = registry([{ id: 'vm-1', name: 'VM' }]);
+  const vmRegistry = registry([{
+    id: 'vm-1', name: 'VM',
+    ...(options.engineRecovery ? { ownerSessionId: root.sessionId } : {}),
+  }]);
   const jsRegistry = registry([{ id: 'notebook-1', name: 'Notebook' }]);
-  const podRegistry = registry([{ id: 'pod-1', name: 'Pod' }]);
+  const podRegistry = registry([{
+    id: 'pod-1', name: 'Pod',
+    ...(options.engineRecovery ? {
+      ownerSessionId: root.sessionId, persistent: false,
+    } : {}),
+  }]);
   const appRegistry = registry([{
     id: 'app-1', name: 'Todo', ownerSessionId: root.sessionId,
     source: 'dweb', dweb: { publisher: 'did:key:alice' },
@@ -259,8 +271,16 @@ const harness = async (
   } };
   const cache = new Map<string, any>([['currentSessionId', root.sessionId]]);
   const kvState = new Map<string, any>();
+  if (options.engineRecovery) {
+    kvState.set(ENGINE_LIVENESS_KEY, {
+      'vm:vm-1': { kind: 'vm', id: 'vm-1', tabId: 31, at: 10 },
+      'pod:pod-1': { kind: 'pod', id: 'pod-1', tabId: 32, at: 11 },
+      'app:app-1': { kind: 'app', id: 'app-1', tabId: 17, at: 12 },
+    });
+  }
   const broadcasts: any[] = [];
   const sourceProjections: any[] = [];
+  const destroyedRepositories: any[] = [];
   let actorConfig: any;
   const engine: any = {
     vmRegistry, jsRegistry, podRegistry, appRegistry,
@@ -283,6 +303,7 @@ const harness = async (
       statusApp: async () => ({ oid: null, changed: [] }),
       commitApp: async () => ({ oid: 'commit-1' }),
       diffApp: async () => ({ files: [] }),
+      destroy: async (...args: any[]) => { destroyedRepositories.push(args); },
     },
     opfsHelpers: () => ({ nuke: async () => {} }),
     withDwebPublication: async (operation: (current: () => boolean) => any) => operation(() => true),
@@ -427,6 +448,7 @@ const harness = async (
     audits,
     scriptRuns,
     appNetworkAdmissions,
+    destroyedRepositories,
     actorConfig: () => actorConfig,
   };
 };
@@ -1144,6 +1166,41 @@ describe('kernel turn authority adapter', () => {
     expect(settled).toBe(true);
     expect(stages).toEqual(['network-start', 'network-ready']);
     expect(h.engine.appTabTracker.getTabId('app-1')).toBe(17);
+  });
+
+  test('reaps lost engine hosts after restored App hydration', async () => {
+    const notes: any[] = [];
+    const h = await harness(undefined, {
+      restoredApp: true,
+      engineRecovery: true,
+      postChatNote: (...args) => { notes.push(args); },
+    });
+
+    await h.runtime.relays.engineReady;
+
+    expect(h.kvState.get(ENGINE_LIVENESS_KEY)).toEqual({
+      'app:app-1': { kind: 'app', id: 'app-1', tabId: 17, at: 12 },
+    });
+    expect(h.audits.filter((entry: any) =>
+      entry.type === 'lifecycle.engine.orphan-reaped').map((entry: any) => entry.details))
+      .toEqual([
+        { kind: 'vm', id: 'vm-1' },
+        { kind: 'pod', id: 'pod-1' },
+      ]);
+    expect(h.destroyedRepositories).toEqual([
+      [{ kind: 'pod', id: 'pod-1' }, { worktree: true }],
+    ]);
+    expect(await h.engine.podRegistry.get('pod-1')).toBeNull();
+    const notices = h.kvState.get(PENDING_NOTICES_KEY)?.[h.root.sessionId];
+    expect(notices).toHaveLength(1);
+    expect(notices[0].recoveryRecord).toMatchObject({
+      recoveryState: 'interrupted',
+      resourceLost: true,
+      resources: [{ kind: 'vm', id: 'vm-1' }],
+    });
+    expect(notes).toEqual([[
+      expect.stringContaining('VM'), null, h.root.sessionId,
+    ]]);
   });
 
   test('runs a bound actor with projection and spend gates, then replays live state', async () => {

@@ -35,6 +35,7 @@ import {
   makeDispatchTracker,
   makeEngineLiveness,
   makeFailClosedTracker,
+  groupResourceLossNotices,
   makeFixedSiteClientOriginGuard,
   makeJudgeLanding,
   makeLearnedOrigins,
@@ -2826,12 +2827,51 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         trustedEngineMessage(sender) ? attachAppTabActor(message, sender) : false,
     };
     const engineTrackersHydrated = Promise.resolve();
+    const recoverLostEngineHosts = async () => {
+      await lifecycleArmed;
+      const entries = registryEntries();
+      const surviving = entries.flatMap(([kind, , , tracker]) =>
+        tracker.listLive().map((/** @type {string} */ id) => `${kind}:${id}`));
+      const lost = await engineLiveness.sweep({ surviving });
+      /** @type {Array<{kind:'vm'|'notebook'|'app',id:string,name?:string,ownerSessionId:string}>} */
+      const lostResources = [];
+      for (const entry of lost) {
+        deps.auditLog.append({
+          type: 'lifecycle.engine.orphan-reaped',
+          details: { kind: entry.kind, id: entry.id },
+        }).catch(() => {});
+        const registry = entries.find(([kind]) => kind === entry.kind)?.[2];
+        const record = await Promise.resolve(registry?.get?.(entry.id)).catch(() => null);
+        if (entry.kind === 'pod' && record?.persistent === false) {
+          await engine.repositories.destroy(
+            { kind: 'pod', id: entry.id }, { worktree: true },
+          ).catch(() => {});
+          await engine.podRegistry.delete(entry.id).catch(() => {});
+          continue;
+        }
+        if (!record?.ownerSessionId || !['vm', 'notebook', 'app'].includes(entry.kind)) continue;
+        lostResources.push({
+          kind: /** @type {'vm'|'notebook'|'app'} */ (entry.kind),
+          id: entry.id,
+          name: record.name,
+          ownerSessionId: record.ownerSessionId,
+        });
+      }
+      for (const notice of groupResourceLossNotices(lostResources)) {
+        await lifecycleBoot.parkNotice(notice.sessionId, notice).catch(() => {});
+      }
+    };
     const engineReady = Promise.all(engine.appCandidates.map((/** @type {any} */ candidate) =>
       attachAppTabActor({
         type: 'app/tab-ready', appId: candidate.appId,
         ownerSessionId: candidate.ownerSessionId,
       }, { tab: { id: candidate.tabId, url: candidate.url } })))
-      .then(() => undefined);
+      .then(recoverLostEngineHosts)
+      .catch((cause) => {
+        // why: orphan reporting is best-effort bookkeeping. Losing that report
+        // must not make otherwise-reconciled engine tabs unusable.
+        console.warn('[kernel] engine orphan sweep failed', cause);
+      });
     const conversationRegistry = createConversationRegistry();
     const dwebAgentOn = () => deps.dwebEnabled
       && deps.settingsStore.get().dwebEnabled === true

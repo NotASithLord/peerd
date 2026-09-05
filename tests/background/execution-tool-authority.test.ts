@@ -127,6 +127,43 @@ describe('exact execution creation rollback', () => {
     expect(imports).toBe(0);
   });
 
+  test('creation failures use the consolidated sandbox tool name', async () => {
+    const podPlan = planFor('pod');
+    const pod = createExecutionToolAuthority({
+      binding: { operation: 'turn.execution.create-pod', args: { plan: podPlan } },
+      ctx: {
+        session: { sessionId: 'chat-1' },
+        podRegistry: {
+          create: async () => ({ id: 'pod-1', name: 'Work' }),
+          delete: async () => true,
+        },
+        podTabTracker: { ensureTab: async () => {}, getTabId: () => null },
+        repositories: {
+          clone: async () => { throw new Error('clone refused'); },
+          destroy: async () => {},
+        },
+        confirm: async () => true,
+        readAuthorityPermission: async () => ({ mode: 'act' }),
+      },
+    });
+    expect(await pod.createPod(podPlan)).toEqual({
+      ok: false, error: 'sandbox_create_failed: pod: clone refused',
+    });
+
+    const appPlan = { kind: 'app', name: 'Work' };
+    const app = createExecutionToolAuthority({
+      binding: { operation: 'turn.execution.create-app', args: { plan: appPlan } },
+      ctx: {
+        session: { sessionId: 'chat-1' },
+        appClient: { create: async () => { throw new Error('private backend detail'); } },
+      },
+    });
+    expect(await app.createApp(appPlan)).toEqual({
+      ok: false, error: 'sandbox_create_failed: app',
+      outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+  });
+
   test.each(['notebook', 'pod'] as const)(
     '%s rollback requires the registry to attest that its provisional record was deleted',
     async (kind) => {

@@ -28,7 +28,7 @@ import {
   cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync, existsSync,
   readdirSync, lstatSync, statSync, utimesSync, chmodSync, realpathSync,
 } from 'node:fs';
-import { join, relative, basename, dirname, resolve, sep } from 'node:path';
+import { join, relative, basename, dirname, resolve, sep, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
@@ -150,6 +150,59 @@ export const assertRegularPackageTree = (root: string, label: string): void => {
   visit(root, '.');
 };
 
+const isWithinOrEqual = (parent: string, child: string): boolean =>
+  child === parent || child.startsWith(`${parent}${sep}`);
+
+/**
+ * Refuse indirection in every path component before reading a release input.
+ * why: checking only the staged extension tree misses manifests, defaults, and
+ * swap templates; copyFileSync/import follow those links and erase the evidence
+ * before the staging-tree check can see it.
+ */
+export const assertRegularContainedPackageInput = (
+  trustedRoot: string,
+  input: string,
+  label: string,
+  kind: 'file' | 'tree' = 'file',
+): void => {
+  const absoluteRoot = resolve(trustedRoot);
+  const absoluteInput = resolve(input);
+  const relativeInput = relative(absoluteRoot, absoluteInput);
+  if (relativeInput === '..' || relativeInput.startsWith(`..${sep}`) || isAbsolute(relativeInput)) {
+    throw new Error(`${label} is outside its trusted root: ${input}`);
+  }
+
+  const components = relativeInput === '' ? [] : relativeInput.split(sep);
+  let current = absoluteRoot;
+  for (let index = 0; index <= components.length; index += 1) {
+    const relativePath = index === 0 ? '.' : components.slice(0, index).join(sep);
+    if (index > 0) current = join(current, components[index - 1]);
+    const entry = lstatSync(current);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${label} contains a symbolic link: ${relativePath}`);
+    }
+    const final = index === components.length;
+    if (!final && !entry.isDirectory()) {
+      throw new Error(`${label} contains a non-directory parent: ${relativePath}`);
+    }
+    if (final && (kind === 'file' ? !entry.isFile() : !entry.isDirectory())) {
+      throw new Error(`${label} is not a regular ${kind === 'file' ? 'file' : 'directory'}: ${relativePath}`);
+    }
+  }
+
+  const realRoot = realpathSync(absoluteRoot);
+  const realInput = realpathSync(absoluteInput);
+  if (!isWithinOrEqual(realRoot, realInput)) {
+    throw new Error(`${label} resolves outside its trusted root: ${input}`);
+  }
+  if (kind === 'tree') assertRegularPackageTree(absoluteInput, label);
+};
+
+const copyPackageTemplate = (source: string, destination: string): void => {
+  assertRegularContainedPackageInput(REPO_ROOT, source, 'package template');
+  copyFileSync(source, destination);
+};
+
 const normalizeStagingForZip = (staging: string): string[] => {
   assertRegularPackageTree(staging, 'package staging tree');
   const entries = listEntriesSorted(staging);
@@ -194,12 +247,12 @@ export const applyDwebDisabledTemplates = (
   browser: Browser,
 ): boolean => {
   if (dwebEnabledForTarget(channel, browser)) return false;
-  copyFileSync(STORE_LOADER_TEMPLATE, join(staging, 'shared', 'dweb-loader.js'));
-  copyFileSync(
+  copyPackageTemplate(STORE_LOADER_TEMPLATE, join(staging, 'shared', 'dweb-loader.js'));
+  copyPackageTemplate(
     DWEB_ROUTES_DISABLED_TEMPLATE,
     join(staging, 'background', 'routes', 'dweb.js'),
   );
-  copyFileSync(
+  copyPackageTemplate(
     DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
     join(staging, 'background', 'routes', 'dweb-self.js'),
   );
@@ -246,8 +299,6 @@ export const packageArtifact = async (
   const extensionDir = join(resolvedSourceRoot, 'extension');
   const manifestsDir = join(resolvedSourceRoot, 'manifests');
   const defaultSettingsFile = join(resolvedSourceRoot, 'packaging', 'default-settings.mjs');
-  const isWithinOrEqual = (parent: string, child: string): boolean =>
-    child === parent || child.startsWith(`${parent}${sep}`);
   const legacyDefaultRoots = resolvedSourceRoot === canonicalPath(REPO_ROOT)
     && resolvedArtifactRoot === canonicalPath(ARTIFACTS_DIR);
   if (!legacyDefaultRoots
@@ -258,7 +309,15 @@ export const packageArtifact = async (
   for (const required of [extensionDir, manifestsDir, defaultSettingsFile]) {
     if (!existsSync(required)) throw new Error(`package source root is incomplete: missing ${required}`);
   }
-  assertRegularPackageTree(extensionDir, 'package source extension tree');
+  assertRegularContainedPackageInput(
+    resolvedSourceRoot, extensionDir, 'package source extension tree', 'tree',
+  );
+  assertRegularContainedPackageInput(
+    resolvedSourceRoot, manifestsDir, 'package source manifests tree', 'tree',
+  );
+  assertRegularContainedPackageInput(
+    resolvedSourceRoot, defaultSettingsFile, 'package source default settings',
+  );
   if (!['enforce', 'measure-only'].includes(coldBudgetMode)) {
     throw new Error(`unknown coldBudgetMode ${coldBudgetMode}`);
   }
@@ -293,12 +352,12 @@ export const packageArtifact = async (
   );
   applyDwebDisabledTemplates(staging, channel, browser);
   if (channel === 'store') {
-    copyFileSync(STORE_ACTOR_WORKER_TEMPLATE, join(staging, 'offscreen', 'actor-worker.js'));
-    copyFileSync(
+    copyPackageTemplate(STORE_ACTOR_WORKER_TEMPLATE, join(staging, 'offscreen', 'actor-worker.js'));
+    copyPackageTemplate(
       STORE_OPTIONS_APP_TEMPLATE,
       join(staging, 'options', 'components', 'options-app.js'),
     );
-    copyFileSync(
+    copyPackageTemplate(
       STORE_SEMANTIC_HOST_TEMPLATE,
       join(staging, 'offscreen', 'semantic-route-host.js'),
     );
@@ -310,7 +369,7 @@ export const packageArtifact = async (
   // is permanently false there. Swap the whole reviewed module for the exact
   // unavailable implementation rather than applying a brittle text transform.
   if (channel === 'store' || browser === 'firefox') {
-    copyFileSync(
+    copyPackageTemplate(
       DEBUGGER_UNAVAILABLE_TEMPLATE,
       join(staging, 'background', 'debugger-pool.js'),
     );

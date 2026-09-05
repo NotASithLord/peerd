@@ -109,7 +109,7 @@ export const formatPdfBody = ({
       ocrAvailable
         ? '[note] This PDF has little or no embedded text (likely scanned); OCR did not recover more.'
         : '[note] This PDF has little or no embedded text — it looks scanned/image-only. '
-          + 'On-device OCR is available but not installed (Settings → Voice & OCR).',
+          + 'OCR is unavailable in this build; use a searchable PDF or page images.',
     );
   }
   if (truncated) {

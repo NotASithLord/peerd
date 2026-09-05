@@ -179,7 +179,9 @@ export const createExecutionToolAuthority = ({ binding, ctx, signal, shared = {}
       });
       const repository = await cloneRemote('pod', record.id, plan);
       if (repository?.error) {
-        const error = repository.error.replace(/^git_clone_failed:/, 'pod_create_failed:');
+        const error = repository.error.replace(
+          /^git_clone_failed:/, 'sandbox_create_failed: pod:',
+        );
         if (!await rollbackCreatedExecution(ctx, registry, 'pod', record.id)) {
           throw rollbackFailure(error);
         }
@@ -189,7 +191,7 @@ export const createExecutionToolAuthority = ({ binding, ctx, signal, shared = {}
         await tracker.ensureTab(record.id, { active: false, groupTitle: ENGINE_TAB_GROUP_TITLE });
       } catch (cause) {
         if (tracker.getTabId?.(record.id) == null) {
-          const error = `pod_create_failed: ${messageOf(cause)}`;
+          const error = `sandbox_create_failed: pod: ${messageOf(cause)}`;
           if (!await rollbackCreatedExecution(ctx, registry, 'pod', record.id)) {
             throw rollbackFailure(error);
           }
@@ -274,7 +276,7 @@ export const createExecutionToolAuthority = ({ binding, ctx, signal, shared = {}
         // detail. The exact host outcome is known here, but its raw text is not
         // trusted model content.
         return {
-          ok: false, error: 'app_create_failed',
+          ok: false, error: 'sandbox_create_failed: app',
           outcomeKind: 'pre-effect-failure', retryable: true,
         };
       }

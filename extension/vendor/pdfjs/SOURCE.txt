@@ -14,9 +14,9 @@ peerd reads PDFs the agent encounters through the read_doc runner tool
 PDF engine; its text layer extraction is the DEFAULT, always-available
 reader (no download). Extraction runs in the OFFSCREEN document
 (offscreen/pdf-extract.js) — pdf.js needs a Worker, which a service worker
-cannot host. The heavier OCR path for scanned PDFs is a separate, opt-in
-runtime download (peerd-runtime/pdf/ocr-store.js), the Moonshine-voice
-pattern.
+cannot host. The heavier OCR path for scanned PDFs is disabled until its
+cached-byte loader passes installed-extension acceptance; see
+peerd-runtime/pdf/ocr-store.js.
 
 Files committed (the npm `build/` minified ESM build)
 -----------------------------------------------------

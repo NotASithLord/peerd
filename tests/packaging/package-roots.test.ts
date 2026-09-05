@@ -8,7 +8,9 @@ import { join } from 'node:path';
 import { genChannelConfigSource } from '../../packaging/gen-channel-config.ts';
 import { generateManifest } from '../../packaging/gen-manifest.ts';
 import { REPO_ROOT } from '../../packaging/lib.ts';
-import { assertRegularPackageTree, packageArtifact } from '../../packaging/package.ts';
+import {
+  assertRegularContainedPackageInput, assertRegularPackageTree, packageArtifact,
+} from '../../packaging/package.ts';
 
 const roots: string[] = [];
 const temporaryRoot = (): string => {
@@ -114,6 +116,59 @@ describe('isolated package source and artifact roots', () => {
     })).rejects.toThrow(
       'package source extension tree contains a symbolic link: assets/unreferenced.txt',
     );
+  });
+
+  test('non-extension inputs reject symlinked files and parent directories', () => {
+    const trustedRoot = temporaryRoot();
+    const outsideRoot = temporaryRoot();
+    const outsideFile = join(outsideRoot, 'vault-plaintext.js');
+    writeFileSync(outsideFile, 'must never enter an extension archive\n');
+
+    const linkedFile = join(trustedRoot, 'template.js');
+    symlinkSync(outsideFile, linkedFile);
+    expect(() => assertRegularContainedPackageInput(trustedRoot, linkedFile, 'fixture input'))
+      .toThrow('fixture input contains a symbolic link: template.js');
+
+    const outsideParent = join(outsideRoot, 'templates');
+    mkdirSync(outsideParent);
+    writeFileSync(join(outsideParent, 'template.js'), 'must never enter an extension archive\n');
+    const linkedParent = join(trustedRoot, 'templates');
+    symlinkSync(outsideParent, linkedParent);
+    expect(() => assertRegularContainedPackageInput(
+      trustedRoot, join(linkedParent, 'template.js'), 'fixture input',
+    )).toThrow('fixture input contains a symbolic link: templates');
+  });
+
+  test('package sources reject linked manifests and default-settings parents before staging', async () => {
+    const sourceRoot = temporaryRoot();
+    const artifactRoot = temporaryRoot();
+    const outsideRoot = temporaryRoot();
+    mkdirSync(join(sourceRoot, 'extension'));
+    mkdirSync(join(sourceRoot, 'packaging'));
+    writeFileSync(join(sourceRoot, 'packaging', 'default-settings.mjs'), 'export const defaults = {};\n');
+    const outsideManifests = join(outsideRoot, 'manifests');
+    mkdirSync(outsideManifests);
+    symlinkSync(outsideManifests, join(sourceRoot, 'manifests'));
+
+    await expect(packageArtifact({
+      channel: 'preview', browser: 'chrome', version: '0.0.0',
+      sourceRoot, artifactRoot, sign: false, verify: false, minify: false,
+      coldBudgetMode: 'measure-only',
+    })).rejects.toThrow('package source manifests tree contains a symbolic link: manifests');
+
+    const linkedDefaultsSource = temporaryRoot();
+    mkdirSync(join(linkedDefaultsSource, 'extension'));
+    mkdirSync(join(linkedDefaultsSource, 'manifests'));
+    const outsidePackaging = join(outsideRoot, 'packaging');
+    mkdirSync(outsidePackaging);
+    writeFileSync(join(outsidePackaging, 'default-settings.mjs'), 'export const defaults = {};\n');
+    symlinkSync(outsidePackaging, join(linkedDefaultsSource, 'packaging'));
+
+    await expect(packageArtifact({
+      channel: 'preview', browser: 'chrome', version: '0.0.0',
+      sourceRoot: linkedDefaultsSource, artifactRoot,
+      sign: false, verify: false, minify: false, coldBudgetMode: 'measure-only',
+    })).rejects.toThrow('package source default settings contains a symbolic link: packaging');
   });
 
   test('release trees reject special filesystem nodes', () => {

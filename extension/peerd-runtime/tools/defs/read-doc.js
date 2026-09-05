@@ -79,7 +79,7 @@ const DOCUMENT_FAILURE_GUIDANCE = Object.freeze({
   parse_failed: 'The recognized document could not be parsed. Try a fresh export or another copy.',
   fetch_failed: 'The document could not be fetched. Verify that the direct URL is reachable without a redirect or login wall.',
   is_web_content: 'The URL served a web page or plain text, not a document file. Use fetch_url or open it in a tab.',
-  ocr_not_installed: 'OCR is not installed. Retry with the automatic or pdf.js engine, or install OCR support.',
+  ocr_not_installed: 'OCR is unavailable in this build. Retry with the automatic or pdf.js engine, or use page images.',
   pdf_extract_failed: 'The PDF could not be parsed. Try another copy or a fresh PDF export.',
   doc_extract_aborted: 'Document extraction stopped.',
   doc_extract_failed: 'Document extraction failed before any readable content was returned.',

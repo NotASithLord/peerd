@@ -51,7 +51,7 @@ export { createRefRegistry } from './dom/ref-registry.js';
 export { SessionNotFoundError } from './errors.js';
 export { makeLifecycleBoot } from './lifecycle/boot.js';
 export { makeDispatchTracker, makeFailClosedTracker } from './lifecycle/dispatch-tracking.js';
-export { makeEngineLiveness } from './lifecycle/engine-liveness.js';
+export { makeEngineLiveness, groupResourceLossNotices } from './lifecycle/engine-liveness.js';
 export { retryClassForTool } from './lifecycle/tool-retry-class.js';
 export { makePrewalkController } from './loop/prewalk-controller.js';
 export { makeTurnAuthorityDriver } from './loop/turn-authority-driver.js';
