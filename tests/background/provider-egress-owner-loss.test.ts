@@ -227,6 +227,113 @@ describe('provider egress cleanup after controller loss', () => {
     expect(cancelled).toBe(true);
   });
 
+  test('inventory and context probes assemble multi-chunk responses exactly', async () => {
+    const cases = [
+      {
+        call: 'inventory', input: { providerId: 'openrouter' },
+        expectedUrl: 'https://openrouter.ai/api/v1/models',
+      },
+      {
+        call: 'context', input: { providerId: 'anthropic', modelId: 'claude/test' },
+        expectedUrl: 'https://api.anthropic.com/v1/models/claude%2Ftest',
+      },
+    ] as const;
+    for (const spec of cases) {
+      let fetchedUrl = '';
+      let index = 0;
+      const chunks = [new TextEncoder().encode('{"data":'), new TextEncoder().encode('[]}')];
+      const authority = createProviderEgressAuthority({
+        safeFetch: async (resource) => {
+          fetchedUrl = String(resource);
+          return {
+            status: 200, statusText: 'OK',
+            headers: new Headers({ 'content-type': 'application/json' }),
+            body: { getReader: () => ({
+              read: async () => index < chunks.length
+                ? { done: false, value: chunks[index++] }
+                : { done: true, value: undefined },
+              cancel: () => {}, releaseLock: () => {},
+            }) },
+          } as unknown as Response;
+        },
+        vault: { getSecret: async () => 'vault-key' },
+        settingsStore: { get: () => ({}) },
+      });
+      const owner = {};
+      const permit = {
+        owner,
+        permitsProvider: (providerId: string) => providerId === spec.input.providerId,
+      };
+      const reply = spec.call === 'inventory'
+        ? await authority.readModelInventory(spec.input, permit)
+        : await authority.readModelContext(spec.input, permit);
+      expect(reply).toMatchObject({
+        ok: true, outcomeKnown: true,
+        value: { status: 200, headers: { 'content-type': 'application/json' } },
+      });
+      expect(new TextDecoder().decode((reply as any).value.body)).toBe('{"data":[]}');
+      expect(fetchedUrl).toBe(spec.expectedUrl);
+    }
+  });
+
+  test('a declared oversized inventory maps stably and cancels before reading', async () => {
+    const limit = 4 * 1024 * 1024;
+    let cancelled = false;
+    let reads = 0;
+    const authority = createProviderEgressAuthority({
+      safeFetch: async () => ({
+        status: 200, statusText: 'OK',
+        headers: new Headers({ 'content-length': String(limit + 1) }),
+        body: {
+          cancel: () => { cancelled = true; },
+          getReader: () => ({ read: async () => { reads += 1; return { done: true }; } }),
+        },
+      }) as unknown as Response,
+      vault: { getSecret: async () => 'vault-key' },
+      settingsStore: { get: () => ({}) },
+    });
+    await expect(authority.readModelInventory({ providerId: 'openrouter' }, {
+      owner: {}, permitsProvider: (providerId: string) => providerId === 'openrouter',
+    })).resolves.toEqual({
+      ok: false,
+      code: 'model-egress-probe-response-too-large',
+      error: 'model-egress-probe-response-too-large',
+      outcomeKnown: true,
+    });
+    await Promise.resolve();
+    expect(cancelled).toBe(true);
+    expect(reads).toBe(0);
+  });
+
+  test('a streamed oversized context maps stably and cancels at the limit', async () => {
+    const limit = 4 * 1024 * 1024;
+    let cancelled = false;
+    let index = 0;
+    const chunks = [new Uint8Array(limit), new Uint8Array(1)];
+    const authority = createProviderEgressAuthority({
+      safeFetch: async () => fakeResponse({
+        read: async () => index < chunks.length
+          ? { done: false, value: chunks[index++] }
+          : { done: true, value: undefined },
+        cancel: () => { cancelled = true; },
+        releaseLock: () => {},
+      }),
+      vault: { getSecret: async () => 'vault-key' },
+      settingsStore: { get: () => ({}) },
+    });
+    await expect(authority.readModelContext({
+      providerId: 'anthropic', modelId: 'claude-test',
+    }, {
+      owner: {}, permitsProvider: (providerId: string) => providerId === 'anthropic',
+    })).resolves.toEqual({
+      ok: false,
+      code: 'model-egress-probe-response-too-large',
+      error: 'model-egress-probe-response-too-large',
+      outcomeKnown: true,
+    });
+    expect(cancelled).toBe(true);
+  });
+
   test('a duplicate generated stream id preserves the first stream', async () => {
     let fetches = 0;
     let collisionCancelled = false;

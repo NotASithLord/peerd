@@ -127,8 +127,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 403, graphBytes: 4_035_671 }),
-  target: Object.freeze({ modules: 406, graphBytes: 4_125_338 }),
+  shared: Object.freeze({ modules: 403, graphBytes: 4_037_118 }),
+  target: Object.freeze({ modules: 406, graphBytes: 4_126_785 }),
   // Shared contributor settlement now owns its action ceiling so every parser
   // enforces one bound. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 89_867 }),
@@ -166,7 +166,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // deleted.
   // Browser-child generations, runtime-capability-hosts and the semantic hook
   // manifest are fixed custody/policy inputs, not feature ownership.
-  kernel: Object.freeze({ modules: 403, graphBytes: 4_035_671, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 403, graphBytes: 4_037_118, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -197,7 +197,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // exact achieved graph with no reserved headroom. The source-action child
     // generation and bounded hostile-response reads are fixed browser custody
     // and do not grow with tool count.
-    serviceWorker: Object.freeze({ modules: 400, graphBytes: 2_032_580, entryBytes: 173 }),
+    serviceWorker: Object.freeze({ modules: 400, graphBytes: 2_033_470, entryBytes: 173 }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
     sidepanel: Object.freeze({ modules: 11, graphBytes: 136_954, entryBytes: 396 }),
@@ -226,7 +226,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   store: COLD_GRAPH_RATCHETS,
   preview: Object.freeze({
     chrome: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 406, graphBytes: 2_146_521, entryBytes: 207 }),
+      serviceWorker: Object.freeze({ modules: 406, graphBytes: 2_147_411, entryBytes: 207 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 136_954, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 137_122, entryBytes: 564 }),
       offscreen: Object.freeze({ modules: 7, graphBytes: 22_080, entryBytes: 13_355 }),

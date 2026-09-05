@@ -80,7 +80,10 @@ const readBoundedResponse = async (
   /** @type {Response|any} */ response, /** @type {number} */ limit,
   /** @type {AbortSignal|undefined} */ signal, /** @type {boolean} */ asText,
 ) => {
-  throwIfAborted(signal, 'The response read was aborted.');
+  if (signal?.aborted) {
+    cancelBestEffort(response.body, signal.reason);
+    throw abortError(signal, 'The response read was aborted.');
+  }
   const declared = Number(response.headers?.get?.('content-length'));
   if (!asText && Number.isFinite(declared) && declared > limit) {
     cancelBestEffort(response.body);

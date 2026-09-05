@@ -4,11 +4,40 @@
 // SW-owned session/actor context are closed over, so the controller cannot
 // select another VM, URL, file, timeout, or destructive target after admission.
 
-import { readBoundedResponseBytes, ResponseTooLargeError } from '/shared/abort.js';
+import {
+  abortError, cancelBestEffort, readBoundedResponseBytes, ResponseTooLargeError,
+} from '/shared/abort.js';
 
 const mismatch = () => Object.assign(new Error('VM authority mismatch'), {
   outcomeKnown: true, retryable: false,
 });
+
+/** Stop owns settlement even when a transport ignores its signal. Any response
+ * arriving after settlement is observed only long enough to cancel its body.
+ * @param {(url:string,init?:RequestInit)=>Promise<Response>} webFetch
+ * @param {string} url @param {AbortSignal|undefined} signal */
+const fetchForImport = (webFetch, url, signal) => {
+  if (!signal) return webFetch(url);
+  if (signal.aborted) return Promise.reject(abortError(signal, 'VM import stopped.'));
+  return new Promise((resolve, reject) => {
+    let stopped = false;
+    const onAbort = () => {
+      stopped = true;
+      reject(abortError(signal, 'VM import stopped.'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve().then(() => signal.aborted
+      ? Promise.reject(abortError(signal, 'VM import stopped.'))
+      : webFetch(url, { signal })).then((response) => {
+      signal.removeEventListener('abort', onAbort);
+      if (stopped) cancelBestEffort(response.body, signal.reason);
+      else resolve(response);
+    }, (cause) => {
+      signal.removeEventListener('abort', onAbort);
+      if (!stopped) reject(cause);
+    });
+  });
+};
 
 /** @param {{binding:any,ctx:any,signal?:AbortSignal,shared?:any}} input */
 export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal, shared = {} }) => {
@@ -82,7 +111,8 @@ export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal,
       let response;
       let bytes;
       try {
-        response = await ctx.webFetch(url);
+        requireLive();
+        response = await fetchForImport(ctx.webFetch, url, signal);
         if (!response.ok) throw Object.assign(new Error(`fetch_failed: HTTP ${response.status}`), {
           outcomeKnown: true, expectedFetchFailure: true,
         });
@@ -90,6 +120,10 @@ export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal,
       }
       catch (cause) {
         const detail = /** @type {{name?:string,message?:string,bytes?:number,expectedFetchFailure?:boolean}} */ (cause);
+        if (signal?.aborted) {
+          cancelBestEffort(response?.body, signal.reason);
+          requireLive();
+        }
         if (detail?.expectedFetchFailure) throw cause;
         if (cause instanceof ResponseTooLargeError) throw Object.assign(
           new Error(`payload_too_large: ${detail.bytes}B > ${maxBytes}B`),

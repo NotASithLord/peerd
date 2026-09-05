@@ -2,6 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import { createVmToolAuthority } from '../../extension/background/vm-tool-authority.js';
 import { executeControllerVmTool } from '../../extension/peerd-runtime/controller-vm-tools.js';
 
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (cause?: unknown) => void;
+  const promise = new Promise<T>((accept, refuse) => { resolve = accept; reject = refuse; });
+  return { promise, resolve, reject };
+};
+
 const context = (overrides: Record<string, any> = {}) => ({
   session: { sessionId: 'session-1' },
   vm: {
@@ -112,6 +119,77 @@ describe('exact WebVM authority', () => {
     expect(result).toMatchObject({ ok: true });
     expect(written).toBeInstanceOf(Uint8Array);
     expect(result.content).toContain('"bytes": 7');
+  });
+
+  test('Stop settles while an observing fetch is waiting for response headers', async () => {
+    const stop = new AbortController();
+    let transportSignal: AbortSignal | undefined;
+    let written = false;
+    const authority = createVmToolAuthority({
+      binding: {
+        operation: 'turn.vm.import-file',
+        args: { url: 'https://example.com/pending.bin', path: '/tmp/pending.bin' },
+      },
+      signal: stop.signal,
+      ctx: context({
+        webFetch: (_url: string, init?: RequestInit) => {
+          transportSignal = init?.signal ?? undefined;
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(
+              new DOMException('Aborted', 'AbortError'),
+            ), { once: true });
+          });
+        },
+        vm: { writeFile: async () => { written = true; } },
+      }),
+    });
+    const pending = authority.importFile(
+      'https://example.com/pending.bin', '/tmp/pending.bin', 50 * 1024 * 1024,
+    );
+    await Promise.resolve();
+    expect(transportSignal).toBe(stop.signal);
+    stop.abort('stopped');
+    await expect(pending).rejects.toMatchObject({
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+    expect(written).toBe(false);
+  });
+
+  test('Stop settles before an abort-ignoring response and cancels its late body', async () => {
+    const stop = new AbortController();
+    const response = deferred<Response>();
+    const bodyCancelled = deferred<void>();
+    let entered!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let written = false;
+    const authority = createVmToolAuthority({
+      binding: {
+        operation: 'turn.vm.import-file',
+        args: { url: 'https://example.com/late.bin', path: '/tmp/late.bin' },
+      },
+      signal: stop.signal,
+      ctx: context({
+        webFetch: async (_url: string, init?: RequestInit) => {
+          expect(init?.signal).toBe(stop.signal);
+          entered();
+          return response.promise;
+        },
+        vm: { writeFile: async () => { written = true; } },
+      }),
+    });
+    const pending = authority.importFile(
+      'https://example.com/late.bin', '/tmp/late.bin', 50 * 1024 * 1024,
+    );
+    await fetchEntered;
+    stop.abort('stopped');
+    await expect(pending).rejects.toMatchObject({
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    });
+    response.resolve(new Response(new ReadableStream({
+      cancel: () => { bodyCancelled.resolve(); },
+    })));
+    await bodyCancelled.promise;
+    expect(written).toBe(false);
   });
 
   test('rejects an oversized declared import before reading or writing', async () => {
