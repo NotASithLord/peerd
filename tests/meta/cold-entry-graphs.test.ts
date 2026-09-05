@@ -43,6 +43,22 @@ const RICH_UI_GRAPH_CEILINGS = {
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';
 const previewKernelEntry = 'background/vault-kernel-preview.js';
 
+// The prior exact ratchet remains a diagnostic baseline. These are the only
+// cold inputs intentionally changed since it: the two authority hosts gained
+// terminal outcome/audit custody, policy gained the Plan-safe page-program
+// subset, quota gained its matching bound, and a2a shed a stale prompt grant.
+// Computing from prior input sizes makes an unrelated offsetting edit fail too.
+const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
+  baselineGraphBytes: 4_035_518,
+  priorInputBytes: Object.freeze({
+    'background/controller-turn-bridge.js': 145_646,
+    'background/offscreen-actor-client.js': 162_659,
+    'peerd-runtime/actor/a2a-api.js': 8_997,
+    'peerd-runtime/permissions/policy.js': 14_942,
+    'shared/controller-kernel-quota.js': 31_640,
+  }),
+});
+
 const stats = async (name: keyof typeof entries) => {
   const entry = join(EXTENSION_DIR, entries[name]);
   const graph = await collectStaticModuleGraph(EXTENSION_DIR, entry);
@@ -131,6 +147,12 @@ describe('cold entry graphs', () => {
 
   test('every cold graph stays at or below its achieved no-growth ratchet', async () => {
     const kernel = await nativeKernelStats();
+    const accountedGraphBytes = KERNEL_SOURCE_DELTA_ACCOUNTING.baselineGraphBytes
+      + Object.entries(KERNEL_SOURCE_DELTA_ACCOUNTING.priorInputBytes)
+        .reduce((delta, [file, priorBytes]) =>
+          delta + statSync(join(EXTENSION_DIR, file)).size - priorBytes, 0);
+    expect(kernel.graphBytes, 'kernel graph delta has an unaccounted input')
+      .toBe(accountedGraphBytes);
     expect(kernel.modules, 'kernel modules')
       .toBeLessThanOrEqual(COLD_SOURCE_RATCHETS.kernel.modules);
     expect(kernel.graphBytes, 'kernel graph bytes')

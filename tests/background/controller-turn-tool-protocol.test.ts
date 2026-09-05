@@ -395,6 +395,8 @@ describe('controller turn finite tool protocol', () => {
   test('audit rejection preserves main receipts and prevents later effects or clean finalization', async () => {
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let removals = 0;
+    let trackingBegins = 0;
+    const trackingSettlements: any[] = [];
     let authorityAudits = 0;
     let markAuditStarted = () => {};
     const auditStarted = new Promise<void>((resolve) => { markAuditStarted = resolve; });
@@ -406,6 +408,13 @@ describe('controller turn finite tool protocol', () => {
     const ctx = context({
       tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
       allowedOperations: ['turn.schedule.cancel-routine'],
+      lifecycle: {
+        requiresIntentConfirmation: async () => false,
+        beginTracking: async () => ({ handle: { sequence: ++trackingBegins } }),
+        settleTracking: async (handle: any, outcome: any) => {
+          trackingSettlements.push({ handle, outcome });
+        },
+      },
       appendAudit: async (entry: any) => {
         if (entry?.type !== 'authority_effect') return;
         authorityAudits += 1;
@@ -468,6 +477,13 @@ describe('controller turn finite tool protocol', () => {
     } catch (cause) { failure = cause; }
 
     expect(removals).toBe(1);
+    expect(trackingBegins).toBe(2);
+    expect(trackingSettlements).toContainEqual({
+      handle: { sequence: 2 },
+      outcome: expect.objectContaining({
+        ok: false, outcomeKind: 'pre-effect-failure',
+      }),
+    });
     expect(replies[0]).toMatchObject({
       ok: false, code: 'audit_unavailable', outcomeKnown: true,
       authorityReceipt: { outcome: 'performed', performed: true, outcomeKnown: true },
@@ -488,12 +504,37 @@ describe('controller turn finite tool protocol', () => {
   test('an unknown main authority effect refuses every later domain mutation', async () => {
     const scheduleDescriptor = authorityDescriptor('schedule_cancel');
     let removals = 0;
+    let trackingBegins = 0;
+    const trackingSettlements: any[] = [];
+    const audits: any[] = [];
+    let markFirstRemoval = () => {};
+    const firstRemovalStarted = new Promise<void>((resolve) => { markFirstRemoval = resolve; });
+    let releaseFirstRemoval = () => {};
+    const firstRemovalReleased = new Promise<void>((resolve) => { releaseFirstRemoval = resolve; });
+    let markSecondTracked = () => {};
+    const secondTracked = new Promise<void>((resolve) => { markSecondTracked = resolve; });
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     const ctx = context({
       tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
       allowedOperations: ['turn.schedule.cancel-routine'],
+      lifecycle: {
+        requiresIntentConfirmation: async () => false,
+        beginTracking: async () => {
+          trackingBegins += 1;
+          if (trackingBegins === 2) markSecondTracked();
+          return { handle: { sequence: trackingBegins } };
+        },
+        settleTracking: async (handle: any, outcome: any) => {
+          trackingSettlements.push({ handle, outcome });
+        },
+      },
+      appendAudit: async (entry: any) => { audits.push(entry); },
       scheduleRemove: async () => {
         removals += 1;
+        if (removals === 1) {
+          markFirstRemoval();
+          await firstRemovalReleased;
+        }
         return removals === 1
           ? { performed: true, outcomeKnown: false, outcomeKind: 'transport-lost' }
           : true;
@@ -513,14 +554,18 @@ describe('controller turn finite tool protocol', () => {
             type: 'tool-use-start', id: callId, name: 'schedule_cancel',
           });
         }
-        replies.push(await invoke('turn.schedule.cancel-routine', {
+        const first = invoke('turn.schedule.cancel-routine', {
           callId: 'unknown-call-1', effectId: 'unknown-call-1:1', effectSequence: 1,
           turnGeneration: payload.turnGeneration, id: 'routine-1',
-        }));
-        replies.push(await invoke('turn.schedule.cancel-routine', {
+        });
+        await firstRemovalStarted;
+        const second = invoke('turn.schedule.cancel-routine', {
           callId: 'unknown-call-2', effectId: 'unknown-call-2:1', effectSequence: 1,
           turnGeneration: payload.turnGeneration, id: 'routine-2',
-        }));
+        });
+        await secondTracked;
+        releaseFirstRemoval();
+        replies.push(...await Promise.all([first, second]));
         return invoke('turn.finalize', {});
       },
     });
@@ -530,8 +575,27 @@ describe('controller turn finite tool protocol', () => {
     } catch { /* the first unknown receipt makes finalization terminal */ }
 
     expect(removals).toBe(1);
+    expect(trackingBegins).toBe(2);
+    expect(trackingSettlements).toContainEqual({
+      handle: { sequence: 2 },
+      outcome: expect.objectContaining({
+        ok: false, outcomeKind: 'pre-effect-failure',
+      }),
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_effect_failed',
+      details: expect.objectContaining({
+        operation: 'turn.schedule.cancel-routine', code: 'authority_outcome_unknown',
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      }),
+    }));
     expect(replies[0]).toMatchObject({ outcomeKnown: false, retryable: false });
-    expect(replies[1]).toMatchObject({ ok: false });
+    expect(replies[1]).toMatchObject({
+      ok: false, code: 'authority_outcome_unknown', outcomeKnown: false,
+      authorityReceipt: {
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      },
+    });
   });
 
   test('audit rejection cannot make an unknown receipt known during abort finalization', async () => {

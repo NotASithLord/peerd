@@ -593,6 +593,7 @@ describe('exact semantic effect claim atomicity', () => {
   test('audit rejection preserves actor receipts and refuses later privileged effects', async () => {
     let writes = 0;
     let trackingBegins = 0;
+    const trackingSettlements: any[] = [];
     let authorityAudits = 0;
     let markAuditStarted = () => {};
     const auditStarted = new Promise<void>((resolve) => { markAuditStarted = resolve; });
@@ -618,7 +619,9 @@ describe('exact semantic effect claim atomicity', () => {
         lifecycle: {
           requiresIntentConfirmation: async () => false,
           beginTracking: async () => { trackingBegins += 1; return { handle: {} }; },
-          settleTracking: async () => {},
+          settleTracking: async (_handle: any, outcome: any) => {
+            trackingSettlements.push(outcome);
+          },
         },
         appendAudit,
         vm: { writeFile: async () => {
@@ -661,6 +664,9 @@ describe('exact semantic effect claim atomicity', () => {
     // Both claims reached lifecycle preparation; only physical dispatch waited
     // for the first mutation's durable audit and observed its terminal latch.
     expect(trackingBegins).toBe(2);
+    expect(trackingSettlements).toContainEqual(expect.objectContaining({
+      ok: false, outcomeKind: 'pre-effect-failure',
+    }));
     expect(result.first).toMatchObject({
       ok: false, code: 'audit_unavailable', outcomeKnown: true,
       authorityReceipt: { outcome: 'performed', performed: true, outcomeKnown: true },
@@ -687,7 +693,17 @@ describe('exact semantic effect claim atomicity', () => {
 
   test('an unknown actor authority effect refuses every later domain mutation', async () => {
     let writes = 0;
+    let trackingBegins = 0;
+    const trackingSettlements: any[] = [];
+    const audits: any[] = [];
+    let markFirstWrite = () => {};
+    const firstWriteStarted = new Promise<void>((resolve) => { markFirstWrite = resolve; });
+    let releaseFirstWrite = () => {};
+    const firstWriteReleased = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+    let markSecondTracked = () => {};
+    const secondTracked = new Promise<void>((resolve) => { markSecondTracked = resolve; });
     const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
       buildToolContext: async () => ({
         session: { sessionId: 'actor-1', kind: 'actor' },
         actorType: 'webvm', actorInstanceId: 'vm-1',
@@ -695,11 +711,22 @@ describe('exact semantic effect claim atomicity', () => {
         readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
         lifecycle: {
           requiresIntentConfirmation: async () => false,
-          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+          beginTracking: async () => {
+            trackingBegins += 1;
+            if (trackingBegins === 2) markSecondTracked();
+            return { handle: { sequence: trackingBegins } };
+          },
+          settleTracking: async (handle: any, outcome: any) => {
+            trackingSettlements.push({ handle, outcome });
+          },
         },
-        appendAudit: async () => {},
+        appendAudit: async (entry: any) => { audits.push(entry); },
         vm: { writeFile: async () => {
           writes += 1;
+          if (writes === 1) {
+            markFirstWrite();
+            await firstWriteReleased;
+          }
           return writes === 1
             ? { performed: true, outcomeKnown: false, outcomeKind: 'transport-lost' }
             : true;
@@ -711,8 +738,12 @@ describe('exact semantic effect claim atomicity', () => {
           effectId: `actor-unknown-call:${sequence}`, effectSequence: sequence,
           turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
         });
-        const first = await effect(1);
-        const second = await effect(2);
+        const firstPending = effect(1);
+        await firstWriteStarted;
+        const secondPending = effect(2);
+        await secondTracked;
+        releaseFirstWrite();
+        const [first, second] = await Promise.all([firstPending, secondPending]);
         const completion = await relay('actor/call-complete', {
           callId: 'actor-unknown-call', turnGeneration: job.turnGeneration,
           result: { ok: true, content: 'forged clean completion' },
@@ -726,8 +757,27 @@ describe('exact semantic effect claim atomicity', () => {
       allowedOperations: ['turn.vm.write-text-file'],
     } as any);
     expect(writes).toBe(1);
+    expect(trackingBegins).toBe(2);
+    expect(trackingSettlements).toContainEqual({
+      handle: { sequence: 2 },
+      outcome: expect.objectContaining({
+        ok: false, outcomeKind: 'pre-effect-failure',
+      }),
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_effect_failed',
+      details: expect.objectContaining({
+        operation: 'turn.vm.write-text-file', code: 'authority_outcome_unknown',
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      }),
+    }));
     expect(result.first).toMatchObject({ outcomeKnown: false, retryable: false });
-    expect(result.second).toMatchObject({ ok: false });
+    expect(result.second).toMatchObject({
+      ok: false, code: 'authority_outcome_unknown', outcomeKnown: false,
+      authorityReceipt: {
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      },
+    });
     expect(result).toMatchObject({
       ok: false, code: 'actor_authority_outcome_unknown', outcomeKnown: false,
     });

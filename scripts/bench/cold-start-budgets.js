@@ -127,8 +127,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 403, graphBytes: 4_035_518 }),
-  target: Object.freeze({ modules: 406, graphBytes: 4_125_185 }),
+  shared: Object.freeze({ modules: 403, graphBytes: 4_043_978 }),
+  target: Object.freeze({ modules: 406, graphBytes: 4_133_645 }),
   // Shared contributor settlement now owns its action ceiling so every parser
   // enforces one bound. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 89_867 }),
@@ -168,7 +168,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // transitions and the goal-runner bind; every other exact relay fails unbound.
   // Browser-child generations, runtime-capability-hosts and the semantic hook
   // manifest are fixed custody/policy inputs, not feature ownership.
-  kernel: Object.freeze({ modules: 403, graphBytes: 4_035_518, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 403, graphBytes: 4_043_978, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -202,7 +202,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // and do not grow with tool count. Finite relay validation is fixed owner
     // assembly, not a feature-selected dispatcher.
     serviceWorker: Object.freeze({
-      modules: 400, graphBytes: 2_032_382, entryBytes: 173,
+      modules: 400, graphBytes: 2_036_929, entryBytes: 173,
       inputSha256: '7b50f453b44f16ac1c81e04c8cfa1de8475ee30934ff9c117158e85f86c264cf',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -234,7 +234,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
-        modules: 406, graphBytes: 2_146_323, entryBytes: 207,
+        modules: 406, graphBytes: 2_150_870, entryBytes: 207,
         inputSha256: 'f9ea6444ed31f052cf7f09936b4ecae14276b573b612fb0c981dd11d6c49d5fb',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 135_725, entryBytes: 396 }),

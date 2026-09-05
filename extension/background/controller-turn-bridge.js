@@ -635,14 +635,42 @@ export const makeControllerTurnBridge = ({
     }
     if (run.auditUnavailable || run.authorityOutcomeUnknown) {
       const code = run.auditUnavailable ? 'audit_unavailable' : 'authority_outcome_unknown';
+      const error = run.auditUnavailable
+        ? 'Authority audit persistence is unavailable.'
+        : 'A prior authority effect has an unknown outcome.';
       const receipt = Object.freeze({
         effectId: effect.effectId, operation, outcome: 'not-performed',
         outcomeKnown: true, performed: false, refused: true, retryable: false,
         code, ...(target ? { target } : {}),
       });
       run.effectReceipts.set(effect.effectId, { ...receipt, callId: effect.callId });
-      return run.auditUnavailable ? auditUnavailable(receipt) : {
-        ok: false, code, error: 'A prior authority effect has an unknown outcome.',
+      const recoveryRewrite = await settleAuthorityTracking({
+        run, authorityCtx, tracking,
+        receipt: { ...receipt, callId: effect.callId },
+        physical: receipt,
+        outcome: { ok: false, error, outcomeKind: 'pre-effect-failure' },
+      });
+      // why: lifecycle admission can complete before the preceding mutation's
+      // audit. Closing that known-unperformed record is not enough by itself;
+      // when audit still works, durably record why the physical dispatch was
+      // refused. An already-failed audit channel cannot accept more evidence.
+      if (!run.auditUnavailable) {
+        const auditPersisted = await appendRunAudit(run, {
+          type: 'authority_effect_failed', sessionId: run.sessionId,
+          details: {
+            operation, outcome: 'not-performed', outcomeKnown: true,
+            performed: false, refused: true, retryable: false, code,
+            ...lifecycleRecoveryAttribution(recoveryRewrite),
+            ...(target ? { target } : {}), runId: run.runId,
+          },
+        });
+        if (!auditPersisted) return auditUnavailable(
+          receipt, run.authorityOutcomeUnknown !== true,
+        );
+      }
+      return run.auditUnavailable
+        ? auditUnavailable(receipt, run.authorityOutcomeUnknown !== true) : {
+        ok: false, code, error,
         outcomeKnown: false, retryable: false, authorityReceipt: receipt,
       };
     }
