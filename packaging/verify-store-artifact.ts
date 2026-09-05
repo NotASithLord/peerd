@@ -23,12 +23,13 @@
 // Run: bun packaging/verify-store-artifact.ts artifacts/peerd-store-chrome.zip
 // (package.ts runs it automatically for every store artifact)
 
-import { existsSync, readFileSync, rmSync, mkdtempSync, readdirSync, statSync } from 'node:fs';
+import {
+  existsSync, readFileSync, writeFileSync, rmSync, mkdtempSync, readdirSync, statSync,
+} from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { plugin } from 'bun';
 import {
   REPO_ROOT, STORE_LOADER_TEMPLATE,
   DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
@@ -96,16 +97,34 @@ export const storeContributorBoundaryFailures = (artifactRoot: string): string[]
   return failures;
 };
 
-let stagedImportRoot = '';
-plugin({
-  name: 'peerd-staged-artifact-imports',
-  setup(build) {
-    build.onResolve({ filter: /^\// }, (args) => {
-      const candidate = join(stagedImportRoot, args.path.slice(1));
-      return stagedImportRoot && existsSync(candidate) ? { path: candidate } : undefined;
-    });
-  },
-});
+/** Execute the exact staged resolver graph without teaching Bun that browser
+ * root imports are host filesystem roots. The plugin is build-scoped because
+ * a process-global resolver can retain a deleted verification directory. */
+export const loadStagedModuleResolver = async (
+  artifactRoot: string,
+  scratchRoot: string,
+): Promise<typeof import('../extension/peerd-engine/module-resolver.js')> => {
+  const built = await Bun.build({
+    entrypoints: [join(artifactRoot, 'peerd-engine', 'module-resolver.js')],
+    target: 'bun',
+    format: 'esm',
+    plugins: [{
+      name: 'peerd-staged-artifact-imports',
+      setup(build) {
+        build.onResolve({ filter: /^\// }, (args) => {
+          const candidate = join(artifactRoot, args.path.slice(1));
+          return existsSync(candidate) ? { path: candidate } : undefined;
+        });
+      },
+    }],
+  });
+  if (!built.success || built.outputs.length !== 1) {
+    throw new Error('could not assemble staged module resolver');
+  }
+  const executable = join(scratchRoot, '.store-module-resolver-verifier.mjs');
+  writeFileSync(executable, await built.outputs[0].text());
+  return await import(pathToFileURL(executable).href);
+};
 
 const walk = (dir: string, out: string[] = []): string[] => {
   for (const entry of readdirSync(dir)) {
@@ -142,6 +161,10 @@ export const verifyStoreArtifact = async (
 ): Promise<void> => {
   const failures: string[] = [];
   const tmp = mkdtempSync(join(tmpdir(), 'peerd-verify-'));
+  // why: Bun caches the extracted root's directory while bundling it, so a
+  // verifier module written back into that same directory is not importable
+  // reliably in the current process.
+  const runtimeTmp = mkdtempSync(join(tmpdir(), 'peerd-verify-runtime-'));
   try {
     execFileSync('unzip', ['-q', artifactPath, '-d', tmp]);
     const files = walk(tmp);
@@ -197,9 +220,8 @@ export const verifyStoreArtifact = async (
         }
       }
 
-      stagedImportRoot = tmp;
       const stagedConfig = await import(pathToFileURL(join(tmp, 'shared', 'channel-config.js')).href);
-      const stagedResolver = await import(pathToFileURL(join(tmp, 'peerd-engine', 'module-resolver.js')).href);
+      const stagedResolver = await loadStagedModuleResolver(tmp, runtimeTmp);
       let moduleRequests = 0;
       const resolverDeps = {
         remoteModulesEnabled: stagedConfig.REMOTE_MODULE_IMPORTS_ENABLED,
@@ -277,6 +299,7 @@ export const verifyStoreArtifact = async (
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+    rmSync(runtimeTmp, { recursive: true, force: true });
   }
 
   if (failures.length > 0) {
