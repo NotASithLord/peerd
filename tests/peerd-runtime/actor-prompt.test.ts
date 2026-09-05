@@ -437,8 +437,9 @@ describe('capability-derived actor profiles', () => {
 
     const mesh = actorBlock('dweb');
     expect(mesh.includes(codeClientReference('mesh'))).toBe(true);
-    expect(mesh).toContain('Only an explicit confirmation decline');
-    expect(mesh).toContain('another mesh.call/mesh.cast refusal is a system or policy failure');
+    expect(mesh).toContain('report that confirmation');
+    expect(mesh).toContain('do not infer the user declined');
+    expect(mesh).toContain('unavailable UI, timeout, or Stop');
     expect(mesh).not.toContain('a refused ask means the user said no');
   });
 
