@@ -41,6 +41,15 @@ describe('actorsCallToOp — validation', () => {
     expect(() => actorsCallToOp({ method: 'call', args: { address: 'vm-9', message: '  ' } })).toThrow(/message/);
   });
 
+  test('call rejects the retired to / goal argument aliases', () => {
+    expect(() => actorsCallToOp({
+      method: 'call', args: { to: 'web', message: 'inspect it' },
+    })).toThrow(/address/);
+    expect(() => actorsCallToOp({
+      method: 'call', args: { address: 'web', goal: 'inspect it' },
+    })).toThrow(/message/);
+  });
+
   test('call omits absent options (no undefined keys leak to the wire)', () => {
     const r = actorsCallToOp({ method: 'call', args: { address: 'web', message: 'find the price' } });
     expect(r.args).toEqual({ to: 'web', goal: 'find the price' });

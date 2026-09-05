@@ -1715,6 +1715,39 @@ describe('kernel turn authority adapter', () => {
     }
   });
 
+  test('an ungranted a2a confirmation is not mislabeled as a user decline', async () => {
+    let meshMessages = 0;
+    const h = await harness(undefined, {
+      dweb: true,
+      confirm: async () => 'no',
+      runtimeSendMessage: async (message) => {
+        if (message?.type === 'dweb/base-host/room' && message?.op === 'dm') {
+          meshMessages += 1;
+        }
+        return { ok: true };
+      },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['a2a_run'] }, depth: 1,
+      actorType: 'dweb', instanceId: 'dweb',
+    });
+    const runId = h.scriptRuns.mintRunId(actor.sessionId);
+    h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+    const result = await h.runtime.relays.relayRoutes['a2a/call']({
+      method: 'cast', args: { did: 'did:key:zPeer', message: 'hello' },
+      ownerSessionId: actor.sessionId, runId,
+    }, {});
+    expect(result).toEqual({
+      ok: false,
+      error: 'a2a: confirmation was not granted for send to did:key:zPeer',
+    });
+    expect((result as any).error).not.toContain('user declined');
+    expect(meshMessages).toBe(0);
+  });
+
   test('a lost a2a mutation response remains unknown through the SW relay', async () => {
     const h = await harness(undefined, {
       dweb: true,

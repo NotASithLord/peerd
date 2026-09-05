@@ -2977,7 +2977,10 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
               details: { target, op, approved: consent.ok, standing: consent.persist },
             }).catch(() => {});
             if (!consent.ok) {
-              return { ok: false, error: `a2a: the user declined ${op} to ${target}` };
+              return {
+                ok: false,
+                error: `a2a: confirmation was not granted for ${op} to ${target}`,
+              };
             }
           }
         }

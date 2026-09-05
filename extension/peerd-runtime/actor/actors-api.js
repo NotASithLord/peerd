@@ -105,9 +105,9 @@ const ACTORS_METHODS = {
   call: {
     op: 'call',
     toArgs: (a) => {
-      const to = actorAddress(a?.address ?? a?.to, 'actors.call(address, message): address');
+      const to = actorAddress(a?.address, 'actors.call(address, message): address');
       const goal = boundedNonEmptyString(
-        a?.message ?? a?.goal,
+        a?.message,
         'actors.call(address, message): message',
         ACTORS_GOAL_MAX_CHARS,
       );
