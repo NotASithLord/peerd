@@ -117,6 +117,10 @@ export const CONTROLLER_OPTIONAL_BUILD_ENTRIES = Object.freeze([
 export const CONTROLLER_BUILD_ASSETS = Object.freeze([
   'peerd-provider/system-prompt.txt',
   'peerd-provider/system-prompt-dweb.txt',
+  // Document workers execute under the digest-custodied offscreen operation
+  // but are selected by library URLs rather than authored module imports.
+  'vendor/pdfjs/pdf.worker.min.mjs',
+  'vendor/tesseract/worker.min.js',
 ] as const);
 
 // These are the generated identity leaves, not merely modules that re-export

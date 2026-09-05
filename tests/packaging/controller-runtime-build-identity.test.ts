@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import {
   CONTROLLER_BUILD_ENTRIES,
   CONTROLLER_OPTIONAL_BUILD_ENTRIES,
+  CONTROLLER_BUILD_ASSETS,
   CONTROLLER_BUILD_STAMP_MODULES,
   controllerBuildDigest,
   writeControllerBuildIdentity,
@@ -96,6 +97,25 @@ describe('controller runtime build identity', () => {
       writeFileSync(path, `${readFileSync(path, 'utf8')}\n`);
       const next = await controllerBuildDigest(extension);
       expect(next, entry).not.toBe(prior);
+      prior = next;
+    }
+  });
+
+  test('binds the PDF and OCR worker assets executed by the document host', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'peerd-controller-document-assets-'));
+    roots.push(root);
+    const extension = join(root, 'extension');
+    cpSync(join(process.cwd(), 'extension'), extension, { recursive: true });
+    let prior = await controllerBuildDigest(extension);
+    for (const asset of [
+      'vendor/pdfjs/pdf.worker.min.mjs',
+      'vendor/tesseract/worker.min.js',
+    ]) {
+      expect(CONTROLLER_BUILD_ASSETS).toContain(asset as any);
+      const path = join(extension, asset);
+      writeFileSync(path, `${readFileSync(path, 'utf8')}\n`);
+      const next = await controllerBuildDigest(extension);
+      expect(next, asset).not.toBe(prior);
       prior = next;
     }
   });
