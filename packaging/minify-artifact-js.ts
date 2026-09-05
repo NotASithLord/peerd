@@ -265,7 +265,8 @@ export const assertColdArtifactBudgets = (
     }
     if (budget.inputSha256 && stats.inputSha256 !== budget.inputSha256) {
       throw new Error(
-        `${name} cold input closure changed (${stats.inputSha256}; expected ${budget.inputSha256})`,
+        `${report.channel}/${report.browser} ${name} cold input closure changed `
+        + `(actual ${stats.inputSha256}; expected ${budget.inputSha256})`,
       );
     }
   }
