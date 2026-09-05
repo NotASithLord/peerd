@@ -19,7 +19,7 @@ _Generated from the current checkout by the command above._
 | 04 | Hostile peer bundle (tamper / re-attribute / amplify / poison) | malicious peer | bundle integrity, publisher authenticity, and discovery-surface memory | [INV-4](./THREAT-MODEL.md#inv-4) | blocked |
 | 05 | Tool poisoning via untrusted peer/agent (MCP analog) | malicious peer / a "poisoned" external agent | the orchestrator’s delegation authority + the user’s signing identity | [INV-5](./THREAT-MODEL.md#inv-5) | blocked |
 | 06 | Sandbox escape (Notebook/Pod workers, App iframe, WebVM) | malicious sandboxed code | the host origin, the network, and other sandbox instances | [INV-6](./THREAT-MODEL.md#inv-6) | blocked |
-| 07 | Private-network / metadata SSRF | malicious webpage | internal network + cloud metadata credentials | [INV-7](./THREAT-MODEL.md#inv-7) | partial — platform residual |
+| 07 | Private-network / metadata SSRF | malicious webpage | internal network + cloud metadata credentials | [INV-7](./THREAT-MODEL.md#inv-7) | partial: platform residual |
 | 08 | Prompt-injection benchmark (versus single-context agents) | malicious model output / injected page content | every capability an injected instruction might try to reach | [INV-8](./THREAT-MODEL.md#inv-8) | blocked |
 | 09 | Hostile page content and browser egress | malicious webpage / user-generated content on a trusted host | what the model reads, what the agent writes with your session, and what leaves the machine | [INV-8](./THREAT-MODEL.md#inv-8) | blocked |
 | 10 | Retasking or minting a web actor through a moved tab | malicious webpage, open redirect, or a hostile link on a trusted host | the user's live browser session on the sites they are signed in to | [INV-19](./THREAT-MODEL.md#inv-19) | blocked |
@@ -140,8 +140,8 @@ _Generated from the current checkout by the command above._
 | smuggle mesh op "constructor" through the a2a bridge | blocked | meshCallToOp threw MeshApiError (method not in the vocabulary) |
 | smuggle mesh op "unknownOp" through the a2a bridge | blocked | meshCallToOp threw MeshApiError (method not in the vocabulary) |
 | card lookup with a bogus did:key | blocked | meshCallToOp threw MeshApiError (arg validation) |
-| ask a peer with an empty message | blocked | meshCallToOp threw MeshApiError (arg validation) |
-| sign-as-the-user without flagging (silent consent bypass) | blocked | ask/send/publishCard flagged signing; peers/inbox/unknown are not |
+| call a peer with an empty message | blocked | meshCallToOp threw MeshApiError (arg validation) |
+| sign-as-the-user without flagging (silent consent bypass) | blocked | call/cast/publishCard flagged signing; peers/inbox/unknown are not |
 | a rejected peer op is dressed up as a success | blocked | shapeMeshResult threw on a failed op result |
 
 ## 06-sandbox-escape: Sandbox escape (Notebook/Pod workers, App iframe, WebVM)
@@ -189,7 +189,7 @@ _Generated from the current checkout by the command above._
 - Asset: internal network + cloud metadata credentials
 - Claim checked: Open-web and browser entry points refuse private targets, no-tab worker rules are narrowly scoped to a custodied page domain, and child guards require exact source identity; live Chrome acceptance separately classifies the browser worker-WebSocket limitation.
 - Threat-model invariant: INV-7
-- Coverage: partial — platform residual
+- Coverage: partial: platform residual
 - Platform residuals: Chrome service-worker-created WebSockets bypass DNR, including an unscoped diagnostic rule; Chrome can establish a TCP connection/preconnect for a blocked direct top-level private navigation while sending no HTTP request
 - Defenses exercised: isPrivateOrLocalHost (SSRF guard), webFetch pre-flight host check, browser automation target classifier, tab-scoped private-network DNR rules, origin-scoped no-tab worker DNR rule shape (live Chrome classifies worker-WebSocket enforcement), exact-child blocking Firefox request stop, exact-source startup child rule copy, redirect fail-closed
 - Verified in the browser by: `scripts/cdp/states.mjs (browser network floor); scripts/firefox/run-runtime-tests.mjs (Firefox private-network and child navigation probes)`

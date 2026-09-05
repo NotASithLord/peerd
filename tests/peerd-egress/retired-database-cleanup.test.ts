@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { IDBFactory } from 'fake-indexeddb';
 import { cleanupRetiredDatabases } from '../../extension/peerd-egress/storage/idb.js';
 
-const RETIRED = ['peerd-toolbox', 'peerd-run-cache'];
+const RETIRED = ['peerd-toolbox', 'peerd-run-cache', 'peerd-checkpoints'];
 const LIVE = [
   'peerd',
   'peerd-skills',
@@ -10,7 +10,6 @@ const LIVE = [
   'peerd-result-spills',
   'peerd-pdf',
   'peerd-voice',
-  'peerd-checkpoints',
   'peerd-vm-overlay',
   'peerd-app-bodies',
 ];
@@ -42,7 +41,7 @@ const readMarker = (factory: IDBFactory, name: string) =>
   });
 
 describe('retired standalone database cleanup', () => {
-  test('deletes only the two removed product stores and preserves live databases', async () => {
+  test('deletes only removed product stores and preserves live databases', async () => {
     const factory = new IDBFactory();
     await Promise.all([...RETIRED, ...LIVE].map((name) => seed(factory, name)));
 

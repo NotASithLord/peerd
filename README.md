@@ -44,8 +44,8 @@ builds send no product telemetry to peerd.
   compute without access to your host operating system.
 - **Delegates to separate actors.** Every page and compute environment gets its
   own keyless actor with tools scoped to that environment.
-- **Keeps useful context.** Sessions, memory, skills, goals, review, and
-  checkpoints live in the extension.
+- **Keeps useful context.** Sessions, memory, skills, goals, and browser-native
+  repository history live in the extension.
 - **Uses the model you choose.** The live provider inventory is defined in
   [`registry.js`](extension/peerd-provider/registry.js), including BYOK cloud
   adapters and keyless local options.

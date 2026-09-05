@@ -10,6 +10,15 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the unreachable pre-Git edit snapshot store and its retired
+  `peerd-checkpoints` database. Live App history remains in its browser-native
+  Git repository; workspace files are unaffected.
+- Removed the transitional `actors.ask`, `mesh.ask`, and `mesh.send` worker
+  aliases. Generated code uses the single `actors.call` and `mesh.call`/`cast`
+  vocabulary.
+
 ## [0.7.3] - 2026-08-18
 
 ### Added

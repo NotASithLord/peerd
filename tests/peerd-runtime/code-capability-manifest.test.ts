@@ -13,14 +13,13 @@ import {
   renderCodeOpTrace,
   WEB_ACTOR_CODE_CLIENT_TOOL_NAMES,
 } from '../../extension/peerd-runtime/actor/capability-manifest.js';
-import { ACTORS_API_ACCEPTED_METHODS, ACTORS_API_METHODS } from '../../extension/peerd-runtime/actor/actors-api.js';
+import { ACTORS_API_METHODS } from '../../extension/peerd-runtime/actor/actors-api.js';
 import { PAGE_API_METHODS } from '../../extension/peerd-runtime/actor/page-api.js';
 import { MESH_API_METHODS } from '../../extension/peerd-runtime/actor/a2a-api.js';
 
 describe('declarative code-capability contract', () => {
-  test('translation APIs and accepted compatibility aliases cannot drift', () => {
+  test('translation APIs and generated clients cannot drift', () => {
     expect([...ACTORS_API_METHODS]).toEqual(codeClientMethods('actors'));
-    expect([...ACTORS_API_ACCEPTED_METHODS]).toEqual(codeClientMethods('actors', true));
     expect([...PAGE_API_METHODS]).toEqual(codeClientMethods('page'));
     expect(codeClientMethods('app').filter((name) => name !== 'wait')).toEqual(['observe', 'act']);
     expect([...MESH_API_METHODS]).toEqual(codeClientMethods('mesh'));
@@ -30,11 +29,14 @@ describe('declarative code-capability contract', () => {
     for (const client of ['actors', 'page', 'app', 'mesh'] as const) {
       const source = buildCodeClientSource(client, { timeoutMs: 9_000 });
       expect(source).toContain(`globalThis.${CODE_CLIENT_MANIFESTS[client].global}`);
-      for (const method of codeClientMethods(client, true)) {
+      for (const method of codeClientMethods(client)) {
         expect(source.match(new RegExp(`\\n  ${method}:`, 'g'))?.length).toBe(1);
       }
     }
     expect(buildCodeClientSource('actors')).not.toContain('cast:');
+    expect(buildCodeClientSource('actors')).not.toContain('ask:');
+    expect(buildCodeClientSource('mesh')).not.toContain('ask:');
+    expect(buildCodeClientSource('mesh')).not.toContain('send:');
     const provider = buildCodeClientSource('provider');
     expect(provider).toContain("makeBridge('provider')");
     expect(provider).toContain('globalThis.peerd.provider.call');

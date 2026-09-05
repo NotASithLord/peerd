@@ -30,7 +30,6 @@ import {
   ACTORS_ASK_MAX_TIMEOUT_MS,
   ACTORS_GOAL_MAX_CHARS,
   ACTORS_TRACE_ERROR_MAX_CHARS,
-  settleActorCodeCall,
 } from '../../shared/actor-code-authority.js';
 
 export {
@@ -67,16 +66,16 @@ const actorAddress = (v, what) => {
 };
 
 // The timeout TOWER, defined once so it cannot drift apart (the nesting
-// job wall-clock > worker bridge guard > per-ask cap is what makes a stuck
-// actor turn fail as an ask timeout the script can handle, not a mid-run
+// job wall-clock > worker bridge guard > per-call cap is what makes a stuck
+// actor turn fail as a call timeout the script can handle, not a mid-run
 // worker termination — same reasoning as a2a-run's timer note). Every layer
-// DERIVES from the ask ceiling: bump it and the tower moves together.
+// DERIVES from the call ceiling: bump it and the tower moves together.
 // Worker-controlled strings cross two heaps and are mirrored for crash
 // recovery. Reject them at the shared translation edge before any trim/regex
 // work, then retain only smaller bounded trace projections in each host.
 // One run may compose many calls, but it is not an unbounded actor-message
 // pump. Shared by the SW admission meter and the offscreen trace ring.
-// The worker-side bridge guard — sits ABOVE the ask cap so the SW's timeout
+// The worker-side bridge guard — sits ABOVE the call cap so the SW's timeout
 // (a handleable rejection) always fires before the bridge gives up.
 export const ACTORS_BRIDGE_GUARD_MS = ACTORS_ASK_MAX_TIMEOUT_MS + 10_000;
 // The job wall-clock for a delegating run — sits ABOVE the bridge guard.
@@ -100,7 +99,7 @@ const ACTORS_METHODS = {
     toArgs: () => ({}),
     shape: (c) => ({ refs: Array.isArray(c?.refs) ? c.refs : [] }),
   },
-  // ASK — delegate a goal and await the actor's ONE reply within this run.
+  // CALL — delegate a goal and await the actor's ONE reply within this run.
   // Returns { reply, failed } (failed:true = the actor's turn errored/aborted;
   // the reply text then describes the failure). A timeout REJECTS (throws).
   call: {
@@ -120,24 +119,10 @@ const ACTORS_METHODS = {
     shape: (c) => ({ reply: c?.reply ?? null, failed: c?.failed === true }),
     delegates: true,
   },
-  // why the alias stays out of ACTORS_API_METHODS + prompt lore: scripts written
-  // during the #327 rollout keep working for one 0.x migration window, while
-  // new model output sees the GenServer-shaped `call` contract only.
-  ask: {
-    op: 'call',
-    toArgs: (a) => ACTORS_METHODS.call.toArgs(a),
-    shape: (c) => ACTORS_METHODS.call.shape(c),
-    delegates: true,
-  },
 };
 
 /** The canonical model-facing method list comes from the shared manifest. */
 export const ACTORS_API_METHODS = Object.freeze(codeClientMethods('actors'));
-/** Canonical + compatibility methods accepted at the relay. */
-export const ACTORS_API_ACCEPTED_METHODS = Object.freeze(codeClientMethods('actors', true));
-
-/** Does this method hand a goal to an actor (vs a read)? Pure. @param {string} method */
-export const actorsMethodDelegates = (method) => ACTORS_METHODS[method]?.delegates === true;
 
 /**
  * Translate an `actors.<method>(args)` call into a gated OP + validated args.
@@ -171,28 +156,6 @@ export const shapeActorsResult = (method, opResult) => {
     throw new ActorsApiError(opResult?.error ?? `actors.${method} failed`);
   }
   return spec.shape(opResult);
-};
-
-/**
- * Map a messageActor(awaitReply) settle into the ask op's wire result — the
- * security-relevant fork, extracted pure so it is provable:
- *   • timeout (this route's own timer) → a REFUSAL the script's await rejects
- *     with, naming the target + budget;
- *   • a SYSTEM refusal (messageActor's own 'message_actor:'-prefixed errors —
- *     sender gate, rate caps, duplicate intent, the oneShot sandbox rule) →
- *     rejected verbatim, so policy is felt as policy;
- *   • anything else in the error slot is the DELIVERED actor turn's own
- *     failure text → returned as { failed:true } for the script to handle
- *     in code (retry, fall back, report) instead of an exception.
- * A Stop-abort (the run signal fired, not this route's timer) must reject —
- * without the `aborted` fork it would masquerade as an actor-level failure
- * and a retry-in-code loop would grind through fully-audited post-Stop asks.
- * @param {{ ok: boolean, content?: string, error?: string }} r
- * @param {{ timedOut: boolean, aborted?: boolean, timeoutMs: number, to: string }} o
- * @returns {{ ok: true, reply: string | null, failed: boolean } | { ok: false, error: string }}
- */
-export const askOutcome = (r, { timedOut, aborted, timeoutMs, to }) => {
-  return settleActorCodeCall(r, { timedOut, aborted, timeoutMs, to });
 };
 
 // ── the ops TRACE — the observability half of this surface ────────────────
@@ -239,7 +202,7 @@ const fencedTargetPreview = (to) => {
 /**
  * Render the fence-SAFE trace lines: method + fixed target label + outcome +
  * timing per op — and NOTHING runtime-shaped beyond that. why no goal here:
- * a chained goal (`actors.ask(next, prior.reply)`) carries whatever the prior
+ * a chained goal (`actors.call(next, prior.reply)`) carries whatever the prior
  * actor (or a fetched page) said — exactly the bytes the fence exists for —
  * so goal previews render only INSIDE the fenced body (traceGoalLines), and
  * error detail likewise (traceErrorDetails). An op the run died around

@@ -92,8 +92,6 @@ import { normalizeApiOrigin } from './web-actor.js';
  *   a permanent hole. Always assign, never coalesce.
  */
 
-/** Kept as a public compatibility export. Exact-origin corridors use no hop budget. */
-export const EXCURSION_BUDGET = 4;
 /** A deadline keeps an unused grant or parked sign-in from living indefinitely. */
 export const EXCURSION_MS = 3 * 60_000;
 /** How many excursions one bound actor may open, ever.

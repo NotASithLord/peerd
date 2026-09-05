@@ -112,8 +112,8 @@ export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 export const clamp = (n, lo, hi) => Math.min(Math.max(n, lo), hi);
 
 /**
- * SHA-256 of a UTF-8 string, hex-encoded. Used by the snapshot store to
- * content-address file blobs so identical bodies dedup to one row.
+ * SHA-256 of a UTF-8 string, hex-encoded. Used for stable digests at authority
+ * and sharing boundaries without exposing the underlying value.
  *
  * Uses Web Crypto's subtle.digest, which is present in the SW, workers,
  * and Bun's test runtime alike — no polyfill needed. Async because

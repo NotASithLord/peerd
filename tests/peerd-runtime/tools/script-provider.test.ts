@@ -87,13 +87,13 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
   });
 
   test('baseline: a chat turn referencing `actors` mints the delegation surface', async () => {
-    const { opts } = await run('await actors.ask("web", "x");', actorsCtx());
+    const { opts } = await run('await actors.call("web", "x");', actorsCtx());
     expect(opts?.actors).toBe(true);
     expect(opts?.ownerSessionId).toBe('s1');
   });
 
   test('a trusted spawned actor gets code parity when message_actor survived narrowing', async () => {
-    const { opts, scriptRuns } = await run('return (await actors.ask("vm-1", "run tests")).reply;', {
+    const { opts, scriptRuns } = await run('return (await actors.call("vm-1", "run tests")).reply;', {
       ...actorsCtx(),
       session: { sessionId: 'spawn-1', kind: 'spawned' },
       toolAllow: new Set(['script', 'message_actor']),
@@ -127,14 +127,14 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
   });
 
   test('a chat manifest that removes message_actor cannot recover it through script', async () => {
-    const { opts } = await run('await actors.ask("web", "x");', {
+    const { opts } = await run('await actors.call("web", "x");', {
       ...actorsCtx(), toolAllow: new Set(['script']), operationGrant: new Set(),
     });
     expect(opts?.actors).toBeUndefined();
   });
 
   test('a bound environment actor remains non-delegating even if a malformed ctx carries the closure', async () => {
-    const { opts } = await run('await actors.ask("web", "x");', {
+    const { opts } = await run('await actors.call("web", "x");', {
       ...actorsCtx(), session: { sessionId: 'actor-1', kind: 'actor' },
     });
     expect(opts?.actors).toBeUndefined();
@@ -145,7 +145,7 @@ describe('script — the actors mint is refused on an inbound (untrusted) turn (
     // script tool must not hand that same delegation reach through a relay that
     // never carried the flag. ctx.inbound is folded SW-side (trusted); the fix
     // fails closed at the mint so no surface is ever advertised.
-    const { opts, scriptRuns } = await run('await actors.ask("site:https://mail.example.com", "x");', {
+    const { opts, scriptRuns } = await run('await actors.call("site:https://mail.example.com", "x");', {
       ...actorsCtx(), inbound: true,
     });
     expect(opts?.actors).toBeUndefined();

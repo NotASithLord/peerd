@@ -122,7 +122,6 @@ const probeBoundActorTurnDriver = async () => {
     contextWindowFor: () => null,
     liveContextWindow: () => null,
     currentAppScope: async () => null,
-    checkpointMgr: { capture: async () => {} },
     detectInterruptedTurn: () => ({ resumable: false }),
   });
 

@@ -755,7 +755,7 @@ throw new Error('unrelated failure');`,
     // owner-bound the way the SW job/abort route passes it.
     const pending = runJob(
       {
-        code: 'await mesh.ask("did:key:z6MkBob", "long ask"); return "never";',
+        code: 'await mesh.call("did:key:z6MkBob", "long call"); return "never";',
         a2a: true, ownerSessionId: 'dweb-sess-1', runId: 'a2a-abort-1', timeoutMs: 30000,
       },
       {
@@ -808,7 +808,7 @@ throw new Error('unrelated failure');`,
     const calls = [];
     const r = await runJob(
       {
-        code: 'const a = await actors.ask("vm-9", "run pytest", { oneShot: true }); return a.reply;',
+        code: 'const a = await actors.call("vm-9", "run pytest", { oneShot: true }); return a.reply;',
         actors: true, ownerSessionId: 'chat-1', ownerToolUseId: 'tu-7', runId: 'run-1',
       },
       {
@@ -923,8 +923,8 @@ throw new Error('unrelated failure');`,
     const r = await runJob(
       {
         code: [
-          'await actors.ask("vm-9", "one");',
-          'try { await actors.ask("web", "two"); } catch (e) { /* refused */ }',
+          'await actors.call("vm-9", "one");',
+          'try { await actors.call("web", "two"); } catch (e) { /* refused */ }',
           'return "done";',
         ].join('\n'),
         actors: true, ownerSessionId: 'chat-1', runId: 'run-2',
@@ -959,7 +959,7 @@ throw new Error('unrelated failure');`,
     expect(off.value).toBe('undefined');
     // actors:true but NO ownerSessionId — the host refuses the relay (fail closed)
     const noOwner = await runJob(
-      { code: 'try { await actors.ask("vm-9", "x"); return "reached"; } catch (e) { return e.message; }', actors: true },
+      { code: 'try { await actors.call("vm-9", "x"); return "reached"; } catch (e) { return e.message; }', actors: true },
       { sendToSW: async () => ({ ok: true }) },
     );
     expect(String(noOwner.value)).toContain('disabled');
@@ -1117,7 +1117,7 @@ throw new Error('unrelated failure');`,
   it('actors: abortJob(runId) terminates a live run — partial trace survives', async () => {
     const pending = runJob(
       {
-        code: 'await actors.ask("vm-9", "long"); return "never";',
+        code: 'await actors.call("vm-9", "long"); return "never";',
         actors: true, ownerSessionId: 'chat-1', runId: 'run-abort', timeoutMs: 30000,
       },
       {

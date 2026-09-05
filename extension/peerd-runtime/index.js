@@ -135,10 +135,10 @@ export {
 } from './actor/capability-manifest.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
-  askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
+  ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
   ACTORS_RUN_MAX_OPS, ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS,
   ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
-  ACTORS_API_METHODS, ACTORS_API_ACCEPTED_METHODS,
+  ACTORS_API_METHODS,
 } from './actor/actors-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 // Design 5 — peerd.provider.call: the pure core (text-only arg validation,
@@ -195,7 +195,7 @@ export {
   runtimeCapabilityForTool, filterByRuntimeCapabilities, runtimeCapabilityRefusal,
   runtimeCapabilityPromptBlock, RuntimeCapabilityUnavailableError, requireRuntimeCapability,
 } from './runtime-capabilities.js';
-export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
+export { decideLanding, mayHoldCredentials, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
 export {
   makeJudgeLanding, makeCredentialScope, makeSiteClientOriginGuard,
   makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, makeSignInOriginAuthorizer,
@@ -237,20 +237,13 @@ export {
   makeCheapCall, CHEAP_CALL_MAX_STEPS, CHEAP_CALL_MAX_OUTPUT_TOKENS,
 } from './actor/cheap-call.js';
 
-// --- edit (SEARCH/REPLACE diff editing + checkpoint/undo) ---------------
+// --- edit (SEARCH/REPLACE diff editing) ----------------------------------
 export {
   parseEditBlocks, applyBlocks, applyEdit,
 } from './edit/search-replace.js';
 export {
   EditParseError, SearchNotFoundError, SearchAmbiguousError,
 } from './edit/errors.js';
-export {
-  createSnapshotStore, createBrowserSnapshotStore, browserSnapshotIO,
-} from './edit/snapshot-store.js';
-export { createCheckpointManager } from './edit/checkpoint.js';
-export {
-  defaultWritePermissions, resolveCanWrite,
-} from './edit/permissions-adapter.js';
 // --- tools --------------------------------------------------------------
 export { GATES } from './tools/gates.js';
 export {

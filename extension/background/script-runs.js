@@ -197,7 +197,7 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
      * pending SW-side is an orphan whose actor turn must die with it (a job
      * timeout / worker crash reaches here without the Stop signal ever firing
      * — without this abort those turns would burn tokens for up to the
-     * per-ask cap after the script already returned). Then detaches the
+     * per-call cap after the script already returned). Then detaches the
      * outer-signal listener so a long-lived turn signal doesn't accumulate
      * dead handlers.
      * @param {string} runId

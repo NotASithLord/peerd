@@ -137,11 +137,12 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure after live actor-isolation projection and
-  // named executable route groups replaced duplicated host literals.
-  modules: 87, graphBytes: 656_751, entryBytes: 239, directImports: 3,
+  // named executable route groups replaced duplicated host literals. The
+  // retired-store list includes the unreachable pre-Git checkpoint database.
+  modules: 87, graphBytes: 656_755, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 89, graphBytes: 664_382, entryBytes: 250, directImports: 2,
+  modules: 89, graphBytes: 664_386, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -176,8 +177,8 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // postcondition, preventing a healthy Mithril mount from being replaced by a
   // false terminal failure. Rich-app effect policy stays outside the transport-
   // only vault shell graph. Exact shared-shell values, no reserved headroom.
-  sidepanel: Object.freeze({ modules: 11, graphBytes: 143_624, entryBytes: 396, directImports: 1 }),
-  home: Object.freeze({ modules: 11, graphBytes: 143_792, entryBytes: 564, directImports: 1 }),
+  sidepanel: Object.freeze({ modules: 11, graphBytes: 143_628, entryBytes: 396, directImports: 1 }),
+  home: Object.freeze({ modules: 11, graphBytes: 143_796, entryBytes: 564, directImports: 1 }),
 });
 
 // Cold-start is an observed user-visible outcome, not a bundle-size contest.
@@ -214,7 +215,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 22_022, entryBytes: 13_355 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 87, graphBytes: 416_499, entryBytes: 210 }),
+    serviceWorker: Object.freeze({ modules: 87, graphBytes: 416_519, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 139_449, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 139_617, entryBytes: 564 }),
   }),
@@ -237,7 +238,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 89, graphBytes: 421_898, entryBytes: 81 }),
+      serviceWorker: Object.freeze({ modules: 89, graphBytes: 421_918, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 139_449, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 139_617, entryBytes: 564 }),
     }),

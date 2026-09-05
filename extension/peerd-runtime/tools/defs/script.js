@@ -31,7 +31,7 @@ import {
 import { renderCodeOpTrace } from '../../actor/capability-manifest.js';
 
 // A DELEGATING run awaits real actor turns, so its wall-clock comes from the
-// timeout TOWER in actors-api.js (job > bridge guard > per-ask cap, all
+// timeout TOWER in actors-api.js (job > bridge guard > per-call cap, all
 // derived from one ceiling) — never a literal here that could drift below the
 // bridge and kill the worker mid-ask.
 

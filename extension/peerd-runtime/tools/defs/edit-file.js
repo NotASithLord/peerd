@@ -9,12 +9,9 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // the agent didn't re-read, and a hard failure when the search text isn't
 // a unique anchor (rather than a corrupting "first match wins").
 //
-// Targets either an App file (kind 'app', via appClient) or a Notebook
-// file (kind 'notebook', via jsClient). The post-turn snapshot in the SW
-// captures whichever workspace this touched, so /undo can roll it back.
-//
-// Writes route through feature 03's permission policy via the adapter
-// (resolveCanWrite). Until 03 is wired, that defaults to allow.
+// Targets either an App file or a Notebook file. The controller plans the
+// semantic edit; the exact workspace authority owns reads, writes, policy,
+// lifecycle receipts, and the App repository's recoverable history.
 
 import { parseEditBlocks, applyBlocks, isWholeFileCreate } from '../../edit/search-replace.js';
 import {
