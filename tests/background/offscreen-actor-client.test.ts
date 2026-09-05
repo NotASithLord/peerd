@@ -593,8 +593,23 @@ describe('exact semantic effect claim atomicity', () => {
   test('audit rejection preserves actor receipts and refuses later privileged effects', async () => {
     let writes = 0;
     let trackingBegins = 0;
+    let authorityAudits = 0;
+    let markAuditStarted = () => {};
+    const auditStarted = new Promise<void>((resolve) => { markAuditStarted = resolve; });
+    let releaseAudit = () => {};
+    const auditReleased = new Promise<void>((resolve) => { releaseAudit = resolve; });
+    let markSecondWrite = () => {};
+    const secondWrite = new Promise<void>((resolve) => { markSecondWrite = resolve; });
+    const appendAudit = async (entry: any) => {
+      if (entry?.type !== 'authority_effect') return;
+      authorityAudits += 1;
+      if (authorityAudits !== 1) return;
+      markAuditStarted();
+      await auditReleased;
+      throw new Error('audit offline');
+    };
     const client = makeOffscreenActorClient(baseDeps({
-      appendAudit: async () => { throw new Error('audit offline'); },
+      appendAudit,
       buildToolContext: async () => ({
         session: { sessionId: 'actor-1', kind: 'actor' },
         actorType: 'webvm', actorInstanceId: 'vm-1',
@@ -605,8 +620,12 @@ describe('exact semantic effect claim atomicity', () => {
           beginTracking: async () => { trackingBegins += 1; return { handle: {} }; },
           settleTracking: async () => {},
         },
-        appendAudit: async () => { throw new Error('audit offline'); },
-        vm: { writeFile: async () => { writes += 1; return true; } },
+        appendAudit,
+        vm: { writeFile: async () => {
+          writes += 1;
+          if (writes === 2) markSecondWrite();
+          return true;
+        } },
       }),
       runOnChannel: async (job: any, { relay }: any) => {
         const effect = (sequence: number) => relay('vm/write-text-file', {
@@ -614,8 +633,15 @@ describe('exact semantic effect claim atomicity', () => {
           effectId: `actor-audit-call:${sequence}`, effectSequence: sequence,
           turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
         });
-        const first = await effect(1);
-        const second = await effect(2);
+        const firstPending = effect(1);
+        await auditStarted;
+        const secondPending = effect(2);
+        await Promise.race([
+          secondWrite,
+          new Promise<void>((resolve) => setTimeout(resolve, 50)),
+        ]);
+        releaseAudit();
+        const [first, second] = await Promise.all([firstPending, secondPending]);
         const completion = await relay('actor/call-complete', {
           callId: 'actor-audit-call', turnGeneration: job.turnGeneration,
           result: { ok: true, content: 'forged clean completion' },
@@ -631,7 +657,10 @@ describe('exact semantic effect claim atomicity', () => {
       ...exactReadJob, tools: [{ name: 'vm_write_file' }],
       allowedOperations: ['turn.vm.write-text-file'],
     } as any);
-    expect({ writes, trackingBegins }).toEqual({ writes: 1, trackingBegins: 1 });
+    expect(writes).toBe(1);
+    // Both claims reached lifecycle preparation; only physical dispatch waited
+    // for the first mutation's durable audit and observed its terminal latch.
+    expect(trackingBegins).toBe(2);
     expect(result.first).toMatchObject({
       ok: false, code: 'audit_unavailable', outcomeKnown: true,
       authorityReceipt: { outcome: 'performed', performed: true, outcomeKnown: true },
@@ -653,6 +682,97 @@ describe('exact semantic effect claim atomicity', () => {
     expect(result).toMatchObject({
       ok: false, code: 'audit_unavailable', outcomeKnown: true,
       retryable: false, authorityPerformed: true, finalText: '',
+    });
+  });
+
+  test('an unknown actor authority effect refuses every later domain mutation', async () => {
+    let writes = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => {
+          writes += 1;
+          return writes === 1
+            ? { performed: true, outcomeKnown: false, outcomeKind: 'transport-lost' }
+            : true;
+        } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = (sequence: number) => relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'actor-unknown-call',
+          effectId: `actor-unknown-call:${sequence}`, effectSequence: sequence,
+          turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
+        });
+        const first = await effect(1);
+        const second = await effect(2);
+        const completion = await relay('actor/call-complete', {
+          callId: 'actor-unknown-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean completion' },
+        });
+        return { first, second, completion, newMessages: durableMessages('actor-unknown-call') };
+      },
+    }));
+
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(writes).toBe(1);
+    expect(result.first).toMatchObject({ outcomeKnown: false, retryable: false });
+    expect(result.second).toMatchObject({ ok: false });
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_authority_outcome_unknown', outcomeKnown: false,
+    });
+  });
+
+  test('an oversized actor result cannot make an unknown authority receipt known', async () => {
+    const unknown = {
+      performed: true, outcomeKnown: false, outcomeKind: 'transport-lost',
+      content: 'x'.repeat(21 * 1024 * 1024),
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => unknown },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const callId = 'actor-oversize-unknown';
+        const effect = await relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration, path: '/tmp/result', content: 'x',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean completion' },
+        });
+        return { effect, completion, newMessages: durableMessages(callId) };
+      },
+    }));
+
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(result.effect).toMatchObject({
+      ok: false, error: 'authority result exceeds its fixed byte cap',
+      outcomeKnown: false, retryable: false,
     });
   });
 

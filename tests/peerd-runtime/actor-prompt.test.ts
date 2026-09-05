@@ -7,6 +7,7 @@ import {
 import {
   actorCapabilityManifest,
   codeClientReference,
+  DWEB_INBOUND_TOOL_NAMES,
 } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 
 // The base template IS the orchestrator prompt now: an earlier transform
@@ -516,11 +517,12 @@ describe('capability-derived actor profiles', () => {
     expect(full).toContain('read/run its existing origin-pinned site client');
   });
 
-  test('an inbound dweb prompt advertises only its read/moderation subset', () => {
-    const inbound = actorBlock('dweb', undefined, 'dweb', 'tools', false, [
-      'dweb_discover', 'dweb_peers', 'dweb_block',
-    ], true);
-    expect(inbound).toContain('tools: dweb_discover, dweb_peers, dweb_block');
+  test('an inbound dweb prompt matches its exact read-only projection', () => {
+    const inbound = actorBlock(
+      'dweb', undefined, 'dweb', 'tools', false, [...DWEB_INBOUND_TOOL_NAMES], true,
+    );
+    expect(inbound).toContain('tools: dweb_discover, dweb_peers');
+    expect(inbound).not.toContain('dweb_block');
     expect(inbound).not.toContain('mesh.ask');
     expect(inbound).not.toContain('a2a_run');
     expect(inbound).toContain('cannot share/install/sign/send');
