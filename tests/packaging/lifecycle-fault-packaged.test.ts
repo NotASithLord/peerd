@@ -82,6 +82,7 @@ describe('packaged Chrome lifecycle fault lane', () => {
     expect(storeLane).toContain("channel: 'store', browser: 'chrome'");
     expect(storeLane).toContain('verify: true, minify: true');
     expect(storeLane).toContain("join(artifactRoot, 'staging', 'store-chrome')");
+    expect(storeLane).toContain("join(staging, 'background/vault-kernel.js')");
     expect(harness).toContain('chrome-extension://${extensionId}/${FAULT_PAGE}');
   });
 

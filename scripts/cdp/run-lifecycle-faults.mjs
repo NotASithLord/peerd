@@ -311,6 +311,9 @@ const makePackagedFaultExtension = async () => {
   }
   const stagedSources = [
     readFileSync(join(staging, backgroundEntry), 'utf8'),
+    // why: Store preserves native module boundaries; the test route is in the
+    // imported kernel owner, not textually bundled into the manifest entry.
+    readFileSync(join(staging, 'background/vault-kernel.js'), 'utf8'),
     readFileSync(join(staging, 'background/execution-tool-authority.js'), 'utf8'),
     readFileSync(join(staging, 'background/controller-turn-bridge.js'), 'utf8'),
     readFileSync(join(staging, 'offscreen/controller-turn-runtime.js'), 'utf8'),
