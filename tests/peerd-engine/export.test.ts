@@ -225,9 +225,11 @@ describe('the 64MB export rail', () => {
   test('the options page rejects an oversized .peerd file before reading it', async () => {
     expect(EXPORT_FILE_LIMIT_BYTES).toBeGreaterThan(Math.ceil(EXPORT_LIMIT_BYTES / 3) * 4);
     const source = await Bun.file('extension/options/sections/transfer.js').text();
-    const sizeCheck = source.indexOf('file.size > EXPORT_FILE_LIMIT_BYTES');
+    const demandLoad = source.indexOf("await import('/peerd-engine/artifact.js')");
+    const sizeCheck = source.indexOf('file.size > exportFileLimitBytes');
     const read = source.indexOf('envelope = JSON.parse(await file.text())');
-    expect(sizeCheck).toBeGreaterThan(-1);
+    expect(demandLoad).toBeGreaterThan(-1);
+    expect(sizeCheck).toBeGreaterThan(demandLoad);
     expect(read).toBeGreaterThan(sizeCheck);
   });
 });

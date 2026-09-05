@@ -7,15 +7,14 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { CHANNEL } from '/shared/channel-config.js';
-import { bundleToOtlp } from '/peerd-runtime/ui.js';
-import { EXPORT_PASSPHRASE_MIN_LENGTH } from '/peerd-runtime/transfer/transfer.js';
-import { EXPORT_FILE_LIMIT_BYTES } from '/peerd-engine/artifact.js';
+import { bundleToOtlp } from '/peerd-runtime/options.js';
 import { PrivateTransferPortError } from '../private-transfer-client.js';
 import {
   isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,
 } from '../mutation-custody.js';
 
 const MAX_BACKUP_FILE_BYTES = 32 * 1024 * 1024;
+const EXPORT_PASSPHRASE_MIN_LENGTH = 16;
 const IMPORT_NOT_STARTED_CODES = new Set([
   'channel-unavailable', 'channel-request-failed', 'channel-timeout', 'post-failed',
 ]);
@@ -279,10 +278,19 @@ export const TransferSection = {
       ui.artifactEnvelope = null;
       const file = e.target.files?.[0];
       if (!file) return;
-      if (file.size > EXPORT_FILE_LIMIT_BYTES) {
+      let exportFileLimitBytes;
+      try {
+        ({ EXPORT_FILE_LIMIT_BYTES: exportFileLimitBytes } = await import('/peerd-engine/artifact.js'));
+      } catch {
+        ui.artifactMsg = { ok: false, text: 'Artifact import is unavailable in this build.' };
+        e.target.value = '';
+        m.redraw();
+        return;
+      }
+      if (file.size > exportFileLimitBytes) {
         ui.artifactMsg = {
           ok: false,
-          text: `That artifact is too large to import safely (${Math.round(EXPORT_FILE_LIMIT_BYTES / 1024 / 1024)} MB maximum).`,
+          text: `That artifact is too large to import safely (${Math.round(exportFileLimitBytes / 1024 / 1024)} MB maximum).`,
         };
         e.target.value = '';
         m.redraw();

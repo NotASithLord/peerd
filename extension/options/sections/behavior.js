@@ -17,7 +17,7 @@
 // redesign is how a page quietly starts lying about its own guarantees.
 
 import m from '/vendor/mithril/mithril.js';
-import { listProviderMetadata } from '/peerd-provider/ui.js';
+import { listProviderMetadata } from '/peerd-provider/options.js';
 import { resetRow } from './reset-row.js';
 import { settingsRow, settingsBand, toggleSwitch } from '../components/settings-row.js';
 

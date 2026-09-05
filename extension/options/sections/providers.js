@@ -20,7 +20,7 @@ import {
   checkApiKeyFormat,
   probeGpuCapability,
   recommendOllamaModel,
-} from '/peerd-provider/ui.js';
+} from '/peerd-provider/options.js';
 import { LocalModelsSection } from './local-models.js';
 import {
   isUnknownMutationOutcome, mutationFailureCopy,

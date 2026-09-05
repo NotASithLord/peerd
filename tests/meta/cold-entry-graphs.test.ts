@@ -28,6 +28,18 @@ const entries = {
   offscreen: 'offscreen/offscreen.js',
 } as const;
 
+const richUiEntries = {
+  sidepanel: 'sidepanel/sidepanel.js',
+  home: 'home/home.js',
+} as const;
+
+// Exact pre-Options-boundary graphs. The shared ui.js surfaces are first-paint
+// contracts; Settings-only features must never widen either rich document.
+const RICH_UI_GRAPH_CEILINGS = {
+  sidepanel: { modules: 61, graphBytes: 670_963 },
+  home: { modules: 68, graphBytes: 847_827 },
+} as const;
+
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';
 const previewKernelEntry = 'background/vault-kernel-preview.js';
 
@@ -42,6 +54,16 @@ const stats = async (name: keyof typeof entries) => {
       readFileSync(entry, 'utf8'),
       relative(EXTENSION_DIR, entry),
     )).length,
+    modulesSet: new Set([...graph].map((file) => relative(EXTENSION_DIR, file))),
+  };
+};
+
+const richUiStats = async (name: keyof typeof richUiEntries) => {
+  const entry = join(EXTENSION_DIR, richUiEntries[name]);
+  const graph = await collectStaticModuleGraph(EXTENSION_DIR, entry);
+  return {
+    modules: graph.size,
+    graphBytes: [...graph].reduce((total, file) => total + statSync(file).size, 0),
     modulesSet: new Set([...graph].map((file) => relative(EXTENSION_DIR, file))),
   };
 };
@@ -77,14 +99,34 @@ describe('cold entry graphs', () => {
         'peerd-egress/vault/argon2.js',
         'peerd-engine/editor.js',
         'peerd-engine/repository/repository-service.js',
+        'peerd-runtime/transfer/transfer.js',
+        'peerd-runtime/observability/contributor-metrics.js',
+        'peerd-runtime/observability/contributor-store.js',
+        'peerd-engine/export.js',
+        'shared/backup-passphrase.js',
+        'shared/argon2id.js',
         'vendor/codemirror/cm.js',
         'vendor/acorn/acorn.mjs',
       ].includes(module)
       || module.startsWith('peerd-runtime/controller')
       || module.startsWith('peerd-provider/adapters/')
       || module.startsWith('peerd-egress/storage/')
-      || module.startsWith('peerd-egress/fetch/'));
+      || module.startsWith('peerd-egress/fetch/')
+      || module.startsWith('shared/bundle/')
+      || module.startsWith('vendor/argon2/'));
     expect(forbidden, 'Options acquired execution or authority modules').toEqual([]);
+  });
+
+  test('Options-only surfaces do not widen Sidepanel or Home rich graphs', async () => {
+    for (const name of ['sidepanel', 'home'] as const) {
+      const measured = await richUiStats(name);
+      const ceiling = RICH_UI_GRAPH_CEILINGS[name];
+      expect(measured.modules, `${name} rich modules`).toBeLessThanOrEqual(ceiling.modules);
+      expect(measured.graphBytes, `${name} rich graph bytes`)
+        .toBeLessThanOrEqual(ceiling.graphBytes);
+      expect(measured.modulesSet.has('peerd-provider/options.js')).toBe(false);
+      expect(measured.modulesSet.has('peerd-runtime/options.js')).toBe(false);
+    }
   });
 
   test('every cold graph stays at or below its achieved no-growth ratchet', async () => {

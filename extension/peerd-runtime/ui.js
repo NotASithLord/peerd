@@ -1,5 +1,5 @@
 // @ts-check
-// Cold-safe UI surface. Keep this exact: document surfaces must not inherit the
+// Cold-safe UI surface. Keep this exact: sidepanel/Home must not inherit the
 // agent loop, tool catalog, repository engine, or background semantics through
 // the universal barrel before the vault gate is actionable.
 
@@ -18,7 +18,3 @@ export { bundleToOtlp } from './observability/otel-export.js';
 export { classifyFailure } from './observability/failure-classify.js';
 export { contributorFeedbackTargets } from './observability/contributor-feedback.js';
 export { PEER_NAME_MAX } from './profiles/profile.js';
-export {
-  createOcrStore, hasValidOcrSris, OCR_TOTAL_BYTES,
-} from './pdf/ocr-store.js';
-export { countLines, ALWAYS_LOADED_LINE_BUDGET } from './memory/memory.js';

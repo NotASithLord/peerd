@@ -8,7 +8,7 @@
 // — this page is the global, between-chats view.
 
 import m from '/vendor/mithril/mithril.js';
-import { DEFAULT_PRICING } from '/peerd-provider/ui.js';
+import { DEFAULT_PRICING } from '/peerd-provider/options.js';
 import { resetRow } from './reset-row.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */

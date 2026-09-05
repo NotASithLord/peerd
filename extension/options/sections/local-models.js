@@ -24,7 +24,7 @@
 import m from '/vendor/mithril/mithril.js';
 import {
   listLocalModelSpecs, probeLocalModelCapability, judgeModelCapability,
-} from '/peerd-provider/ui.js';
+} from '/peerd-provider/options.js';
 import {
   isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,
 } from '../mutation-custody.js';
