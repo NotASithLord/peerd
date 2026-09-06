@@ -44,8 +44,8 @@ builds send no product telemetry to peerd.
   compute without access to your host operating system.
 - **Delegates to separate actors.** Every page and compute environment gets its
   own keyless actor with tools scoped to that environment.
-- **Keeps useful context.** Sessions, memory, skills, goals, review, and
-  checkpoints live in the extension.
+- **Keeps useful context.** Sessions, memory, skills, goals, and browser-native
+  repository history live in the extension.
 - **Uses the model you choose.** The live provider inventory is defined in
   [`registry.js`](extension/peerd-provider/registry.js), including BYOK cloud
   adapters and keyless local options.
@@ -71,9 +71,10 @@ and uses visible Notebooks for JavaScript compute. Features that need Chrome's
 offscreen document host are removed from Firefox controls and model tools before
 use. Firefox preview builds omit dweb until Firefox has a mesh host.
 
-Apps and WebVMs run on Chrome. Apps have no ambient network access. Remote
-resources, fetches, WebRTC, forms, and external document navigation are blocked.
-External HTTP and HTTPS links require user confirmation.
+Apps run on Chromium and Firefox 154 or later; WebVMs remain Chromium-only.
+Apps have no ambient network access. Remote resources, fetches, WebRTC, forms,
+and external document navigation are blocked. External HTTP and HTTPS links
+require user confirmation.
 
 Concrete browser capability gaps, their upstream issues, and the tests required
 to remove each guard are tracked in

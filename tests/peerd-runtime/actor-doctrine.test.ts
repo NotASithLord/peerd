@@ -7,14 +7,17 @@
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { scriptTool } from '../../extension/peerd-runtime/tools/defs/script.js';
+import { getToolMetadata } from '../../extension/peerd-runtime/semantic.js';
+
+const scriptMetadata = getToolMetadata(scriptTool.name);
 
 describe('runAgent doctrine in tool descriptions', () => {
   test('script (headless scratch) never advertises peerd.runtime.runAgent', () => {
     // headless script is the agent's OWN compute, never a user-facing artifact —
     // runAgent has no doctrine-legitimate use there, so it must not be nudged.
-    expect(scriptTool.description).not.toContain('runAgent');
+    expect(scriptMetadata.description).not.toContain('runAgent');
     // and own-work delegation is pointed at the actor_create tool instead.
-    expect(scriptTool.description).toContain('actor_create');
+    expect(scriptMetadata.description).toContain('actor_create');
   });
 
   test('js_create scopes runAgent to user-facing artifacts, not orchestration', () => {

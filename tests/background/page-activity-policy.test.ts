@@ -1,15 +1,12 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 
-let clearPageActivity: typeof import('../../extension/background/page-activity.js').clearPageActivity;
 let createPageActivityReporter: typeof import('../../extension/background/page-activity.js').createPageActivityReporter;
-let showPageActivity: typeof import('../../extension/background/page-activity.js').showPageActivity;
 
 beforeAll(async () => {
-  (globalThis as any).chrome = { runtime: { id: 'test-extension' } };
+  // The shared bootstrap provides the browser namespace; this suite injects
+  // every browser operation it executes.
   const module = await import('../../extension/background/page-activity.js');
-  clearPageActivity = module.clearPageActivity;
   createPageActivityReporter = module.createPageActivityReporter;
-  showPageActivity = module.showPageActivity;
 });
 
 const depsFor = (href: string) => {
@@ -35,30 +32,21 @@ const depsFor = (href: string) => {
 };
 
 describe('page activity browser target policy', () => {
-  test('an allowed page overlay is pinned to the checked document', async () => {
-    const { calls, deps } = depsFor('https://example.com/work');
-    expect(await showPageActivity(7, 'Reading', 'https://example.com', deps as any)).toBe(true);
-    expect(calls).toHaveLength(2);
-    expect(calls[1].target).toEqual({ tabId: 7, documentIds: ['document-1'] });
-  });
-
-  test('a private page receives no overlay mutation', async () => {
+  test('reporter refuses a private page before overlay mutation', async () => {
     const { calls, deps } = depsFor('http://127.0.0.1/admin');
-    expect(await showPageActivity(7, 'Reading', '', deps as any)).toBe(false);
+    const reporter = createPageActivityReporter(deps as any);
+    await reporter.begin(7, 'Reading', '');
+    expect(reporter.markedTabs()).toEqual([]);
     expect(calls).toHaveLength(1);
   });
 
-  test('clearing an overlay also refuses a private replacement document', async () => {
-    const { calls, deps } = depsFor('http://169.254.169.254/latest/meta-data');
-    expect(await clearPageActivity(7, deps as any)).toBe(false);
-    expect(calls).toHaveLength(1);
-  });
-
-  test('a denylisted page receives no overlay mutation', async () => {
+  test('reporter refuses a denylisted page before overlay mutation', async () => {
     const { calls, deps } = depsFor('https://accounts.example.com/login');
-    expect(await showPageActivity(7, 'Reading', '', deps as any, {
+    const reporter = createPageActivityReporter(deps as any);
+    await reporter.begin(7, 'Reading', '', {
       denylist: ['accounts.example.com'],
-    })).toBe(false);
+    });
+    expect(reporter.markedTabs()).toEqual([]);
     expect(calls).toHaveLength(1);
   });
 

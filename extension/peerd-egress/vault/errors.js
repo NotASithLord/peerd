@@ -10,6 +10,7 @@ import { TypedError } from '/shared/errors.js';
  * No vault has been initialized yet — UI should show first-run flow.
  */
 export class VaultNotInitializedError extends TypedError {
+  static errorName = 'VaultNotInitializedError';
   constructor() { super('Vault has not been initialized.'); }
 }
 
@@ -19,6 +20,7 @@ export class VaultNotInitializedError extends TypedError {
  * silently overwrite.
  */
 export class VaultAlreadyInitializedError extends TypedError {
+  static errorName = 'VaultAlreadyInitializedError';
   constructor() { super('Vault is already initialized.'); }
 }
 
@@ -27,6 +29,7 @@ export class VaultAlreadyInitializedError extends TypedError {
  * unlocking first. UI should prompt for passphrase.
  */
 export class VaultLockedError extends TypedError {
+  static errorName = 'VaultLockedError';
   constructor() { super('Vault is locked.'); }
 }
 
@@ -36,6 +39,7 @@ export class VaultLockedError extends TypedError {
  * one error so the side-channel doesn't leak which it was.
  */
 export class WrongPassphraseError extends TypedError {
+  static errorName = 'WrongPassphraseError';
   constructor() { super('Wrong passphrase.'); }
 }
 
@@ -45,6 +49,7 @@ export class WrongPassphraseError extends TypedError {
  * fall back to the passphrase prompt.
  */
 export class PrfNotEnrolledError extends TypedError {
+  static errorName = 'PrfNotEnrolledError';
   constructor() { super('No platform authenticator is enrolled for this vault.'); }
 }
 
@@ -56,6 +61,7 @@ export class PrfNotEnrolledError extends TypedError {
  * into this single error to avoid a side-channel.
  */
 export class PrfUnlockFailedError extends TypedError {
+  static errorName = 'PrfUnlockFailedError';
   constructor() { super('Touch ID unlock failed.'); }
 }
 
@@ -68,6 +74,7 @@ export class PrfUnlockFailedError extends TypedError {
  * UI should not invite retries.
  */
 export class KdfUnavailableError extends TypedError {
+  static errorName = 'KdfUnavailableError';
   constructor() { super('This vault uses a key-derivation scheme this build cannot run.'); }
 }
 
@@ -78,5 +85,6 @@ export class KdfUnavailableError extends TypedError {
  * passkey" instead of implying the user typed it wrong.
  */
 export class RecoveryPassphraseNotSetError extends TypedError {
+  static errorName = 'RecoveryPassphraseNotSetError';
   constructor() { super('No recovery passphrase has been set for this vault.'); }
 }

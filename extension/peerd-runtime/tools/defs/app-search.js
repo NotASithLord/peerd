@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_search — substring search across saved Apps.
 //
 // Searches BOTH metadata (name, tags) and body HTML. Returns ranked
@@ -9,37 +11,18 @@ import { serializeListResult } from './columnar.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appSearchTool = {
-  name: 'app_search',
-  primitive: 'app',
-  description: [
-    'Search saved Apps by name, tags, and body text (substring,',
-    'case-insensitive). Returns up to 20 ranked matches with a short',
-    'snippet from the body when the hit was in the HTML. Use when the',
-    'user vaguely references a past app ("the chart I had you make").',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: 'Search text.' },
-    },
-    required: ['query'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const appSearchTool = composeTool("app_search", {
 
   execute: async (args, ctx) => {
     if (typeof args?.query !== 'string' || !args.query.trim()) {
       return { ok: false, error: 'query_required' };
     }
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls (search returns ranked app hits).
-    const appClient = /** @type {{ search?: (query: string) => Promise<Array<{ app: { id: string, name: string, tags: string[], updatedAt: number }, snippet: string }>> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.search) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ searchApps?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.searchApps) return { ok: false, error: 'app_not_available' };
     try {
-      const hits = await appClient.search(args.query.trim());
-      const trimmed = hits.slice(0, 20).map((h) => ({
+      const hits = await authority.searchApps(args.query.trim());
+      const trimmed = hits.slice(0, 20).map((/** @type {any} */ h) => ({
         id: h.app.id,
         name: h.app.name,
         tags: h.app.tags,
@@ -49,7 +32,7 @@ export const appSearchTool = {
       return {
         ok: true,
         // why: names, tags, and especially body snippets are user-authored App
-        // bytes. A spawned child or clean-context reviewer may receive this
+        // bytes. A spawned child may receive this
         // otherwise-main-visible tool, so fence the result at the tool seam just
         // like app_read_file rather than letting saved HTML become instructions.
         content: wrapUntrusted({
@@ -67,4 +50,4 @@ export const appSearchTool = {
       return { ok: false, error: `app_search_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

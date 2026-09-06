@@ -1,7 +1,10 @@
 // @ts-check
 // Offscreen half of the targeted actor MessageChannel transport.
 
-import { ACTOR_CHANNEL_PROTOCOL } from '/shared/actor-channel-protocol.js';
+import {
+  ACTOR_CHANNEL_PROTOCOL,
+  actorRelayRouteClass,
+} from '/shared/actor-channel-protocol.js';
 
 /**
  * @param {Object} deps
@@ -19,12 +22,20 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
   let committed = false;
   let completed = false;
   let abortRequested = false;
+  let abortIssued = false;
   let relaySequence = 0;
+  const abortRun = () => {
+    if (!abortIssued && runId) {
+      abortIssued = true;
+      abort(runId);
+    }
+  };
   const post = (/** @type {Record<string, any>} */ message) => port.postMessage({
     protocol: ACTOR_CHANNEL_PROTOCOL, channelId, ...message,
   });
   const sendToSW = (/** @type {string} */ type, /** @type {object} */ payload) => new Promise((resolve, reject) => {
     if (!committed || completed) { reject(new Error('actor channel is not active')); return; }
+    if (!actorRelayRouteClass(type)) { reject(new Error('actor relay route is invalid')); return; }
     const requestId = `relay-${++relaySequence}`;
     pendingRelays.set(requestId, { resolve, reject });
     try { post({ type: 'actor/relay', requestId, relayType: type, payload }); }
@@ -44,7 +55,7 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
     }
     if (message.type === 'actor/abort') {
       abortRequested = true;
-      if (runId) abort(runId);
+      abortRun();
       if (!committed) {
         completed = true;
         job = null;
@@ -60,7 +71,7 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
     }
     if (message.type !== 'actor/commit' || !job || committed) return;
     committed = true;
-    if (abortRequested && runId) abort(runId);
+    if (abortRequested) abortRun();
     run(job, { workerUrl, sendToSW })
       .then((result) => {
         completed = true;
@@ -86,12 +97,12 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
       });
   };
   port.onmessageerror = () => {
-    if (runId && committed && !completed) abort(runId);
+    if (committed && !completed) abortRun();
     for (const pending of pendingRelays.values()) pending.reject(new Error('actor channel message error'));
     pendingRelays.clear();
   };
   port.addEventListener('close', () => {
-    if (runId && committed && !completed) abort(runId);
+    if (committed && !completed) abortRun();
     for (const pending of pendingRelays.values()) pending.reject(new Error('actor channel closed'));
     pendingRelays.clear();
   }, { once: true });

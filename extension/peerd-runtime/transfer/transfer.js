@@ -49,11 +49,17 @@
 //                      import treats absence as unlabelled durability data.
 
 import { omittedDeviceBoundStores, portableStores } from '../lifecycle/store-registry.js';
+import { isDefaultHookId } from '/shared/default-hook-manifest.js';
 import {
   BACKUP_ARGON2ID_PARAMS, BACKUP_ARGON2ID_SALT_BYTES,
   deriveBackupPassphraseBytes,
 } from '/shared/backup-passphrase.js';
 import { isCustodySecretName, portableSecretEntries } from './secret-policy.js';
+import {
+  assertUserHookRecordsBounded,
+  HookRecordsLimitError,
+  USER_HOOK_RECORDS_MAX_COUNT,
+} from '/shared/semantic-hook-manifest.js';
 export { isCustodySecretName } from './secret-policy.js';
 
 export const EXPORT_VERSION = 2;
@@ -83,13 +89,51 @@ export class ExportPassphraseError extends Error {
 const LEGACY_PBKDF2_ITERATIONS = 600_000;
 const IV_BYTES = 12;
 const MAX_ENCRYPTED_SECRETS_B64 = 4 * 1024 * 1024;
+const MAX_HOOK_ID_BYTES = 128;
+const MAX_HOOK_TEXT_BYTES = 64 * 1024;
+
+/**
+ * Classify the bounded hook records a backup may carry. Executable JS,
+ * regex rules, and built-in ID collisions remain portable only so an upgrade
+ * can show them as disabled/retired; none becomes executable during import.
+ * @param {unknown} value
+ * @returns {'current'|'legacy-js'|'legacy-regex'|'reserved-id'|'invalid'}
+ */
+export const portableHookDisposition = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid';
+  const hook = /** @type {Record<string,any>} */ (value);
+  if (typeof hook.id !== 'string' || !hook.id || hook.id.length > MAX_HOOK_ID_BYTES
+      || (hook.event !== 'pre-tool-use' && hook.event !== 'post-tool-use')
+      || (hook.enabled !== undefined && typeof hook.enabled !== 'boolean')
+      || (hook.order !== undefined && (!Number.isFinite(hook.order)
+        || Math.abs(hook.order) > 1_000_000))
+      || (hook.match !== undefined && (typeof hook.match !== 'string'
+        || hook.match.length > 1024))
+      || (hook.doc !== undefined && (typeof hook.doc !== 'string'
+        || hook.doc.length > MAX_HOOK_TEXT_BYTES))) return 'invalid';
+  if (isDefaultHookId(hook.id)) return 'reserved-id';
+  if (hook.kind === 'js') {
+    return typeof hook.body === 'string' && hook.body.length <= MAX_HOOK_TEXT_BYTES
+      ? 'legacy-js' : 'invalid';
+  }
+  if (hook.kind !== 'declarative' || !hook.rule || typeof hook.rule !== 'object'
+      || Array.isArray(hook.rule)) return 'invalid';
+  const rule = /** @type {Record<string,any>} */ (hook.rule);
+  if (typeof rule.matchArg !== 'string' || !rule.matchArg || rule.matchArg.length > 128
+      || (rule.onMatch !== undefined && rule.onMatch !== 'block' && rule.onMatch !== 'allow')
+      || (rule.reason !== undefined && (typeof rule.reason !== 'string'
+        || rule.reason.length > 4096))) return 'invalid';
+  if (typeof rule.contains === 'string' && rule.contains.length > 0
+      && rule.contains.length <= 1024 && !Object.hasOwn(rule, 'pattern')) return 'current';
+  return typeof rule.pattern === 'string' && rule.pattern.length <= 4096
+    ? 'legacy-regex' : 'invalid';
+};
 const MAX_SECRET_ENTRIES = 256;
 const MAX_SECRET_NAME_LENGTH = 256;
 const MAX_SECRET_VALUE_LENGTH = 1024 * 1024;
 const MAX_SETTINGS_KEYS = 512;
 const MAX_PROVIDER_ENDPOINTS = 64;
 const MAX_MEMORY_DOCS = 10_000;
-const MAX_HOOKS = 256;
 const MAX_SKILLS = 512;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 
@@ -350,8 +394,9 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
     || (typeof payload.memory === 'object' && Array.isArray(payload.memory.docs)
       && payload.memory.docs.length <= MAX_MEMORY_DOCS
       && payload.memory.docs.every((/** @type {any} */ doc) => doc && typeof doc === 'object'));
-  const hooksValid = Array.isArray(payload.hooks) && payload.hooks.length <= MAX_HOOKS
-    && payload.hooks.every((/** @type {any} */ hook) => hook && typeof hook === 'object');
+  const hooksValid = Array.isArray(payload.hooks)
+    && payload.hooks.length <= USER_HOOK_RECORDS_MAX_COUNT
+    && payload.hooks.every((/** @type {any} */ hook) => portableHookDisposition(hook) !== 'invalid');
   const skillsValid = Array.isArray(payload.skills) && payload.skills.length <= MAX_SKILLS
     && payload.skills.every((/** @type {any} */ skill) => skill && typeof skill === 'object');
   const dwebValid = payload.dweb == null
@@ -360,6 +405,13 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   if (!settingsValid || !endpointsValid || !memoryValid || !hooksValid || !skillsValid
       || !dwebValid || !secretsValid) {
     return { ok: false, error: 'invalid-export-sections' };
+  }
+  try { assertUserHookRecordsBounded(payload.hooks); }
+  catch (cause) {
+    if (cause instanceof HookRecordsLimitError) {
+      return { ok: false, error: cause.message, code: cause.code };
+    }
+    throw cause;
   }
   const settings = (payload.settings && typeof payload.settings === 'object') ? payload.settings : {};
   const known = new Set(knownSettingKeys);
@@ -407,8 +459,14 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
   /** @type {string[]} */
   const hookIds = (Array.isArray(payload.hooks) ? payload.hooks : [])
     .map((/** @type {any} */ h) => String(h?.id ?? 'unknown'));
+  const unsupportedHookIds = (Array.isArray(payload.hooks) ? payload.hooks : [])
+    .filter((/** @type {any} */ hook) => portableHookDisposition(hook) !== 'current')
+    .map((/** @type {any} */ hook) => String(hook.id));
   if (hookIds.length > 0) {
     notices.push(`${hookIds.length} hook(s) will be imported DISABLED and untrusted (${hookIds.join(', ')}) — review and re-enable them in Settings → Hooks.`);
+  }
+  if (unsupportedHookIds.length > 0) {
+    notices.push(`Unsupported legacy or reserved hook record(s) will remain DISABLED and appear as retired until removed or replaced: ${unsupportedHookIds.join(', ')}.`);
   }
   // §12 durability labels. Additive to the format, so an export written
   // before this section existed is fully valid: absent means "unlabelled",
@@ -436,6 +494,7 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
       memoryDocs: Array.isArray(payload.memory?.docs) ? payload.memory.docs.length : 0,
       hooks: Array.isArray(payload.hooks) ? payload.hooks.length : 0,
       hookIds,
+      unsupportedHookIds,
       endpointUrls,
       skills: skills.map((s) => s?.name ?? s?.id ?? 'unknown'),
       dwebPresent,
@@ -464,6 +523,7 @@ export const inspectImport = ({ payload, channel, knownSettingKeys }) => {
  * @param {(name: string, value: string) => Promise<void>} args.io.setSecret
  * @param {(payload: any) => Promise<{written: number, skipped: number}>} args.io.importMemory
  * @param {(record: any) => Promise<any>} args.io.saveHook
+ * @param {(records: any[]) => Promise<void>} [args.io.prepareHookImport]
  * @param {(record: any, passphrase: string, options?: { replaceExisting?: boolean, prepareOnly?: boolean, expectedExistingDid?: string | null, expectedExistingRevision?: string, expectedIncomingDid?: string }) => Promise<{ adopted: boolean, did?: string | null, reason?: string, existingDid?: string | null, incomingDid?: string | null, existingUnreadable?: boolean, existingRevision?: string, runtimeRecoveryPending?: boolean }>} [args.io.adoptDwebIdentity]
  *        preview-channel identity adoption (absent on store builds / when
  *        the receiving build cannot host an identity)
@@ -491,6 +551,13 @@ export const applyImport = async ({
     settings: 0, secrets: 0, providerEndpoints: 0,
     memoryWritten: 0, hooks: 0, dwebIdentity: 0,
   };
+
+  // Validate the complete merge against the receiving store before any import
+  // mutation. This keeps a clear hook-limit refusal from becoming a partial
+  // settings/memory import when the local store is already populated.
+  await io.prepareHookImport?.((payload.hooks ?? []).map((/** @type {any} */ record) => ({
+    ...record, enabled: false,
+  })));
 
   /** @type {'not-present'|'restored'|'replaced'|'already-present'|'kept-local'|'unsupported'} */
   let identityOutcome = 'not-present';
@@ -679,12 +746,11 @@ export const applyImport = async ({
     }
 
     for (const record of payload.hooks ?? []) {
-      // R6: an imported hook is CODE (or a rule) that runs against every tool
-      // call. It arrives from a file, not from this user's editor — so it
-      // lands disabled AND untrusted (a kind:'js' hook cannot even compile
-      // without trusted:true). Enabling is an explicit per-hook decision in
-      // Settings → Hooks, where the body is visible.
-      await io.saveHook({ ...record, enabled: false, trusted: false });
+      // R6: imported declarative hook policy runs against every tool call. It
+      // arrives from a file, so it lands disabled for explicit user review;
+      // legacy executable/regex kinds remain inert retired records so import
+      // matches the preflight promise instead of failing after earlier writes.
+      await io.saveHook({ ...record, enabled: false });
       imported.hooks++;
     }
 
@@ -720,16 +786,15 @@ export const applyImport = async ({
         identityOutcome = 'already-present';
       }
       runtimeRecoveryPending = outcome.runtimeRecoveryPending === true;
-      if (runtimeRecoveryPending) {
-        summary.notices.push('The peer identity was stored, but the peer network is still recovering. Keep peerd open; it will retry automatically.');
-      }
     }
     if (identityOutcome === 'already-present') {
       summary.notices.push('The backup carries the same peer identity already present on this install; no identity change was needed.');
     }
     return { ok: true, imported, identityOutcome, runtimeRecoveryPending, notices: summary.notices };
   } catch (cause) {
-    const named = /** @type {{ name?: string, code?: string }} */ (cause);
+    const named = /** @type {{ name?: string, code?: string, outcomeKnown?: boolean }} */ (cause);
+    const outcomeKnown = named?.name !== 'IdentityTransferError'
+      || named.outcomeKnown !== false;
     const failure = cause instanceof ExportPassphraseError
       ? 'wrong-passphrase'
       : named?.name === 'IdentityTransferError'
@@ -740,7 +805,8 @@ export const applyImport = async ({
       error: 'import-partial',
       failure,
       partial: imported,
-      identityOutcome: 'not-changed',
+      identityOutcome: outcomeKnown ? 'not-changed' : 'unknown',
+      ...(outcomeKnown ? {} : { outcomeKnown: false }),
     };
   }
 };

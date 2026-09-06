@@ -4,14 +4,13 @@
     "shapeCommit": "86aaa0a",
     "shapeDate": "2026-08-01",
     "notes": [
-      "peerd 0.4.0 (86aaa0a:package.json, the CURRENT release) — the shapes today's build itself writes, so this fixture is the 'no drift on the way out' anchor the three older files can't be: a regression here means the build stopped round-tripping its OWN records.",
+      "Historical peerd 0.4.0 record-shape sample (86aaa0a:package.json). It extends the earlier fixtures through the fields present in that release; it is not a claim about current production output.",
       "Sessions are v2 (msgIndex + messagesV2:true, bodies in the sibling session_messages store) and carry the full modern field set: todos (todo/core.js TodoItem[]), prewalk (loop/prewalk.js PrewalkState), toolManifest (tools/manifests.js), trimSummary, customSystemPrompt, cost.",
-      "419ecb6 (#228, 0.3.0) added session.review — the SW-stamped review-exemption marker on a SPAWNED child (never on a chat), so the review child below is where the field can honestly appear.",
       "1455923 (#255, 0.3.0) added session.originState — a TAB-backed web actor's origin authority (actor/origin-lock.js ActorOriginState: mode, ownedOrigin, provisional, excursion, excursionsUsed). Durable BECAUSE it is the authority: losing it across an eviction turns a bound actor back into an unbounded one.",
       "There is no settings-level confirm toggle: the Act sub-axis is persisted PER SESSION as `confirmActions` (sessions/types.js; permissions/policy.js confirmActionsFromRecord). So 'confirmations disabled' is the explicit `confirmActions:false` on the two chats here — an explicit false, not an absent key, which is the only value that turns confirmation off.",
       "settings hold NON-DEFAULT values on purpose (advancedAutomationEnabled false against the preview default true, a 5-minute vaultAutoLockMs against 45 minutes, confirmWebWrites false, autoMemoryEnabled false, watchAgentTab true): §11 Option A says a stored value always wins over CHANNEL_DEFAULTS, so a fixture full of defaults would prove nothing about the upgrade path.",
-      "exportEnvelope is today's transfer.js buildExport output — the FIRST fixture carrying the §12 `durability` block (70f6e42, 2026-08-05): tier labels for the sections actually present plus omittedDeviceBound, the device-bound surfaces an export structurally cannot carry.",
-      "storeVersions is null: the lifecycle store registry landed 2026-08-05 (3c5566d/70f6e42), AFTER the 0.4.0 release — so even a profile written by the CURRENT release is unstamped, and checkStores must read that as a fresh profile, never as a version skew.",
+      "exportEnvelope is a deliberately malformed later-envelope fixture: it carries the first durability block shape (70f6e42, 2026-08-05), but its abbreviated hook entries are intentionally not valid buildExport output. It exists to prove today's importer rejects incomplete legacy snapshots before summarizing them.",
+      "storeVersions is null: the lifecycle store registry landed 2026-08-05 (3c5566d/70f6e42), after the 0.4.0 release, so this historical profile is unstamped and checkStores must read it as a fresh profile, never as a version skew.",
       "Planted `unknown*FromANewerBuild` / `future*` fields at every level (settings, session record, message body, hook, memory doc, export envelope) — forward-compat data a LATER build wrote that today's build must carry through untouched."
     ]
   },
@@ -183,11 +182,10 @@
       "task": "review the reconciliation notebook for off-by-one errors",
       "depth": 1,
       "spawnedTrusted": true,
-      "review": true,
       "grantedTools": ["js_read_file", "app_read_file", "read_doc"],
       "messagesV2": true,
       "msgIndex": ["01990a00-4001-7000-8000-000000011005"],
-      "futureReviewFieldFromANewerBuild": "keep-me"
+      "futureSpawnedFieldFromANewerBuild": "keep-me"
     }
   ],
 

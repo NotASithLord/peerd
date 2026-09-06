@@ -33,19 +33,37 @@
 // the SW's reply verbatim where it's actionable.
 
 import m from '/vendor/mithril/mithril.js';
-import {
-  enrollWithPrf,
-  getPrfOutput,
-  isWebAuthnAvailable,
-  probeWebAuthnCapabilities,
-  planEnrollment,
-  platformAuthenticatorLabel,
-  PrfCancelledError,
-  PrfNotSupportedError,
-  PrfUnsupportedByAuthenticatorError,
-} from '/peerd-egress/index.js';
 import { base64ToBytes, bytesToBase64 } from '/shared/util.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
+
+/** @typedef {import('/peerd-egress/vault/enroll-options.js').CapabilityProbe} CapabilityProbe */
+
+/** @type {Promise<typeof import('/peerd-egress/ui.js')>|null} */
+let vaultUiPromise = null;
+const loadVaultUi = () => (vaultUiPromise ??= import('/peerd-egress/ui.js')
+  .catch((cause) => { vaultUiPromise = null; throw cause; }));
+const isWebAuthnAvailable = () => typeof navigator !== 'undefined'
+  && typeof navigator.credentials?.create === 'function'
+  && typeof PublicKeyCredential !== 'undefined';
+/** @param {unknown} platform */
+const platformAuthenticatorLabel = (platform) => {
+  if (typeof platform !== 'string') return null;
+  const normalized = platform.toLowerCase();
+  return normalized.includes('mac') ? 'Touch ID'
+    : normalized.includes('win') ? 'Windows Hello' : null;
+};
+/** @param {CapabilityProbe} probe @returns {{paths:EnrollFlavor[],prfHint:string}} */
+const planEnrollment = ({ webAuthnAvailable, platformAuthenticator, clientCapabilities }) => {
+  if (!webAuthnAvailable) return { paths: [], prfHint: 'unknown' };
+  const prf = clientCapabilities?.['extension:prf'];
+  const prfHint = prf === true ? 'supported' : prf === false ? 'unsupported' : 'unknown';
+  if (prfHint === 'unsupported') return { paths: [], prfHint };
+  const platform = platformAuthenticator === true
+    || clientCapabilities?.userVerifyingPlatformAuthenticator === true;
+  return { paths: platform ? ['platform', 'security-key'] : ['security-key'], prfHint };
+};
+/** @param {unknown} error @param {string} name */
+const isPrfError = (error, name) => /** @type {{name?:unknown}} */ (error)?.name === name;
 
 // LABEL only (the enrollment flow is identical everywhere):
 // navigator.userAgentData is Chromium-only; navigator.platform is the
@@ -251,11 +269,20 @@ const ERROR_MESSAGES = {
   'recovery-not-set':    'No recovery passphrase has been set — unlock with your passkey.',
   'invalid-passphrase':  'Passphrase must be at least 8 characters.',
   'invalid-prf-payload': 'Passkey setup did not return usable credentials.',
+  'vault-authority-timeout': 'The secure vault did not confirm whether the operation finished. Wait a moment while peerd reconciles, then try again.',
+  'vault-authority-channel-lost': 'The secure vault restarted before it could confirm the result. Wait a moment while peerd reconciles, then try again.',
+};
+
+/** @param {unknown} cause */
+const authorityUncertainMessage = (cause) => {
+  const error = /** @type {{code?:string,outcomeKnown?:boolean}} */ (cause);
+  return error?.outcomeKnown === false || error?.code === 'vault-authority-timeout'
+    ? 'The secure vault did not confirm whether that finished. Wait a moment while peerd reconciles before trying again.'
+    : null;
 };
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
-/** @typedef {import('/peerd-egress/vault/enroll-options.js').CapabilityProbe} CapabilityProbe */
 /** @typedef {import('/peerd-egress/vault/enroll-options.js').EnrollFlavor} EnrollFlavor */
 
 /**
@@ -273,6 +300,7 @@ const ERROR_MESSAGES = {
  * @property {'idle'|'ceremony'|'finishing'} passkeyStage
  * @property {boolean} showPassphrase
  * @property {boolean} forcePassphrase
+ * @property {boolean} probeStarted
  * @property {CapabilityProbe|null} probe
  */
 
@@ -303,10 +331,7 @@ export const VaultGate = {
     // before a human can click); the UI renders the generic single
     // passkey button meanwhile, which is the legacy behavior.
     vnode.state.probe = null;
-    probeWebAuthnCapabilities().then((p) => {
-      vnode.state.probe = p;
-      m.redraw();
-    }).catch(() => { /* keep legacy generic button */ });
+    vnode.state.probeStarted = false;
   },
 
   /** @param {VaultGateVnode} vnode */
@@ -349,6 +374,16 @@ export const VaultGate = {
     // vault snapshot; otherwise the post-credential request can appear stuck
     // behind a cold service-worker module graph.
     const backendReady = state.hydrated === true;
+    if (backendReady && !ui.probeStarted) {
+      ui.probeStarted = true;
+      loadVaultUi().then(({ probeWebAuthnCapabilities }) => probeWebAuthnCapabilities())
+        .then((probe) => { ui.probe = probe; m.redraw(); })
+        .catch(() => { /* keep the generic passkey path */ });
+    }
+    const backendWait = () => (!backendReady ? m('p.muted', {
+      role: 'status',
+      'aria-live': 'polite',
+    }, 'Starting the secure vault service. This may take a moment on first launch…') : null);
     const webauthnAvailable = isWebAuthnAvailable();
     // What this machine offers, per the capability probe. null while the
     // probe is in flight → the generic single passkey button (legacy).
@@ -378,14 +413,19 @@ export const VaultGate = {
       const keepBackendWarm = setInterval(() => {
         send({ type: 'vault/prfStatus' }).catch(() => {});
       }, 20_000);
+      let commitDispatched = false;
       m.redraw();
       try {
         // Run the ceremony FIRST while the click is the active gesture —
         // create() needs user activation, which a SW round-trip can lose.
-        const { credentialId, prfSalt, prfOutput, transports } =
-          await enrollWithPrf({ flavor });
+        const { enrollWithPrf } = await loadVaultUi();
+        const { credentialId, prfSalt, prfOutput, transports } = await enrollWithPrf({ flavor });
         ui.passkeyStage = 'finishing';
-        m.redraw();
+        // This is the credential-return boundary, not generic progress. Paint
+        // its aria-live status before the fast local vault commit can replace
+        // the gate, so users and host-monotonic acceptance both observe it.
+        m.redraw.sync();
+        commitDispatched = true;
         const reply = await send({
           type: 'vault/initializeWithPasskey',
           credentialId: bytesToBase64(credentialId),
@@ -394,26 +434,34 @@ export const VaultGate = {
           transports,
         });
         if (!reply?.ok) {
-          ui.error = ERROR_MESSAGES[reply?.error] ?? reply?.error ?? 'Setup failed.';
+          ui.error = authorityUncertainMessage(reply)
+            ?? ERROR_MESSAGES[reply?.error] ?? 'Setup could not be completed.';
         }
         // on success the SW unlocks → state push flips us out of the gate
       } catch (err) {
-        if (err instanceof PrfCancelledError) {
+        if (commitDispatched) {
+          ui.error = authorityUncertainMessage({ outcomeKnown: false });
+        } else if (isPrfError(err, 'PrfCancelledError')) {
           ui.error = 'Passkey setup was cancelled. Try again, or use a passphrase.';
-        } else if (err instanceof PrfUnsupportedByAuthenticatorError) {
+        } else if (isPrfError(err, 'PrfUnsupportedByAuthenticatorError')) {
           // THIS authenticator can't do PRF, so it can't protect the
           // vault key — but another one (or the passphrase) still can.
           // Stay on the passkey screen with the other choices intact.
           ui.error = 'This authenticator can’t protect the vault key — it doesn’t '
             + 'support the PRF extension. Try a different one (YubiKey 5 or '
             + 'newer security keys work), or use a passphrase instead.';
-        } else if (err instanceof PrfNotSupportedError) {
+        } else if (isPrfError(err, 'PrfNotSupportedError')) {
           // The BROWSER can't do WebAuthn PRF — there's nothing to retry
           // with any authenticator. Drop to the passphrase path so the
           // user can still get a vault.
           ui.error = 'This browser can’t use passkeys for the vault. Set a passphrase instead.';
           ui.forcePassphrase = true;
         } else {
+          const uncertain = authorityUncertainMessage(err);
+          if (uncertain) {
+            ui.error = uncertain;
+            return;
+          }
           console.error('[vault-gate] passkey setup threw', err);
           ui.error = 'Passkey setup failed. Try again, or use a passphrase.';
         }
@@ -446,25 +494,35 @@ export const VaultGate = {
         return;
       }
       ui.busy = true;
-      const reply = await send({ type: 'vault/initialize', passphrase: ui.passphrase });
-      ui.busy = false;
-      if (reply?.ok) {
-        ui.passphrase = '';
-        ui.confirmPassphrase = '';
-      } else if (reply?.error === 'invalid-passphrase') {
-        ui.floorViolated = true;
-      } else {
-        ui.error = ERROR_MESSAGES[reply?.error] ?? reply?.error ?? 'Something went wrong.';
+      try {
+        const reply = await send({ type: 'vault/initialize', passphrase: ui.passphrase });
+        if (reply?.ok) {
+          ui.passphrase = '';
+          ui.confirmPassphrase = '';
+        } else if (reply?.error === 'invalid-passphrase') {
+          ui.floorViolated = true;
+        } else {
+          ui.error = authorityUncertainMessage(reply)
+            ?? ERROR_MESSAGES[reply?.error] ?? 'Vault setup could not be completed.';
+        }
+      } catch (error) {
+        console.error('[vault-gate] passphrase setup failed', error);
+        // send() crossed the authority boundary before this promise could
+        // reject, so a missing reply can never be advertised as safe replay.
+        ui.error = authorityUncertainMessage({ outcomeKnown: false });
+      } finally {
+        ui.busy = false;
+        m.redraw();
       }
-      m.redraw();
     };
 
     // ---------- Unlock paths ------------------------------------------
     const unlockWithPasskey = async () => {
-      if (ui.busy) return;
+      if (ui.busy || !backendReady) return;
       ui.error = null;
       ui.errorKind = 'neutral';
       ui.busy = true;
+      let unlockDispatched = false;
       m.redraw();
       try {
         const status = await send({ type: 'vault/prfStatus' });
@@ -473,6 +531,7 @@ export const VaultGate = {
           if (hasRecovery) ui.showPassphrase = true;
           return;
         }
+        const { getPrfOutput } = await loadVaultUi();
         const prfOutput = await getPrfOutput({
           credentialId: base64ToBytes(status.credentialId),
           prfSalt:      base64ToBytes(status.prfSalt),
@@ -482,22 +541,31 @@ export const VaultGate = {
           // try-everything prompt.
           transports:   status.transports,
         });
+        unlockDispatched = true;
         const reply = await send({
           type: 'vault/unlockPrf',
           prfOutput: bytesToBase64(prfOutput),
         });
         if (!reply?.ok) {
-          ui.error = ERROR_MESSAGES[reply?.error] ?? reply?.error ?? 'Passkey unlock failed.';
+          ui.error = authorityUncertainMessage(reply)
+            ?? ERROR_MESSAGES[reply?.error] ?? 'Passkey unlock could not be completed.';
         }
       } catch (err) {
-        if (err instanceof PrfCancelledError) {
+        if (unlockDispatched) {
+          ui.error = authorityUncertainMessage({ outcomeKnown: false });
+        } else if (isPrfError(err, 'PrfCancelledError')) {
           // User dismissed the prompt. Offer the recovery passphrase if
           // one exists; otherwise leave them on the passkey screen.
           if (hasRecovery) ui.showPassphrase = true;
-        } else if (err instanceof PrfNotSupportedError) {
+        } else if (isPrfError(err, 'PrfNotSupportedError')) {
           ui.error = 'Passkeys are not supported in this browser.';
           if (hasRecovery) ui.showPassphrase = true;
         } else {
+          const uncertain = authorityUncertainMessage(err);
+          if (uncertain) {
+            ui.error = uncertain;
+            return;
+          }
           console.error('[vault-gate] passkey unlock threw', err);
           ui.error = hasRecovery
             ? 'Your passkey could not be used. Use your recovery passphrase.'
@@ -513,7 +581,7 @@ export const VaultGate = {
     /** @param {Event} [e] */
     const unlockWithPassphrase = async (e) => {
       e?.preventDefault?.();
-      if (ui.busy) return;
+      if (ui.busy || !backendReady) return;
       ui.error = null;
       ui.errorKind = 'neutral';
       if (!ui.passphrase) {
@@ -521,17 +589,25 @@ export const VaultGate = {
         return;
       }
       ui.busy = true;
-      const reply = await send({ type: 'vault/unlock', passphrase: ui.passphrase });
-      ui.busy = false;
-      if (reply?.ok) {
-        ui.passphrase = '';
-      } else {
-        ui.error = ERROR_MESSAGES[reply?.error] ?? reply?.error ?? 'Something went wrong.';
-        // §5f: the wrong passphrase is the one WRONG ANSWER on this
-        // screen - everything else that can land here is a condition.
-        ui.errorKind = reply?.error === 'wrong-passphrase' ? 'wrong' : 'neutral';
+      try {
+        const reply = await send({ type: 'vault/unlock', passphrase: ui.passphrase });
+        if (reply?.ok) {
+          ui.passphrase = '';
+        } else {
+          ui.error = authorityUncertainMessage(reply)
+            ?? ERROR_MESSAGES[reply?.error] ?? 'Vault unlock could not be completed.';
+          // §5f: the wrong passphrase is the one WRONG ANSWER on this
+          // screen - everything else that can land here is a condition.
+          ui.errorKind = reply?.error === 'wrong-passphrase' ? 'wrong' : 'neutral';
+        }
+      } catch (error) {
+        console.error('[vault-gate] passphrase unlock failed', error);
+        ui.error = authorityUncertainMessage({ outcomeKnown: false });
+        ui.errorKind = 'neutral';
+      } finally {
+        ui.busy = false;
+        m.redraw();
       }
-      m.redraw();
     };
 
     // ---------- Render: first-run -------------------------------------
@@ -604,10 +680,7 @@ export const VaultGate = {
           m('p.muted', { style: 'font-size:11px; margin-top:12px;' },
             'You can add a recovery passphrase later in Settings, in case ' +
             'you lose access to your passkey.'),
-          !backendReady ? m('p.muted', {
-            role: 'status',
-            'aria-live': 'polite',
-          }, 'Starting the secure vault service. This may take a moment on first launch…') : null,
+          backendWait(),
           ui.passkeyStage === 'finishing' ? m('p.muted', {
             role: 'status',
             'aria-live': 'polite',
@@ -675,10 +748,7 @@ export const VaultGate = {
               onclick: () => { ui.forcePassphrase = false; ui.error = null; ui.errorKind = 'neutral'; ui.floorViolated = false; m.redraw(); },
             }, 'Use a passkey instead') : null,
           ]),
-          !backendReady ? m('p.muted', {
-            role: 'status',
-            'aria-live': 'polite',
-          }, 'Starting the secure vault service. This may take a moment on first launch…') : null,
+          backendWait(),
         ]),
       ]);
     }
@@ -692,17 +762,19 @@ export const VaultGate = {
         m('.auth-actions.auth-actions--row', [
           m('button', {
             type: 'button',
-            disabled: ui.busy,
+            disabled: ui.busy || !backendReady,
             onclick: unlockWithPasskey,
-          }, ui.busy ? '…' : 'Unlock with passkey'),
+          }, !backendReady ? 'Preparing secure unlock…'
+            : ui.busy ? '…' : 'Unlock with passkey'),
           // Recovery passphrase is only an option if one was ever set.
           hasRecovery ? m('button.secondary', {
             type: 'button',
-            disabled: ui.busy,
+            disabled: ui.busy || !backendReady,
             onclick: () => { ui.showPassphrase = true; ui.error = null; ui.errorKind = 'neutral'; m.redraw(); },
           }, 'Use recovery passphrase') : null,
         ]),
         waitNote(),
+        backendWait(),
         gateError(),
       ]);
     }
@@ -720,7 +792,7 @@ export const VaultGate = {
             type: 'password',
             autocomplete: 'current-password',
             value: ui.passphrase,
-            disabled: ui.busy,
+            disabled: ui.busy || !backendReady,
             // §5f: only the wrong answer marks the field.
             class: ui.errorKind === 'wrong' && ui.error ? 'is-error' : '',
             oninput: (/** @type {Event} */ e) => { ui.passphrase = /** @type {HTMLInputElement} */ (e.target).value; },
@@ -729,14 +801,15 @@ export const VaultGate = {
         ]),
         gateError(),
         m('.auth-actions.auth-actions--row', [
-          m('button', { type: 'submit', disabled: ui.busy },
-            ui.busy ? '…' : 'Unlock'),
+          m('button', { type: 'submit', disabled: ui.busy || !backendReady },
+            !backendReady ? 'Preparing secure unlock…' : ui.busy ? '…' : 'Unlock'),
           (prfEnrolled && webauthnAvailable) ? m('button.secondary', {
             type: 'button',
-            disabled: ui.busy,
+            disabled: ui.busy || !backendReady,
             onclick: () => { ui.showPassphrase = false; ui.error = null; ui.errorKind = 'neutral'; m.redraw(); },
           }, 'Use passkey') : null,
         ]),
+        backendWait(),
       ]),
     ]);
   },

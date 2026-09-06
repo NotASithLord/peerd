@@ -52,7 +52,7 @@
 //
 // why the split, concretely: wrapUntrusted fences ~27 callsites and only some
 // carry page text. The rest carry SOURCE CODE and DIFFS — js_read_file,
-// app_read_file, site_client_read, request_review's diff, a2a_run output. The
+// app_read_file, site_client_read, and a2a_run output. The
 // invisible/control sweep is safe on all of them (a literal zero-width byte in
 // source is the trojan-source attack, not a feature worth preserving). The
 // HTML-comment pass is NOT: it would silently eat `<!-- ... -->` out of an HTML

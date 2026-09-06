@@ -10,7 +10,6 @@
 import { describe, it, expect } from '../../framework.js';
 import {
   makeLifecycleBoot, makeDispatchTracker, retryClassForTool,
-  registerTool, clearTools, dispatchToolCall,
   OPERATION_STATES, groupResourceLossNotices,
 } from '/peerd-runtime/index.js';
 
@@ -171,25 +170,9 @@ describe('lifecycle recovery over real chrome.storage', () => {
     }
   });
 
-  it('the wired dispatcher refuses a cross-generation Class E replay end-to-end', async () => {
+  it('the authority tracker refuses a cross-generation Class E replay', async () => {
     await cleanup();
-    clearTools();
     try {
-      let executions = 0;
-      registerTool(/** @type {any} */ ({
-        name: 'test_submit', description: 'x', schema: {},
-        primitive: 'web', sideEffect: 'mutate_external',
-        origins: () => [],
-        execute: async () => { executions += 1; throw new Error('request timed out'); },
-      }));
-      const ctx = (/** @type {any} */ tracker) => /** @type {any} */ ({
-        audit: async () => {}, hooks: [],
-        session: { sessionId: 'sess-real' },
-        permission: { mode: 'act', confirmActions: false },
-        lifecycle: tracker,
-      });
-
-      // Generation 1 dispatches; the timeout settles it outcome_unknown.
       const gen1 = boot();
       const g1 = await gen1.init();
       const tracker1 = makeDispatchTracker({
@@ -197,13 +180,16 @@ describe('lifecycle recovery over real chrome.storage', () => {
         generationId: () => g1.generation.id,
         retryClassFor: retryClassForTool,
       });
-      const first = await dispatchToolCall(
-        { id: 'real-tu-1', name: 'test_submit', args: {} }, ctx(tracker1));
-      expect(first.ok).toBe(false);
-      expect(String(/** @type {any} */ (first).error).startsWith('outcome_unknown:')).toBe(true);
+      const first = await tracker1.beginTracking({
+        callId: 'real-tu-1', sessionId: 'sess-real', args: {},
+        tool: { name: 'test_submit', retryClass: 'E' },
+      });
+      const settled = await tracker1.settleTracking(
+        /** @type {{handle:any}} */ (first).handle,
+        { ok: false, error: 'request timed out' },
+      );
+      expect(String(settled?.error).startsWith('outcome_unknown:')).toBe(true);
 
-      // Generation 2 (post-eviction) re-drives the same tool_use id: the
-      // replay guard must answer without re-executing the tool.
       const gen2 = boot();
       const g2 = await gen2.init();
       const tracker2 = makeDispatchTracker({
@@ -211,13 +197,13 @@ describe('lifecycle recovery over real chrome.storage', () => {
         generationId: () => g2.generation.id,
         retryClassFor: retryClassForTool,
       });
-      const replay = await dispatchToolCall(
-        { id: 'real-tu-1', name: 'test_submit', args: {} }, ctx(tracker2));
-      expect(executions).toBe(1);
-      expect(replay.ok).toBe(false);
-      expect(String(/** @type {any} */ (replay).error).startsWith('outcome_unknown:')).toBe(true);
+      const replay = await tracker2.beginTracking({
+        callId: 'real-tu-1', sessionId: 'sess-real', args: {},
+        tool: { name: 'test_submit', retryClass: 'E' },
+      });
+      expect(String(/** @type {any} */ (replay).refuse.error)
+        .startsWith('outcome_unknown:')).toBe(true);
     } finally {
-      clearTools();
       await cleanup();
     }
   });

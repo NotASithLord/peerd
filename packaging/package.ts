@@ -6,9 +6,10 @@
 //   2. prune what the channel must not ship:
 //        both channels: tests/ and checked-in generated files
 //        store:         eval/
-//        dweb-disabled: peerd-distributed/ entirely, and the dweb loader is
-//                       swapped for the stub-only template. This covers store
-//                       packages and Firefox until it has a mesh host.
+//        dweb-disabled: peerd-distributed/ entirely; the loader and two cold
+//                       route factories are swapped for committed fail-closed
+//                       templates. This covers store packages and Firefox
+//                       until it has a mesh host.
 //   3. generate shared/channel-config.js (channel flag + CHANNEL_DEFAULTS)
 //   4. generate the manifest for (channel, browser)
 //   5. compact authored modules in the static SW/offscreen cold graphs
@@ -24,17 +25,23 @@
 //          --no-minify (diagnostic artifact; release commands never use it)
 
 import {
-  cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync,
-  readdirSync, statSync, utimesSync, chmodSync,
+  cpSync, rmSync, mkdirSync, writeFileSync, copyFileSync, existsSync,
+  readdirSync, lstatSync, statSync, utimesSync, chmodSync, realpathSync,
 } from 'node:fs';
-import { join, relative, basename } from 'node:path';
+import { join, relative, basename, dirname, resolve, sep, isAbsolute } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
-  REPO_ROOT, EXTENSION_DIR, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE,
+  REPO_ROOT, ARTIFACTS_DIR, STORE_LOADER_TEMPLATE,
+  DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
+  DEBUGGER_UNAVAILABLE_TEMPLATE,
+  STORE_ACTOR_WORKER_TEMPLATE, STORE_OPTIONS_APP_TEMPLATE,
+  STORE_SEMANTIC_HOST_TEMPLATE,
   CHANNELS, BROWSERS, type Channel, type Browser,
   readVersion, parseArgs,
 } from './lib.ts';
 import { generateManifest } from './gen-manifest.ts';
+import { genBuildConfigSource } from './gen-build-config.ts';
 import { dwebEnabledForTarget, genChannelConfigSource } from './gen-channel-config.ts';
 import { verifyStoreArtifact } from './verify-store-artifact.ts';
 import { signPreviewArtifact } from './sign.ts';
@@ -44,6 +51,10 @@ import {
   formatArtifactMinifyReport,
   minifyColdArtifactModules,
 } from './minify-artifact-js.ts';
+import {
+  CONTROLLER_BUILD_ENTRIES,
+  writeControllerBuildIdentity,
+} from './controller-build-identity.ts';
 
 // Paths (relative to extension/) that never ship in ANY artifact.
 // why eval/ is NOT here: the home page's Lab (home/eval-section.js) imports
@@ -51,11 +62,31 @@ import {
 // graph and black-screens the home tab. The Lab is a dev tool, so it's pruned
 // from STORE only (below), and eval-section lazy-loads it + degrades gracefully
 // when absent — so store's home still mounts.
-const PRUNE_ALWAYS = ['tests', 'manifest.json', 'shared/channel-config.js'];
+const PRUNE_ALWAYS = [
+  'tests', 'manifest.json', 'shared/channel-config.js', 'shared/build-config.js',
+];
 // The home Lab is a preview-only dev tool. Dweb source and prompt text are
 // separately pruned from every artifact without a working mesh host.
-const PRUNE_STORE = ['eval'];
-const PRUNE_DWEB = ['peerd-distributed', 'peerd-provider/system-prompt-dweb.txt'];
+const PRUNE_STORE = [
+  'eval',
+  'background/kernel-contributor-owner.js',
+  'background/kernel-firefox-contributor-addon.js',
+  'background/vault-kernel-firefox-preview.js',
+  'offscreen/contributor-channel-addon.js',
+  'offscreen/semantic-routes/contributor.js',
+  'options/sections/contributor-metrics.js',
+  'peerd-runtime/controller-contributor.js',
+  'peerd-runtime/observability/contributor-metrics.js',
+  'peerd-runtime/observability/contributor-store.js',
+];
+const PRUNE_DWEB = [
+  'peerd-distributed', 'peerd-provider/system-prompt-dweb.txt',
+  'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
+  'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
+];
+const PRUNE_PREVIEW_CHROME = [
+  'background/kernel-preview-addon.js', 'background/vault-kernel-preview.js',
+];
 
 // Reproducible artifacts: two builds of the same tree must produce
 // byte-identical zips, so a shipped artifact can be independently rebuilt
@@ -94,7 +125,86 @@ const listEntriesSorted = (root: string): string[] =>
     .map((p) => p.split('\\').join('/'))
     .sort();
 
+/**
+ * Refuse filesystem indirection and special nodes anywhere in a release tree.
+ * why: cpSync preserves a symlink and Info-ZIP follows it by default, so even
+ * an unreferenced asset link can copy bytes from outside extension/ into the
+ * signed artifact. lstat + an explicit walk must run before any stat/chmod.
+ */
+export const assertRegularPackageTree = (root: string, label: string): void => {
+  const visit = (absolute: string, relativePath: string): void => {
+    const entry = lstatSync(absolute);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${label} contains a symbolic link: ${relativePath}`);
+    }
+    if (entry.isDirectory()) {
+      for (const name of readdirSync(absolute).sort()) {
+        visit(join(absolute, name), relativePath === '.' ? name : join(relativePath, name));
+      }
+      return;
+    }
+    if (!entry.isFile()) {
+      throw new Error(`${label} contains a non-regular entry: ${relativePath}`);
+    }
+  };
+  visit(root, '.');
+};
+
+const isWithinOrEqual = (parent: string, child: string): boolean =>
+  child === parent || child.startsWith(`${parent}${sep}`);
+
+/**
+ * Refuse indirection in every path component before reading a release input.
+ * why: checking only the staged extension tree misses manifests, defaults, and
+ * swap templates; copyFileSync/import follow those links and erase the evidence
+ * before the staging-tree check can see it.
+ */
+export const assertRegularContainedPackageInput = (
+  trustedRoot: string,
+  input: string,
+  label: string,
+  kind: 'file' | 'tree' = 'file',
+): void => {
+  const absoluteRoot = resolve(trustedRoot);
+  const absoluteInput = resolve(input);
+  const relativeInput = relative(absoluteRoot, absoluteInput);
+  if (relativeInput === '..' || relativeInput.startsWith(`..${sep}`) || isAbsolute(relativeInput)) {
+    throw new Error(`${label} is outside its trusted root: ${input}`);
+  }
+
+  const components = relativeInput === '' ? [] : relativeInput.split(sep);
+  let current = absoluteRoot;
+  for (let index = 0; index <= components.length; index += 1) {
+    const relativePath = index === 0 ? '.' : components.slice(0, index).join(sep);
+    if (index > 0) current = join(current, components[index - 1]);
+    const entry = lstatSync(current);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${label} contains a symbolic link: ${relativePath}`);
+    }
+    const final = index === components.length;
+    if (!final && !entry.isDirectory()) {
+      throw new Error(`${label} contains a non-directory parent: ${relativePath}`);
+    }
+    if (final && (kind === 'file' ? !entry.isFile() : !entry.isDirectory())) {
+      throw new Error(`${label} is not a regular ${kind === 'file' ? 'file' : 'directory'}: ${relativePath}`);
+    }
+  }
+
+  const realRoot = realpathSync(absoluteRoot);
+  const realInput = realpathSync(absoluteInput);
+  if (!isWithinOrEqual(realRoot, realInput)) {
+    throw new Error(`${label} resolves outside its trusted root: ${input}`);
+  }
+  if (kind === 'tree') assertRegularPackageTree(absoluteInput, label);
+};
+
+const copyPackageTemplate = (source: string, destination: string): void => {
+  assertRegularContainedPackageInput(REPO_ROOT, source, 'package template');
+  copyFileSync(source, destination);
+};
+
 const normalizeStagingForZip = (staging: string): string[] => {
+  assertRegularPackageTree(staging, 'package staging tree');
   const entries = listEntriesSorted(staging);
   const stamp = new Date(SOURCE_DATE_EPOCH * 1000);
   for (const rel of ['.', ...entries]) {
@@ -105,8 +215,13 @@ const normalizeStagingForZip = (staging: string): string[] => {
   return entries;
 };
 
-const shouldCopy = (src: string, channel: Channel, browser: Browser): boolean => {
-  const rel = relative(EXTENSION_DIR, src);
+const shouldCopy = (
+  extensionDir: string,
+  src: string,
+  channel: Channel,
+  browser: Browser,
+): boolean => {
+  const rel = relative(extensionDir, src);
   if (rel === '') return true;
   if (basename(src) === '.DS_Store') return false;
   // why: .d.ts sidecars (e.g. vendor/browser-polyfill.d.ts) are dev-only
@@ -117,12 +232,39 @@ const shouldCopy = (src: string, channel: Channel, browser: Browser): boolean =>
     ...PRUNE_ALWAYS,
     ...(channel === 'store' ? PRUNE_STORE : []),
     ...(!dwebEnabledForTarget(channel, browser) ? PRUNE_DWEB : []),
+    ...(channel === 'preview' && browser === 'chrome' ? [] : PRUNE_PREVIEW_CHROME),
   ];
   return !pruned.some((p) => rel === p || rel.startsWith(p + '/'));
 };
 
+/**
+ * Replace the two cold route factories only where the target has no mesh host.
+ * Whole committed files keep this package boundary reviewable and deterministic.
+ */
+export const applyDwebDisabledTemplates = (
+  staging: string,
+  channel: Channel,
+  browser: Browser,
+): boolean => {
+  if (dwebEnabledForTarget(channel, browser)) return false;
+  copyPackageTemplate(STORE_LOADER_TEMPLATE, join(staging, 'shared', 'dweb-loader.js'));
+  copyPackageTemplate(
+    DWEB_ROUTES_DISABLED_TEMPLATE,
+    join(staging, 'background', 'routes', 'dweb.js'),
+  );
+  copyPackageTemplate(
+    DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
+    join(staging, 'background', 'routes', 'dweb-self.js'),
+  );
+  return true;
+};
+
 export const packageArtifact = async (
-  { channel, browser, version, sign = true, verify = true, minify = true }:
+  {
+    channel, browser, version, sign = true, verify = true, minify = true,
+    sourceRoot = REPO_ROOT, artifactRoot = ARTIFACTS_DIR,
+    coldBudgetMode = 'enforce',
+  }:
   {
     channel: Channel;
     browser: Browser;
@@ -130,38 +272,152 @@ export const packageArtifact = async (
     sign?: boolean;
     verify?: boolean;
     minify?: boolean;
+    /** Repository-root input tree. Packaging code/tooling still comes from
+     *  the caller's checkout; extension/manifests/default settings come from
+     *  this immutable source tree. */
+    sourceRoot?: string;
+    /** Isolated output root for staging, archives, and optional signatures. */
+    artifactRoot?: string;
+    /** Base artifacts in an interleaved comparison are measured, not allowed
+     *  to fail today's candidate ceiling. Candidate/release builds enforce. */
+    coldBudgetMode?: 'enforce' | 'measure-only';
   },
 ): Promise<string> => {
-  const staging = join(ARTIFACTS_DIR, 'staging', `${channel}-${browser}`);
+  const canonicalPath = (input: string): string => {
+    let existing = resolve(input);
+    const missing: string[] = [];
+    while (!existsSync(existing)) {
+      const parent = dirname(existing);
+      if (parent === existing) break;
+      missing.unshift(basename(existing));
+      existing = parent;
+    }
+    return resolve(realpathSync(existing), ...missing);
+  };
+  const resolvedSourceRoot = canonicalPath(sourceRoot);
+  const resolvedArtifactRoot = canonicalPath(artifactRoot);
+  const extensionDir = join(resolvedSourceRoot, 'extension');
+  const manifestsDir = join(resolvedSourceRoot, 'manifests');
+  const defaultSettingsFile = join(resolvedSourceRoot, 'packaging', 'default-settings.mjs');
+  const legacyDefaultRoots = resolvedSourceRoot === canonicalPath(REPO_ROOT)
+    && resolvedArtifactRoot === canonicalPath(ARTIFACTS_DIR);
+  if (!legacyDefaultRoots
+      && (isWithinOrEqual(resolvedSourceRoot, resolvedArtifactRoot)
+        || isWithinOrEqual(resolvedArtifactRoot, resolvedSourceRoot))) {
+    throw new Error('explicit sourceRoot and artifactRoot must be disjoint (no ancestor overlap)');
+  }
+  for (const required of [extensionDir, manifestsDir, defaultSettingsFile]) {
+    if (!existsSync(required)) throw new Error(`package source root is incomplete: missing ${required}`);
+  }
+  assertRegularContainedPackageInput(
+    resolvedSourceRoot, extensionDir, 'package source extension tree', 'tree',
+  );
+  assertRegularContainedPackageInput(
+    resolvedSourceRoot, manifestsDir, 'package source manifests tree', 'tree',
+  );
+  assertRegularContainedPackageInput(
+    resolvedSourceRoot, defaultSettingsFile, 'package source default settings',
+  );
+  if (!['enforce', 'measure-only'].includes(coldBudgetMode)) {
+    throw new Error(`unknown coldBudgetMode ${coldBudgetMode}`);
+  }
+  // This escape hatch exists only to observe an immutable historical base.
+  // Normal/current-tree and normal/release output paths can never bypass the
+  // checked-in absolute package ratchet.
+  if (coldBudgetMode === 'measure-only'
+      && (resolvedSourceRoot === canonicalPath(REPO_ROOT)
+        || resolvedArtifactRoot === canonicalPath(ARTIFACTS_DIR))) {
+    throw new Error('measure-only cold budgets require isolated historical source and artifact roots');
+  }
+
+  const staging = join(resolvedArtifactRoot, 'staging', `${channel}-${browser}`);
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
 
-  cpSync(EXTENSION_DIR, staging, {
+  cpSync(extensionDir, staging, {
     recursive: true,
-    filter: (src) => shouldCopy(src, channel, browser),
+    filter: (src) => shouldCopy(extensionDir, src, channel, browser),
   });
 
-  // Channel-specific generated/swapped files. The store loader swap is a
-  // wholesale committed-file replacement (packaging/templates/), never a text
-  // transform — what ships is exactly what's reviewable in the repo.
-  writeFileSync(join(staging, 'shared', 'channel-config.js'), genChannelConfigSource(channel, browser));
-  if (!dwebEnabledForTarget(channel, browser)) {
-    copyFileSync(STORE_LOADER_TEMPLATE, join(staging, 'shared', 'dweb-loader.js'));
+  // Channel-specific generated/swapped files. Disabled dweb surfaces use
+  // wholesale committed-file replacements (packaging/templates/), never text
+  // transforms; what ships is exactly what's reviewable in the repo.
+  const sourceDefaults = (await import(pathToFileURL(defaultSettingsFile).href)).defaults;
+  if (!sourceDefaults || typeof sourceDefaults !== 'object') {
+    throw new Error(`package source default settings are invalid: ${defaultSettingsFile}`);
+  }
+  writeFileSync(
+    join(staging, 'shared', 'channel-config.js'),
+    genChannelConfigSource(channel, browser, sourceDefaults),
+  );
+  applyDwebDisabledTemplates(staging, channel, browser);
+  if (channel === 'store') {
+    copyPackageTemplate(STORE_ACTOR_WORKER_TEMPLATE, join(staging, 'offscreen', 'actor-worker.js'));
+    copyPackageTemplate(
+      STORE_OPTIONS_APP_TEMPLATE,
+      join(staging, 'options', 'components', 'options-app.js'),
+    );
+    copyPackageTemplate(
+      STORE_SEMANTIC_HOST_TEMPLATE,
+      join(staging, 'offscreen', 'semantic-route-host.js'),
+    );
+  }
+  // CDP is a package-time capability, not a runtime grant: Store Chrome and
+  // every Firefox artifact remove the debugger permission in gen-manifest.
+  // Shipping the 50+ KiB pool and its custody/registry graph in those targets
+  // can therefore only delay cold listener registration; advancedAutomationOn
+  // is permanently false there. Swap the whole reviewed module for the exact
+  // unavailable implementation rather than applying a brittle text transform.
+  if (channel === 'store' || browser === 'firefox') {
+    copyPackageTemplate(
+      DEBUGGER_UNAVAILABLE_TEMPLATE,
+      join(staging, 'background', 'debugger-pool.js'),
+    );
   }
 
-  const manifest = generateManifest({ channel, browser, version });
+  const manifest = generateManifest({ channel, browser, version, manifestsDir });
+  writeFileSync(
+    join(staging, 'shared', 'build-config.js'),
+    genBuildConfigSource(manifest, {
+      dwebEnabled: dwebEnabledForTarget(channel, browser),
+      channel,
+      browser,
+    }),
+  );
   writeFileSync(join(staging, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 
   if (minify) {
-    const report = await minifyColdArtifactModules(staging, browser);
-    assertColdArtifactBudgets(report);
+    const report = await minifyColdArtifactModules(staging, browser, channel);
+    if (coldBudgetMode === 'enforce') {
+      assertColdArtifactBudgets(report);
+    }
     console.log(formatArtifactMinifyReport(report));
+    if (coldBudgetMode === 'enforce') {
+      console.log('cold graph budget: package no-growth ratchet');
+    }
+    if (coldBudgetMode === 'measure-only') {
+      console.log('cold graph budget: measure-only historical base (candidate ratchet not applied)');
+    }
+  }
+
+  // Bind the private semantic-controller channel to the exact target bytes.
+  // This must happen after pruning/minification: hashing the authored source
+  // would allow a stale host from a different packaged artifact to handshake.
+  const canStampController = CONTROLLER_BUILD_ENTRIES.every((entry) => existsSync(join(staging, entry)))
+    && existsSync(join(staging, 'shared', 'controller-build.js'));
+  if (canStampController) {
+    await writeControllerBuildIdentity(staging);
+  } else if (coldBudgetMode === 'measure-only') {
+    console.log('controller build identity: absent from historical base; no candidate stamp injected');
+  } else {
+    throw new Error('candidate artifact is missing the complete controller build-identity graph');
   }
 
   // Package. AMO takes .xpi (a zip); Chrome Web Store takes .zip; the
   // Chrome preview .crx is produced from the zip by the signing step.
   const ext = browser === 'firefox' ? 'xpi' : 'zip';
-  const artifact = join(ARTIFACTS_DIR, `peerd-${channel}-${browser}.${ext}`);
+  mkdirSync(resolvedArtifactRoot, { recursive: true });
+  const artifact = join(resolvedArtifactRoot, `peerd-${channel}-${browser}.${ext}`);
   rmSync(artifact, { force: true });
   // -X strips platform extra fields; -@ takes the sorted entry list on stdin
   // (see normalizeStagingForZip — mtimes/modes/order are already normalized).
@@ -175,10 +431,12 @@ export const packageArtifact = async (
   console.log(`built ${relative(REPO_ROOT, artifact)} (${channel}/${browser} v${version})`);
 
   if (channel === 'store' && verify) {
-    await verifyStoreArtifact(artifact);
+    await verifyStoreArtifact(artifact, { sourceRoot: resolvedSourceRoot });
   }
   if (channel === 'preview' && sign) {
-    await signPreviewArtifact({ browser, artifact, version });
+    await signPreviewArtifact({
+      browser, artifact, version, artifactRoot: resolvedArtifactRoot, stagingDir: staging,
+    });
   }
   return artifact;
 };

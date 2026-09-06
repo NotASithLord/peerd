@@ -218,12 +218,12 @@ export const sniffDocFormat = (bytes, hints = {}) => {
  * the agent a route instead of 16k characters of garbage.
  *
  * @param {{ contentType?: string, url?: string, bodyHead?: string }} input
- * @returns {{ format: DocFormat, tool: 'read_doc'|'read_pdf' } | null}
+ * @returns {{ format: DocFormat, tool: 'read_doc' } | null}
  */
 export const sniffResponseAsDocument = ({ contentType = '', url = '', bodyHead = '' }) => {
   // Signatures first — they beat a wrong content-type, which is the common case
   // (S3 and most CDNs serve application/octet-stream for everything).
-  if (bodyHead.startsWith('%PDF')) return { format: 'pdf', tool: 'read_pdf' };
+  if (bodyHead.startsWith('%PDF')) return { format: 'pdf', tool: 'read_doc' };
   if (bodyHead.startsWith('{\\rt')) return { format: 'rtf', tool: 'read_doc' };
   if (bodyHead.startsWith('PK')) {
     // A ZIP. Only claim it when we can say WHICH document it is — a plain
@@ -238,7 +238,7 @@ export const sniffResponseAsDocument = ({ contentType = '', url = '', bodyHead =
   // text, so fetch_url's own output is fine and a redirect would be noise.
   for (const [re, format] of BY_MIME) {
     if (!re.test(contentType.toLowerCase())) continue;
-    if (format === 'pdf') return { format, tool: 'read_pdf' };
+    if (format === 'pdf') return { format, tool: 'read_doc' };
     if (isConvertible(format) && format !== 'csv' && format !== 'tsv') return { format, tool: 'read_doc' };
   }
   return null;

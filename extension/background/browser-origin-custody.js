@@ -115,19 +115,37 @@ export const createBrowserOriginCustody = ({
     /** @param {readonly (readonly [number, readonly string[]])[]} rows */
     async hydrate(rows) {
       try {
-        for (const row of rows ?? []) {
-          if (!Array.isArray(row) || row.length !== 2) continue;
-          const [tabId, storedDomains] = row;
-          if (!Number.isInteger(tabId) || tabId < 0 || closedDuringHydration.has(tabId)
-            || !isGuarded(tabId) || !Array.isArray(storedDomains)) continue;
-          for (const storedDomain of storedDomains) {
-            if (typeof storedDomain !== 'string') continue;
-            const domain = domainForUrl(`https://${storedDomain}/`);
-            if (!domain || domain !== storedDomain) continue;
-            const domains = domainsByTab.get(tabId) ?? new Set();
-            domains.add(domain);
-            domainsByTab.set(tabId, domains);
+        if (!Array.isArray(rows)) {
+          throw new TypeError('browser-origin-custody-snapshot-invalid');
+        }
+        /** @type {Map<number, Set<string>>} */
+        const restored = new Map();
+        for (const row of rows) {
+          if (!Array.isArray(row) || row.length !== 2) {
+            throw new TypeError('browser-origin-custody-snapshot-invalid');
           }
+          const [tabId, storedDomains] = row;
+          if (!Number.isInteger(tabId) || tabId < 0 || !Array.isArray(storedDomains)) {
+            throw new TypeError('browser-origin-custody-snapshot-invalid');
+          }
+          const domains = restored.get(tabId) ?? new Set();
+          for (const storedDomain of storedDomains) {
+            if (typeof storedDomain !== 'string') {
+              throw new TypeError('browser-origin-custody-snapshot-invalid');
+            }
+            const domain = domainForUrl(`https://${storedDomain}/`);
+            if (!domain || domain !== storedDomain) {
+              throw new TypeError('browser-origin-custody-snapshot-invalid');
+            }
+            domains.add(domain);
+          }
+          restored.set(tabId, domains);
+        }
+        for (const [tabId, domains] of restored) {
+          if (closedDuringHydration.has(tabId) || !isGuarded(tabId)) continue;
+          const current = domainsByTab.get(tabId) ?? new Set();
+          for (const domain of domains) current.add(domain);
+          domainsByTab.set(tabId, current);
         }
         if (closedDuringHydration.size) await persistCurrent();
       } catch (error) {

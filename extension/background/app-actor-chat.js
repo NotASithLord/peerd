@@ -32,22 +32,27 @@ export const makeAppActorChatHandler = ({
   if (!prompt) return { ok: false, error: 'app_actor_chat_message_required' };
   if (prompt.length > messageChars) return { ok: false, error: 'app_actor_chat_message_too_large' };
 
-  const actorSessionId = await ensureAppActorBinding(appId, ownerClaim).catch(() => null);
-  if (!actorSessionId) return { ok: false, error: 'app_actor_chat_actor_unavailable' };
-  const actor = await sessions.get(actorSessionId).catch(() => null);
-  const ownerRoot = actor?.parentSessionId;
-  if (typeof ownerRoot !== 'string'
-      || appTabTracker.getOwnedTabId(appId, ownerRoot) !== tabId) {
-    return { ok: false, error: 'app_actor_chat_owner_mismatch' };
-  }
-
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(new Error('App actor reply timed out')),
     timeoutMs,
   );
+  const interrupted = new Promise((_, reject) => {
+    controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
+  });
+  const bounded = (/** @type {Promise<any>} */ operation) => Promise.race([operation, interrupted]);
   try {
-    return await messageActor({
+    const actorSessionId = await bounded(Promise.resolve(
+      ensureAppActorBinding(appId, ownerClaim),
+    ));
+    if (!actorSessionId) return { ok: false, error: 'app_actor_chat_actor_unavailable' };
+    const actor = await bounded(Promise.resolve(sessions.get(actorSessionId)));
+    const ownerRoot = actor?.parentSessionId;
+    if (typeof ownerRoot !== 'string'
+        || appTabTracker.getOwnedTabId(appId, ownerRoot) !== tabId) {
+      return { ok: false, error: 'app_actor_chat_owner_mismatch' };
+    }
+    return await bounded(Promise.resolve(messageActor({
       to: appId,
       message: prompt,
       senderSessionId: ownerRoot,
@@ -57,7 +62,20 @@ export const makeAppActorChatHandler = ({
       trustedAppTab: true,
       via: 'app-native',
       awaitSignal: controller.signal,
-    });
+    })));
+  } catch (cause) {
+    if (controller.signal.aborted) {
+      return {
+        ok: false,
+        error: 'app_actor_chat_outcome_unconfirmed',
+        code: 'app-actor-chat-timeout',
+        outcomeKnown: false,
+        outcomeKind: 'unknown',
+        retryable: false,
+      };
+    }
+    void cause;
+    return { ok: false, error: 'app_actor_chat_actor_unavailable' };
   } finally {
     clearTimeout(timer);
   }

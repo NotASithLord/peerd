@@ -17,8 +17,8 @@ future store update requires a separate review decision.
 
 ### Remote skill installation
 
-The store package keeps remote skill installation disabled. Local skill text is
-supported. The live feature gate and service-worker checks are the authority.
+Remote skill installation is not a product surface. Local pasted skill text is
+supported; there are no remote-install routes or URL controls.
 
 ### Remote JavaScript imports
 

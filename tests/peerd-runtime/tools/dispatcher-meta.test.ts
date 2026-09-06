@@ -3,9 +3,7 @@
 // classify and render them. They ride in meta (off the wire).
 
 import { describe, test, expect, afterEach } from 'bun:test';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
-import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
-import { messageActorTool } from '../../../extension/peerd-runtime/tools/defs/message-actor.js';
+import { createExplicitToolFixture } from './explicit-tool-fixture';
 import {
   BROWSER_TARGET_STAGES,
   BrowserAutomationPolicyError,
@@ -39,28 +37,51 @@ const baseTool = (over: any = {}) => ({
   ...over,
 });
 
-afterEach(() => clearTools());
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
+
+afterEach(fixture.clear);
 
 describe('dispatcher lineage spine fields', () => {
   test('success: sideEffect + origins on meta', async () => {
-    registerTool(baseTool() as any);
+    setFixtureTool(baseTool() as any);
     const r: any = await dispatchToolCall({ id: 't1', name: 'lt', args: {} } as any, ctx);
     expect(r.ok).toBe(true);
     expect(r.meta.sideEffect).toBe('read');
     expect(r.meta.origins).toEqual(['https://example.com']);
     expect(typeof r.meta.durationMs).toBe('number');
+    expect(r.meta).not.toHaveProperty('dispatch');
   });
 
   test('failure (execute throws): spine fields still present', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       sideEffect: 'mutate_external',
       origins: () => ['https://api.bank.com'],
       execute: async () => { throw new Error('boom'); },
     }) as any);
-    const r: any = await dispatchToolCall({ id: 't2', name: 'lt', args: {} } as any, ctx);
+    const r: any = await dispatchToolCall(
+      { id: 't2', name: 'lt', args: {} } as any,
+      { ...ctx, allowlist: ['https://api.bank.com'] },
+    );
     expect(r.ok).toBe(false);
     expect(r.meta.sideEffect).toBe('mutate_external');
     expect(r.meta.origins).toEqual(['https://api.bank.com']);
+  });
+
+  test('a normalized semantic throw keeps its bounded custody fields', async () => {
+    setFixtureTool(baseTool({
+      execute: async () => { throw Object.assign(new Error('semantic execution failed'), {
+        code: 'controller-tool-execution-failed', outcomeKnown: false, retryable: true,
+      }); },
+    }) as any);
+    const result: any = await dispatchToolCall(
+      { id: 'semantic-custody', name: 'lt', args: {} } as any, ctx,
+    );
+    expect(result).toMatchObject({
+      ok: false, error: 'semantic execution failed',
+      code: 'controller-tool-execution-failed', outcomeKnown: false, retryable: false,
+    });
   });
 
   test('a thrown browser policy refusal preserves human and structured details', async () => {
@@ -68,7 +89,7 @@ describe('dispatcher lineage spine fields', () => {
       stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
     });
     if (verdict.allowed) throw new Error('expected browser target to be refused');
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => { throw new BrowserAutomationPolicyError(verdict, { effectCompleted: false }); },
     }) as any);
     const r: any = await dispatchToolCall({ id: 'policy', name: 'lt', args: {} } as any, ctx);
@@ -82,7 +103,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a serialized exposed error is projected without a concrete error class', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => { throw {
         exposeToModel: true,
         code: 'typed_policy_stop',
@@ -103,7 +124,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('an unvalidated thrown marker cannot expose arbitrary fields', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => { throw {
         exposeToModel: true,
         code: 'Bad Code',
@@ -120,7 +141,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('return-value failure ({ok:false}) audits tool_failed, not tool_executed', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       primitive: 'web',
       execute: async () => ({ ok: false, error: 'declined' }),
     }) as any);
@@ -134,6 +155,7 @@ describe('dispatcher lineage spine fields', () => {
     expect(failed.details.primitive).toBe('web');
     expect(failed.details.error).toBe('declined');
     expect(typeof failed.details.durationMs).toBe('number');
+    expect(failed.details).not.toHaveProperty('dispatch');
   });
 
   test('a browser policy failure audits only its fixed recovery fields', async () => {
@@ -141,7 +163,7 @@ describe('dispatcher lineage spine fields', () => {
       stage: BROWSER_TARGET_STAGES.COMMITTED_ORIGIN,
     });
     if (verdict.allowed) throw new Error('expected browser target to be refused');
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => browserTargetRefusalResult(verdict, {
         effectCompleted: false,
         neutralized: true,
@@ -165,7 +187,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a sensitive-site landing audits its URL-free recovery fields', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       execute: async () => browserTargetRefusalResult(sensitiveSiteBrowserTargetVerdict(), {
         neutralized: false,
       }),
@@ -183,7 +205,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('success audits tool_executed', async () => {
-    registerTool(baseTool() as any);
+    setFixtureTool(baseTool() as any);
     const { ctx: rctx, audited } = recorderCtx();
     await dispatchToolCall({ id: 't5', name: 'lt', args: {} } as any, rctx);
     await Promise.resolve();
@@ -192,7 +214,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a throwing tool audits tool_failed enriched with primitive + durationMs', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       primitive: 'web',
       execute: async () => { throw new Error('boom'); },
     }) as any);
@@ -210,128 +232,45 @@ describe('dispatcher lineage spine fields', () => {
     // The agent loop redacts at the larger paged ceiling only when the DISPATCH
     // result carries paged:true — but dispatch spreads the tool result to attach
     // meta, so a spread that dropped unknown fields would silently un-page it.
-    registerTool(baseTool({ execute: async () => ({ ok: true, content: 'slice', paged: true }) }) as any);
+    setFixtureTool(baseTool({ execute: async () => ({ ok: true, content: 'slice', paged: true }) }) as any);
     const r: any = await dispatchToolCall({ id: 't4b', name: 'lt', args: {} } as any, ctx);
     expect(r.ok).toBe(true);
     expect(r.paged).toBe(true);
     expect(r.meta.sideEffect).toBe('read');   // enrichment still attached
   });
 
-  test('a lifecycle recovery rewrite preserves actor delivery custody', async () => {
-    registerTool(baseTool({
+  test('semantic dispatch preserves actor custody without touching durable lifecycle', async () => {
+    let lifecycleCalls = 0;
+    setFixtureTool(baseTool({
       sideEffect: 'write',
       execute: async () => ({
-        ok: false,
-        error: 'transport lost',
+        ok: false, error: 'authority already settled',
+        outcomeKnown: false, retryable: false,
         actorDeliveryId: 'delivery-one',
         actorDeliveryIds: ['delivery-two', 'delivery-two'],
       }),
     }) as any);
     const lifecycle = {
-      beginTracking: async () => ({ handle: { operationId: 'op-1' } }),
-      settleTracking: async () => ({
-        error: 'outcome_unknown: verify before retry',
-        recovery: { category: 'verify_before_retry' },
-      }),
-    };
-
-    const r: any = await dispatchToolCall(
-      { id: 't-custody', name: 'lt', args: {} } as any,
-      { ...ctx, lifecycle },
-    );
-
-    expect(r).toMatchObject({
-      ok: false,
-      error: 'outcome_unknown: verify before retry',
-      actorDeliveryId: 'delivery-one',
-      actorDeliveryIds: ['delivery-two'],
-    });
-  });
-
-  test('outer outcome_unknown overrides stale inner actor certainty and cancellation', async () => {
-    registerTool(baseTool({
-      name: 'message_actor',
-      primitive: 'spawned',
-      sideEffect: 'write',
-      execute: async () => ({
-        ok: false,
-        error: 'clean inner policy stop',
-        actorCorrelationId: 'actor-delivery',
-        actorTerminal: true,
-        actorOutcomeKnown: true,
-        actorPerformed: false,
-        actorAborted: true,
-      }),
-    }) as any);
-    let settledOutcome: any = null;
-    const lifecycle = {
-      beginTracking: async () => ({ handle: { operationId: 'op-actor' } }),
-      settleTracking: async (_handle: any, outcome: any) => {
-        settledOutcome = outcome;
-        return {
-          error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
-          recovery: { state: 'outcome_unknown', category: 'verify_before_retry' },
-        };
-      },
+      beginTracking: async () => { lifecycleCalls += 1; throw new Error('must not run'); },
+      settleTracking: async () => { lifecycleCalls += 1; throw new Error('must not run'); },
+      requiresIntentConfirmation: async () => { lifecycleCalls += 1; return true; },
     };
 
     const result: any = await dispatchToolCall(
-      { id: 'actor-call', name: 'message_actor', args: { await: true } } as any,
+      { id: 'authority-settled', name: 'lt', args: {} } as any,
       { ...ctx, lifecycle },
     );
 
-    expect(settledOutcome.aborted).toBe(true);
+    expect(lifecycleCalls).toBe(0);
     expect(result).toMatchObject({
-      ok: false,
-      actorCorrelationId: 'actor-delivery',
-      actorTerminal: true,
-      actorOutcomeKnown: false,
-      actorPerformed: true,
-      actorAborted: false,
-    });
-    expect(result.error).toStartWith('outcome_unknown:');
-  });
-
-  test('message_actor Not run evidence reaches lifecycle as a typed pre-effect failure', async () => {
-    registerTool(messageActorTool as any);
-    let settledOutcome: any = null;
-    const lifecycle = {
-      beginTracking: async () => ({ handle: { operationId: 'op-not-run' } }),
-      settleTracking: async (_handle: any, outcome: any) => {
-        settledOutcome = outcome;
-        return null;
-      },
-    };
-
-    const result: any = await dispatchToolCall(
-      { id: 'actor-not-run', name: 'message_actor', args: { to: 'web', message: 'read it', await: true } } as any,
-      {
-        ...ctx,
-        lifecycle,
-        messageActor: async () => ({
-          ok: false,
-          error: 'the actor request was not run because that helper was retired.',
-          actorTerminal: true,
-          actorOutcomeKnown: true,
-          actorPerformed: false,
-        }),
-      } as any,
-    );
-
-    expect(settledOutcome).toMatchObject({
-      ok: false, outcomeKind: 'pre-effect-failure', aborted: false,
-    });
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'the actor request was not run because that helper was retired.',
-      outcomeKind: 'pre-effect-failure',
-      actorOutcomeKnown: true,
-      actorPerformed: false,
+      ok: false, error: 'authority already settled',
+      outcomeKnown: false, retryable: false,
+      actorDeliveryId: 'delivery-one', actorDeliveryIds: ['delivery-two'],
     });
   });
 
   test('a throwing origins() fails closed at the origin gate (never reaches meta)', async () => {
-    registerTool(baseTool({ origins: () => { throw new Error('origins blew up'); } }) as any);
+    setFixtureTool(baseTool({ origins: () => { throw new Error('origins blew up'); } }) as any);
     const r: any = await dispatchToolCall({ id: 't3', name: 'lt', args: {} } as any, ctx);
     // The origin gate runs origins() and fails CLOSED on throw — so the call
     // is blocked before execute(); the spine-field path is never reached.
@@ -340,10 +279,14 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a child policy receipt reaches the model without destination details', async () => {
-    registerTool(baseTool({
+    const queuedNotices: any[] = [];
+    setFixtureTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
-      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+      execute: async () => {
+        queuedNotices.push(notice);
+        return { ok: true, content: JSON.stringify({ clicked: true }) };
+      },
     }) as any);
     const notice = {
       reason: 'protected_child_navigation',
@@ -351,7 +294,6 @@ describe('dispatcher lineage spine fields', () => {
       child: 'left_blank',
       retryable: false,
     };
-    const queuedNotices = [notice];
     const result: any = await dispatchToolCall(
       { id: 'child-policy', name: 'lt', args: {} } as any,
       {
@@ -366,10 +308,14 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a blocked child subrequest has an honest guarded receipt', async () => {
-    registerTool(baseTool({
+    const queuedNotices: any[] = [];
+    setFixtureTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
-      execute: async () => ({ ok: true, content: 'clicked' }),
+      execute: async () => {
+        queuedNotices.push(notice);
+        return { ok: true, content: 'clicked' };
+      },
     }) as any);
     const notice = {
       reason: 'protected_child_request',
@@ -377,7 +323,6 @@ describe('dispatcher lineage spine fields', () => {
       child: 'guarded',
       retryable: false,
     };
-    const queuedNotices = [notice];
     const result: any = await dispatchToolCall(
       { id: 'child-request-policy', name: 'lt', args: {} } as any,
       {
@@ -392,16 +337,19 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('ordered child policy receipts survive one tool result', async () => {
-    registerTool(baseTool({
+    const queuedNotices: any[] = [];
+    setFixtureTool(baseTool({
       primitive: 'tab',
       sideEffect: 'write',
-      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+      execute: async () => {
+        queuedNotices.push(...notices);
+        return { ok: true, content: JSON.stringify({ clicked: true }) };
+      },
     }) as any);
     const notices = [
       { reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false },
       { reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false },
     ];
-    const queuedNotices = [...notices];
     const result: any = await dispatchToolCall(
       { id: 'child-policies', name: 'lt', args: {} } as any,
       {
@@ -420,7 +368,7 @@ describe('dispatcher lineage spine fields', () => {
   });
 
   test('a delayed child receipt returns with the action that created it', async () => {
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click',
       primitive: 'tab',
       sideEffect: 'write',
@@ -446,11 +394,165 @@ describe('dispatcher lineage spine fields', () => {
     expect(JSON.parse(result.content).browserPolicy).toEqual(notice);
   });
 
+  test('Chrome arms navigation and direct page-action tools before their effect', async () => {
+    for (const name of ['navigate', 'click', 'type']) {
+      fixture.clear();
+      const calls: string[] = [];
+      setFixtureTool(baseTool({
+        name, primitive: 'tab', sideEffect: 'write',
+        execute: async (_args: any, executionContext: any) => {
+          if (name === 'navigate'
+              && executionContext.browserChildQuarantineArmedTabId !== 7) {
+            await executionContext.armBrowserChildQuarantine(7);
+          }
+          calls.push('effect');
+          return { ok: true, content: 'done' };
+        },
+      }) as any);
+      const result: any = await dispatchToolCall(
+        { id: `quarantine-${name}`, name, args: {} } as any,
+        {
+          ...ctx,
+          activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+          browserChildQuarantineRequired: true,
+          armBrowserChildQuarantine: async (tabId: number) => {
+            calls.push(`arm:${tabId}`);
+            return { ok: true };
+          },
+        },
+      );
+      expect(result.ok).toBe(true);
+      expect(calls).toEqual(['arm:7', 'effect']);
+    }
+  });
+
+  test('a failed Chrome quarantine never reaches the page effect', async () => {
+    let effects = 0;
+    setFixtureTool(baseTool({
+      name: 'click', primitive: 'tab', sideEffect: 'write',
+      execute: async () => { effects += 1; return { ok: true }; },
+    }) as any);
+    const result: any = await dispatchToolCall(
+      { id: 'quarantine-failed', name: 'click', args: {} } as any,
+      {
+        ...ctx,
+        activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+        browserChildQuarantineRequired: true,
+        armBrowserChildQuarantine: async () => ({
+          ok: false, code: 'browser-child-quarantine-unavailable',
+          error: 'browser_child_quarantine_unavailable',
+        }),
+      },
+    );
+    expect(effects).toBe(0);
+    expect(result).toMatchObject({
+      ok: false, code: 'browser-child-quarantine-unavailable',
+      outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+  });
+
+  test('a delayed prior action receipt is detached before the next click', async () => {
+    setFixtureTool(baseTool({
+      name: 'click', primitive: 'tab', sideEffect: 'write',
+      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+    }) as any);
+    const recorded = recorderCtx();
+    const notice = {
+      reason: 'protected_child_navigation', outcome: 'not_run',
+      child: 'closed', retryable: false,
+    };
+    let queued: any[] = [];
+    const dispatchCtx = {
+      ...recorded.ctx,
+      activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+      consumeBrowserChildPolicyNotice: () => queued.splice(0),
+      waitForBrowserChildPolicyNotice: async () => false,
+    };
+    const actionA: any = await dispatchToolCall(
+      { id: 'action-a', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(actionA.structured?.browserPolicy).toBeUndefined();
+    queued.push(notice);
+    const actionB: any = await dispatchToolCall(
+      { id: 'action-b', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(actionB.structured?.browserPolicy).toBeUndefined();
+    expect(actionB.structured?.browserAsyncPolicies).toEqual([notice]);
+    expect(actionB.structured?.browserAsyncPolicyAttribution).toBe('prior_action');
+    expect(JSON.parse(actionB.content).browserAsyncPolicyAttribution).toBe('prior_action');
+    expect(recorded.audited).toContainEqual({
+      type: 'browser_child_policy_detached', details: { count: 1 },
+    });
+  });
+
+  test('a guarded authority failure is retryable without exposing its destination', async () => {
+    setFixtureTool(baseTool({
+      name: 'click', primitive: 'tab', sideEffect: 'write',
+      execute: async () => ({ ok: true, content: 'evaluated' }),
+    }) as any);
+    const notice = {
+      reason: 'child_authority_unavailable', outcome: 'unverified',
+      child: 'guarded', retryable: true,
+    };
+    let queued: any[] = [];
+    const result: any = await dispatchToolCall(
+      { id: 'authority-unavailable', name: 'click', args: {} } as any,
+      {
+        ...ctx,
+        activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+        consumeBrowserChildPolicyNotice: () => queued.splice(0),
+        waitForBrowserChildPolicyNotice: async () => { queued.push(notice); return true; },
+      },
+    );
+    expect(result.structured.browserPolicy).toEqual(notice);
+    expect(result.content).toContain('retry');
+    expect(JSON.stringify(result)).not.toContain('127.0.0.1');
+  });
+
+  test('a pending cold child outcome cannot move to the next action', async () => {
+    setFixtureTool(baseTool({
+      name: 'click', primitive: 'tab', sideEffect: 'write',
+      execute: async () => ({ ok: true, content: JSON.stringify({ clicked: true }) }),
+    }) as any);
+    const notice = {
+      reason: 'child_navigation_unverified', outcome: 'unverified',
+      child: 'uncontained', retryable: false,
+    };
+    let pending = true;
+    let queued: any[] = [];
+    const waits: any[] = [];
+    const dispatchCtx = {
+      ...ctx,
+      activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
+      consumeBrowserChildPolicyNotice: () => queued.splice(0),
+      hasPendingBrowserChildPolicy: () => pending,
+      waitForBrowserChildPolicyNotice: async (_tabId: number, timeoutMs: number,
+        terminal = false) => {
+        waits.push([timeoutMs, terminal]);
+        if (terminal) {
+          pending = false;
+          queued.push(notice);
+          return true;
+        }
+        return false;
+      },
+    };
+    const first: any = await dispatchToolCall(
+      { id: 'cold-child-first', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(first.structured.browserPolicy).toEqual(notice);
+    expect(waits).toEqual([[175, false], [5_000, true]]);
+    const second: any = await dispatchToolCall(
+      { id: 'cold-child-second', name: 'click', args: {} } as any, dispatchCtx,
+    );
+    expect(second.structured?.browserPolicy).toBeUndefined();
+  });
+
   test('page_code keeps an inner page receipt even when user code discards the call result', async () => {
     const notice = {
       reason: 'protected_child_navigation', outcome: 'not_run', child: 'closed', retryable: false,
     };
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'page_code',
       primitive: 'web',
       sideEffect: 'write',
@@ -475,29 +577,34 @@ describe('dispatcher lineage spine fields', () => {
     expect(result.meta.browserPolicies).toEqual([notice]);
   });
 
-  test('a throwing tab tool does not lose an older child receipt', async () => {
+  test('a throwing tab tool never claims an older child receipt', async () => {
     const notice = {
       reason: 'child_navigation_failed', outcome: 'unverified', child: 'uncontained', retryable: false,
     };
     const queued = [notice];
-    registerTool(baseTool({
+    setFixtureTool(baseTool({
       name: 'click',
       primitive: 'tab',
       sideEffect: 'write',
       execute: async () => { throw new Error('click exploded'); },
     }) as any);
+    const recorded = recorderCtx();
     const result: any = await dispatchToolCall(
       { id: 'throwing-child-policy', name: 'click', args: {} } as any,
       {
-        ...ctx,
+        ...recorded.ctx,
         activeTab: { id: 7, url: 'https://example.com', origin: 'https://example.com' },
         consumeBrowserChildPolicyNotice: () => queued.splice(0),
         waitForBrowserChildPolicyNotice: async () => false,
       },
     );
     expect(result.ok).toBe(false);
-    expect(result.content).toContain('The browser did not confirm');
-    expect(result.structured.browserPolicy).toEqual(notice);
-    expect(result.meta.browserPolicies).toEqual([notice]);
+    expect(result.structured?.browserPolicy).toBeUndefined();
+    expect(result.meta?.browserPolicies).toEqual([]);
+    expect(result.structured?.browserAsyncPolicies).toEqual([notice]);
+    expect(result.meta?.browserAsyncPolicies).toEqual([notice]);
+    expect(recorded.audited).toContainEqual({
+      type: 'browser_child_policy_detached', details: { count: 1 },
+    });
   });
 });

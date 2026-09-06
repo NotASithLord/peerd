@@ -70,12 +70,12 @@ describe('toAnthropicBody — thinking param', () => {
     expect(body.thinking).toBeUndefined();
   });
 
-  test('max_tokens is lifted for thinking headroom on both shapes', () => {
+  test('an explicit max_tokens authority ceiling remains hard on both thinking shapes', () => {
     for (const model of ['claude-opus-4-8', 'claude-haiku-4-5-20251001']) {
       const body = toAnthropicBody({
-        model, system: 's', messages: [userMsg('hi')], maxTokens: 1024, reasoning,
+        model, system: 's', messages: [userMsg('hi')], maxTokens: 4096, reasoning,
       });
-      expect(body.max_tokens).toBe(2048 + 4096);
+      expect(body.max_tokens).toBe(4096);
     }
   });
 });

@@ -42,7 +42,6 @@
       "/peerd-egress/*": ["./extension/peerd-egress/*"],
       "/peerd-provider/*": ["./extension/peerd-provider/*"],
       "/peerd-distributed/*": ["./extension/peerd-distributed/*"],
-      "/peerd-voice-host/*": ["./extension/peerd-voice-host/*"],
       "/vendor/*": ["./extension/vendor/*"],
       "/background/*": ["./extension/background/*"],
       "/sidepanel/*": ["./extension/sidepanel/*"],

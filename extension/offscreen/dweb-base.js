@@ -17,11 +17,13 @@
 // greps the SHIPPED bytes for that path; even a mention in a comment trips it).
 // Inert on store.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { makeStartStopBarrier } from '/offscreen/start-stop-barrier.js';
+import { makeDwebCustodyHost } from '/offscreen/dweb-custody-host.js';
+import { makeDwebTransferHost } from '/offscreen/dweb-transfer-host.js';
 import { createContentOwnership } from '/offscreen/content-ownership.js';
 import { rollbackSharePublication } from '/offscreen/share-publication.js';
 import { createShareRollbackStore } from '/offscreen/share-rollback-store.js';
@@ -31,8 +33,11 @@ import {
   identityForDiscoveredUri,
 } from '/offscreen/install-card-identity.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
-import { runPublishTransaction } from '/shared/publish-transaction.js';
+import { publishFailureError, runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
+import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
+import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
+import { runDwebReseedPublication } from '/offscreen/dweb-reseed-publication.js';
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -46,6 +51,25 @@ const warn = (...a) => console.warn('[offscreen/dweb]', ...a);
 // rather than widening the shared stub (the dweb boundary stays intact).
 /** @type {any} */
 let handle = null;    // { base, room, close } once the lobby is joined
+// Renderer-local mesh generation. It increments only when a newly assembled
+// base handle activates, never when a successor kernel adopts the existing
+// lease. Bound with hostEpoch, this makes a hidden stop/restart observable.
+let meshGeneration = 0;
+/** @type {string | null} */
+let activeFeatureHostEpoch = null;
+/** @type {Map<string,string>} */
+const latestReseedAttempts = new Map();
+const reseedNotifier = createDwebReseedNotifier({
+  send: async (notice, { signal }) => {
+    if (signal.aborted) throw new Error('dweb-generation-retired');
+    const reply = await browser.runtime.sendMessage(notice);
+    if (signal.aborted) throw new Error('dweb-generation-retired');
+    return reply;
+  },
+  current: (notice) => custodyIntended
+    && activeFeatureHostEpoch === notice.hostEpoch
+    && meshGeneration === notice.meshGeneration,
+});
 const contentOwnership = createContentOwnership();
 const shareRollbacks = createShareRollbackStore();
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -91,8 +115,8 @@ const servedHashesForApp = (appId) => [...new Set(
 )];
 
 /** @param {any} h @param {{ appId: string, name: string, entry: string,
- *   created?: number, expectedHash?: string, release?: any, releaseSnapshot?: any }} msg @param {string} ownerSlot */
-const publishLocalApp = async (h, msg, ownerSlot) => {
+ *   created?: number, expectedHash?: string, release?: any, releaseSnapshot?: any }} msg @param {string} ownerId */
+const publishLocalApp = async (h, msg, ownerId) => {
   const supplied = msg.releaseSnapshot;
   if (supplied && (
     !msg.release
@@ -129,16 +153,31 @@ const publishLocalApp = async (h, msg, ownerSlot) => {
     created: msg.created,
     expectedHash: msg.expectedHash,
   });
-  const ownershipAdded = trackServedHash(appContentOwner(msg.appId, ownerSlot), published.hash);
+  const ownershipAdded = trackServedHash(ownerId, published.hash);
   return { ...published, size: published.packedBytes, storedBytes: snapshot.totalBytes, ownershipAdded };
 };
 // dwapp ROOMS hosted here — each is base.openRoom(id) ONCE, ref-counted across
 // the app-tabs that join it. The room's connectivity IS the base mesh (no second
 // rendezvous): a dwapp is a sub-protocol, not tied to a signaler.
-/** @type {Map<string, { room: any, refs: number, name: string, topicSubs: Map<string, () => void>, offs: (() => void)[] }>} */
-const rooms = new Map();        // roomId -> { room, refs, name, topicSubs:Map, offs:[] }
+/** @typedef {{ token: string|null, appId: string }} RoomClient */
+/** @typedef {{ room: any, clients: Map<string, RoomClient>, name: string, topicSubs: Map<string, () => void>, offs: (() => void)[] }} HostedRoom */
+/** @type {Map<string, HostedRoom>} */
+const rooms = new Map();        // roomId -> { room, clients, name, topicSubs:Map, offs:[] }
 /** @param {string} type @param {object} [payload] @returns {Promise<any>} */
 const swCall = (type, payload = {}) => browser.runtime.sendMessage({ type, ...payload });
+/** @param {string} type @param {object} payload @returns {Promise<any>} */
+const swEffectCall = async (type, payload) => {
+  try { return await swCall(type, payload); }
+  catch (cause) {
+    // why: runtime messaging can lose a response after the SW committed. The
+    // offscreen host cannot turn that transport ambiguity into a safe retry.
+    throw Object.assign(publishFailureError({
+      error: /** @type {{message?:string}} */ (cause)?.message ?? 'service worker response lost',
+      code: 'dweb-sw-response-lost', performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    }, 'service worker response lost'), { cause });
+  }
+};
 
 // The permanent identity seed and backup passphrase never ride swCall. This
 // dedicated channel is accepted only after the service worker verifies the
@@ -148,21 +187,34 @@ const CUSTODY_RECONNECT_MS = 500;
 const CUSTODY_TIMEOUT_MS = 60_000;
 /** @type {import('webextension-polyfill').Runtime.Port | null} */
 let custodyPort = null;
+let custodyIntended = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let custodyReconnectTimer = null;
 /** @type {Set<{ resolve: (port: import('webextension-polyfill').Runtime.Port) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
 const custodyWaiters = new Set();
-/** @type {Map<string, { resolve: (value: any) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
-const custodySecretPending = new Map();
+/** @type {Map<string, { type:string, resolve: (value: any) => void, reject: (reason: any) => void, timer: ReturnType<typeof setTimeout> }>} */
+const custodyKernelPending = new Map();
 
-const rejectCustodySecretPending = () => {
-  for (const entry of custodySecretPending.values()) {
+const rejectCustodyKernelPending = () => {
+  for (const entry of custodyKernelPending.values()) {
     clearTimeout(entry.timer);
     entry.reject(new Error('identity custody port disconnected'));
   }
-  custodySecretPending.clear();
+  custodyKernelPending.clear();
+};
+
+/** @param {string} reason */
+const rejectCustodyWaiters = (reason) => {
+  for (const waiter of custodyWaiters) {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error(reason));
+  }
+  custodyWaiters.clear();
 };
 
 const waitForCustodyPort = async () => {
   if (custodyPort) return custodyPort;
+  if (!custodyIntended) throw new Error('dweb feature lease is not active');
   return new Promise((resolve, reject) => {
     const waiter = {
       resolve,
@@ -176,44 +228,45 @@ const waitForCustodyPort = async () => {
   });
 };
 
-/** @param {'get'|'set'|'self-get'|'self-set'} operation @param {any} [args] */
-const callIdentitySecret = async (operation, args = {}) => {
+/** @param {string} operation @param {any} [args] @param {{parentOperationId?:string,onDispatched?:()=>void}} [context] */
+const callKernelEffect = async (operation, args = {}, context = {}) => {
   const port = await waitForCustodyPort();
   if (custodyPort !== port) throw new Error('identity custody port disconnected');
   const requestId = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      custodySecretPending.delete(requestId);
+      custodyKernelPending.delete(requestId);
       reject(new Error(`identity custody ${operation} timed out`));
     }, CUSTODY_TIMEOUT_MS);
-    custodySecretPending.set(requestId, { resolve, reject, timer });
+    custodyKernelPending.set(requestId, {
+      type: 'custody/effect-response', resolve, reject, timer,
+    });
     try {
+      const { onDispatched, ...wireContext } = context;
       port.postMessage({
-        type: 'custody/secret-request', requestId, operation, args,
+        type: 'custody/effect-request', requestId, operation, args, ...wireContext,
       });
+      onDispatched?.();
     } catch (cause) {
-      custodySecretPending.delete(requestId);
+      custodyKernelPending.delete(requestId);
       clearTimeout(timer);
       reject(cause);
     }
   });
 };
 
-// The self-device stack's vault surface. Same verified custody port as the
-// identity seed, different operation pair, and the SW's handler serves a
-// closed allowlist (background/dweb-self-custody.js): this document can
-// read its own device key and the person's discovery secret, and nothing
-// else. The device key never leaves here except as signatures.
+// The self-device stack gets only its fixed vault capabilities on the same
+// verified custody port. The device key never leaves here except as signatures.
 const selfSecretIo = {
   /** @param {string} name */
   getSecret: async (name) => {
-    const r = await callIdentitySecret('self-get', { name });
+    const r = await callKernelEffect('self/read', { name });
     if (!r?.ok) throw new Error(r?.error ?? 'self secret unavailable');
     return r.value ?? null;
   },
   /** @param {string} name @param {string} value */
   setSecret: async (name, value) => {
-    const r = await callIdentitySecret('self-set', { name, value });
+    const r = await callKernelEffect('self/write', { name, value });
     if (!r?.ok) throw new Error(r?.error ?? 'self secret store failed');
     if (name === 'distributed/self-records/v1' || name === 'distributed/self-discovery/v1') {
       // Do not await here: coordinator roster persistence itself uses this
@@ -279,12 +332,12 @@ const baseLifecycle = makeStartStopBarrier({
     try {
       const material = await client.identityMaterial({
         getSecret: async () => {
-          const r = await callIdentitySecret('get');
+          const r = await callKernelEffect('identity/read');
           if (!r?.ok) throw new Error(r?.error === 'vault-locked' ? 'vault is locked — unlock peerd first' : (r?.error ?? 'identity unavailable'));
           return r.value;
         },
         setSecret: async (/** @type {string} */ _n, /** @type {string} */ value) => {
-          const r = await callIdentitySecret('set', { value });
+          const r = await callKernelEffect('identity/create', { value });
           if (!r?.ok) throw new Error(r?.error ?? 'identity store failed');
         },
       });
@@ -294,7 +347,7 @@ const baseLifecycle = makeStartStopBarrier({
       throw e;
     }
     log(`joining lobby "${client.BASE_TOPIC}" as …${identity.did.slice(-8)}`);
-    return client.joinBaseNetwork({
+    const joined = await client.joinBaseNetwork({
       identity,
       // Signature/shape/derived-id verification happens in discovery before
       // this callback. The SW persists the monotonic decision; fail closed if
@@ -310,9 +363,11 @@ const baseLifecycle = makeStartStopBarrier({
         return false;
       },
     });
+    return joined;
   },
   activate: (candidate) => {
     candidate.base.start();
+    meshGeneration += 1;
     handle = candidate;
     startNotifications(candidate);
     // Late joiners discover through the sovereign subscription plane.
@@ -343,6 +398,7 @@ const baseLifecycle = makeStartStopBarrier({
       for (const off of entry.topicSubs.values()) { try { off(); } catch { /* already closed */ } }
     }
     rooms.clear();
+    roomLiveness.clear();
     contentOwnership.clear();
     shareRollbacks.clear();
     if (resubTimer) { clearInterval(resubTimer); resubTimer = null; }
@@ -353,43 +409,79 @@ const baseLifecycle = makeStartStopBarrier({
 
 const start = () => baseLifecycle.start();
 
-/** @param {'export'|'adopt'|'suspend'|'resume'|'reset'} operation @param {any} args */
-const runCustodyOperation = async (operation, args) => {
-  if (operation === 'suspend') {
-    if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
-      throw new Error('lease-required');
-    }
-    await selfHost.stop({ suspend: true });
-    await baseLifecycle.stop({ suspensionOwner: args.leaseId });
-    return { suspended: true };
-  }
-  if (operation === 'resume') {
-    if (typeof args?.leaseId !== 'string' || args.leaseId.length === 0) {
-      throw new Error('lease-required');
-    }
-    const resumed = baseLifecycle.resume(args.leaseId);
-    if (resumed) selfHost.resume();
-    return { resumed };
-  }
-  if (operation === 'reset') {
-    baseLifecycle.resetSuspension();
-    selfHost.resume();
-    return { reset: true };
-  }
+/** @param {'export'|'adopt'} operation @param {any} args */
+const runIdentityCrypto = async (operation, args) => {
   const client = await loadDweb();
   if (operation === 'export') {
-    if (!client.identityRecordExport) throw new Error('portable identity export is unsupported');
+    if (!client.identityRecordExport) throw new Error('portable-identity-export-unsupported');
     return client.identityRecordExport(args);
   }
-  if (operation === 'adopt') {
-    if (!client.identityRecordAdopt) throw new Error('portable identity restore is unsupported');
-    return client.identityRecordAdopt(args);
+  if (!client.identityRecordAdopt) throw new Error('portable-identity-restore-unsupported');
+  return client.identityRecordAdopt(args);
+};
+
+const stopIdentityRuntime = async (/** @type {string} */ leaseId) => {
+  await selfHost.stop({ suspend: true });
+  await baseLifecycle.stop({ suspensionOwner: leaseId });
+};
+
+const resumeIdentityRuntime = async (/** @type {string} */ leaseId) => {
+  if (!baseLifecycle.resume(leaseId)) throw new Error('identity-runtime-lease-conflict');
+  selfHost.resume();
+  await start();
+};
+
+const startIdentityRuntime = async (/** @type {string} */ leaseId) => {
+  await resumeIdentityRuntime(leaseId);
+};
+
+const recoverIdentityRuntime = (/** @type {string} */ leaseId) => {
+  if (!baseLifecycle.resume(leaseId)) throw new Error('identity-runtime-lease-conflict');
+  selfHost.resume();
+  void start().catch((error) => warn('identity runtime recovery failed:', error));
+  return baseLifecycle.snapshot();
+};
+
+const transferHost = makeDwebTransferHost({
+  callEffect: callKernelEffect,
+  runCrypto: runIdentityCrypto,
+  stopIdentityRuntime,
+  startIdentityRuntime,
+});
+
+/** @param {'export'|'prepare'|'adopt'} operation @param {any} args @param {{operationId:string,signal:AbortSignal,deadline:number}} context */
+const runCustodyOperation = (operation, args, context) => {
+  if (operation === 'export') return transferHost.exportRecord(args?.passphrase, context);
+  if (operation === 'prepare') {
+    return transferHost.prepareRecord(
+      args?.record, args?.passphrase, args?.options ?? {}, context,
+    );
   }
-  throw new Error('unknown identity custody operation');
+  if (operation === 'adopt') {
+    return transferHost.adoptRecord(
+      args?.record, args?.passphrase, args?.options ?? {}, context,
+    );
+  }
+  throw new Error('unknown-identity-custody-operation');
+};
+
+const custodyHost = makeDwebCustodyHost({
+  runOperation: runCustodyOperation,
+  readState: baseLifecycle.snapshot,
+  recoverOperation: recoverIdentityRuntime,
+  operationTimeoutMs: CUSTODY_TIMEOUT_MS - 5_000,
+});
+
+const scheduleCustodyReconnect = () => {
+  if (!custodyIntended || custodyReconnectTimer !== null) return;
+  custodyReconnectTimer = setTimeout(() => {
+    custodyReconnectTimer = null;
+    connectCustodyPort();
+  }, CUSTODY_RECONNECT_MS);
 };
 
 const connectCustodyPort = () => {
-  if (!DWEB_ENABLED) return;
+  if (!DWEB_ENABLED || !custodyIntended || custodyPort) return;
   try {
     const port = browser.runtime.connect({ name: CUSTODY_PORT_NAME });
     custodyPort = port;
@@ -398,40 +490,25 @@ const connectCustodyPort = () => {
       waiter.resolve(port);
     }
     custodyWaiters.clear();
-    /** @param {any} response */
-    const respond = (response) => {
-      try { port.postMessage(response); } catch { /* disconnect rejects the SW-side request */ }
-    };
     port.onMessage.addListener((/** @type {any} */ message) => {
-      if (message?.type === 'custody/secret-response'
+      if (message?.type === 'custody/effect-response'
           && typeof message.requestId === 'string') {
-        const entry = custodySecretPending.get(message.requestId);
-        if (!entry) return;
-        custodySecretPending.delete(message.requestId);
+        const entry = custodyKernelPending.get(message.requestId);
+        if (!entry || entry.type !== message.type) return;
+        custodyKernelPending.delete(message.requestId);
         clearTimeout(entry.timer);
         if (message.ok) entry.resolve(message.result);
         else entry.reject(new Error(message.error ?? 'identity secret operation failed'));
         return;
       }
-      if (message?.type !== 'custody/request'
-          || typeof message.requestId !== 'string'
-          || !['export', 'adopt', 'suspend', 'resume', 'reset'].includes(message.operation)) return;
-      Promise.resolve(runCustodyOperation(message.operation, message.args ?? {}))
-        .then((result) => respond({
-          type: 'custody/response', requestId: message.requestId, ok: true, result,
-        }))
-        .catch((cause) => respond({
-          type: 'custody/response', requestId: message.requestId, ok: false,
-          error: /** @type {{ code?: string, message?: string }} */ (cause)?.code
-            ?? /** @type {{ message?: string }} */ (cause)?.message ?? 'host-failed',
-        }));
     });
+    custodyHost.attach(port);
     port.onDisconnect.addListener(() => {
       if (custodyPort === port) {
         custodyPort = null;
-        rejectCustodySecretPending();
+        rejectCustodyKernelPending();
       }
-      setTimeout(connectCustodyPort, CUSTODY_RECONNECT_MS);
+      scheduleCustodyReconnect();
     });
     // Certificate-only installs cannot start the public person-root base.
     // Connecting the verified custody channel is their boot signal for the
@@ -440,14 +517,27 @@ const connectCustodyPort = () => {
     // immediately on a warm service worker.
     void selfHost.start().catch((/** @type {any} */ e) => warn('self-device auto-start failed:', e?.message ?? e));
   } catch {
-    setTimeout(connectCustodyPort, CUSTODY_RECONNECT_MS);
+    scheduleCustodyReconnect();
   }
 };
-connectCustodyPort();
+
+const disconnectCustodyPort = () => {
+  custodyIntended = false;
+  if (custodyReconnectTimer !== null) clearTimeout(custodyReconnectTimer);
+  custodyReconnectTimer = null;
+  rejectCustodyWaiters('dweb feature lease ended');
+  rejectCustodyKernelPending();
+  const previous = custodyPort;
+  custodyPort = null;
+  try { previous?.disconnect(); } catch { /* already disconnected */ }
+};
 
 const status = () => (handle
-  ? { running: true, did: handle.base.did, peers: handle.base.peers().length, present: handle.base.presence.list().length }
-  : { running: false });
+  ? {
+      running: true, meshGeneration, did: handle.base.did,
+      peers: handle.base.peers().length, present: handle.base.presence.list().length,
+    }
+  : { running: false, meshGeneration });
 
 // The read surface behind peerd.distributed.* AND the home-page Network view.
 // A DISTINCT shape from status() above (ops/debug counts): it carries the live
@@ -461,6 +551,69 @@ const info = () => {
   return { running: true, did: handle.base.did, rendezvous: handle.room?.rendezvous?.() ?? 'none', bootstrapUrl: handle.url ?? null, ...snap };
 };
 
+// The feature host is the only lifecycle owner. Importing this module is inert:
+// it neither opens the custody channel nor joins the mesh until an exact dweb
+// lease has crossed the service-worker coordinator's dispatch boundary.
+const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ lease = {}) => {
+  if (!DWEB_ENABLED) throw new Error('dweb-disabled');
+  if (typeof lease.hostEpoch !== 'string' || lease.hostEpoch.length < 8) {
+    throw new Error('dweb-feature-host-epoch-invalid');
+  }
+  custodyIntended = true;
+  connectCustodyPort();
+  try {
+    await start();
+    activeFeatureHostEpoch = lease.hostEpoch;
+    const current = { ...status(), hostEpoch: activeFeatureHostEpoch };
+    // App tabs authenticate the sender as the exact offscreen document, then
+    // use this generation to rejoin their stable room member after a renderer
+    // replacement. A successor service worker adopts the same hostEpoch, so it
+    // does not trigger a duplicate room join.
+    // Do not hold the feature-host start receipt behind reseeding. The kernel
+    // finishes the dweb lease transition first, then keeps this exact runtime
+    // message alive while it rebuilds durable shares.
+    // why: recovery must never become an in-lane install barrier. A transient
+    // reseed refusal retries in the background while local self-fetch reports
+    // its exact pre-effect unavailability until the bytes are announced.
+    void reseedNotifier.notify({
+      type: 'dweb/base-host/generation',
+      hostEpoch: activeFeatureHostEpoch,
+      meshGeneration,
+      did: current.did ?? null,
+    }).catch((cause) => ({
+      ok: false,
+      error: /** @type {{message?:unknown}} */ (cause)?.message ?? String(cause),
+    }));
+    return current;
+  } catch (cause) {
+    activeFeatureHostEpoch = null;
+    disconnectCustodyPort();
+    throw cause;
+  }
+};
+
+export const startDwebFeatureLease = activateDwebFeatureLease;
+
+// A successor service worker adopts the same offscreen realm after its old
+// keepalive port disappears. The base handle remains live, so adoption only
+// reasserts the custody intent and reconnects the private channel if needed.
+export const adoptDwebFeatureLease = activateDwebFeatureLease;
+
+export const stopDwebFeatureLease = async () => {
+  reseedNotifier.cancel();
+  // why: retire in-flight generation-bound publications before awaiting host
+  // close. Their next async boundary compensates against the retiring handle.
+  activeFeatureHostEpoch = null;
+  try {
+    await selfHost.stop();
+    await baseLifecycle.stop();
+  } finally {
+    latestReseedAttempts.clear();
+    disconnectCustodyPort();
+  }
+  return status();
+};
+
 // --- dwapp room hosting (sub-protocols on the shared base mesh) ---------------
 // Events (feed message / direct / presence / status) are PUSHED to the dwapp's
 // app-tab as a `dweb/base-room/event` runtime message it filters by roomId. Every
@@ -470,13 +623,30 @@ const info = () => {
 const pushRoomEvent = (roomId, event, data) =>
   browser.runtime.sendMessage({ type: 'dweb/base-room/event', roomId, event, data }).catch(() => {});
 
-/** @param {string} roomId @param {string} [name] */
-const ensureRoom = async (roomId, name) => {
+/** @param {unknown} value */
+const roomClientId = (value) => typeof value === 'string'
+  && value.length >= 8 && value.length <= 160
+  && !/[\u0000-\u001f\u007f]/.test(value)
+  ? value : null;
+
+/** @param {unknown} value */
+const appRoomAdmissionToken = (value) => typeof value === 'string'
+  && value.length >= 16 && value.length <= 192
+  && !/[\u0000-\u001f\u007f]/.test(value)
+  ? value : null;
+
+/** @param {string} roomId @param {string|undefined} name @param {string} clientId @param {{appId?:unknown,appDocumentId?:unknown,appTabId?:unknown,roomAdmissionToken?:unknown}} [owner] */
+const ensureRoom = async (roomId, name, clientId, owner = {}) => {
+  const appId = typeof owner.appId === 'string' ? owner.appId : '';
+  const appDocumentId = typeof owner.appDocumentId === 'string' ? owner.appDocumentId : '';
+  const appTabId = Number.isInteger(owner.appTabId) ? Number(owner.appTabId) : -1;
+  const admissionToken = appRoomAdmissionToken(owner.roomAdmissionToken);
+  if (appId && !admissionToken) throw new Error('app-room-admission-token-invalid');
   const h = await start();
   let entry = rooms.get(roomId);
   if (!entry) {
-    /** @type {{ room: any, refs: number, name: string, topicSubs: Map<string, () => void>, offs: (() => void)[] }} */
-    const e = { room: null, refs: 0, name: name ?? '', topicSubs: new Map(), offs: [] };
+    /** @type {HostedRoom} */
+    const e = { room: null, clients: new Map(), name: name ?? '', topicSubs: new Map(), offs: [] };
     entry = e;
     const room = h.base.openRoom(roomId, { meta: () => ({ name: e.name }) }); // meta reads the latest name
     entry.room = room;
@@ -490,28 +660,72 @@ const ensureRoom = async (roomId, name) => {
     log(`room "${roomId}" opened on the base mesh`);
   }
   if (name) entry.name = name;     // latest joiner's name wins (one identity per browser)
-  entry.refs += 1;
+  const current = entry.clients.get(clientId);
+  if (current && (current.token !== admissionToken || current.appId !== appId)) {
+    throw new Error('app-room-admission-conflict');
+  }
+  entry.clients.set(clientId, { token: admissionToken, appId });
+  if (appId) {
+    if (!roomLiveness.track({
+      roomId,
+      clientId,
+      appId,
+      documentId: appDocumentId,
+      tabId: appTabId,
+      admissionToken: /** @type {string} */ (admissionToken),
+    })) {
+      if (!current) closeRoom(entry, roomId, clientId, admissionToken, appId);
+      throw new Error('app-room-owner-invalid');
+    }
+  }
   return entry;
 };
 
-/** @param {{ refs: number, room: any, offs: (() => void)[], topicSubs: Map<string, () => void> }} entry @param {string} roomId */
-const closeRoom = (entry, roomId) => {
-  entry.refs -= 1;
-  if (entry.refs > 0) return;
+/** @param {HostedRoom} entry @param {string} roomId @param {string} clientId @param {string|null} [admissionToken] @param {string} [appId] @param {boolean} [livenessExpired] */
+const closeRoom = (entry, roomId, clientId, admissionToken = null, appId = '', livenessExpired = false) => {
+  const current = entry.clients.get(clientId);
+  if (!current || (admissionToken && current.token !== admissionToken)
+      || (appId && current.appId !== appId)) return false;
+  if (!livenessExpired) roomLiveness.untrack(roomId, clientId, admissionToken);
+  entry.clients.delete(clientId);
+  if (entry.clients.size > 0) return true;
   for (const off of entry.offs) off();
   for (const off of entry.topicSubs.values()) off();
   entry.room.leave();
   rooms.delete(roomId);
   log(`room "${roomId}" closed (no app-tabs left)`);
+  return true;
 };
+
+const roomLiveness = createAppRoomLiveness({
+  appTabUrl: browser.runtime.getURL('engine-tabs/app-tab/index.html'),
+  getContexts: typeof browser.runtime.getContexts === 'function'
+    ? /** @type {any} */ (browser.runtime.getContexts.bind(browser.runtime)) : null,
+  onExpired: ({ roomId, clientId, admissionToken, appId }) => {
+    const entry = rooms.get(roomId);
+    if (entry) closeRoom(entry, roomId, clientId, admissionToken ?? null, appId, true);
+  },
+});
 
 // One relayed op from the dwapp bridge (app-tab -> SW -> here). Returns the reply.
 /** @param {any} msg */
 const handleRoomOp = async (msg) => {
   const { op, roomId } = msg;
+  if (typeof msg.expectedHostEpoch === 'string'
+      && msg.expectedHostEpoch !== activeFeatureHostEpoch) {
+    return { ok: false, error: 'dweb-host-generation-changed' };
+  }
+  const clientId = roomClientId(msg.roomClientId);
+  if (!clientId) return { ok: false, error: 'dweb-room-client-invalid' };
+  const admissionToken = appRoomAdmissionToken(msg.roomAdmissionToken);
   if (op === 'join') {
-    const entry = await ensureRoom(roomId, msg.name);
-    return { ok: true, did: entry.room.did, joined: roomId, ...entry.room.status() };
+    const entry = await ensureRoom(roomId, msg.name, clientId, msg);
+    return {
+      ok: true, did: entry.room.did, joined: roomId,
+      hostEpoch: activeFeatureHostEpoch,
+      ...(admissionToken ? { admissionToken } : {}),
+      ...entry.room.status(),
+    };
   }
   // Content install doesn't need a joined room; the bridge prompts from the
   // URI's bounded publisher identity before this full fetch can begin.
@@ -532,8 +746,11 @@ const handleRoomOp = async (msg) => {
       announce: () => client.installAppBundle({
         uri: msg.uri, manifest, payload, name: msg.name,
         install: async (/** @type {any} */ a) => {
-          const r = await swCall('dweb/app-install', { appId, ...a, files: jsonSafeFiles(a.files) });
-          if (!r?.ok) throw new Error(r?.error ?? 'install failed');
+          const r = await swEffectCall('dweb/app-install', {
+            appId, ...a, files: jsonSafeFiles(a.files),
+            publicationGeneration: msg.publicationGeneration,
+          });
+          if (!r?.ok) throw publishFailureError(r, 'install failed');
           return { app: r.app, warning: r.warning };
         },
       }),
@@ -550,10 +767,25 @@ const handleRoomOp = async (msg) => {
   }
   const entry = rooms.get(roomId);
   if (!entry) return { ok: false, error: 'not-in-room' };
+  if (op === 'join-ack') {
+    if (!admissionToken || typeof msg.appId !== 'string'
+        || !roomLiveness.owns(roomId, clientId, admissionToken, msg.appId)
+        || !roomLiveness.finalize(roomId, clientId, admissionToken)) {
+      return { ok: false, error: 'app-room-admission-mismatch' };
+    }
+    return { ok: true, joined: roomId, admissionToken };
+  }
+  if (typeof msg.appId === 'string' && msg.appId
+      && (!admissionToken
+        || !roomLiveness.owns(roomId, clientId, admissionToken, msg.appId))) {
+    return { ok: false, error: 'app-room-admission-mismatch' };
+  }
   const { room } = entry;
   switch (op) {
-    case 'leave': closeRoom(entry, roomId); return { ok: true, left: true };
-    case 'status': return { ok: true, ...room.status() };
+    case 'leave': return closeRoom(
+      entry, roomId, clientId, admissionToken, msg.appId,
+    ) ? { ok: true, left: true } : { ok: false, error: 'app-room-admission-mismatch' };
+    case 'status': return { ok: true, hostEpoch: activeFeatureHostEpoch, ...room.status() };
     case 'presence': return { ok: true, present: room.presence.list() };
     case 'announce': { if (typeof msg.name === 'string') entry.name = msg.name.slice(0, 40); await room.presence.announce(); return { ok: true }; }
     case 'publish': { const env = msg.retain ? await room.sync.publish(msg.topic, msg.data) : await room.gossip.publish(msg.topic, msg.data); return { ok: true, id: env.id, ts: env.ts }; }
@@ -580,7 +812,14 @@ const handleRoomOp = async (msg) => {
       const client = /** @type {any} */ (await loadDweb());
       let clean;
       try { clean = client.validateCard(msg.card).card; }
-      catch (e) { return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? 'agent card rejected' }; }
+      catch (e) {
+        return {
+          ok: false,
+          error: /** @type {{ message?: string }} */ (e)?.message ?? 'agent card rejected',
+          performed: false, outcomeKnown: true,
+          outcomeKind: 'pre-effect-failure', retryable: false,
+        };
+      }
       const card = { ...clean, did: room.did };
       room.sync.retain('~card');
       const env = await room.sync.publish('~card', card);
@@ -603,16 +842,34 @@ const handleRoomOp = async (msg) => {
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
     case 'publish-app': {
       const h = await start();
-      const { uri, hash, ownershipAdded } = await publishLocalApp(h, msg, 'room');
-      const recorded = await swCall('dweb/app-record-served', { appId: msg.appId, uri, hash });
-      if (!recorded?.ok) {
-        if (ownershipAdded) unserveTrackedHash(h, appContentOwner(msg.appId, 'room'), hash);
-        throw new Error(recorded?.error ?? 'shared App version could not be recorded');
+      const ownerId = appContentOwner(msg.appId, 'room');
+      const { published, announced: recorded } = await runPublishTransaction({
+        publish: () => publishLocalApp(h, msg, ownerId),
+        announce: async ({ uri, hash }) => {
+          const result = await swEffectCall('dweb/app-record-served', {
+            appId: msg.appId, uri, hash,
+            publicationGeneration: msg.publicationGeneration,
+          });
+          if (!result?.ok) {
+            throw publishFailureError(result, 'shared App version could not be recorded');
+          }
+          return result;
+        },
+        rollback: ({ hash, ownershipAdded }) => {
+          if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
+        },
+      });
+      const { uri, hash } = published;
+      const pendingRoomUnserveHashes = [];
+      for (const staleHash of recorded.pendingUnserveHashes ?? []) {
+        try { unserveTrackedHash(h, ownerId, staleHash); }
+        catch { pendingRoomUnserveHashes.push(staleHash); }
       }
-      if (recorded.previousHash && recorded.previousHash !== hash) {
-        unserveTrackedHash(h, appContentOwner(msg.appId, 'room'), recorded.previousHash);
-      }
-      return { ok: true, uri, hash };
+      return {
+        ok: true, uri, hash, pendingRoomUnserveHashes,
+        ...(pendingRoomUnserveHashes.length
+          ? { warning: 'previous-version-cleanup-pending' } : {}),
+      };
     }
     default: return { ok: false, error: `unknown room op: ${op}` };
   }
@@ -623,7 +880,7 @@ const handleRoomOp = async (msg) => {
  * @param {import('webextension-polyfill').Runtime.MessageSender} sender
  * @param {(response: any) => void} sendResponse
  */
-const onBaseHostMessage = (msg, sender, sendResponse) => {
+export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
   if (!msg?.type?.startsWith?.('dweb/base-host/')) return undefined;
   if (!isServiceWorkerSender(sender)) {
     sendResponse({ ok: false, error: 'unauthorized-command-sender' });
@@ -680,7 +937,38 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
         // Share: publish the app's files as a signed bundle the base mesh serves,
         // then announce it (gossip + DHT). dwapp_id = content hash.
         case 'dweb/base-host/share-app': {
+          const reseed = msg.reseed === true;
+          const transactionId = !reseed && typeof msg.transactionId === 'string'
+            && /^[a-f0-9-]{36}$/i.test(msg.transactionId)
+            ? msg.transactionId : null;
+          if (!reseed && !transactionId) {
+            sendResponse({ ok: false, error: 'share-transaction-id-required' });
+            return;
+          }
+          const reseedAttemptId = typeof msg.reseedAttemptId === 'string'
+            && msg.reseedAttemptId.length >= 8 && msg.reseedAttemptId.length <= 128
+            && !/[\u0000-\u001f\u007f]/.test(msg.reseedAttemptId)
+            ? msg.reseedAttemptId : null;
+          if (reseed && (!reseedAttemptId
+            || typeof msg.appId !== 'string'
+            || msg.expectedHostEpoch !== activeFeatureHostEpoch
+            || msg.expectedMeshGeneration !== meshGeneration
+          )) {
+            sendResponse({ ok: false, error: 'dweb-generation-retired' });
+            return;
+          }
+          if (reseed) latestReseedAttempts.set(msg.appId, reseedAttemptId);
           const h = await start();
+          const reseedCurrent = () => !reseed || (
+            handle === h
+            && msg.expectedHostEpoch === activeFeatureHostEpoch
+            && msg.expectedMeshGeneration === meshGeneration
+            && latestReseedAttempts.get(msg.appId) === reseedAttemptId
+          );
+          if (!reseedCurrent()) {
+            sendResponse({ ok: false, error: 'dweb-generation-retired' });
+            return;
+          }
           // The UI passes an edited namespace on FIRST share (and the stored slug on
           // reshare); fall back to the name. A RESHARE reuses the same slug → same
           // dwapp_id → publishMeta amends the existing card (higher seq) instead of
@@ -690,9 +978,17 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
           const previousCard = h.base.heardDwapps().find((/** @type {any} */ row) => (
             row.publisher === h.base.did && row.slug === slug
           )) ?? null;
-          const { published, announced } = await runPublishTransaction({
-            publish: () => publishLocalApp(h, msg, 'share'),
-            announce: ({ uri, hash, size }) => h.base.publishMeta({
+          const stableOwnerId = appContentOwner(msg.appId, 'share');
+          const publicationOwnerId = reseed
+            ? `${stableOwnerId}:reseed:${reseedAttemptId}` : stableOwnerId;
+          const rollbackPublishedBytes = (/** @type {any} */ published) => {
+            if (published.ownershipAdded) {
+              unserveTrackedHash(h, publicationOwnerId, published.hash);
+            }
+          };
+          const announce = (/** @type {any} */ {
+            uri, hash, size,
+          }) => h.base.publishMeta({
               slug, name: msg.name, description: msg.description ?? '',
               head: {
                 version_id: hash, content_addr: uri, size,
@@ -707,16 +1003,71 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
               // timestamp and sequence, and publishApp refuses changed bytes before
               // this card can be announced.
               ...(Number.isInteger(msg.seq) ? { seq: msg.seq } : {}),
-            }),
+            });
+          const publish = () => publishLocalApp(h, msg, publicationOwnerId);
+          const transaction = reseed ? await runDwebReseedPublication({
+            current: reseedCurrent,
+            publish,
+            announce,
+            rollbackBytes: rollbackPublishedBytes,
+            compensate: async (published, announced) => {
+              const newerAttemptOwnsThisHost = handle === h
+                && latestReseedAttempts.get(msg.appId) !== reseedAttemptId;
+              let metadataFailure = null;
+              if (!newerAttemptOwnsThisHost) {
+                try {
+                  await rollbackSharePublication({
+                    base: h,
+                    state: {
+                      appId: msg.appId,
+                      ownerId: publicationOwnerId,
+                      slug,
+                      name: msg.name,
+                      newHash: published.hash,
+                      ownershipAdded: false,
+                      previous: previousCard ? {
+                        name: previousCard.name,
+                        description: previousCard.description ?? '',
+                        head: previousCard.head,
+                        seq: previousCard.seq,
+                      } : null,
+                    },
+                    failedSeq: announced?.card?.seq,
+                    release: () => {},
+                  });
+                } catch (cause) { metadataFailure = cause; }
+              }
+              try { rollbackPublishedBytes(published); }
+              catch (cause) {
+                if (metadataFailure) {
+                  throw new AggregateError(
+                    [metadataFailure, cause], 'dweb reseed compensation failed',
+                  );
+                }
+                throw cause;
+              }
+              if (metadataFailure) throw metadataFailure;
+            },
+            commit: (published) => {
+              if (published.ownershipAdded
+                  && !contentOwnership.transfer(
+                    publicationOwnerId, stableOwnerId, published.hash,
+                  )) {
+                throw new Error('dweb-reseed-ownership-transfer-failed');
+              }
+            },
+          }) : await runPublishTransaction({
+            publish,
+            announce,
             rollback: ({ hash, ownershipAdded }) => {
               if (ownershipAdded && hash !== previousHash) {
-                unserveTrackedHash(h, appContentOwner(msg.appId, 'share'), hash);
+                unserveTrackedHash(h, stableOwnerId, hash);
               }
             },
           });
+          const { published, announced } = transaction;
           const { uri, hash, created, size } = published;
-          const { dwapp_id, card } = announced;
-          const transactionId = msg.reseed ? null : crypto.randomUUID();
+          const { dwapp_id, card, propagated } = announced;
           if (transactionId) {
             shareRollbacks.register(transactionId, {
               appId: msg.appId,
@@ -737,6 +1088,7 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
           sendResponse({
             ok: true, uri, hash, size, created, dwapp_id, slug,
             seq: card.seq, publisher: h.base.did, transactionId,
+            propagated: propagated !== false,
           });
           return;
         }
@@ -864,8 +1216,11 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
               // Library later detect a newer announce for this same dwapp_id.
               dwappId: identity.dwappId, slug: identity.slug, seq: identity.seq,
               install: async (/** @type {any} */ a) => {
-                const r = await swCall('dweb/app-install', { appId, ...a, files: jsonSafeFiles(a.files) });
-                if (!r?.ok) throw new Error(r?.error ?? 'install failed');
+                const r = await swEffectCall('dweb/app-install', {
+                  appId, ...a, files: jsonSafeFiles(a.files),
+                  publicationGeneration: msg.publicationGeneration,
+                });
+                if (!r?.ok) throw publishFailureError(r, 'install failed');
                 return { app: r.app, warning: r.warning };
               },
             }),
@@ -927,8 +1282,9 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
                   ...(Array.isArray(msg.pendingHashes) ? msg.pendingHashes : []),
                   ...(previousHash ? [previousHash] : []),
                 ].filter((hash) => typeof hash === 'string' && hash !== a.dweb?.hash))];
-                const r = await swCall('dweb/app-update', {
+                const r = await swEffectCall('dweb/app-update', {
                   appId: msg.appId,
+                  publicationGeneration: msg.publicationGeneration,
                   ...(msg.strategy === 'replace' || msg.strategy === 'fork' ? { strategy: msg.strategy } : {}),
                   ...a,
                   dweb: {
@@ -937,7 +1293,7 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
                   },
                   files: jsonSafeFiles(a.files),
                 });
-                if (!r?.ok) throw new Error(r?.error ?? 'update failed');
+                if (!r?.ok) throw publishFailureError(r, 'update failed');
                 return { app: r.app, warning: r.warning, fork: r.fork };
               },
             }),
@@ -976,11 +1332,21 @@ const onBaseHostMessage = (msg, sender, sendResponse) => {
       }
     } catch (e) {
       warn('handler threw', msg.type, '—', /** @type {{ message?: string }} */ (e)?.message ?? e);
-      sendResponse({ ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) });
+      const failure = /** @type {any} */ (e);
+      sendResponse({
+        ok: false,
+        error: failure?.message ?? String(e),
+        ...(typeof failure?.code === 'string' ? { code: failure.code } : {}),
+        ...(typeof failure?.performed === 'boolean' ? { performed: failure.performed } : {}),
+        ...(typeof failure?.outcomeKnown === 'boolean'
+          ? { outcomeKnown: failure.outcomeKnown } : {}),
+        ...(typeof failure?.retryable === 'boolean' ? { retryable: failure.retryable } : {}),
+        ...(['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+          .includes(failure?.outcomeKind) ? { outcomeKind: failure.outcomeKind } : {}),
+      });
     }
   })();
   return true; // async sendResponse
 };
-browser.runtime.onMessage.addListener(/** @type {any} */ (onBaseHostMessage));
 
-log('handler registered', DWEB_ENABLED ? '(dweb enabled)' : '(dweb disabled — inert)');
+log('host loaded', DWEB_ENABLED ? '(dweb enabled)' : '(dweb disabled and inert)');

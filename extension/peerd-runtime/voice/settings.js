@@ -26,8 +26,7 @@
 //                             the card from re-appearing.
 //
 // All of these live in chrome.storage.local under 'settings.v1' (same
-// store the SW already manages). The SW's updateSettings handler
-// whitelists which keys it accepts — see service-worker.js.
+// store the kernel already manages).
 
 /**
  * Collapse any candidate variant to the single shipped model. With one

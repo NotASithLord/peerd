@@ -19,42 +19,7 @@ export const concat = (a, b) => {
   return out;
 };
 
-/**
- * Encode bytes as a base64 string. Used to make binary values survive
- * chrome.storage.local's JSON serialization (it doesn't preserve
- * Uint8Array, despite occasional implications to the contrary in docs)
- * and to ship VM-bridge response bodies across messaging.
- *
- * Implementation note: we use String.fromCharCode because
- * Uint8Array.toBase64() is recent (Chrome 122+); the loop works
- * everywhere. Chunked so large buffers (the WebVM HTTP bridge stages bodies
- * up to ~50MB) don't blow fromCharCode.apply's argument limit — small inputs
- * take a single pass.
- *
- * @param {Uint8Array} bytes
- * @returns {string}
- */
-export const bytesToBase64 = (bytes) => {
-  let str = '';
-  const CHUNK = 32_768;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    str += String.fromCharCode.apply(null, /** @type {number[]} */ (/** @type {unknown} */ (bytes.subarray(i, i + CHUNK))));
-  }
-  return btoa(str);
-};
-
-/**
- * Inverse of bytesToBase64.
- *
- * @param {string} b64
- * @returns {Uint8Array}
- */
-export const base64ToBytes = (b64) => {
-  const str = atob(b64);
-  const out = new Uint8Array(str.length);
-  for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i);
-  return out;
-};
+export { bytesToBase64, base64ToBytes, uuidv7 } from './cold-util.js';
 
 /**
  * Escape a value for safe inclusion as an XML/HTML attribute. Used by
@@ -110,40 +75,6 @@ export const stripUntrustedFences = (text) => {
 };
 
 /**
- * Generate a UUIDv7. Time-sortable (first 48 bits are ms since epoch),
- * so IndexedDB cursors over audit-log entries return them in chronological
- * order without a separate timestamp key.
- *
- * Implementation note: we use a clock callback so tests can inject a fixed
- * time and assert on byte layout deterministically.
- *
- * @param {() => number} [now]   ms since epoch
- * @param {(n: number) => Uint8Array} [randomBytes]
- * @returns {string}             canonical 36-char UUID
- */
-export const uuidv7 = (now = Date.now, randomBytes = randomBytesDefault) => {
-  const t = BigInt(now());
-  const rand = randomBytes(10);
-  const bytes = new Uint8Array(16);
-  // 48 bits of unix-ms timestamp
-  bytes[0] = Number((t >> 40n) & 0xffn);
-  bytes[1] = Number((t >> 32n) & 0xffn);
-  bytes[2] = Number((t >> 24n) & 0xffn);
-  bytes[3] = Number((t >> 16n) & 0xffn);
-  bytes[4] = Number((t >> 8n) & 0xffn);
-  bytes[5] = Number(t & 0xffn);
-  bytes.set(rand, 6);
-  // Set version (7) and variant (10) bits per RFC 9562
-  bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
-};
-
-/** @param {number} n */
-const randomBytesDefault = (n) => crypto.getRandomValues(new Uint8Array(n));
-
-/**
  * Deep-freeze a value. Useful for compile-time-immutable config tables
  * like the egress allowlist. Mutates the input (per Object.freeze
  * semantics) but returns it for chaining.
@@ -181,8 +112,8 @@ export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 export const clamp = (n, lo, hi) => Math.min(Math.max(n, lo), hi);
 
 /**
- * SHA-256 of a UTF-8 string, hex-encoded. Used by the snapshot store to
- * content-address file blobs so identical bodies dedup to one row.
+ * SHA-256 of a UTF-8 string, hex-encoded. Used for stable digests at authority
+ * and sharing boundaries without exposing the source value.
  *
  * Uses Web Crypto's subtle.digest, which is present in the SW, workers,
  * and Bun's test runtime alike — no polyfill needed. Async because

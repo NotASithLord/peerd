@@ -4,14 +4,16 @@
 // components and the privileged background agent-loop assembly.
 
 export { createModelStore } from './voice/model-store.js';
-export { makeToolboxParseCheck } from './toolbox/core.js';
 export {
   CODE_RUN_MAX_TRACE_OPS, buildCodeClientSource, canonicalCodeTraceLabel,
 } from './actor/capability-manifest.js';
 export {
   ACTORS_BRIDGE_GUARD_MS, ACTORS_RUN_MAX_OPS,
   ACTORS_TRACE_ERROR_MAX_CHARS, ACTORS_TRACE_TARGET_MAX_CHARS, actorsCallToOp,
+  shapeActorsResult,
 } from './actor/actors-api.js';
+export { shapeActorRoster } from './tools/defs/actor-list.js';
+export { pageCallToToolCall, shapePageCallOutcome } from './actor/page-api.js';
 export { MAX_FILE_CONTENT_CHARS } from './tools/defs/js-write-file.js';
 export {
   chooseEngine, looksScanned, createOcrStore, PdfFetchError, PdfParseError,
@@ -20,3 +22,4 @@ export {
   convertToDocument, sniffDocFormat, DocFetchError, DocParseError,
   UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
 } from './doc/index.js';
+export { MAX_SPILL_TEXT_CHARS } from './tools/result-store-policy.js';

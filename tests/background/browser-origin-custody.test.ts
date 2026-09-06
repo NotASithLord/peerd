@@ -172,4 +172,13 @@ describe('browser origin custody', () => {
       5, ['current.example', 'old-a.example', 'old-b.example'],
     ]]);
   });
+
+  test('a partial snapshot rejects atomically instead of accepting surviving rows', async () => {
+    const custody = createBrowserOriginCustody({ isGuarded: () => true });
+    await expect(custody.hydrate([
+      [5, ['valid.example']],
+      [6] as any,
+    ])).rejects.toThrow('browser-origin-custody-snapshot-invalid');
+    expect(custody.domains()).toEqual([]);
+  });
 });

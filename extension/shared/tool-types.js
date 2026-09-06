@@ -111,12 +111,17 @@
  * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
  * @property {boolean} [actorPerformed] host-stamped execution state.
  * @property {boolean} [actorAborted] host-stamped user cancellation state.
+ * @property {any[]} [authorityReceipts] host-stamped exact-effect receipt ledger.
+ * @property {boolean} [authorityPerformed] whether any exact authority effect performed.
  */
 
 /**
  * @typedef {Object} ToolResultErr
  * @property {false} ok
  * @property {string} error
+ * @property {string} [code] stable bounded machine-readable error code
+ * @property {boolean} [outcomeKnown] whether the effect is known to have completed or not run
+ * @property {boolean} [retryable] whether an automatic retry is safe
  * @property {boolean} [endTurn]
  * @property {any} [content]  optional human-readable explanation authored
  *   alongside the machine `error` code (e.g. "User declined the outbound
@@ -139,6 +144,8 @@
  * @property {boolean} [actorOutcomeKnown] host-stamped outcome certainty.
  * @property {boolean} [actorPerformed] host-stamped execution state.
  * @property {boolean} [actorAborted] host-stamped user cancellation state.
+ * @property {any[]} [authorityReceipts] host-stamped exact-effect receipt ledger.
+ * @property {boolean} [authorityPerformed] whether any exact authority effect performed.
  */
 
 /** @typedef {ToolResultOk | ToolResultErr} ToolResult */
@@ -157,6 +164,7 @@
  * @property {number} [depth]          delegation depth (parent + 1); SW-injected
  * @property {number} [messageCount]   session message count at ctx-build — the load_skill dedup anchor; SW-injected
  * @property {number} [trimCovered]    leading messages the rolling summary folded out of the sent slice — the load_skill dedup watermark; SW-injected
+ * @property {any[]} [messages]        bounded live transcript projection for once-per-session result notes.
  */
 
 /**
@@ -232,10 +240,6 @@
  * @property {Primitive} primitive    the RESOURCE/domain this tool exercises
  *   (tab / web / webvm / notebook / pod / app / memory / inspect / actor). Answers
  *   "what does it touch?".
- * @property {'inline'|'spawned'} [dispatch]   the EXECUTION mechanism —
- *   orthogonal to `primitive`. Absent/'inline' = runs in the dispatcher.
- *   'spawned' = carried out by a spawned child session. Lets the UI show the
- *   mechanism without conflating it into the primitive. Answers "how is it run?".
  * @property {Record<string, any>} schema           JSON Schema for args
  * @property {SideEffect} sideEffect
  * @property {'A'|'B'|'C'|'D'|'E'|'F'} [retryClass] optional explicit lifecycle retry class

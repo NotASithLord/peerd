@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // schedule_list — enumerate the registered background Routines (loop/scheduler.js
 // singleton, via ctx.scheduleList). Read-class, no egress: it reads local
 // scheduler state only, so it never confirms and the origin/egress gates pass
@@ -12,21 +14,15 @@ import { describeSchedule } from '../../loop/schedule.js';
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'schedule', execute: (args: any, ctx: ToolContext) => Promise<ScheduleToolResult> }} ScheduleTool */
 
 /** @type {ScheduleTool} */
-export const scheduleListTool = {
-  name: 'schedule_list',
-  primitive: 'schedule',
-  description: 'List the registered background routines: id, task prompt, cadence, mode, enabled state, and next run time. Use schedule_create to add one, schedule_cancel to remove one.',
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const scheduleListTool = composeTool("schedule_list", {
 
   execute: async (_args, ctx) => {
-    const scheduleList = /** @type {(() => any[]) | undefined} */ (
-      /** @type {{ scheduleList?: unknown }} */ (ctx).scheduleList);
-    if (typeof scheduleList !== 'function') {
+    const authority = /** @type {{ readRoutines?:()=>Promise<any[]> }|undefined} */ (
+      /** @type {{ scheduleAuthority?: unknown }} */ (ctx).scheduleAuthority);
+    if (typeof authority?.readRoutines !== 'function') {
       return { ok: false, error: 'schedule_unavailable', content: 'Background scheduling is not available in this context.' };
     }
-    const routines = scheduleList() ?? [];
+    const routines = await authority.readRoutines() ?? [];
     if (routines.length === 0) {
       return { ok: true, content: 'No background routines registered.' };
     }
@@ -38,8 +34,10 @@ export const scheduleListTool = {
       enabled: r.enabled !== false,
       nextRunAt: new Date(r.nextRunAt).toISOString(),
       lastRunAt: r.lastRunAt ? new Date(r.lastRunAt).toISOString() : null,
+      lastOutcomeUnknownAt: r.lastOutcomeUnknownAt
+        ? new Date(r.lastOutcomeUnknownAt).toISOString() : null,
       runCount: r.runCount ?? 0,
     }));
     return { ok: true, content: JSON.stringify(rows, null, 2) };
   },
-};
+});

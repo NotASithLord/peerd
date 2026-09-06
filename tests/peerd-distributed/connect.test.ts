@@ -1,7 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { createConnector } from '../../extension/peerd-distributed/transport/connect.js';
 import { createInprocTransport } from '../../extension/peerd-distributed/transport/transports/inproc.js';
-import { deMdnsSdp } from '../../extension/peerd-distributed/transport/sdp.js';
 
 describe('in-process transport', () => {
   test('links two same-realm peers through a channel pair', async () => {
@@ -60,13 +59,5 @@ describe('connect() transport selection', () => {
     const inproc = createInprocTransport();
     const { connect } = createConnector({ transports: [inproc] });
     await expect(connect({ did: 'did:key:zGhost' })).rejects.toThrow(/no transport reached/);
-  });
-});
-
-describe('same-machine SDP strategy', () => {
-  test('deMdns rewrites the privacy mDNS hostname to loopback', () => {
-    const sdp = 'a=candidate:1 1 udp 2113937151 9f3c2a10-dead-beef-1234-aabbccddeeff.local 51820 typ host';
-    expect(deMdnsSdp(sdp)).toContain('127.0.0.1');
-    expect(deMdnsSdp(sdp)).not.toContain('.local');
   });
 });

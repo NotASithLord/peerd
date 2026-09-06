@@ -14,8 +14,8 @@
 //
 // This module is the pure decision: given a session, was its last turn
 // interrupted by INFRASTRUCTURE (resumable) rather than by the user or a
-// clean stop (not resumable)? The imperative shell (service-worker.js)
-// calls it on session open / vault unlock and, when it says yes, drives
+// clean stop (not resumable)? The host calls it on session open / vault unlock
+// and, when it says yes, drives
 // one synthetic continuation turn — the loop rebuilds history from the
 // session each step, so injectResumeNotes (partial reasoning) and the
 // format layer's orphan-repair (dangling tool_use) make the continuation
@@ -53,8 +53,6 @@ const NOT_RESUMABLE = Object.freeze({ resumable: false });
  *     mid-stream; the persisted content is partial;
  *   - last is an assistant message with stopReason 'incomplete' — the
  *     provider stream closed without a message_stop (rate limit / drop);
- *   - last is an assistant message carrying an `error` (and NOT a user
- *     abort) — a provider/transport failure ended the turn;
  *   - last is an assistant message whose stopReason is 'tool_use' with
  *     pending toolUses — the model asked for tools but the dispatch round
  *     never produced the matching tool_result turn (SW died between);
@@ -84,6 +82,9 @@ export const detectInterruptedTurn = (session) => {
     // User-initiated stop wins over every interruption signal: never
     // auto-resume what the user deliberately ended.
     if (last.stopReason === 'aborted') return NOT_RESUMABLE;
+    if (/** @type {{outcomeKnown?:boolean}} */ (last).outcomeKnown === false) {
+      return NOT_RESUMABLE;
+    }
     if (last.streaming === true) return resumable('stream-interrupted', last);
     if (last.stopReason === 'incomplete') return resumable('incomplete', last);
     // why we DON'T resume on a bare `error`: only stream-drop markers
@@ -103,6 +104,9 @@ export const detectInterruptedTurn = (session) => {
 
   if (last.role === 'user'
       && Array.isArray(last.toolResults) && last.toolResults.length > 0) {
+    if (last.toolResults.some((result) => result?.outcomeKnown === false)) {
+      return NOT_RESUMABLE;
+    }
     // Tools completed and were persisted; the next model call never ran.
     return resumable('model-call-pending', last);
   }

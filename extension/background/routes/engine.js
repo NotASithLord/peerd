@@ -44,13 +44,16 @@ export const makeEngineRoutes = (deps) => {
     appRegistry, vmRegistry, jsRegistry, podRegistry, podTabTracker, appClient, appTabTracker,
     appQuiescence,
     opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
-    buildAppExport, buildNotebookExport, buildVmRecipeExport,
-    openEnvelope, inspectEnvelope, exportFilename,
+    artifactEngine,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
     repositories, parseAppManifest, podGitRemoteOperation, getCurrentSessionId, onAppDeleted,
   } = deps;
+  const {
+    buildAppExport, buildNotebookExport, buildVmRecipeExport,
+    openEnvelope, inspectEnvelope, exportFilename,
+  } = artifactEngine;
   if (typeof awaitDenylistPolicy !== 'function') {
     throw new TypeError('makeEngineRoutes: awaitDenylistPolicy is required');
   }
@@ -63,15 +66,45 @@ export const makeEngineRoutes = (deps) => {
   if (typeof podGitRemoteOperation !== 'function') {
     throw new TypeError('makeEngineRoutes: podGitRemoteOperation is required');
   }
+  if (!artifactEngine || [
+    buildAppExport, buildNotebookExport, buildVmRecipeExport,
+    openEnvelope, inspectEnvelope, exportFilename,
+  ].some((operation) => typeof operation !== 'function')) {
+    throw new TypeError('makeEngineRoutes: artifactEngine is required');
+  }
+  /** @param {unknown} error @param {any} ErrorClass */
+  const isArtifactError = (error, ErrorClass) => error instanceof ErrorClass
+    || (typeof ErrorClass?.name === 'string'
+      && /** @type {{name?:unknown}} */ (error)?.name === ErrorClass.name);
 
   /** @param {string} appId @param {() => Promise<any>} operation */
-  const coordinateApp = (appId, operation) => repositories.coordinate({ kind: 'app', id: appId }, operation);
+  const coordinateApp = (appId, operation) => repositories.coordinate(
+    { kind: 'app', id: appId },
+    async () => {
+      if (vault.isLocked()) throw new Error('vault-locked');
+      return operation();
+    },
+  );
   /** @param {string} appId @param {() => Promise<any>} operation */
-  const quiesceApp = (appId, operation) => appQuiescence.run(
+  const quiesceApp = (appId, operation, close = true) => appQuiescence.run(
     appId,
     () => coordinateApp(appId, operation),
-    { close: true },
+    { close },
   );
+  /** @param {unknown} cause @param {string} action */
+  const repositoryFailure = (cause, action) => {
+    const detail = /** @type {{code?:string,outcomeKnown?:boolean,message?:string}} */ (cause);
+    const outcomeKnown = detail?.outcomeKnown !== false;
+    return {
+      ok: false,
+      code: detail?.code ?? 'repository-operation-failed',
+      outcomeKnown,
+      retryable: outcomeKnown,
+      error: outcomeKnown
+        ? `Peerd could not ${action}. Try again.`
+        : `Peerd could not confirm the result of trying to ${action}. Refresh Git history to reconcile before trying again.`,
+    };
+  };
   /** @param {unknown} appId @param {unknown} path @param {any} sender */
   const ownsAppDataMutation = (appId, path, sender) => typeof appId === 'string'
     && typeof path === 'string'
@@ -144,6 +177,7 @@ export const makeEngineRoutes = (deps) => {
     return repositories.coordinate(ref, async () => {
     const [command = '', ...args] = argv.map(String);
     const remoteOp = podGitRemoteOperation(argv);
+    /** @type {string|undefined} */ let expectedRemote;
     if (remoteOp && remoteGrant !== true) {
       let target = null;
       if (remoteOp === 'clone' || remoteOp === 'link') {
@@ -165,6 +199,10 @@ export const makeEngineRoutes = (deps) => {
           },
         };
       }
+      if (remoteOp === 'fetch' || remoteOp === 'push') expectedRemote = target ?? undefined;
+    }
+    if ((remoteOp === 'fetch' || remoteOp === 'push') && expectedRemote === undefined) {
+      expectedRemote = (await repositories.getRemote(ref))?.url;
     }
     const abortable = remoteOp && typeof jobId === 'string'
       ? registerPodController(podId, jobId)
@@ -222,13 +260,15 @@ export const makeEngineRoutes = (deps) => {
         });
         result = { stdout: shellLine(`Cloned ${cloned.remote.url}`), stderr: '', exitCode: 0 };
       } else if (command === 'fetch') {
-        const fetched = await repositories.fetch(ref, { signal: abortable?.controller.signal });
+        const fetched = await repositories.fetch(ref, {
+          signal: abortable?.controller.signal, expectedRemote,
+        });
         result = { stdout: shellLine(`Fetched ${fetched.remote.url}`), stderr: '', exitCode: 0 };
       } else if (command === 'push') {
         const branchName = args.find((arg) => !arg.startsWith('-') && arg !== 'origin');
         const pushed = await repositories.push(ref, {
           ...(branchName ? { ref: branchName } : {}),
-          signal: abortable?.controller.signal,
+          signal: abortable?.controller.signal, expectedRemote,
         });
         result = pushed.ok
           ? { stdout: shellLine(`Pushed ${pushed.branch} to ${pushed.remote.url}`), stderr: '', exitCode: 0 }
@@ -248,6 +288,16 @@ export const makeEngineRoutes = (deps) => {
       auditLog.append({ type: 'pod_git_command', details: { podId, command, exitCode: result.exitCode } }).catch(() => {});
       return { ok: true, result };
     } catch (error) {
+      if (/** @type {{outcomeKnown?:unknown}} */ (error)?.outcomeKnown === false) {
+        return {
+          ok: false,
+          error: 'Git may have completed, but Peerd could not confirm the result. Refresh Git history before trying again.',
+          code: /** @type {{code?:string}} */ (error)?.code ?? 'pod-git-outcome-unknown',
+          outcomeKnown: false,
+          outcomeKind: 'unknown',
+          retryable: false,
+        };
+      }
       const result = podGitFailure(error);
       auditLog.append({
         type: 'pod_git_command',
@@ -374,7 +424,7 @@ export const makeEngineRoutes = (deps) => {
           || !isOffscreenSender?.(sender)
           || scriptRuns?.ownerFor(runId) !== ownerSessionId
           || scriptRuns?.allows(runId, 'egress') !== true
-          || scriptRuns?.admitOp(runId, 'egress') !== true) {
+          || scriptRuns?.admitCodeOp(runId, 'egress') !== true) {
           return { ok: false, error: 'web_fetch_unknown_finished_foreign_or_over_limit_run' };
         }
         sourceSignal = scriptRuns.signalFor(runId);
@@ -453,8 +503,9 @@ export const makeEngineRoutes = (deps) => {
     'app/get-meta': async ({ appId }) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        let meta = await appRegistry.get(appId);
+        const meta = await appRegistry.get(appId);
         if (!meta) return { ok: false, error: 'app-not-found' };
+        let runtimeEntryFile = meta.entryFile;
         let runtimeDweb = meta.dweb ?? null;
         let runtimeAgent = { kind: 'bound-app', profile: 'developer', surface: 'code' };
         try {
@@ -465,7 +516,7 @@ export const makeEngineRoutes = (deps) => {
             ? (meta.dweb ?? { uri: null, publisher: null, hash: null, local: true })
             : null;
           runtimeAgent = contract.agent;
-          if (contract.entry !== meta.entryFile) meta = await appRegistry.update(appId, { entryFile: contract.entry });
+          runtimeEntryFile = contract.entry;
         } catch (error) {
           if ((/** @type {{name?:string}} */ (error)).name !== 'NotFoundError') {
             return { ok: false, error: /** @type {{message?:string}} */ (error)?.message ?? String(error) };
@@ -476,7 +527,7 @@ export const makeEngineRoutes = (deps) => {
         return {
           ok: true,
           name: meta.name,
-          entryFile: meta.entryFile,
+          entryFile: runtimeEntryFile,
           fileKinds: meta.fileKinds ?? {},
           dweb: runtimeDweb,
           agent: runtimeAgent,
@@ -560,6 +611,15 @@ export const makeEngineRoutes = (deps) => {
         });
         return { ok: true, ...result };
       } catch (e) {
+        if (/** @type {{outcomeKnown?:boolean}} */ (e)?.outcomeKnown === false) {
+          return {
+            ok: false,
+            code: /** @type {{code?:string}} */ (e)?.code ?? 'repository-operation-failed',
+            outcomeKnown: false,
+            retryable: false,
+            error: 'Peerd could not confirm whether the Git import finished. Refresh and inspect the Library before trying again.',
+          };
+        }
         return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) };
       }
     },
@@ -625,6 +685,7 @@ export const makeEngineRoutes = (deps) => {
       catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
     },
     'apps/repository/status': async ({ appId }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         const [status, remote, branches] = await Promise.all([
@@ -633,74 +694,91 @@ export const makeEngineRoutes = (deps) => {
         ]);
         return { ok: true, status, remote, branches };
       }
-      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      catch (e) { return repositoryFailure(e, 'load Git status'); }
     },
     'apps/repository/history': async ({ appId, depth }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try { return { ok: true, commits: await repositories.historyApp(appId, { depth, includeSafety: true }) }; }
-      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      catch (e) { return repositoryFailure(e, 'load Git history'); }
     },
     'apps/repository/diff': async ({ appId, from, to }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try { return { ok: true, diff: await repositories.diffApp(appId, { from: from || 'HEAD', to: to || null }) }; }
-      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      catch (e) { return repositoryFailure(e, 'load this Git diff'); }
     },
     'apps/repository/commit': async ({ appId, message }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        const result = await quiesceApp(appId, () => repositories.commitApp(appId, { message: typeof message === 'string' ? message : 'manual edit' }));
+        const result = await quiesceApp(appId, () => repositories.commitApp(appId, { message: typeof message === 'string' ? message : 'manual edit' }), false);
         await auditLog.append({ type: 'git_commit_created', details: { kind: 'app', appId, oid: result.oid, changed: result.changed.length } });
         return { ok: true, result };
-      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      } catch (e) { return repositoryFailure(e, 'save the Git checkpoint'); }
     },
     'apps/repository/restore': async ({ appId, to }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof to !== 'string') return { ok: false, error: 'appId-and-to-required' };
       try {
         const result = await quiesceApp(appId, () => repositories.restoreApp(appId, { to }));
         appTabTracker.reloadTab(appId).catch(() => {});
         await auditLog.append({ type: 'git_version_restored', details: { kind: 'app', appId, to, oid: result.oid } });
         return { ok: true, result };
-      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      } catch (e) { return repositoryFailure(e, 'restore this Git version'); }
     },
     'apps/repository/branch': async ({ appId, name, checkout = true }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
       try { return { ok: true, result: await (checkout === false ? coordinateApp : quiesceApp)(appId, () => repositories.branch({ kind: 'app', id: appId }, { name, checkout: checkout !== false })) }; }
-      catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      catch (e) { return repositoryFailure(e, 'create this Git branch'); }
     },
     'apps/repository/checkout': async ({ appId, name }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
       try {
         const result = await quiesceApp(appId, () => repositories.checkout({ kind: 'app', id: appId }, { name }));
         appTabTracker.reloadTab(appId).catch(() => {});
         return { ok: true, result };
-      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      } catch (e) { return repositoryFailure(e, 'switch this Git branch'); }
     },
     'apps/repository/link': async ({ appId, url }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof url !== 'string') return { ok: false, error: 'appId-and-url-required' };
       try {
         const remote = await coordinateApp(appId, () => repositories.setRemote({ kind: 'app', id: appId }, { url }));
         await auditLog.append({ type: 'git_remote_linked', details: { kind: 'app', appId, host: remote.host, url: remote.url } });
         return { ok: true, remote };
-      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      } catch (e) { return repositoryFailure(e, 'link this Git remote'); }
     },
     'apps/repository/fetch': async ({ appId }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
-        const result = await coordinateApp(appId, () => repositories.fetch({ kind: 'app', id: appId }));
+        const result = await coordinateApp(appId, async () => {
+          const ref = { kind: 'app', id: appId };
+          const expectedRemote = (await repositories.getRemote(ref))?.url;
+          return repositories.fetch(ref, { expectedRemote });
+        });
         await auditLog.append({ type: 'git_remote_fetched', details: { kind: 'app', appId, host: result.remote.host } });
         return { ok: true, result };
-      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      } catch (e) { return repositoryFailure(e, 'fetch this Git remote'); }
     },
     'apps/repository/push': async ({ appId, branch }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         const result = await quiesceApp(appId, async () => {
+          const ref = { kind: 'app', id: appId };
+          const expectedRemote = (await repositories.getRemote(ref))?.url;
           await repositories.commitApp(appId, { message: 'checkpoint before push' });
-          return repositories.push({ kind: 'app', id: appId }, { ref: typeof branch === 'string' ? branch : undefined });
-        });
+          return repositories.push(ref, {
+            ref: typeof branch === 'string' ? branch : undefined, expectedRemote,
+          });
+        }, false);
         await auditLog.append({ type: 'git_remote_pushed', details: { kind: 'app', appId, host: result.remote.host, branch: result.branch } });
         return { ok: result.ok, result, ...(result.ok ? {} : { error: result.error || 'push rejected (the remote may contain unrelated or newer commits)' }) };
-      } catch (e) { return { ok: false, error: /** @type {{message?:string}} */ (e)?.message ?? String(e) }; }
+      } catch (e) { return repositoryFailure(e, 'push this Git branch'); }
     },
     'apps/delete': async ({ appId }) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
@@ -733,6 +811,9 @@ export const makeEngineRoutes = (deps) => {
                     ...(Array.isArray(record.dweb?.pending_seed_unserve_hashes)
                       ? record.dweb.pending_seed_unserve_hashes
                       : []),
+                    ...(Array.isArray(record.dweb?.pending_room_unserve_hashes)
+                      ? record.dweb.pending_room_unserve_hashes
+                      : []),
                   ].filter((hash) => typeof hash === 'string' && hash))],
                 });
                 if (!reply?.ok) throw new Error(reply?.error ?? 'app-unshare-failed');
@@ -740,6 +821,7 @@ export const makeEngineRoutes = (deps) => {
             } catch {
               return {
                 ok: false,
+                code: 'dweb-unshare-failed',
                 error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
               };
             }
@@ -804,12 +886,13 @@ export const makeEngineRoutes = (deps) => {
         } else {
           return { ok: false, error: 'unknown-kind' };
         }
-        auditLog.append({ type: 'artifact_exported', details: { kind, id, name: record.name } }).catch(() => {});
-        return { ok: true, filename: exportFilename(record.name, kind), envelope };
+        return JSON.parse(JSON.stringify({
+          ok: true, filename: exportFilename(record.name, kind), envelope,
+        }));
       } catch (e) {
         // why cast: the error class arrives via the `any` deps bag, so
         // instanceof can't narrow `e` for tsc — read .message off a view.
-        if (e instanceof ArtifactTooLargeError) return { ok: false, error: /** @type {{ message?: string }} */ (e).message };
+        if (isArtifactError(e, ArtifactTooLargeError)) return { ok: false, error: /** @type {{ message?: string }} */ (e).message };
         throw e;
       }
     },
@@ -824,9 +907,9 @@ export const makeEngineRoutes = (deps) => {
       try {
         opened = await openEnvelope(envelope);
       } catch (e) {
-        if (e instanceof EnvelopeFormatError
-            || e instanceof EnvelopeIntegrityError
-            || e instanceof ArtifactTooLargeError) {
+        if (isArtifactError(e, EnvelopeFormatError)
+            || isArtifactError(e, EnvelopeIntegrityError)
+            || isArtifactError(e, ArtifactTooLargeError)) {
           // why cast: the error classes arrive via the `any` deps bag, so
           // instanceof can't narrow `e` for tsc — read .message off a view.
           return { ok: false, error: /** @type {{ message?: string }} */ (e).message };

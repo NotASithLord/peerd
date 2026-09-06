@@ -79,6 +79,56 @@ const slugify = (name) => (String(name || 'app').toLowerCase().replace(/[^a-z0-9
 /** @param {App} [app] */
 const isSeeded = (app) => !!(app?.shared || app?.dweb?.version_id || app?.dweb?.seed);
 
+/** @param {unknown} cause @param {string} action */
+const mutationFailureCopy = (cause, action) =>
+  /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false
+    ? `Peerd could not confirm whether ${action} finished. Refresh to reconcile before trying again.`
+    : `Peerd could not ${action}. Try again.`;
+
+/** @param {unknown} cause */
+const outcomeUnknown = (cause) =>
+  /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false;
+
+/**
+ * Preserve an App effect's unknown custody in the UI. While an outcome is
+ * unconfirmed, every effect control for that App is disabled; the existing
+ * A catalog read is not a causal receipt: the timed-out send can still land
+ * after that read. The card remains fenced until the user explicitly confirms
+ * that they inspected the current Library state.
+ * @param {{state:any}} vnode @param {App} app @param {unknown} cause
+ * @param {string} action @param {boolean} [transportLost]
+ */
+const recordMutationFailure = (vnode, app, cause, action, transportLost = false) => {
+  const unknown = transportLost || outcomeUnknown(cause);
+  if (unknown) vnode.state.unconfirmedApps.add(app.id);
+  vnode.state.error = mutationFailureCopy(
+    unknown ? { outcomeKnown: false } : cause,
+    action,
+  );
+};
+
+/**
+ * Git effects require Git state reconciliation, not merely an App catalog
+ * refresh. Keep their latch separate so opening the App remains available.
+ * @param {{state:any}} vnode @param {App} app @param {unknown} cause
+ * @param {string} action @param {boolean} [transportLost]
+ */
+const recordRepositoryFailure = (vnode, app, cause, action, transportLost = false) => {
+  const unknown = transportLost || outcomeUnknown(cause);
+  if (unknown) vnode.state.repositoryUnconfirmed.add(app.id);
+  vnode.state.error = unknown
+    ? `Peerd could not confirm whether ${action} finished. Recheck Git, inspect the result, then explicitly allow another change.`
+    : mutationFailureCopy(cause, action);
+};
+
+// A rejected runtime-message promise has crossed browser dispatch but carries
+// no host receipt. In Firefox an event-page discard takes exactly this shape;
+// conservatively require reconciliation before any Git effect is retried.
+/** @param {string} action */
+const gitTransportFailureCopy = (action) => mutationFailureCopy(
+  { outcomeKnown: false }, action,
+);
+
 /**
  * @param {string | undefined} filename
  * @param {any} envelope
@@ -153,6 +203,8 @@ export const LibrarySection = {
     vnode.state.updates = {};          // appId -> { uri, version_id, seq, … } when a newer version exists
     vnode.state.repositoryOpenId = null;
     vnode.state.repositories = {};     // appId -> { status, remote, commits }
+    vnode.state.repositoryErrors = {}; // appId -> bounded human retry message
+    vnode.state.repositoryUnconfirmed = new Set(); // exact Git read reconciliation required
     vnode.state.remoteInput = '';
     vnode.state.repositoryMessage = '';
     vnode.state.repositoryBranch = '';
@@ -167,7 +219,9 @@ export const LibrarySection = {
     vnode.state.gitImportName = '';
     vnode.state.gitImportRef = '';
     vnode.state.gitImportBusy = false;
+    vnode.state.gitImportOutcomeUnknown = false;
     vnode.state.notice = null;
+    vnode.state.unconfirmedApps = new Set(); // App effects awaiting catalog reconciliation
     LibrarySection.refresh(vnode);
   },
 
@@ -227,7 +281,9 @@ export const LibrarySection = {
     vnode.state.warning = null;
     vnode.state.refreshing = true;          // drives the ↻ spin until it lands
     vnode.attrs.send({ type: 'apps/list' }).then((/** @type {any} */ r) => {
-      if (r?.ok) vnode.state.apps = r.apps ?? [];
+      if (r?.ok) {
+        vnode.state.apps = r.apps ?? [];
+      }
       else vnode.state.error = r?.error ?? 'failed to load apps';
     }).catch((/** @type {unknown} */ e) => { vnode.state.error = /** @type {{ message?: string }} */ (e)?.message ?? 'failed to load apps'; })
       .finally(() => { vnode.state.refreshing = false; m.redraw(); });
@@ -268,8 +324,16 @@ export const LibrarySection = {
     // source of truth; this just avoids a refetch round-trip flicker.
     app.favorite = next;
     m.redraw();
-    const r = await vnode.attrs.send({ type: 'apps/favorite', appId: app.id, favorite: next });
-    if (!r?.ok) { app.favorite = !next; vnode.state.error = r?.error ?? 'favorite failed'; m.redraw(); }
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/favorite', appId: app.id, favorite: next });
+      if (!r?.ok) {
+        app.favorite = !next;
+        recordMutationFailure(vnode, app, r, 'update this favorite');
+      }
+    } catch (cause) {
+      app.favorite = !next;
+      recordMutationFailure(vnode, app, cause, 'update this favorite', true);
+    } finally { m.redraw(); }
   },
 
   /**
@@ -280,7 +344,9 @@ export const LibrarySection = {
     vnode.state.error = null;
     vnode.state.busyId = app.id;
     vnode.attrs.send({ type: 'apps/open', appId: app.id }).then((/** @type {any} */ r) => {
-      if (!r?.ok) vnode.state.error = r?.error ?? 'open failed';
+      if (!r?.ok) recordMutationFailure(vnode, app, r, 'open this App');
+    }).catch((cause) => {
+      recordMutationFailure(vnode, app, cause, 'open this App', true);
     }).finally(() => {
       vnode.state.busyId = null;
       m.redraw();
@@ -308,10 +374,13 @@ export const LibrarySection = {
     const name = vnode.state.renameValue.trim();
     vnode.state.renamingId = null;
     if (!name || name === app.name) { m.redraw(); return; }
-    const r = await vnode.attrs.send({ type: 'apps/rename', appId: app.id, name });
-    if (r?.ok && r.app) app.name = r.app.name;
-    else vnode.state.error = r?.error ?? 'rename failed';
-    m.redraw();
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/rename', appId: app.id, name });
+      if (r?.ok && r.app) app.name = r.app.name;
+      else recordMutationFailure(vnode, app, r, 'rename this App');
+    } catch (cause) {
+      recordMutationFailure(vnode, app, cause, 'rename this App', true);
+    } finally { m.redraw(); }
   },
 
   /**
@@ -327,12 +396,22 @@ export const LibrarySection = {
     vnode.state.error = null;
     vnode.state.armedDeleteId = null;
     vnode.state.busyId = app.id;
-    const r = await vnode.attrs.send({ type: 'apps/delete', appId: app.id });
-    vnode.state.busyId = null;
-    if (r?.ok) vnode.state.apps = (vnode.state.apps ?? []).filter((/** @type {App} */ a) => a.id !== app.id);
-    else vnode.state.error = r?.error ?? 'delete failed';
-    m.redraw();
-    focusLibraryAction(r?.ok ? adjacentAppId : app.id, r?.ok ? 'open' : 'more');
+    let deleted = false;
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/delete', appId: app.id });
+      deleted = r?.ok === true;
+      if (deleted) {
+        vnode.state.apps = (vnode.state.apps ?? []).filter((/** @type {App} */ a) => a.id !== app.id);
+      } else if (r?.code === 'dweb-unshare-failed' && !outcomeUnknown(r)) {
+        vnode.state.error = 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.';
+      } else recordMutationFailure(vnode, app, r, 'delete this App');
+    } catch (cause) {
+      recordMutationFailure(vnode, app, cause, 'delete this App', true);
+    } finally {
+      vnode.state.busyId = null;
+      m.redraw();
+      focusLibraryAction(deleted ? adjacentAppId : app.id, deleted ? 'open' : 'more');
+    }
   },
 
   /**
@@ -342,11 +421,16 @@ export const LibrarySection = {
   async exportApp(vnode, app) {
     vnode.state.error = null;
     vnode.state.busyId = app.id;
-    const r = await vnode.attrs.send({ type: 'export/artifact', kind: 'app', id: app.id });
-    vnode.state.busyId = null;
-    if (r?.ok && r.envelope) downloadEnvelope(r.filename, r.envelope);
-    else vnode.state.error = r?.error ?? 'export failed';
-    m.redraw();
+    try {
+      const r = await vnode.attrs.send({ type: 'export/artifact', kind: 'app', id: app.id });
+      if (r?.ok && r.envelope) downloadEnvelope(r.filename, r.envelope);
+      else vnode.state.error = 'Peerd could not export this App. Try again.';
+    } catch {
+      vnode.state.error = 'The export service stopped responding. Nothing was downloaded; try again.';
+    } finally {
+      vnode.state.busyId = null;
+      m.redraw();
+    }
   },
 
   /** Clone a conforming App or dwapp repository through browser-native Git.
@@ -367,7 +451,9 @@ export const LibrarySection = {
         ...(ui.gitImportRef.trim() ? { ref: ui.gitImportRef.trim() } : {}),
       });
       if (!reply?.ok) {
-        ui.error = reply?.error ?? 'Git import failed';
+        const unknown = outcomeUnknown(reply);
+        ui.gitImportOutcomeUnknown = unknown;
+        ui.error = mutationFailureCopy(unknown ? { outcomeKnown: false } : reply, 'import this Git App');
         return;
       }
       const opened = await vnode.attrs.send({ type: 'apps/open', appId: reply.record.id });
@@ -377,10 +463,11 @@ export const LibrarySection = {
       ui.gitImportRef = '';
       ui.notice = opened?.ok
         ? `Imported ${reply.record?.name ?? 'App'} from Git and opened it with its bound actor.`
-        : `Imported ${reply.record?.name ?? 'App'} from Git. Open it from Library to attach its actor. ${opened?.error ?? ''}`.trim();
+        : `Imported ${reply.record?.name ?? 'App'} from Git. Open it from Library to attach its actor.`;
       LibrarySection.refresh(vnode);
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'Git import failed';
+    } catch {
+      ui.gitImportOutcomeUnknown = true;
+      ui.error = gitTransportFailureCopy('import this Git App');
     } finally {
       ui.gitImportBusy = false;
       m.redraw();
@@ -404,6 +491,7 @@ export const LibrarySection = {
       return;
     }
     ui.repositoryOpenId = app.id;
+    delete ui.repositoryErrors[app.id];
     ui.repositoryFocusId = refresh ? null : app.id;
     // A cached diff compares the selected commit to a mutable working tree.
     // Opening or refreshing Git is the synchronization boundary for edits made
@@ -430,9 +518,12 @@ export const LibrarySection = {
         // edits. Existing-branch state belongs in the adjacent selector.
         if (!refresh) ui.repositoryBranch = '';
         ui.repositoryCheckout = statusReply.status?.branch ?? '';
-      } else ui.error = statusReply?.error ?? historyReply?.error ?? 'repository history failed';
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'repository history failed';
+        delete ui.repositoryErrors[app.id];
+      } else {
+        ui.repositoryErrors[app.id] = 'Git history is temporarily unavailable. Try again.';
+      }
+    } catch {
+      ui.repositoryErrors[app.id] = 'Git took too long to respond. Nothing was changed; try again.';
     } finally {
       ui.busyId = null;
       m.redraw();
@@ -445,12 +536,12 @@ export const LibrarySection = {
     ui.error = null; ui.busyId = app.id;
     try {
       const r = await vnode.attrs.send({ type: 'apps/repository/commit', appId: app.id, message });
-      if (!r?.ok) { ui.error = r?.error ?? 'checkpoint failed'; return; }
+      if (!r?.ok) { recordRepositoryFailure(vnode, app, r, 'save this checkpoint'); return; }
       ui.notice = r.result?.created ? 'Checkpoint saved.' : 'No changes to checkpoint.';
       if (r.result?.created) ui.repositoryMessage = '';
       await LibrarySection.openRepository(vnode, app, true);
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'checkpoint failed';
+    } catch (cause) {
+      recordRepositoryFailure(vnode, app, cause, 'save this checkpoint', true);
     } finally {
       ui.busyId = null;
       m.redraw();
@@ -468,10 +559,10 @@ export const LibrarySection = {
     ui.error = null; ui.busyId = app.id;
     try {
       const r = await vnode.attrs.send({ type: 'apps/repository/diff', appId: app.id, from: oid, to: null });
-      if (!r?.ok) ui.error = r?.error ?? 'diff failed';
+      if (!r?.ok) ui.error = 'Peerd could not load this diff. Try again.';
       else ui.repositoryDiffs[key] = r.diff;
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'diff failed';
+    } catch {
+      ui.error = 'Peerd could not load this diff. Try again.';
     } finally {
       ui.busyId = null;
       m.redraw();
@@ -486,14 +577,14 @@ export const LibrarySection = {
     ui.error = null; ui.busyId = app.id;
     try {
       const r = await vnode.attrs.send({ type: 'apps/repository/branch', appId: app.id, name, checkout: true });
-      if (!r?.ok) ui.error = r?.error ?? 'branch failed';
+      if (!r?.ok) recordRepositoryFailure(vnode, app, r, 'create this branch');
       else {
         ui.notice = `Created and checked out ${name}.`;
         ui.repositoryBranch = '';
         await LibrarySection.openRepository(vnode, app, true);
       }
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'branch failed';
+    } catch (cause) {
+      recordRepositoryFailure(vnode, app, cause, 'create this branch', true);
     } finally {
       ui.busyId = null;
       m.redraw();
@@ -508,13 +599,13 @@ export const LibrarySection = {
     ui.error = null; ui.busyId = app.id;
     try {
       const r = await vnode.attrs.send({ type: 'apps/repository/checkout', appId: app.id, name });
-      if (!r?.ok) ui.error = r?.error ?? 'checkout failed';
+      if (!r?.ok) recordRepositoryFailure(vnode, app, r, 'check out this branch');
       else {
         ui.notice = `Checked out ${name}.`;
         await LibrarySection.openRepository(vnode, app, true);
       }
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'checkout failed';
+    } catch (cause) {
+      recordRepositoryFailure(vnode, app, cause, 'check out this branch', true);
     } finally {
       ui.busyId = null;
       m.redraw();
@@ -530,14 +621,16 @@ export const LibrarySection = {
     try {
       const type = `apps/repository/${op}`;
       const r = await vnode.attrs.send({ type, appId: app.id, ...(op === 'link' ? { url: ui.remoteInput.trim() } : {}) });
-      if (!r?.ok) ui.error = r?.error ?? `${op} failed`;
+      const action = op === 'link' ? 'link this remote' : op === 'fetch' ? 'fetch this remote' : 'push this branch';
+      if (!r?.ok) recordRepositoryFailure(vnode, app, r, action);
       else {
         ui.notice = op === 'push' ? 'Pushed without force.' : op === 'fetch'
           ? 'Fetched remote history. Your working branch was not merged or changed.' : 'Remote linked.';
         await LibrarySection.openRepository(vnode, app, true);
       }
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? `${op} failed`;
+    } catch (cause) {
+      const action = op === 'link' ? 'link this remote' : op === 'fetch' ? 'fetch this remote' : 'push this branch';
+      recordRepositoryFailure(vnode, app, cause, action, true);
     } finally {
       ui.busyId = null;
       m.redraw();
@@ -563,15 +656,15 @@ export const LibrarySection = {
     ui.armedRestore = null; ui.error = null; ui.busyId = app.id;
     try {
       const r = await vnode.attrs.send({ type: 'apps/repository/restore', appId: app.id, to: oid });
-      if (!r?.ok) ui.error = r?.error ?? 'restore failed';
+      if (!r?.ok) recordRepositoryFailure(vnode, app, r, 'restore this version');
       else if (r.result?.restored) ui.notice = r.result?.checkpointOid
         ? `Restored as a new commit. Your previous working tree is preserved in safety checkpoint ${String(r.result.checkpointOid).slice(0, 10)}.`
         : 'Restored as a new commit; the prior history is still available.';
       else if (r.result?.checkpointOid) ui.notice = `The target already matched this branch. Your previous working tree is preserved in safety checkpoint ${String(r.result.checkpointOid).slice(0, 10)}.`;
       else ui.notice = 'Already at that version.';
       if (r?.ok) await LibrarySection.openRepository(vnode, app, true);
-    } catch (error) {
-      ui.error = /** @type {{message?:string}} */ (error)?.message ?? 'restore failed';
+    } catch (cause) {
+      recordRepositoryFailure(vnode, app, cause, 'restore this version', true);
     } finally {
       ui.busyId = null;
       m.redraw();
@@ -620,12 +713,13 @@ export const LibrarySection = {
           vnode.state.warning = 'The update was shared. Older shared bytes will be cleaned up on the next share or delete.';
         }
       } else {
-        vnode.state.error = r?.error === 'dweb-disabled'
+        vnode.state.error = r?.error === 'dweb-disabled' && !outcomeUnknown(r)
           ? 'turn the base network on (unlock + dweb enabled) to share'
-          : (r?.error ?? 'share failed');
+          : null;
+        if (!vnode.state.error) recordMutationFailure(vnode, app, r, 'share this App');
       }
     } catch (error) {
-      vnode.state.error = /** @type {{message?:string}} */ (error)?.message ?? 'share failed';
+      recordMutationFailure(vnode, app, error, 'share this App', true);
     } finally {
       vnode.state.busyId = null;
       m.redraw();
@@ -672,10 +766,10 @@ export const LibrarySection = {
       } else if (r?.error === 'local-changes') {
         vnode.state.updateConflictId = app.id;
       } else {
-        vnode.state.error = r?.error ?? 'update failed';
+        recordMutationFailure(vnode, app, r, 'update this App');
       }
     } catch (error) {
-      vnode.state.error = /** @type {{message?:string}} */ (error)?.message ?? 'update failed';
+      recordMutationFailure(vnode, app, error, 'update this App', true);
     } finally {
       vnode.state.busyId = null;
       m.redraw();
@@ -742,27 +836,43 @@ export const LibrarySection = {
           placeholder: 'https://github.com/you/my-app',
           'aria-label': 'Git repository URL',
           value: ui.gitImportUrl,
-          disabled: ui.gitImportBusy,
+          disabled: ui.gitImportBusy || ui.gitImportOutcomeUnknown,
           oninput: (/** @type {{target:HTMLInputElement}} */ event) => { ui.gitImportUrl = event.target.value; },
         }),
         m('input', {
           type: 'text', spellcheck: false, placeholder: 'Branch or tag (optional)',
           'aria-label': 'Git branch or tag',
           value: ui.gitImportRef,
-          disabled: ui.gitImportBusy,
+          disabled: ui.gitImportBusy || ui.gitImportOutcomeUnknown,
           oninput: (/** @type {{target:HTMLInputElement}} */ event) => { ui.gitImportRef = event.target.value; },
         }),
         m('input', {
           type: 'text', maxlength: 80, placeholder: 'Display name (optional)',
           'aria-label': 'Imported App display name',
           value: ui.gitImportName,
-          disabled: ui.gitImportBusy,
+          disabled: ui.gitImportBusy || ui.gitImportOutcomeUnknown,
           oninput: (/** @type {{target:HTMLInputElement}} */ event) => { ui.gitImportName = event.target.value; },
         }),
-        m('button.library-open', { type: 'submit', disabled: ui.gitImportBusy || !ui.gitImportUrl.trim() },
-          ui.gitImportBusy ? 'Cloning…' : 'Clone App'),
+        m('button.library-open', {
+          type: 'submit',
+          disabled: ui.gitImportBusy || ui.gitImportOutcomeUnknown || !ui.gitImportUrl.trim(),
+        }, ui.gitImportBusy ? 'Cloning…' : ui.gitImportOutcomeUnknown
+          ? 'Refresh to reconcile' : 'Clone App'),
       ]),
       m('p.muted.library-repository-help', 'Private repositories use the token for their Git host from Settings. Credentials never enter the App or its actor.'),
+      ui.gitImportOutcomeUnknown ? m('.library-repository-warning', {
+        role: 'alert', 'aria-live': 'assertive',
+      }, [
+        m('p', 'The previous clone is still unconfirmed. Refresh and inspect the Library before allowing another clone.'),
+        m('button.library-btn', {
+          type: 'button',
+          onclick: () => {
+            ui.gitImportOutcomeUnknown = false;
+            ui.error = null;
+            m.redraw();
+          },
+        }, 'I checked the Library; allow another clone'),
+      ]) : null,
     ]) : null;
     if (ui.apps.length === 0) {
       return m('div', [header, ...banners, gitImport, m('p.muted',
@@ -805,7 +915,7 @@ export const LibrarySection = {
    */
   card(vnode, app) {
     const ui = vnode.state;
-    const busy = ui.busyId === app.id;
+    const busy = ui.busyId === app.id || ui.unconfirmedApps.has(app.id);
     const renaming = ui.renamingId === app.id;
     const armed = ui.armedDeleteId === app.id;
 
@@ -845,12 +955,26 @@ export const LibrarySection = {
           ]),
         ]),
         m('button.icon.library-star', {
+          disabled: busy,
           title: app.favorite ? 'Unfavorite' : 'Favorite',
           'aria-pressed': String(!!app.favorite),
           class: app.favorite ? 'is-on' : '',
           onclick: () => LibrarySection.toggleFavorite(vnode, app),
         }, app.favorite ? '★' : '☆'),
       ]),
+      ui.unconfirmedApps.has(app.id) ? m('.library-repository-warning', {
+        role: 'alert', 'aria-live': 'assertive',
+      }, [
+        m('p', 'The previous App change is still unconfirmed. A refresh cannot prove that its original request has stopped.'),
+        m('button.library-btn', {
+          type: 'button',
+          onclick: () => {
+            ui.unconfirmedApps.delete(app.id);
+            ui.error = null;
+            m.redraw();
+          },
+        }, 'I checked this App; allow changes'),
+      ]) : null,
       (app.tags && app.tags.length)
         ? m('.library-tags', app.tags.slice(0, 4).map((/** @type {string} */ t) => m('span.library-tag', { key: t }, t)))
         : null,
@@ -990,6 +1114,7 @@ export const LibrarySection = {
   /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app */
   repositoryPanel(vnode, app) {
     const ui = vnode.state;
+    const effectBusy = ui.busyId === app.id || ui.repositoryUnconfirmed.has(app.id);
     const repo = ui.repositories[app.id];
     const panelAttrs = {
       role: 'region', 'aria-label': `History and Git for ${app.name}`, tabindex: '-1',
@@ -1000,7 +1125,38 @@ export const LibrarySection = {
         v.dom.focus({ preventScroll: true });
       },
     };
-    if (!repo) return m('.library-repository', panelAttrs, m('p.muted', 'Loading repository…'));
+    if (!repo) {
+      const failure = ui.repositoryErrors[app.id];
+      return m('.library-repository', panelAttrs, [
+        m('.library-repository-head', [
+          m('strong', 'History & Git'),
+          m('button.icon', {
+            title: 'Close history', 'aria-label': `Close Git history for ${app.name}`,
+            onclick: () => {
+              ui.repositoryOpenId = null;
+              delete ui.repositoryErrors[app.id];
+              focusLibraryAction(app.id, 'more');
+            },
+          }, '×'),
+        ]),
+        failure ? m('p.muted', { role: 'alert' }, failure)
+          : m('p.muted', { role: 'status', 'aria-live': 'polite' }, 'Loading repository…'),
+        failure ? m('.library-actions', [
+          m('button.library-btn', {
+            type: 'button',
+            onclick: () => LibrarySection.openRepository(vnode, app, true),
+          }, 'Retry'),
+          m('button.library-btn', {
+            type: 'button',
+            onclick: () => {
+              ui.repositoryOpenId = null;
+              delete ui.repositoryErrors[app.id];
+              focusLibraryAction(app.id, 'more');
+            },
+          }, 'Close'),
+        ]) : null,
+      ]);
+    }
     const changed = repo.status?.changed ?? [];
     const isArmed = (/** @type {string} */ oid) => ui.armedRestore?.appId === app.id
       && ui.armedRestore?.oid === oid && ui.armedRestore?.expiresAt >= Date.now();
@@ -1016,7 +1172,25 @@ export const LibrarySection = {
             focusLibraryAction(app.id, 'more');
           },
         }, '×'),
+        m('button.library-btn', {
+          type: 'button', disabled: ui.busyId === app.id,
+          title: 'Re-read branch, remote, working tree, and history',
+          onclick: () => LibrarySection.openRepository(vnode, app, true),
+        }, ui.repositoryUnconfirmed.has(app.id) ? 'Recheck Git' : 'Refresh Git'),
       ]),
+      ui.repositoryUnconfirmed.has(app.id) ? m('.library-repository-warning', {
+        role: 'alert', 'aria-live': 'assertive',
+      }, [
+        m('p', 'The previous Git change is still unconfirmed. The view above is a read, not proof that the earlier request cannot land later.'),
+        m('button.library-btn', {
+          type: 'button', disabled: ui.busyId === app.id,
+          onclick: () => {
+            ui.repositoryUnconfirmed.delete(app.id);
+            ui.error = null;
+            m.redraw();
+          },
+        }, 'I checked Git; allow changes'),
+      ]) : null,
       changed.length
         ? m('.library-repository-dirty', [
             m('span', `${changed.length} uncommitted change${changed.length === 1 ? '' : 's'}`),
@@ -1024,14 +1198,14 @@ export const LibrarySection = {
               type: 'text', value: ui.repositoryMessage, maxlength: 160,
               placeholder: 'What changed? (no secrets)',
               'aria-label': `Checkpoint message for ${app.name}`,
-              disabled: ui.busyId === app.id,
+              disabled: effectBusy,
               oninput: (/** @type {{target:HTMLInputElement}} */ e) => { ui.repositoryMessage = e.target.value; },
               onkeydown: (/** @type {KeyboardEvent} */ e) => {
                 if (e.key === 'Enter') LibrarySection.checkpointRepository(vnode, app, ui.repositoryMessage.trim() || 'manual checkpoint');
               },
             }),
             m('button.library-btn', {
-              disabled: ui.busyId === app.id,
+              disabled: effectBusy,
               onclick: () => LibrarySection.checkpointRepository(vnode, app, ui.repositoryMessage.trim() || 'manual checkpoint'),
             }, 'Checkpoint'),
           ])
@@ -1041,21 +1215,21 @@ export const LibrarySection = {
         repo.branches?.length > 1 ? m('select', {
           value: ui.repositoryCheckout,
           'aria-label': `Existing Git branch for ${app.name}`,
-          disabled: ui.busyId === app.id || repo.status?.dirty,
+          disabled: effectBusy || repo.status?.dirty,
           onchange: (/** @type {{target:HTMLSelectElement}} */ e) => { ui.repositoryCheckout = e.target.value; },
         }, repo.branches.map((/** @type {string} */ name) => m('option', { value: name }, name))) : null,
         repo.branches?.length > 1 ? m('button.library-btn', {
-          disabled: !ui.repositoryCheckout || ui.repositoryCheckout === repo.status?.branch || repo.status?.dirty || ui.busyId === app.id,
+          disabled: !ui.repositoryCheckout || ui.repositoryCheckout === repo.status?.branch || repo.status?.dirty || effectBusy,
           onclick: () => LibrarySection.repositoryCheckoutBranch(vnode, app),
         }, 'Switch') : null,
         m('input', {
           type: 'text', spellcheck: false, value: ui.repositoryBranch,
           placeholder: 'feature/my-change', 'aria-label': `New branch name for ${app.name}`,
-          disabled: ui.busyId === app.id,
+          disabled: effectBusy,
           oninput: (/** @type {{target:HTMLInputElement}} */ e) => { ui.repositoryBranch = e.target.value; },
         }),
         m('button.library-btn', {
-          disabled: !ui.repositoryBranch.trim() || ui.repositoryBranch.trim() === repo.status?.branch || ui.busyId === app.id,
+          disabled: !ui.repositoryBranch.trim() || ui.repositoryBranch.trim() === repo.status?.branch || effectBusy,
           onclick: () => LibrarySection.repositoryCreateBranch(vnode, app),
         }, 'New branch'),
       ]),
@@ -1066,12 +1240,12 @@ export const LibrarySection = {
           value: ui.remoteInput,
           oninput: (/** @type {{target:HTMLInputElement}} */ e) => { ui.remoteInput = e.target.value; },
         }),
-        m('button.library-btn', { disabled: !ui.remoteInput.trim() || ui.busyId === app.id, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'link') }, repo.remote ? 'Relink' : 'Link'),
+        m('button.library-btn', { disabled: !ui.remoteInput.trim() || effectBusy, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'link') }, repo.remote ? 'Relink' : 'Link'),
       ]),
       repo.remote ? m('.library-remote-actions', [
         m('span.muted', repo.remote.url),
-        m('button.library-btn', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'fetch') }, 'Fetch'),
-        m('button.library-btn', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'push') }, 'Push'),
+        m('button.library-btn', { disabled: effectBusy, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'fetch') }, 'Fetch'),
+        m('button.library-btn', { disabled: effectBusy, onclick: () => LibrarySection.repositoryRemote(vnode, app, 'push') }, 'Push'),
       ]) : m('p.muted.library-repository-clean', 'Link a new, empty HTTPS remote for backup. Add a host token under Settings → API integrations for private repositories.'),
       m('p.muted.library-repository-help', [
         'Fetch downloads remote history but never merges or overwrites this App. Push checkpoints and sends every working-tree file, including data/*.json. Use Import Git for an existing App repository; repositories needing LFS, submodules, symlinks, or a large history belong in a WebVM.',
@@ -1086,14 +1260,14 @@ export const LibrarySection = {
             m('span.library-commit-message', [commit.safety ? m('span', { title: 'Private recovery checkpoint' }, 'safety · ') : null, commit.message || '(no message)']),
             m('span.muted', fmtWhen(commit.timestamp)),
             commit.safety ? null : m('button.library-btn', {
-              disabled: ui.busyId === app.id,
+              disabled: effectBusy,
               'aria-expanded': String(open),
               'aria-label': `${open ? 'Hide' : 'Show'} changes since ${commit.message || commit.oid.slice(0, 10)}`,
               onclick: () => LibrarySection.repositoryDiff(vnode, app, commit.oid),
             }, open ? 'Hide diff' : 'Diff'),
             m('button.library-btn', {
               class: isArmed(commit.oid) ? 'is-armed' : '',
-              disabled: ui.busyId === app.id,
+              disabled: effectBusy,
               'aria-label': `${isArmed(commit.oid) ? 'Confirm restore' : 'Restore'} ${app.name} to ${commit.message || commit.oid.slice(0, 10)}`,
               onclick: () => LibrarySection.restoreRepository(vnode, app, commit.oid),
             }, isArmed(commit.oid) ? 'Restore?' : 'Restore'),
@@ -1112,12 +1286,13 @@ export const LibrarySection = {
   /** @param {{ state: any, attrs: { send: Send } }} vnode @param {App} app */
   updateConflict(vnode, app) {
     const ui = vnode.state;
+    const effectBusy = ui.busyId === app.id || ui.unconfirmedApps.has(app.id);
     return m('.library-update-conflict', { role: 'group', 'aria-live': 'assertive', 'aria-label': `Resolve update conflict for ${app.name}` }, [
       m('strong', 'You changed this app locally.'),
       m('p', 'The peer update will not overwrite those changes silently. Keep a local fork, or explicitly replace this copy with the verified release.'),
       m('.library-actions', [
-        m('button.library-open', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.updateApp(vnode, app, 'fork') }, 'Keep a fork & update'),
-        m('button.library-btn', { disabled: ui.busyId === app.id, onclick: () => LibrarySection.updateApp(vnode, app, 'replace') }, 'Replace local copy'),
+        m('button.library-open', { disabled: effectBusy, onclick: () => LibrarySection.updateApp(vnode, app, 'fork') }, 'Keep a fork & update'),
+        m('button.library-btn', { disabled: effectBusy, onclick: () => LibrarySection.updateApp(vnode, app, 'replace') }, 'Replace local copy'),
         m('button.library-btn', { onclick: () => { ui.updateConflictId = null; } }, 'Cancel'),
       ]),
     ]);

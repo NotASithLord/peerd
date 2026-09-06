@@ -66,7 +66,7 @@ describe('actor isolation capability', () => {
 });
 
 describe('actor isolation exposure', () => {
-  const tools = ['message_actor', 'actor_create', 'request_review', 'actor_list', 'read_memory']
+  const tools = ['message_actor', 'actor_create', 'actor_list', 'read_memory']
     .map((name) => ({ name }));
 
   test('removes actor execution tools but keeps inventory', () => {

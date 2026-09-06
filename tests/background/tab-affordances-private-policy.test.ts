@@ -3,7 +3,6 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 let makeTabAffordances: typeof import('../../extension/background/tab-affordances.js').makeTabAffordances;
 
 beforeAll(async () => {
-  (globalThis as any).chrome = { runtime: { id: 'test-extension' } };
   ({ makeTabAffordances } = await import('../../extension/background/tab-affordances.js'));
 });
 

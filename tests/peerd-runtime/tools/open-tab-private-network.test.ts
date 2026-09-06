@@ -1,5 +1,18 @@
 import { describe, expect, test } from 'bun:test';
-import { openTabTool } from '../../../extension/peerd-runtime/tools/defs/open-tab.js';
+import { openProtectedBackgroundTabAuthority } from '../../../extension/background/page-authority/open-tab.js';
+import { HOST_EFFECT_OUTCOME } from '../../../extension/background/host-effect-verdict.js';
+import { openTabTool as controllerOpenTabTool } from '../../../extension/peerd-runtime/tools/defs/open-tab.js';
+
+const fencedJson = (content: string) => JSON.parse(
+  content.slice(content.indexOf('\n') + 1, content.lastIndexOf('\n</untrusted_web_content>')),
+);
+
+const openTabTool = { execute: (args: any, ctx: any) => controllerOpenTabTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    openProtectedBackgroundTab: () => openProtectedBackgroundTabAuthority(args, ctx),
+  },
+}) };
 
 type HarnessOptions = {
   cleanupFails?: boolean;
@@ -8,6 +21,7 @@ type HarnessOptions = {
   guardFails?: boolean;
   originGuardFails?: boolean;
   withGuard?: boolean;
+  withQuarantine?: boolean;
   denylist?: string[];
 };
 
@@ -18,6 +32,7 @@ const openHarness = ({
   guardFails = false,
   originGuardFails = false,
   withGuard = false,
+  withQuarantine = false,
   denylist = [],
 }: HarnessOptions = {}) => {
   let listener: any = null;
@@ -93,11 +108,26 @@ const openHarness = ({
         released.push(tabId);
       },
     } : {}),
+    ...(withQuarantine ? {
+      armBrowserChildQuarantine: async () => {
+        order.push('quarantine');
+        return { ok: true };
+      },
+    } : {}),
   };
   return { creates, ctx, guarded, hints, noted, order, reconciled, released, removed, updates };
 };
 
 describe('open_tab committed target policy', () => {
+  test('arms child quarantine before loading the initial public HTML', async () => {
+    const { ctx, order } = openHarness({
+      finalUrl: 'https://public.example/start', withGuard: true, withQuarantine: true,
+    });
+    const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    expect(result.ok).toBe(true);
+    expect(order.indexOf('quarantine')).toBeGreaterThan(order.indexOf('guard'));
+    expect(order.indexOf('quarantine')).toBeLessThan(order.indexOf('update'));
+  });
   test('returns a structured refusal after a redirect onto a sensitive site', async () => {
     const { ctx, updates } = openHarness({
       finalUrl: 'https://accounts.example/private?token=secret',
@@ -185,7 +215,7 @@ describe('open_tab committed target policy', () => {
     expect(updates).toEqual(['https://public.example/start']);
     expect(noted).toEqual([[9, finalUrl]]);
     expect(hints).toEqual([[9, finalUrl]]);
-    expect(JSON.parse(result.content ?? '{}')).toEqual({
+    expect(fencedJson(result.content ?? '')).toEqual({
       tabId: 9,
       url: finalUrl,
       networkGuard: {
@@ -196,6 +226,54 @@ describe('open_tab committed target policy', () => {
         chromeWorkerWebSocket: 'not_covered_by_dnr',
       },
     });
+  });
+
+  test('Stop while the network guard arms closes the new tab before navigation', async () => {
+    let guardStarted!: () => void;
+    let releaseGuard!: () => void;
+    const started = new Promise<void>((resolve) => { guardStarted = resolve; });
+    const wait = new Promise<void>((resolve) => { releaseGuard = resolve; });
+    const controller = new AbortController();
+    const { ctx, removed, updates } = openHarness();
+    ctx.abortSignal = controller.signal;
+    ctx.ensureBrowserNetworkGuard = async () => {
+      guardStarted();
+      await wait;
+      return { ok: true };
+    };
+    const pending = openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    await started;
+    controller.abort();
+    releaseGuard();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, error: 'page action was stopped', outcomeKind: 'pre-effect-failure',
+    });
+    expect(updates).toEqual([]);
+    expect(removed).toEqual([9]);
+  });
+
+  test('Stop reports a performed effect when the new tab cannot be closed', async () => {
+    let guardStarted!: () => void;
+    let releaseGuard!: () => void;
+    const started = new Promise<void>((resolve) => { guardStarted = resolve; });
+    const wait = new Promise<void>((resolve) => { releaseGuard = resolve; });
+    const controller = new AbortController();
+    const { ctx, updates } = openHarness();
+    ctx.abortSignal = controller.signal;
+    ctx.tabs.remove = async () => { throw new Error('tab close refused'); };
+    ctx.ensureBrowserNetworkGuard = async () => {
+      guardStarted();
+      await wait;
+      return { ok: true };
+    };
+    const pending = openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    await started;
+    controller.abort();
+    releaseGuard();
+    await expect(pending).resolves.toMatchObject({
+      ok: false, error: 'page action was stopped', outcomeKind: 'effect-completed',
+    });
+    expect(updates).toEqual([]);
   });
 
   test('installs the tab-scoped network floor before starting navigation', async () => {
@@ -269,6 +347,49 @@ describe('open_tab committed target policy', () => {
       error: 'browser_network_guard_unavailable',
       outcomeKind: 'pre-effect-failure',
     });
+    expect(updates).toEqual([]);
+    expect(removed).toEqual([9]);
+  });
+
+  test('records tab creation when generic guard startup fails and close is refused', async () => {
+    const { ctx, updates } = openHarness({ withGuard: true });
+    ctx.ensureBrowserNetworkGuard = async () => ({
+      ok: false,
+      code: 'kernel-browser-network-ensure-load-timeout',
+      outcomeKnown: true,
+      retryable: true,
+      phase: 'startup',
+    });
+    ctx.tabs.remove = async () => { throw new Error('tab close refused'); };
+    const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'kernel-browser-network-ensure-load-timeout',
+      outcomeKind: 'effect-completed',
+      performed: true,
+    });
+    expect(updates).toEqual([]);
+  });
+
+  test('preserves an unknown network-host outcome through the open-tab receipt', async () => {
+    const { ctx, removed, updates } = openHarness({ withGuard: true });
+    ctx.ensureBrowserNetworkGuard = async () => ({
+      ok: false,
+      error: 'browser network host timed out',
+      code: 'kernel-browser-network-ensure-load-timeout',
+      outcomeKnown: false,
+      retryable: false,
+      phase: 'run',
+    });
+    const result = await openTabTool.execute({ url: 'https://public.example/start' }, ctx);
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'kernel-browser-network-ensure-load-timeout',
+      outcomeKnown: false,
+      retryable: false,
+      phase: 'run',
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(result)).toBe('unknown');
     expect(updates).toEqual([]);
     expect(removed).toEqual([9]);
   });

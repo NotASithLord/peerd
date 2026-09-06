@@ -26,9 +26,7 @@ import m from '/vendor/mithril/mithril.js';
 import { renderMarkdown } from '/shared/markdown.js';
 import { stripUntrustedFences } from '/shared/util.js';
 import { CHANNEL } from '/shared/channel-config.js';
-import {
-  classifyFailure, contributorFeedbackTargets, formatBytes,
-} from '/peerd-runtime/index.js';
+import { classifyFailure, contributorFeedbackTargets, formatBytes } from '/peerd-runtime/ui.js';
 
 // `performed:false` is host custody metadata. Error bodies are not: provider,
 // actor, and page text can all flow into them. Keep the human recovery generic
@@ -63,7 +61,7 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [actorCorrelationId]
  * @property {string} [actorDeliveryId]
  * @property {string[]} [actorDeliveryIds]
- * @property {{ primitive?: string, durationMs?: number, dispatch?: string, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
+ * @property {{ primitive?: string, durationMs?: number, gates: Array<{ name: string, reason: string, allowed: boolean }>, browserPolicies?: Array<{ reason: string, outcome: string, child: string, retryable: boolean }> }|null} [meta]
  */
 
 /** @typedef {{ toolUse: ToolUse, toolResult: ToolResult|null }} PairedTool */
@@ -137,7 +135,7 @@ const renderTranscript = ({ messages, vmStreams, spawned, actors, scriptOps, loa
   // Feedback belongs to the completed answer for a human turn, not every
   // intermediate assistant step before a tool call. The live answer becomes
   // eligible only after the authoritative turn slot is idle.
-  const feedbackMessageIds = busy
+  const feedbackMessageIds = busy || !CONTRIBUTOR_FEEDBACK_ENABLED
     ? new Set()
     : new Set(contributorFeedbackTargets(messages ?? []).keys());
   // Inline "peerd opened a tab" notices (top level only), bucketed by the TURN
@@ -555,7 +553,8 @@ const ActorReplyMessage = {
     const body = content.includes('\n\n') ? content.slice(content.indexOf('\n\n') + 2) : content;
     // A Stop with an explicitly unknown outcome is not a clean cancellation;
     // verification guidance must win over the friendlier cancelled label.
-    const aborted = reply.aborted === true && reply.outcomeKnown !== false;
+    const aborted = reply.aborted === true
+      && reply.outcomeKnown !== false && reply.performed !== true;
     const failed = reply.failed === true && !aborted;
     const userFailure = failed && reply.performed === false
       ? ACTOR_NOT_RUN_USER_FAILURE : null;
@@ -974,7 +973,7 @@ const ToolCall = {
  * @param {{
  *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
  *   spawned?: TranscriptArgs['spawned'], actors?: Record<string, any>,
- *   loadActor?: (sessionId: string) => void,
+ *   loadActor?: (sessionId: string, retry?: boolean) => void,
  *   peerName?: string, depth: number, ui: ToolCallState,
  * }} args
  */
@@ -1020,9 +1019,13 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
         : null,
       tooDeep
         ? m('p.muted', `nested ${MAX_NESTED_DEPTH} levels deep — deeper transcripts are inspectable via session navigation`)
-        : (childSession && childSession.messages.length > 0)
+        : (childSession && Array.isArray(childSession.messages) && childSession.messages.length > 0)
           ? m('.actor-transcript',
               renderTranscript({ messages: childSession.messages, spawned, actors, loadActor, peerName, depth: depth + 1 }))
+          : childSession?.loadError
+            ? m('button.error-line', {
+                type: 'button', onclick: () => { if (childId) loadActor?.(childId, true); },
+              }, childSession.loadError)
           : childId
             ? m('p.muted', status === 'pending' ? 'actor running…' : status === 'cancelled' ? 'actor cancelled' : 'loading transcript…')
             : m('p.muted', outcomeUnknown
@@ -1070,7 +1073,6 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
   // which wrongly implies a tab/DOM agent for a tabless fetch-only thing).
   const isApiIntegration = card?.kind === 'web' && /^https?:\/\//.test(String(who));
   const resultText = toolResult ? formatResultContent(toolResult) : '';
-  const failureText = `${card?.error ?? ''} ${resultText}`;
   const outcomeUnknown = card?.outcomeKnown === false
     || (!card && toolResult?.actorOutcomeKnown === false);
   // The actor's own live state drives the status (the tool result is the async
@@ -1261,7 +1263,7 @@ const formatResultContent = (toolResult) => {
 //                     pod     : Pod execution kind
 //                     app      — App execution kind
 //   distributed       dweb     — the dweb / dwapp network (share/discover/
-//   (magenta)                    install/peers/block/discovery/guide)
+//   (magenta)                    install/peers/block/discovery)
 //
 // provider (cyan) owns no tool primitive — the model call isn't a tool. The
 // dweb tools are preview-only (exposure-gated), so the distributed badge only

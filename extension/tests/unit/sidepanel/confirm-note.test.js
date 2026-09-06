@@ -1,7 +1,7 @@
 // @ts-check
 // security-arc issue 242, the SEEN half: the confirmation card's optional note.
 //
-// The dispatcher can now force a confirm the user never asked for — on a UGC
+// Exact page authority can force a confirm the user never asked for on a UGC
 // zone, with confirmations turned OFF. A prompt that appears unexplained, in a
 // posture where the user believes they disabled prompting, reads as a bug and
 // gets dismissed. The note is the whole answer to "why am I being asked": one

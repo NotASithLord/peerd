@@ -1,5 +1,10 @@
 import { describe, test, expect } from 'bun:test';
 import { INITIAL_STATE, reduceChat as reduceChatRaw } from '../../extension/sidepanel/chat-reducer.js';
+import {
+  KERNEL_STATE_DEFERRED_FIELDS,
+  KERNEL_STATE_PROVENANCE,
+  KERNEL_STATE_SCHEMA,
+} from '../../extension/shared/kernel-state-contract.js';
 
 // reduceChat returns the loose `object` type (the no-build extension has no
 // named State type); cast through a thin wrapper so the tests can read the
@@ -13,6 +18,23 @@ const reduceChat = (state: any, msg: any): any => reduceChatRaw(state, msg);
 
 const withSession = (sessionId: string, messages: any[] = []) =>
   ({ ...INITIAL_STATE, session: { sessionId, messages, cost: null } });
+const projected = (generation: number, authorityEpoch = 'kernel-epoch-projected') => ({
+  hydrated: true,
+  vault: { initialized: true, locked: true, unlockedAt: 0, prfEnrolled: false,
+    hasRecovery: false, lockReason: null },
+  settings: { vaultAutoLockMs: 60_000, openrouterModels: [] },
+  session: { sessionId: null, messages: [], permission: { mode: 'act', confirmActions: false } },
+  providers: { current: '', model: '', hasKey: false },
+  composer: { provider: '', model: '', keyless: false, credentialReady: false,
+    localReady: false, canSend: false, reason: 'vault-locked' },
+  capabilities: { actorExecution: { status: 'temporarily_unavailable',
+    host: 'offscreen-document-worker', reason: 'controller-not-ready', retryable: true } },
+  actors: {}, actorProjectionEpoch: null, actorProjectionRevision: 0,
+  spawned: { byToolUse: {}, sessions: {} }, asyncTasks: {},
+  projection: { schema: KERNEL_STATE_SCHEMA, provenance: KERNEL_STATE_PROVENANCE,
+    authorityEpoch, generation, settings: 'hydrated', actorIsolation: 'hydrated',
+    semanticController: 'required', deferredFields: [...KERNEL_STATE_DEFERRED_FIELDS], failures: [] },
+});
 
 describe('reduceChat', () => {
   test('the client becomes hydrated only after an authoritative state snapshot', () => {
@@ -22,6 +44,27 @@ describe('reduceChat', () => {
       state: { vault: { initialized: false, locked: true } },
     });
     expect(hydrated.hydrated).toBe(true);
+  });
+
+  test('projected state rejects malformed, stale-generation, and late-epoch pushes', () => {
+    const current = reduceChat(INITIAL_STATE, { type: 'state', state: projected(2) });
+    expect(current.projection.generation).toBe(2);
+    expect(reduceChat(current, { type: 'state', state: projected(1) })).toBe(current);
+    expect(reduceChat(current, { type: 'state', state: projected(3, 'kernel-epoch-late-old') }))
+      .toBe(current);
+    const future = projected(3);
+    future.projection.schema = KERNEL_STATE_SCHEMA + 1;
+    expect(reduceChat(current, { type: 'state', state: future })).toBe(current);
+    const malformed = projected(3);
+    (malformed.settings as any).openrouterModels = 'bad';
+    expect(reduceChat(current, { type: 'state', state: malformed })).toBe(current);
+    expect(reduceChat(current, {
+      type: 'state', state: projected(1, 'kernel-epoch-after-disconnect'),
+      authorityReplacement: true,
+    }).projection.authorityEpoch).toBe('kernel-epoch-after-disconnect');
+    expect(reduceChat(INITIAL_STATE, {
+      type: 'state', state: projected(1, 'kernel-epoch-after-disconnect'),
+    }).projection.authorityEpoch).toBe('kernel-epoch-after-disconnect');
   });
 
   test('unhandled / voice / malformed → returns the SAME ref (surface skips redraw)', () => {
@@ -35,6 +78,24 @@ describe('reduceChat', () => {
     const s1 = reduceChat(s0, { type: 'turn/delta', sessionId: 's1', messageId: 'm1', text: 'llo' });
     expect(s1.session.messages[0].content).toBe('Hello');
     expect(s1).not.toBe(s0); // new ref
+  });
+
+  test('turn/error preserves unknown custody and forbids automatic retry', () => {
+    const s0 = withSession('s1', [{
+      id: 'm1', role: 'assistant', content: '', streaming: true,
+    }]);
+    const s1 = reduceChat(s0, {
+      type: 'turn/error', sessionId: 's1', messageId: 'm1',
+      error: 'The turn may have started.', code: 'controller-call-timeout',
+      outcomeKnown: false, retryable: false,
+    });
+    expect(s1.session.messages[0]).toMatchObject({
+      streaming: false,
+      error: 'The turn may have started.',
+      errorCode: 'controller-call-timeout',
+      outcomeKnown: false,
+      retryable: false,
+    });
   });
 
   test('per-session guard: a BACKGROUND session delta does not touch the viewed chat', () => {
@@ -200,15 +261,15 @@ describe('reduceChat', () => {
   test('spawned lifecycle keeps live parentage + server-resolved grants through state, then settles', () => {
     const seeded = reduceChat(INITIAL_STATE, {
       type: 'turn/spawned-start', sessionId: 'c1', parentSessionId: 'root',
-      depth: 1, task: 'research', grantedTools: ['script'],
+      depth: 1, task: 'research', visibleTools: ['script'],
     });
     expect(seeded.spawned.sessions.c1).toMatchObject({
-      task: 'research', parentSessionId: 'root', grantedTools: ['script'], running: true,
+      task: 'research', parentSessionId: 'root', visibleTools: ['script'], running: true,
     });
     const folded = reduceChat(seeded, { type: 'turn/spawned-state', session: { sessionId: 'c1', messages: [{ id: 'x' }] } });
     expect(folded.spawned.sessions.c1.messages).toHaveLength(1);
     expect(folded.spawned.sessions.c1).toMatchObject({
-      parentSessionId: 'root', grantedTools: ['script'], running: true,
+      parentSessionId: 'root', visibleTools: ['script'], running: true,
     });
     const done = reduceChat(folded, { type: 'turn/spawned-done', sessionId: 'c1' });
     expect(done.spawned.sessions.c1.running).toBe(false);
@@ -368,6 +429,34 @@ describe('reduceChat', () => {
     });
   });
 
+  test('a delayed older full snapshot cannot settle spawned work or erase async tasks', () => {
+    const viewing = withSession('chat-A');
+    const spawned = reduceChat(viewing, {
+      type: 'turn/spawned-start', rootSessionId: 'chat-A', parentToolUseId: 'spawn-new',
+      sessionId: 'child-new', parentSessionId: 'chat-A', task: 'new child',
+      actorProjectionEpoch: 'worker-a', actorProjectionRevision: 2,
+    });
+    const tasked = reduceChat(spawned, {
+      type: 'async-tasks/update', parentSessionId: 'chat-A',
+      tasks: [{ taskId: 'task-new', status: 'running' }],
+      actorProjectionEpoch: 'worker-a', actorProjectionRevision: 3,
+    });
+    const delayed = reduceChat(tasked, {
+      type: 'state', state: {
+        session: { sessionId: 'chat-A', messages: [] },
+        actorProjectionEpoch: 'worker-a', actorProjectionRevision: 1,
+        spawned: { byToolUse: {}, sessions: {} },
+        asyncTasks: {},
+      },
+    });
+
+    expect(delayed.actorProjectionRevision).toBe(3);
+    expect(delayed.spawned.sessions['child-new']).toMatchObject({
+      task: 'new child', running: true,
+    });
+    expect(delayed.asyncTasks['chat-A']).toEqual([{ taskId: 'task-new', status: 'running' }]);
+  });
+
   test('a fresh worker epoch is accepted after disconnect and fences delayed old-worker data', () => {
     const oldStarted = reduceChat(withSession('chat-A'), {
       type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'restart-id',
@@ -486,6 +575,39 @@ describe('reduceChat', () => {
     });
   });
 
+  test('fresh hydration rebuilds a cancelled card from its correlated durable receipt', () => {
+    const hydrated = reduceChat(INITIAL_STATE, {
+      type: 'state',
+      state: {
+        session: {
+          sessionId: 'chat-A',
+          messages: [
+            { id: 'call', role: 'assistant', toolUses: [{
+              id: 'stopped-call', name: 'message_actor',
+              input: { to: 'web', message: 'slow work' },
+            }] },
+            { id: 'accepted', role: 'user', toolResults: [{
+              tool_use_id: 'stopped-call', is_error: false, content: 'accepted',
+              actorCorrelationId: 'delivery-stopped', actorTerminal: false,
+            }] },
+            { id: 'receipt', role: 'user', synthetic: true, content: 'stopped', actorReply: {
+              kind: 'web', instanceId: 'web', parentToolUseId: 'stopped-call',
+              actorDeliveryId: 'delivery-stopped', failed: true, aborted: true,
+              performed: false, outcomeKnown: true,
+            } },
+          ],
+        },
+        actors: {},
+      },
+    });
+
+    expect(hydrated.actors['stopped-call']).toMatchObject({
+      kind: 'web', instanceId: 'web', actorCorrelationId: 'delivery-stopped',
+      streaming: false, aborted: true, performed: false, outcomeKnown: true,
+      error: null,
+    });
+  });
+
   test('a durable failure overrides an earlier aborted pulse', () => {
     const viewing = withSession('chat-A');
     const started = reduceChat(viewing, {
@@ -515,6 +637,33 @@ describe('reduceChat', () => {
     expect(settled.actors['tu-aborted']).toMatchObject({
       streaming: false, aborted: false, outcomeKnown: false,
       error: 'the actor turn ended with an unknown outcome',
+    });
+  });
+
+  test('a known performed receipt overrides an aborted pulse', () => {
+    const started = reduceChat(withSession('chat-A'), {
+      type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'tu-performed',
+      sessionId: 'actor-web', fromIndex: 0, kind: 'web', instanceId: 'web',
+    });
+    const settled = reduceChat(started, {
+      type: 'turn/state', session: { sessionId: 'chat-A', messages: [
+        { id: 'call', role: 'assistant', toolUses: [{
+          id: 'tu-performed', name: 'message_actor', input: { to: 'web' },
+        }] },
+        { id: 'accepted', role: 'user', toolResults: [{
+          tool_use_id: 'tu-performed', is_error: false, content: 'accepted',
+          actorCorrelationId: 'delivery-performed',
+        }] },
+        { id: 'receipt', role: 'user', synthetic: true, content: 'fenced failure', actorReply: {
+          kind: 'web', instanceId: 'web', parentToolUseId: 'tu-performed',
+          actorDeliveryId: 'delivery-performed', failed: true, aborted: true,
+          performed: true, outcomeKnown: true,
+        } },
+      ] },
+    });
+    expect(settled.actors['tu-performed']).toMatchObject({
+      streaming: false, aborted: false, performed: true, outcomeKnown: true,
+      error: 'the actor turn did not complete',
     });
   });
 
@@ -761,6 +910,32 @@ describe('reduceChat', () => {
     }
   });
 
+  test('hydration refuses a receipt whose delivery id does not match the acknowledgement', () => {
+    const hydrated = reduceChat(withSession('chat-A'), {
+      type: 'turn/state',
+      session: {
+        sessionId: 'chat-A',
+        messages: [
+          { id: 'call', role: 'assistant', toolUses: [{
+            id: 'actor-call', name: 'message_actor', input: { to: 'web' },
+          }] },
+          { id: 'ack', role: 'user', toolResults: [{
+            tool_use_id: 'actor-call', is_error: false, content: 'accepted',
+            actorCorrelationId: 'acknowledged-delivery', actorTerminal: false,
+          }] },
+          { id: 'forged-receipt', role: 'user', synthetic: true, content: 'done',
+            actorReply: {
+              kind: 'web', instanceId: 'web', parentToolUseId: 'actor-call',
+              actorDeliveryId: 'different-delivery', failed: false,
+              outcomeKnown: true, performed: true,
+            } },
+        ],
+      },
+    });
+
+    expect(hydrated.actors['actor-call']).toBeUndefined();
+  });
+
   test('an older correlated awaited result settles after a newer same-id pre-effect refusal', () => {
     const started = reduceChat(withSession('chat-A'), {
       type: 'turn/actor-start', rootSessionId: 'chat-A', parentToolUseId: 'reused-awaited',
@@ -966,7 +1141,7 @@ describe('reduceChat', () => {
     const started = reduceChat(viewing, {
       type: 'turn/actor-start', rootSessionId: 'A', parentSessionId: 'A',
       parentToolUseId: 'tu-1', sessionId: 'actor-a', fromIndex: 0,
-      task: 'inspect', grantedTools: ['read_page'],
+      task: 'inspect', visibleTools: ['read_page'],
     });
     const withActivity = reduceChat(started, {
       type: 'turn/actor-state', rootSessionId: 'A', parentToolUseId: 'tu-1', fromIndex: 0,
@@ -979,7 +1154,7 @@ describe('reduceChat', () => {
       },
     });
     expect(snap.actors['tu-1']).toMatchObject({
-      sessionId: 'actor-a', task: 'inspect', grantedTools: ['read_page'],
+      sessionId: 'actor-a', task: 'inspect', visibleTools: ['read_page'],
       streaming: false, messages: [{ id: 'reply' }],
     });
   });

@@ -46,6 +46,14 @@ const drain = async (gen) => {
   return events;
 };
 
+/** @param {(request:any)=>Promise<Response>} openInference */
+const modelEgress = (openInference) => ({
+  openInference,
+  readModelInventory: async () => new Response(null, { status: 404 }),
+  readModelContext: async () => new Response(null, { status: 404 }),
+  async *generateLocal() {},
+});
+
 /**
  * @param {Partial<CallOllamaArgs>} [overrides]
  * @returns {CallOllamaArgs}
@@ -54,7 +62,7 @@ const baseArgs = (overrides = {}) => ({
   /** @type {InternalMessage[]} */
   messages: [{ role: 'user', content: 'hi', id: 'u', when: 0 }],
   system: 'sys',
-  safeFetch: async () => { throw new Error('safeFetch not set'); },
+  modelEgress: modelEgress(async () => { throw new Error('model egress not set'); }),
   ...overrides,
 });
 
@@ -66,10 +74,8 @@ describe('callOllama — streaming through the OpenAI format layer', () => {
     // nature (same rationale as the adapter's /api/tags parse).
     /** @type {any} */
     let sentBody = null;
-    /** @type {CallOllamaArgs['safeFetch']} */
-    const safeFetch = async (url, init) => {
-      expect(url).toBe('http://localhost:11434/v1/chat/completions');
-      sentBody = JSON.parse(/** @type {string} */ (init?.body));
+    const openInference = async (/** @type {any} */ request) => {
+      sentBody = request.nativeBody;
       return sseBody([
         'data: {"choices":[{"delta":{"content":"Open"}}]}\n\n',
         'data: {"choices":[{"delta":{"content":"ing…"}}]}\n\n',
@@ -83,7 +89,7 @@ describe('callOllama — streaming through the OpenAI format layer', () => {
       ]);
     };
     const events = await drain(callOllama(baseArgs({
-      safeFetch,
+      modelEgress: modelEgress(openInference),
       model: 'qwen3:8b',
       tools: [{ name: 'open_tab', description: 'open a tab', schema: { type: 'object' } }],
     })));
@@ -114,7 +120,7 @@ describe('callOllama — streaming through the OpenAI format layer', () => {
     let thrown;
     try {
       await drain(callOllama(baseArgs({
-        safeFetch: async () => { throw new TypeError('Failed to fetch'); },
+        modelEgress: modelEgress(async () => { throw new TypeError('Failed to fetch'); }),
         _sleep: async () => {}, // skip the single connect-retry backoff
       })));
     } catch (e) { thrown = e; }
@@ -127,11 +133,11 @@ describe('callOllama — streaming through the OpenAI format layer', () => {
 
   it('works without a getSecret at all (keyless contract)', async () => {
     const events = await drain(callOllama(baseArgs({
-      safeFetch: async () => sseBody([
+      modelEgress: modelEgress(async () => sseBody([
         'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
         'data: [DONE]\n\n',
-      ]),
+      ])),
       // no getSecret on purpose
     })));
     expect(/** @type {ProviderEvent} */ (events.at(-1)).type).toBe('message-stop');
@@ -142,7 +148,6 @@ describe('ollamaAdapter — registry descriptor', () => {
   it('declares the keyless + live-models markers the chassis keys off', () => {
     expect(ollamaAdapter.name).toBe('ollama');
     expect(ollamaAdapter.keyless).toBe(true);
-    expect(ollamaAdapter.vaultSecretName).toBe(null);
     expect(ollamaAdapter.listModels).toBe(listOllamaModels);
   });
 });

@@ -2,8 +2,8 @@
 // Per-session tool exposure manifests (ROADMAP "Tool exposure manifests
 // per session").
 //
-// Registration stays GLOBAL (the SW registers every tool once); a session
-// may opt into a NARROW exposed set via `session.toolManifest`:
+// A session may opt into a NARROW model-visible set via
+// `session.toolManifest`:
 //
 //     { preset?: string, allow?: string[] }
 //
@@ -13,20 +13,30 @@
 // tool narrowing (actor/spawn.js); it can never re-expose a tool one
 // of those layers removed.
 //
-// Enforced at BOTH layers, same pattern as the main-hidden tool split:
-//   1. descriptors — the SW intersects the main turn's descriptor list
-//      with the manifest, so the model never SEES an excluded tool;
-//   2. dispatch — the exposure gate (gates.js) refuses an excluded tool
-//      BY NAME via ctx.toolAllow, so a hallucinated/injected call still
-//      fails closed, with the refusal reason in the lineage.
+// Applied twice inside the sealed semantic runtime:
+//   1. descriptor projection keeps excluded names out of the model request;
+//   2. the semantic exposure gate refuses an excluded emitted name.
+// This is model-surface policy and defense in depth. Host authority is the
+// fixed exact-operation ceiling plus actor grants and live target/mode/
+// confirmation/lifecycle checks; manifests do not promise name-level
+// isolation between tools that intentionally share an exact operation.
 //
 // Pure module — data + value-in/value-out helpers only. Bun-testable.
 
 /** @typedef {{ preset?: string, allow?: string[] }} ToolManifest */
 
+// Persisted manifests are user data, so old records stay byte-for-byte intact.
+// Resolve the few true renames at the semantic boundary instead: aliases never
+// become executable tool names and newly deleted tools naturally fail closed.
+export const LEGACY_TOOL_RENAMES = Object.freeze({
+  read_web_cache: 'read_result',
+  read_run_cache: 'read_result',
+  read_pdf: 'read_doc',
+});
+
 // Named presets — DATA, deliberately literal so editing a preset is a
-// one-line diff. Names must match registered tool names exactly; the
-// in-browser suite checks every entry against the real registry, and the
+// one-line diff. Names must match controller tool names exactly; the
+// in-browser suite checks every entry against the real catalog, and the
 // bun suite checks the runner-internals invariant below, so drift fails CI.
 //
 // INVARIANT (web actor): a preset that grants message_actor must also
@@ -43,41 +53,42 @@ export const TOOL_MANIFEST_PRESETS = Object.freeze({
       // web_search/call_api/read_article/submit_form were all removed — the web
       // actor searches by navigating to an engine + reading results, and reads via
       // fetch_url or its drive-a-tab DOM tools.
-      // read_web_cache MUST ride along with any spill producer (fetch_url /
+      // read_result MUST ride along with any spill producer (fetch_url /
       // read_page mode:'content'): an overflowing read spills to the cache and
-      // emits a trusted footer instructing read_web_cache — omit it and the
+      // emits a trusted footer instructing read_result: omit it and the
       // pager the model is told to call is refused by the manifest gate, the
       // spilled tail is unreachable, and turns burn on guaranteed-refused calls.
-      'fetch_url', 'read_web_cache', 'capture',
+      'fetch_url', 'read_result', 'capture',
       // the main agent's browser surface: enumerate actors (instances/tabs/
       // integrations) + open a tab + message a tab's web actor to read or act.
       'actor_list', 'open_tab', 'message_actor',
       // page DOM toolset (inherited by the web actor, which DOES the page work —
       // see invariant above)
       'snapshot', 'read_page', 'read_state', 'watch_changes',
-      'click', 'type', 'navigate', 'query_dom', 'read_pdf', 'read_doc', 'view',
+      'click', 'type', 'navigate', 'query_dom', 'read_doc', 'view',
       // memory
       'remember', 'read_memory',
       // sovereignty / sessions introspection (one kind-discriminated tool)
       'inspect',
       // temporal grounding
-      'now', 'wait_until',
+      'now',
     ]),
   }),
   'browse-only': Object.freeze({
     description: 'passive browsing — read-only page access via a tab\'s actor, navigation, web reads; no page actions, no memory, no execution',
     allow: Object.freeze([
-      // enumerate actors + open + message a tab's actor; the actor is held
-      // READ-ONLY by this manifest (only the READ DOM tools below are allowed, so
-      // it can observe but not click/type — the manifest constrains the actor too).
+      // enumerate actors + open + message a tab's actor; the manifest advertises
+      // only the READ DOM tools below, so the semantic actor surface observes but
+      // does not offer click/type. The host still applies its exact per-kind ceiling
+      // and live page gates independently.
       'actor_list', 'open_tab', 'navigate', 'message_actor',
       // read-only DOM subset (observe, never mutate) — inherited by the web actor.
-      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'read_doc', 'view',
+      'snapshot', 'read_page', 'read_state', 'query_dom', 'read_doc', 'view',
       // web reads: fetch_url (the web actor's sessionless fetch) + its pager.
-      // read_web_cache pages a spilled fetch_url / read_page body — it must be
+      // read_result pages a spilled fetch_url / read_page body: it must be
       // present wherever a spill producer is, or the trusted paging footer names
       // a tool this manifest refuses (read-only, local cache, no new authority).
-      'fetch_url', 'read_web_cache',
+      'fetch_url', 'read_result',
       // temporal grounding (reads)
       'now',
     ]),
@@ -137,10 +148,48 @@ export const resolveManifestAllow = (toolManifest) => {
     // undefined (the fail-closed path documented above), so the index is
     // safe to widen here.
     const preset = /** @type {Record<string, { allow: readonly string[] }>} */ (TOOL_MANIFEST_PRESETS)[manifest.preset];
-    if (preset) for (const n of preset.allow) names.add(n);
+    if (preset) {
+      for (const name of preset.allow) {
+        names.add(/** @type {Record<string,string>} */ (LEGACY_TOOL_RENAMES)[name] ?? name);
+      }
+    }
   }
-  if (manifest.allow) for (const n of manifest.allow) names.add(n);
+  if (manifest.allow) {
+    for (const name of manifest.allow) {
+      names.add(/** @type {Record<string,string>} */ (LEGACY_TOOL_RENAMES)[name] ?? name);
+    }
+  }
   return names;
+};
+
+/**
+ * Resolve a saved manifest against the current controller catalog. Historical
+ * bytes are not rewritten: callers get the effective allow-set plus a concise
+ * explanation of names that were renamed or retired.
+ *
+ * @param {unknown} toolManifest
+ * @param {Iterable<string>} knownToolNames
+ * @returns {{allow:Set<string>|null,renamed:string[],unavailable:string[]}}
+ */
+export const resolveManifestStatus = (toolManifest, knownToolNames) => {
+  const manifest = normalizeToolManifest(toolManifest);
+  if (!manifest) return { allow: null, renamed: [], unavailable: [] };
+  const known = new Set(knownToolNames);
+  const resolved = resolveManifestAllow(manifest) ?? new Set();
+  const allow = new Set([...resolved].filter((name) => known.has(name)));
+  /** @type {string[]} */
+  const renamed = [];
+  /** @type {string[]} */
+  const unavailable = [];
+  for (const name of manifest.allow ?? []) {
+    const replacement = /** @type {Record<string,string>} */ (LEGACY_TOOL_RENAMES)[name];
+    if (replacement) {
+      if (!renamed.includes(`${name} → ${replacement}`)) renamed.push(`${name} → ${replacement}`);
+    } else if (!known.has(name) && !unavailable.includes(name)) {
+      unavailable.push(name);
+    }
+  }
+  return { allow, renamed, unavailable };
 };
 
 /**
@@ -148,16 +197,24 @@ export const resolveManifestAllow = (toolManifest) => {
  * gate's refusal reason. null when no manifest is set ("full").
  *
  * @param {unknown} toolManifest
+ * @param {Iterable<string>} [knownToolNames]
  * @returns {string | null}
  */
-export const manifestLabel = (toolManifest) => {
+export const manifestLabel = (toolManifest, knownToolNames) => {
   const manifest = normalizeToolManifest(toolManifest);
   if (!manifest) return null;
+  const allow = knownToolNames
+    ? resolveManifestStatus(manifest, knownToolNames).allow
+    : resolveManifestAllow(manifest);
   if (manifest.preset !== undefined) {
-    const extra = manifest.allow?.length ? ` +${manifest.allow.length}` : '';
+    const presetAllow = resolveManifestAllow({ preset: manifest.preset }) ?? new Set();
+    const extraCount = allow
+      ? [...allow].filter((name) => !presetAllow.has(name)).length
+      : 0;
+    const extra = extraCount ? ` +${extraCount}` : '';
     return `${manifest.preset}${extra}`;
   }
-  const n = manifest.allow?.length ?? 0;
+  const n = allow?.size ?? 0;
   return `custom (${n} tool${n === 1 ? '' : 's'})`;
 };
 

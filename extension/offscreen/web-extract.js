@@ -14,19 +14,4 @@
 // (Firecrawl etc.) are forbidden here — BYOK / no backend / no third party
 // sees the user's browsing. This is peerd's privacy-preserving substitute.
 
-import browser from '/vendor/browser-polyfill.js';
-import { isTrustedSender } from '/shared/messaging.js';
-import { extractWeb } from './web-extract-core.js';
-
-// Gated on isTrustedSender like every sibling handler (pdf/extract, job/run,
-// voice) — fail-closed defense-in-depth; see pdf-extract.js's note.
-// why cast: the polyfill's OnMessageListener return-type is stricter than this
-// fire-and-respond handler (mirrors the sibling listeners).
-browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {any} */ sendResponse) => {
-  if (msg?.type !== 'web/extract') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
-  extractWeb(msg)
-    .then((out) => sendResponse(out))
-    .catch((e) => sendResponse({ ok: false, error: e?.name ? `${e.name}: ${e.message}` : (e?.message ?? String(e)) }));
-  return true;     // async sendResponse contract
-}));
+export { extractWeb as handleWebExtract } from './web-extract-core.js';

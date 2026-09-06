@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // actor_create — decompose a task into a focused child agent.
 //
 // This is the THIN tool wrapper. All the orchestration lives in
@@ -47,63 +49,7 @@ const MAX_RESULT_CHARS = 200 * 1024;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const actorCreateTool = {
-  name: 'actor_create',
-  primitive: 'spawned',
-  description: [
-    'Spawn a focused actor that runs its own agent loop on ONE task.',
-    'ASYNC by default (non-blocking): returns immediately, your turn ends,',
-    'and the child\'s result comes back as a NEW message on a LATER turn',
-    'when it finishes — you and the user keep working meanwhile. Do NOT',
-    'poll or re-spawn to wait; it returns on its own. Pass sync:true ONLY',
-    'when your very next step needs the result THIS turn (fan out N',
-    'reasoners, then compare). Use to DECOMPOSE — ✅ "go research X and',
-    'report back" (async) / "compare 3 libraries now" (sync:true). ❌ work',
-    'you can do this turn. PARALLEL = emit MULTIPLE calls in ONE message.',
-    'Inherits your tools minus actor_create (tools:[...] to scope, [] for',
-    'pure reasoning), under your permissions. This actor is EPHEMERAL — it',
-    'lives for the task and has no address. Bound actors (a sandbox\'s or',
-    'the web actor\'s) are reached via message_actor instead.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      task: {
-        type: 'string',
-        description: 'The focused task for the actor. Self-contained — the actor sees only this, not your conversation.',
-      },
-      tools: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'Optional. Exact tool-name subset to grant. Omit to inherit your tools (minus actor_create). [] = no tools.',
-      },
-      maxSteps: {
-        type: 'integer',
-        description: 'Optional. Max model+tool rounds the actor may take (default 20).',
-      },
-      maxDepth: {
-        type: 'integer',
-        description: 'Optional. Spawn-depth ceiling (default 5). The spawn is refused past it.',
-      },
-      allowRecursion: {
-        type: 'boolean',
-        description: 'Optional. Keep actor_create in the actor\'s toolset so it can spawn its own children (default false).',
-      },
-      sync: {
-        type: 'boolean',
-        description: 'Optional. true = BLOCK and return the result in THIS turn (use when your next step needs it). Default false = async: the result arrives on a later turn; do not wait or poll.',
-      },
-    },
-    required: ['task'],
-  },
-  // why: write, not mutate_external — spawning creates a child session
-  // and runs the loop, but every network/DOM effect the CHILD produces
-  // goes through the child's own six gates. Nothing escapes here that
-  // wasn't already gated downstream.
-  sideEffect: 'write',
-  // The tool itself touches no origins; the actor's tools declare
-  // their own and are gated individually.
-  origins: () => [],
+export const actorCreateTool = composeTool("actor_create", {
 
   execute: async (args, ctx) => {
     if (typeof args?.task !== 'string' || args.task.trim().length === 0) {
@@ -196,7 +142,7 @@ export const actorCreateTool = {
     }
     return { ok: true, content: formatActorResult(out) };
   },
-};
+});
 
 /** @param {SpawnActorResult} out */
 const formatActorResult = (out) => {

@@ -29,7 +29,6 @@ describe('makeUiPorts', () => {
     ui.add(a); ui.add(b);
     ui.remove(a);
     expect(ui.size).toBe(1);
-    expect(ui.has(a)).toBe(false);
 
     ui.broadcast({ x: 1 });
     expect(a.sent).toHaveLength(0);   // gone — no delivery

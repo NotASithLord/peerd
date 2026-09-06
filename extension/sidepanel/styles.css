@@ -152,6 +152,27 @@ html, body, #app {
 
 #app { display: flex; flex-direction: column; min-height: 100%; }
 
+/* Parser-independent first paint. This static HTML is visible before the
+ * Mithril graph or service worker is ready and is replaced atomically by the
+ * mounted app. Keep it dependency-free so a cold-start regression can never
+ * return to a blank panel. */
+.boot-shell {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg-muted);
+  background: var(--bg);
+}
+.boot-shell__wordmark {
+  color: var(--fg);
+  font: 700 30px/1 var(--font-mono);
+  letter-spacing: -0.08em;
+}
+.boot-shell p { margin: 0; font: 12px/1.5 var(--font-mono); }
+
 .topbar {
   display: flex;
   align-items: center;
@@ -3052,6 +3073,8 @@ button.tool-call-header:focus-visible {
   background: var(--bg);
   color: var(--fg);
 }
+.model-picker-status { font-size: 11px; color: var(--warning); }
+.model-picker-finish { white-space: nowrap; }
 
 /* --- Settings: collapsible sections ----------------------------------- */
 .settings-view { display: flex; flex-direction: column; gap: 10px; }

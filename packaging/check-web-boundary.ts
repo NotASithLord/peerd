@@ -22,7 +22,7 @@
 //   6. PLATFORM-TOUCH RATCHET — module-scope chrome./browser. touches must be
 //      in web-target.ts's reviewed KNOWN_BROWSER_TOUCHES allowlist; a NEW
 //      touch fails until the shim's coverage is reviewed and the list bumped
-//      (same posture as the tscheck floor).
+//      (same posture as complete tscheck coverage).
 //
 // Run: bun run check:web (also auto-runs at the end of `bun run package:web`).
 

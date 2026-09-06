@@ -1,11 +1,13 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // fetch_url — the web actor's secure fetch (its non-render web mechanism).
 //
 // The cheaper of the web actor's two mechanisms (the other is open + drive a tab).
 // A direct, denylist-gated, audited HTTP call with NO tab and NO rendering. It rides
 // ctx.webFetch — scheme + SSRF/private-network + denylist + redirect-block + audit,
 // the SAME chain call_api uses — and the capability strip (spawn.js
-// restrictCtxCapabilities) leaves the web ctx NO getSecret / NO safeFetch (keyless).
+// isolated actor relay leaves the web ctx NO getSecret / NO safeFetch (keyless).
 //
 // SESSION is decided AT THE BOUNDARY, not here: ctx.webFetch is session-scoped
 // (peerd-egress withSessionScopedCredentials) so the user's cookies ride ONLY on a
@@ -16,12 +18,11 @@
 // tool-supplied HEADERS (a laundered injection forging a credential); the real
 // same-origin cookies come from the browser's jar via the boundary, never a header.
 
-import { fetchUrl } from '../web/primitives.js';
-import { originOfUrl } from './dom-helpers.js';
+import { originOfUrl } from '../../tool-origin-policy.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { disarmMarkup, disarmText } from '../../dom/cdr.js';
 import { windowText, pagingFooter, excerptRelevant, excerptFooter } from '../web/spill.js';
-import { needsWebWriteConfirm } from '/peerd-engine/background.js';
+import { needsWebWriteConfirm } from '/peerd-engine/vm-net/http-bridge.js';
 // The pure "is this response a document file?" test — see peerd-runtime/doc.
 import { sniffResponseAsDocument } from '../../doc/sniff.js';
 import { runtimeCapabilityAvailable, runtimeCapabilityForTool } from '../../runtime-capabilities.js';
@@ -65,47 +66,13 @@ const stripSessionHeaders = (headers) => {
 };
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const fetchUrlTool = {
-  name: 'fetch_url',
-  primitive: 'web',
-  description: [
-    'Secure fetch: a direct GET/POST to a URL — no tab, no rendering. The cheaper of',
-    'your two web mechanisms. SESSIONLESS for every cross-origin request and whenever',
-    "you own no tab (no cookies); it carries the user's session ONLY for a request",
-    'same-origin to the tab you currently own. Use it for data reachable WITHOUT login',
-    '(public / JSON APIs, RSS, static content, an endpoint a page just wraps). For a',
-    'target you have NOT yet rendered that needs the login, or one that only renders',
-    'client-side, drive a tab instead — but once you HAVE rendered a site, fetch_url',
-    "carries its session, so hit that SAME origin's endpoints here instead of",
-    're-scraping. Rides the denylist + SSRF + audit egress chain; does NOT follow',
-    'redirects. Returns status, final URL, body + parsed JSON (capped 16k). HTML',
-    'is extracted to clean markdown by default (raw:true for the full HTML). A DOCUMENT',
-    'FILE (.docx/.xlsx/.pptx/.odt/.rtf/.epub, or a PDF) is not readable here — those',
-    'come back as binary; read_doc and read_pdf open them.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    required: ['url'],
-    properties: {
-      url: { type: 'string', description: 'Absolute URL (must include an http(s) scheme).' },
-      method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method. Default GET. Any non-GET is an outbound write and crosses the shared web:write confirm.' },
-      raw: { type: 'boolean', description: 'HTML responses are extracted to clean markdown by default (boilerplate stripped). Pass true to get the raw HTML instead — e.g. when you need markup, attributes, or embedded script/JSON the extraction would drop.' },
-      query: { type: 'string', description: 'What you are looking for on this page (a few keywords). When the page is too long to show whole, the most relevant passages are surfaced (BM25) instead of a blind head+tail window — so a mid-page answer is not missed. Omit to get the head+tail window.' },
-      headers: {
-        type: 'object',
-        description: 'Request headers. Tool-supplied Cookie / Authorization are always stripped (you cannot inject a credential). Content-Type is set automatically for JSON bodies.',
-      },
-      body: { description: 'Request body. If an object, it is JSON-stringified and Content-Type is set.' },
-    },
-  },
-  // read, like call_api — the non-GET write is gated INSIDE via the shared
-  // web:write confirm, not the mutate_external egress hook.
-  sideEffect: 'read',
-  origins: (args) => {
-    const o = originOfUrl(args?.url);
-    return o ? [o] : [];
-  },
+export const fetchUrlTool = composeTool("fetch_url", {
   execute: async (args, ctx) => {
+    const authority = /** @type {{confirmWebWrite?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<string|boolean>,requestWebText?:(request:{url:string,method:string,headers:Record<string,string>,body?:string})=>Promise<{ok?:boolean,status:number,body:string,bodyTruncated?:boolean,headers:Record<string,string>,finalUrl:string,reason?:string,error?:string}>,extractReadableMarkdown?:(html:string,url:string)=>Promise<{readerable:boolean,markdown?:string,title?:string|null}>,spillResult?:(record:Record<string,unknown>)=>Promise<string|null>}|undefined} */ (
+      /** @type {any} */ (ctx).resourceAuthority);
+    if (!authority?.requestWebText) {
+      return { ok: false, error: 'web_resource_authority_unavailable' };
+    }
     if (typeof args?.url !== 'string' || !args.url) return { ok: false, error: 'url_required' };
     let parsed;
     try { parsed = new URL(args.url); }
@@ -113,37 +80,35 @@ export const fetchUrlTool = {
     if (!/^https?:$/.test(parsed.protocol)) return { ok: false, error: `unsupported_scheme: ${parsed.protocol}` };
 
     const method = (args.method ?? 'GET').toUpperCase();
-    // Anti-exfiltration: a non-GET can transmit in-context data to an arbitrary
-    // host. Confirm by default (the shared 'web:write' key + needsWebWriteConfirm
-    // predicate cover call_api + the WebVM bridge too, so one approval governs
-    // all). Fail closed: no confirm channel → refuse rather than send unconfirmed.
-    // GET reads are never gated.
-    if (needsWebWriteConfirm(method)) {
-      if (!ctx.confirm) return { ok: false, error: 'declined', content: 'No confirmation channel available for an outbound write.' };
-      const ans = await ctx.confirm(/** @type {any} */ ({
-        tool: 'web:write', kind: 'web_write', origins: [parsed.origin],
-        summary: `Allow a ${method} request to ${parsed.host}? This can send data out of the browser.`,
-        sessionId: ctx.session?.sessionId ?? null,
-      }), ctx.abortSignal);
-      if (ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined', content: 'User declined the outbound write.' };
-    }
-
     let body = args.body;
     const headers = stripSessionHeaders(/** @type {Record<string, unknown>} */ (args.headers ?? {}));
     if (body !== undefined && typeof body !== 'string') {
       body = JSON.stringify(body);
       if (!headers['Content-Type'] && !headers['content-type']) headers['Content-Type'] = 'application/json';
     }
+    // Anti-exfiltration: a non-GET can transmit in-context data to an arbitrary
+    // host. Confirm by default (the shared 'web:write' key + needsWebWriteConfirm
+    // predicate cover call_api + the WebVM bridge too, so one approval governs
+    // all). Fail closed: no confirm channel → refuse rather than send unconfirmed.
+    // GET reads are never gated.
+    if (needsWebWriteConfirm(method)) {
+      if (!authority.confirmWebWrite) return { ok: false, error: 'declined', content: 'No confirmation channel available for an outbound write.' };
+      const ans = await authority.confirmWebWrite({
+        url: args.url, method, headers, body: /** @type {string | undefined} */ (body),
+      });
+      if (ans !== true && ans !== 'yes_once' && ans !== 'yes_session') return { ok: false, error: 'declined', content: 'User declined the outbound write.' };
+    }
 
     try {
       // No credentials arg: the SESSION decision is the boundary's (ctx.webFetch is
       // session-scoped) — same-origin to the owned tab carries the session, every
       // cross-origin request stays sessionless. The tool can't override it.
-      const res = await fetchUrl(
-        args.url,
-        { method, headers, body: /** @type {string | undefined} */ (body) },
-        ctx,
-      );
+      const res = await authority.requestWebText({
+        url: args.url, method, headers, body: /** @type {string | undefined} */ (body),
+      });
+      if (res?.ok === false) {
+        throw Object.assign(new Error(res.error ?? 'fetch_failed'), { reason: res.reason });
+      }
       const ct = res.headers['content-type'] ?? '';
       // A DOCUMENT FILE, not a page. fetch_url's primitive decodes every
       // response with Response.text(), so a .docx/.xlsx/.pptx/PDF arrives as
@@ -191,7 +156,7 @@ export const fetchUrlTool = {
       // CDR (dom/cdr.js) runs HERE, on the whole body, BEFORE anything derived
       // from it exists. why here and not later: everything below measures or
       // slices this string — excerptRelevant/windowText report character
-      // offsets, and webCache.put stores the text read_web_cache pages back.
+      // offsets, and resultStore.put stores the text read_result pages back.
       // Disarming after windowing would make those offsets describe pre-strip
       // text and would leave undisarmed bytes sitting in the cache.
       //
@@ -209,11 +174,12 @@ export const fetchUrlTool = {
       let workingBody = isMarkupType(ct) ? disarmMarkup(res.body) : disarmText(res.body);
       let format = 'raw';
       let title = null;
-      const webClient = /** @type {{ extractMarkdown?: (s: { html: string, url?: string }) => Promise<{ readerable: boolean, markdown?: string, title?: string | null }> } | null | undefined} */ (
-        /** @type {any} */ (ctx).webOffscreenClient);
-      if (args.raw !== true && /text\/html|application\/xhtml/i.test(ct) && webClient?.extractMarkdown) {
+      if (args.raw !== true && /text\/html|application\/xhtml/i.test(ct)
+          && authority.extractReadableMarkdown) {
         try {
-          const ex = await webClient.extractMarkdown({ html: workingBody, url: res.finalUrl || args.url });
+          const ex = await authority.extractReadableMarkdown(
+            workingBody, res.finalUrl || args.url,
+          );
           // Disarmed AGAIN after extraction, and it is not belt-and-braces:
           // extraction PARSES the HTML, so `&#8203;` — plain ASCII the first
           // sweep correctly left alone — is decoded into a literal zero-width
@@ -229,19 +195,18 @@ export const fetchUrlTool = {
           }
         } catch { /* extraction failed — raw fallback */ }
       }
-      // Spill-and-page for an oversized body (Hermes-style): the FULL text is
-      // stored locally and the model sees a head+tail WINDOW plus the exact
-      // read_web_cache paging call — instead of the old silent head-only slice
+      // Spill-and-page for an oversized body (Hermes-style): the retained text
+      // is stored locally and the model sees a head+tail WINDOW plus the exact
+      // read_result paging call instead of the old silent head-only slice
       // that lost the tail without saying so. Falls back to the old slice when
-      // the cache capability is absent (a ctx without webCache).
-      const webCache = /** @type {{ key?: () => string, put?: (r: object) => Promise<void> } | undefined} */ (
-        /** @type {any} */ (ctx).webCache);
+      // the spill capability is absent (a ctx without resultStore).
       // When the caller named a query AND the body is prose (not JSON — BM25 is
       // for paragraphs, not object trees), surface the most-relevant PASSAGES
       // instead of a blind head+tail window: a long page's answer usually sits
       // mid-document. excerptRelevant returns null (no query / no match / too
-      // few passages) → fall back to windowText. Either way the FULL text is
-      // stored and pageable; this only picks a better first window.
+      // few passages) → fall back to windowText. Either way every retained char
+      // is stored and pageable; bodyTruncated says when the host cap cut the
+      // source response before this semantic layer received it.
       const query = typeof args.query === 'string' ? args.query.trim() : '';
       const ex = (query && !/(json|graphql)/i.test(ct))
         ? excerptRelevant(workingBody, query, MAX_BODY_CHARS) : null;
@@ -250,22 +215,31 @@ export const fetchUrlTool = {
       const truncated = ex ? ex.excerpted : win.windowed;
       /** @type {string | null} */
       let footer = null;
-      if (truncated && webCache?.key && webCache?.put) {
-        const cacheKey = webCache.key();
+      if (truncated && authority.spillResult) {
         try {
           // Stamp the OWNER. The spill store is one service-worker-level map keyed
           // by an opaque handle, so without this any actor holding a key could page
           // back bytes a different actor fetched - credentialed, from an origin it
-          // is itself locked out of. read_web_cache checks this before slicing.
-          await webCache.put({
-            key: cacheKey, url: res.finalUrl || args.url, format, text: workingBody,
-            ownerSessionId: ctx.session?.sessionId ?? null,
+          // is itself locked out of. read_result checks this before slicing.
+          const cacheKey = await authority.spillResult({
+            url: res.finalUrl || args.url, format, text: workingBody,
+            producer: 'fetch_url', fenced: true,
+            originLabel: originOfUrl(res.finalUrl || args.url),
           });
-          footer = ex
-            ? excerptFooter({ key: cacheKey, total: ex.total, passagesShown: ex.passagesShown, passagesTotal: ex.passagesTotal, query })
-            : pagingFooter({ key: cacheKey, total: win.total, headChars: win.headChars, tailChars: win.tailChars });
+          if (cacheKey) {
+            footer = ex
+              ? excerptFooter({
+                  key: cacheKey, total: ex.total, passagesShown: ex.passagesShown,
+                  passagesTotal: ex.passagesTotal, query,
+                  retainedPrefix: res.bodyTruncated === true,
+                })
+              : pagingFooter({
+                  key: cacheKey, total: win.total, headChars: win.headChars,
+                  tailChars: win.tailChars, retainedPrefix: res.bodyTruncated === true,
+                });
+          }
         } catch { /* spill failed — the window/excerpt (with its elision markers) still ships */ }
-      } else if (truncated && !webCache) {
+      } else if (truncated) {
         // No cache capability → the pre-spill behavior (head-only slice).
         text = workingBody.slice(0, MAX_BODY_CHARS);
       }
@@ -286,6 +260,7 @@ export const fetchUrlTool = {
           format,
           ...(title ? { title } : {}),
           truncated,
+          bodyTruncated: res.bodyTruncated === true,
           body: text,
           json: parsedJson,
         }, null, 2),
@@ -329,4 +304,4 @@ export const fetchUrlTool = {
       };
     }
   },
-};
+});

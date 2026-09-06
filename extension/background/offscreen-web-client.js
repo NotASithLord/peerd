@@ -6,7 +6,7 @@
 // only the OFFSCREEN document can build (offscreen/web-extract.js). This
 // client ensures the offscreen doc exists and dispatches the extraction.
 // Dependencies are injected (ensureOffscreen + sendMessage) so it stays a
-// pure, testable shell — the same shape as offscreen-pdf-client.js.
+// pure, testable shell, with the same shape as the document client.
 
 // Cap what crosses runtime.sendMessage: a multi-MB page is structured-cloned
 // into the offscreen doc, and article content virtually always lives in the

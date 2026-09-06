@@ -1,27 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
 import { siteClientWriteTool } from '../../../extension/peerd-runtime/tools/defs/site-client-write.js';
-import { clearTools, registerTool } from '../../../extension/peerd-runtime/tools/registry.js';
-import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
-import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
-import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
-import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
+import { createExplicitToolFixture } from './explicit-tool-fixture';
+import { createSiteClientToolAuthority } from '../../../extension/background/site-client-tool-authority.js';
 
-afterEach(() => clearTools());
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
 
-const context = (over: Record<string, unknown> = {}) => ({
-  audit: async () => {},
-  hooks: [],
-  session: { sessionId: 'bound-a' },
-  permission: { mode: 'act', confirmActions: true },
-  exposure: 'actor',
-  actorType: 'web',
-  backing: 'tab',
-  actorSurface: 'tools',
-  denylist: [],
-  canUseSiteClientOrigin: (origin: string) => origin === 'https://a.test',
-  ...over,
-});
+afterEach(fixture.clear);
 
 const call = {
   id: 'write-a',
@@ -32,31 +18,41 @@ const call = {
   },
 };
 
-const trackedLifecycle = () => {
-  const values = new Map<string, unknown>();
-  const log = createOperationLog({
-    storage: {
-      get: async (key: string) => values.get(key),
-      set: async (key: string, value: unknown) => {
-        values.set(key, structuredClone(value));
-      },
-    },
-    now: () => 1,
+const context = (over: Record<string, unknown> = {}) => {
+  const authorityContext: any = {
+    audit: async () => {},
+    hooks: [],
+    session: { sessionId: 'bound-a' },
+    permission: { mode: 'act', confirmActions: true },
+    exposure: 'actor',
+    actorType: 'web',
+    backing: 'tab',
+    actorSurface: 'tools',
+    denylist: [],
+    canUseSiteClientOrigin: (origin: string) => origin === 'https://a.test',
+    ...over,
+  };
+  const shared = {};
+  const authorityFor = (operation: string, args: any) => createSiteClientToolAuthority({
+    binding: { operation, args }, ctx: authorityContext,
+    signal: authorityContext.abortSignal, shared,
   });
   return {
-    log,
-    tracker: makeDispatchTracker({
-      operationLog: log,
-      generationId: () => 'site-client-test-generation',
-      retryClassFor: () => 'E',
-      classifyFailure,
-    }),
+    ...authorityContext,
+    siteClientAuthority: {
+      readStoredClient: (origin: string) => authorityFor(
+        'turn.site-client.read', { origin },
+      ).readStoredClient(origin),
+      commitConfirmedClient: (origin: string) => authorityFor(
+        'turn.site-client.commit', call.args,
+      ).commitConfirmedClient(origin),
+    },
   };
 };
 
 describe('site-client dispatch confirmation ordering', () => {
   test('live-custody refusal happens before any generic or dossier prompt', async () => {
-    registerTool(siteClientWriteTool);
+    setFixtureTool(siteClientWriteTool);
     let prompts = 0;
     let storeEffects = 0;
     const result = await dispatchToolCall(call as any, context({
@@ -75,8 +71,53 @@ describe('site-client dispatch confirmation ordering', () => {
     expect(storeEffects).toBe(0);
   });
 
+  test('an initial durable read failure cannot open confirmation or mutate', async () => {
+    setFixtureTool(siteClientWriteTool);
+    let prompts = 0;
+    let mutations = 0;
+    const result = await dispatchToolCall(call as any, context({
+      authorizeSiteClientOrigin: async () => true,
+      confirm: async () => { prompts += 1; return 'yes_once'; },
+      siteClients: {
+        get: async () => { throw new Error('idb unavailable'); },
+        put: async () => { mutations += 1; return {}; },
+        remove: async () => { mutations += 1; },
+      },
+    }) as any);
+
+    expect(result).toMatchObject({
+      ok: false, error: 'site_clients_unavailable', outcomeKind: 'pre-effect-failure',
+    });
+    expect({ prompts, mutations }).toEqual({ prompts: 0, mutations: 0 });
+  });
+
+  test('a post-confirm durable read failure cannot mutate reviewed state', async () => {
+    setFixtureTool(siteClientWriteTool);
+    let reads = 0;
+    let prompts = 0;
+    let mutations = 0;
+    const result = await dispatchToolCall(call as any, context({
+      authorizeSiteClientOrigin: async () => true,
+      confirm: async () => { prompts += 1; return 'yes_once'; },
+      siteClients: {
+        get: async () => {
+          reads += 1;
+          if (reads === 1) return null;
+          throw new Error('idb unavailable after confirmation');
+        },
+        put: async () => { mutations += 1; return {}; },
+        remove: async () => { mutations += 1; },
+      },
+    }) as any);
+
+    expect(result).toMatchObject({
+      ok: false, error: 'site_clients_unavailable', outcomeKind: 'pre-effect-failure',
+    });
+    expect({ reads, prompts, mutations }).toEqual({ reads: 2, prompts: 1, mutations: 0 });
+  });
+
   test('an owned write receives exactly the detailed tool confirmation', async () => {
-    registerTool(siteClientWriteTool);
+    setFixtureTool(siteClientWriteTool);
     const prompts: any[] = [];
     let puts = 0;
     const result = await dispatchToolCall(call as any, context({
@@ -98,14 +139,19 @@ describe('site-client dispatch confirmation ordering', () => {
     expect(prompts[0].proposal.body).toBe('return { own: true };');
   });
 
-  test('a declined dossier settles failed and does not create unknown-intent friction', async () => {
-    registerTool(siteClientWriteTool);
-    const { tracker, log } = trackedLifecycle();
+  test('a declined dossier stays pre-effect and semantic dispatch does not settle lifecycle', async () => {
+    setFixtureTool(siteClientWriteTool);
+    let lifecycleCalls = 0;
+    const lifecycle = {
+      beginTracking: async () => { lifecycleCalls += 1; },
+      settleTracking: async () => { lifecycleCalls += 1; },
+      requiresIntentConfirmation: async () => { lifecycleCalls += 1; },
+    };
     const prompts: any[] = [];
     let puts = 0;
     let answer: 'no' | 'yes_once' = 'no';
     const trackedContext = (turnId: string) => context({
-      lifecycle: tracker,
+      lifecycle,
       lifecycleTurnId: turnId,
       lifecycleUserInitiated: true,
       authorizeSiteClientOrigin: async () => true,
@@ -126,7 +172,7 @@ describe('site-client dispatch confirmation ordering', () => {
       outcomeKind: 'pre-effect-failure',
     });
     expect(puts).toBe(0);
-    expect((await log.get('bound-a:write-a'))!.state).toBe(OPERATION_STATES.FAILED);
+    expect(lifecycleCalls).toBe(0);
 
     answer = 'yes_once';
     const repeated = await dispatchToolCall(
@@ -162,14 +208,17 @@ describe('site-client dispatch confirmation ordering', () => {
         expectedError: 'site_client_write_aborted: the turn stopped before mutation',
       };
     }],
-  ])('Stop %s is proven pre-effect and settles failed', async (_label, arrange) => {
-    registerTool(siteClientWriteTool);
-    const { tracker, log } = trackedLifecycle();
+  ])('Stop %s is proven pre-effect without semantic lifecycle settlement', async (_label, arrange) => {
+    setFixtureTool(siteClientWriteTool);
+    let lifecycleCalls = 0;
     const controller = new AbortController();
     const arranged = arrange(controller);
     let mutations = 0;
     const result = await dispatchToolCall(call as any, context({
-      lifecycle: tracker,
+      lifecycle: {
+        beginTracking: async () => { lifecycleCalls += 1; },
+        settleTracking: async () => { lifecycleCalls += 1; },
+      },
       lifecycleTurnId: 'turn-stop',
       lifecycleUserInitiated: true,
       abortSignal: controller.signal,
@@ -188,6 +237,6 @@ describe('site-client dispatch confirmation ordering', () => {
       outcomeKind: 'pre-effect-failure',
     });
     expect(mutations).toBe(0);
-    expect((await log.get('bound-a:write-a'))!.state).toBe(OPERATION_STATES.FAILED);
+    expect(lifecycleCalls).toBe(0);
   });
 });

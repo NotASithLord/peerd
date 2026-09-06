@@ -43,6 +43,40 @@ describe('sidepanel.message-list aborted cards', () => {
     } finally { unmount(); }
   });
 
+  it('a persisted pre-host actor cancellation survives a fresh render', async () => {
+    const { root, unmount } = mount([
+      { role: 'user', id: 'u1', content: 'slowly read the page' },
+      {
+        role: 'assistant', id: 'a1', content: '', stopReason: 'aborted',
+        toolUses: [{
+          id: 't1', name: 'message_actor',
+          input: { to: 'web', message: 'do a slow web read' },
+        }],
+      },
+      {
+        role: 'user', id: 'u2', content: '',
+        toolResults: [{
+          tool_use_id: 't1', is_error: true,
+          content: 'message_actor: stopped before the actor started',
+          actorTerminal: true, actorOutcomeKnown: true,
+          actorPerformed: false, actorAborted: true,
+        }],
+      },
+    ]);
+    try {
+      await flush();
+      const card = /** @type {Element} */ (root.querySelector('.tool-actor'));
+      expect(root.querySelector('.message-user .bubble')?.textContent)
+        .toContain('slowly read the page');
+      expect(card.classList.contains('tool-cancelled')).toBe(true);
+      expect(card.classList.contains('tool-failed')).toBe(false);
+      expect(card.classList.contains('tool-not-run')).toBe(false);
+      expect(card.querySelector('.dot-cancelled')).toBeTruthy();
+      expect(card.querySelector('.tool-duration')?.textContent).toBe('cancelled');
+      expect(root.querySelector('.message-assistant.failed')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
   it('the generic disclosure is a focusable native button with expansion state', async () => {
     const { root, unmount } = mount([
       {
@@ -327,6 +361,26 @@ describe('sidepanel.message-list actor-reply bubbles', () => {
       expect(role).toContain('cancelled');
       expect(role.includes('failed')).toBe(false);
       expect(role.includes('Not run')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('a known performed receipt outranks an aborted reply pulse', async () => {
+    const { root, unmount } = mount([{
+      role: 'user', id: 'u-cancelled-performed', synthetic: true,
+      actorReply: {
+        kind: 'web', instanceId: 'web', failed: true,
+        aborted: true, performed: true, outcomeKnown: true,
+      },
+      content: 'The web actor could not complete your request:\n\nthe action completed',
+    }]);
+    try {
+      await flush();
+      const message = /** @type {Element} */ (root.querySelector('.message-actor-reply'));
+      const role = message.querySelector('.role')?.textContent ?? '';
+      expect(message.classList.contains('cancelled')).toBe(false);
+      expect(message.classList.contains('failed')).toBe(true);
+      expect(role.includes('cancelled')).toBe(false);
+      expect(role).toContain('failed');
     } finally { unmount(); }
   });
 

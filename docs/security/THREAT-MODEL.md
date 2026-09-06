@@ -35,14 +35,16 @@ from dangerous capability in three ways:
    Chrome hosts it from an offscreen document. Firefox hosts it from the
    extension background page. Actor work fails closed if the boundary cannot be
    proved.
-2. Policy. Every tool call is checked at dispatch against a fixed set of gates.
+2. Policy. Every tool call is checked inside the sealed controller against a
+   fixed set of semantic gates, and every privileged effect is independently
+   admitted by the service worker's finite run-bound authority policy.
 3. Chokepoints. All outbound network traffic and all signing pass through a single
    audited path.
 
 Injected text can influence a reasoning context, but the actor loop does not
 receive live vault or provider-egress functions. Tool and model calls still pass
-through service-worker policy. An isolated host also keeps the reasoning out of
-the service-worker heap.
+through privileged authority policy. An isolated host also keeps the reasoning
+out of the privileged background heap.
 
 ---
 
@@ -51,10 +53,12 @@ the service-worker heap.
 peerd runs across several browser execution contexts. Trust boundaries fall
 between them.
 
-| Surface | What runs there | Holds the key |
+| Surface | What runs there | Credential access |
 |---|---|---|
-| Privileged background (`background/`) | Orchestrator agent loop, tool dispatch and gates, vault, egress wrappers, and actor relays. Firefox also starts actor workers here | Yes. Actor loops run in separate dedicated worker heaps |
-| Offscreen document (`offscreen/`, Chrome) | Hosts isolated actor workers, headless `script`, voice, and the dweb base network | No. Actor worker heaps are keyless |
+| Privileged background (`background/`) | Authority kernel: vault and credential egress, browser/storage/engine custody, confirmation, audit, replay classification, sessions/lifecycle, finite controller effect handlers, and actor relays. Firefox starts controller and actor Workers from this page without running their reasoning in its privileged heap | Does not retain the live vault key handle. It brokers the bounded session-resume mirror and receives an exact requested plaintext secret only for its bounded egress handler |
+| Sealed vault Worker | Vault cryptography, data-key custody, and plaintext decryption. Chrome hosts it through the offscreen document; Firefox starts it from the extension background page | The only JavaScript realm retaining the live vault key handle; it returns only an explicitly requested secret over its private authority channel |
+| Sealed controller Worker | Orchestrator loop, tool metadata and projection, semantic dispatch and gates, provider/model shaping, and result semantics. Chrome hosts it through the offscreen document; Firefox hosts it from the extension background page | No |
+| Offscreen document (`offscreen/`, Chrome) | A thin host supervisor for the sealed controller and isolated actor Workers, plus headless `script`, voice, and the dweb base network | No. Hosted Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
 | Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
@@ -79,9 +83,9 @@ holds both untrusted input and dangerous capability. Enforcement lives in
 | Actor | Trusted with | Not permitted to |
 |---|---|---|
 | The user | Everything: unlocking the vault, approving confirms, installing skills and imports | (the root of trust) |
-| The orchestrator (main agent loop, in the service worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold an environment's low-level tools, read raw page bytes, or run untrusted code directly |
+| The orchestrator (main agent loop, in the sealed controller Worker) | The conversation, planning, and delegating a plain-language goal to an actor | Hold credentials or browser/storage authority, call an environment's low-level tools, read raw page bytes, or run untrusted code directly |
 | A bound actor (web, webvm, notebook, app) | Driving one tab, VM, notebook, or app. It holds only that instance's tools, keyless, in its own worker heap | Touch another instance or kind, hold the key, or return anything to the orchestrator except a `wrapUntrusted`-fenced summary |
-| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset and its own heap | Escalate past its grant or hold the key. Every tool call is re-checked in the privileged background |
+| An actor | A short-lived actor spawned to break down a task. Keyless, with a narrowed toolset and its own heap | Escalate past its grant or hold the key. Every privileged effect is independently admitted against the run grant in the privileged background |
 | The dweb actor (preview, opt-in) | Monitoring inbound mesh traffic and A2A over the mesh. Keyless, with its own heap | Delegate on an inbound (untrusted) turn, or sign as the user without consent |
 | The egress chokepoint (`safeFetch` and `webFetch`) | Every outbound byte: the allowlist for credentialed calls, or the SSRF and denylist checks for open-web calls | Be bypassed. A bare `fetch` is forbidden by lint across the project |
 
@@ -94,9 +98,10 @@ holds both untrusted input and dangerous capability. Enforcement lives in
   `background/offscreen-actor-client.js`). A versioned readiness and realm probe
   must pass before work starts. Missing or failed isolation refuses the actor
   turn before any target action.
-- B2. An actor loop and the network or the key. Model and tool calls leave the
-  worker only through privileged, gated relays. The host adds live provider
-  functions only at the model-call boundary and re-checks every tool call. On
+- B2. An actor loop and the network or the key. Model egress and tool effects
+  leave the worker only through privileged, gated relays. The host adds live
+  provider functions only at the model-call boundary and independently admits
+  each exact tool effect against the run grant. On
   Chrome, the service worker transfers a standard MessageChannel endpoint to the
   exact offscreen WindowClient. The job and relays never use extension-wide
   runtime messaging. Firefox binds the same relays to its private in-process host.
@@ -129,7 +134,7 @@ malicious separate extension, and physical device access.
 
 | Asset | Where it lives | Primary protection |
 |---|---|---|
-| Model-provider API key | Encrypted in the vault, decrypted only in the service worker at request time | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never handed to an actor loop, egress allowlist |
+| Model-provider API key | Encrypted in the vault; decrypted only in the sealed vault Worker. An explicitly requested secret crosses its private channel only to the service worker's exact egress handler | Vault crypto (Argon2id or WebAuthn-PRF, AES-GCM), never handed to an actor loop, egress allowlist |
 | Origin-bound API keys (per integration) | Vault, injected at the egress boundary only | `origin-credentials.js`. Sent only to the exact owned https origin |
 | Proof-of-possession key (DPoP, per origin — opt-in per integration) | A non-extractable `CryptoKey` handle in IndexedDB — the key material never leaves the browser's crypto implementation and peerd never holds it as bytes | Non-extractable by construction, checked at generate and on every load (`usableDpopPrivateKey`; `exportKey` rejects for every caller, including us); usable only at the audited egress boundary, which mints a fresh per-request proof and never exposes one to the agent. Minted when the user saves a DPoP credential, retired when they remove it (INV-15) |
 | The user's session cookies (logged-in tabs) | The browser's cookie jar. peerd never reads cookies | Sensitive-origin denylist, Plan and Act mode, confirm gate |
@@ -223,9 +228,9 @@ targets where Preview enables literal static remote modules, they cross the
 audited web-fetch path, have source and graph
 caps, and may carry an optional SHA-256 pin. Any remote module marks the whole
 resolved graph as untrusted compute. Runtime network and file access, agents,
-model calls, browser and site clients, and dweb are disabled for that run. A
-remote module cannot import a local toolbox module. Generated worker shims and
-independent host relay checks enforce the same profile. Firefox links the
+model calls, browser and site clients, and dweb are disabled for that run.
+Generated worker shims and independent host relay checks enforce the same
+profile. Firefox links the
 authorized graph and realm seal in a disposable compiler Worker, then runs the
 result through a sandboxed opaque-origin host with no extension APIs, string
 compilation, or network. Stop terminates the compiler or code Worker and
@@ -306,7 +311,7 @@ spawned by an inbound or injected turn is tainted for its whole subtree. Forged,
 severed, foreign-rooted, and cyclic lineages fail closed. A poisoned mesh op (bad
 method or args) is rejected, and signing as the user requires per-target consent. The
 wall covers EVERY door to delegation, not only the direct `message_actor` tool: the
-`script` tool's awaited `actors.ask` surface reaches the same `messageActor`
+`script` tool's awaited `actors.call` surface reaches the same `messageActor`
 (while `actors.list` only reads the roster), so delegation is refused mint on
 an inbound turn (`tools/defs/script.js` gates `actorsOn` on
 `ctx.inbound !== true` — the trusted turn signal folded SW-side; the untrusted worker
@@ -335,9 +340,8 @@ at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 escaped against a `</script>` breakout. The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
 field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
-includes remote code, the entire run uses the compute-only profile. The resolver
-blocks remote access to local toolbox modules. The worker and host both refuse
-every authority-bearing relay, and the tool boundary fences all remote-controlled
+includes remote code, the entire run uses the compute-only profile. The worker
+and host both refuse every authority-bearing relay, and the tool boundary fences all remote-controlled
 output.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `engine-tabs/notebook-tab/worker-source.js`,
@@ -351,15 +355,15 @@ with the real-realm proof in
 `extension/tests/unit/red-team/sandbox-escape.test.js`.
 
 <a id="inv-7"></a>
-### INV-7. No egress to private, loopback, link-local, or metadata hosts
-`webFetch` refuses a host classified as private, loopback, link-local, `.local`, or
+### INV-7. Peerd-controlled and browser-enforceable channels refuse private targets
+`webFetch` and the credential-bearing repository egress wrapper refuse a host classified as private, loopback, link-local, `.local`, or
 metadata by `isPrivateOrLocalHost`, across decimal, hex, octal, and short-form IPv4 and
 IPv4-mapped and NAT64 IPv6 encodings — plus the RFC 6598 shared/CGNAT (`100.64.0.0/10`),
 benchmarking (`198.18.0.0/15`), and reserved/broadcast (`240.0.0.0/4`) ranges that are
 internal-use on real deployments — before any network call, ahead of the denylist,
 and fails closed on redirects so a public host cannot pivot to an internal one. The same
-redirect refusal is applied by `read_pdf`'s byte fetch (`offscreen/pdf-extract.js`,
-`redirect:'manual'`), which previously validated only the pre-redirect host.
+redirect refusal is applied by `read_doc`'s byte fetch (`offscreen/doc-extract.js`,
+`redirect:'manual'`), before content detection selects the PDF or document engine.
 Browser automation applies the same lexical classifier before navigation and
 to the committed document. Driven tabs also receive tab-scoped DNR rules for
 private hosts and address ranges, covering redirects, forms, frames, and
@@ -369,8 +373,9 @@ requests that the browser attributes to no tab when their initiator domain
 matches a public domain visited by the driven tab. This covers page service-worker fetches and
 Firefox worker WebSockets without applying a browser-wide rule. Chrome DNR does
 not intercept WebSockets created inside a page service worker, even with a
-matching unscoped block rule. The live regression test keeps that residual
-visible. The scope follows browser DNR
+matching unscoped block rule. That is an accepted platform limitation, not an
+enforced product invariant; the live regression test records it without gating
+on the browser changing behavior. The scope follows browser DNR
 domain matching, so it ignores scheme and port and can include subdomains. A
 user-owned tab with the same matching domain can therefore lose private-network
 service-worker fetch access while peerd drives that domain. peerd does not prompt, unregister
@@ -400,10 +405,14 @@ for an autonomous child if the browser lost its session rules while peerd's
 later registry restore still identifies the source as driven. A page-initiated
 cross-origin redirect can also begin before the browser reports the new committed
 URL and adds its no-tab domain scope. DNS resolution and rebinding remain
-outside this client-side lexical boundary. With native local-network checks
+outside this client-side lexical boundary. An isolated live Chrome probe also
+shows that a blocked direct top-level private navigation sends no HTTP bytes but
+can still open a TCP connection/preconnect to the target. The browser floor is
+therefore not an absolute zero-transport or port-oracle defense. With native local-network checks
 disabled, Chrome can also start an inherited about:blank child's immediate
 private request before the extension receives enough child identity to close it.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
+`background/kernel-demand-plane.js`,
 `peerd-egress/denylist/dnr-rules.js`, `background/denylist-net-guard.js`,
 `background/browser-origin-custody.js`,
 `background/driven-child-request-guard.js`, `background/startup-popup-network-guard.js`,
@@ -434,7 +443,7 @@ strip runs at both read boundaries and inside the untrusted-data fence itself, s
 web-sourced tool cannot forget it, and it also runs at the two boundaries where
 page-derived text becomes DURABLE trusted context rather than a transient tool result:
 the `/init` active-tab probe that seeds always-loaded project memory
-(`memory/init-orchestrator.js`) and the skill descriptions rendered into the system
+(`background/kernel-memory-init-probe.js`) and the skill descriptions rendered into the system
 prompt at startup (`skills/registry.js`) — a covert channel there would persist,
 invisible at the approval gate, and it runs TWICE around HTML extraction, because
 extraction parses the document and turns `&#8203;` — seven ordinary ASCII characters
@@ -448,7 +457,7 @@ are ordinary visible characters. The comment-removal pass is applied
 only where a comment is genuinely a comment (markup), never to JSON or plain text
 where `<!--` is visible content.
 Code: `peerd-runtime/dom/cdr.js`, wired at `tools/prompt-wrap.js`,
-`tools/defs/fetch-url.js`, `tools/defs/read-page.js`, `memory/init-orchestrator.js`,
+`tools/defs/fetch-url.js`, `tools/defs/read-page.js`, `background/kernel-memory-init-probe.js`,
 `skills/registry.js`. Red-team: scenario 09.
 
 ### INV-13. Borrowing the user's identity on a page strangers wrote takes the user
@@ -459,7 +468,8 @@ posture in which the rule means anything. Reads are exempt (reading is the point
 sending an actor there) and so is navigation (leaving is how it finishes). The zone is
 classified from the tab's live URL rather than a turn-start pin, because an in-page
 hop moves the page with no tool call to observe.
-Code: `peerd-runtime/actor/ugc-registry.js`, enforced in `tools/dispatcher.js`.
+Code: `peerd-runtime/actor/ugc-registry.js`, enforced in
+`background/page-tool-authority.js`.
 Red-team: scenario 09.
 
 <a id="inv-14"></a>
@@ -634,8 +644,11 @@ The schema accepts reviewed enums, bounded counters, and named histogram buckets
 Unknown keys fail closed. Unknown provider and model strings collapse to `custom`, so
 a caller cannot encode a URL, prompt, identifier, or other content in a cohort field.
 Restart-safe operation and feedback tokens are consent-rotated, bounded, local-only,
-and absent from the canonical payload bytes shown in Settings. Disabling deletes the
-consent, aggregate, tokens, and pending feedback in one storage key.
+and absent from the canonical payload bytes shown in Settings. Disabling commits a
+newer revocation generation before cleanup, making every older consent snapshot and
+pending receipt unavailable for processing or display. Each generation uses a durable
+proposal followed by its commit marker, so an unseen timed-out write remains inert;
+physical deletion is bounded and cannot delete a later acknowledged choice.
 
 This stage has no uploader, endpoint, alarm, collector origin, or network primitive.
 Store and web channels register no Contributor Metrics routes or UI. A later uploader
@@ -643,7 +656,9 @@ is a separate security boundary and cannot inherit consent if the disclosure ver
 changes.
 Code: `peerd-runtime/observability/contributor-metrics.js`,
 `peerd-runtime/observability/contributor-store.js`,
-`background/routes/contributor-metrics.js`, and
+`background/kernel-contributor-owner.js`,
+`background/kernel-contributor-feedback-guard.js`,
+`offscreen/semantic-routes/contributor.js`, and
 `options/sections/contributor-metrics.js`. Red-team: scenario 12.
 
 <a id="inv-17"></a>
@@ -659,7 +674,7 @@ Artifacts without a dweb mesh host omit the dweb module, controls, defaults,
 and model tools.
 
 Code: `peerd-runtime/runtime-capabilities.js`, `peerd-runtime/tools/gates.js`,
-`peerd-runtime/loop/turn-driver.js`, `packaging/gen-channel-config.ts`.
+`background/kernel-turn-authority-adapter.js`, `packaging/gen-channel-config.ts`.
 Red-team: scenario 08.
 
 <a id="inv-18"></a>
@@ -689,8 +704,8 @@ may observe a common `api.` sibling, but its digest retains exact-origin
 attribution and calls it separate custody; only that origin's actor may verify
 and persist its client.
 Code: `peerd-runtime/actor/origin-lock.js` (`mayUseSiteClientOrigin`),
-`tools/gates.js`, `tools/defs/site-client-{read,run,write}.js`,
-`tools/defs/site-capture.js`, and `background/service-worker.js`. Red-team:
+`tools/gates.js`, `tools/defs/site-client-{read,run,write}.js`, and
+`tools/defs/site-capture.js`. Red-team:
 scenario 13.
 
 <a id="inv-19"></a>
@@ -721,8 +736,8 @@ Refusals expose only the canonical origin and a machine-authored recovery rule.
 They never expose the path, query, title, or other page-authored text.
 
 Code: `peerd-runtime/actor/numeric-tab-authority.js`,
-`peerd-runtime/actor/idp-registry.js`, `peerd-runtime/actor/landing-rule.js`,
-`background/service-worker.js`, and `peerd-runtime/actor/actor-messaging.js`.
+`peerd-runtime/actor/idp-registry.js`, `peerd-runtime/actor/landing-rule.js`, and
+`peerd-runtime/actor/actor-messaging.js`.
 Red-team: scenario 10.
 
 <a id="inv-20"></a>
@@ -742,7 +757,7 @@ same uncertain action through a sibling actor therefore requires a new exact
 user confirmation. A different root chat or external target remains independent.
 
 Code: `peerd-egress/confirm/protocol.js`, `background/routes/vault.js`,
-`background/service-worker.js`, `peerd-runtime/lifecycle/dispatch-tracking.js`,
+`peerd-runtime/lifecycle/dispatch-tracking.js`,
 and `peerd-runtime/tools/dispatcher.js`. Red-team: scenario 14.
 
 ### Additional invariants (not scenario-gated, enforced in code)
@@ -825,14 +840,14 @@ evaluating peerd should know. Each cites where it lives in the code.
   attacker-paraphrased content, and an approved note persists into every future prompt.
   Approval is the trust boundary. A user who approves a poisoned note owns the
   consequence. Narrowed: the `/init` seed of always-loaded project memory now
-  CDR-strips its page-derived probe (`memory/init-orchestrator.js`, INV-12), so an
+  CDR-strips its page-derived probe (`background/kernel-memory-init-probe.js`, INV-12), so an
   INVISIBLE-Unicode instruction can no longer ride into durable memory beneath the
   approval gate — the note the user reviews is the note the model reads. The residual is
   the visible channel: content the model paraphrases into ordinary assistant text.
-  (`peerd-runtime/memory/auto-memory.js`, `memory/init-orchestrator.js`.)
-- R3 (narrowed). A skill body is trusted instructions by design. Skill install fetches
-  through `webFetch` (denylist and caps), and the frontmatter parser refuses unknown
-  keys, but the skill body loads into context as trusted instructions with no
+  (`peerd-runtime/memory/auto-memory.js`, `background/kernel-memory-init-probe.js`.)
+- R3 (narrowed). A skill body is trusted instructions by design. Installation accepts
+  only text the user pastes locally, and the frontmatter parser refuses unknown keys,
+  but the skill body loads into context as trusted instructions with no
   untrusted-content fence. A malicious shared skill is a direct instruction-injection
   vector. Installing a skill runs its author's prompt. Narrowed: the skill name and
   description rendered into the startup prompt — the one skill field shown before any
@@ -932,18 +947,17 @@ evaluating peerd should know. Each cites where it lives in the code.
   with no tool call, a page redirecting itself) into one check no redirect chain walks
   around. The same policy is asked synchronously inside the credential-scope getter, so
   a self-redirect onto a credentialed origin cannot be spent by `fetch_url`,
-  `read_web_cache` or a site-client fetch in the window before a DOM tool re-enters
+  `read_result` or a site-client fetch in the window before a DOM tool re-enters
   the chokepoint. Durable client record custody is a separate invariant (INV-18).
   (`peerd-runtime/actor/landing-rule.js`, `origin-lock.js`,
-  `tools/defs/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
+  `browser-authority/dom-helpers.js`; driven end to end by the `origin-lock` e2e state.)
   The #251 arc hardened the TAB actor's site-client CREDENTIAL path but left its
   API-actor sibling: the `site-fetch/call` relay's `backing:'api'` branch pinned credentials to the
   MODEL-supplied `origin` argument, so an API actor bound to one origin could name a
   DIFFERENT origin and spend that origin's stored key + cookies — a cross-origin
   credential escalation past the "an API actor owns one origin" containment (DESIGN-18).
   Closed: the branch now pins to the actor's own bound origin (`instanceId`) and refuses a
-  cross-origin target, mirroring `fetch_url`'s API pin. (`background/service-worker.js`
-  `siteFetchCallRoute`.)
+  cross-origin target, mirroring `fetch_url`'s API pin.
 - R13. The egress tripwire does not scan the query string or fragment, so the canonical
   exfil GET is uncovered. `attacker.test/?d=<blob>` is not inspected, because that is
   where legitimate long high-entropy values live — OIDC `id_token`s, SAML requests,

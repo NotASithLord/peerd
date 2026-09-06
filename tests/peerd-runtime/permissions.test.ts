@@ -3,19 +3,9 @@
 //
 // The policy is a PURE function (peerd-runtime/permissions/policy.js) with
 // no IO and no `/peerd-*` absolute imports, so it's directly importable
-// under Bun — unlike the dispatcher, which transitively imports
-// /peerd-egress/index.js (a browser-resolved path Bun can't follow). We
-// therefore test the policy at its real boundary, the same `decideAction`
-// the persona gate and the dispatcher call, against tool descriptors that
-// mirror the actual built-in tools' { name, sideEffect, primitive }.
-//
-// A tiny `simulateDispatch` replays the dispatcher's exact decision flow
-// (persona-gate block in Plan, then the async confirm step in Act) so the
-// required scenarios are asserted end-to-end at the policy layer:
-//   - Plan blocks a write/tab/fetch tool
-//   - Act + confirmActions ON confirms each non-read
-//   - Act + confirmActions OFF allows all without confirming
-// Plus the legacy-tier migration reader (confirmActionsFromRecord).
+// under Bun. Test the pure decision table here; exact service-worker
+// confirmation and lifecycle custody are exercised at their real authority
+// boundary in the controller protocol suites.
 
 import { describe, test, expect } from 'bun:test';
 import {
@@ -39,7 +29,6 @@ const TOOLS = {
   app_write:     { name: 'app_write_file', sideEffect: 'write',          primitive: 'app' },
   vm_boot:       { name: 'vm_boot',       sideEffect: 'write',           primitive: 'webvm' },
   js_notebook:       { name: 'js_notebook',       sideEffect: 'write',           primitive: 'notebook' },
-  page_exec:     { name: 'page_exec',     sideEffect: 'write',           primitive: 'tab' },
   script:        { name: 'script',        sideEffect: 'write',           primitive: 'notebook' },
   click:         { name: 'click',         sideEffect: 'write',           primitive: 'tab' },
   type:          { name: 'type',          sideEffect: 'write',           primitive: 'tab' },
@@ -47,6 +36,7 @@ const TOOLS = {
   open_tab:      { name: 'open_tab',      sideEffect: 'mutate_external',  primitive: 'tab' },
   vm_delete:     { name: 'vm_delete',     sideEffect: 'destructive',      primitive: 'webvm' },
   message_actor: { name: 'message_actor', sideEffect: 'write',            primitive: 'spawned' },
+  page_code:     { name: 'page_code',     sideEffect: 'write',            primitive: 'web' },
 } as const; // why: keep sideEffect as the SideEffect literal union, not string
 
 // ---- classifyAction: the taxonomy --------------------------------------
@@ -69,7 +59,6 @@ describe('classifyAction', () => {
   test('code execution → SHELL (even on a workspace primitive)', () => {
     expect(classifyAction(TOOLS.vm_boot)).toBe(ACTION_CLASSES.SHELL);
     expect(classifyAction(TOOLS.js_notebook)).toBe(ACTION_CLASSES.SHELL);
-    expect(classifyAction(TOOLS.page_exec)).toBe(ACTION_CLASSES.SHELL);
     // design 7.4: script (headless JS with egress + delegation) must not carry
     // a softer confirm class than the other code lanes via its notebook primitive.
     expect(classifyAction(TOOLS.script)).toBe(ACTION_CLASSES.SHELL);
@@ -98,7 +87,7 @@ describe('PLAN mode is read-only (plus the navigation carve-out)', () => {
   // of the confirm toggle.
   test.each([
     ['workspace write', TOOLS.vm_write_file],
-    ['shell / page_exec', TOOLS.page_exec],
+    ['shell / script', TOOLS.script],
     ['DOM click', TOOLS.click],
     ['DOM type', TOOLS.type],
     ['destructive delete', TOOLS.vm_delete],
@@ -149,6 +138,19 @@ describe('PLAN mode is read-only (plus the navigation carve-out)', () => {
     expect(v.allowed).toBe(true);
     expect(v.confirm).toBe(true);
   });
+
+  test('allows page_code composition in Plan while retaining its external write classification', () => {
+    const plan = decideAction({
+      mode: PERMISSION_MODES.PLAN, confirmActions: true, tool: TOOLS.page_code,
+    });
+    expect(plan).toMatchObject({
+      allowed: true, confirm: false, actionClass: ACTION_CLASSES.EXTERNAL,
+    });
+    expect(plan.reason).toContain('composition carve-out');
+    expect(decideAction({
+      mode: PERMISSION_MODES.ACT, confirmActions: true, tool: TOOLS.page_code,
+    })).toMatchObject({ allowed: true, confirm: true, actionClass: ACTION_CLASSES.EXTERNAL });
+  });
 });
 
 describe('ACT + confirmActions ON confirms every non-read', () => {
@@ -157,7 +159,7 @@ describe('ACT + confirmActions ON confirms every non-read', () => {
   });
 
   test.each([
-    TOOLS.vm_write_file, TOOLS.js_notebook, TOOLS.vm_boot, TOOLS.page_exec, TOOLS.script,
+    TOOLS.vm_write_file, TOOLS.js_notebook, TOOLS.vm_boot, TOOLS.script,
     TOOLS.click, TOOLS.type, TOOLS.navigate, TOOLS.open_tab, TOOLS.vm_delete,
   ])('confirms %o', (tool) => {
     const v = decideAction({ mode: PERMISSION_MODES.ACT, confirmActions: true, tool });
@@ -232,52 +234,5 @@ describe('confirmActionsFromRecord', () => {
     expect(confirmActionsFromRecord({})).toBeUndefined();
     expect(confirmActionsFromRecord(null)).toBeUndefined();
     expect(confirmActionsFromRecord(undefined)).toBeUndefined();
-  });
-});
-
-// ---- dispatcher replay: prove the policy drives the gate + confirm -----
-//
-// Mirrors dispatcher.js exactly: in Plan, a non-read tool is blocked by
-// the persona gate before execute(); in Act, decideAction decides whether
-// the async confirm fires. We record confirm() calls + execute() calls to
-// assert the observable behavior the real dispatcher produces.
-
-type DispatchOutcome = { blocked: boolean; confirmed: boolean; executed: boolean };
-
-const simulateDispatch = async (
-  { mode, confirmActions }: { mode: string; confirmActions: boolean },
-  tool: { name: string; sideEffect: string; primitive: string },
-): Promise<DispatchOutcome> => {
-  const verdict = decideAction({ mode, confirmActions, tool } as any);
-  // persona gate: Plan blocks non-read outright.
-  if (!verdict.allowed) return { blocked: true, confirmed: false, executed: false };
-  // async confirm step.
-  let confirmed = false;
-  if (verdict.confirm) {
-    confirmed = true; // the dispatcher would await ctx.confirm here
-  }
-  // execute() runs once the action is allowed (and confirmed if required).
-  return { blocked: false, confirmed, executed: true };
-};
-
-describe('simulated dispatch matches the required scenarios', () => {
-  test('Plan blocks a tab write before execute', async () => {
-    const r = await simulateDispatch({ mode: 'plan', confirmActions: false }, TOOLS.click);
-    expect(r).toEqual({ blocked: true, confirmed: false, executed: false });
-  });
-
-  test('confirmations ON confirms then executes a write', async () => {
-    const r = await simulateDispatch({ mode: 'act', confirmActions: true }, TOOLS.vm_write_file);
-    expect(r).toEqual({ blocked: false, confirmed: true, executed: true });
-  });
-
-  test('confirmations ON confirms a shell action too', async () => {
-    const r = await simulateDispatch({ mode: 'act', confirmActions: true }, TOOLS.vm_boot);
-    expect(r).toEqual({ blocked: false, confirmed: true, executed: true });
-  });
-
-  test('confirmations OFF executes everything WITHOUT confirm', async () => {
-    const r = await simulateDispatch({ mode: 'act', confirmActions: false }, TOOLS.open_tab);
-    expect(r).toEqual({ blocked: false, confirmed: false, executed: true });
   });
 });

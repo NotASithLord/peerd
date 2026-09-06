@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   groupResourceLossNotices,
-} from '../../../extension/peerd-runtime/lifecycle/resource-recovery.js';
+} from '../../../extension/peerd-runtime/lifecycle/engine-liveness.js';
 
 describe('groupResourceLossNotices', () => {
   test('groups losses by owning session and distinguishes stored from live state', () => {

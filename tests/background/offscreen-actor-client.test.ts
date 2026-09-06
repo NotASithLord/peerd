@@ -1,52 +1,74 @@
-// The heap-split SW-side client: the Stop-cascade `aborted` stamping (so an aborted
-// offscreen turn renders 'cancelled', not a blank 'ok') and the security-critical
-// 'actor/tool-dispatch' route (SW-side pin + gate + the web actor's owned-tab thread).
 import { describe, test, expect } from 'bun:test';
 import { makeOffscreenActorClient } from '../../extension/background/offscreen-actor-client.js';
-import { makeDirectActorHost } from '../../extension/background/direct-actor-host.js';
+import { makeOffscreenActorChannelClient } from '../../extension/background/offscreen-actor-channel-client.js';
+import { bindActorChannel } from '../../extension/offscreen/actor-channel-host.js';
 import { DWEB_INBOUND_TOOL_NAMES } from '../../extension/peerd-runtime/actor/capability-manifest.js';
+import { nestedActorProgramCallId } from '../../extension/shared/actor-channel-protocol.js';
+import { createReadOnlyOperationGrant } from '../../extension/background/controller-turn-authority-scope.js';
 
-// Stand-ins for the two senders that matter. The relay routes must accept only the
-// first: `runtime.sendMessage` from the SW broadcasts to EVERY extension context, so
-// the grant token is visible to the side panel and to the three engine tab pages that
-// host agent-authored content — which makes the sender check, not the token, the
-// actual boundary.
 const OFFSCREEN = { id: 'ext', url: 'chrome-extension://ext/offscreen/offscreen.html' };
 const ENGINE_TAB = { id: 'ext', url: 'chrome-extension://ext/engine-tabs/vm-tab/vm-tab.html' };
+const durableMessages = (...callIds: string[]) => [{
+  role: 'assistant', content: '',
+  toolUses: callIds.map((id) => ({ id, name: 'fixture_tool', input: {} })),
+}, {
+  role: 'user', content: '',
+  toolResults: callIds.map((tool_use_id) => ({
+    tool_use_id, content: 'semantic result', is_error: false,
+  })),
+}];
 
-const baseDeps = (over: any = {}) => ({
-  ensureOffscreen: async () => {},
-  isOffscreenSender: (s: any) => s?.url === OFFSCREEN.url,
-  sendMessage: async () => ({ ok: true }),
-  callModel: (async function* () {})(),
-  getSecret: async () => 'sk',
-  safeFetch: async () => new Response('x'),
-  sessions: { get: async () => null },
-  buildToolContext: async () => ({}),
-  dispatchToolCall: async () => ({ ok: true }),
-  reviewToolAllowed: () => true,
-  pinActorCall: () => {},
-  EXPOSURE_ACTOR: 'actor',
+const inferenceInput = (relayToken: string, over: Record<string, any> = {}) => ({
+  relayToken,
+  providerId: 'anthropic',
+  modelId: 'model-1',
+  nativeBody: {
+    model: 'model-1', stream: true, messages: [], system: 'system', max_tokens: 128,
+  },
+  ...over,
+});
+const providerEgress = (over: Record<string, any> = {}) => ({
+  openInference: async (input: any, grant: any) => grant.permits(
+    input.providerId, input.modelId,
+  ) ? {
+      ok: true, outcomeKnown: true,
+      value: { streamId: 'stream-1', status: 200, headers: {}, hasBody: true },
+    } : { ok: false, error: 'model-egress-request-invalid', outcomeKnown: true },
+  readInferenceChunk: async () => ({
+    ok: true, outcomeKnown: true, value: { done: true },
+  }),
+  cancelInference: async () => ({ ok: true, outcomeKnown: true, value: null }),
+  readModelContext: async () => ({ ok: true, value: { contextWindow: 100_000 } }),
+  openLocalGeneration: async () => ({ ok: false, outcomeKnown: true }),
+  readLocalGeneration: async () => ({ ok: false, outcomeKnown: true }),
+  cancelLocalGeneration: async () => ({ ok: true, outcomeKnown: true }),
+  closeOwner: async () => {},
+  ...over,
+});
+
+const baseDeps = (over: Record<string, any> = {}) => ({
+  ensureHost: async () => {},
+  isRelaySender: (sender: any) => sender?.url === OFFSCREEN.url,
+  sendMessage: async () => ({ ok: true, started: true, finalText: '' }),
+  providerEgress: providerEgress(),
+  spendRefusalFor: async () => null,
+  sessions: { get: async () => ({
+    kind: 'actor', sessionId: 'actor-1', actorType: 'webvm', instanceId: 'vm-1',
+  }) },
+  buildToolContext: async () => ({ session: { sessionId: 'actor-1', kind: 'actor' } }),
   inboundDwebToolNames: DWEB_INBOUND_TOOL_NAMES,
   ...over,
 });
 
-/**
- * Build a client plus a `during` helper that invokes a relay route with a LIVE
- * grant token, from inside the run the token was minted for — which is the only
- * window in which the token is valid, and exactly how the offscreen runner
- * relays in production. Every route test goes through this: calling a route with
- * a hand-written session id is precisely the forgery the grant now refuses.
- */
-const clientWithRelay = (over: any = {}) => {
+const clientWithRelay = (over: Record<string, any> = {}) => {
   let relay: ((token: string) => Promise<any>) | null = null;
   let captured: any = null;
   const client = makeOffscreenActorClient(baseDeps({
     ...over,
-    // Last, so it wins over any baseDeps-derived `over` (subDeps is a full
-    // baseDeps result): this IS the relay window the helper exists to open.
-    sendMessage: async (m: any) => {
-      if (m.type === 'actor/run' && relay) captured = await relay(m.job.relayToken);
+    sendMessage: async (message: any) => {
+      if (message.type === 'actor/run' && relay) {
+        captured = await relay(message.job.relayToken);
+      }
       return { ok: true, started: true, finalText: '' };
     },
   }));
@@ -54,781 +76,2674 @@ const clientWithRelay = (over: any = {}) => {
     client,
     during: async (
       fn: (token: string) => Promise<any>,
-      actorSessionId = 's1',
-      onEvent?: (ev: any) => void,
+      actorSessionId = 'actor-1',
       job: Record<string, any> = {},
-      runOptions: Record<string, any> = {},
     ) => {
       relay = fn;
-      await client.run(
-        { actorSessionId, message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm', ...job } as any,
-        { ...(onEvent ? { onEvent } : {}), ...runOptions },
-      );
+      await client.run({
+        actorSessionId,
+        actorType: 'webvm',
+        message: 'm',
+        systemPrompt: 's',
+        provider: 'anthropic',
+        model: 'model-1',
+        maxOutputTokens: 4096,
+        ...job,
+      } as any);
       return captured;
     },
   };
 };
 
-describe('run() — Stop-cascade aborted stamping', () => {
-  test('channel transport binds a relay without serializing its grant', async () => {
-    let sentJob: any = null;
-    let relayResult: any = null;
+describe('isolated actor run custody', () => {
+  test('refuses construction without spend-limit authority', () => {
+    expect(() => makeOffscreenActorClient(baseDeps({ spendRefusalFor: undefined })))
+      .toThrow('actor spend-limit authority is required');
+  });
+
+  test('keeps the actor operation grant live while exposing no mutation surface', () => {
+    const membership = new Set(['turn.execution.run-script']);
+    const grant = createReadOnlyOperationGrant(membership);
+    expect(grant instanceof Set).toBe(true);
+    expect(grant.has('turn.execution.run-script')).toBe(true);
+    expect((grant as any).add).toBeUndefined();
+    expect((grant as any).delete).toBeUndefined();
+    expect((grant as any).clear).toBeUndefined();
+    expect(() => Set.prototype.add.call(grant, 'turn.actor.message')).toThrow();
+    expect(membership.has('turn.actor.message')).toBe(false);
+    membership.delete('turn.execution.run-script');
+    expect(grant.has('turn.execution.run-script')).toBe(false);
+  });
+
+  test('cannot widen actor authority by mutating the projected job after admission', async () => {
+    const spawned = {
+      kind: 'spawned', sessionId: 'actor-grant-child', parentSessionId: 'chat-root',
+      spawnedTrusted: true,
+      grantedOperations: ['turn.execution.run-script', 'turn.actor.message'],
+    };
+    const executionOptions: any[] = [];
     const client = makeOffscreenActorClient(baseDeps({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', backing: 'api' }) },
-      dispatchToolCall: async () => ({ ok: true, content: 'ran' }),
+      sessions: { get: async (id: string) => id === spawned.sessionId
+        ? structuredClone(spawned)
+        : id === 'chat-root' ? { kind: 'chat', sessionId: 'chat-root' } : null },
+      buildToolContext: async () => ({
+        session: { sessionId: spawned.sessionId, kind: 'spawned', depth: 1 },
+        messageActor: async () => ({ ok: true }),
+        jsOffscreenClient: {
+          execHeadless: async (_code: string, options: any) => {
+            executionOptions.push(options);
+            return { value: null, durationMs: 1, error: null };
+          },
+        },
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
       runOnChannel: async (job: any, { relay }: any) => {
-        sentJob = job;
-        relayResult = await relay('actor/tool-dispatch', { call: { name: 'fetch_url', args: {} } });
-        return { ok: true, started: true, finalText: 'done' };
+        job.allowedOperations.push('turn.actor.message');
+        const callId = 'actor-grant-script';
+        const effect = await relay('execution/run-script', {
+          operation: 'turn.execution.run-script', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          code: 'return actors;', actors: true, provider: false,
+          workspace: false, timeoutMs: null,
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'done' },
+        });
+        return { effect, completion, newMessages: durableMessages(callId) };
       },
+    }));
+    const allowedOperations = ['turn.execution.run-script'];
+    const result: any = await client.run({
+      actorSessionId: spawned.sessionId, message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', tools: [{ name: 'script' }],
+      allowedOperations,
+    } as any);
+    expect(result.effect).toMatchObject({ ok: true });
+    expect(allowedOperations).toContain('turn.actor.message');
+    expect(executionOptions[0]?.actors).toBeUndefined();
+    expect(executionOptions[0]?.caps).toEqual({ subagent: false });
+  });
+
+  test.each([
+    'api.example.test',
+    'https://api.example.test/path',
+    'HTTPS://API.EXAMPLE.TEST',
+    'http://localhost',
+    'https://api.example.test@evil.test',
+  ])('refuses a corrupted noncanonical API actor identity before opening any host edge: %s', async (instanceId) => {
+    let hostStarts = 0;
+    let contexts = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => ({
+        kind: 'actor', sessionId: 'api-actor', actorType: 'web', backing: 'api', instanceId,
+      }) },
+      ensureHost: async () => { hostStarts += 1; },
+      buildToolContext: async () => { contexts += 1; return {}; },
     }));
     const result = await client.run({
-      actorSessionId: 'actor-channel', message: 'm', systemPrompt: 's',
-      provider: 'anthropic', model: 'm',
+      actorSessionId: 'api-actor', actorType: 'web', backing: 'api', instanceId,
+      message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+      tools: [{ name: 'fetch_url' }],
+      allowedOperations: ['turn.resource.request-web-text', 'turn.site-client.run'],
     } as any);
-    expect(sentJob.relayToken).toBeUndefined();
-    expect(relayResult).toEqual({ ok: true, result: { ok: true, content: 'ran' } });
-    expect(result.finalText).toBe('done');
-  });
-
-  test('stamps aborted when the signal fired and the turn produced NO reply', async () => {
-    // The worker can unwind an abort CLEANLY (empty reply, no error) → looks ok at the
-    // result shape. signal.aborted here is the authoritative proof a Stop hit this run.
-    const ac = new AbortController();
-    const client = makeOffscreenActorClient(baseDeps({
-      sendMessage: async (m: any) => {
-        if (m.type === 'actor/run') { ac.abort(); return { ok: true, started: true, finalText: '' }; }
-        return { ok: true };
-      },
-    }));
-    const r = await client.run({ actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any, { signal: ac.signal });
-    expect(r.aborted).toBe(true);
-  });
-
-  test('does NOT stamp aborted when the turn produced text just before Stop (raced)', async () => {
-    const ac = new AbortController();
-    const client = makeOffscreenActorClient(baseDeps({
-      sendMessage: async (m: any) => {
-        if (m.type === 'actor/run') { ac.abort(); return { ok: true, started: true, finalText: 'a real reply' }; }
-        return { ok: true };
-      },
-    }));
-    const r = await client.run({ actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any, { signal: ac.signal });
-    expect(r.aborted).toBeUndefined();
-    expect(r.finalText).toBe('a real reply');
-  });
-
-  test('no signal → never stamps aborted', async () => {
-    const client = makeOffscreenActorClient(baseDeps({
-      sendMessage: async (m: any) => (m.type === 'actor/run' ? { ok: true, started: true, finalText: '' } : { ok: true }),
-    }));
-    const r = await client.run({ actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any);
-    expect(r.aborted).toBeUndefined();
-  });
-
-  test('Stop during offscreen startup prevents actor/run from being dispatched', async () => {
-    let finishStartup: (() => void) | undefined;
-    const startup = new Promise<void>((resolve) => { finishStartup = resolve; });
-    const sent: string[] = [];
-    const ac = new AbortController();
-    const client = makeOffscreenActorClient(baseDeps({
-      ensureOffscreen: () => startup,
-      sendMessage: async (m: any) => { sent.push(m.type); return { ok: true }; },
-    }));
-    const pending = client.run(
-      { actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any,
-      { signal: ac.signal },
-    );
-    ac.abort();
-    finishStartup?.();
-    const result: any = await pending;
-    expect(result).toEqual(expect.objectContaining({ ok: false, started: true, aborted: true }));
-    expect(sent).toEqual([]);
-  });
-
-  test('runner settlement aborts an already-admitted SW tool relay', async () => {
-    let relay: Promise<any> | null = null;
-    let dispatchStarted: (() => void) | undefined;
-    const started = new Promise<void>((resolve) => { dispatchStarted = resolve; });
-    let relaySignal: AbortSignal | undefined;
-    let client: ReturnType<typeof makeOffscreenActorClient>;
-    client = makeOffscreenActorClient(baseDeps({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
-      buildToolContext: async () => ({}),
-      dispatchToolCall: async (_call: any, ctx: any) => {
-        relaySignal = ctx.abortSignal;
-        dispatchStarted?.();
-        return await new Promise((resolve) => {
-          const finish = () => resolve({ ok: false, error: 'cancelled with actor run' });
-          if (ctx.abortSignal.aborted) finish();
-          else ctx.abortSignal.addEventListener('abort', finish, { once: true });
-        });
-      },
-      sendMessage: async (m: any) => {
-        if (m.type !== 'actor/run') return { ok: true };
-        relay = client.routes['actor/tool-dispatch']({
-          relayToken: m.job.relayToken, call: { name: 'vm_boot', args: {} },
-        }, OFFSCREEN);
-        await started;
-        return { ok: false, started: true, aborted: true, error: 'actor timed out' };
-      },
-    }));
-
-    const result: any = await client.run({
-      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
-    } as any);
-    const relayResult: any = await relay;
-    expect(result.aborted).toBe(true);
-    expect(relaySignal?.aborted).toBe(true);
-    expect(relayResult).toEqual({ ok: false, error: 'aborted' });
-  });
-
-  test('runner settlement aborts an already-admitted SW model relay', async () => {
-    let relay: Promise<any> | null = null;
-    let modelStarted: (() => void) | undefined;
-    const started = new Promise<void>((resolve) => { modelStarted = resolve; });
-    let modelSignal: AbortSignal | undefined;
-    let client: ReturnType<typeof makeOffscreenActorClient>;
-    client = makeOffscreenActorClient(baseDeps({
-      callModel: async function* ({ signal }: any) {
-        modelSignal = signal;
-        modelStarted?.();
-        await new Promise<void>((resolve) => {
-          if (signal.aborted) resolve();
-          else signal.addEventListener('abort', () => resolve(), { once: true });
-        });
-      },
-      sendMessage: async (m: any) => {
-        if (m.type !== 'actor/run') return { ok: true };
-        relay = client.routes['actor/model-call']({
-          relayToken: m.job.relayToken, args: { provider: 'anthropic', model: 'm' },
-        }, OFFSCREEN);
-        await started;
-        return { ok: false, started: true, aborted: true, error: 'actor timed out' };
-      },
-    }));
-
-    const result: any = await client.run({
-      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
-    } as any);
-    const relayResult: any = await relay;
-    expect(result.aborted).toBe(true);
-    expect(modelSignal?.aborted).toBe(true);
-    expect(relayResult).toEqual({ ok: false, error: 'aborted' });
-  });
-
-  test('Firefox lease loss revokes a pending model relay before late bytes arrive', async () => {
-    let modelStarted: (() => void) | undefined;
-    const started = new Promise<void>((resolve) => { modelStarted = resolve; });
-    let releaseModel: (() => void) | undefined;
-    const modelRelease = new Promise<void>((resolve) => { releaseModel = resolve; });
-    let modelSignal: AbortSignal | undefined;
-    let relayResult: Promise<any> | null = null;
-    let relayToken = '';
-    let relayAgain: ((type: string, payload: any) => Promise<any>) | null = null;
-    const workerAborts: string[] = [];
-    const host = makeDirectActorHost({
-      workerUrl: 'worker.js',
-      run: async (job: any, { sendToSW }: any) => {
-        relayToken = job.relayToken;
-        relayAgain = sendToSW;
-        relayResult = sendToSW('actor/model-call', {
-          relayToken,
-          args: { provider: 'anthropic', model: 'm' },
-        });
-        await relayResult;
-        return { ok: true, started: true, finalText: 'late response' };
-      },
-      abort: (runId: string) => { workerAborts.push(runId); },
+    expect(result).toMatchObject({
+      ok: false, started: false, phase: 'admission', code: 'actor_identity_invalid',
+      outcomeKnown: true,
     });
+    expect({ hostStarts, contexts }).toEqual({ hostStarts: 0, contexts: 0 });
+  });
+
+  test('runs the fixed isolation probe without a synthetic session or relay grant', async () => {
+    let hostStarts = 0;
+    let sessionReads = 0;
+    let contexts = 0;
+    let channelJob: any = null;
+    let relayReply: any = null;
     const client = makeOffscreenActorClient(baseDeps({
-      ensureHost: async () => {},
-      isRelaySender: host.isRelaySender,
-      sendMessage: host.sendMessage,
-      callModel: async function* ({ signal }: any) {
-        modelSignal = signal;
-        modelStarted?.();
-        await modelRelease;
-        yield { type: 'text_delta', text: 'late provider bytes' };
+      ensureHost: async () => { hostStarts += 1; },
+      sessions: { get: async () => { sessionReads += 1; return null; } },
+      buildToolContext: async () => { contexts += 1; return {}; },
+      runOnChannel: async (job: any, { relay }: any) => {
+        channelJob = job;
+        relayReply = await relay('model/open-inference', {});
+        return {
+          ok: true, started: false, phase: 'startup', code: 'actor_worker_ready',
+          workerType: 'dedicated', realmVerified: true, extensionApisPresent: false,
+        };
       },
     }));
-    host.bindRelayRoutes(client.routes);
 
-    const run = client.run({
-      actorSessionId: 'a', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm',
+    const result = await client.run({
+      actorSessionId: 'forged', message: 'ignored', systemPrompt: 'ignored',
+      provider: 'forged', model: 'forged', probeOnly: true,
+      tools: [{ name: 'forged' }], allowedOperations: ['turn.page.click'],
     } as any);
-    await started;
-    host.failKeepAlive(new Error('session heartbeat stopped'));
 
-    expect(await run).toEqual(expect.objectContaining({
-      ok: false,
-      started: true,
-      code: 'actor_host_keepalive_lost',
-      outcomeKnown: false,
-    }));
-    expect(workerAborts).toHaveLength(1);
-    expect(modelSignal?.aborted).toBe(true);
-    expect(relayAgain).not.toBeNull();
-    const replayResult = await (relayAgain as unknown as (type: string, payload: any) => Promise<any>)(
-      'actor/model-call', {
-      relayToken,
-      args: { provider: 'anthropic', model: 'm' },
-      });
-    expect(replayResult).toEqual({ ok: false, error: 'actor/model-call: unauthorized relay' });
-
-    releaseModel?.();
-    expect(relayResult).not.toBeNull();
-    expect(await (relayResult as unknown as Promise<any>)).toEqual({ ok: false, error: 'aborted' });
+    expect(result).toMatchObject({
+      ok: true, started: false, code: 'actor_worker_ready', realmVerified: true,
+    });
+    expect(channelJob).toEqual({
+      actorSessionId: '__actor_isolation_probe__', message: '', systemPrompt: '',
+      provider: '', model: '', probeOnly: true,
+    });
+    expect(relayReply).toMatchObject({
+      ok: false, code: 'actor_isolation_probe_relay_refused',
+      outcomeKnown: true, performed: false, retryable: false,
+    });
+    expect({ hostStarts, sessionReads, contexts }).toEqual({
+      hostStarts: 1, sessionReads: 0, contexts: 0,
+    });
   });
-});
 
-describe('inbound provenance — monotonic SW grant', () => {
-  test('advertises only the positive read/moderation dweb set to an inbound worker', async () => {
-    let sentJob: any = null;
+  test('binds a tab-Web lifecycle target to actor session and host-owned tab across restart', async () => {
+    const targets: string[] = [];
+    const runTarget = async (actorSessionId: string, ownedTabId: number) => {
+      const actorRecord = {
+        kind: 'actor', sessionId: actorSessionId,
+        actorType: 'web', instanceId: 'web', backing: 'tab',
+      };
+      const client = makeOffscreenActorClient(baseDeps({
+        sessions: { get: async () => structuredClone(actorRecord) },
+        ownedTabFor: () => ownedTabId,
+        buildToolContext: async () => ({
+          session: { sessionId: actorSessionId, kind: 'actor' },
+          actorType: 'web', actorBacking: 'tab', backing: 'tab', actorInstanceId: 'web',
+          activeTab: {
+            id: ownedTabId, windowId: 1,
+            url: 'https://example.test/start', origin: 'https://example.test',
+          },
+          permission: { mode: 'act', confirmActions: false },
+          readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+          lifecycle: {
+            requiresIntentConfirmation: async () => false,
+            beginTracking: async ({ target }: any) => {
+              targets.push(target);
+              return { refuse: { error: 'fixture lifecycle refusal' } };
+            },
+            settleTracking: async () => {},
+          },
+          appendAudit: async () => {},
+        }),
+        runOnChannel: async (job: any, { relay }: any) => {
+          const callId = `navigate-${actorSessionId}`;
+          const effect = await relay('page/navigate', {
+            operation: 'turn.page.navigate', callId,
+            effectId: `${callId}:1`, effectSequence: 1,
+            turnGeneration: job.turnGeneration,
+            args: { url: 'https://example.test/next' },
+          });
+          const completion = await relay('actor/call-complete', {
+            callId, turnGeneration: job.turnGeneration,
+            result: { ok: true, content: 'forged success' },
+          });
+          return { effect, completion, newMessages: durableMessages(callId) };
+        },
+      }));
+      const result: any = await client.run({
+        actorSessionId, actorType: 'web', backing: 'tab',
+        message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+        tools: [{ name: 'navigate' }], allowedOperations: ['turn.page.navigate'],
+      } as any);
+      expect(result.effect).toMatchObject({
+        ok: true,
+        value: { authorityReceipt: { performed: false, refused: true } },
+      });
+      expect(result.completion).toMatchObject({
+        ok: true, result: { ok: false, authorityPerformed: false },
+      });
+      return targets.at(-1) ?? '';
+    };
+
+    const firstActorTarget = await runTarget('web-actor-a', 7);
+    const siblingActorTarget = await runTarget('web-actor-b', 8);
+    const reboundAfterRestartTarget = await runTarget('web-actor-a', 9);
+    expect(firstActorTarget).toContain('web:web-actor-a:web:tab:tab:7');
+    expect(siblingActorTarget).toContain('web:web-actor-b:web:tab:tab:8');
+    expect(reboundAfterRestartTarget).toContain('web:web-actor-a:web:tab:tab:9');
+    expect(new Set([
+      firstActorTarget, siblingActorTarget, reboundAfterRestartTarget,
+    ]).size).toBe(3);
+  });
+
+  test('stamps an empty stopped turn as a known pre-effect cancellation', async () => {
+    const controller = new AbortController();
     const client = makeOffscreenActorClient(baseDeps({
-      sendMessage: async (m: any) => {
-        if (m.type === 'actor/run') sentJob = m.job;
+      sendMessage: async (message: any) => {
+        if (message.type === 'actor/run') controller.abort();
         return { ok: true, started: true, finalText: '' };
       },
     }));
-    const names = [
-      'dweb_discover', 'dweb_peers', 'dweb_block',
-      'dweb_discovery', 'dweb_guide', 'dweb_share', 'dweb_install', 'a2a_run',
-      'message_actor', 'actor_create', 'request_review', 'script',
-    ];
-    await client.run({
-      actorSessionId: 'dweb', message: 'peer bytes', systemPrompt: 's',
-      provider: 'anthropic', model: 'm', actorType: 'dweb', inbound: true,
-      tools: names.map((name) => ({ name, description: name, schema: {} })),
+    const result: any = await client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any, { signal: controller.signal });
+    expect(result).toMatchObject({
+      aborted: true, performed: false, outcomeKnown: true,
     });
-    expect(sentJob.inbound).toBe(true);
-    expect(sentJob.tools.map((tool: any) => tool.name)).toEqual([
-      'dweb_discover', 'dweb_peers', 'dweb_block',
+  });
+
+  test('an inference-only stopped turn is still a known no-target-effect cancellation', async () => {
+    const controller = new AbortController();
+    const client = makeOffscreenActorClient(baseDeps({
+      runOnChannel: async (_job: any, { relay }: any) => {
+        const opened = await relay('actor/model-open-inference', {
+          providerId: 'anthropic', modelId: 'model-1',
+          nativeBody: {
+            model: 'model-1', stream: true, messages: [],
+            system: 'system', max_tokens: 128,
+          },
+        });
+        expect(opened).toMatchObject({ ok: true });
+        controller.abort();
+        return { ok: false, started: true, finalText: '', newMessages: [] };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+    } as any, { signal: controller.signal });
+
+    expect(result).toMatchObject({
+      aborted: true, performed: false, outcomeKnown: true,
+    });
+  });
+
+  test('does not overwrite a raced real reply with abort state', async () => {
+    const controller = new AbortController();
+    const client = makeOffscreenActorClient(baseDeps({
+      sendMessage: async (message: any) => {
+        if (message.type === 'actor/run') controller.abort();
+        return { ok: true, started: true, finalText: 'reply' };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any, { signal: controller.signal });
+    expect(result.finalText).toBe('reply');
+    expect(result.aborted).toBeUndefined();
+  });
+
+  test('does not start the host after a pre-start abort', async () => {
+    let started = false;
+    let messages = 0;
+    const controller = new AbortController();
+    controller.abort();
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => { started = true; },
+      sendMessage: async () => { messages += 1; return { ok: true }; },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any, { signal: controller.signal });
+    expect(result).toEqual({
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    });
+    expect(started).toBe(false);
+    expect(messages).toBe(0);
+  });
+
+  test('stamps host startup failure as known before any actor effect', async () => {
+    let messages = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => { throw new Error('renderer unavailable'); },
+      sendMessage: async () => { messages += 1; return { ok: true }; },
+    }));
+    const result = await client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any);
+    expect(result).toEqual({
+      ok: false, started: false, phase: 'startup', code: 'actor_host_unavailable',
+      error: 'actor host unavailable: renderer unavailable',
+      performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+    expect(messages).toBe(0);
+  });
+
+  test('does not dispatch after Stop lands while the host is starting', async () => {
+    let releaseHost!: () => void;
+    let hostStarted!: () => void;
+    const hostGate = new Promise<void>((resolve) => { releaseHost = resolve; });
+    const started = new Promise<void>((resolve) => { hostStarted = resolve; });
+    let messages = 0;
+    const controller = new AbortController();
+    const client = makeOffscreenActorClient(baseDeps({
+      ensureHost: async () => { hostStarted(); await hostGate; },
+      sendMessage: async () => { messages += 1; return { ok: true }; },
+    }));
+    const pending = client.run({
+      actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1',
+    } as any, { signal: controller.signal });
+    await started;
+    controller.abort();
+    releaseHost();
+
+    expect(await pending).toEqual({
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    });
+    expect(messages).toBe(0);
+  });
+});
+
+describe('exact semantic effect claim atomicity', () => {
+  const exactReadJob = {
+    actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+    provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+    tools: [{ name: 'sandbox_status' }], allowedOperations: ['turn.vm.read'],
+  };
+
+  test('racing duplicate effect ids enter host authority exactly once', async () => {
+    let releaseContext!: () => void;
+    let contextStarted!: () => void;
+    const contextGate = new Promise<void>((resolve) => { releaseContext = resolve; });
+    const started = new Promise<void>((resolve) => { contextStarted = resolve; });
+    let reads = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => {
+        contextStarted();
+        await contextGate;
+        return {
+          session: { sessionId: 'actor-1', kind: 'actor' },
+          actorType: 'webvm', actorInstanceId: 'vm-1',
+          vmRegistry: { get: async () => {
+            reads += 1;
+            return { id: 'vm-1', name: 'one', pinned: false };
+          } },
+        };
+      },
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = {
+          operation: 'turn.vm.read', callId: 'duplicate-call',
+          effectId: 'duplicate-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, vmId: 'vm-1',
+        };
+        const first = relay('vm/read', effect);
+        await started;
+        const duplicate = relay('vm/read', { ...effect });
+        releaseContext();
+        const replies = await Promise.all([first, duplicate]);
+        const complete = await relay('actor/call-complete', {
+          callId: 'duplicate-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'worker result' },
+        });
+        return { replies, complete, newMessages: durableMessages('duplicate-call') };
+      },
+    }));
+    const result: any = await client.run(exactReadJob as any);
+    expect(result.replies.filter((reply: any) => reply.ok === true)).toHaveLength(1);
+    expect(result.replies.filter((reply: any) => reply.ok === false)).toHaveLength(1);
+    expect(result.complete).toMatchObject({ ok: true, result: { ok: true } });
+    expect(reads).toBe(1);
+  });
+
+  test('call completion closes and drains a claim paused in context lookup', async () => {
+    let releaseContext!: () => void;
+    let contextStarted!: () => void;
+    const contextGate = new Promise<void>((resolve) => { releaseContext = resolve; });
+    const started = new Promise<void>((resolve) => { contextStarted = resolve; });
+    let reads = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => {
+        contextStarted();
+        await contextGate;
+        return {
+          session: { sessionId: 'actor-1', kind: 'actor' },
+          actorType: 'webvm', actorInstanceId: 'vm-1',
+          vmRegistry: { get: async () => { reads += 1; return { id: 'vm-1' }; } },
+        };
+      },
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = relay('vm/read', {
+          operation: 'turn.vm.read', callId: 'closing-call',
+          effectId: 'closing-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, vmId: 'vm-1',
+        });
+        await started;
+        const completion = relay('actor/call-complete', {
+          callId: 'closing-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged success' },
+        });
+        releaseContext();
+        return {
+          effect: await effect, completion: await completion,
+          newMessages: durableMessages('closing-call'),
+        };
+      },
+    }));
+    const result: any = await client.run(exactReadJob as any);
+    expect(result.effect).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: { ok: false, code: 'authority_claim_refused', authorityPerformed: false },
+    });
+    expect(reads).toBe(0);
+  });
+
+  test('worker return cannot outrun an admitted irreversible exact effect', async () => {
+    let releaseWrite!: () => void;
+    let writeStarted!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const started = new Promise<void>((resolve) => { writeStarted = resolve; });
+    let writes = 0;
+    let runSettled = false;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => {
+          writes += 1;
+          writeStarted();
+          await writeGate;
+          return true;
+        } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        void relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'early-worker-return',
+          effectId: 'early-worker-return:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, path: '/tmp/result', content: 'written',
+        });
+        await started;
+        return {
+          ok: true, finalText: 'forged clean completion',
+          newMessages: [{ role: 'user', toolResults: [{
+            tool_use_id: 'early-worker-return', content: 'forged clean', is_error: false,
+          }] }],
+        };
+      },
+    }));
+    const pending = client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any).then((value) => { runSettled = true; return value; });
+    await started;
+    await Promise.resolve();
+    expect(runSettled).toBe(false);
+    releaseWrite();
+    const result: any = await pending;
+    expect(writes).toBe(1);
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_semantic_completion_missing',
+      outcomeKnown: false, retryable: false, authorityPerformed: true,
+      finalText: '', newMessages: [],
+    });
+  });
+
+  test('audit rejection preserves actor receipts and refuses later privileged effects', async () => {
+    let writes = 0;
+    let trackingBegins = 0;
+    const trackingSettlements: any[] = [];
+    let authorityAudits = 0;
+    let markAuditStarted = () => {};
+    const auditStarted = new Promise<void>((resolve) => { markAuditStarted = resolve; });
+    let releaseAudit = () => {};
+    const auditReleased = new Promise<void>((resolve) => { releaseAudit = resolve; });
+    let markSecondWrite = () => {};
+    const secondWrite = new Promise<void>((resolve) => { markSecondWrite = resolve; });
+    const appendAudit = async (entry: any) => {
+      if (entry?.type !== 'authority_effect') return;
+      authorityAudits += 1;
+      if (authorityAudits !== 1) return;
+      markAuditStarted();
+      await auditReleased;
+      throw new Error('audit offline');
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit,
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => { trackingBegins += 1; return { handle: {} }; },
+          settleTracking: async (_handle: any, outcome: any) => {
+            trackingSettlements.push(outcome);
+          },
+        },
+        appendAudit,
+        vm: { writeFile: async () => {
+          writes += 1;
+          if (writes === 2) markSecondWrite();
+          return true;
+        } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = (sequence: number) => relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'actor-audit-call',
+          effectId: `actor-audit-call:${sequence}`, effectSequence: sequence,
+          turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
+        });
+        const firstPending = effect(1);
+        await auditStarted;
+        const secondPending = effect(2);
+        await Promise.race([
+          secondWrite,
+          new Promise<void>((resolve) => setTimeout(resolve, 50)),
+        ]);
+        releaseAudit();
+        const [first, second] = await Promise.all([firstPending, secondPending]);
+        const completion = await relay('actor/call-complete', {
+          callId: 'actor-audit-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean completion' },
+        });
+        return {
+          first, second, completion,
+          newMessages: durableMessages('actor-audit-call'),
+        };
+      },
+    }));
+
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(writes).toBe(1);
+    // Both claims reached lifecycle preparation; only physical dispatch waited
+    // for the first mutation's durable audit and observed its terminal latch.
+    expect(trackingBegins).toBe(2);
+    expect(trackingSettlements).toContainEqual(expect.objectContaining({
+      ok: false, outcomeKind: 'pre-effect-failure',
+    }));
+    expect(result.first).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      authorityReceipt: { outcome: 'performed', performed: true, outcomeKnown: true },
+    });
+    expect(result.second).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      authorityReceipt: {
+        outcome: 'not-performed', performed: false, outcomeKnown: true,
+        refused: true, code: 'audit_unavailable',
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, code: 'audit_unavailable', outcomeKnown: true,
+        authorityPerformed: true,
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      retryable: false, authorityPerformed: true, finalText: '',
+    });
+  });
+
+  test('an unknown actor authority effect refuses every later domain mutation', async () => {
+    let writes = 0;
+    let trackingBegins = 0;
+    const trackingSettlements: any[] = [];
+    const audits: any[] = [];
+    let markFirstWrite = () => {};
+    const firstWriteStarted = new Promise<void>((resolve) => { markFirstWrite = resolve; });
+    let releaseFirstWrite = () => {};
+    const firstWriteReleased = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+    let markSecondTracked = () => {};
+    const secondTracked = new Promise<void>((resolve) => { markSecondTracked = resolve; });
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => {
+            trackingBegins += 1;
+            if (trackingBegins === 2) markSecondTracked();
+            return { handle: { sequence: trackingBegins } };
+          },
+          settleTracking: async (handle: any, outcome: any) => {
+            trackingSettlements.push({ handle, outcome });
+          },
+        },
+        appendAudit: async (entry: any) => { audits.push(entry); },
+        vm: { writeFile: async () => {
+          writes += 1;
+          if (writes === 1) {
+            markFirstWrite();
+            await firstWriteReleased;
+          }
+          return writes === 1
+            ? { performed: true, outcomeKnown: false, outcomeKind: 'transport-lost' }
+            : true;
+        } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = (sequence: number) => relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'actor-unknown-call',
+          effectId: `actor-unknown-call:${sequence}`, effectSequence: sequence,
+          turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
+        });
+        const firstPending = effect(1);
+        await firstWriteStarted;
+        const secondPending = effect(2);
+        await secondTracked;
+        releaseFirstWrite();
+        const [first, second] = await Promise.all([firstPending, secondPending]);
+        const completion = await relay('actor/call-complete', {
+          callId: 'actor-unknown-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean completion' },
+        });
+        return { first, second, completion, newMessages: durableMessages('actor-unknown-call') };
+      },
+    }));
+
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(writes).toBe(1);
+    expect(trackingBegins).toBe(2);
+    expect(trackingSettlements).toContainEqual({
+      handle: { sequence: 2 },
+      outcome: expect.objectContaining({
+        ok: false, outcomeKind: 'pre-effect-failure',
+      }),
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_effect_failed',
+      details: expect.objectContaining({
+        operation: 'turn.vm.write-text-file', code: 'authority_outcome_unknown',
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      }),
+    }));
+    expect(result.first).toMatchObject({ outcomeKnown: false, retryable: false });
+    expect(result.second).toMatchObject({
+      ok: false, code: 'authority_outcome_unknown', outcomeKnown: false,
+      authorityReceipt: {
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_authority_outcome_unknown', outcomeKnown: false,
+    });
+  });
+
+  test('an oversized actor result cannot make an unknown authority receipt known', async () => {
+    const unknown = {
+      performed: true, outcomeKnown: false, outcomeKind: 'transport-lost',
+      content: 'x'.repeat(21 * 1024 * 1024),
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => unknown },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const callId = 'actor-oversize-unknown';
+        const effect = await relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration, path: '/tmp/result', content: 'x',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean completion' },
+        });
+        return { effect, completion, newMessages: durableMessages(callId) };
+      },
+    }));
+
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(result.effect).toMatchObject({
+      ok: false, error: 'authority result exceeds its fixed byte cap',
+      outcomeKnown: false, retryable: false,
+    });
+  });
+
+  test('semantic report audit rejection cannot settle an actor run cleanly', async () => {
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async () => { throw new Error('audit offline'); },
+      runOnChannel: async () => ({
+        ok: true, finalText: 'forged clean completion',
+        newMessages: durableMessages('semantic-audit-call'),
+      }),
+    }));
+    await expect(client.run(exactReadJob as any)).resolves.toMatchObject({
+      ok: false, code: 'audit_unavailable', outcomeKnown: true,
+      retryable: false, authorityPerformed: false, finalText: '',
+    });
+  });
+
+  test('Stop settles an abort-ignoring actor host operation unknown', async () => {
+    const controller = new AbortController();
+    let hostStarted!: () => void;
+    const started = new Promise<void>((resolve) => { hostStarted = resolve; });
+    const neverSettles = new Promise<void>(() => {});
+    let writes = 0;
+    let effectReply: any;
+    let completionReply: any;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => {
+          writes += 1;
+          hostStarted();
+          await neverSettles;
+        } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        effectReply = await relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'hung-actor-write',
+          effectId: 'hung-actor-write:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, path: '/tmp/result', content: 'written',
+        });
+        completionReply = await relay('actor/call-complete', {
+          callId: 'hung-actor-write', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean completion' },
+        });
+        return { newMessages: durableMessages('hung-actor-write') };
+      },
+    }));
+    const pending = client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any, { signal: controller.signal });
+    await started;
+    controller.abort();
+    const result: any = await pending;
+    expect(writes).toBe(1);
+    expect(effectReply).toMatchObject({
+      ok: false, outcomeKnown: false, retryable: false,
+      authorityReceipt: { performed: false, outcomeKnown: false, retryable: false },
+    });
+    expect(completionReply).toMatchObject({
+      ok: false, error: 'actor/call-complete: authority retired',
+      outcomeKnown: false, retryable: false,
+    });
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_semantic_completion_missing',
+      outcomeKnown: false, retryable: false, authorityPerformed: false,
+    });
+  });
+
+  test('worker cannot omit a completed receipt-bearing call from its durable transcript', async () => {
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => true },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        await relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'dropped-actor-result',
+          effectId: 'dropped-actor-result:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, path: '/tmp/result', content: 'written',
+        });
+        const completed = await relay('actor/call-complete', {
+          callId: 'dropped-actor-result', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'worker saw the stamped result' },
+        });
+        expect(completed).toMatchObject({ ok: true, result: { authorityPerformed: true } });
+        return { ok: true, finalText: 'discarded result', newMessages: [] };
+      },
+    }));
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_semantic_result_ledger_invalid',
+      outcomeKnown: false, retryable: false, authorityPerformed: true,
+      finalText: '', newMessages: [],
+    });
+  });
+
+  test('a completed failing VM command is performed and cannot be retried as a no-op', async () => {
+    let runs = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { run: async () => {
+          runs += 1;
+          return { ok: false, exitCode: 1, stderr: 'command failed after writing' };
+        } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const callId = 'failing-vm-command';
+        const effect = await relay('vm/run', {
+          operation: 'turn.vm.run', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          command: 'write-then-fail', timeoutMs: 30_000, vmId: 'vm-1',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: false, error: 'forged pre-effect semantic failure', retryable: true },
+        });
+        return { effect, completion, newMessages: durableMessages(callId) };
+      },
+    }));
+    const result: any = await client.run({
+      ...exactReadJob, tools: [{ name: 'vm_run' }],
+      allowedOperations: ['turn.vm.run'],
+    } as any);
+    expect(runs).toBe(1);
+    expect(result.effect).toMatchObject({
+      ok: true,
+      value: {
+        authorityValue: { ok: false, exitCode: 1 },
+        authorityReceipt: { performed: true, outcomeKnown: true, retryable: false },
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      performed: true, outcomeKnown: true,
+      result: { ok: false, authorityPerformed: true, retryable: false },
+    });
+  });
+
+  test('host derives pure semantic audit from a unique model-call/result pair', async () => {
+    const audits: any[] = [];
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      runOnChannel: async () => ({
+        ok: true, finalText: 'done', newMessages: durableMessages('pure-call'),
+      }),
+    }));
+    const result: any = await client.run(exactReadJob as any);
+    expect(result.ok).toBe(true);
+    expect(audits).toEqual([expect.objectContaining({
+      type: 'semantic_report', sessionId: 'actor-1',
+      details: expect.objectContaining({
+        tool: 'fixture_tool', callId: 'pure-call',
+        semantic: true, outcome: 'semantic-success', performed: false,
+      }),
+    })]);
+  });
+
+  test('a missing stored site client remains a known host refusal through actor settlement', async () => {
+    const actorRecord = {
+      kind: 'actor', sessionId: 'site-client-actor', actorType: 'web',
+      instanceId: 'web', backing: 'tab',
+    };
+    const audits: any[] = [];
+    const origin = 'https://api.example.test';
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      sessions: { get: async () => structuredClone(actorRecord) },
+      ownedTabFor: () => 17,
+      buildToolContext: async () => ({
+        session: { sessionId: actorRecord.sessionId, kind: 'actor' },
+        actorType: 'web', actorBacking: 'tab', backing: 'tab', actorInstanceId: 'web',
+        activeTab: { id: 17, windowId: 1, url: `${origin}/items`, origin },
+        authorizeSiteClientOrigin: async (candidate: string) => candidate === origin,
+        siteClients: { get: async () => null },
+        jsOffscreenClient: { execHeadless: async () => ({ ok: true }) },
+        scriptRuns: {},
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async (entry: any) => { audits.push(entry); },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const callId = 'missing-site-client-call';
+        const effect = await relay('site-client/run', {
+          operation: 'turn.site-client.run', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          origin, code: 'return await client.list()', timeoutMs: 5000,
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged semantic success' },
+        });
+        return { effect, completion, newMessages: durableMessages(callId) };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: actorRecord.sessionId, actorType: 'web', backing: 'tab',
+      instanceId: 'web', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+      tools: [{ name: 'site_client_run' }], allowedOperations: ['turn.site-client.run'],
+    } as any);
+    expect(result.effect).toMatchObject({
+      ok: true,
+      value: {
+        authorityValue: {
+          ok: false, performed: false, outcomeKnown: true,
+          outcomeKind: 'pre-effect-failure', retryable: true,
+          error: expect.stringContaining('derive one first'),
+        },
+        authorityReceipt: {
+          outcome: 'not-performed', performed: false, outcomeKnown: true,
+          refused: true, retryable: true,
+        },
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, authorityPerformed: false, outcomeKnown: true, retryable: true,
+        error: expect.stringContaining('derive one first'),
+      },
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_effect',
+      details: expect.objectContaining({
+        operation: 'turn.site-client.run', outcome: 'not-performed',
+        performed: false, outcomeKnown: true, refused: true, retryable: true,
+      }),
+    }));
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'tool_failed',
+      details: expect.objectContaining({
+        outcome: 'refused', performed: false, outcomeKnown: true,
+      }),
+    }));
+  });
+
+  test('foreign or duplicate durable actor results are terminal, never audited', async () => {
+    const audits: any[] = [];
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      runOnChannel: async () => ({
+        ok: true, finalText: 'forged', newMessages: [{
+          role: 'assistant', toolUses: [{ id: 'issued', name: 'now', input: {} }],
+        }, {
+          role: 'user', toolResults: [
+            { tool_use_id: 'foreign', content: 'x', is_error: false },
+            { tool_use_id: 'foreign', content: 'x', is_error: false },
+          ],
+        }],
+      }),
+    }));
+    await expect(client.run(exactReadJob as any)).resolves.toMatchObject({
+      ok: false, code: 'actor_semantic_result_ledger_invalid',
+      outcomeKnown: false, retryable: false,
+    });
+    expect(audits).toEqual([]);
+  });
+
+  test('live Plan mode blocks a raw exact write after a prior Act effect', async () => {
+    let mode = 'act';
+    let writes = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode, confirmActions: false },
+        readAuthorityPermission: async () => ({ mode, confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => { writes += 1; return true; } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = (sequence: number) => relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'permission-call',
+          effectId: `permission-call:${sequence}`, effectSequence: sequence,
+          turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
+        });
+        const allowed = await effect(1);
+        mode = 'plan';
+        const refused = await effect(2);
+        const completion = await relay('actor/call-complete', {
+          callId: 'permission-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged all-success' },
+        });
+        return {
+          allowed, refused, completion,
+          newMessages: durableMessages('permission-call'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      ...exactReadJob,
+      tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(result.allowed).toMatchObject({ ok: true });
+    expect(result.refused).toMatchObject({
+      ok: true,
+      value: { authorityValue: { ok: false, code: 'plan_mode_refused' } },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true, result: { ok: false, authorityPerformed: true, retryable: false },
+    });
+    expect(writes).toBe(1);
+  });
+
+  test('live Act confirmation changes are re-read before a raw exact write', async () => {
+    let confirmActions = false;
+    let writes = 0;
+    let prompts = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions }),
+        confirm: async () => { prompts += 1; return false; },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => { writes += 1; return true; } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = (sequence: number) => relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'confirmation-call',
+          effectId: `confirmation-call:${sequence}`, effectSequence: sequence,
+          turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
+        });
+        const auto = await effect(1);
+        confirmActions = true;
+        const declined = await effect(2);
+        const completion = await relay('actor/call-complete', {
+          callId: 'confirmation-call', turnGeneration: job.turnGeneration,
+          result: { ok: false, error: 'declined', retryable: false },
+        });
+        return {
+          auto, declined, completion,
+          newMessages: durableMessages('confirmation-call'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      ...exactReadJob,
+      tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(result.auto).toMatchObject({ ok: true });
+    expect(result.declined).toMatchObject({
+      ok: true,
+      value: { authorityValue: { ok: false, error: 'declined', retryable: false } },
+    });
+    expect({ writes, prompts }).toEqual({ writes: 1, prompts: 1 });
+  });
+
+  test('a declined self-confirmation overrides forged semantic success', async () => {
+    const actorRecord = {
+      kind: 'actor', sessionId: 'api-actor', actorType: 'web',
+      instanceId: 'https://api.example.test', backing: 'api',
+    };
+    let prompts = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => structuredClone(actorRecord) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'api-actor', kind: 'actor' },
+        actorType: 'web', backing: 'api', actorInstanceId: 'https://api.example.test',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        confirm: async () => { prompts += 1; return false; },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const declined = await relay('resource/confirm-web-write', {
+          operation: 'turn.resource.confirm-web-write', callId: 'confirm-call',
+          effectId: 'confirm-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          url: 'https://api.example.test/write', method: 'POST', headers: {}, body: 'x',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'confirm-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged success after denial' },
+        });
+        return {
+          declined, completion, newMessages: durableMessages('confirm-call'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'api-actor', actorType: 'web', backing: 'api',
+      instanceId: 'https://api.example.test',
+      message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+      maxOutputTokens: 4096, tools: [{ name: 'fetch_url' }],
+      allowedOperations: ['turn.resource.confirm-web-write'],
+    } as any);
+    expect(result.declined).toMatchObject({
+      ok: true,
+      value: {
+        authorityValue: false,
+        authorityReceipt: {
+          outcome: 'not-performed', performed: false, refused: true,
+          code: 'confirmation_declined', retryable: false,
+        },
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, code: 'confirmation_declined',
+        authorityPerformed: false, retryable: false,
+      },
+    });
+    expect(prompts).toBe(1);
+  });
+
+  test('an accepted claim without a host receipt settles unknown despite forged success', async () => {
+    const actorRecord = {
+      kind: 'actor', sessionId: 'app-actor', actorType: 'app', instanceId: 'app-1',
+    };
+    let actions = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => structuredClone(actorRecord) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'app-actor', kind: 'actor' },
+        actorType: 'app', actorInstanceId: 'app-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        appClient: { act: async () => { actions += 1; return { ok: true }; } },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const shared = { value: 1 };
+        const effect = await relay('app/act', {
+          operation: 'turn.app.act', callId: 'missing-receipt-call',
+          effectId: 'missing-receipt-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          action: 'move', params: { first: shared, second: shared },
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'missing-receipt-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged success without host receipt' },
+        });
+        return {
+          ok: true, effect, completion,
+          newMessages: durableMessages('missing-receipt-call'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'app-actor', actorType: 'app', instanceId: 'app-1',
+      message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+      maxOutputTokens: 4096, tools: [{ name: 'app_act' }],
+      allowedOperations: ['turn.app.act'],
+    } as any);
+    expect(actions).toBe(0);
+    expect(result.effect).toMatchObject({
+      ok: false, error: 'turn.app.act: authority arguments are invalid',
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        outcomeKnown: false, retryable: false,
+        authorityReceipts: [{ code: 'authority_receipt_missing' }],
+      },
+    });
+    expect(result).toMatchObject({
+      ok: false, code: 'actor_authority_outcome_unknown',
+      outcomeKnown: false, retryable: false,
+    });
+  });
+
+  for (const change of ['plan', 'confirm'] as const) {
+    test(`a queued exact write rechecks live ${change} policy at the physical edge`, async () => {
+      let mode = 'act';
+      let confirmActions = false;
+      let writes = 0;
+      let trackingCount = 0;
+      let releaseFirst!: () => void;
+      let firstEntered!: () => void;
+      let secondTracked!: () => void;
+      const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      const firstStarted = new Promise<void>((resolve) => { firstEntered = resolve; });
+      const secondPrepared = new Promise<void>((resolve) => { secondTracked = resolve; });
+      const client = makeOffscreenActorClient(baseDeps({
+        buildToolContext: async () => ({
+          session: { sessionId: 'actor-1', kind: 'actor' },
+          actorType: 'webvm', actorInstanceId: 'vm-1',
+          permission: { mode: 'act', confirmActions: false },
+          readAuthorityPermission: async () => ({ mode, confirmActions }),
+          confirm: async () => false,
+          lifecycle: {
+            requiresIntentConfirmation: async () => false,
+            beginTracking: async () => {
+              trackingCount += 1;
+              if (trackingCount === 2) secondTracked();
+              return { handle: {} };
+            },
+            settleTracking: async () => {},
+          },
+          appendAudit: async () => {},
+          vm: {
+            writeFile: async () => {
+              writes += 1;
+              if (writes === 1) {
+                firstEntered();
+                await firstGate;
+              }
+              return true;
+            },
+          },
+        }),
+        runOnChannel: async (job: any, { relay }: any) => {
+          const effect = (sequence: number) => relay('vm/write-text-file', {
+            operation: 'turn.vm.write-text-file', callId: 'queued-policy-call',
+            effectId: `queued-policy-call:${sequence}`, effectSequence: sequence,
+            turnGeneration: job.turnGeneration, path: `/tmp/${sequence}`, content: 'x',
+          });
+          const first = effect(1);
+          await firstStarted;
+          const second = effect(2);
+          await secondPrepared;
+          if (change === 'plan') mode = 'plan';
+          else confirmActions = true;
+          releaseFirst();
+          const results = { first: await first, second: await second };
+          const completion = await relay('actor/call-complete', {
+            callId: 'queued-policy-call', turnGeneration: job.turnGeneration,
+            result: { ok: false, error: 'policy changed', retryable: false },
+          });
+          return {
+            ...results, completion,
+            newMessages: durableMessages('queued-policy-call'),
+          };
+        },
+      }));
+      const result: any = await client.run({
+        ...exactReadJob,
+        tools: [{ name: 'vm_write_file' }],
+        allowedOperations: ['turn.vm.write-text-file'],
+      } as any);
+      expect(result.first).toMatchObject({ ok: true });
+      expect(result.second).toMatchObject({ ok: false, outcomeKnown: true });
+      expect(writes).toBe(1);
+    });
+  }
+
+  test('nested page-program completion does not wait on its active parent call', async () => {
+    const listeners = new Set<(tabId: number, change: any) => void>();
+    let currentUrl = 'https://www.wikipedia.org/';
+    let channelRelay: any = null;
+    let currentParentEffect = '';
+    let nestedCompleted = false;
+    let confirmations = 0;
+    const spilled: any[] = [];
+    const tabs = {
+      get: async () => ({ id: 7, windowId: 1, url: currentUrl }),
+      update: async (tabId: number, update: { url: string }) => {
+        currentUrl = update.url;
+        queueMicrotask(() => {
+          for (const listener of listeners) listener(tabId, { url: update.url });
+          for (const listener of listeners) listener(tabId, { status: 'complete' });
+        });
+        return { id: tabId, url: update.url };
+      },
+      onUpdated: {
+        addListener: (listener: any) => listeners.add(listener),
+        removeListener: (listener: any) => listeners.delete(listener),
+      },
+    };
+    const actorRecord = {
+      kind: 'actor', sessionId: 'web-actor', actorType: 'web',
+      instanceId: 'web', backing: 'tab',
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => structuredClone(actorRecord) },
+      ownedTabFor: () => 7,
+      buildToolContext: async () => ({
+        session: { sessionId: 'web-actor', kind: 'actor' },
+        actorType: 'web', actorBacking: 'tab', backing: 'tab', actorInstanceId: 'web',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        activeTab: { id: 7, windowId: 1, url: currentUrl, origin: new URL(currentUrl).origin },
+        tabs, denylist: [],
+        scripting: {
+          executeScript: async ({ target, args }: any) => target.documentIds && args
+            ? [{
+                documentId: `document:${currentUrl}`,
+                result: { ok: true, clicked: true, tag: 'BUTTON', text: 'Continue', matchedCount: 1 },
+              }]
+            : target.documentIds
+              ? [{ documentId: `document:${currentUrl}`, result: { has: false, capped: false } }]
+              : [{
+                  documentId: `document:${currentUrl}`,
+                  result: {
+                    origin: new URL(currentUrl).origin, href: currentUrl, timeOrigin: 1,
+                  },
+                }],
+        },
+        ensureBrowserNetworkGuard: async () => ({ ok: true }),
+        armBrowserChildQuarantine: async () => ({ ok: true }),
+        updateBrowserNetworkGuardOrigin: async () => ({ ok: true }),
+        judgeLanding: async () => ({ action: 'continue' }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        confirm: async () => { confirmations += 1; return true; },
+        webFetch: async (url: string) => {
+          const bytes = new TextEncoder().encode('<main><h1>Nested result</h1></main>');
+          let sent = false;
+          return {
+            status: 200, url, headers: new Headers({ 'content-type': 'text/html' }),
+            body: { getReader: () => ({
+              read: async () => {
+                if (sent) return { done: true, value: undefined };
+                sent = true;
+                return { done: false, value: bytes };
+              },
+              cancel: () => {}, releaseLock: () => {},
+            }) },
+          };
+        },
+        webOffscreenClient: {
+          extractMarkdown: async () => ({ readerable: true, markdown: '# Nested result' }),
+        },
+        resultStore: {
+          key: () => 'result:nested',
+          put: async (record: any) => { spilled.push(record); },
+        },
+        scriptRuns: {
+          mintRunId: () => 'page-program-run', register: () => {}, release: () => {},
+        },
+        jsOffscreenClient: {
+          execHeadless: async () => {
+            const nestedPageCall = nestedActorProgramCallId(
+              'aw-1-1', currentParentEffect, 'page-semantic-1',
+            );
+            const nested = await channelRelay('page/navigate', {
+              operation: 'turn.page.navigate', callId: nestedPageCall,
+              effectId: `${nestedPageCall}:1`, effectSequence: 1,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+              args: { url: 'https://www.wikipedia.org/wiki/Test' },
+            });
+            expect(nested).toMatchObject({ ok: true });
+            const completion = await channelRelay('actor/call-complete', {
+              callId: nestedPageCall, turnGeneration: 'aw-1-1:1',
+              result: { ok: true, content: 'nested complete' },
+            });
+            expect(completion).toMatchObject({ ok: true, result: { ok: true } });
+            const nestedClickCall = nestedActorProgramCallId(
+              'aw-1-1', currentParentEffect, 'page-semantic-2',
+            );
+            const clicked = await channelRelay('page/click', {
+              operation: 'turn.page.click', callId: nestedClickCall,
+              effectId: `${nestedClickCall}:1`, effectSequence: 1,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+              args: { selector: '#continue' },
+            });
+            expect(clicked).toMatchObject({
+              ok: true,
+              value: { authorityValue: { ok: true } },
+            });
+            const clickedCompletion = await channelRelay('actor/call-complete', {
+              callId: nestedClickCall, turnGeneration: 'aw-1-1:1',
+              result: { ok: true, content: 'nested click complete' },
+            });
+            expect(clickedCompletion).toMatchObject({ ok: true, result: { ok: true } });
+            const webRequest = {
+              url: 'https://www.wikipedia.org/api/save', method: 'POST',
+              headers: { 'Content-Type': 'application/json' }, body: '{"ok":true}',
+            };
+            const nestedFetchCall = nestedActorProgramCallId(
+              'aw-1-1', currentParentEffect, 'page-semantic-3',
+            );
+            const confirmed = await channelRelay('resource/confirm-web-write', {
+              operation: 'turn.resource.confirm-web-write', callId: nestedFetchCall,
+              effectId: `${nestedFetchCall}:1`, effectSequence: 1,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+              ...webRequest,
+            });
+            expect(confirmed).toMatchObject({ ok: true, value: { authorityValue: true } });
+            const fetched = await channelRelay('resource/request-web-text', {
+              operation: 'turn.resource.request-web-text', callId: nestedFetchCall,
+              effectId: `${nestedFetchCall}:2`, effectSequence: 2,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+              ...webRequest,
+            });
+            expect(fetched).toMatchObject({
+              ok: true,
+              value: { authorityValue: { ok: true, status: 200, bodyTruncated: false } },
+            });
+            const extracted = await channelRelay('resource/extract-markdown', {
+              operation: 'turn.resource.extract-markdown', callId: nestedFetchCall,
+              effectId: `${nestedFetchCall}:3`, effectSequence: 3,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+              html: '<main><h1>Nested result</h1></main>', url: webRequest.url,
+            });
+            expect(extracted).toMatchObject({ ok: true });
+            const spill = await channelRelay('resource/spill-result', {
+              operation: 'turn.resource.spill-result', callId: nestedFetchCall,
+              effectId: `${nestedFetchCall}:4`, effectSequence: 4,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+              url: webRequest.url, format: 'markdown', text: '# Nested result',
+              producer: 'fetch_url', fenced: true,
+              originLabel: 'https://www.wikipedia.org',
+            });
+            expect(spill).toMatchObject({ ok: true, value: { authorityValue: 'result:nested' } });
+            const fetchCompletion = await channelRelay('actor/call-complete', {
+              callId: nestedFetchCall, turnGeneration: 'aw-1-1:1',
+              result: { ok: true, content: 'nested fetch complete' },
+            });
+            expect(fetchCompletion).toMatchObject({ ok: true, result: { ok: true } });
+            nestedCompleted = true;
+            return { ok: true, content: 'program complete' };
+          },
+        },
+      }),
+      now: () => 1,
+      runOnChannel: async (job: any, { relay }: any) => {
+        channelRelay = relay;
+        const reply: any[] = [];
+        const completion: any[] = [];
+        for (const suffix of ['a', 'b']) {
+          const callId = `outer-page-call-${suffix}`;
+          currentParentEffect = `${callId}:1`;
+          const outer = relay('page/run-program', {
+            operation: 'turn.page.run-program', callId,
+            effectId: currentParentEffect, effectSequence: 1,
+            turnGeneration: job.turnGeneration,
+            args: { code: 'await page.goto("https://www.wikipedia.org/wiki/Test")' },
+            pageProgramSemanticToken: `page-token-${suffix}`,
+          });
+          reply.push(await Promise.race([
+            outer,
+            new Promise((resolve) => setTimeout(() => resolve({ ok: false, timeout: true }), 100)),
+          ]));
+          completion.push(await relay('actor/call-complete', {
+            callId, turnGeneration: job.turnGeneration,
+            result: { ok: true, content: 'outer complete' },
+          }));
+        }
+        return {
+          reply, completion,
+          newMessages: durableMessages('outer-page-call-a', 'outer-page-call-b'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'web-actor', actorType: 'web', backing: 'tab', actorSurface: 'code',
+      message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+      maxOutputTokens: 4096, tools: [{ name: 'page_code' }],
+      allowedOperations: ['turn.page.run-program'],
+      programTools: [{ name: 'navigate' }, { name: 'click' }, { name: 'fetch_url' }],
+      programOperations: [
+        'turn.page.navigate', 'turn.page.click',
+        'turn.resource.confirm-web-write', 'turn.resource.request-web-text',
+        'turn.resource.extract-markdown', 'turn.resource.spill-result',
+      ],
+    } as any);
+    expect(result.reply).toHaveLength(2);
+    expect(result.reply.every((entry: any) => entry.ok === true
+      && entry.timeout === undefined)).toBe(true);
+    expect(result.completion).toHaveLength(2);
+    expect(result.completion.every((entry: any) => entry.ok === true
+      && entry.result?.ok === true)).toBe(true);
+    expect({ nestedCompleted, currentUrl }).toEqual({
+      nestedCompleted: true, currentUrl: 'https://www.wikipedia.org/wiki/Test',
+    });
+    expect(confirmations).toBe(2);
+    expect(spilled).toHaveLength(2);
+  });
+
+  test('nested app program observe and act use the exact parent-bound authority path', async () => {
+    let channelRelay: any = null;
+    let currentParentEffect = '';
+    const hostCalls: any[] = [];
+    const actorRecord = {
+      kind: 'actor', sessionId: 'app-actor', actorType: 'app',
+      instanceId: 'app-1', actorSurface: 'code',
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => structuredClone(actorRecord) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'app-actor', kind: 'actor' },
+        actorType: 'app', actorInstanceId: 'app-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        appAgentCall: async (method: string, args: any) => {
+          hostCalls.push({ method, args });
+          return method === 'observe'
+            ? { ok: true, value: { screen: 'game' } }
+            : { ok: true, value: { accepted: true } };
+        },
+        scriptRuns: {
+          mintRunId: () => 'app-program-run', register: () => {}, release: () => {},
+        },
+        jsOffscreenClient: {
+          execHeadless: async () => {
+            const observedCallId = nestedActorProgramCallId(
+              'aw-1-1', currentParentEffect, 'app-semantic-1',
+            );
+            const observed = await channelRelay('app/observe', {
+              operation: 'turn.app.observe', callId: observedCallId,
+              effectId: `${observedCallId}:1`, effectSequence: 1,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+            });
+            expect(observed).toMatchObject({ ok: true });
+            const observedCompletion = await channelRelay('actor/call-complete', {
+              callId: observedCallId, turnGeneration: 'aw-1-1:1',
+              result: { ok: true, structured: { value: { screen: 'game' } } },
+            });
+            expect(observedCompletion).toMatchObject({ ok: true });
+            const actedCallId = nestedActorProgramCallId(
+              'aw-1-1', currentParentEffect, 'app-semantic-2',
+            );
+            const acted = await channelRelay('app/act', {
+              operation: 'turn.app.act', callId: actedCallId,
+              effectId: `${actedCallId}:1`, effectSequence: 1,
+              turnGeneration: 'aw-1-1:1', parentCallId: currentParentEffect,
+              action: 'move', params: { x: 1 },
+            });
+            expect(acted).toMatchObject({ ok: true });
+            const actedCompletion = await channelRelay('actor/call-complete', {
+              callId: actedCallId, turnGeneration: 'aw-1-1:1',
+              result: { ok: true, structured: { value: { accepted: true } } },
+            });
+            expect(actedCompletion).toMatchObject({ ok: true });
+            return { value: { screen: 'game' }, consoleOutput: [], durationMs: 1, error: null };
+          },
+        },
+      }),
+      now: () => 1,
+      runOnChannel: async (job: any, { relay }: any) => {
+        channelRelay = relay;
+        const outer: any[] = [];
+        const completion: any[] = [];
+        for (const suffix of ['a', 'b']) {
+          const callId = `outer-app-call-${suffix}`;
+          currentParentEffect = `${callId}:1`;
+          outer.push(await relay('app/run-code', {
+            operation: 'turn.app.run-code', callId,
+            effectId: currentParentEffect, effectSequence: 1,
+            turnGeneration: job.turnGeneration,
+            code: 'const before = await app.observe(); await app.act("move", {x:1}); return before;',
+            timeoutMs: 5000, appProgramSemanticToken: `app-program-token-${suffix}`,
+          }));
+          completion.push(await relay('actor/call-complete', {
+            callId, turnGeneration: job.turnGeneration,
+            result: { ok: true, content: 'app program complete' },
+          }));
+        }
+        return {
+          outer, completion,
+          newMessages: durableMessages('outer-app-call-a', 'outer-app-call-b'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: 'app-actor', actorType: 'app', instanceId: 'app-1',
+      actorSurface: 'code', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+      tools: [{ name: 'app_code' }], allowedOperations: ['turn.app.run-code'],
+      programTools: [{ name: 'app_observe' }, { name: 'app_act' }],
+      programOperations: ['turn.app.observe', 'turn.app.act'],
+    } as any);
+    expect(result.outer).toHaveLength(2);
+    expect(result.outer.every((entry: any) => entry.ok === true)).toBe(true);
+    expect(result.completion).toHaveLength(2);
+    expect(result.completion.every((entry: any) => entry.ok === true
+      && entry.result?.ok === true)).toBe(true);
+    expect(hostCalls).toEqual([
+      { method: 'observe', args: {} },
+      { method: 'act', args: { action: 'move', params: { x: 1 } } },
+      { method: 'observe', args: {} },
+      { method: 'act', args: { action: 'move', params: { x: 1 } } },
     ]);
   });
 
-  test('rechecks the inbound grant at dispatch and rebuilds an untrusted stripped ctx', async () => {
-    const buildOpts: any[] = [];
-    const dispatches: string[] = [];
-    let dispatchedCtx: any = null;
-    let restrictedTo: string[] = [];
-    const { client, during } = clientWithRelay({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'dweb', instanceId: 'dweb' }) },
-      buildToolContext: async (opts: any) => {
-        buildOpts.push(opts);
-        // Simulate a ctx builder that forgot the derived bit. The live SW grant
-        // must still stamp inbound and strip the signing-worker closure.
-        return { inbound: false, synthetic: false, jsOffscreenClient: { run: true }, dweb: { peers: true } };
+  const runActorMessageLifecycle = async ({
+    lifecycle, deliverMessage, signal, workerFailure = false,
+  }: {
+    lifecycle: any;
+    deliverMessage: () => Promise<any> | any;
+    signal?: AbortSignal;
+    workerFailure?: boolean;
+  }) => {
+    const spawned = {
+      kind: 'spawned', sessionId: 'actor-lifecycle-child', parentSessionId: 'chat-root',
+      spawnedTrusted: true, grantedOperations: ['turn.actor.message'],
+    };
+    const audits: any[] = [];
+    let deliveries = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      sessions: { get: async (id: string) => id === spawned.sessionId
+        ? structuredClone(spawned)
+        : id === 'chat-root' ? { kind: 'chat', sessionId: 'chat-root' } : null },
+      buildToolContext: async () => ({
+        session: { sessionId: spawned.sessionId, kind: 'spawned', depth: 1 },
+        inbound: false,
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        actorAuthority: {
+          deliverMessage: async () => {
+            deliveries += 1;
+            return deliverMessage();
+          },
+        },
+        lifecycle: { requiresIntentConfirmation: async () => false, ...lifecycle },
+        appendAudit: async (entry: any) => { audits.push(entry); },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const callId = 'actor-lifecycle-call';
+        const effect = await relay('actor/message-deliver', {
+          operation: 'turn.actor.message', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          to: 'web', message: 'inspect', oneShot: false,
+          awaitReply: true, degradeToAsync: false, awaitCapMs: 30_000,
+        });
+        const completion = await relay('actor/call-complete', {
+          callId, turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'stale semantic success' },
+        });
+        if (workerFailure) return {
+          ok: false, started: true, code: 'actor_worker_error',
+          error: 'outcome_unknown: Verify the target before retrying.',
+          outcomeKnown: false, retryable: false,
+        };
+        return { effect, completion, newMessages: durableMessages(callId) };
       },
-      restrictCtxCapabilities: (ctx: any, allowed: Set<string>) => {
-        restrictedTo = [...allowed];
-        const narrowed = { ...ctx };
-        if (!allowed.has('a2a_run')) delete narrowed.jsOffscreenClient;
-        return narrowed;
-      },
-      dispatchToolCall: async (call: any, ctx: any) => {
-        dispatches.push(call.name);
-        dispatchedCtx = ctx;
-        return { ok: true, content: 'safe read' };
-      },
-    });
-    const out = await during(async (relayToken) => {
-      const forbidden = await client.routes['actor/tool-dispatch']({
-        relayToken, call: { name: 'a2a_run', args: { code: 'await mesh.send(...)' } },
-      }, OFFSCREEN);
-      const allowed = await client.routes['actor/tool-dispatch']({
-        relayToken, call: { name: 'dweb_peers', args: {} },
-      }, OFFSCREEN);
-      return { forbidden, allowed };
-    }, 'dweb', undefined, {
-      actorType: 'dweb', inbound: true,
-      tools: ['dweb_peers', 'a2a_run', 'dweb_share', 'dweb_install']
-        .map((name) => ({ name, description: name, schema: {} })),
-    });
-
-    expect(out.forbidden.ok).toBe(false);
-    expect(out.forbidden.error).toContain('tool_not_available_to_inbound_actor');
-    expect(out.allowed).toEqual({ ok: true, result: { ok: true, content: 'safe read' } });
-    expect(dispatches).toEqual(['dweb_peers']);
-    expect(buildOpts).toEqual([expect.objectContaining({ synthetic: true, trusted: false })]);
-    expect(dispatchedCtx).toEqual(expect.objectContaining({ synthetic: true, trusted: false, inbound: true }));
-    expect(dispatchedCtx.jsOffscreenClient).toBeUndefined();
-    expect(restrictedTo).toEqual(['dweb_peers']);
-  });
-
-  test('fails closed when an inbound ctx capability filter is not wired', async () => {
-    let dispatched = false;
-    const { client, during } = clientWithRelay({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'dweb', instanceId: 'dweb' }) },
-      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
-    });
-    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({
-      relayToken, call: { name: 'dweb_peers', args: {} },
-    }, OFFSCREEN), 'dweb', undefined, {
-      actorType: 'dweb', inbound: true,
-      tools: [{ name: 'dweb_peers', description: 'peers', schema: {} }],
-    });
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('inbound capability filter not wired');
-    expect(dispatched).toBe(false);
-  });
-});
-
-describe("routes['actor/tool-dispatch'] — SW-side pin + gate + owned-tab thread", () => {
-  test('a bound actor tool receives the live turn AbortSignal', async () => {
-    let seenSignal: AbortSignal | undefined;
-    const controller = new AbortController();
-    const { client, during } = clientWithRelay({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
-      buildToolContext: async () => ({}),
-      dispatchToolCall: async (_call: any, ctx: any) => {
-        seenSignal = ctx.abortSignal;
-        return { ok: true };
-      },
-    });
-    const out = await during(
-      (relayToken) => client.routes['actor/tool-dispatch']({
-        relayToken, call: { name: 'vm_boot', args: {} },
-      }, OFFSCREEN),
-      's1', undefined, {}, { signal: controller.signal },
-    );
-    expect(out.ok).toBe(true);
-    expect(seenSignal).not.toBe(controller.signal);   // host-owned run signal
-    expect(seenSignal?.aborted).toBe(true);            // settlement cancels relays
-  });
-
-  test('a WEB (tab) actor threads its owned tab into buildToolContext + re-pins', async () => {
-    let ctxOpts: any = null;
-    let pinned: any = null;
-    const { client, during } = clientWithRelay({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', backing: undefined, instanceId: 'web' }) },
-      ownedTabFor: () => 42,
-      buildToolContext: async (o: any) => { ctxOpts = o; return { ctx: true }; },
-      pinActorCall: (call: any, at: string, id: string) => { pinned = { call, at, id }; },
-      dispatchToolCall: async () => ({ ok: true, content: 'snapshot' }),
-    });
-    const out = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'snapshot', args: {} } }, OFFSCREEN));
-    expect(out).toEqual({ ok: true, result: { ok: true, content: 'snapshot' } });
-    expect(ctxOpts.activeTabId).toBe(42);           // the owned tab reached the ctx
-    expect(ctxOpts.actorType).toBe('web');
-    expect(pinned.id).toBe('web');                  // re-pinned to the bound instance
-  });
-
-  test('a WEB actor relay keeps the surface resolved at turn start', async () => {
-    let liveSetting = 'code';
-    let ctxOpts: any = null;
-    const { client, during } = clientWithRelay({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', instanceId: 'web' }) },
-      buildToolContext: async (o: any) => { ctxOpts = { ...o, liveSetting }; return {}; },
-      dispatchToolCall: async () => ({ ok: true }),
-    });
-    await during(async (relayToken) => {
-      // Settings can change while the Worker is reasoning. The SW-owned grant
-      // must carry the already-advertised surface into every relayed dispatch.
-      liveSetting = 'tools';
-      return client.routes['actor/tool-dispatch']({
-        relayToken, call: { name: 'page_code', args: { code: 'return 1' } },
-      }, OFFSCREEN);
-    }, 's1', undefined, { actorType: 'web', actorSurface: 'code' });
-    expect(ctxOpts.liveSetting).toBe('tools');
-    expect(ctxOpts.actorSurface).toBe('code');
-  });
-
-  test('an API actor (backing api) gets NO tab (fetch-only, no DOM)', async () => {
-    let ctxOpts: any = null;
-    const { client, during } = clientWithRelay({
-      sessions: { get: async () => ({ kind: 'actor', actorType: 'web', backing: 'api', instanceId: 'https://api.example.com' }) },
-      ownedTabFor: () => 42,   // even if a tab existed, an API actor must not receive it
-      buildToolContext: async (o: any) => { ctxOpts = o; return {}; },
-      dispatchToolCall: async () => ({ ok: true }),
-    });
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'fetch_url', args: {} } }, OFFSCREEN));
-    expect(ctxOpts.activeTabId).toBeUndefined();
-  });
-
-  test('an ENGINE actor gets no tab; refuses a non-actor/non-actor session', async () => {
-    let ctxOpts: any = null;
-    const { client, during } = clientWithRelay({
-      sessions: { get: async (id: string) => (id === 'engine' ? { kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' } : { kind: 'chat' }) },
-      ownedTabFor: () => 99,
-      buildToolContext: async (o: any) => { ctxOpts = o; return {}; },
-      dispatchToolCall: async () => ({ ok: true }),
-    });
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_boot', args: {} } }, OFFSCREEN), 'engine');
-    expect(ctxOpts.activeTabId).toBeUndefined();     // engine acts on its instance, not a tab
-    // The grant now decides WHICH session is dispatched against, so a chat-session
-    // grant reaches the kind check and is refused there.
-    const refused = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'x', args: {} } }, OFFSCREEN), 'chatSession');
-    expect(refused.ok).toBe(false);
-    expect(refused.error).toContain('not an actor or actor session');
-  });
-});
-
-// The relay grant (P0-2): identity comes from a per-run token minted SW-side, not
-// from the message. why it matters: these routes ride the one runtime.onMessage
-// surface whose only guard is "some first-party extension context" — which is every
-// engine tab page and the side panel. Before the grant, any of them could dispatch a
-// tool as an arbitrary actor session (inheriting its instance pin and granted tools)
-// or spend the user's key on a dead run just by naming it in the payload.
-describe('relay grant — routes refuse anything without a live token', () => {
-  const dispatchDeps = {
-    sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
-    buildToolContext: async () => ({}),
-    dispatchToolCall: async () => ({ ok: true, content: 'ran' }),
+    }));
+    const result: any = await client.run({
+      actorSessionId: spawned.sessionId, message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', tools: [{ name: 'message_actor' }],
+      allowedOperations: ['turn.actor.message'],
+    } as any, signal ? { signal } : undefined);
+    return { result, audits, deliveries };
   };
 
-  test('tool-dispatch with a FORGED session id and no token is refused', async () => {
-    let dispatched = false;
-    const client = makeOffscreenActorClient(baseDeps({
-      ...dispatchDeps,
-      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
-    }));
-    const out: any = await client.routes['actor/tool-dispatch']({ actorSessionId: 'victim-actor', call: { name: 'vm_exec', args: {} } } as any, OFFSCREEN);
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('unauthorized relay');
-    expect(dispatched).toBe(false);   // refused BEFORE any ctx build or dispatch
-  });
-
-  test('model-call without a token never reaches the key-bearing provider call', async () => {
-    let called = false;
-    const client = makeOffscreenActorClient(baseDeps({
-      callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
-    }));
-    const out: any = await client.routes['actor/model-call']({ runId: 'aw-guess', args: {} } as any, OFFSCREEN);
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('unauthorized relay');
-    expect(called).toBe(false);
-  });
-
-  test('a token is RETIRED when its run settles — a replayed relay is refused', async () => {
-    let leaked = '';
-    const { client, during } = clientWithRelay(dispatchDeps);
-    await during(async (relayToken) => { leaked = relayToken; return null; });
-    // Same token, after the run — the liveness half of the grant.
-    const out: any = await client.routes['actor/tool-dispatch']({ relayToken: leaked, call: { name: 'vm_exec', args: {} } }, OFFSCREEN);
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('unauthorized relay');
-  });
-
-  test("one run's token cannot dispatch against another run's session", async () => {
-    // Two concurrent runs; each grant resolves to its OWN session, so the session a
-    // relay acts on is decided by the token, never by the caller.
-    const seen: string[] = [];
-    const { client, during } = clientWithRelay({
-      sessions: { get: async (id: string) => { seen.push(id); return { kind: 'actor', actorType: 'webvm', instanceId: id }; } },
-      buildToolContext: async () => ({}),
-      dispatchToolCall: async () => ({ ok: true }),
-    });
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }, OFFSCREEN), 'actor-A');
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }, OFFSCREEN), 'actor-B');
-    expect(seen).toEqual(['actor-A', 'actor-B']);
-  });
-
-  test('loop-event without a token cannot inject progress into a run', async () => {
-    // Assert the event is NOT DELIVERED, not merely that the reply says no: a route
-    // that forwarded first and returned {ok:false} after would pass the weaker check
-    // while doing exactly the injection this forbids.
-    const seen: any[] = [];
-    const { client, during } = clientWithRelay({});
-    const out: any = await during(async (relayToken) => {
-      // A live run exists (its onEvent is recording), but this relay carries no token.
-      const r = await client.routes['actor/loop-event']({ event: { type: 'fake' } } as any, OFFSCREEN);
-      // ...and a live token from a page that is not the offscreen doc is equally refused.
-      await client.routes['actor/loop-event']({ relayToken, event: { type: 'forged' } }, ENGINE_TAB);
-      return r;
-    }, 's1', (ev: any) => seen.push(ev));
-    expect(out.ok).toBe(false);
-    expect(seen).toEqual([]);
-  });
-});
-
-// Firefox's private background host still uses a token to bind each relay to a
-// live run. Even there, a token-bearing call from a different extension page
-// must get nowhere. Chrome closes the grant over a targeted MessageChannel.
-describe('relay sender pin — a leaked token is useless from any other page', () => {
-  const dispatchDeps = {
-    sessions: { get: async () => ({ kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' }) },
-    buildToolContext: async () => ({}),
-  };
-
-  test('an engine tab replaying a LIVE token cannot dispatch a tool', async () => {
-    let dispatched = false;
-    const { client, during } = clientWithRelay({
-      ...dispatchDeps,
-      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
-    });
-    const out: any = await during((relayToken) =>
-      client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'vm_exec', args: {} } }, ENGINE_TAB));
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('unauthorized relay');
-    expect(dispatched).toBe(false);
-  });
-
-  test('an engine tab replaying a LIVE token cannot spend the key', async () => {
-    let called = false;
-    const { client, during } = clientWithRelay({
-      callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
-    });
-    const out: any = await during((relayToken) =>
-      client.routes['actor/model-call']({ relayToken, args: {} }, ENGINE_TAB));
-    expect(out.ok).toBe(false);
-    expect(called).toBe(false);
-  });
-
-  test('an unwired client refuses every relay (fail-closed, not fail-open)', async () => {
-    // isOffscreenSender defaults to () => false: forgetting to wire the predicate
-    // must break the lane loudly rather than silently drop the boundary.
-    let relayed: any = null;
-    const client = makeOffscreenActorClient({ ...baseDeps({ ...dispatchDeps }), isOffscreenSender: undefined } as any);
-    const r = await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' } as any)
-      .catch(() => null);
-    relayed = await client.routes['actor/tool-dispatch']({ relayToken: 'anything', call: { name: 'vm_exec', args: {} } }, OFFSCREEN);
-    expect(relayed.ok).toBe(false);
-    expect(relayed.error).toContain('unauthorized relay');
-    expect(r).not.toBeUndefined();
-  });
-});
-
-// The actor lane's spend-limit preflight (P0-3): actors spend the user's money on
-// the owning chat session, and this relay is where the key is added — so a session
-// past the hard cap must not be pushed further by delegating to an actor.
-describe('actor/model-call — spend-limit preflight', () => {
-  test('refuses before the key-bearing call when the owning chat is past the cap', async () => {
-    let called = false;
-    const { client, during } = clientWithRelay({
-      callModel: async function* () { called = true; yield { type: 'text', text: 'x' }; },
-      spendRefusalFor: async () => 'actor refused: the session spend limit ($5) is reached',
-    });
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN));
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('spend limit');
-    expect(called).toBe(false);
-  });
-
-  test('proceeds when under the cap, and is asked about the RUN\'s session', async () => {
-    const asked: string[] = [];
-    const { client, during } = clientWithRelay({
-      callModel: async function* () { yield { type: 'text', text: 'hi' }; },
-      spendRefusalFor: async (sid: string) => { asked.push(sid); return null; },
-    });
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({ relayToken, args: {} }, OFFSCREEN), 'actor-A');
-    expect(out.ok).toBe(true);
-    expect(asked).toEqual(['actor-A']);
-  });
-});
-
-describe('actor/model-call: trusted run metadata wins over worker args', () => {
-  test('pins provider, model, and Ollama host at the key-bearing boundary', async () => {
-    let seen: any = null;
-    const { client, during } = clientWithRelay({
-      callModel: async function* (args: any) { seen = args; yield { type: 'text', text: 'ok' }; },
-      sendMessage: undefined,
-    });
-    // The helper's job is anthropic/model m. The worker-controlled payload tries
-    // to switch all three fields; the live grant must overwrite it.
-    const out: any = await during((relayToken) => client.routes['actor/model-call']({
-      relayToken,
-      args: { provider: 'openai', model: 'expensive-unknown', ollamaHost: 'http://attacker.test' },
-    }, OFFSCREEN));
-    expect(out.ok).toBe(true);
-    expect(seen.provider).toBe('anthropic');
-    expect(seen.model).toBe('m');
-    expect(seen.ollamaHost).toBeUndefined();
-  });
-});
-
-describe('run(): relay lifetime', () => {
-  test('aborts the SW-side relay signal whenever the host settles', async () => {
-    let relaySignal: AbortSignal | null = null;
-    let client: any;
-    client = makeOffscreenActorClient(baseDeps({
-      sessions: { get: async () => ({ kind: 'spawned', grantedTools: ['script'] }) },
-      restrictCtxCapabilities: (ctx: any) => ctx,
-      buildToolContext: async () => ({}),
-      dispatchToolCall: async (_call: any, ctx: any) => {
-        relaySignal = ctx.abortSignal;
-        return { ok: true };
-      },
-      sendMessage: async (message: any) => {
-        if (message.type === 'actor/run') {
-          await client.routes['actor/tool-dispatch']({
-            relayToken: message.job.relayToken,
-            call: { name: 'script', args: {} },
-          }, OFFSCREEN);
-          return { ok: true, started: true, finalText: 'done' };
-        }
-        return { ok: true };
-      },
-    }));
-
-    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
-    await Promise.resolve();
-    expect(relaySignal).not.toBeNull();
-    expect((relaySignal as unknown as AbortSignal).aborted).toBe(true);
-  });
-
-  test('a model relay suspended in preflight cannot start after its host settles', async () => {
-    let releasePreflight!: () => void;
-    const preflightGate = new Promise<void>((resolve) => { releasePreflight = resolve; });
-    let enteredPreflight!: () => void;
-    const preflightEntered = new Promise<void>((resolve) => { enteredPreflight = resolve; });
-    let routeResult: Promise<any> = Promise.resolve(null);
-    let modelCalled = false;
-    let client: any;
-    client = makeOffscreenActorClient(baseDeps({
-      spendRefusalFor: async () => {
-        enteredPreflight();
-        await preflightGate;
-        return null;
-      },
-      callModel: async function* () { modelCalled = true; yield { type: 'text', text: 'forbidden' }; },
-      sendMessage: async (message: any) => {
-        if (message.type === 'actor/run') {
-          routeResult = client.routes['actor/model-call']({
-            relayToken: message.job.relayToken,
-            args: {},
-          }, OFFSCREEN);
-          await preflightEntered;
-          return { ok: true, started: true, finalText: 'host settled' };
-        }
-        return { ok: true };
-      },
-    }));
-
-    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
-    releasePreflight();
-    expect(await routeResult).toEqual({ ok: false, error: 'aborted' });
-    expect(modelCalled).toBe(false);
-  });
-
-  test('a tool relay suspended in session lookup cannot dispatch after its host settles', async () => {
-    let releaseSession!: () => void;
-    const sessionGate = new Promise<void>((resolve) => { releaseSession = resolve; });
-    let enteredSession!: () => void;
-    const sessionEntered = new Promise<void>((resolve) => { enteredSession = resolve; });
-    let routeResult: Promise<any> = Promise.resolve(null);
-    let dispatched = false;
-    let client: any;
-    client = makeOffscreenActorClient(baseDeps({
-      sessions: {
-        get: async () => {
-          enteredSession();
-          await sessionGate;
-          return { kind: 'actor', actorType: 'webvm', instanceId: 'vm-1' };
+  test('lifecycle unknown overrides stale actor cancellation but preserves identity and receipt', async () => {
+    const settled: any[] = [];
+    const recovery = {
+      category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+      retryRequires: ['external-verification'], verificationRequired: true,
+      keepIdempotencyKey: false, reason: 'actor delivery settlement was lost',
+    };
+    const { result, audits } = await runActorMessageLifecycle({
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-unknown' } }),
+        settleTracking: async (_handle: any, outcome: any) => {
+          settled.push(outcome);
+          return { error: 'outcome_unknown: verify actor delivery before retrying', recovery };
         },
       },
-      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
-      sendMessage: async (message: any) => {
-        if (message.type === 'actor/run') {
-          routeResult = client.routes['actor/tool-dispatch']({
-            relayToken: message.job.relayToken,
-            call: { name: 'vm_exec', args: {} },
-          }, OFFSCREEN);
-          await sessionEntered;
-          return { ok: true, started: true, finalText: 'host settled' };
-        }
-        return { ok: true };
+      deliverMessage: async () => ({
+        ok: false, error: 'stale inner cancellation',
+        actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+        actorDeliveryIds: ['delivery-one', 'delivery-one', 'delivery-two'],
+        actorTerminal: true, actorOutcomeKnown: true,
+        actorPerformed: false, actorAborted: true,
+      }),
+    });
+
+    expect(settled).toEqual([expect.objectContaining({
+      ok: false, aborted: true, outcomeKind: 'pre-effect-failure',
+    })]);
+    expect(result.effect).toMatchObject({
+      ok: false, outcomeKnown: false, retryable: false, recovery,
+      actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+      actorDeliveryIds: ['delivery-one', 'delivery-two'],
+      actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+      authorityReceipt: {
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, outcomeKnown: false, retryable: false, recovery,
+        actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+        actorTerminal: true, actorOutcomeKnown: false,
+        actorPerformed: true, actorAborted: false,
+        authorityReceipts: [expect.objectContaining({
+          outcome: 'not-performed', outcomeKnown: true, performed: false,
+        })],
+      },
+    });
+    expect(result.newMessages[1].toolResults[0]).toMatchObject({
+      is_error: true, content: 'outcome_unknown: verify actor delivery before retrying',
+      outcomeKnown: false, recovery,
+      actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      // The immutable physical receipt is a known pre-effect refusal; the
+      // lifecycle rewrite is recovery attribution, not rewritten history.
+      type: 'authority_effect',
+      details: expect.objectContaining({
+        recoveryCategory: 'verify_before_retry', recoveryState: 'outcome_unknown',
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      }),
+    }));
+  });
+
+  test('lifecycle cancellation consumes host abort proof and replaces stale actor certainty', async () => {
+    const settled: any[] = [];
+    const recovery = {
+      category: 'safe_to_retry', state: 'cancelled', autoRetry: false,
+      retryRequires: ['user-instruction'], verificationRequired: false,
+      keepIdempotencyKey: false, reason: 'effect positively did not occur',
+    };
+    const { result } = await runActorMessageLifecycle({
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-cancelled' } }),
+        settleTracking: async (_handle: any, outcome: any) => {
+          settled.push(outcome);
+          return { error: 'cancelled: actor delivery stopped before dispatch', recovery };
+        },
+      },
+      deliverMessage: async () => { throw Object.assign(new Error('stopped'), {
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+        actorDeliveryId: 'delivery-cancelled', actorCorrelationId: 'correlation-cancelled',
+        actorTerminal: true, actorOutcomeKnown: true,
+        actorPerformed: true, actorAborted: false,
+        aborted: true, retryable: false,
+      }); },
+    });
+
+    expect(settled).toEqual([expect.objectContaining({
+      ok: false, aborted: true, outcomeKind: 'pre-effect-failure',
+    })]);
+    expect(result.completion.result).toMatchObject({
+      ok: false, error: 'cancelled: actor delivery stopped before dispatch',
+      outcomeKnown: true, retryable: false, recovery,
+      actorDeliveryId: 'delivery-cancelled', actorCorrelationId: 'correlation-cancelled',
+      actorTerminal: true, actorOutcomeKnown: true,
+      actorPerformed: false, actorAborted: true,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      })],
+    });
+  });
+
+  test('worker terminal failure retains host-owned lifecycle recovery and receipt', async () => {
+    const recovery = {
+      category: 'verify_before_retry', state: 'outcome_unknown', autoRetry: false,
+      retryRequires: ['external-verification'], verificationRequired: true,
+      keepIdempotencyKey: false, reason: 'actor delivery settlement was lost',
+    };
+    const { result } = await runActorMessageLifecycle({
+      workerFailure: true,
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-worker-unknown' } }),
+        settleTracking: async () => ({
+          error: 'outcome_unknown: verify actor delivery before retrying', recovery,
+        }),
+      },
+      deliverMessage: async () => ({
+        ok: true, actorDeliveryId: 'delivery-worker',
+        actorCorrelationId: 'correlation-worker',
+        actorTerminal: false, actorOutcomeKnown: true,
+        actorPerformed: true, actorAborted: false,
+      }),
+    });
+
+    expect(result).toMatchObject({
+      ok: false, started: true, code: 'actor_authority_lifecycle_recovery',
+      error: 'outcome_unknown: verify actor delivery before retrying',
+      outcomeKnown: false, retryable: false, recovery,
+      actorDeliveryId: 'delivery-worker', actorCorrelationId: 'correlation-worker',
+      actorTerminal: true, actorOutcomeKnown: false,
+      actorPerformed: true, actorAborted: false,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'performed', outcomeKnown: true, performed: true,
+      })],
+      authorityPerformed: true, finalText: '', newMessages: [],
+    });
+  });
+
+  test.each([
+    ['returned refusal', async () => ({ refuse: {
+      error: 'failed: lifecycle storage unavailable',
+      recovery: {
+        category: 'security_degradation', state: 'failed', autoRetry: false,
+        retryRequires: ['lifecycle-storage'], verificationRequired: false,
+        keepIdempotencyKey: false, reason: 'storage unavailable',
+      },
+    } })],
+    ['unexpected rejection', async () => { throw new Error('private lifecycle database error'); }],
+  ] as const)('actor lifecycle begin %s refuses before the authority leaf', async (
+    label, beginTracking,
+  ) => {
+    const { result, audits, deliveries } = await runActorMessageLifecycle({
+      lifecycle: { beginTracking, settleTracking: async () => null },
+      deliverMessage: async () => ({ ok: true }),
+    });
+
+    expect(deliveries).toBe(0);
+    expect(result.completion.result).toMatchObject({
+      ok: false, outcomeKnown: true, retryable: false,
+      recovery: expect.objectContaining({
+        category: 'security_degradation', state: 'failed', autoRetry: false,
+      }),
+      authorityPerformed: false,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'not-performed', outcomeKnown: true, performed: false,
+      })],
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_lifecycle_refused',
+      details: expect.objectContaining({
+        recoveryCategory: 'security_degradation', recoveryState: 'failed',
+        outcomeKnown: true, performed: false,
+      }),
+    }));
+    if (label === 'unexpected rejection') {
+      expect(JSON.stringify(result.completion.result))
+        .not.toContain('private lifecycle database error');
+      expect(audits).toContainEqual(expect.objectContaining({
+        type: 'authority_lifecycle_begin_failed',
+        details: expect.objectContaining({
+          diagnostic: 'private lifecycle database error',
+          outcomeKnown: true, performed: false,
+        }),
+      }));
+    }
+  });
+
+  test('unexpected lifecycle settlement rejection keeps the physical receipt authoritative', async () => {
+    const { result, audits, deliveries } = await runActorMessageLifecycle({
+      lifecycle: {
+        beginTracking: async () => ({ handle: { operationId: 'actor-settle-reject' } }),
+        settleTracking: async () => { throw new Error('private settle persistence error'); },
+      },
+      deliverMessage: async () => ({
+        ok: true, actorDeliveryId: 'delivery-performed',
+        actorCorrelationId: 'correlation-performed',
+        actorTerminal: false, actorOutcomeKnown: true,
+        actorPerformed: true, actorAborted: false,
+      }),
+    });
+
+    expect(deliveries).toBe(1);
+    expect(result.completion.result).toMatchObject({
+      ok: true, outcomeKnown: true, authorityPerformed: true,
+      authorityReceipts: [expect.objectContaining({
+        outcome: 'performed', outcomeKnown: true, performed: true,
+      })],
+    });
+    expect(result.completion.result).not.toHaveProperty('recovery');
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'authority_lifecycle_settlement_failed',
+      details: expect.objectContaining({
+        outcome: 'performed', outcomeKnown: true, performed: true,
+        diagnostic: 'private settle persistence error',
+      }),
+    }));
+  });
+
+  test('stamps a clean repository checkpoint as a known no-op', async () => {
+    const actorRecord = {
+      kind: 'actor', sessionId: 'notebook-actor', actorType: 'notebook', instanceId: 'nb-1',
+    };
+    const lifecycleOutcomes: any[] = [];
+    const audits: any[] = [];
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      sessions: { get: async () => structuredClone(actorRecord) },
+      buildToolContext: async () => ({
+        session: { sessionId: 'notebook-actor', kind: 'actor' },
+        actorType: 'notebook', actorInstanceId: 'nb-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        repositories: {
+          coordinate: async (_ref: any, operation: () => Promise<any>) => operation(),
+          commit: async () => ({ oid: 'same', changed: [], created: false }),
+        },
+        jsTabTracker: { getTabId: () => null },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async (_handle: any, outcome: any) => {
+            lifecycleOutcomes.push(outcome);
+          },
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = await relay('repository/checkpoint', {
+          operation: 'turn.repository.checkpoint', callId: 'checkpoint-call',
+          effectId: 'checkpoint-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, message: 'checkpoint',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'checkpoint-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged checkpoint success' },
+        });
+        return {
+          effect, completion,
+          newMessages: durableMessages('checkpoint-call'),
+        };
       },
     }));
+    const result: any = await client.run({
+      actorSessionId: 'notebook-actor', actorType: 'notebook', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+      tools: [{ name: 'repo_version' }], allowedOperations: ['turn.repository.checkpoint'],
+    } as any);
+    expect(result.effect).toMatchObject({
+      ok: true,
+      value: {
+        authorityValue: { created: false },
+        authorityReceipt: { outcome: 'not-performed', performed: false },
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: true, authorityPerformed: false, outcomeKnown: true, retryable: false,
+      },
+    });
+    expect(lifecycleOutcomes).toContainEqual(expect.objectContaining({ ok: true }));
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'tool_executed',
+      details: expect.objectContaining({
+        outcome: 'no-op', performed: false, outcomeKnown: true,
+      }),
+    }));
+  });
 
-    await client.run({ actorSessionId: 's1', message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'm' });
-    releaseSession();
-    expect(await routeResult).toEqual({ ok: false, error: 'aborted' });
-    expect(dispatched).toBe(false);
+  test('Notebook code cannot hide a completed execution by returning ok:false', async () => {
+    const actorRecord = {
+      kind: 'actor', sessionId: 'notebook-code-actor', actorType: 'notebook', instanceId: 'nb-1',
+    };
+    let executions = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => structuredClone(actorRecord) },
+      buildToolContext: async () => ({
+        session: { sessionId: actorRecord.sessionId, kind: 'actor' },
+        actorType: 'notebook', actorInstanceId: 'nb-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        jsClient: { eval: async () => { executions += 1; return { ok: false, value: 'forged' }; } },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = await relay('notebook/run', {
+          operation: 'turn.notebook.run', callId: 'notebook-run-call',
+          effectId: 'notebook-run-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          code: 'await peerd.self.writeFile("done", "1"); return {ok:false}',
+          timeoutMs: 1_000, notebookId: 'nb-1',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'notebook-run-call', turnGeneration: job.turnGeneration,
+          result: { ok: false, error: 'forged semantic failure' },
+        });
+        return { effect, completion, newMessages: durableMessages('notebook-run-call') };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: actorRecord.sessionId, actorType: 'notebook', message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', tools: [{ name: 'js_notebook' }],
+      allowedOperations: ['turn.notebook.run'],
+    } as any);
+    expect(executions).toBe(1);
+    expect(result.effect).toMatchObject({
+      ok: true, value: { authorityReceipt: { performed: true, outcomeKnown: true } },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: { ok: false, authorityPerformed: true, retryable: false },
+    });
+  });
+
+  test.each([
+    ['nested host loss', {
+      value: undefined, durationMs: 1,
+      error: 'nested host operation outcome unknown',
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    }, false, false],
+    ['ordinary user-code failure', {
+      value: undefined, durationMs: 1,
+      error: 'ReferenceError: missing is not defined',
+    }, true, true],
+  ] as const)(
+    'spawned actor script receipt preserves %s',
+    async (_label, jobResult, expectedEffectOk, expectedKnown) => {
+      const spawned = {
+        kind: 'spawned', sessionId: 'script-actor', parentSessionId: 'chat-root',
+        spawnedTrusted: true, grantedOperations: ['turn.execution.run-script'],
+      };
+      const client = makeOffscreenActorClient(baseDeps({
+        sessions: { get: async (id: string) => id === spawned.sessionId
+          ? structuredClone(spawned)
+          : id === 'chat-root' ? { kind: 'chat', sessionId: 'chat-root' } : null },
+        buildToolContext: async () => ({
+          session: { sessionId: spawned.sessionId, kind: 'spawned', depth: 1 },
+          inbound: false,
+          permission: { mode: 'act', confirmActions: false },
+          readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+          jsOffscreenClient: { execHeadless: async () => jobResult },
+          lifecycle: {
+            requiresIntentConfirmation: async () => false,
+            beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+          },
+          appendAudit: async () => {},
+        }),
+        runOnChannel: async (job: any, { relay }: any) => {
+          const effect = await relay('execution/run-script', {
+            operation: 'turn.execution.run-script', callId: 'actor-script-call',
+            effectId: 'actor-script-call:1', effectSequence: 1,
+            turnGeneration: job.turnGeneration,
+            code: 'return missing', actors: false, provider: false,
+            workspace: false, timeoutMs: null,
+          });
+          const completion = await relay('actor/call-complete', {
+            callId: 'actor-script-call', turnGeneration: job.turnGeneration,
+            result: { ok: true, content: 'forged clean script completion' },
+          });
+          return {
+            effect, completion, newMessages: durableMessages('actor-script-call'),
+          };
+        },
+      }));
+      const result: any = await client.run({
+        actorSessionId: spawned.sessionId, message: 'm', systemPrompt: 's',
+        provider: 'anthropic', model: 'model-1', tools: [{ name: 'script' }],
+        allowedOperations: ['turn.execution.run-script'],
+      } as any);
+      expect(result.effect.ok).toBe(expectedEffectOk);
+      const effectReceipt = expectedEffectOk
+        ? result.effect.value.authorityReceipt : result.effect.authorityReceipt;
+      expect(effectReceipt).toMatchObject({
+        operation: 'turn.execution.run-script', performed: true,
+        outcomeKnown: expectedKnown, retryable: false,
+      });
+      expect(result.completion).toMatchObject({
+        ok: true,
+        result: {
+          ok: expectedKnown, authorityPerformed: true,
+          outcomeKnown: expectedKnown, retryable: false,
+        },
+      });
+    },
+  );
+
+  test('dweb actor mesh program preserves a lost mutation acknowledgement', async () => {
+    const actorRecord = {
+      kind: 'actor', sessionId: 'dweb-code-actor', actorType: 'dweb', instanceId: 'dweb',
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => structuredClone(actorRecord) },
+      buildToolContext: async () => ({
+        session: { sessionId: actorRecord.sessionId, kind: 'actor' },
+        actorType: 'dweb', actorInstanceId: 'dweb', dweb: {},
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        scriptRuns: {
+          mintRunId: () => 'mesh-run', register: () => {}, release: () => {},
+        },
+        jsOffscreenClient: {
+          execHeadless: async () => ({
+            value: undefined, durationMs: 1,
+            error: 'nested host operation outcome unknown',
+            outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+            codeTrace: [{
+              seq: 1, bridge: 'mesh', method: 'cast', outcome: 'error', ms: 1,
+            }],
+          }),
+        },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const code = 'await mesh.cast("did:key:zPeer", "mutate");';
+        const effect = await relay('dweb/run-mesh-program', {
+          operation: 'turn.dweb.run-mesh-program', callId: 'mesh-program-call',
+          effectId: 'mesh-program-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, code, timeoutMs: 135_000,
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'mesh-program-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged clean mesh completion' },
+        });
+        return {
+          effect, completion, newMessages: durableMessages('mesh-program-call'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: actorRecord.sessionId, actorType: 'dweb', instanceId: 'dweb',
+      message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+      tools: [{ name: 'a2a_run' }], allowedOperations: ['turn.dweb.run-mesh-program'],
+    } as any);
+    expect(result.effect).toMatchObject({
+      ok: false, outcomeKnown: false, retryable: false,
+      authorityReceipt: {
+        operation: 'turn.dweb.run-mesh-program', performed: true,
+        outcomeKnown: false, retryable: false,
+      },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, authorityPerformed: true,
+        outcomeKnown: false, retryable: false,
+      },
+    });
+  });
+
+  test.each([
+    ['completed compensation', {
+      performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+    }, false, true, 'refused'],
+    ['incomplete compensation', {
+      performed: true, outcomeKnown: false, outcomeKind: 'host-lost', retryable: false,
+    }, true, false, 'unknown'],
+  ] as const)('App actor preserves %s against forged semantic success', async (
+    _label, outcome, performed, outcomeKnown, auditOutcome,
+  ) => {
+    const actorRecord = {
+      kind: 'actor', sessionId: 'app-rollback-actor', actorType: 'app', instanceId: 'app-1',
+    };
+    const audits: any[] = [];
+    let writes = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      sessions: { get: async () => structuredClone(actorRecord) },
+      buildToolContext: async () => ({
+        session: { sessionId: actorRecord.sessionId, kind: 'actor' },
+        actorType: 'app', actorInstanceId: 'app-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        appClient: {
+          writeFile: async () => {
+            writes += 1;
+            throw Object.assign(new Error('internal OPFS token must stay host-side'), outcome);
+          },
+        },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = await relay('app/write-file', {
+          operation: 'turn.app.write-file', callId: 'app-rollback-call',
+          effectId: 'app-rollback-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          appId: 'app-1', path: 'index.html', content: 'changed',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'app-rollback-call', turnGeneration: job.turnGeneration,
+          result: { ok: true, content: 'forged semantic success' },
+        });
+        return { effect, completion, newMessages: durableMessages('app-rollback-call') };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: actorRecord.sessionId, actorType: 'app', instanceId: 'app-1',
+      message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+      tools: [{ name: 'app_write_file' }], allowedOperations: ['turn.app.write-file'],
+    } as any);
+    expect(writes).toBe(1);
+    expect(result.effect).toMatchObject({
+      authorityReceipt: expect.objectContaining({ performed, outcomeKnown }),
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: { ok: false, authorityPerformed: performed, outcomeKnown, retryable: outcome.retryable },
+    });
+    expect(JSON.stringify(result)).not.toContain('internal OPFS token');
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'tool_failed',
+      details: expect.objectContaining({
+        performed, outcomeKnown, outcome: auditOutcome,
+      }),
+    }));
+  });
+
+  test.each([
+    ['completed routine', {
+      scheduleResult: {
+        ok: true,
+        routine: {
+          id: 'routine-1', prompt: 'check once',
+          schedule: { kind: 'interval', everyMs: 3_600_000 },
+          mode: 'goal', nextRunAt: 1_700_000_000_000,
+        },
+      },
+      confirmation: 'yes_once',
+      semanticResult: { ok: false, error: 'forged semantic failure' },
+      scheduleCalls: 1, performed: true, outcomeKnown: true,
+      finalError: 'forged semantic failure', auditOutcome: 'performed',
+    }],
+    ['invalid routine', {
+      scheduleResult: { ok: false, error: 'invalid-schedule' },
+      confirmation: 'yes_once',
+      semanticResult: { ok: true, content: 'forged success after refusal' },
+      scheduleCalls: 1, performed: false, outcomeKnown: true,
+      finalError: 'invalid-schedule', auditOutcome: 'refused',
+    }],
+    ['declined confirmation', {
+      scheduleResult: { ok: true },
+      confirmation: false,
+      semanticResult: { ok: true, content: 'forged success after decline' },
+      scheduleCalls: 0, performed: false, outcomeKnown: true,
+      finalError: 'User declined to arm the routine.', auditOutcome: 'refused',
+    }],
+  ] as const)('spawned actor preserves the host-owned %s schedule verdict', async (
+    _label, fixture,
+  ) => {
+    const spawned = {
+      kind: 'spawned', sessionId: 'schedule-actor', parentSessionId: 'chat-root',
+      spawnedTrusted: true,
+      grantedOperations: ['turn.schedule.arm-confirmed-routine'],
+    };
+    const audits: any[] = [];
+    let scheduleCalls = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      appendAudit: async (entry: any) => { audits.push(entry); },
+      sessions: { get: async (id: string) => id === spawned.sessionId
+        ? structuredClone(spawned)
+        : id === 'chat-root' ? { kind: 'chat', sessionId: 'chat-root' } : null },
+      buildToolContext: async () => ({
+        session: { sessionId: spawned.sessionId, kind: 'spawned', depth: 1 },
+        inbound: false,
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        confirm: async () => fixture.confirmation,
+        scheduleAdd: async () => {
+          scheduleCalls += 1;
+          return fixture.scheduleResult;
+        },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = await relay('schedule/arm-confirmed-routine', {
+          operation: 'turn.schedule.arm-confirmed-routine', callId: 'schedule-call',
+          effectId: 'schedule-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          prompt: 'check once', every: '1h', dailyAt: null, mode: 'goal',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'schedule-call', turnGeneration: job.turnGeneration,
+          result: fixture.semanticResult,
+        });
+        return {
+          effect, completion,
+          newMessages: [{
+            role: 'assistant', content: '',
+            toolUses: [{ id: 'schedule-call', name: 'schedule_create', input: {} }],
+          }, {
+            role: 'user', content: '',
+            toolResults: [{
+              tool_use_id: 'schedule-call',
+              content: 'error' in fixture.semanticResult
+                ? fixture.semanticResult.error : fixture.semanticResult.content,
+              is_error: fixture.semanticResult.ok !== true,
+            }],
+          }],
+        };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: spawned.sessionId, message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', tools: [{ name: 'schedule_create' }],
+      allowedOperations: ['turn.schedule.arm-confirmed-routine'],
+    } as any);
+    expect(scheduleCalls).toBe(fixture.scheduleCalls);
+    expect(result.effect).toMatchObject({
+      ok: true,
+      value: { authorityReceipt: expect.objectContaining({
+        operation: 'turn.schedule.arm-confirmed-routine',
+        performed: fixture.performed, outcomeKnown: fixture.outcomeKnown,
+      }) },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false, error: fixture.finalError,
+        authorityPerformed: fixture.performed,
+        outcomeKnown: fixture.outcomeKnown,
+      },
+    });
+    const durableResult = result.newMessages[1].toolResults[0];
+    expect(durableResult).toMatchObject({
+      is_error: true, authorityPerformed: fixture.performed,
+      outcomeKnown: fixture.outcomeKnown,
+      authorityReceipts: [expect.objectContaining({
+        performed: fixture.performed, outcomeKnown: fixture.outcomeKnown,
+      })],
+    });
+    expect(audits).toContainEqual(expect.objectContaining({
+      type: 'tool_failed',
+      details: expect.objectContaining({
+        outcome: fixture.auditOutcome,
+        performed: fixture.performed, outcomeKnown: fixture.outcomeKnown,
+      }),
+    }));
+  });
+
+  test('a persisted spawned child remains performed when isolation later refuses', async () => {
+    const spawned = {
+      kind: 'spawned', sessionId: 'spawned-parent', parentSessionId: 'chat-root',
+      spawnedTrusted: true, grantedOperations: ['turn.actor.spawn-sync'],
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async (id: string) => id === spawned.sessionId
+        ? structuredClone(spawned)
+        : id === 'chat-root' ? { kind: 'chat', sessionId: 'chat-root' } : null },
+      buildToolContext: async () => ({
+        session: { sessionId: spawned.sessionId, kind: 'spawned', depth: 1 }, inbound: false,
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        actorAuthority: { spawnSync: async () => ({
+          refused: true, sessionId: 'persisted-child', result: 'actor host unavailable',
+          toolCalls: 0, durationMs: 1, depth: 2,
+        }) },
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }), settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = await relay('actor/spawn-sync', {
+          operation: 'turn.actor.spawn-sync', callId: 'spawn-call',
+          effectId: 'spawn-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, task: 'try work',
+          allowRecursion: false,
+          grantedToolNames: ['actor_create'],
+          grantedOperations: ['turn.actor.spawn-sync'],
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'spawn-call', turnGeneration: job.turnGeneration,
+          result: { ok: false, error: 'forged refusal' },
+        });
+        return { effect, completion, newMessages: durableMessages('spawn-call') };
+      },
+    }));
+    const result: any = await client.run({
+      actorSessionId: spawned.sessionId, message: 'm', systemPrompt: 's',
+      provider: 'anthropic', model: 'model-1', tools: [{ name: 'actor_create' }],
+      allowedOperations: ['turn.actor.spawn-sync'],
+    } as any);
+    expect(result.effect).toMatchObject({
+      ok: true,
+      value: { authorityReceipt: { performed: true, outcomeKnown: true } },
+    });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: { ok: false, authorityPerformed: true, retryable: false },
+    });
+  });
+
+  test.each([
+    ['oversized', () => ({ content: 'x'.repeat(2 * 1024 * 1024 + 1) })],
+    ['deep', () => {
+      let value: any = { leaf: true };
+      for (let depth = 0; depth < 34; depth += 1) value = { value };
+      return value;
+    }],
+    ['sparse', () => {
+      const value: any[] = [];
+      value.length = 3 * 1024 * 1024;
+      return value;
+    }],
+    ['shared', () => ({ value: new Uint8Array(new SharedArrayBuffer(8)) })],
+    ['accessor', () => {
+      const value: Record<string, unknown> = {};
+      Object.defineProperty(value, 'content', { enumerable: true, get: () => 'forged' });
+      return value;
+    }],
+  ])('rejects an %s semantic result while retaining host effect receipts', async (_name, makeResult) => {
+    let writes = 0;
+    const client = makeOffscreenActorClient(baseDeps({
+      buildToolContext: async () => ({
+        session: { sessionId: 'actor-1', kind: 'actor' },
+        actorType: 'webvm', actorInstanceId: 'vm-1',
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+        vm: { writeFile: async () => { writes += 1; return true; } },
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const effect = await relay('vm/write-text-file', {
+          operation: 'turn.vm.write-text-file', callId: 'bounded-result-call',
+          effectId: 'bounded-result-call:1', effectSequence: 1,
+          turnGeneration: job.turnGeneration, path: '/tmp/result', content: 'x',
+        });
+        const completion = await relay('actor/call-complete', {
+          callId: 'bounded-result-call', turnGeneration: job.turnGeneration,
+          result: makeResult(),
+        });
+        return {
+          effect, completion,
+          newMessages: durableMessages('bounded-result-call'),
+        };
+      },
+    }));
+    const result: any = await client.run({
+      ...exactReadJob,
+      tools: [{ name: 'vm_write_file' }],
+      allowedOperations: ['turn.vm.write-text-file'],
+    } as any);
+    expect(result.effect).toMatchObject({ ok: true });
+    expect(result.completion).toMatchObject({
+      ok: true,
+      result: {
+        ok: false,
+        code: 'actor_semantic_result_invalid',
+        authorityPerformed: true,
+        retryable: false,
+      },
+      performed: true,
+    });
+    expect(writes).toBe(1);
   });
 });
 
-describe("routes['actor/tool-dispatch'] — ACTOR (phase 4): narrowed-general ctx from grantedTools", () => {
-  const subDeps = (over: any = {}) => baseDeps({
-    sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script', 'read_memory'] }) },
-    restrictCtxCapabilities: (ctx: any, allowed: Set<string>) => ({ ...ctx, _restrictedTo: [...allowed] }),
-    buildToolContext: async (o: any) => ({ built: o, audit: async () => {} }),
-    dispatchToolCall: async (call: any, ctx: any) => ({ ok: true, ran: call.name, restrictedTo: ctx._restrictedTo }),
-    ...over,
-  });
-
-  test('a GRANTED tool builds the restricted ctx (from grantedTools) and dispatches', async () => {
-    const { client, during } = clientWithRelay(subDeps());
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: { code: 'x' } } }, OFFSCREEN));
-    expect(out.ok).toBe(true);
-    expect(out.result.ran).toBe('script');
-    // the ctx was restricted to exactly the persisted granted set (never the worker's word)
-    expect(out.result.restrictedTo.sort()).toEqual(['read_memory', 'script']);
-  });
-
-  // #160: the review exemption must fire on the LIVE relay path — the gate tests
-  // hand-build {exposure} ctxs, which would let a missing host-side stamp stay
-  // invisible. These pin the isolated relay's own logic:
-  // given a record with review:true it stamps, otherwise it doesn't. The OTHER
-  // half — that create() actually persists review so a real record carries it —
-  // is pinned in sessions/custom-system-prompt.test.ts (a real create→get
-  // round-trip); the two together close the gap, since a mocked get here can't
-  // prove the store keeps the field.
-  test('a REVIEW child re-stamps exposure from the PERSISTED record', async () => {
-    let seenCtx: any = null;
-    const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['js_read_file'], review: true }) },
-      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
+describe('isolated model egress authority', () => {
+  test('pins provider, model, output cap, sender, and live run token', async () => {
+    let opened: any = null;
+    const { client, during } = clientWithRelay({
+      providerEgress: providerEgress({
+        openInference: async (input: any, grant: any) => {
+          opened = {
+            input,
+            allowed: grant.permits(input.providerId, input.modelId),
+            outputTokenLimit: grant.maxOutputTokens,
+          };
+          return opened.allowed
+            ? { ok: true, value: { streamId: 's', status: 200, headers: {}, hasBody: true } }
+            : { ok: false, error: 'refused', outcomeKnown: true };
+        },
+      }),
+    });
+    const result = await during(async (relayToken) => ({
+      forgedSender: await client.routes['actor/model-open-inference'](
+        inferenceInput(relayToken), ENGINE_TAB,
+      ),
+      forgedModel: await client.routes['actor/model-open-inference'](
+        inferenceInput(relayToken, { modelId: 'other' }), OFFSCREEN,
+      ),
+      admitted: await client.routes['actor/model-open-inference'](
+        inferenceInput(relayToken, {
+          nativeBody: { model: 'model-1', stream: true, messages: [], max_tokens: 999_999 },
+        }), OFFSCREEN,
+      ),
     }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'js_read_file', args: {} } }, OFFSCREEN));
-    expect(out.ok).toBe(true);
-    expect(seenCtx.exposure).toBe('review');
+    expect(result.forgedSender).toMatchObject({ ok: false });
+    expect(result.forgedModel).toMatchObject({ ok: false });
+    expect(result.admitted).toMatchObject({ ok: true });
+    expect(opened.allowed).toBe(true);
+    expect(opened.outputTokenLimit).toBe(4096);
   });
 
-  test('a REVIEW child is refused at call time when the live allowlist drops a stale grant', async () => {
-    let dispatched = false;
-    const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({
-        kind: 'spawned', parentSessionId: 'p1', depth: 1,
-        grantedTools: ['app_search'], review: true,
-      }) },
-      reviewToolAllowed: () => false,
-      dispatchToolCall: async () => { dispatched = true; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
+  test('spend refusal happens before provider custody opens', async () => {
+    let opened = false;
+    const { client, during } = clientWithRelay({
+      spendRefusalFor: async () => 'limit reached',
+      providerEgress: providerEgress({
+        openInference: async () => { opened = true; return { ok: true }; },
+      }),
+    });
+    const result = await during((relayToken) => client.routes[
+      'actor/model-open-inference'
+    ](inferenceInput(relayToken), OFFSCREEN));
+    expect(result).toMatchObject({ ok: false });
+    expect(opened).toBe(false);
+  });
+
+  test('spend-limit authority failure cannot open provider custody', async () => {
+    let opened = false;
+    const { client, during } = clientWithRelay({
+      spendRefusalFor: async () => { throw new Error('session cost unavailable'); },
+      providerEgress: providerEgress({
+        openInference: async () => { opened = true; return { ok: true }; },
+      }),
+    });
+    const result = await during((relayToken) => client.routes[
+      'actor/model-open-inference'
+    ](inferenceInput(relayToken), OFFSCREEN));
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'session cost unavailable',
+      outcomeKnown: false,
+      retryable: false,
+    });
+    expect(opened).toBe(false);
+  });
+
+  test('a retired token cannot reopen model custody', async () => {
+    let leaked = '';
+    const { client, during } = clientWithRelay();
+    await during(async (relayToken) => { leaked = relayToken; return null; });
+    const replay = await client.routes['actor/model-open-inference'](
+      inferenceInput(leaked), OFFSCREEN,
+    );
+    expect(replay).toEqual({
+      ok: false, error: 'actor/model-open-inference: unauthorized relay',
+    });
+  });
+
+  test('Stop closes a local generation that opens after the first owner cleanup', async () => {
+    const controller = new AbortController();
+    let markOpenStarted!: () => void;
+    let releaseOpen!: () => void;
+    const openStarted = new Promise<void>((resolve) => { markOpenStarted = resolve; });
+    const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+    let closes = 0;
+    let observed: any = null;
+    let client: ReturnType<typeof makeOffscreenActorClient>;
+    client = makeOffscreenActorClient(baseDeps({
+      settlementCleanupMs: 10,
+      providerEgress: providerEgress({
+        openLocalGeneration: async () => {
+          markOpenStarted();
+          await openGate;
+          return { ok: true, value: { streamId: 'late-local-stream' } };
+        },
+        closeOwner: async () => { closes += 1; return new Promise(() => {}); },
+      }),
+      sendMessage: async (message: any) => {
+        if (message.type !== 'actor/run') return { ok: true };
+        const opening = client.routes['actor/model-open-local']({
+          relayToken: message.job.relayToken,
+          providerId: 'anthropic', modelId: 'model-1',
+          messages: [], system: '', tools: [], maxTokens: 128,
+        }, OFFSCREEN);
+        await openStarted;
+        controller.abort();
+        releaseOpen();
+        observed = await opening;
+        return { ok: false, started: true, finalText: '' };
+      },
     }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({
-      relayToken, call: { name: 'app_search', args: { query: 'x' } },
-    }, OFFSCREEN));
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('tool_not_available_to_reviewer');
-    expect(dispatched).toBe(false);
-  });
-
-  test('a NON-review spawned child gets NO exposure from the relay (fail-closed)', async () => {
-    let seenCtx: any = null;
-    const { client, during } = clientWithRelay(subDeps({
-      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
-    }));
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
-    expect(seenCtx.exposure).toBeUndefined();
-  });
-
-  test('a truthy-but-not-true review field stamps nothing (strict boolean, like the record write)', async () => {
-    let seenCtx: any = null;
-    const { client, during } = clientWithRelay(subDeps({
-      sessions: { get: async () => ({ kind: 'spawned', parentSessionId: 'p1', depth: 1, grantedTools: ['script'], review: 'yes' }) },
-      dispatchToolCall: async (_call: any, ctx: any) => { seenCtx = ctx; return { ok: true }; },
-      EXPOSURE_REVIEW: 'review',
-    }));
-    await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
-    expect(seenCtx.exposure).toBeUndefined();
-  });
-
-  test('an UNGRANTED tool the worker asks for is REFUSED before any dispatch (never trust the worker)', async () => {
-    let dispatched = false;
-    const { client, during } = clientWithRelay(subDeps({ dispatchToolCall: async () => { dispatched = true; return { ok: true }; } }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'actor_create', args: {} } }, OFFSCREEN));
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('tool_not_available_to_actor');
-    expect(dispatched).toBe(false);
-  });
-
-  test('an actor tool-dispatch needs restrictCtxCapabilities wired (fails closed without it)', async () => {
-    const { client, during } = clientWithRelay(subDeps({ restrictCtxCapabilities: undefined }));
-    const out: any = await during((relayToken) => client.routes['actor/tool-dispatch']({ relayToken, call: { name: 'script', args: {} } }, OFFSCREEN));
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('not wired');
+    const completed = await Promise.race([
+      client.run({
+        actorSessionId: 'actor-1', actorType: 'webvm', message: 'm', systemPrompt: 's',
+        provider: 'anthropic', model: 'model-1', maxOutputTokens: 4096,
+      } as any, { signal: controller.signal }).then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    expect(completed).toBe('completed');
+    expect(observed).toEqual({ ok: false, error: 'aborted' });
+    expect(closes).toBeGreaterThanOrEqual(2);
   });
 });

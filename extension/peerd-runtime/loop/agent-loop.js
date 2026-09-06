@@ -54,8 +54,8 @@ import { RESUME_NUDGE } from './resume-detect.js';
  *        | { type: 'reasoning', sessionId: string, messageId: string, text: string }
  *        | { type: 'tool-use', sessionId: string, messageId: string, toolUseId: string, name: string, input: object }
  *        | { type: 'tool-result', sessionId: string, toolUseId: string, result: ToolResult }
- *        | { type: 'usage', sessionId: string, messageId: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number } }
- *        | { type: 'error', sessionId: string, messageId: string, error: string }
+ *        | { type: 'usage', sessionId: string, messageId: string, usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, price?: {cost:number,estimated:boolean} }
+ *        | { type: 'error', sessionId: string, messageId: string, error: string, code?: string, outcomeKnown?: boolean, retryable?: boolean }
  *        | { type: 'stop',  sessionId: string, messageId: string, stopReason?: string }
  *        | { type: 'rate-limit-pause', sessionId: string, messageId: string, retryAfterMs: number, attempt: number }
  *        } LoopEvent
@@ -73,16 +73,6 @@ const REQUIRED_CTX = [
   'sessions', 'getSystemPrompt', 'appendAudit',
 ];
 
-// Tools safe to dispatch CONCURRENTLY by NAME, independent of permission
-// classification. actor_create orchestrates a child session that owns
-// its own gate pipeline + session and shares no external mutable state with
-// its siblings, so N spawns in one turn can run in parallel instead of
-// one-at-a-time. Everything else earns concurrency only via the injected
-// permission classifier (ctx.classifyToolCall → READ class), preserving
-// peerd's single-writer posture for DOM / VM / file side effects (two
-// clicks or two file edits must not interleave).
-const CONCURRENT_TOOLS = new Set(['actor_create']);
-
 // Hard ceiling on ONE tool dispatch (issue #176). A dispatch that never
 // settles — the concrete leaf is an un-timed CDP Runtime.evaluate against a
 // hung page — parks the turn generator forever: the turn's finally never runs,
@@ -96,6 +86,25 @@ const CONCURRENT_TOOLS = new Set(['actor_create']);
 // detached — its eventual settlement is dropped; late side effects are
 // possible but strictly better than a permanently wedged session.
 const DISPATCH_DEADLINE_MS = 10 * 60_000;
+const UNKNOWN_TOOL_OUTCOME = 'outcome_unknown: Verify the target before retrying.';
+const UNKNOWN_TURN_OUTCOME = 'Turn outcome unknown. Check the session before retrying.';
+const REASONING_BUDGET_TOKENS = 2048;
+const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
+const DEFAULT_REASONING_EFFORT = 'medium';
+
+/**
+ * Model-facing reasoning policy belongs beside the semantic loop that consumes
+ * it. Authority sends only the user's bounded settings snapshot.
+ * @param {{ reasoningEnabled?: unknown, reasoningEffort?: unknown }} settings
+ */
+export const reasoningForTurn = (settings) => ({
+  enabled: settings.reasoningEnabled === true,
+  budgetTokens: REASONING_BUDGET_TOKENS,
+  effort: typeof settings.reasoningEffort === 'string'
+    && REASONING_EFFORT_LEVELS.includes(settings.reasoningEffort)
+    ? /** @type {'low'|'medium'|'high'|'xhigh'|'max'} */ (settings.reasoningEffort)
+    : DEFAULT_REASONING_EFFORT,
+});
 
 // Yield settled values in completion order. Each input promise MUST resolve
 // (the dispatcher below never rejects), so there is no rejection branch —
@@ -181,16 +190,15 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   returns the SAME decideAction verdict the dispatcher will enforce
  *   (action class + confirm), or null for unknown tools. READ-class,
  *   non-confirming calls may run concurrently; everything else stays
- *   serial. Omitted (actor/runner loops today) → only the by-name
- *   CONCURRENT_TOOLS set (actor_create) is treated as safe.
+ *   serial. Omitted → fail closed to serial dispatch.
  * @param {{ enabled?: boolean, budgetTokens?: number, effort?: 'low'|'medium'|'high'|'xhigh'|'max' }} [ctx.reasoning]
  *   Extended-thinking control, passed straight to the provider. When
  *   enabled, reasoning streams as `reasoning` loop events and signed
  *   thinking blocks are persisted on the assistant message for replay.
  * @param {AbortSignal} [ctx.signal]
  *   When fired, the loop stops at the next iteration boundary OR at
- *   the first stream chunk after abort, persists whatever was streamed,
- *   and yields a clean stop event with stopReason='aborted'.
+ *   the first stream chunk after abort.
+ * @param {(value:{sessionId:string,messageId:string,content?:string,error?:string,code?:string,outcomeKnown?:false,retryable?:false})=>Promise<{outcomeKnown?:boolean}|unknown>} [ctx.finalizeAbort]
  * @param {number} [ctx.maxSteps]
  *   Per-turn step cap. Defaults to MAX_STEPS. Actors pass a smaller
  *   value (default 20) so a runaway child can't burn the parent's whole
@@ -395,6 +403,42 @@ export async function* runUserTurn(ctx) {
   // Helper: was the turn aborted? Used at iteration boundaries; the
   // stream catch block has its own AbortError handling.
   const wasAborted = () => signal?.aborted === true;
+  const finalizeAbort = async (
+    /** @type {string} */ messageId,
+    /** @type {string|undefined} */ content,
+    /** @type {boolean} */ outcomeUnknown = false,
+  ) => {
+    const unknownPatch = outcomeUnknown ? {
+      error: UNKNOWN_TURN_OUTCOME,
+      code: 'tool-outcome-unknown',
+      outcomeKnown: /** @type {false} */ (false),
+      retryable: /** @type {false} */ (false),
+    } : {};
+    if (typeof ctx.finalizeAbort === 'function') {
+      const result = await ctx.finalizeAbort({
+        sessionId, messageId,
+        ...(content === undefined ? {} : { content }),
+        ...unknownPatch,
+      });
+      // A host may reconcile the loop's conservative abort race from an exact
+      // authority receipt. Ordinary abort finalization remains handled; only an
+      // outcome-unknown request requires explicit host proof to become known.
+      return outcomeUnknown
+        ? /** @type {{outcomeKnown?:boolean}|undefined} */ (result)?.outcomeKnown === true
+        : true;
+    }
+    await sessions.updateAssistantMessage(sessionId, messageId, {
+      ...(content === undefined ? {} : { content }),
+      streaming: false,
+      ...(outcomeUnknown ? {
+        error: UNKNOWN_TURN_OUTCOME,
+        errorCode: 'tool-outcome-unknown',
+        outcomeKnown: false,
+        retryable: false,
+      } : { stopReason: 'aborted' }),
+    });
+    return false;
+  };
 
   // ---- Outer loop: model call → maybe tools → model call → ... -----------
   let step = 0;
@@ -408,13 +452,12 @@ export async function* runUserTurn(ctx) {
     step++;
     if (wasAborted()) {
       if (lastAssistantId) {
-        await sessions.updateAssistantMessage(sessionId, lastAssistantId, {
-          streaming: false, stopReason: 'aborted',
-        });
-        yield {
-          type: 'stop', sessionId,
-          messageId: lastAssistantId, stopReason: 'aborted',
-        };
+        if (!await finalizeAbort(lastAssistantId, undefined)) {
+          yield {
+            type: 'stop', sessionId,
+            messageId: lastAssistantId, stopReason: 'aborted',
+          };
+        }
       }
       return;
     }
@@ -657,16 +700,19 @@ export async function* runUserTurn(ctx) {
             // No-op: input is complete; parsing happens below.
             break;
           case 'usage':
-            // why: forward token usage straight through as a loop event.
-            // The loop itself stays pricing-agnostic — the SW multiplies
-            // by the local pricing table, accumulates per-turn/session,
-            // and enforces the optional hard spend limit (feature 06).
+            // why: forward token usage and the sealed controller's bounded
+            // price projection straight through. The loop stays pricing-
+            // agnostic; the SW validates/folds the projection and retains
+            // spend-limit custody.
             // Emitting per model call means a multi-step tool-using turn
             // reports each call's usage as it lands, so the meter ticks
             // up live instead of only at end-of-turn.
             yield {
               type: 'usage', sessionId,
               messageId: assistantStub.id, usage: ev.usage,
+              ...(/** @type {ProviderEvent & {price?:{cost:number,estimated:boolean}}} */ (ev).price === undefined
+                ? {}
+                : { price: /** @type {ProviderEvent & {price:{cost:number,estimated:boolean}}} */ (ev).price }),
             };
             break;
           case 'message-stop':
@@ -728,19 +774,16 @@ export async function* runUserTurn(ctx) {
       // the turn-local stash is discarded either way, so bytes never persist.
       if (liveToolImages.size > 0) liveToolImages.clear();
     } catch (e) {
-      const err = /** @type {{ name?: string, message?: string }} */ (e);
+      const err = /** @type {{ name?: string, message?: string, code?: string, outcomeKnown?: boolean, retryable?: boolean }} */ (e);
       // AbortError when the user clicks Stop or sends a new message
       // mid-stream. Not an error; mark message aborted and exit.
       if (wasAborted() || err?.name === 'AbortError' || /abort/i.test(err?.message ?? '')) {
-        await sessions.updateAssistantMessage(sessionId, assistantStub.id, {
-          content: textBuf,
-          streaming: false,
-          stopReason: 'aborted',
-        });
-        yield {
-          type: 'stop', sessionId,
-          messageId: assistantStub.id, stopReason: 'aborted',
-        };
+        if (!await finalizeAbort(assistantStub.id, textBuf)) {
+          yield {
+            type: 'stop', sessionId,
+            messageId: assistantStub.id, stopReason: 'aborted',
+          };
+        }
         return;
       }
       errored = true;
@@ -748,18 +791,30 @@ export async function* runUserTurn(ctx) {
       // boundary errors are erased here unless they are mapped before the
       // string event crosses to the turn driver. Keep the refusal explicit:
       // no model request ran, and retrying is safe.
-      const message = e instanceof ActorCredentialBoundaryError
+      const outcomeUnknown = err?.outcomeKnown === false;
+      const message = outcomeUnknown
+        ? UNKNOWN_TURN_OUTCOME
+        : e instanceof ActorCredentialBoundaryError
         ? ACTOR_CREDENTIAL_BOUNDARY_FAILURE
         : err?.message ?? String(e);
       await sessions.updateAssistantMessage(sessionId, assistantStub.id, {
         content: textBuf,
         streaming: false,
         error: message,
+        ...(typeof err?.code === 'string' ? { errorCode: err.code } : {}),
+        ...(outcomeUnknown ? { outcomeKnown: false, retryable: false } : {}),
       });
       yield {
         type: 'error', sessionId,
         messageId: assistantStub.id, error: message,
+        ...(typeof err?.code === 'string' ? { code: err.code } : {}),
+        ...(outcomeUnknown ? { outcomeKnown: false, retryable: false } : {}),
       };
+      if (outcomeUnknown) {
+        throw Object.assign(new Error(message), {
+          code: err.code ?? 'turn-outcome-unknown', outcomeKnown: false, retryable: false,
+        });
+      }
     }
 
     // Parse tool-use input JSON. Anthropic streams partial_json
@@ -858,13 +913,12 @@ export async function* runUserTurn(ctx) {
     // it as a deliberate stop, NOT a resumable tools-pending interruption — and
     // short-circuit before the dispatch waves.
     if (wasAborted()) {
-      await sessions.updateAssistantMessage(sessionId, assistantStub.id, {
-        stopReason: 'aborted',
-      });
-      yield {
-        type: 'stop', sessionId,
-        messageId: assistantStub.id, stopReason: 'aborted',
-      };
+      if (!await finalizeAbort(assistantStub.id, undefined)) {
+        yield {
+          type: 'stop', sessionId,
+          messageId: assistantStub.id, stopReason: 'aborted',
+        };
+      }
       return;
     }
 
@@ -893,15 +947,29 @@ export async function* runUserTurn(ctx) {
             if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* stub signal in tests */ } }
             resolveDispatch(v);
           };
-          /** @param {string} error @param {'aborted'|'timeout'} [kind] */
-          const failWith = (error, kind) => {
+          /** @param {unknown} cause @param {'aborted'|'timeout'} [kind] */
+          const failWith = (cause, kind) => {
             // why: deadline/abort failures are synthesized HERE, bypassing the
             // dispatcher audit — emit tool_failed so the log matches is_error.
             // A timeout waited the full deadline before we gave up (a real,
             // known wall-clock); an abort can fire at any moment, so 0.
-            if (kind) appendAudit({ type: 'tool_failed', sessionId, details: { tool: tu.name, primitive: 'unknown', error, kind, durationMs: kind === 'timeout' ? DISPATCH_DEADLINE_MS : 0 } }).catch(() => {});
+            const detail = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
+            const outcomeUnknown = detail?.outcomeKnown === false || kind !== undefined;
+            if (kind) appendAudit({
+              type: 'tool_failed', sessionId,
+              details: {
+                tool: tu.name, primitive: 'unknown',
+                error: detail?.message ?? String(cause), kind,
+                durationMs: kind === 'timeout' ? DISPATCH_DEADLINE_MS : 0,
+              },
+            }).catch(() => {});
             return finish({
-              ok: false, error,
+              ok: false,
+              error: outcomeUnknown
+                ? UNKNOWN_TOOL_OUTCOME
+                : detail?.message ?? String(cause),
+              ...(typeof detail?.code === 'string' ? { code: detail.code } : {}),
+              ...(outcomeUnknown ? { outcomeKnown: false, retryable: false } : {}),
               meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
             });
           };
@@ -909,16 +977,16 @@ export async function* runUserTurn(ctx) {
           // detached — a tracked side effect can land AFTER the abort, and
           // the durable operation log records that truth. Asserting a
           // definite "never happened" here would contradict it.
-          const onAbort = () => failWith('tool call aborted (Stop / steer / halt) before it settled — '
+          const onAbort = () => failWith(new Error('tool call aborted (Stop / steer / halt) before it settled; '
             + 'it may still settle in the background; a side effect\'s recorded outcome '
-            + 'arrives via interruption-recovery if it does', 'aborted');
+            + 'arrives via interruption-recovery if it does'), 'aborted');
           const deadline = setTimeout(
-            () => failWith(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes — treating it as hung and moving on`, 'timeout'),
+            () => failWith(new Error(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes; treating it as hung and moving on`), 'timeout'),
             DISPATCH_DEADLINE_MS,
           );
           toolDispatch({ id: tu.id, name: tu.name, args: tu.input }).then(
             (/** @type {ToolResult} */ r) => finish(r),
-            (/** @type {unknown} */ e) => failWith(/** @type {{ message?: string }} */ (e)?.message ?? String(e)),
+            (/** @type {unknown} */ e) => failWith(e),
           );
           if (signal) {
             if (signal.aborted) onAbort();
@@ -926,10 +994,26 @@ export async function* runUserTurn(ctx) {
           }
         }));
       } catch (e) {
+        const detail = /** @type {{ message?: string, code?: string, outcomeKnown?: boolean, retryable?: boolean }} */ (e);
         dispatchResult = {
           ok: false,
-          error: /** @type {{ message?: string }} */ (e)?.message ?? String(e),
+          error: detail?.outcomeKnown === false
+            ? UNKNOWN_TOOL_OUTCOME
+            : detail?.message ?? String(e),
+          ...(typeof detail?.code === 'string' ? { code: detail.code } : {}),
+          ...(detail?.outcomeKnown === false ? { outcomeKnown: false, retryable: false } : {}),
           meta: { toolName: tu.name, primitive: 'unknown', gates: [], durationMs: 0 },
+        };
+      }
+      if (/** @type {{outcomeKnown?:boolean}} */ (dispatchResult).outcomeKnown === false) {
+        const failed = /** @type {import('/shared/tool-types.js').ToolResultErr} */ (dispatchResult);
+        dispatchResult = {
+          ...dispatchResult,
+          ok: false,
+          code: failed.code ?? 'tool-outcome-unknown',
+          error: UNKNOWN_TOOL_OUTCOME,
+          outcomeKnown: false,
+          retryable: false,
         };
       }
       // why: redact BEFORE persisting. Strips data:image base64 (one
@@ -960,8 +1044,8 @@ export async function* runUserTurn(ctx) {
             && typeof im.data === 'string' && im.data.length > 0);
         if (imgs.length > 0) liveToolImages.set(tu.id, imgs);
       }
-      // why the paged raise: an EXPLICITLY-PAGED reader result (read_web_cache /
-      // read_run_cache / the self-paging file reads flag `paged`) is one slice
+      // why the paged raise: an EXPLICITLY-PAGED reader result (read_result or
+      // the self-paging file reads flag `paged`) is one slice
       // the model asked for — redact it at the larger paged ceiling so the
       // requested page survives instead of being re-cut by the 8k backstop.
       // Guarded to `ok && paged` so a normal firehose result still gets 8k'd.
@@ -974,6 +1058,8 @@ export async function* runUserTurn(ctx) {
         tool_use_id: tu.id,
         content: redactToolResult(rawContent, paged ? { maxChars: PAGED_MAX_CHARS } : undefined),
         is_error: !dispatchResult.ok,
+        ...(/** @type {{outcomeKnown?:boolean}} */ (dispatchResult).outcomeKnown === false
+          ? { outcomeKnown: false, retryable: false } : {}),
         meta: dispatchResult.meta,
         ...(typeof dispatchResult.actorDeliveryId === 'string'
           ? { actorDeliveryId: dispatchResult.actorDeliveryId }
@@ -988,6 +1074,12 @@ export async function* runUserTurn(ctx) {
         ...(typeof dispatchResult.actorPerformed === 'boolean'
           ? { actorPerformed: dispatchResult.actorPerformed } : {}),
         ...(dispatchResult.actorAborted === true ? { actorAborted: true } : {}),
+        ...(Array.isArray(dispatchResult.authorityReceipts)
+          ? { authorityReceipts: dispatchResult.authorityReceipts }
+          : {}),
+        ...(typeof dispatchResult.authorityPerformed === 'boolean'
+          ? { authorityPerformed: dispatchResult.authorityPerformed }
+          : {}),
       };
       return { tu, dispatchResult, block };
     };
@@ -996,21 +1088,21 @@ export async function* runUserTurn(ctx) {
     // EXISTING permission classification doing double duty as the scheduler:
     //   - READ class → safe (reads share no mutable state, and decideAction
     //     never confirms a read, so no modal can race another).
-    //   - confirm:true → NEVER safe, even for actor_create — a turn must
+    //   - confirm:true → NEVER safe: a turn must
     //     not stack two confirmation modals (serialize confirms).
-    //   - otherwise only the by-name CONCURRENT_TOOLS set (actor_create)
-    //     qualifies; every write stays strictly serial in emitted order.
-    // Without a classifier (actor/runner loops) we keep the original
-    // actor_create-only behavior.
+    //   - every write stays strictly serial in emitted order.
+    // Missing classification fails closed to serial dispatch. Both sealed
+    // production runtimes inject the same descriptor-based classifier; keeping
+    // no by-name exception here prevents a tool rename or new call path from
+    // silently acquiring concurrency outside semantic policy.
     const classify = typeof ctx.classifyToolCall === 'function' ? ctx.classifyToolCall : null;
     /** @param {ToolUseBlock} tu */
     const isConcurrencySafe = (tu) => {
-      if (!classify) return CONCURRENT_TOOLS.has(tu.name);
+      if (!classify) return false;
       let verdict = null;
       try { verdict = classify(tu.name); } catch { verdict = null; }
       if (!verdict || verdict.confirm === true) return false;
-      if (verdict.actionClass === 'read') return true;
-      return CONCURRENT_TOOLS.has(tu.name);
+      return verdict.actionClass === 'read';
     };
 
     /** @type {ToolResultBlock[]} */
@@ -1019,6 +1111,7 @@ export async function* runUserTurn(ctx) {
     // (a notebook eval's ok:true + in-band [ERROR] — the evalError marker).
     // Such a round must NOT short-circuit as "clean"; track it per round.
     let roundHadEvalError = false;
+    let roundHadUnknownOutcome = false;
     /** @type {{ block: ToolResultBlock, result: ToolResult } | null} */
     let turnEndingResult = null;
     // partitionToolBatch groups CONSECUTIVE safe calls into concurrent
@@ -1047,8 +1140,11 @@ export async function* runUserTurn(ctx) {
         }
         const blocksById = new Map();
         for await (const { tu, dispatchResult, block } of asCompleted(wave.calls.map(dispatchOne))) {
-          yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          if (!wasAborted()) {
+            yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          }
           if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
+          if (/** @type {{outcomeKnown?:boolean}} */ (dispatchResult).outcomeKnown === false) roundHadUnknownOutcome = true;
           blocksById.set(tu.id, block);
           if (dispatchResult.endTurn === true && !turnEndingResult) {
             turnEndingResult = { block, result: dispatchResult };
@@ -1068,17 +1164,23 @@ export async function* runUserTurn(ctx) {
             toolUseId: tu.id, name: tu.name, input: tu.input,
           };
           const { dispatchResult, block } = await dispatchOne(tu);
-          yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          if (!wasAborted()) {
+            yield { type: 'tool-result', sessionId, toolUseId: tu.id, result: dispatchResult };
+          }
           if (/** @type {{ evalError?: boolean }} */ (dispatchResult).evalError === true) roundHadEvalError = true;
           toolResults.push(block);
+          if (/** @type {{outcomeKnown?:boolean}} */ (dispatchResult).outcomeKnown === false) {
+            roundHadUnknownOutcome = true;
+            break;
+          }
           if (dispatchResult.endTurn === true) {
             turnEndingResult = { block, result: dispatchResult };
             break;
           }
         }
-        if (abortedMidBatch || turnEndingResult) break;
+        if (abortedMidBatch || turnEndingResult || roundHadUnknownOutcome) break;
       }
-      if (turnEndingResult) break;
+      if (turnEndingResult || roundHadUnknownOutcome) break;
     }
     // why the extra wasAborted(): the per-wave checks run BEFORE each dispatch,
     // so an abort landing DURING the batch's FINAL dispatch is seen by neither —
@@ -1089,19 +1191,44 @@ export async function* runUserTurn(ctx) {
     // whose tool_result no longer follows its tool_use, which the provider
     // rejects on every later call (the format layer's orphan-tool_result
     // demotion is the wire-side backstop for sessions already shaped that way).
+    if (toolResults.length > 0 && wasAborted()) {
+      // why: Stop does not prove an admitted side effect was cancelled.
+      if (await finalizeAbort(assistantStub.id, undefined, true)) return;
+      yield {
+        type: 'error', sessionId, messageId: assistantStub.id,
+        error: UNKNOWN_TURN_OUTCOME, code: 'tool-outcome-unknown',
+        outcomeKnown: false, retryable: false,
+      };
+      throw Object.assign(new Error(UNKNOWN_TURN_OUTCOME), {
+        code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+      });
+    }
+
     if (abortedMidBatch || wasAborted()) {
       // Mirror the pre-dispatch abort guard (:683): mark a DELIBERATE stop (not a
       // resumable tools-pending interruption) and drop the partial tool_result
       // message, so the turn ends cleanly on the aborted assistant message and
       // detectInterruptedTurn won't re-drive it.
-      await sessions.updateAssistantMessage(sessionId, assistantStub.id, {
-        stopReason: 'aborted',
-      });
-      yield {
-        type: 'stop', sessionId,
-        messageId: assistantStub.id, stopReason: 'aborted',
-      };
+      if (!await finalizeAbort(assistantStub.id, undefined)) {
+        yield {
+          type: 'stop', sessionId,
+          messageId: assistantStub.id, stopReason: 'aborted',
+        };
+      }
       return;
+    }
+
+    if (roundHadUnknownOutcome) {
+      const completed = new Set(toolResults.map((block) => block.tool_use_id));
+      for (const tu of toolUses) {
+        if (!completed.has(tu.id)) toolResults.push({
+          tool_use_id: tu.id,
+          content: 'not_run: Prior tool outcome unknown.',
+          is_error: true,
+          outcomeKnown: true,
+          retryable: false,
+        });
+      }
     }
 
     // Append the user message that carries tool results back to the
@@ -1117,6 +1244,12 @@ export async function* runUserTurn(ctx) {
     };
     session = await sessions.appendMessage(sessionId, resultMessage);
     yield { type: 'state', session };
+
+    if (roundHadUnknownOutcome) {
+      throw Object.assign(new Error(UNKNOWN_TOOL_OUTCOME), {
+        code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+      });
+    }
 
     // A host policy can hand the interaction to the user and close this turn.
     // Sign-in uses this after confirmation or an IdP landing so no later model

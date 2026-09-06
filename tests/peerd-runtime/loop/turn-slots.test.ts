@@ -38,6 +38,29 @@ describe('makeTurnSlots', () => {
     expect(slots.busySessionIds()).toEqual(['b']);
   });
 
+  test('publishes only the current turn activity and clears it on release', () => {
+    const slots = makeTurnSlots();
+    const turn = slots.claim('a');
+    expect(slots.activityFor('a')).toBe(null);
+    turn.setActivity('Compare the rollout options');
+    expect(slots.activityFor('a')).toBe('Compare the rollout options');
+    turn.release();
+    expect(slots.activityFor('a')).toBe(null);
+  });
+
+  test('a superseded turn cannot overwrite or clear its replacement activity', () => {
+    const slots = makeTurnSlots();
+    const first = slots.claim('a');
+    first.setActivity('old request');
+    const second = slots.claim('a');
+    second.setActivity('new request');
+    first.setActivity('late old request');
+    first.release();
+    expect(slots.activityFor('a')).toBe('new request');
+    second.release();
+    expect(slots.activityFor('a')).toBe(null);
+  });
+
   test('claiming the SAME session aborts the prior turn (steer-live)', () => {
     const slots = makeTurnSlots();
     const first = slots.claim('a');

@@ -11,7 +11,6 @@
 //                feature 01's workspace store
 //   registry.js  description-at-startup / body-on-invocation contract +
 //                system-prompt block rendering
-//   install.js   local / git-URL / static-manifest sources (egress-gated)
 //   load-skill-tool.js  the model-facing tool that injects a body on demand
 
 export { parseSkillMd, normalizeName, SkillParseError } from './parse.js';
@@ -21,11 +20,4 @@ export {
   SkillExistsError,
   SkillNotFoundError,
 } from './registry.js';
-export {
-  installFromLocal,
-  installFromGit,
-  installFromManifest,
-  resolveGitRawUrl,
-  SkillInstallError,
-} from './install.js';
 export { loadSkillTool } from './load-skill-tool.js';

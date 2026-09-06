@@ -14,7 +14,7 @@ const VALUE_MAX_CHARS = 6000;
 
 /**
  * Serialize a run value + report whether it overflows the [VALUE] cap.
- * why a separate pure helper: the spill path (script → runCache) must know the
+ * why a separate pure helper: the spill path (script → resultStore) must know the
  * FULL text and the overflow verdict BEFORE formatting, without duplicating the
  * stringify fallback chain here — one serialization contract, two consumers.
  * @param {unknown} value

@@ -8,6 +8,7 @@ import { describe, test, expect } from 'bun:test';
 import { jsReadFileTool } from '../../extension/peerd-runtime/tools/defs/js-read-file.js';
 import { appReadFileTool } from '../../extension/peerd-runtime/tools/defs/app-read-file.js';
 import { scriptTool } from '../../extension/peerd-runtime/tools/defs/script.js';
+import { executionToolContext } from '../helpers/execution-tool.js';
 
 const FENCE_OPEN = '<untrusted_web_content';
 const FENCE_CLOSE = '</untrusted_web_content>';
@@ -18,7 +19,7 @@ const content = (r: unknown): string => (r as { content: string }).content;
 describe('js_read_file — fenced content', () => {
   const ctx = (content: string) => ({
     session: { sessionId: 's1' },
-    jsClient: { readFile: async () => content },
+    notebookAuthority: { readFile: async () => content },
   });
 
   test('the file body comes back inside the untrusted fence, origin naming the file', async () => {
@@ -44,8 +45,7 @@ describe('js_read_file — fenced content', () => {
 describe('app_read_file — fenced content', () => {
   test('the file body comes back inside the untrusted fence, origin naming the app file', async () => {
     const ctx = {
-      session: { sessionId: 's1' },
-      appClient: { readFile: async () => '<h1>from the web</h1>' },
+      appAuthority: { readFile: async () => '<h1>from the web</h1>' },
     };
     const r = await appReadFileTool.execute({ appId: 'app-1', path: 'index.html' }, ctx as any);
     expect(r.ok).toBe(true);
@@ -56,7 +56,7 @@ describe('app_read_file — fenced content', () => {
 });
 
 describe('script — output fenced ONLY when the run used egress', () => {
-  const ctx = (result: object) => ({
+  const ctx = (result: object) => executionToolContext({
     session: { sessionId: 's1' },
     jsOffscreenClient: { execHeadless: async () => result },
   });

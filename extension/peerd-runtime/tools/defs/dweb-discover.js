@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_discover — list the Apps peers are sharing on the dweb right now.
 //
 // Read-only window onto the peer-to-peer app store: the gossip-heard cache plus
@@ -27,27 +29,16 @@
  */
 
 /** @type {DwebTool} */
-export const dwebDiscoverTool = {
-  name: 'dweb_discover',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'List Apps peers are sharing on the dweb right now — the peer-to-peer app',
-    'store. Returns each app\'s name, publisher, and peerd:// uri (pass the uri to',
-    'dweb_install). Read-only. Returns an empty list if no peers are sharing or the',
-    'base network is not up yet.',
-  ].join(' '),
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const dwebDiscoverTool = composeTool("dweb_discover", {
 
   execute: async (_args, ctx) => {
     // why: ctx.dweb is an SW-injected slot (null when the dweb is off) absent
     // from the base ToolContext; narrow it to the one discover() op used here.
-    const dweb = /** @type {{ discover: () => Promise<DiscoverResult> } | null | undefined} */ (
-      /** @type {{ dweb?: unknown }} */ (ctx).dweb);
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
-    const r = await dweb.discover();
+    const authority = /** @type {{discoverApps?:()=>Promise<DiscoverResult>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.discoverApps !== 'function') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    const r = await authority.discoverApps();
+    if (r?.error === 'dweb_unavailable') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (!r?.ok) return { ok: false, error: r?.error ?? 'discover_failed' };
     const apps = (r.apps ?? []).map((a) => ({
       name: a.name,
@@ -59,4 +50,4 @@ export const dwebDiscoverTool = {
     }));
     return { ok: true, content: JSON.stringify({ count: apps.length, apps }, null, 2) };
   },
-};
+});

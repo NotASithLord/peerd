@@ -1,7 +1,20 @@
 import { describe, expect, test } from 'bun:test';
-import { openTabTool } from '../../../extension/peerd-runtime/tools/defs/open-tab.js';
+import { openProtectedBackgroundTabAuthority } from '../../../extension/background/page-authority/open-tab.js';
 import { siteCaptureTool } from '../../../extension/peerd-runtime/tools/defs/site-capture.js';
-import { clickTool } from '../../../extension/peerd-runtime/tools/defs/click.js';
+import { executeSiteClientTool } from '../../helpers/site-client-tool.js';
+import { clickOwnedTargetAuthority } from '../../../extension/background/page-authority/click.js';
+import { openTabTool as controllerOpenTabTool } from '../../../extension/peerd-runtime/tools/defs/open-tab.js';
+import { clickTool as controllerClickTool } from '../../../extension/peerd-runtime/tools/defs/click.js';
+
+const openTabTool = { execute: (args: any, ctx: any) => controllerOpenTabTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    openProtectedBackgroundTab: () => openProtectedBackgroundTabAuthority(args, ctx),
+  },
+}) };
+const clickTool = { execute: (args: any, ctx: any) => controllerClickTool.execute(args, {
+  ...ctx, pageAuthority: { clickOwnedTarget: () => clickOwnedTargetAuthority(args, ctx) },
+}) };
 import {
   BrowserAutomationPolicyError,
   BrowserNetworkGuardUnavailableError,
@@ -71,7 +84,7 @@ describe('browser entry-point private-network policy', () => {
         cancel: async () => { canceled += 1; },
       },
     };
-    await expect(siteCaptureTool.execute({ action: 'start' }, ctx))
+    await expect(executeSiteClientTool(siteCaptureTool, { action: 'start' }, ctx))
       .rejects.toBeInstanceOf(BrowserAutomationPolicyError);
     expect(started).toBe(0);
     expect(canceled).toBe(1);
@@ -79,7 +92,7 @@ describe('browser entry-point private-network policy', () => {
 
   test('site_capture discards a prior capture when the owned tab is blank', async () => {
     let canceled = 0;
-    const operation = siteCaptureTool.execute({ action: 'stop' }, {
+    const operation = executeSiteClientTool(siteCaptureTool, { action: 'stop' }, {
       actorType: 'web',
       activeTab: { id: 7, url: 'https://stale.example/', origin: 'https://stale.example' },
       tabs: { get: async () => ({ id: 7, url: 'about:blank' }) },
@@ -112,7 +125,7 @@ describe('browser entry-point private-network policy', () => {
         stop: async () => ({}),
       },
     };
-    const result: any = await siteCaptureTool.execute({ action: 'start' }, ctx);
+    const result: any = await executeSiteClientTool(siteCaptureTool, { action: 'start' }, ctx);
     expect(result.ok).toBe(true);
     expect(input).toEqual({
       tabId: 7,
@@ -142,7 +155,7 @@ describe('browser entry-point private-network policy', () => {
         stop: async () => ({ endpoints: [], dropped: 3 }),
       },
     };
-    const result: any = await siteCaptureTool.execute({ action: 'stop' }, ctx);
+    const result: any = await executeSiteClientTool(siteCaptureTool, { action: 'stop' }, ctx);
     expect(result.ok).toBe(true);
     expect(result.content).toContain('another origin');
     expect(result.content).toContain('exact API actor');
@@ -168,7 +181,7 @@ describe('browser entry-point private-network policy', () => {
         }),
       },
     };
-    const result: any = await siteCaptureTool.execute({ action: 'stop' }, ctx);
+    const result: any = await executeSiteClientTool(siteCaptureTool, { action: 'stop' }, ctx);
     expect(result.ok).toBe(true);
     expect(result.content).toContain('origin: https://app.example (owned tab)');
     expect(result.content).toContain('origin: https://api.app.example (related observation; separate custody)');

@@ -5,13 +5,13 @@ for browser-platform differences that cause a concrete loss of Peerd
 functionality or isolation. It is not a general roadmap or a claim that two
 browsers expose identical extension APIs.
 
-Last audited: **2026-08-11**. The packaged Firefox 149 Pod smoke rejected the
-raw blob module Worker before it executed; the ordinary shell/WASI/persistence
-checks passed. Firefox 154 sandbox support is an upstream milestone and has not
-yet been adopted or verified by Peerd. Upstream statuses below are snapshots;
-follow the linked issues for their live state. An upstream issue closing is not
-enough to remove a guard: the exit check in this file must pass in a packaged
-extension.
+The packaged Firefox acceptance lane targets Firefox 154 or later. Apps have
+passed the opaque-origin sandbox, isolation, import/open, Git, and restart
+checks. Pod JavaScript remains guarded because the raw blob module Worker is
+still rejected before execution; ordinary shell/WASI/persistence checks pass.
+Upstream statuses below are snapshots; follow the linked issues for their live
+state. An upstream issue closing is not enough to remove a guard: the exit
+check in this file must pass in a packaged extension.
 
 ## Current user-visible differences
 
@@ -19,9 +19,9 @@ extension.
 |---|---|---|---|
 | WebVM and threaded WebAssembly | WebVM can boot in a cross-origin-isolated extension page | WebVM cannot boot from an extension page; WebAssembly that needs shared memory/threads is unavailable. Non-threaded WASI in Notebooks and Pods is unaffected | Blocked upstream |
 | Pod JavaScript | `js` runs Web-standard JavaScript in a sealed module Worker | `js` is refused; the shell, OPFS, Git, HTTP bridge, and WASI remain available | Platform behavior under review plus a Peerd guard |
-| Apps | Opaque-origin manifest-sandbox runner is available | Unavailable in the current Peerd Firefox package | Upstream fixed for Firefox 154; Peerd adoption pending |
-| Headless/offscreen services | Headless `script`/`page_code`, site-client and A2A code runners, PDF/document conversion, rich HTML extraction, voice/local-model hosts, and per-actor Worker heaps are available | Those offscreen-hosted tools are absent or fall back; notably, bound actors fall back to the service-worker heap and lose the dedicated memory boundary | Peerd architecture gap; upstream API request is WONTFIX |
-| Advanced tab automation | Preview/dev builds can use CDP; the store build uses the scripting fallback | Uses the scripting fallback: core read/navigate/click/type work, but `page_exec`, trusted `page_keys`, cross-frame accessibility snapshots, and some hardened-site flows are unavailable | Accepted fallback around a missing API |
+| Apps | Opaque-origin manifest-sandbox runner is available | Available on Firefox 154 or later with the same no-network sandbox floor | Supported with packaged acceptance |
+| Headless/offscreen services | Headless `script`/`page_code`, site-client and A2A code runners, PDF/document conversion, rich HTML extraction, voice/local-model hosts, and per-actor Worker heaps are available | The sealed controller and per-actor Workers run from the event page and preserve their separate keyless heaps; voice has a background-page host. Sealed jobs, document/PDF conversion, rich HTML extraction, local WebGPU, and dweb/A2A hosts remain unavailable, so their dependent tools are not exposed | Isolation parity is implemented; hosted capability gaps remain |
+| Advanced tab automation | Preview/dev builds can use CDP; the store build uses the scripting fallback | Uses the scripting fallback for core read/navigate/click/type work and `tabs.captureTab(tabId)` for exact-tab vision; cross-frame accessibility snapshots, network capture, trusted CDP input, and some hardened-site flows remain unavailable | Accepted fallback around a missing API |
 
 The side panel/sidebar naming difference is not a capability loss. Minor UI
 differences such as tab grouping are also omitted unless they begin preventing
@@ -68,50 +68,38 @@ Dynamic Worker/CSP behavior is not yet a stable Firefox Pod contract.
   Worker under its shipped CSP, AMO policy permits the construction, and the
   same realm-seal, cancellation, egress, and red-team tests pass as Chromium.
 
-### FF-SANDBOX: manifest sandbox support landed in Firefox 154
-
-- **Peerd impact:** Apps are disabled because Peerd's current Firefox manifest
-  strips the `sandbox` key and the runtime refuses to open an App without a
-  proven opaque-origin runner.
-- **Upstream:** [Mozilla Bug 1685123](https://bugzilla.mozilla.org/show_bug.cgi?id=1685123)
-  is `RESOLVED FIXED` for Firefox 154.
-- **Peerd status:** this is no longer an upstream blocker. Peerd must decide when
-  Firefox 154 is an acceptable minimum, retain `sandbox` plus its CSP in the
-  Firefox manifest, and remove the Firefox-only App refusal.
-- **Exit check:** packaged Firefox App tests prove an opaque origin, no extension
-  API access, no ambient network, correct Worker rewriting, and normal
-  create/edit/preview/version/reopen behavior.
-
 ### FF-OFFSCREEN: Firefox uses event pages instead of `chrome.offscreen`
 
-- **Peerd impact:** the headless tools and document/media/model hosts listed in
-  the table are unavailable or degraded. More importantly, actor turns can fall
-  back to the service-worker realm; the exact security consequence is documented
-  as [residual risk R1](security/THREAT-MODEL.md#8-known-residual-risks).
+- **Peerd impact:** Firefox has no offscreen document, so sealed jobs,
+  document/PDF conversion, rich HTML extraction, local WebGPU, and dweb/A2A
+  hosts remain unavailable. The runtime capability projection removes dependent
+  tools instead of routing them through a weaker host. This does not move
+  reasoning into the privileged background heap: the orchestrator and every
+  actor run in separate keyless dedicated Workers.
 - **Upstream:** [Mozilla Bug 1807830](https://bugzilla.mozilla.org/show_bug.cgi?id=1807830)
   is `RESOLVED WONTFIX`; Mozilla's stated replacement is the DOM-capable MV3
   event page. The cross-browser API discussion remains in
   [WECG issue 170](https://github.com/w3c/webextensions/issues/170).
-- **Peerd status:** this is a Peerd architecture task, not something to wait for
-  Mozilla to fix. The current gate is `offscreenAvailable` in
-  [`service-worker.js`](../extension/background/service-worker.js).
-- **Exit check:** a Firefox event-page or equivalent host provides the same
-  lifecycle, cancellation, keyless Worker boundary, and document/media
-  capabilities, with Firefox browser tests covering both success and recovery.
+- **Peerd status:** Firefox uses a sealed event-page controller and actor host.
+  A run-scoped acknowledged `storage.session` heartbeat keeps the event page
+  alive only while actor work is active; loss pauses work and recovery refuses
+  uncertain replay. Voice uses its dedicated background-page host. There is no
+  service-worker-heap reasoning fallback.
+- **Exit check:** new Firefox hosts add the currently unavailable sealed-job,
+  document/media, rich-HTML, local-model, or dweb capabilities without weakening
+  the existing Worker isolation, lifecycle, cancellation, and recovery proofs.
 
 ### FF-DEBUGGER: no compatible `chrome.debugger` extension API
 
 - **Peerd impact:** Firefox uses the same `chrome.scripting`/DOM-walk path as the
-  initial Chromium store build. It cannot provide CDP-only trusted input,
-  `page_exec` on Trusted-Types pages, or the full cross-frame accessibility
-  tree.
+  initial Chromium store build and `tabs.captureTab(tabId)` for exact-tab
+  vision. It cannot provide CDP-only trusted input, site-client network capture,
+  or the full cross-frame accessibility tree.
 - **Upstream:** [Mozilla Bug 1316741](https://bugzilla.mozilla.org/show_bug.cgi?id=1316741)
   remains `NEW`; the older direct Chrome-parity request,
   [Bug 1241448](https://bugzilla.mozilla.org/show_bug.cgi?id=1241448), is
   `RESOLVED WONTFIX`.
-- **Peerd fallback:** the capability gate and exact fallback surface are in
-  [`service-worker.js`](../extension/background/service-worker.js); the
-  top-frame-only snapshot constraint is in
+- **Peerd fallback:** the top-frame-only snapshot constraint is in
   [`walk-injected.js`](../extension/peerd-runtime/dom/walk-injected.js).
 - **Exit check:** Firefox exposes a reviewed automation API with the required
   trusted-input and inspection semantics, or Peerd implements equivalent

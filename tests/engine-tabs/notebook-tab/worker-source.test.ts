@@ -3,6 +3,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { buildWorkerSource, mapWorkerError } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
+import { buildCodeClientSource } from '../../../extension/peerd-runtime/actor/capability-manifest.js';
 
 const resolverDeps = {
   readFile: async () => { throw new Error('no OPFS in this test'); },
@@ -23,6 +24,32 @@ describe('buildWorkerSource dynamic import compatibility relay', () => {
     const { source } = await buildWorkerSource('return 1', { notebookId: 'nb-1', resolverDeps });
     expect(source).toContain('if (m.errorCode) error.code = m.errorCode');
     expect(source).not.toContain('errorCode: err?.code');
+  });
+});
+
+describe('buildWorkerSource generated code clients', () => {
+  test('the assembled worker exposes only canonical actor and mesh method names', async () => {
+    const { source } = await buildWorkerSource('return 1', {
+      notebookId: 'job-1', resolverDeps, actors: true, a2a: true,
+      clientSources: {
+        actors: buildCodeClientSource('actors'),
+        mesh: buildCodeClientSource('mesh'),
+      },
+    });
+    expect(source).toContain("call: (address, message, options) => actorsCall('call'");
+    expect(source).toContain("cast: (did, message) => meshCall('cast'");
+    expect(source).not.toContain("ask:  (address");
+    expect(source).not.toContain("ask:         (did");
+    expect(source).not.toContain("send:        (did");
+  });
+
+  test('enabled actor clients cannot fall back to a second hand-written API', async () => {
+    await expect(buildWorkerSource('return 1', {
+      notebookId: 'job-1', resolverDeps, actors: true,
+    })).rejects.toThrow('actors worker client source is required');
+    await expect(buildWorkerSource('return 1', {
+      notebookId: 'job-1', resolverDeps, a2a: true,
+    })).rejects.toThrow('mesh worker client source is required');
   });
 });
 

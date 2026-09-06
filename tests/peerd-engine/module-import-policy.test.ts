@@ -50,13 +50,13 @@ describe('remote module syntax policy', () => {
     "import/* comment */('ht\\ttps://cdn.test/stripped-tab.js');",
     "import('data:text/javascript,export default 1');",
     "import('/peerd-runtime/loop.js');",
+    "import { helper } from 'peerd:host/helper';",
   ])('unsupported native import forms get the repair-specific refusal: %s', (source) => {
     expectPolicyRefusal(source, UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE);
   });
 
   test.each([
     "import { table } from 'peerd:std';",
-    "import { helper } from 'peerd:toolbox/helper';",
     "import { value } from './local.js';",
   ])('supported literal static local import remains available: %s', (source) => {
     expect(() => assertRemoteModulePolicy(

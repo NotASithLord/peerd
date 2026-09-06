@@ -50,11 +50,11 @@ const FAKE_ASSETS = [
   { name: 'lang-eng',  url: 'https://example.test/eng.gz',   sri: null, sizeBytes: 4 },
 ];
 
-describe('OCR engine SRIs are pinned (shippable)', () => {
-  test('hasValidOcrSris is true and every asset carries a sha384 hash', () => {
-    expect(hasValidOcrSris()).toBe(true);
+describe('OCR remains unavailable until its browser loader is proven', () => {
+  test('production is fail-closed and future asset URLs stay version-pinned', () => {
+    expect(hasValidOcrSris()).toBe(false);
     for (const a of OCR_ASSETS) {
-      expect(a.sri).toMatch(/^sha384-/);
+      expect(a.sri).toBeNull();
       expect(a.url).toMatch(/@\d+\.\d+\.\d+\//);  // exact-version-pinned URL (not @6/@1)
     }
   });

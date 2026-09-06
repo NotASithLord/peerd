@@ -74,7 +74,7 @@ describe('formatPdfBody', () => {
       scanned: true, ocrUsed: false, ocrAvailable: false,
     });
     expect(body).toContain('looks scanned');
-    expect(body).toContain('Settings → Voice & OCR');
+    expect(body).toContain('OCR is unavailable in this build');
   });
 
   test('OCR flagged when it ran', () => {

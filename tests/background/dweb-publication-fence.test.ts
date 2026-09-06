@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
+import { runDwebReseedPublication } from '../../extension/offscreen/dweb-reseed-publication.js';
 
 describe('dweb publication fence', () => {
   test('invalidates queued work and serializes stop after admitted work', async () => {
@@ -23,5 +24,254 @@ describe('dweb publication fence', () => {
     release();
     await Promise.all([first, stale, stop]);
     expect(events).toEqual(['publish:start', 'publish:end', 'stale:blocked', 'stop']);
+  });
+
+  test('retires a hung reseed and admits its successor without reviving it', async () => {
+    const retirements: string[] = [];
+    const fence = createDwebPublicationFence({
+      retireReseedHost: async (reason) => { retirements.push(reason); },
+    });
+    let release!: () => void;
+    let admittedCurrent!: () => boolean;
+    let started!: () => void;
+    const publicationStarted = new Promise<void>((resolve) => { started = resolve; });
+    const effects: string[] = [];
+    const first = fence.runReseed(async (current) => {
+      admittedCurrent = current;
+      started();
+      await new Promise<void>((resolve) => { release = resolve; });
+      if (current()) effects.push('stale-effect');
+    }, { timeoutMs: 5 });
+    await publicationStarted;
+    expect(await first.catch((error) => error.message)).toBe('dweb-reseed-publication-timeout');
+    expect(admittedCurrent()).toBe(false);
+    await fence.runReseed(async (current) => {
+      if (current()) effects.push('successor-effect');
+    }, { timeoutMs: 20 });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(effects).toEqual(['successor-effect']);
+    expect(retirements).toEqual(['dweb-reseed-outcome-unknown']);
+  });
+
+  test('does not admit an ordinary share or delete until a timed-out host is retired', async () => {
+    let finishRetirement!: () => void;
+    const retirement = new Promise<void>((resolve) => { finishRetirement = resolve; });
+    let releaseReseed!: () => void;
+    let staleCurrent!: () => boolean;
+    let reseedStarted!: () => void;
+    const started = new Promise<void>((resolve) => { reseedStarted = resolve; });
+    const events: string[] = [];
+    const fence = createDwebPublicationFence({
+      retireReseedHost: async () => {
+        events.push('host:retire');
+        await retirement;
+        events.push('host:retired');
+      },
+    });
+    const reseed = fence.runReseed(async (current) => {
+      staleCurrent = current;
+      events.push('reseed:start');
+      reseedStarted();
+      await new Promise<void>((resolve) => { releaseReseed = resolve; });
+      if (current()) events.push('reseed:commit');
+    }, { timeoutMs: 5 });
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 8));
+    const share = fence.run(async () => { events.push('ordinary:share'); });
+    const remove = fence.run(async () => { events.push('ordinary:delete'); });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(staleCurrent()).toBe(false);
+    expect(events).toEqual(['reseed:start', 'host:retire']);
+    finishRetirement();
+    expect(await reseed.catch((error) => error.code)).toBe('dweb-reseed-publication-timeout');
+    await Promise.all([share, remove]);
+    releaseReseed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual([
+      'reseed:start', 'host:retire', 'host:retired', 'ordinary:share', 'ordinary:delete',
+    ]);
+  });
+
+  test('a failed retirement poisons later publication until physical retirement succeeds', async () => {
+    let retirements = 0;
+    const events: string[] = [];
+    const fence = createDwebPublicationFence({
+      retireReseedHost: async () => {
+        retirements += 1;
+        if (retirements === 1) throw new Error('host-close-failed');
+        events.push('host:retired');
+      },
+    });
+    const uncertain = fence.runReseed(async () => {
+      throw Object.assign(new Error('compensation-failed'), { outcomeKnown: false });
+    }, { timeoutMs: 20 });
+    expect(await uncertain.catch((error) => error.message))
+      .toBe('dweb reseed host retirement failed');
+    await fence.run(async () => { events.push('ordinary'); });
+    expect({ retirements, events }).toEqual({
+      retirements: 2, events: ['host:retired', 'ordinary'],
+    });
+  });
+
+  test('a hung retirement releases the lane only into the same poisoned admission gate', async () => {
+    let retirements = 0;
+    const effects: string[] = [];
+    const fence = createDwebPublicationFence({
+      retirementTimeoutMs: 5,
+      retireReseedHost: async () => {
+        retirements += 1;
+        if (retirements === 1) return new Promise(() => {});
+      },
+    });
+    await expect(fence.runReseed(async () => {
+      throw Object.assign(new Error('unknown'), { outcomeKnown: false });
+    }, { timeoutMs: 20 })).rejects.toMatchObject({
+      code: 'dweb-reseed-host-retirement-failed', outcomeKnown: false,
+    });
+    await fence.run(async () => { effects.push('ordinary'); });
+    expect({ retirements, effects }).toEqual({ retirements: 2, effects: ['ordinary'] });
+  });
+
+  test('durably arms the exact host before a reseed effect and disarms only after settlement', async () => {
+    const events: string[] = [];
+    const fence = createDwebPublicationFence({
+      ensureReseedHostRetired: async () => { events.push('ensure'); },
+      armReseedHost: async (hostEpoch) => { events.push(`arm:${hostEpoch}`); },
+      disarmReseedHost: async (hostEpoch) => { events.push(`disarm:${hostEpoch}`); },
+      retireReseedHost: async () => { events.push('retire'); },
+    });
+    await expect(fence.runReseed(async () => {
+      events.push('effect');
+      return 'seeded';
+    }, { timeoutMs: 20, hostEpoch: 'host-epoch-durable' })).resolves.toBe('seeded');
+    expect(events).toEqual([
+      'ensure', 'arm:host-epoch-durable', 'effect', 'disarm:host-epoch-durable',
+    ]);
+  });
+
+  test('a failed durable arm is pre-effect and admits no later publication past the marker read', async () => {
+    let effects = 0;
+    const fence = createDwebPublicationFence({
+      ensureReseedHostRetired: async () => {},
+      armReseedHost: async () => { throw new Error('retirement-store-down'); },
+      disarmReseedHost: async () => {},
+      retireReseedHost: async () => {},
+    });
+    await expect(fence.runReseed(async () => { effects += 1; }, {
+      timeoutMs: 20, hostEpoch: 'host-epoch-durable',
+    })).rejects.toThrow('retirement-store-down');
+    expect(effects).toBe(0);
+  });
+
+  test('an uncertain armed reseed retires rather than clearing its write-ahead marker', async () => {
+    const events: string[] = [];
+    const fence = createDwebPublicationFence({
+      ensureReseedHostRetired: async () => {},
+      armReseedHost: async () => { events.push('arm'); },
+      disarmReseedHost: async () => { events.push('disarm'); },
+      retireReseedHost: async () => { events.push('retire'); },
+    });
+    await expect(fence.runReseed(async () => {
+      throw Object.assign(new Error('unknown'), { outcomeKnown: false });
+    }, { timeoutMs: 20, hostEpoch: 'host-epoch-durable' })).rejects.toThrow('unknown');
+    expect(events).toEqual(['arm', 'retire']);
+  });
+
+  test('a successor that fails before mutation cannot revive the retired predecessor', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    const effects: string[] = [];
+    const fence = createDwebPublicationFence({ retireReseedHost: async () => {} });
+    const predecessor = fence.runReseed(async (current) => {
+      started();
+      await new Promise<void>((resolve) => { release = resolve; });
+      if (current()) effects.push('predecessor:commit');
+    }, { timeoutMs: 5 });
+    await began;
+    await expect(predecessor).rejects.toMatchObject({ outcomeKnown: false });
+    await expect(fence.runReseed(async () => {
+      effects.push('successor:prepare');
+      throw new Error('pre-effect-failure');
+    }, { timeoutMs: 20 })).rejects.toThrow('pre-effect-failure');
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(effects).toEqual(['successor:prepare']);
+  });
+
+  test('a queued reseed timeout cannot leapfrog an ordinary publication', async () => {
+    const fence = createDwebPublicationFence();
+    let release!: () => void;
+    let started!: () => void;
+    const publicationStarted = new Promise<void>((resolve) => { started = resolve; });
+    const events: string[] = [];
+    const ordinary = fence.run(async () => {
+      events.push('ordinary:start');
+      started();
+      await new Promise<void>((resolve) => { release = resolve; });
+      events.push('ordinary:end');
+    });
+    await publicationStarted;
+    const reseed = fence.runReseed(async () => { events.push('reseed'); }, { timeoutMs: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(events).toEqual(['ordinary:start']);
+    release();
+    await Promise.all([ordinary, reseed]);
+    expect(events).toEqual(['ordinary:start', 'ordinary:end', 'reseed']);
+  });
+
+  test('generation invalidation during byte publication rolls back before announce', async () => {
+    const fence = createDwebPublicationFence();
+    let release!: () => void;
+    let started!: () => void;
+    const publicationStarted = new Promise<void>((resolve) => { started = resolve; });
+    const events: string[] = [];
+    const operation = fence.runReseed((current) => runDwebReseedPublication({
+      current,
+      publish: async () => {
+        events.push('publish:start');
+        started();
+        await new Promise<void>((resolve) => { release = resolve; });
+        events.push('publish:end');
+        return { hash: 'new' };
+      },
+      announce: async () => { events.push('announce'); return { seq: 2 }; },
+      rollbackBytes: () => { events.push('rollback-bytes'); },
+      compensate: () => { events.push('compensate'); },
+      commit: () => { events.push('commit'); },
+    }), { timeoutMs: 50 });
+    await publicationStarted;
+    fence.invalidate();
+    release();
+    expect(await operation.catch((error) => error.code)).toBe('dweb-generation-retired');
+    expect(events).toEqual(['publish:start', 'publish:end', 'rollback-bytes']);
+  });
+
+  test('generation invalidation during announcement compensates before release', async () => {
+    const fence = createDwebPublicationFence();
+    let release!: () => void;
+    let started!: () => void;
+    const announcementStarted = new Promise<void>((resolve) => { started = resolve; });
+    const events: string[] = [];
+    const operation = fence.runReseed((current) => runDwebReseedPublication({
+      current,
+      publish: async () => { events.push('publish'); return { hash: 'new' }; },
+      announce: async () => {
+        events.push('announce:start');
+        started();
+        await new Promise<void>((resolve) => { release = resolve; });
+        events.push('announce:end');
+        return { seq: 2 };
+      },
+      rollbackBytes: () => { events.push('rollback-bytes'); },
+      compensate: () => { events.push('compensate'); },
+      commit: () => { events.push('commit'); },
+    }), { timeoutMs: 50 });
+    await announcementStarted;
+    fence.invalidate();
+    release();
+    expect(await operation.catch((error) => error.code)).toBe('dweb-generation-retired');
+    expect(events).toEqual(['publish', 'announce:start', 'announce:end', 'compensate']);
   });
 });

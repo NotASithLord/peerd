@@ -27,7 +27,7 @@
 //   - `no-restricted-syntax` forbids Mithril `m.request`, `m.jsonp`, and
 //     `m.mount(document.body, …)`.
 //   - `no-restricted-imports` enforces per-module public APIs — the universal
-//     index.js plus declared host surfaces (background.js/offscreen.js) are the
+//     index.js plus declared host surfaces (background.js/offscreen.js/ui.js) are the
 //     only module entry points importable from outside the module.
 //
 // New in this pass — the shadow/TDZ class of bug (as warnings):
@@ -43,7 +43,9 @@ import globals from 'globals';
 // whole rule, so the patterns it keeps must be spelled out).
 const CROSS_MODULE_IMPORT = {
   // any `peerd-<name>/<deeper>` path that isn't a declared public entry point
-  regex: '(^|/)peerd-[a-z]+/(?!index\\.js$|background\\.js$|offscreen\\.js$).+',
+  // A few pure leaves and exact host surfaces are deliberately public. Naming
+  // each one keeps their cold graph explicit without widening sibling paths.
+  regex: '(^|/)peerd-(?!runtime/(?:administrative|browser-authority|controller(?:-administrative|-contributor|-model|-tools|-turn|-turn-semantics)?|kernel-executable|semantic|skills)\\.js$|runtime/(?:memory/store|skills/(?:registry|store)|tools/hooks/registry|transfer/(?:secret-policy|self-sync-surfaces|transfer)|voice/settings)\\.js$|runtime/contacts/(?:store|aggregate)\\.js$|runtime/observability/contributor-store\\.js$|engine/(?:app-assets|artifact|app-manifest|authority)\\.js$|egress/(?:kernel-storage\\.js|confirm/protocol\\.js)$)[a-z]+/(?!index\\.js$|background\\.js$|controller\\.js$|document-conversion\\.js$|offscreen\\.js$|options\\.js$|repository\\.js$|voice-host\\.js$|kernel-(?:browser|credentials|custody|memory|network|transfer|turn|turn-authority|turn-lifecycle)\\.js$|ui\\.js$).+',
   message: 'Cross-module imports must go through a declared /peerd-<name> public entry point.',
 };
 // The dweb module is stricter: NOTHING outside it may import it — not even its
@@ -241,11 +243,10 @@ export default [
     ],
     rules: { 'no-restricted-globals': 'off' },
   },
-  // Storage wrappers and the SW chassis touch chrome.storage directly.
+  // Storage wrappers touch chrome.storage directly.
   {
     files: [
       'extension/peerd-egress/storage/**',
-      'extension/background/service-worker.js',
     ],
     rules: { 'no-restricted-globals': 'off' },
   },
@@ -253,7 +254,7 @@ export default [
   // network egress). The egress allowlist intentionally wouldn't admit our
   // own extension origin, so safeFetch isn't the right tool here. Same for
   // tab-affordances (the pull-in hint reads our own bundled icon32.png via
-  // runtime.getURL) — extracted from service-worker.js, which had this off.
+  // runtime.getURL) - this bundled static read is not network egress.
   {
     files: [
       'extension/peerd-runtime/loop/system-prompt.js',
@@ -271,7 +272,7 @@ export default [
   },
   // pdf/ocr-store loads the opt-in OCR engine assets (CDN URLs); same posture
   // as voice/model-store — DATA verified by SRI, not a provider API call.
-  // offscreen/pdf-extract fetches the PDF bytes for the read_pdf tool (the
+  // offscreen/pdf-extract fetches the PDF bytes for the read_doc tool (the
   // target is denylist-checked at the tool boundary before we get here).
   // offscreen/doc-extract is the exact same posture for read_doc: the office
   // document's bytes, whose target read-doc.js denylist- and SSRF-checked
@@ -359,7 +360,7 @@ export default [
       'extension/peerd-runtime/dom/pull-in-hint-injected.js',
       'extension/peerd-runtime/dom/fetch-tap-injected.js',
       'extension/background/debugger-pool.js',
-      'extension/peerd-runtime/tools/defs/watch-changes.js',
+      'extension/background/page-authority/watch-changes.js',
     ],
     rules: {
       'no-var': 'off',
@@ -385,7 +386,7 @@ export default [
   },
 
   // --- heap-split Worker: a WORKER-SAFE subset, not the barrel ---
-  // offscreen/actor-worker.js is the ONE dedicated Worker (its own heap) that runs
+  // offscreen/actor-worker-runtime.js is the ONE dedicated Worker runtime (its own heap) that runs
   // the agent loop for every offscreen loop (reasoning actors + bound actors). It
   // must import a MINIMAL, worker-safe subset (agent-loop.js + actor-worker-core.js —
   // both verified to touch no chrome.*/DOM at import) rather than the full
@@ -393,7 +394,7 @@ export default [
   // chrome-touching modules into a context that has none, throwing at import. So the
   // cross-module rule is relaxed for THIS file only; the dweb/tests/eval guards stay.
   {
-    files: ['extension/offscreen/actor-worker.js'],
+    files: ['extension/offscreen/actor-worker-runtime.js'],
     rules: {
       'no-restricted-imports': ['error', { patterns: [DWEB_IMPORT, TESTS_IMPORT, EVAL_IMPORT] }],
     },

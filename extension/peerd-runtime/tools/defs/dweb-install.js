@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_install — fetch + verify + install an App a peer is sharing on the dweb.
 //
 // Fetches the signed bundle over the base mesh, verifies the signature + every
@@ -30,33 +32,14 @@
  */
 
 /** @type {DwebTool} */
-export const dwebInstallTool = {
-  name: 'dweb_install',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Install an App a peer is sharing on the dweb (from dweb_discover). Pass the',
-    'peerd:// uri from that exact result. The host binds its update identity to the',
-    'matching discovery card, fetches the bundle over the base mesh, verifies its',
-    'signature and every chunk, and saves it to the user\'s Library as a sandboxed App.',
-    'CONFIRMS every time — it is code from a peer.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      uri: { type: 'string', description: 'The peerd:// uri from dweb_discover.' },
-      name: { type: 'string', description: 'Optional local name for the installed app.' },
-    },
-    required: ['uri'],
-  },
-  sideEffect: 'mutate_external',
-  origins: () => [],
+export const dwebInstallTool = composeTool("dweb_install", {
 
   execute: async (args, ctx) => {
     // why: narrow ctx to the dweb-only slots (dweb surface + force-confirm) the
     // SW injects for dweb builds — absent/loosely-typed on the base ToolContext.
-    const dctx = /** @type {DwebInstallCtx} */ (/** @type {unknown} */ (ctx));
-    if (!dctx.dweb) return {
+    const authority = /** @type {{installConfirmedApp?:(uri:string,name?:string)=>Promise<any>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.installConfirmedApp !== 'function') return {
       ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
       outcomeKind: 'pre-effect-failure',
     };
@@ -65,20 +48,15 @@ export const dwebInstallTool = {
       ok: false, error: 'peerd_uri_required', content: 'A peerd:// uri is required (from dweb_discover).',
       outcomeKind: 'pre-effect-failure',
     };
-    if (dctx.permission?.confirmActions === false && dctx.confirm) {
-      const ans = await dctx.confirm({
-        tool: 'dweb_install', kind: 'dweb_install', origins: [],
-        summary: `Install the app at ${uri.slice(0, 72)}… from a peer? It runs sandboxed, with no extension access.`,
-        sessionId: ctx.session?.sessionId ?? null,
-      }, ctx.abortSignal);
-      if (ans !== 'yes_once' && ans !== 'yes_session') {
-        return {
-          ok: false, error: 'declined', content: 'User declined the install.',
-          outcomeKind: 'pre-effect-failure',
-        };
-      }
-    }
-    const r = await dctx.dweb.install({ uri, name: args?.name });
+    const r = await authority.installConfirmedApp(uri, args?.name);
+    if (r?.error === 'dweb_unavailable') return {
+      ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
+      outcomeKind: 'pre-effect-failure',
+    };
+    if (r?.declined === true) return {
+      ok: false, error: 'declined', content: 'User declined the install.',
+      outcomeKind: 'pre-effect-failure',
+    };
     if (!r?.ok) return {
       ok: false,
       error: r?.error ?? 'install_failed',
@@ -95,4 +73,4 @@ export const dwebInstallTool = {
       }, null, 2),
     };
   },
-};
+});

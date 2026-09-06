@@ -14,10 +14,11 @@ import {
   TOOL_MANIFEST_PRESETS,
   normalizeToolManifest,
   resolveManifestAllow,
+  resolveManifestStatus,
   manifestLabel,
   filterDescriptorsByManifest,
 } from '../../extension/peerd-runtime/tools/manifests.js';
-import { makeToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
+import { makeToolsCommand, planToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
 import { exposureGate as exposureGateRaw } from '../../extension/peerd-runtime/tools/gates.js';
 import { mainAgentDescriptors } from '../../extension/peerd-runtime/tools/exposure.js';
 import { narrowTools, makeSpawnActor } from '../../extension/peerd-runtime/actor/spawn.js';
@@ -57,10 +58,10 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
 
   test('browse-only carries the READ DOM subset only, no mutating internals', () => {
     const allow = new Set(TOOL_MANIFEST_PRESETS['browse-only'].allow);
-    for (const name of ['message_actor', 'snapshot', 'read_page', 'read_state', 'query_dom', 'read_pdf', 'view']) {
+    for (const name of ['message_actor', 'snapshot', 'read_page', 'read_state', 'query_dom', 'read_doc', 'view']) {
       expect(allow.has(name)).toBe(true);
     }
-    for (const name of ['do', 'get', 'check', 'click', 'type', 'page_keys', 'watch_changes']) {
+    for (const name of ['do', 'get', 'check', 'click', 'type', 'watch_changes']) {
       expect(allow.has(name)).toBe(false);
     }
   });
@@ -71,7 +72,7 @@ describe('TOOL_MANIFEST_PRESETS — data invariants', () => {
       for (const name of [
         'vm_boot', 'vm_create', 'vm_delete', 'js_notebook', 'js_create',
         'app_create', 'app_update', 'edit_file', 'actor_create',
-        'page_eval', 'page_exec', 'request_review', 'load_skill',
+        'load_skill',
       ]) {
         expect(allow.has(name)).toBe(false);
       }
@@ -136,6 +137,25 @@ describe('resolveManifestAllow', () => {
     expect([...allow]).toEqual(['snapshot']);
     // garbage-but-present manifest → empty set
     expect(resolveManifestAllow({})!.size).toBe(0);
+  });
+
+  test('saved manifests resolve renamed tools without rewriting their stored bytes', () => {
+    const saved = {
+      allow: ['read_web_cache', 'read_run_cache', 'read_pdf', 'page_keys', 'future_tool'],
+    };
+    expect(normalizeToolManifest(saved)).toEqual(saved);
+    expect([...resolveManifestAllow(saved)!].sort()).toEqual([
+      'future_tool', 'page_keys', 'read_doc', 'read_result',
+    ]);
+    expect(resolveManifestStatus(saved, ['read_doc', 'read_result', 'now'])).toEqual({
+      allow: new Set(['read_result', 'read_doc']),
+      renamed: [
+        'read_web_cache → read_result',
+        'read_run_cache → read_result',
+        'read_pdf → read_doc',
+      ],
+      unavailable: ['page_keys', 'future_tool'],
+    });
   });
 });
 
@@ -283,11 +303,19 @@ describe('makeSpawnActor — the parent manifest caps and follows the child', ()
           newMessages: [{ role: 'assistant', content: 'done' }],
         };
       },
-      getToolDescriptors: () => [
-        { name: 'a', description: 'A', schema: {} },
-        { name: 'b', description: 'B', schema: {} },
-        { name: 'c', description: 'C', schema: {} },
-      ],
+      projectChildSurface: async (input: any) => ({
+        tools: narrowTools([
+          { name: 'a', description: 'A', schema: {} },
+          { name: 'b', description: 'B', schema: {} },
+          { name: 'c', description: 'C', schema: {} },
+        ], {
+          tools: input.toolNames,
+          allowRecursion: input.allowRecursion,
+          allow: Array.isArray(input.toolManifest?.allow)
+            ? new Set(input.toolManifest.allow) : null,
+        }),
+        operations: [],
+      }),
     };
     return { deps, seenTools };
   };
@@ -468,5 +496,16 @@ describe('makeToolsCommand — grammar over injected IO', () => {
     expect(notes[3]).toContain('/tools research');
     expect(notes[3]).toContain('/tools browse-only');
     expect(notes[3]).toContain('/tools full');
+  });
+
+  test('/tools reports only current effective tools and explains renamed or retired entries', () => {
+    const plan = planToolsCommand('', {
+      allow: ['read_web_cache', 'read_run_cache', 'read_pdf', 'page_keys'],
+    }, ['read_result', 'read_doc', 'now']);
+    expect(plan.note).toContain('custom (2 tools) (2 tools exposed)');
+    expect(plan.note).toContain('read_web_cache → read_result');
+    expect(plan.note).toContain('read_run_cache → read_result');
+    expect(plan.note).toContain('read_pdf → read_doc');
+    expect(plan.note).toContain('Unavailable saved tools ignored: page_keys.');
   });
 });

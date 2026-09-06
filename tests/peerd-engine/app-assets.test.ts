@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
   BINARY_ASSET_EXTENSIONS,
-  appFileCheckpointContent,
   inferAppFileKind,
   isBinaryAppFile,
   isBinaryAssetPath,
@@ -43,13 +42,5 @@ describe('App binary asset classification', () => {
     const bytes = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('<h1>x</h1>')]);
     expect(isLosslessUtf8Text(bytes)).toBe(true);
     expect(inferAppFileKind('index.html', bytes)).toBe('text');
-  });
-
-  test('checkpoint markers detect binary add, change, and delete without decoding', async () => {
-    const first = await appFileCheckpointContent('asset.custom', new Uint8Array([0xff, 0x00]), 'binary');
-    const changed = await appFileCheckpointContent('asset.custom', new Uint8Array([0xff, 0x01]), 'binary');
-    expect(first).toStartWith('\u0000peerd-binary:2:');
-    expect(changed).not.toBe(first);
-    expect(await appFileCheckpointContent('index.html', new TextEncoder().encode('hello'), 'text')).toBe('hello');
   });
 });

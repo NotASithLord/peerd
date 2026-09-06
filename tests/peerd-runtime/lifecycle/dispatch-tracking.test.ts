@@ -1,16 +1,11 @@
-// Dispatch tracking — the contract wired into the dispatcher choke point.
-// Covers: per-class settle semantics (§16.2 no generic timeouts), the
-// replay guard (guarantee 2: an automatic re-dispatch of an unproven
-// Class E call is refused, never executed), and the full dispatchToolCall
-// path against a real in-memory operation log.
+// Durable authority tracking in isolation. The service-worker authority calls
+// this tracker around exact operations; the semantic dispatcher never does.
 
-import { describe, test, expect, beforeEach } from 'bun:test';
+import { describe, test, expect } from 'bun:test';
 import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
 import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
 import { OPERATION_STATES } from '../../../extension/peerd-runtime/lifecycle/operation-state.js';
 import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
-import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
 import { retryClassForTool } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 
 const S = OPERATION_STATES;
@@ -397,7 +392,7 @@ describe('the replay guard — guarantee 2', () => {
   });
 
   test('every Class F override requires a new call with re-derived grants', async () => {
-    for (const toolName of ['sandbox_create', 'vm_boot', 'actor_create', 'request_review']) {
+    for (const toolName of ['sandbox_create', 'vm_boot', 'actor_create']) {
       const { tracker, log } = makeTracker();
       const tool = { name: toolName, sideEffect: 'read' };
       const retryClass = retryClassForTool(tool);
@@ -634,179 +629,5 @@ describe('the replay guard — guarantee 2', () => {
     });
     expect((unapproved as { refuse: { error: string } }).refuse.error)
       .toContain('needs a new user confirmation');
-  });
-});
-
-describe('the full dispatcher path', () => {
-  const baseCtx = () => ({
-    audit: async () => {},
-    session: { sessionId: 'sess-1' },
-    permission: { mode: 'act', confirmActions: false },
-    hooks: [],
-  });
-
-  beforeEach(() => clearTools());
-
-  test('a tracked tool that times out returns the semantic error and recovery meta', async () => {
-    const { tracker, log } = makeTracker();
-    registerTool({
-      name: 'flaky_submit', description: 'x', schema: {},
-      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
-      origins: () => ['https://example.com'],
-      execute: async () => { throw new Error('request timed out'); },
-    } as any);
-    const result = await dispatchToolCall(
-      { id: 'tu-1', name: 'flaky_submit', args: {} },
-      { ...baseCtx(), lifecycle: tracker } as any,
-    );
-    expect(result.ok).toBe(false);
-    expect((result as { error: string }).error).toStartWith('outcome_unknown:');
-    expect((result.meta as any).recovery.category).toBe('verify_before_retry');
-    expect((await log.get('sess-1:tu-1'))!.state).toBe(S.OUTCOME_UNKNOWN);
-  });
-
-  test('re-dispatching the same tool_use id does NOT re-execute the tool', async () => {
-    const { tracker } = makeTracker();
-    let executions = 0;
-    registerTool({
-      name: 'pay_once', description: 'x', schema: {},
-      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
-      origins: () => [],
-      execute: async () => { executions += 1; throw new Error('connection reset'); },
-    } as any);
-    const ctx = { ...baseCtx(), lifecycle: tracker } as any;
-    await dispatchToolCall({ id: 'tu-1', name: 'pay_once', args: {} }, ctx);
-    const replay = await dispatchToolCall({ id: 'tu-1', name: 'pay_once', args: {} }, ctx);
-    expect(executions).toBe(1); // the replay never reached execute()
-    expect(replay.ok).toBe(false);
-    expect((replay as { error: string }).error).toStartWith('outcome_unknown:');
-  });
-
-  test('a matching unknown intent forces an honestly attributed actor confirmation', async () => {
-    const { tracker } = makeTracker();
-    const beginTracking = tracker.beginTracking;
-    let boundApprovalClaim: any = null;
-    tracker.beginTracking = async (input: any) => {
-      boundApprovalClaim = input.confirmedIntent ?? boundApprovalClaim;
-      return beginTracking(input);
-    };
-    let executions = 0;
-    const prompts: any[] = [];
-    registerTool({
-      name: 'pay_once', description: 'x', schema: {},
-      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
-      origins: () => ['https://payments.example/checkout'],
-      execute: async () => {
-        executions += 1;
-        if (executions === 1) throw new Error('connection reset');
-        return { ok: true, content: 'done' };
-      },
-    } as any);
-    await dispatchToolCall(
-      { id: 'tu-1', name: 'pay_once', args: { amount: 1 } },
-      {
-        ...baseCtx(), lifecycle: tracker,
-        lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
-      } as any,
-    );
-    const repeat = await dispatchToolCall(
-      { id: 'tu-2', name: 'pay_once', args: { amount: 1 } },
-      {
-        ...baseCtx(), lifecycle: tracker,
-        lifecycleTurnId: 'turn-2', lifecycleUserInitiated: true,
-        session: { ...baseCtx().session, kind: 'actor' },
-        confirm: async (prompt: any) => { prompts.push(prompt); return 'yes_once'; },
-      } as any,
-    );
-    expect(repeat.ok).toBe(true);
-    expect(executions).toBe(2);
-    expect(prompts).toHaveLength(1);
-    expect(prompts[0].note).toContain('An actor in this chat');
-    expect(prompts[0].note).toContain('outcome is unknown');
-    expect(prompts[0].lifecycleTarget).toBe('https://payments.example');
-    expect(prompts[0].lifecycleTarget).toBe(boundApprovalClaim.target);
-    expect(prompts[0].oneShot).toBe(true);
-  });
-
-  test('a self-confirming tool can resolve unknown intent without losing its detailed consent', async () => {
-    const { tracker } = makeTracker();
-    let executions = 0;
-    const prompts: any[] = [];
-    registerTool({
-      name: 'site_client_write', description: 'x', schema: {},
-      primitive: 'web', sideEffect: 'write', retryClass: 'E',
-      origins: () => ['https://shop.example'],
-      execute: async (_args: any, ctx: any) => {
-        executions += 1;
-        const answer = await ctx.confirm({
-          tool: 'site_client_write', sideEffect: 'write',
-          origins: ['https://shop.example'], summary: 'Detailed client proposal',
-          sessionId: ctx.session?.sessionId,
-        });
-        if (answer !== 'yes_once') return { ok: false, error: 'declined' };
-        if (executions === 1) throw new Error('connection reset');
-        return { ok: true, content: 'saved' };
-      },
-    } as any);
-    const ctx = {
-      ...baseCtx(), lifecycle: tracker,
-      lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
-      confirm: async (prompt: any) => { prompts.push(prompt); return 'yes_once'; },
-    } as any;
-    await dispatchToolCall({
-      id: 'tu-1', name: 'site_client_write', args: { origin: 'https://shop.example' },
-    }, ctx);
-    expect(prompts).toHaveLength(1);
-
-    const repeated = await dispatchToolCall({
-      id: 'tu-2', name: 'site_client_write', args: { origin: 'https://shop.example' },
-    }, { ...ctx, lifecycleTurnId: 'turn-2' });
-    expect(repeated.ok).toBe(true);
-    expect(prompts).toHaveLength(3);
-    expect(prompts[1].note).toContain('unknown outcome');
-    expect(prompts[2].summary).toBe('Detailed client proposal');
-    expect(prompts[1].dispatchId).toBe('tu-2');
-    expect(prompts[2].dispatchId).toBe('tu-2');
-  });
-
-  test('a synthetic repeat is refused without opening a confirmation prompt', async () => {
-    const { tracker } = makeTracker();
-    let prompts = 0;
-    registerTool({
-      name: 'pay_once', description: 'x', schema: {},
-      primitive: 'web', sideEffect: 'mutate_external', retryClass: 'E',
-      origins: () => [],
-      execute: async () => { throw new Error('connection reset'); },
-    } as any);
-    await dispatchToolCall(
-      { id: 'tu-1', name: 'pay_once', args: { amount: 1 } },
-      {
-        ...baseCtx(), lifecycle: tracker,
-        lifecycleTurnId: 'turn-1', lifecycleUserInitiated: true,
-      } as any,
-    );
-    const repeat = await dispatchToolCall(
-      { id: 'tu-2', name: 'pay_once', args: { amount: 1 } },
-      {
-        ...baseCtx(), lifecycle: tracker,
-        lifecycleTurnId: 'turn-2', lifecycleUserInitiated: false,
-        confirm: async () => { prompts += 1; return 'yes_once'; },
-      } as any,
-    );
-    expect(repeat.ok).toBe(false);
-    expect(prompts).toBe(0);
-    expect((repeat as { error: string }).error).toContain('needs a new user confirmation');
-  });
-
-  test('without ctx.lifecycle the dispatch is unchanged (no tracking, no rewrite)', async () => {
-    registerTool({
-      name: 'plain', description: 'x', schema: {},
-      primitive: 'web', sideEffect: 'mutate_external',
-      origins: () => [],
-      execute: async () => { throw new Error('request timed out'); },
-    } as any);
-    const result = await dispatchToolCall(
-      { id: 'tu-1', name: 'plain', args: {} }, baseCtx() as any);
-    expect((result as { error: string }).error).toBe('request timed out');
   });
 });

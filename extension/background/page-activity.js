@@ -30,7 +30,7 @@ import {
   clearActivityOverlayInjected,
   isDenylistedTab,
   liveDocumentLocationInjected,
-} from '/peerd-runtime/background.js';
+} from '/peerd-runtime/kernel-browser.js';
 
 /**
  * The tab group the driven tab joins. Deliberately the SAME title the engine
@@ -128,7 +128,7 @@ export const restoreDrivenTab = async (tabId, placement, deps) => {
  * @param {string | null} [expectedOrigin]
  * @returns {Promise<{ tabId: number, documentIds: string[] } | null>}
  */
-export const allowedDocumentTarget = async (tabId, deps, policy = {}, expectedOrigin = null) => {
+export async function allowedDocumentTarget(tabId, deps, policy = {}, expectedOrigin = null) {
   try {
     const [injection] = await deps.scripting.executeScript({
       target: { tabId },
@@ -143,7 +143,7 @@ export const allowedDocumentTarget = async (tabId, deps, policy = {}, expectedOr
   } catch {
     return null;
   }
-};
+}
 
 /** @param {{ tabId: number, documentIds: string[] }} target @param {string} label @param {string} origin @param {ActivityDeps} deps */
 const showOnTarget = async (target, label, origin, deps) => {
@@ -157,51 +157,6 @@ const showOnTarget = async (target, label, origin, deps) => {
 /** @param {{ tabId: number, documentIds: string[] }} target @param {ActivityDeps} deps */
 const clearOnTarget = async (target, deps) => {
   await deps.scripting.executeScript({ target, func: clearActivityOverlayInjected });
-};
-
-/**
- * Show (or update) the in-page pill.
- *
- * why re-inject on every call rather than holding a port: the pill dies with the
- * document, and the actor navigates constantly. A per-call injection is
- * self-healing — the first action after a navigation rebuilds it — where a port
- * would need reconnect bookkeeping to reach the same place.
- *
- * @param {number} tabId
- * @param {string} label   the phrase from describeToolActivity
- * @param {string} origin  the origin being driven, shown under the phrase
- * @param {ActivityDeps} deps
- * @param {ActivityPolicy} [policy]
- * @returns {Promise<boolean>}
- */
-export const showPageActivity = async (tabId, label, origin, deps, policy = {}) => {
-  try {
-    const target = await allowedDocumentTarget(tabId, deps, policy);
-    if (!target) return false;
-    await showOnTarget(target, label, origin, deps);
-    return true;
-  } catch {
-    // A restricted page (chrome://, the Web Store, a PDF viewer) refuses
-    // injection. Nothing to do — the tab-group marking still stands.
-    return false;
-  }
-};
-
-/**
- * Remove the in-page pill.
- * @param {number} tabId
- * @param {ActivityDeps} deps
- * @returns {Promise<boolean>}
- */
-export const clearPageActivity = async (tabId, deps) => {
-  try {
-    const target = await allowedDocumentTarget(tabId, deps);
-    if (!target) return false;
-    await clearOnTarget(target, deps);
-    return true;
-  } catch {
-    return false;
-  }
 };
 
 /**

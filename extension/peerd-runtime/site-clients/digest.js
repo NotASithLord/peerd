@@ -14,6 +14,8 @@
 // Response bodies contribute a SHAPE SKETCH (keys + types), never verbatim
 // payloads. A digest is structure, not data.
 
+import { REDACTED, SECRET_PARAM_RE, shapeSketch } from './shape-sketch.js';
+
 // Headers that would carry a credential — dropped from every captured request AND
 // response before anything is summarized. Case-insensitive.
 const CREDENTIAL_HEADERS = new Set([
@@ -24,13 +26,9 @@ const CREDENTIAL_HEADERS = new Set([
 // Query/body param NAMES whose VALUES are redacted to a sentinel (a token/secret
 // riding a param, not a header). The name is kept (it's part of the API shape);
 // only the value is dropped.
-const SECRET_PARAM_RE = /(token|secret|password|passwd|api[-_]?key|auth|session|csrf|xsrf|bearer|access[-_]?token|refresh[-_]?token|sig|signature|\bs?sid\b)/i;
-
 // A value that LOOKS like a credential regardless of its param name — a long
 // high-entropy-ish opaque string. Redacted defensively.
 const SECRETISH_VALUE_RE = /^[A-Za-z0-9_\-.]{24,}$/;
-
-const REDACTED = '<redacted>';
 
 /**
  * One normalized capture event, emitted by both taps. Only caller-approved
@@ -103,23 +101,7 @@ export const templatizeUrl = (url) => {
  * @param {unknown} v @param {number} [depth]
  * @returns {unknown}
  */
-export const shapeSketch = (v, depth = 0) => {
-  if (v == null) return v === null ? 'null' : 'undefined';
-  const t = typeof v;
-  if (t === 'string') return 'string';
-  if (t === 'number' || t === 'boolean') return t;
-  if (t !== 'object') return t;
-  if (depth > 3) return '…';
-  if (Array.isArray(v)) return v.length ? [shapeSketch(v[0], depth + 1), `…×${v.length}`] : [];
-  /** @type {Record<string, unknown>} */
-  const out = {};
-  let n = 0;
-  for (const [k, val] of Object.entries(/** @type {object} */ (v))) {
-    if (n++ >= 24) { out['…'] = 1; break; }
-    out[k] = SECRET_PARAM_RE.test(k) ? REDACTED : shapeSketch(val, depth + 1);
-  }
-  return out;
-};
+export { shapeSketch } from './shape-sketch.js';
 
 /**
  * Should this event be kept, given the exact origin(s) we're deriving for?

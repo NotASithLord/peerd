@@ -29,6 +29,81 @@ beforeEach(async () => {
   await idb.clear('notebooks');
   await idb.clear('pods');
   await idb.clear('vms');
+  await idb.clear('sessions');
+  await idb.clear('profiles');
+  await idb.clear('agents_memory');
+});
+
+const freshIdbProbe = async (body: string) => {
+  const moduleUrl = new URL('../../extension/peerd-egress/storage/idb.js', import.meta.url).href;
+  const child = Bun.spawn([process.execPath, '-e', body.replace('__IDB_MODULE__', moduleUrl)], {
+    stdout: 'pipe', stderr: 'pipe',
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  expect(stderr).toBe('');
+  expect(exitCode).toBe(0);
+  return stdout.trim();
+};
+
+describe('atomic multi-store IDB request graph', () => {
+  test('commits both stores and aborts both on a second-store clone failure', async () => {
+    await idb.transact(['profiles', 'agents_memory'], (stores) => {
+      stores.profiles.put({
+        id: 'default', peerName: 'peerd', createdAt: 1, onboardingComplete: true,
+      });
+      stores.agents_memory.put({
+        id: 'user', kind: 'user', workspace: '', body: 'ok', createdAt: 1, updatedAt: 1,
+      });
+    });
+    expect((await idb.get('profiles', 'default')).onboardingComplete).toBe(true);
+    expect((await idb.get('agents_memory', 'user')).body).toBe('ok');
+
+    await idb.clear('profiles');
+    await idb.clear('agents_memory');
+    await expect(idb.transact(['profiles', 'agents_memory'], (stores) => {
+      stores.profiles.put({
+        id: 'default', peerName: 'peerd', createdAt: 2, onboardingComplete: true,
+      });
+      stores.agents_memory.put({ id: 'user', body: () => 'not cloneable' });
+    })).rejects.toBeTruthy();
+    expect(await idb.get('profiles', 'default')).toBeUndefined();
+    expect(await idb.get('agents_memory', 'user')).toBeUndefined();
+  });
+
+  test('rejects async callbacks before they can escape the transaction lifetime', async () => {
+    await expect(idb.transact(['profiles'], async () => {}))
+      .rejects.toThrow('idb-transaction-callback-must-be-synchronous');
+  });
+
+  test('bounds a silent open and clears the cached failure for an exact retry', async () => {
+    expect(await freshIdbProbe(`
+      globalThis.setTimeout = (fn) => { queueMicrotask(fn); return 1; };
+      globalThis.clearTimeout = () => {};
+      globalThis.indexedDB = { open() { return {}; } };
+      const { openDB } = await import('__IDB_MODULE__?silent-open');
+      try { await openDB(); } catch (error) { console.log(error.message); }
+    `)).toBe('idb-open-timeout');
+
+    expect(await freshIdbProbe(`
+      globalThis.setTimeout = (fn) => { queueMicrotask(fn); return 1; };
+      globalThis.clearTimeout = () => {};
+      let calls = 0;
+      globalThis.indexedDB = { open() {
+        const request = {}; const attempt = ++calls;
+        queueMicrotask(() => {
+          if (attempt === 1) { request.error = new Error('first-open'); request.onerror(); }
+          else { request.result = { close() {} }; request.onsuccess(); }
+        });
+        return request;
+      } };
+      const { openDB } = await import('__IDB_MODULE__?retry-open');
+      try { await openDB(); } catch {}
+      await openDB();
+      console.log(calls);
+    `)).toBe('2');
+  });
 });
 
 describe('idbKV — single-blob IDB adapter', () => {
@@ -53,6 +128,33 @@ describe('idbKV — single-blob IDB adapter', () => {
     const raw = await idb.get('apps', 'apps.v1');
     expect(raw.key).toBe('apps.v1');
     expect(raw.value).toEqual({ schemaVersion: 1, apps: {} });
+  });
+});
+
+describe('atomic IDB patch', () => {
+  test('serializes concurrent shallow patches without losing unrelated fields', async () => {
+    await idb.put('sessions', { sessionId: 'chat', provider: 'anthropic', model: 'old' });
+    await Promise.all(Array.from({ length: 24 }, (_, index) =>
+      idb.patch('sessions', 'chat', { [`field${index}`]: index })));
+    const row = await idb.get('sessions', 'chat');
+    expect(row).toMatchObject({ sessionId: 'chat', provider: 'anthropic', model: 'old' });
+    for (let index = 0; index < 24; index += 1) expect(row[`field${index}`]).toBe(index);
+    await expect(idb.patch('sessions', 'missing', { model: 'none' })).resolves.toBeUndefined();
+  });
+});
+
+describe('atomic IDB mutate', () => {
+  test('round-trips, misses cleanly, and aborts a throwing transform', async () => {
+    await idb.put('sessions', { sessionId: 'chat', model: 'old', permissionMode: 'plan' });
+    await expect(idb.mutate('sessions', 'chat', (row) => ({ ...row, model: 'new' })))
+      .resolves.toMatchObject({ model: 'new', permissionMode: 'plan' });
+    await expect(idb.mutate('sessions', 'missing', (row) => row))
+      .resolves.toBeUndefined();
+    await expect(idb.mutate('sessions', 'chat', () => { throw new Error('stop'); }))
+      .rejects.toThrow('stop');
+    expect(await idb.get('sessions', 'chat')).toMatchObject({
+      model: 'new', permissionMode: 'plan',
+    });
   });
 });
 

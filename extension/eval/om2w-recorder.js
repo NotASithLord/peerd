@@ -85,8 +85,8 @@ export const makeOm2wRecorder = ({ capture, tabInfo, stop, maxSteps = 25 }) => {
     },
 
     /**
-     * A settled page.* op from the CODE surface (the SW page/call route's
-     * 'page/op' broadcast). Single-phase — the op arrives WITH its outcome, so
+     * A settled page.* op from the CODE surface, reported as a 'page/op'
+     * event. The op arrives WITH its outcome, so
      * it becomes a step immediately (the page state is already post-action);
      * no pending map. Same cap enforcement as the tool path, so the two arms
      * run the same 25-step budget.
@@ -106,7 +106,7 @@ export const makeOm2wRecorder = ({ capture, tabInfo, stop, maxSteps = 25 }) => {
     },
 
     /**
-     * A settled ACTOR tool dispatch (the SW actor/tool-dispatch 'actor/op'
+     * A settled ACTOR tool execution (the exact authority relay's 'actor/op'
      * broadcast — the OFFSCREEN actor heap's analog of turn/tool-use +
      * turn/tool-result, which only in-SW turns emit). Single-phase like
      * onPageOp; the TOOL mapper decides page action vs read/compute.

@@ -5,13 +5,26 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  EXPORT_FORMAT, EXPORT_VERSION,
+  EXPORT_FORMAT, EXPORT_PASSPHRASE_MIN_LENGTH, EXPORT_VERSION,
   buildExport, inspectImport, applyImport,
   encryptWithPassphrase, decryptWithPassphrase,
   ExportPassphraseError,
 } from '/peerd-runtime/transfer/transfer.js';
 
 const KNOWN_KEYS = ['devMode', 'reasoningEnabled', 'providerName', 'spendLimitUsd'];
+
+// These are correctness tests, not KDF performance gates. The production
+// Argon2id parameters intentionally allocate 64 MiB and can exceed Bun's 5 s
+// default when the full suite runs several crypto workers concurrently. Keep
+// the timeout local to the genuinely KDF-heavy cases; benchmark policy owns
+// latency assertions separately.
+const KDF_TEST_TIMEOUT_MS = 30_000;
+
+test('Options passphrase copy matches the authority rail', async () => {
+  const source = await Bun.file('extension/options/sections/transfer.js').text();
+  const uiRail = source.match(/const EXPORT_PASSPHRASE_MIN_LENGTH = (\d+);/);
+  expect(Number(uiRail?.[1])).toBe(EXPORT_PASSPHRASE_MIN_LENGTH);
+});
 
 const bytesToB64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const makeLegacySecretsBox = async (passphrase: string, value: unknown) => {
@@ -45,7 +58,10 @@ const makePayload = (over: Record<string, unknown> = {}) => ({
   providerEndpoints: null,
   secrets: null,
   memory: { version: 1, docs: [{ id: 'user', body: 'x', updatedAt: 5 }] },
-  hooks: [{ id: 'h1', event: 'pre-tool-use' }],
+  hooks: [{
+    id: 'h1', event: 'pre-tool-use', kind: 'declarative',
+    rule: { matchArg: 'url', contains: 'blocked' },
+  }],
   skills: [{ id: 's1', name: 'review' }],
   ...over,
 });
@@ -59,12 +75,12 @@ describe('passphrase crypto', () => {
     });
     const back = await decryptWithPassphrase('correct horse', box);
     expect(back).toEqual({ anthropic: 'sk-ant-xyz' });
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('wrong passphrase throws ExportPassphraseError', async () => {
     const box = await encryptWithPassphrase('right', { k: 'v' });
     await expect(decryptWithPassphrase('wrong', box)).rejects.toBeInstanceOf(ExportPassphraseError);
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('rejects attacker-controlled KDF parameters before doing crypto', async () => {
     const box = await encryptWithPassphrase('right', { k: 'v' });
@@ -72,7 +88,7 @@ describe('passphrase crypto', () => {
       .rejects.toBeInstanceOf(ExportPassphraseError);
     await expect(decryptWithPassphrase('right', { ...box, iterations: 600_000 }))
       .rejects.toBeInstanceOf(ExportPassphraseError);
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('imports legacy PBKDF2 backups without emitting new PBKDF2 boxes', async () => {
     const legacy = await makeLegacySecretsBox('old backup passphrase', { anthropic: 'sk-old' });
@@ -81,7 +97,7 @@ describe('passphrase crypto', () => {
     const current = await encryptWithPassphrase('new backup passphrase', { anthropic: 'sk-new' });
     expect(JSON.stringify(current)).not.toContain('PBKDF2');
     expect(current.kdf).toBe('Argon2id');
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 });
 
 describe('buildExport', () => {
@@ -103,7 +119,7 @@ describe('buildExport', () => {
     expect(payload.secrets?.kdf).toBe('Argon2id');
     expect(JSON.stringify(payload.secrets)).not.toContain('PBKDF2');
     expect(JSON.stringify(payload)).not.toContain('sk-1'); // never plaintext
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('refuses secrets without a passphrase', async () => {
     await expect(buildExport({
@@ -228,7 +244,7 @@ describe('applyImport', () => {
     });
     expect(res.ok).toBe(true);
     expect(calls.setSecret).toEqual([['anthropic', 'sk-2']]);
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 });
 
 // R6 — transfer import is an untrusted-deserialization surface. The three
@@ -273,23 +289,32 @@ describe('R6 import gates', () => {
     expect((res.notices as string[]).some((n) => n.includes('Dropped 3'))).toBe(true);
   });
 
-  test('imported hooks land DISABLED and UNTRUSTED regardless of the file\'s flags', async () => {
+  test('imported declarative hooks land disabled for explicit review', async () => {
     const { calls, io } = stubIo();
     await applyImport({
-      payload: makePayload({ hooks: [{ id: 'h1', event: 'pre-tool-use', kind: 'js', enabled: true, trusted: true, body: 'return {}' }] }),
+      payload: makePayload({ hooks: [{
+        id: 'h1', event: 'pre-tool-use', kind: 'declarative', enabled: true,
+        rule: { matchArg: 'url', contains: 'blocked' },
+      }] }),
       channel: 'preview', knownSettingKeys: KNOWN_KEYS, io,
     });
     expect(calls.saveHook.length).toBe(1);
     expect(calls.saveHook[0].enabled).toBe(false);
-    expect(calls.saveHook[0].trusted).toBe(false);
-    expect(calls.saveHook[0].body).toBe('return {}'); // the record itself is preserved for review
+    expect(calls.saveHook[0].trusted).toBeUndefined();
+    expect(calls.saveHook[0].rule).toEqual({ matchArg: 'url', contains: 'blocked' });
   });
 
   test('the inspect summary names endpoint urls and hook quarantine BEFORE apply', () => {
     const res = inspectImport({
       payload: makePayload({
         providerEndpoints: { endpoints: [{ url: 'https://api.custom.example/v1' }] },
-        hooks: [{ id: 'h1', event: 'pre-tool-use' }, { id: 'h2', event: 'post-tool-use' }],
+        hooks: [{
+          id: 'h1', event: 'pre-tool-use', kind: 'declarative',
+          rule: { matchArg: 'url', contains: 'blocked' },
+        }, {
+          id: 'h2', event: 'post-tool-use', kind: 'declarative',
+          rule: { matchArg: 'text', contains: 'observed' },
+        }],
       }),
       channel: 'preview', knownSettingKeys: KNOWN_KEYS,
     });
@@ -299,6 +324,32 @@ describe('R6 import gates', () => {
     const joined = res.summary.notices.join(' ');
     expect(joined).toContain('api.custom.example');
     expect(joined).toContain('DISABLED');
+  });
+
+  test('legacy JS and regex hooks are announced then imported as disabled retired records', async () => {
+    const legacyHooks = [{
+      id: 'legacy-js', event: 'pre-tool-use', enabled: true,
+      kind: 'js', body: 'return { action: "allow" };', trusted: true,
+    }, {
+      id: 'legacy-regex', event: 'post-tool-use', enabled: true,
+      kind: 'declarative', rule: { matchArg: 'url', pattern: '(a+)+$' },
+    }];
+    const payload = makePayload({ version: 1, hooks: legacyHooks });
+    const inspected = inspectImport({
+      payload, channel: 'preview', knownSettingKeys: KNOWN_KEYS,
+    });
+    if (!inspected.ok || !inspected.summary) throw new Error('expected inspect success');
+    expect(inspected.summary.unsupportedHookIds).toEqual(['legacy-js', 'legacy-regex']);
+    expect(inspected.summary.notices.join(' ')).toContain('appear as retired');
+
+    const { calls, io } = stubIo();
+    const applied = await applyImport({
+      payload, channel: 'preview', knownSettingKeys: KNOWN_KEYS, io,
+    });
+    expect(applied).toMatchObject({ ok: true, imported: { hooks: 2 } });
+    expect(calls.saveHook).toEqual(legacyHooks.map((record) => ({
+      ...record, enabled: false,
+    })));
   });
 
   test('the inspect summary calls out an imported Ollama egress destination', () => {
@@ -347,7 +398,7 @@ describe('dweb identity section', () => {
     expect(payload.dweb).toEqual({ identityRecord: record });
     const secrets = await decryptWithPassphrase('pw123456', payload.secrets as any);
     expect(Object.keys(secrets)).toEqual(['anthropic']); // seed/device key filtered by mechanism
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 
   test('inspectImport: store drops with the §10 notice; preview names the identity restore', () => {
     const store = inspectImport({ payload: makePayload({ dweb: { identityRecord: record } }), channel: 'store', knownSettingKeys: KNOWN_KEYS });
@@ -599,7 +650,44 @@ describe('dweb identity section', () => {
     });
   });
 
-  test('a committed identity with runtime recovery pending returns success and a notice', async () => {
+  test('an uncertain final identity commit preserves partial counts and outcome', async () => {
+    let identityCalls = 0;
+    const result = await applyImport({
+      payload: makePayload({
+        settings: { devMode: true }, memory: null, hooks: [],
+        dweb: { identityRecord: record },
+      }),
+      passphrase: 'pw123456', channel: 'preview', knownSettingKeys: KNOWN_KEYS,
+      io: {
+        applySettings: async () => {}, setProviderEndpoints: async () => {},
+        setSecret: async () => {}, importMemory: async () => ({ written: 0, skipped: 0 }),
+        saveHook: async () => {},
+        adoptDwebIdentity: async () => {
+          identityCalls += 1;
+          if (identityCalls === 1) {
+            return {
+              adopted: true, reason: 'replaced', did: record.did,
+              existingDid: 'did:key:zOld', incomingDid: record.did,
+            };
+          }
+          throw Object.assign(new Error('commit uncertain'), {
+            name: 'IdentityTransferError', code: 'identity-store-outcome-unknown',
+            outcomeKnown: false,
+          });
+        },
+      },
+      replaceDwebIdentity: true,
+      approvedExistingDwebDid: 'did:key:zOld', approvedIncomingDwebDid: record.did,
+    });
+    expect(result).toMatchObject({
+      ok: false, error: 'import-partial',
+      failure: 'dweb-identity-identity-store-outcome-unknown',
+      partial: { settings: 1, dwebIdentity: 0 },
+      identityOutcome: 'unknown', outcomeKnown: false,
+    });
+  });
+
+  test('a committed identity reports runtime recovery without promising a retry', async () => {
     let identityCalls = 0;
     const result = await applyImport({
       payload: makePayload({ memory: null, hooks: [], dweb: { identityRecord: record } }),
@@ -623,7 +711,7 @@ describe('dweb identity section', () => {
       ok: true, identityOutcome: 'restored', runtimeRecoveryPending: true,
     });
     if (!result.ok || !('notices' in result)) throw new Error('expected notices');
-    expect((result.notices ?? []).join(' ')).toContain('peer network is still recovering');
+    expect((result.notices ?? []).join(' ')).not.toContain('retry automatically');
   });
 
   test('crafted generic secrets cannot overwrite identity custody records', async () => {
@@ -647,5 +735,5 @@ describe('dweb identity section', () => {
     expect(writes).toEqual([['anthropic', 'sk-safe']]);
     if (!res.ok || !('notices' in res)) throw new Error('expected notices');
     expect((res.notices as string[]).join(' ')).toContain('protected identity/device');
-  });
+  }, KDF_TEST_TIMEOUT_MS);
 });

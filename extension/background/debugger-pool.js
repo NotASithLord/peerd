@@ -1,5 +1,5 @@
-// Debugger pool — owns chrome.debugger attach/detach lifecycle and
-// console-event routing for the page_exec tool.
+// Debugger pool: owns chrome.debugger attach/detach lifecycle for exact
+// document-bound accessibility, action, screenshot, state, and capture effects.
 //
 // Why a pool instead of attach-per-call:
 //   - Each attach/detach is a separate "DevTools is debugging this tab"
@@ -11,26 +11,12 @@
 //
 // Lifecycle:
 //   - attach(tabId): idempotent; first call attaches + enables Runtime
-//   - evaluate(tabId, expression, opts): runs Runtime.evaluate, drains
-//     buffered console events fired during the call, returns
-//     { ok, returnValue, consoleOutput, error?, stack? }
 //   - tab close → automatic detach via chrome.tabs.onRemoved
 //   - chrome.debugger.onDetach → invalidate state (user clicked "Cancel"
 //     on the banner, another extension attached, etc.)
 //
-// Why allowUnsafeEvalBlockedByCSP=true:
-//   - Trusted-Types pages (`require-trusted-types-for 'script'`) reject
-//     injected script elements, so chrome.scripting-based automation
-//     cannot run there at all. CDP's Runtime.evaluate accepts this
-//     option as the sanctioned evaluation path for user-privileged
-//     tooling: page CSP governs what the *page* may inject; CDP
-//     evaluation is the user's own channel — the same one DevTools
-//     uses — for user-directed automation.
-//   - That's the difference between page_eval (fails on Gmail) and
-//     page_exec (works on Gmail). Same code, different channel.
-
-import browser from '/vendor/browser-polyfill.js';
-import { shapeSketch } from '/peerd-runtime/background.js';
+import browser from '/shared/browser-api.js';
+import { shapeSketch } from '/peerd-runtime/kernel-browser.js';
 import {
   createNetworkCaptureRegistry,
   networkCaptureRequestPolicy,
@@ -72,14 +58,6 @@ const preEffectTargetError = (message = 'browser_target_changed') => {
   return error;
 };
 
-/** @param {unknown} value */
-const hostLostError = (value) => {
-  const message = value instanceof Error ? value.message : String(value);
-  const error = new Error(`browser_evaluate_after_dispatch: ${message}`);
-  error.outcomeKind = 'host-lost';
-  return error;
-};
-
 /** @param {unknown} expected @returns {expected is ExpectedDocument} */
 const isExpectedDocument = (expected) => {
   const value = /** @type {Partial<ExpectedDocument> | null} */ (expected);
@@ -90,33 +68,15 @@ const isExpectedDocument = (expected) => {
     && Number.isFinite(value.timeOrigin);
 };
 
-export const createDebuggerPool = () => {
+export const createDebuggerPool = (/** @type {{bindTabEvents?:boolean,bindTabRemoval?:boolean}} */ options = {}) => {
   /** @type {Set<number>} tabIds we've successfully attached to */
   const attached = new Set();
   /** @type {Set<number>} attached tabs whose setup or cleanup is uncertain */
   const quarantined = new Set();
-  /** @type {Map<number, { contextId: number, lines: string[] }>} per-tab console-event buffer */
-  const consoleBufs = new Map();
   const runtimeContexts = createRuntimeContextRegistry();
-  // In-flight Runtime.evaluate rejectors, per tab (issue #176). With
-  // awaitPromise:true an evaluate against a page whose promise never settles
-  // (hung navigation/network) — or a tab that closes / detaches mid-call —
-  // never resolves, parking the agent turn forever. Tab-close and detach
-  // reject every pending evaluate for that tab; a deadline (below) bounds the
-  // hung-page case.
-  /** @type {Map<number, Set<(err: Error) => void>>} */
-  const pendingEvals = new Map();
   // One capture per tab. Identity-aware finish prevents a settling old stop
   // from deleting a replacement capture on the same tab.
   const networkCaptures = createNetworkCaptureRegistry();
-  /** @param {number} tabId @param {string} why */
-  const rejectPendingEvals = (tabId, why) => {
-    const set = pendingEvals.get(tabId);
-    if (!set) return;
-    pendingEvals.delete(tabId);
-    for (const reject of set) reject(new Error(`page_exec: ${why}`));
-  };
-
   // why: `chrome.debugger` may not exist in this build at all. It's a
   // CHANNEL-GATED permission — required (install-time) in the preview/dev
   // manifests where CDP is the default, but stripped from the store Chrome
@@ -142,20 +102,7 @@ export const createDebuggerPool = () => {
     browser.debugger.onEvent.addListener((source, method, params) => {
       const tabId = source.tabId;
       if (typeof tabId !== 'number') return;
-      if (runtimeContexts.observe(tabId, method, params)) {
-        if (method === 'Runtime.executionContextsCleared') consoleBufs.delete(tabId);
-        if (method === 'Runtime.executionContextDestroyed'
-            && consoleBufs.get(tabId)?.contextId === params?.executionContextId) {
-          consoleBufs.delete(tabId);
-        }
-        return;
-      }
-      if (method !== 'Runtime.consoleAPICalled') return;
-      const buf = consoleBufs.get(tabId);
-      if (!buf || params?.executionContextId !== buf.contextId) return;
-      const level = params.type ?? 'log';
-      const output = (params.args ?? []).map(formatRemoteObject).join(' ');
-      buf.lines.push(level === 'log' ? output : `[${level}] ${output}`);
+      runtimeContexts.observe(tabId, method, params);
     });
 
     // User-initiated detach (banner "Cancel" button, other extension
@@ -165,24 +112,18 @@ export const createDebuggerPool = () => {
       console.log('[debugger-pool] detach', source.tabId, reason);
       attached.delete(source.tabId);
       quarantined.delete(source.tabId);
-      consoleBufs.delete(source.tabId);
       runtimeContexts.release(source.tabId);
       networkCaptures.discard(source.tabId);
-      rejectPendingEvals(source.tabId, `debugger detached (${reason ?? 'unknown'}) mid-evaluate`);
     });
   };
 
-  // Tab close → drop our state (the debugger session is gone anyway).
-  // Uses only the `tabs` API (always available), so it's safe to bind at
-  // construction regardless of the debugger permission.
-  browser.tabs.onRemoved.addListener((tabId) => {
+  const onTabRemoved = (/** @type {number} */ tabId) => {
     attached.delete(tabId);
     quarantined.delete(tabId);
-    consoleBufs.delete(tabId);
     runtimeContexts.release(tabId);
     networkCaptures.discard(tabId);
-    rejectPendingEvals(tabId, 'the tab closed mid-evaluate');
-  });
+  };
+  if (options.bindTabRemoval !== false) browser.tabs.onRemoved.addListener(onTabRemoved);
 
   const attach = async (tabId) => {
     // why per-tab: the `debugger` permission Chrome granted is GLOBAL (an
@@ -252,7 +193,6 @@ export const createDebuggerPool = () => {
     networkCaptures.discard(tabId);
     if (!attached.has(tabId)) {
       quarantined.delete(tabId);
-      consoleBufs.delete(tabId);
       runtimeContexts.release(tabId);
       return;
     }
@@ -268,161 +208,17 @@ export const createDebuggerPool = () => {
       console.warn('[debugger-pool] detach threw; custody retained', e);
       throw e;
     }
-    consoleBufs.delete(tabId);
     runtimeContexts.release(tabId);
   };
 
   // The attachment belongs to the document proved by the scripting bridge.
   // A navigation revokes it immediately, including a public to private hop;
   // the next CDP call must attach and prove the new document from scratch.
-  browser.tabs.onUpdated.addListener(makeDebuggerNavigationGuard({
+  const onTabUpdated = makeDebuggerNavigationGuard({
     isAttached: (tabId) => attached.has(tabId),
     detach,
-  }));
-
-  // Deadline for one Runtime.evaluate (issue #176). Generous — an agent
-  // script may legitimately await slow fetches/navigation — but finite, so a
-  // never-settling page promise rejects instead of hanging the dispatch.
-  // Callers can widen per-call via opts.timeoutMs (kept OUT of the CDP params).
-  const EVALUATE_DEADLINE_MS = 120_000;
-
-  const evaluate = async (tabId, expression, {
-    timeoutMs = EVALUATE_DEADLINE_MS,
-    expectedDocument = null,
-    ...opts
-  } = {}) => {
-    const identity = await attachToExpectedDocument(tabId, expectedDocument);
-    const { contextId } = identity;
-    // Reset console buffer just before the call so we capture only
-    // this evaluate's output. Concurrent evals on the same tab would
-    // cross-pollinate; the agent loop is single-threaded per session
-    // so that's fine in practice.
-    consoleBufs.set(tabId, { contextId, lines: [] });
-    // why: wrap in an async IIFE so the agent's expression behaves like
-    // a function body — top-level `await`, `return`, `let`/`const` all
-    // work. Without this:
-    //   - `return r.status` → SyntaxError ("Illegal return statement")
-    //   - `await fetch(...)` → SyntaxError ("await is only valid in
-    //     async functions")
-    // and the agent has to manually construct an IIFE every call. We
-    // do it once, so the agent writes naturally:
-    //
-    //     const r = await fetch(url, {credentials: 'include'});
-    //     return r.status;
-    //
-    // The trailing newline before the closing brace defends against the
-    // user's last line being a line-comment that would otherwise eat
-    // our `})()`.
-    // The exact-document guard and caller code execute in one page task. Its
-    // random tag makes the pre-effect result host-authenticated: page output or
-    // a caller-thrown error string cannot forge positive "nothing ran" proof.
-    const guardTag = crypto.randomUUID();
-    const guard = `if (location.origin !== ${JSON.stringify(expectedDocument.origin)}`
-      + ` || location.href !== ${JSON.stringify(expectedDocument.href)}`
-      + ` || performance.timeOrigin !== ${JSON.stringify(expectedDocument.timeOrigin)}) `
-      + `{ return { __peerdDocumentGuard: ${JSON.stringify(guardTag)} }; }\n`;
-    const wrapped = `(async () => {\n${guard}${expression}\n})()`;
-    let result;
-    try {
-      // Race the CDP call against the deadline and the per-tab rejectors
-      // (tab close / debugger detach) — sendCommand itself never times out,
-      // and awaitPromise pins it on the page's promise. The loser command may
-      // still settle later inside Chrome; its result is dropped.
-      result = await new Promise((resolve, reject) => {
-        const set = pendingEvals.get(tabId) ?? new Set();
-        pendingEvals.set(tabId, set);
-        const timer = setTimeout(() => {
-          fail(new Error(`page_exec: the page script did not settle within ${Math.round(timeoutMs / 1000)}s — hung promise or unresponsive page`));
-        }, timeoutMs);
-        /** @param {Error} e */
-        const fail = (e) => { cleanup(); reject(e); };
-        const cleanup = () => {
-          clearTimeout(timer);
-          set.delete(fail);
-          if (set.size === 0 && pendingEvals.get(tabId) === set) pendingEvals.delete(tabId);
-        };
-        set.add(fail);
-        browser.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-          expression: wrapped,
-          // The IIFE returns a Promise; awaitPromise unwraps it so we
-          // get the actual return value (or thrown rejection) back.
-          awaitPromise: true,
-          returnByValue: true,
-          // Trusted-Types pages (`require-trusted-types-for 'script'`,
-          // e.g. Gmail / Notion / Slack) reject injected script, so
-          // evaluation uses CDP's sanctioned opt-in for user-privileged
-          // tooling — the same channel DevTools uses.
-          allowUnsafeEvalBlockedByCSP: true,
-          // Treat the eval as a user gesture so gesture-gated APIs
-          // (focus, clipboard, fullscreen) work from the script.
-          userGesture: true,
-          // Bind both evaluation and console capture to the vetted main-world
-          // execution context. A replacement document receives a new context.
-          contextId,
-          ...opts,
-        }).then((/** @type {any} */ r) => { cleanup(); resolve(r); }, (error) => fail(hostLostError(error)));
-      });
-    } finally {
-      // Always drain the buffer, even on throw, so the next call starts
-      // clean. Subsequent attempts shouldn't see stale output.
-      const captured = consoleBufs.get(tabId)?.lines ?? [];
-      consoleBufs.delete(tabId);
-      result = result ? { ...result, _capturedConsole: captured.join('\n') } : { _capturedConsole: captured.join('\n') };
-    }
-    if (result?.result?.value?.__peerdDocumentGuard === guardTag) {
-      throw preEffectTargetError();
-    }
-    return result;
-  };
-
-  /**
-   * Dispatch a sequence of keyboard events through CDP Input.dispatchKeyEvent.
-   * Produces events with isTrusted=true so hostile SPAs (Gmail, Slack,
-   * Linear) accept them as real user input.
-   *
-   * @param {number} tabId
-   * @param {Array<{key: string, code?: string, modifiers?: number, text?: string}>} events
-   *   Each entry is one "key press" (we emit keyDown + keyUp per entry).
-   *   The CDP modifiers field is a bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8.
-   */
-  const dispatchKeys = async (tabId, events) => {
-    await attach(tabId);
-    // why NO Page.bringToFront here: it brought the tab's whole browser
-    // window to the OS foreground on EVERY call — an agent typing its way
-    // through a page repeatedly stole the user's focus out of other apps and
-    // windows (the DESIGN-12 no-focus-steal rule applies to key dispatch
-    // too). This raw primitive is no longer exposed to actors because CDP key
-    // dispatch cannot be bound to an exact document. A future caller must prove
-    // the document and enable focus emulation before restoring that surface.
-    for (const ev of events) {
-      const base = {
-        key: ev.key,
-        code: ev.code ?? defaultCode(ev.key),
-        modifiers: ev.modifiers ?? 0,
-        windowsVirtualKeyCode: ev.windowsVirtualKeyCode ?? defaultVk(ev.key),
-        nativeVirtualKeyCode: ev.nativeVirtualKeyCode ?? defaultVk(ev.key),
-      };
-      // For printable characters we also need a "char" event so input
-      // elements receive the typed value. CDP's "rawKeyDown" + "char"
-      // is the closest analog to a real keystroke for inputs; for
-      // shortcuts that don't target inputs, "keyDown" alone is enough.
-      const isChar = ev.text && ev.text.length === 1 && (ev.modifiers ?? 0) === 0;
-      await browser.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
-        ...base,
-        type: isChar ? 'rawKeyDown' : 'keyDown',
-        ...(ev.text ? { text: ev.text } : {}),
-        ...(ev.text ? { unmodifiedText: ev.text } : {}),
-      });
-      if (isChar) {
-        await browser.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
-          ...base, type: 'char', text: ev.text, unmodifiedText: ev.text,
-        });
-      }
-      await browser.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
-        ...base, type: 'keyUp',
-      });
-    }
-  };
+  });
+  if (options.bindTabEvents !== false) browser.tabs.onUpdated.addListener(onTabUpdated);
 
   // --- DOM navigation: a11y snapshot + ref-resolved click/type ----------
 
@@ -975,11 +771,11 @@ export const createDebuggerPool = () => {
   };
 
   return {
-    attach, detach, evaluate, dispatchKeys, getAxTree, captureScreenshot,
+    attach, detach, getAxTree, captureScreenshot,
     clickBackendNode, setValueBackendNode,
     readFrameworkState,
     startNetworkCapture, stopNetworkCapture, discardNetworkCapture,
-    releaseNetworkCapture,
+    releaseNetworkCapture, onTabRemoved, onTabUpdated,
     isAttached: (tabId) => attached.has(tabId),
   };
 };
@@ -1061,50 +857,3 @@ const FRAMEWORK_STATE_FN = `function (expectedHref, expectedTimeOrigin, guardTag
   }
   return { framework: null, note: 'no React/Vue markers on this element' };
 }`;
-
-// Best-effort key → CDP `code` mapping. Covers the common cases (letters,
-// digits, common special keys). For anything exotic the caller can pass
-// `code` explicitly.
-const defaultCode = (key) => {
-  if (!key) return '';
-  if (/^[a-zA-Z]$/.test(key)) return `Key${key.toUpperCase()}`;
-  if (/^[0-9]$/.test(key)) return `Digit${key}`;
-  const SPECIAL = {
-    'Enter': 'Enter', 'Tab': 'Tab', 'Escape': 'Escape', 'Backspace': 'Backspace',
-    ' ': 'Space', 'Space': 'Space',
-    'ArrowUp': 'ArrowUp', 'ArrowDown': 'ArrowDown',
-    'ArrowLeft': 'ArrowLeft', 'ArrowRight': 'ArrowRight',
-    'Shift': 'ShiftLeft', 'Control': 'ControlLeft', 'Alt': 'AltLeft', 'Meta': 'MetaLeft',
-    '*': 'Digit8', '+': 'Equal', '-': 'Minus', '/': 'Slash',
-    '.': 'Period', ',': 'Comma', ';': 'Semicolon', "'": 'Quote',
-  };
-  return SPECIAL[key] ?? '';
-};
-
-// Best-effort key → Windows virtual key code. Some sites still gate on
-// keyCode (legacy). Cover ASCII letters + digits + common specials.
-const defaultVk = (key) => {
-  if (!key) return 0;
-  if (/^[a-zA-Z]$/.test(key)) return key.toUpperCase().charCodeAt(0);
-  if (/^[0-9]$/.test(key)) return key.charCodeAt(0);
-  const VK = {
-    'Enter': 13, 'Tab': 9, 'Escape': 27, 'Backspace': 8, ' ': 32, 'Space': 32,
-    'ArrowUp': 38, 'ArrowDown': 40, 'ArrowLeft': 37, 'ArrowRight': 39,
-    'Shift': 16, 'Control': 17, 'Alt': 18, 'Meta': 91,
-  };
-  return VK[key] ?? 0;
-};
-
-// CDP RemoteObject → user-readable string.
-const formatRemoteObject = (obj) => {
-  if (!obj) return 'undefined';
-  if (obj.type === 'undefined') return 'undefined';
-  if (obj.type === 'object' && obj.subtype === 'null') return 'null';
-  if (obj.value !== undefined) {
-    if (typeof obj.value === 'string') return obj.value;
-    try { return JSON.stringify(obj.value); }
-    catch { return String(obj.value); }
-  }
-  if (obj.description) return obj.description;
-  return obj.type;
-};

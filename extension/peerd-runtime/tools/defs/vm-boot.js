@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // vm_boot — execute a shell command in a WebVM.
 //
 // WebVMs are discrete browser tabs. By default vm_boot routes to the
@@ -39,49 +41,7 @@ const MAX_TIMEOUT_MS = 300_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const vmBootTool = {
-  name: 'vm_boot',
-  primitive: 'webvm',
-  description: [
-    'Run a shell command in a WebVM (stock Debian: python3, pip, git, jq,',
-    'bash, POSIX). Persistent bash — cd, exported vars, and history persist',
-    'across calls; pipes/redirects/&&/|| work. No `vm` arg → the chat\'s',
-    'current VM (auto-created if none); pass `vm` to target another.',
-    'No raw sockets in the kernel, but HTTP(S) AND package install work via',
-    'bash wrappers routed through peerd-egress: curl / wget / git clone /',
-    'peerd-fetch for fetching, and `pip install <pkg>` (also -r',
-    'requirements.txt), `npm install`, `gem install` for packages — peerd',
-    'stages the package + its deps offline, then installs in the VM, so',
-    '`pip install requests` just works. NOT supported: compiled/native',
-    'packages (C extensions, no toolchain), apt, raw Python sockets. Staging',
-    'fetches over the network, so big installs are slow — raise timeoutMs',
-    'rather than giving up. Use `bash -c` (not `sh -c`) for subshells.',
-    'Returns stdout, stderr, exit code, duration. Default 60s (timeoutMs,',
-    'max 300s).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      cmd: {
-        type: 'string',
-        description: 'Shell command to run in a persistent /bin/bash --login -i '
-          + 'session (bash semantics; the curl/wget/git/pip/npm/gem wrappers are '
-          + 'bash functions). Use `bash -c`, never `sh -c`, for subshells.',
-      },
-      vm: {
-        type: 'string',
-        description: 'Optional. VM id or name to target. Without this, '
-          + 'uses the chat\'s current VM (auto-created if absent).',
-      },
-      timeoutMs: {
-        type: 'integer',
-        description: 'Wall-clock cap in ms (default 60000, max 300000).',
-      },
-    },
-    required: ['cmd'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const vmBootTool = composeTool("vm_boot", {
 
   execute: async (args, ctx) => {
     // why .trim(): a whitespace-only cmd makes the wrapped-run template a bash
@@ -89,12 +49,9 @@ export const vmBootTool = {
     if (typeof args?.cmd !== 'string' || !args.cmd.trim()) {
       return { ok: false, error: 'cmd_required' };
     }
-    // why: ctx.vm is the opaque `Object` contract slot; narrow it to the
-    // run() surface this tool exercises (offscreen VM client).
-    const vm = /** @type {VmRunner | undefined} */ (ctx.vm);
-    if (!vm || typeof vm.run !== 'function') {
-      return { ok: false, error: 'vm_not_available' };
-    }
+    const authority = /** @type {{ readVm?: (id:string)=>Promise<VmRecord|null|undefined>, listVms?: ()=>Promise<VmRecord[]>, setDefaultVm?: (id:string)=>Promise<unknown>, runVm?: (cmd:string,timeoutMs:number,vmId?:string)=>Promise<VmRunResult> }} */ (
+      /** @type {any} */ (ctx).vmAuthority);
+    if (!authority?.runVm) return { ok: false, error: 'vm_not_available' };
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
     // Resolve `vm` -- accept either id (vm-...) or name. Name lookup
     // is case-insensitive against the registry.
@@ -102,17 +59,15 @@ export const vmBootTool = {
     let targetVmId;
     if (typeof args.vm === 'string' && args.vm.trim().length > 0) {
       const want = args.vm.trim();
-      // why: vmRegistry is an SW-injected context extra not on the
-      // ToolContext contract slot; narrow to the surface this tool uses.
-      const vmRegistry = /** @type {VmRegistry | undefined} */ (
-        /** @type {{ vmRegistry?: unknown }} */ (ctx).vmRegistry);
-      if (!vmRegistry) return { ok: false, error: 'vm_registry_unavailable' };
+      if (!authority.readVm || !authority.listVms || !authority.setDefaultVm) {
+        return { ok: false, error: 'vm_registry_unavailable' };
+      }
       if (want.startsWith('vm-')) {
-        const rec = await vmRegistry.get(want);
+        const rec = await authority.readVm(want);
         if (!rec) return { ok: false, error: `vm_not_found: ${want}` };
         targetVmId = want;
       } else {
-        const all = await vmRegistry.list();
+        const all = await authority.listVms();
         const lower = want.toLowerCase();
         const found = all.find((rec) => rec.name.toLowerCase() === lower);
         if (!found) return { ok: false, error: `vm_not_found: ${want}` };
@@ -122,24 +77,20 @@ export const vmBootTool = {
       // calls route to the same VM. No "attach" concept; just remember
       // what we touched. (targetVmId is always set on this branch — the
       // explicit check also satisfies the type narrower.)
-      if (ctx.session?.sessionId && targetVmId) {
-        try { await vmRegistry.setDefaultForSession(ctx.session.sessionId, targetVmId); }
+      if (targetVmId) {
+        try { await authority.setDefaultVm(targetVmId); }
         catch (e) { console.debug('[vm_boot] MRU bump failed', e); }
       }
     }
     try {
-      const result = await vm.run(args.cmd, {
-        timeoutMs,
-        sessionId: ctx.session?.sessionId,
-        vmId: targetVmId,
-      });
+      const result = await authority.runVm(args.cmd, timeoutMs, targetVmId);
       return { ok: true, content: formatRunResult(args.cmd, result) };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
       return { ok: false, error: `vm_boot_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
     }
   },
-};
+});
 
 /** @param {string} cmd @param {VmRunResult} r @returns {string} */
 const formatRunResult = (cmd, r) => {

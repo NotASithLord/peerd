@@ -71,7 +71,7 @@ const FIXTURE_HOOKS = [
   },
   {
     id: 'observer', event: 'post-tool-use', enabled: false, order: 100,
-    match: '*', isDefault: false, kind: 'js', doc: '',
+    match: '*', isDefault: false, kind: 'declarative', doc: '',
   },
 ];
 

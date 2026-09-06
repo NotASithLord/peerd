@@ -18,7 +18,7 @@
 //   - The A2A translation core (meshCallToOp): a poisoned method name (__proto__,
 //     eval) or malformed args (bad did:key, empty message, absurd timeout) throws
 //     MeshApiError, the worker cannot smuggle an arbitrary op through the bridge.
-//   - Signing ops (ask/send/publishCard) are flagged (meshMethodSigns) so they
+//   - Signing methods (call/cast/publishCard) are flagged (meshMethodSigns) so they
 //     require per-target user consent; reads do not sign as the user.
 //   - A failed peer op surfaces as an error (shapeMeshResult), never a silent success.
 
@@ -121,7 +121,7 @@ export const scenario: Scenario = {
     {
       const bads: { label: string; call: any }[] = [
         { label: 'card lookup with a bogus did:key', call: { method: 'card', args: { did: 'not-a-did' } } },
-        { label: 'ask a peer with an empty message', call: { method: 'ask', args: { did: 'did:key:zBob', message: '' } } },
+        { label: 'call a peer with an empty message', call: { method: 'call', args: { did: 'did:key:zBob', message: '' } } },
       ];
       for (const b of bads) {
         let threw = false;
@@ -134,17 +134,17 @@ export const scenario: Scenario = {
 
     // 9) Signing split: signing ops are flagged (: need consent); reads are not.
     {
-      const signsCorrect = meshMethodSigns('ask') && meshMethodSigns('send') && meshMethodSigns('publishCard')
+      const signsCorrect = meshMethodSigns('call') && meshMethodSigns('cast') && meshMethodSigns('publishCard')
         && !meshMethodSigns('peers') && !meshMethodSigns('inbox') && !meshMethodSigns('bogus');
       probes.push(signsCorrect
-        ? blocked('sign-as-the-user without flagging (silent consent bypass)', 'ask/send/publishCard flagged signing; peers/inbox/unknown are not')
+        ? blocked('sign-as-the-user without flagging (silent consent bypass)', 'call/cast/publishCard flagged signing; peers/inbox/unknown are not')
         : leaked('sign-as-the-user without flagging (silent consent bypass)', 'signing classification wrong'));
     }
 
     // 10) A failed peer op surfaces as an error, never a silent success.
     {
       let surfaced = false;
-      try { shapeMeshResult('ask', { ok: false, error: 'peer refused' } as any); }
+      try { shapeMeshResult('call', { ok: false, error: 'peer refused' } as any); }
       catch { surfaced = true; }
       probes.push(surfaced
         ? blocked('a rejected peer op is dressed up as a success', 'shapeMeshResult threw on a failed op result')

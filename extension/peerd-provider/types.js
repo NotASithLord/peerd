@@ -17,6 +17,8 @@
  * @property {string} tool_use_id                matches a prior ToolUseBlock.id
  * @property {string} content                    serialized tool output (JSON string for V1)
  * @property {boolean} [is_error]                true if the tool failed or was gate-blocked
+ * @property {boolean} [outcomeKnown]
+ * @property {boolean} [retryable]
  * @property {Array<{ mediaType: string, data: string }>} [images]  live vision blocks
  *   (base64) spliced in for ONE model call (send-once). Rendered as image blocks
  *   inside the tool_result content on Anthropic, and as a follow-on user image
@@ -33,6 +35,8 @@
  * @property {boolean} [actorOutcomeKnown]         host-stamped outcome certainty
  * @property {boolean} [actorPerformed]            host-stamped execution state
  * @property {boolean} [actorAborted]              host-stamped user cancellation state
+ * @property {any[]} [authorityReceipts]           host-stamped exact authority receipts
+ * @property {boolean} [authorityPerformed]        whether any exact host effect performed
  */
 
 /**

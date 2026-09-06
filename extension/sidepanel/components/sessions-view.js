@@ -11,7 +11,6 @@
 //   - Empty + loading + error states
 
 import m from '/vendor/mithril/mithril.js';
-import browser from '/vendor/browser-polyfill.js';
 
 /**
  * One session summary row from `session/list`.
@@ -32,16 +31,15 @@ import browser from '/vendor/browser-polyfill.js';
  * @property {SessionSummary[]|null} sessions
  * @property {boolean} loading
  * @property {string|null} error
+ * @property {boolean} effectBusy
+ * @property {boolean} effectUnconfirmed
  */
-
-/** @param {object} msg */
-const send = (msg) => /** @type {Promise<any>} */ (browser.runtime.sendMessage(msg));
 
 // Fetch the session list and write the result into the shared `ui`
 // object the view reads from. Triggers a redraw at the end so callers
 // don't have to remember.
-/** @param {SessionsState} ui */
-const loadList = async (ui) => {
+/** @param {SessionsState} ui @param {(message:any)=>Promise<any>} send */
+const loadList = async (ui, send) => {
   ui.loading = true;
   ui.error = null;
   m.redraw();
@@ -49,6 +47,7 @@ const loadList = async (ui) => {
     const reply = await send({ type: 'session/list' });
     if (reply?.ok) {
       ui.sessions = reply.sessions;
+      ui.effectUnconfirmed = false;
     } else {
       ui.error = reply?.error ?? 'Could not load chats.';
     }
@@ -61,21 +60,23 @@ const loadList = async (ui) => {
 };
 
 export const SessionsView = {
-  /** @param {{ state: SessionsState }} vnode */
+  /** @param {{ state: SessionsState, attrs: {send:(message:any)=>Promise<any>} }} vnode */
   oninit(vnode) {
     vnode.state.sessions = null;
     vnode.state.loading = true;
     vnode.state.error = null;
-    loadList(vnode.state);
+    vnode.state.effectBusy = false;
+    vnode.state.effectUnconfirmed = false;
+    loadList(vnode.state, vnode.attrs.send);
   },
 
   /**
    * @param {{
-   *   attrs: { state: { session?: { sessionId?: string } | null }, onNavigateToChat?: () => void },
+   *   attrs: { state: { session?: { sessionId?: string } | null }, send:(message:any)=>Promise<any>, onNavigateToChat?: () => void },
    *   state: SessionsState,
    * }} vnode
    */
-  view: ({ attrs: { state, onNavigateToChat }, state: ui }) => {
+  view: ({ attrs: { state, send, onNavigateToChat }, state: ui }) => {
     const activeSessionId = state.session?.sessionId ?? null;
     const visible = (ui.sessions ?? []).filter((s) => !s.archived);
 
@@ -85,40 +86,70 @@ export const SessionsView = {
     // pure + host-agnostic — it's mounted in BOTH surfaces now.
     const goToChat = onNavigateToChat || (() => m.route.set('/chat'));
 
+    const effect = async (
+      /** @type {{type:string}&Record<string,any>} */ message,
+      /** @type {string} */ action,
+      /** @type {()=>void} */ onSuccess,
+    ) => {
+      if (ui.effectBusy || ui.effectUnconfirmed) return;
+      ui.effectBusy = true;
+      ui.error = null;
+      m.redraw();
+      try {
+        const reply = await send(message);
+        if (reply?.ok) onSuccess();
+        else {
+          ui.effectUnconfirmed = reply?.outcomeKnown === false;
+          ui.error = ui.effectUnconfirmed
+            ? `Peerd could not confirm whether ${action} finished. Refresh chats to reconcile before trying again.`
+            : `Peerd could not ${action}. Try again.`;
+        }
+      } catch {
+        ui.effectUnconfirmed = true;
+        ui.error = `Peerd could not confirm whether ${action} finished. Refresh chats to reconcile before trying again.`;
+      } finally {
+        ui.effectBusy = false;
+        m.redraw();
+      }
+    };
     const newChat = async () => {
-      await send({ type: 'session/reset' });
-      goToChat();
+      await effect({ type: 'session/reset' }, 'start a new chat', goToChat);
     };
 
     return m('.sessions-view', [
       m('.sessions-toolbar', [
         m('h2', 'Chats'),
         m('.spacer'),
-        m('button', { onclick: newChat }, '+ New chat'),
+        m('button', { disabled: ui.effectBusy || ui.effectUnconfirmed, onclick: newChat }, '+ New chat'),
       ]),
 
       ui.loading
         ? m('.placeholder', 'Loading…')
         : ui.error
-        ? m('.placeholder', m('p.error', ui.error))
+        ? m('.placeholder', [
+            m('p.error', ui.error),
+            m('button', { disabled: ui.loading, onclick: () => loadList(ui, send) },
+              ui.loading ? 'Refreshing…' : 'Refresh chats'),
+          ])
         : visible.length === 0
         ? m('.placeholder', m('div', [
             m('p', 'No chats yet.'),
             m('p.muted', 'Start your first conversation.'),
-            m('button', { onclick: newChat }, 'New chat'),
+            m('button', { disabled: ui.effectBusy || ui.effectUnconfirmed, onclick: newChat }, 'New chat'),
           ]))
         : m('ul.sessions-list', visible.map((s) =>
             m(SessionRow, {
               key: s.sessionId,
               session: s,
               active: s.sessionId === activeSessionId,
+              disabled: ui.effectBusy || ui.effectUnconfirmed,
               onSwitch: async () => {
-                await send({ type: 'session/switch', sessionId: s.sessionId });
-                goToChat();
+                await effect({ type: 'session/switch', sessionId: s.sessionId },
+                  'switch chats', goToChat);
               },
               onArchive: async () => {
-                await send({ type: 'session/archive', sessionId: s.sessionId });
-                await loadList(ui);
+                await effect({ type: 'session/archive', sessionId: s.sessionId },
+                  'archive this chat', () => { void loadList(ui, send); });
               },
             })
           )),
@@ -130,15 +161,16 @@ const SessionRow = {
   /**
    * @param {{ attrs: {
    *   session: SessionSummary,
-   *   active: boolean,
+ *   active: boolean,
+ *   disabled: boolean,
    *   onSwitch: () => void,
    *   onArchive: () => void,
    * } }} vnode
    */
-  view: ({ attrs: { session, active, onSwitch, onArchive } }) => {
+  view: ({ attrs: { session, active, disabled, onSwitch, onArchive } }) => {
     const title = session.title ?? 'Untitled chat';
     return m(`li.session-row${active ? '.active' : ''}`, [
-      m('button.session-main', { onclick: onSwitch }, [
+      m('button.session-main', { disabled, onclick: onSwitch }, [
         m('.session-title', title),
         m('.session-meta', [
           m('span', formatRelative(session.lastMessageAt)),
@@ -164,7 +196,7 @@ const SessionRow = {
         ]),
       ]),
       m('button.session-archive', {
-        title: 'Archive',
+        title: 'Archive', disabled,
         onclick: (/** @type {Event} */ e) => { e.stopPropagation(); onArchive(); },
       }, '×'),
     ]);

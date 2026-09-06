@@ -54,16 +54,31 @@ try {
   await cp(join(root, 'scripts/firefox/pod-smoke-page.js'), join(source, 'firefox-pod-smoke-page.js'));
   const origin = `http://127.0.0.1:${server.port}`;
 
-  // Test-only harness seam in the disposable copied extension. It uses the
-  // production registry and trusted-sender check, and keeps the loopback URL
-  // out of page-controlled state. It never enters a release package.
-  const workerPath = join(source, 'background/service-worker.js');
+  const manifestPath = join(source, 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const backgroundEntry = manifest.background?.scripts?.[0]
+    ?? manifest.background?.service_worker;
+  if (typeof backgroundEntry !== 'string') throw new Error('Firefox background entry is missing');
+  const workerPath = join(source, backgroundEntry);
   const workerSource = await readFile(workerPath, 'utf8');
   await writeFile(workerPath, `${workerSource}\n
+import { isFirstPartySender as smokeIsFirstPartySender } from '/shared/sender-trust.js';
+import { idb as smokeIdb } from '/peerd-egress/kernel-storage.js';
+import { createPodRegistry as makeSmokePodRegistry } from '/peerd-engine/pod-registry.js';
+const smokeSenderTrust = {
+  runtimeId: browser.runtime?.id,
+  extensionOrigin: browser.runtime?.getURL?.('') ?? '',
+};
+const smokeTrustedSender = (sender) => smokeIsFirstPartySender(sender, smokeSenderTrust);
+const smokePodRegistry = makeSmokePodRegistry({ storage: {
+  get: async (key) => (await smokeIdb.get('pods', key))?.value,
+  set: async (key, value) => smokeIdb.put('pods', { key, value }),
+} });
+await smokePodRegistry.load();
 browser.runtime.onMessage.addListener((msg, sender) => {
-  if (!isTrustedSender(sender)) return false;
+  if (!smokeTrustedSender(sender)) return false;
   if (msg?.type === 'firefox-smoke/create-pod') {
-    return podRegistry.create({ name: 'Firefox smoke Pod', persistent: true })
+    return smokePodRegistry.create({ name: 'Firefox smoke Pod', persistent: true })
       .then((record) => ({ ok: true, record }))
       .catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
   }
@@ -80,8 +95,6 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   return false;
 });\n`);
 
-  const manifestPath = join(source, 'manifest.json');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.content_security_policy.extension_pages = manifest.content_security_policy.extension_pages.replace(
     /connect-src ([^;]+)/, (_match, sources) => `connect-src ${sources} ${origin}`);
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);

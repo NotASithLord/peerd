@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  makeDwebCustodyClient, makeRetryableCustodyReset,
-} from '../../extension/background/dweb-custody-client.js';
+import { makeDwebCustodyHost } from '../../extension/offscreen/dweb-custody-host.js';
+import { coldPortNamesFor } from '../../extension/background/cold-kernel-inventory.js';
 
-const makeEvent = () => {
+const event = () => {
   const listeners: Array<(message?: any) => void> = [];
   return {
     addListener: (listener: (message?: any) => void) => { listeners.push(listener); },
@@ -11,155 +10,123 @@ const makeEvent = () => {
   };
 };
 
-const makePort = () => {
-  const onMessage = makeEvent();
-  const onDisconnect = makeEvent();
-  const sent: any[] = [];
+const pair = () => {
+  const clientMessage = event();
+  const hostMessage = event();
+  const clientDisconnect = event();
+  const hostDisconnect = event();
+  const clientSent: any[] = [];
+  const hostSent: any[] = [];
   return {
-    port: {
-      onMessage,
-      onDisconnect,
-      postMessage: (message: any) => { sent.push(message); },
-      disconnect: () => onDisconnect.emit(),
+    client: {
+      onMessage: clientMessage,
+      onDisconnect: clientDisconnect,
+      postMessage: (message: any) => { clientSent.push(message); hostMessage.emit(message); },
     } as any,
-    sent,
-    reply: (message: any) => onMessage.emit(message),
-    disconnect: () => onDisconnect.emit(),
+    host: {
+      onMessage: hostMessage,
+      onDisconnect: hostDisconnect,
+      postMessage: (message: any) => { hostSent.push(message); clientMessage.emit(message); },
+    } as any,
+    clientSent,
+    hostSent,
   };
 };
-
 const nextTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+const waitForPacket = async (sent: any[], requestId: string) => {
+  for (let attempt = 0; attempt < 30
+    && !sent.some((message) => message.requestId === requestId); attempt += 1) await nextTask();
+  return sent.find((message) => message.requestId === requestId);
+};
 
-describe('dweb custody port client', () => {
-  test('carries a custody request and response only on the attached port', async () => {
-    let ensured = 0;
-    const host = makePort();
-    const client = makeDwebCustodyClient({
-      ensureOffscreen: async () => { ensured++; },
-      handleSecretRequest: async () => ({ ok: false }),
-      timeoutMs: 100,
-      newRequestId: () => 'req-1',
+describe('dweb custody receipt host', () => {
+  test('retains a completed receipt until acknowledgement and never reruns it', async () => {
+    let runs = 0;
+    const host = makeDwebCustodyHost({
+      authorityId: 'authority:stable', readState: () => ({}),
+      runOperation: async () => { runs += 1; return { adopted: true }; },
     });
-    client.attach(host.port);
-    const result = client.call('export', { passphrase: 'secret', material: { seed: 'root' } });
-    await nextTask();
-    expect(host.sent).toEqual([{
-      type: 'custody/request', requestId: 'req-1', operation: 'export',
-      args: { passphrase: 'secret', material: { seed: 'root' } },
-    }]);
-    host.reply({ type: 'custody/response', requestId: 'req-1', ok: true, result: { did: 'did:key:zA' } });
-    expect(await result).toEqual({ did: 'did:key:zA' });
-    expect(ensured).toBe(0);
-  });
+    const first = pair();
+    host.attach(first.host);
+    const args = { record: {} };
+    first.client.postMessage({
+      type: 'custody/request', requestId: 'request:first',
+      operationId: 'operation:stable', operation: 'adopt', args,
+    });
+    expect(await waitForPacket(first.hostSent, 'request:first')).toMatchObject({
+      type: 'custody/response', ok: true, result: { adopted: true },
+    });
 
-  test('waits for the verified host port after ensuring the offscreen document', async () => {
-    const host = makePort();
-    const client = makeDwebCustodyClient({
-      ensureOffscreen: async () => {},
-      handleSecretRequest: async () => ({ ok: false }),
-      timeoutMs: 100,
-      newRequestId: () => 'req-2',
+    const second = pair();
+    host.attach(second.host);
+    second.client.postMessage({
+      type: 'custody/status', requestId: 'status:second', operationId: 'query:second',
+      operation: 'adopt', args,
     });
-    const result = client.call('reset');
-    await nextTask();
-    client.attach(host.port);
-    await nextTask();
-    expect(host.sent[0]).toMatchObject({ operation: 'reset', requestId: 'req-2' });
-    host.reply({ type: 'custody/response', requestId: 'req-2', ok: true, result: { reset: true } });
-    await expect(result).resolves.toEqual({ reset: true });
-  });
-
-  test('rejects in-flight custody work when the exact port disconnects', async () => {
-    const host = makePort();
-    const client = makeDwebCustodyClient({
-      ensureOffscreen: async () => {}, handleSecretRequest: async () => ({ ok: false }),
-      timeoutMs: 100, newRequestId: () => 'req-3',
-    });
-    client.attach(host.port);
-    const result = client.call('adopt', {});
-    await nextTask();
-    host.disconnect();
-    await expect(result).rejects.toMatchObject({
-      name: 'DwebCustodyPortError', code: 'port-disconnected',
-    });
-  });
-
-  test('retries cleanly after the initial port wait times out and a host reconnects', async () => {
-    const ids = ['timed-out', 'after-reconnect'];
-    const host = makePort();
-    const client = makeDwebCustodyClient({
-      ensureOffscreen: async () => {}, handleSecretRequest: async () => ({ ok: false }),
-      timeoutMs: 5, newRequestId: () => ids.shift() ?? 'extra',
-    });
-    await expect(client.call('reset')).rejects.toMatchObject({ code: 'port-timeout' });
-    client.attach(host.port);
-    const retried = client.call('reset');
-    await nextTask();
-    expect(host.sent[0]).toMatchObject({ requestId: 'timed-out', operation: 'reset' });
-    host.reply({
-      type: 'custody/response', requestId: 'timed-out', ok: true,
-      result: { reset: true },
-    });
-    await expect(retried).resolves.toEqual({ reset: true });
-  });
-
-  test('serves identity reads and writes only through the attached verified port', async () => {
-    const host = makePort();
-    const handled: any[] = [];
-    const client = makeDwebCustodyClient({
-      ensureOffscreen: async () => {},
-      handleSecretRequest: async (operation, args) => {
-        handled.push({ operation, args });
-        return operation === 'get' ? { ok: true, value: 'root' } : { ok: true };
-      },
-      timeoutMs: 100,
-    });
-    client.attach(host.port);
-    host.reply({
-      type: 'custody/secret-request', requestId: 'secret-1', operation: 'get', args: {},
-    });
-    await nextTask();
-    expect(handled).toEqual([{ operation: 'get', args: {} }]);
-    expect(host.sent).toContainEqual({
-      type: 'custody/secret-response', requestId: 'secret-1', ok: true,
-      result: { ok: true, value: 'root' },
-    });
-  });
-
-  test('a failed boot reset is retryable and concurrent callers share one attempt', async () => {
-    let attempts = 0;
-    let release = () => {};
-    const reset = makeRetryableCustodyReset({
-      enabled: true,
-      hostAvailable: true,
-      reset: async () => {
-        attempts++;
-        if (attempts === 1) throw new Error('port-timeout');
-        await new Promise<void>((resolve) => { release = resolve; });
+    expect(await waitForPacket(second.hostSent, 'status:second')).toMatchObject({
+      type: 'custody/status-response', receipt: {
+        state: 'succeeded', result: { adopted: true },
       },
     });
-    await expect(reset.ensure()).rejects.toThrow('port-timeout');
-    const first = reset.ensure();
-    const second = reset.ensure();
-    await nextTask();
-    expect(attempts).toBe(2);
-    release();
-    await Promise.all([first, second]);
-    await reset.ensure();
-    expect(attempts).toBe(2);
+    second.client.postMessage({
+      type: 'custody/request', requestId: 'request:second',
+      operationId: 'operation:stable', operation: 'adopt', args,
+    });
+    await waitForPacket(second.hostSent, 'request:second');
+    expect(runs).toBe(1);
+    second.client.postMessage({ type: 'custody/ack', operationId: 'operation:stable' });
+    second.client.postMessage({
+      type: 'custody/status', requestId: 'status:missing', operationId: 'query:missing',
+      operation: 'adopt', args,
+    });
+    expect((await waitForPacket(second.hostSent, 'status:missing'))?.receipt)
+      .toEqual({ state: 'missing' });
   });
 
-  test('does not contact the custody host when dweb or the host is unavailable', async () => {
-    let attempts = 0;
-    const reset = async () => { attempts++; };
-    const disabled = makeRetryableCustodyReset({
-      enabled: false, hostAvailable: true, reset,
+  test('binds an operation id to exact arguments', async () => {
+    const host = makeDwebCustodyHost({
+      authorityId: 'authority:args', readState: () => ({}),
+      runOperation: async () => ({ ok: true }),
     });
-    const hostless = makeRetryableCustodyReset({
-      enabled: true, hostAvailable: false, reset,
+    const ports = pair();
+    host.attach(ports.host);
+    ports.client.postMessage({
+      type: 'custody/request', requestId: 'request:one',
+      operationId: 'operation:one', operation: 'prepare', args: { passphrase: 'one' },
     });
-    await disabled.ensure();
-    await hostless.ensure();
-    expect(attempts).toBe(0);
+    await waitForPacket(ports.hostSent, 'request:one');
+    ports.client.postMessage({
+      type: 'custody/request', requestId: 'request:two',
+      operationId: 'operation:one', operation: 'prepare', args: { passphrase: 'two' },
+    });
+    expect(await waitForPacket(ports.hostSent, 'request:two')).toMatchObject({
+      ok: false, error: 'operation-id-conflict',
+    });
+  });
+
+  test('preserves unknown effect custody in the final receipt', async () => {
+    const host = makeDwebCustodyHost({
+      authorityId: 'authority:unknown', readState: () => ({}),
+      runOperation: async () => {
+        throw Object.assign(new Error('identity-store-outcome-unknown'), {
+          code: 'identity-store-outcome-unknown', outcomeKnown: false,
+        });
+      },
+    });
+    const ports = pair();
+    host.attach(ports.host);
+    ports.client.postMessage({
+      type: 'custody/request', requestId: 'request:unknown',
+      operationId: 'operation:unknown', operation: 'adopt', args: {},
+    });
+    expect(await waitForPacket(ports.hostSent, 'request:unknown')).toMatchObject({
+      ok: false, error: 'identity-store-outcome-unknown', outcomeKnown: false,
+    });
+  });
+
+  test('dweb custody remains Preview-only in the native Port inventory', () => {
+    expect(coldPortNamesFor()).not.toContain('dweb-custody');
+    expect(coldPortNamesFor({ firefox: true })).not.toContain('dweb-custody');
+    expect(coldPortNamesFor({ dweb: true })).toContain('dweb-custody');
   });
 });

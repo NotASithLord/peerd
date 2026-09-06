@@ -53,7 +53,8 @@ the same live target policy as every browser tool.
 | Navigate or fetch a cross-origin URL with a long encoded blob in the host, credentials, or path. | Supported paths refuse the request and record the denial. |
 | Use a fetch, document-reading, or browser tool on localhost, a private network address, or cloud metadata. | The operation is refused. Driven tabs also carry a tab-scoped network rule that blocks redirects and tab-associated requests before they reach the target. |
 | From a service worker controlled by an actor-owned public page, fetch a private target. | The request does not reach the target. The no-tab rule is limited to private targets and public domains visited by the driven tab. Chrome and Firefox prove reachability before custody, blocking during custody, another origin remaining reachable, and reachability after custody closes. |
-| From that service worker, open a WebSocket to a private target. | Firefox blocks it. Chrome DNR does not intercept worker-created WebSockets. The Chrome test proves the bypass remains visible, including against an unscoped diagnostic rule, so it cannot be mistaken for covered behavior. |
+| From that service worker, open a WebSocket to a private target. | Firefox blocks it. Chrome DNR does not intercept worker-created WebSockets. This is an accepted platform limitation, not a product guarantee: the Chrome test records the bypass as non-gating telemetry, including against an unscoped diagnostic rule, while requiring proof that the probe ran. |
+| Navigate an actor-owned Chrome tab directly to a private target. | Chrome DNR blocks the HTTP request, but the isolated target can still observe a TCP connection/preconnect. The live lane records that residual; the browser floor is not an absolute zero-transport or port-oracle boundary. |
 | Follow a redirect from an allowed request or navigation to a blocked destination. | The destination is refused. Browser automation stops and the tab is reset when the browser can verify the reset. |
 | From an actor-owned test page, open a child that navigates, fetches, or opens a WebSocket toward a private or denylisted target. | The protected request does not reach the target. Firefox synchronously stops the exact child's request until its tab-scoped rules are installed. A subrequest observed by that temporary stop produces a URL-free tool and Activity receipt. If DNR wins first, the block is silent. |
 | From the same test page, open a child toward a public target. | Only that child receives the driven-tab network floor, then the public navigation continues. |
@@ -86,8 +87,8 @@ Verify that peerd does not prompt, unregister the worker, or affect domains
 outside that DNR match.
 Visited domains survive extension service-worker restarts and remain covered
 until the owning tab's custody closes.
-Also keep Chrome worker WebSockets, Chrome's immediate inherited-child request
-race when native local-network checks are disabled, the page-initiated
+Also keep Chrome worker WebSockets, Chrome's direct-navigation TCP preconnect,
+Chrome's immediate inherited-child request race when native local-network checks are disabled, the page-initiated
 cross-origin redirect race, and DNS rebinding listed as residual boundaries.
 
 ## Login
@@ -113,6 +114,7 @@ surface.
 | Inspect browser network activity while enabling, recording, previewing, and voting. | No Contributor Metrics request, endpoint, alarm, or upload exists. |
 | Use the worked or didn’t-work control on a final answer. | The control is a named binary group, creates no chat message, and contributes only while consent is current. |
 | Disable and clear, then reopen Settings. | Consent, pending rows, local dedupe tokens, and feedback are gone. |
+| Force an enable or disable storage timeout, make the opposite choice, then release the old write and restart the background. | The later acknowledged choice remains authoritative; stale writes and cleanup stay inert. |
 | Attempt consent or feedback from an engine tab or other extension surface. | The background refuses the sender before any contribution mutation. |
 
 ## Recovery and Stop

@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // sandbox_create: the single create tool for all tab-hosted sandbox kinds.
 //
 // why one tool, not three: vm_create / js_create / app_create were three
@@ -15,7 +17,7 @@
 // each handler stamps into its result JSON, so compaction/trim still carry
 // "which kind of instance this id is" after the merge.
 
-import { executeByKind, kindEnum } from './kind-dispatch.js';
+import { executeByKind } from './kind-dispatch.js';
 import { createWebVmSandbox } from './vm-create.js';
 import { createNotebookSandbox } from './js-create.js';
 import { createAppSandbox } from './app-create.js';
@@ -33,78 +35,7 @@ export const SANDBOX_KIND_HANDLERS = Object.freeze({
 });
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const sandboxCreateTool = {
-  name: 'sandbox_create',
-  primitive: 'engine',
-  // why the per-kind HOW-TO isn't here: the description is the every-turn
-  // routing surface — enough to PICK a kind, no more. The deep operating lore
-  // (charts, iframe runtime, file-by-file growth) rides each kind's
-  // create-RESULT note (NOTEBOOK_NOTE / APP_RUNTIME_NOTE) and the owning
-  // actor's prompt, disclosed once when the agent actually commits to that kind.
-  description: [
-    'Create an isolated, tab-hosted sandbox and return its id. Pick `kind`:',
-    '"webvm" = full Linux/POSIX with bash, Python, Node/npm, and native tools; heavy.',
-    '"notebook" = lightweight fresh-run JS workspace for compute, data, and charts.',
-    '"pod" = fast shell + persistent OPFS, pipelines, WASI, browser Git, and audited',
-    'HTTPS; no Linux, Node/npm, native binaries, sockets, or PTY.',
-    '"app" = user-facing multi-file HTML in a sandboxed iframe with NO ambient',
-    'network; bundle dependencies. Firefox saves Apps but cannot run them.',
-    'Apps use `files` (or `html`); pass `dwapp:true` only for peer multiplayer.',
-    'The sandbox becomes current for its kind. Delegate substantial work with',
-    '`message_actor(id, goal)`; use `script` for quick headless compute.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      kind: {
-        type: 'string',
-        enum: kindEnum(SANDBOX_KIND_HANDLERS),
-        description: 'Which sandbox to create.',
-      },
-      name: { type: 'string', description: 'Human-friendly label (tab strip + actor_list).' },
-      files: {
-        type: 'object',
-        description: 'app only: path → content map. Must include the entry (default index.html). '
-          + 'Text files use strings. Binary assets such as .wasm, images, audio, and fonts use '
-          + '{ "base64": "..." } and are available through window.peerd.assets.',
-        additionalProperties: {
-          anyOf: [
-            { type: 'string' },
-            {
-              type: 'object',
-              properties: { base64: { type: 'string' } },
-              required: ['base64'],
-              additionalProperties: false,
-            },
-          ],
-        },
-      },
-      html: { type: 'string', description: 'app only: shorthand for files:{index.html: html}.' },
-      entryFile: { type: 'string', description: 'app only: entry filename (default index.html).' },
-      tags: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'app only: optional tags (improves search).',
-      },
-      dwapp: {
-        type: 'boolean',
-        description: 'app only: build a MULTIPLAYER / shared dwapp — marks the app so the '
-          + 'app-tab attaches the dweb BRIDGE; only then can the app call '
-          + "dweb('join'/'publish'/'subscribe'/'dm-send'/…). REQUIRED for any app "
-          + 'that talks to peers. Pair with dweb_guide.',
-      },
-      gitUrl: { type: 'string', description: 'app/notebook/pod: HTTPS remote to clone. For an App or dwapp, the repository peerd.json defines its entry, capabilities, and bound actor.' },
-      gitRef: { type: 'string', description: 'app/notebook/pod: branch or tag.' },
-      gitDepth: { type: 'integer', description: 'app/notebook/pod: depth, 1–500.' },
-      persistent: { type: 'boolean', description: 'pod only: preserve the named OPFS workspace when its tab stops (default true).' },
-    },
-    required: ['kind'],
-  },
-  sideEffect: 'write',
-  origins: (args) => {
-    if (typeof args?.gitUrl !== 'string') return [];
-    try { return [new URL(args.gitUrl).origin]; } catch { return []; }
-  },
+export const sandboxCreateTool = composeTool("sandbox_create", {
   // why the wrapper around executeByKind: refuse (not ignore) app-only args on
   // other kinds — a notebook create that silently drops `files` looks seeded
   // when it isn't; the model would delegate "run parse.js" to an actor staring
@@ -137,4 +68,4 @@ export const sandboxCreateTool = {
       return dispatch(args, ctx);
     });
   })(),
-};
+});

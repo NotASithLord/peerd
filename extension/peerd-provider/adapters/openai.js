@@ -9,23 +9,20 @@
 // exactly like the OpenRouter one — it is the OpenRouter adapter minus the
 // gateway-attribution headers and the gateway's per-model window quirks.
 //
-// Same DI contract as every adapter: `safeFetch` + `getSecret` are
-// injected; this module never imports peerd-egress. The API key attaches
-// at fetch-header time (Authorization: Bearer) and is never in the body.
+// The named model-egress authority owns the fixed destination, credential,
+// authentication, and network policy. This adapter sees only the native body
+// it semantically constructs and the resulting response stream.
 
 import { toOpenAiBody } from '../format/to-openai.js';
 import { fromOpenAiStream } from '../format/from-openai.js';
-import { abortableSleep, fetchInitialResponseWithRetry } from '../connect-timeout.js';
+import { abortableSleep, openInitialResponseWithRetry } from '../connect-timeout.js';
 import {
   ProviderError,
   ProviderHttpError,
-  ProviderKeyMissingError,
   ProviderUsageLimitError,
 } from '../errors.js';
 import { isUsageLimitResponse, apiErrorMessage } from '../error-classify.js';
 
-const ENDPOINT = 'https://api.openai.com/v1/chat/completions';
-const VAULT_SECRET_NAME = 'openai_api_key';
 // Connect timeout for the response headers; the SSE body streams untimed.
 const CONNECT_TIMEOUT_MS = 45_000;
 
@@ -45,6 +42,7 @@ const MAX_BACKOFF_MS = 60_000;
 /**
  * @typedef {import('../types.js').InternalMessage} InternalMessage
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
+ * @typedef {import('../model-egress.js').ModelEgress} ModelEgress
  */
 
 /**
@@ -59,8 +57,7 @@ const MAX_BACKOFF_MS = 60_000;
  * @param {string} [args.model]
  * @param {number} [args.maxTokens]
  * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [args.tools]
- * @param {(name: string) => Promise<string | null>} args.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
  * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [args._sleep]
  * @returns {AsyncGenerator<ProviderEvent>}
@@ -71,32 +68,27 @@ export async function* callOpenAi(args) {
     model = DEFAULT_MODEL,
     maxTokens,
     tools,
-    getSecret, safeFetch,
+    modelEgress,
     signal,
     _sleep = abortableSleep,
   } = args;
 
-  const apiKey = await getSecret(VAULT_SECRET_NAME);
-  if (!apiKey) throw new ProviderKeyMissingError('openai');
-
   const body = toOpenAiBody({ model, system, messages, tools, maxTokens });
-  const requestInit = {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal,
-  };
 
   for (let attempt = 1; ; attempt++) {
-    const res = await fetchInitialResponseWithRetry(safeFetch, ENDPOINT, requestInit, {
+    const res = await openInitialResponseWithRetry(
+      (requestSignal) => modelEgress.openInference({
+        providerId: 'openai',
+        modelId: model,
+        nativeBody: body,
+        signal: requestSignal,
+      }), {
       stopSignal: signal,
       timeoutMs: CONNECT_TIMEOUT_MS,
       onTimeout: (ms) => new ProviderError('openai', `the API did not respond within ${ms / 1000}s — it may be unreachable or down. Try again.`),
       sleepFn: _sleep,
-    });
+      },
+    );
     if (res.ok) {
       if (!res.body) {
         throw new ProviderError('openai', 'response has no body (streaming requires it)');
@@ -170,10 +162,8 @@ export const OPENAI_POPULAR = Object.freeze([
 export const openaiAdapter = Object.freeze({
   name: 'openai',
   label: 'OpenAI',
-  endpoint: ENDPOINT,
   defaultModel: DEFAULT_MODEL,
   defaultRunnerModel: DEFAULT_RUNNER_MODEL,
-  vaultSecretName: VAULT_SECRET_NAME,
   call: callOpenAi,
   // NO contextWindow (issue #173): /v1/models carries no context-length field,
   // so a live fetcher here could only ever return null — and the catalog's

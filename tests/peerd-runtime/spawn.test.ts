@@ -4,11 +4,10 @@ import {
   makeSpawnActor,
   narrowTools,
   finalActorTurnReply, finalAssistantText,
-  restrictCtxCapabilities,
-  CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH,
 } from '../../extension/peerd-runtime/actor/spawn.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '../../extension/peerd-runtime/errors.js';
+import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
 
 // ---- pure helpers ---------------------------------------------------------
 
@@ -24,7 +23,7 @@ describe('narrowTools', () => {
       .toEqual(['a', 'b', 'actor_create']);
   });
 
-  test('explicit list intersects with registered tools', () => {
+  test('explicit list intersects with available tools', () => {
     expect(narrowTools(all, { tools: ['a', 'nope'] }).map((t) => t.name)).toEqual(['a']);
   });
 
@@ -79,119 +78,6 @@ describe('finalActorTurnReply', () => {
   });
 });
 
-describe('restrictCtxCapabilities', () => {
-  // A stand-in for the full ctx buildToolContext hands every context: every
-  // capability closure present, plus non-capability fields that must survive.
-  const fullCtx = () => ({
-    getSecret: () => 'KEY',
-    safeFetch: () => {},
-    webFetch: () => {},
-    webCache: { get: () => {}, put: () => {}, key: () => 'k' },
-    siteClients: { get: () => {}, put: () => {}, remove: () => {} },
-    canUseSiteClientOrigin: () => true,
-    authorizeSiteClientOrigin: async () => true,
-    siteCapture: { start: () => {}, stop: () => {} },
-    memory: { read: () => {} },
-    kv: { get: () => {} },
-    idb: { getAll: () => {} },
-    spawnActor: () => {},
-    spawnActorAsync: () => {},
-    actorTasks: () => {},
-    actorCancel: () => {},
-    requestReview: () => {},
-    dweb: { share: () => {} },
-    jsOffscreenClient: { execHeadless: () => {} },
-    scriptRuns: { register: () => {} },
-    // non-capability fields — always retained
-    denylist: ['evil.com'],
-    allowlist: ['https://api.anthropic.com'],
-    activeTab: { id: 1 },
-    debuggerPool: {},
-    scripting: {},
-    domRefs: {},
-    audit: () => {},
-    confirm: () => {},
-  });
-
-  const CAP_KEYS = Object.keys(CAPABILITY_CONSUMERS);
-
-  test("a DOM-only runner toolset strips EVERY capability — no path to secrets/egress/spawn", () => {
-    // read_page is deliberately EXCLUDED here: it consumes webCache (its
-    // mode:'content' spill pager), so it is not a no-capability DOM tool — the
-    // read_page→webCache grant is asserted on its own below. The rest of the
-    // DOM toolset consumes nothing, so this set must strip every capability.
-    const allowed = new Set(['snapshot', 'click', 'type', 'navigate', 'query_dom']);
-    const out = restrictCtxCapabilities(fullCtx(), allowed);
-    for (const cap of CAP_KEYS) expect(out[cap as keyof typeof out]).toBeUndefined();
-    // the high-value ones, called out explicitly
-    expect('getSecret' in out).toBe(false);
-    expect('safeFetch' in out).toBe(false);
-    expect('webFetch' in out).toBe(false);
-    expect('spawnActor' in out).toBe(false);
-    expect('dweb' in out).toBe(false);
-    // non-capability fields survive
-    expect(out.activeTab).toEqual({ id: 1 });
-    expect(out.denylist).toEqual(['evil.com']);
-    expect(typeof out.audit).toBe('function');
-  });
-
-  test('a capability is KEPT when a granted tool consumes it', () => {
-    expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['fetch_url']))).toBe(true);
-    expect('webFetch' in restrictCtxCapabilities(fullCtx(), new Set(['vm_import']))).toBe(true);
-    // read_page mode:'content' pages its overflow through webCache — the grant
-    // that #189 added to CAPABILITY_CONSUMERS.webCache must survive narrowing.
-    expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_page']))).toBe(true);
-    expect('webCache' in restrictCtxCapabilities(fullCtx(), new Set(['read_web_cache']))).toBe(true);
-    expect('memory' in restrictCtxCapabilities(fullCtx(), new Set(['remember']))).toBe(true);
-    expect('requestReview' in restrictCtxCapabilities(fullCtx(), new Set(['request_review']))).toBe(true);
-    for (const tool of ['site_client_read', 'site_client_run', 'site_client_write']) {
-      const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
-      expect('siteClients' in narrowed).toBe(true);
-      expect('canUseSiteClientOrigin' in narrowed).toBe(true);
-      expect('authorizeSiteClientOrigin' in narrowed).toBe(true);
-    }
-    const unrelated = restrictCtxCapabilities(fullCtx(), new Set(['fetch_url']));
-    expect('siteClients' in unrelated).toBe(false);
-    expect('canUseSiteClientOrigin' in unrelated).toBe(false);
-    expect('authorizeSiteClientOrigin' in unrelated).toBe(false);
-    // sandbox_create keeps the dweb closure (its app arm reads ctx.dweb for the dwapp flag)
-    expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['sandbox_create']))).toBe(true);
-    expect('dweb' in restrictCtxCapabilities(fullCtx(), new Set(['dweb_share']))).toBe(true);
-    for (const tool of ['script', 'a2a_run', 'page_code', 'app_code', 'site_client_run']) {
-      const narrowed = restrictCtxCapabilities(fullCtx(), new Set([tool]));
-      expect('jsOffscreenClient' in narrowed).toBe(true);
-      expect('scriptRuns' in narrowed).toBe(true);
-    }
-  });
-
-  test('getSecret / safeFetch have NO tool consumer — always stripped', () => {
-    // even a child granted EVERY known consumer keeps neither.
-    const everyConsumer = new Set(Object.values(CAPABILITY_CONSUMERS).flat());
-    const out = restrictCtxCapabilities(fullCtx(), everyConsumer);
-    expect('getSecret' in out).toBe(false);
-    expect('safeFetch' in out).toBe(false);
-    // but the ones with consumers are all kept
-    expect('webFetch' in out).toBe(true);
-    expect('spawnActor' in out).toBe(true);
-  });
-
-  test('spawn closure is stripped for a non-recursive actor (no actor_create granted)', () => {
-    // the inherit-all-but-spawn case: tools present but actor_create narrowed out.
-    const allowed = new Set(['fetch_url', 'read_memory', 'request_review']);
-    const out = restrictCtxCapabilities(fullCtx(), allowed);
-    expect('spawnActor' in out).toBe(false);
-    expect('spawnActorAsync' in out).toBe(false);
-    expect('webFetch' in out).toBe(true);   // fetch_url needs it
-    expect('memory' in out).toBe(true);     // read_memory needs it
-  });
-
-  test('does not mutate the input ctx (parent ctx closures stay intact)', () => {
-    const ctx = fullCtx();
-    restrictCtxCapabilities(ctx, new Set(['click']));
-    expect(typeof ctx.getSecret).toBe('function'); // original untouched
-  });
-});
-
 // ---- orchestrator ---------------------------------------------------------
 
 // Minimal in-memory session store with the actor fields the
@@ -216,6 +102,10 @@ const makeStore = () => {
         // cached permission at read time").
         ...(opts.permissionMode !== undefined ? { permissionMode: opts.permissionMode } : {}),
         ...(opts.confirmActions !== undefined ? { confirmActions: opts.confirmActions } : {}),
+        ...(opts.toolManifest !== undefined ? { toolManifest: opts.toolManifest } : {}),
+        ...(opts.grantedOperations !== undefined
+          ? { grantedOperations: opts.grantedOperations } : {}),
+        ...(opts.spawnedTrusted !== undefined ? { spawnedTrusted: opts.spawnedTrusted } : {}),
         ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
         ...(opts.task ? { task: opts.task } : {}),
       };
@@ -298,6 +188,11 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
       .find((message) => message.role === 'assistant' && message.content)?.content ?? '';
     return { ok: true, started: true, finalText, newMessages, usage, stopReason, toolCalls };
     };
+  const availableTools = [
+    { name: 'a', description: 'A', schema: {} },
+    { name: 'b', description: 'B', schema: {} },
+    { name: 'actor_create', description: 'S', schema: {} },
+  ];
   return {
     audits,
     modelCalls,
@@ -313,11 +208,15 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
       renderSystemPrompt,
       renderSystemPromptForChild: (task: string) => renderSystemPrompt({ taskOverride: task }),
       runChildOffscreen,
-      getToolDescriptors: () => [
-        { name: 'a', description: 'A', schema: {} },
-        { name: 'b', description: 'B', schema: {} },
-        { name: 'actor_create', description: 'S', schema: {} },
-      ],
+      projectChildSurface: async (input: any) => ({
+        tools: narrowTools(availableTools, {
+          tools: input.toolNames,
+          allowRecursion: input.allowRecursion,
+          allow: Array.isArray(input.toolManifest?.allow)
+            ? new Set(input.toolManifest.allow) : null,
+        }),
+        operations: [],
+      }),
       now: (() => { let t = 1000; return () => (t += 25); })(),
       ...extra,
     },
@@ -354,14 +253,15 @@ describe('makeSpawnActor', () => {
     async function* loop() { loopRuns++; yield { type: 'stop', stopReason: 'end_turn' }; }
     const { deps, audits, modelCalls } = baseDeps(store, loop, {
       runChildOffscreen: async () => ({
-        ok: false, started: false, code: 'actor_worker_spawn_failed', error: 'worker failed to start',
+        ok: false, started: false, phase: 'startup',
+        code: 'actor_worker_spawn_failed', error: 'worker failed to start',
       }),
     });
 
     const result = await makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId });
 
     expect(result.refused).toBe(true);
-    expect(result.result).toContain('worker failed to start');
+    expect(result.result).toBe('Temporarily unavailable. Try again.');
     expect(loopRuns).toBe(0);
     expect(modelCalls).toEqual([]);
     expect(audits).toContainEqual(expect.objectContaining({
@@ -527,6 +427,143 @@ describe('makeSpawnActor', () => {
     await spawn({ task: 't', parentSessionId: parent.sessionId, tools: [] });
     expect(seenTools).toEqual([]);
     expect(ctxBuilt).toBe(false);   // no dispatcher plumbing for a tool-less actor
+  });
+
+  test('intersects controller descriptors and operations with exact run ceilings', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    let job: any = null;
+    const { loop } = makeMockLoop();
+    const { deps } = baseDeps(store, loop, {
+      projectChildSurface: async (input: any) => {
+        expect(input).toEqual({
+          surface: 'spawn', toolManifest: null,
+          toolNames: ['a'], allowRecursion: false,
+        });
+        return {
+          tools: [{ name: 'a', primitive: 'read', sideEffect: 'none' }],
+          operations: ['turn.test.read'],
+        };
+      },
+      runChildOffscreen: async (value: any) => {
+        job = value;
+        return {
+          ok: true, started: true, finalText: 'done',
+          newMessages: [{ role: 'assistant', content: 'done' }],
+        };
+      },
+    });
+    const out = await makeSpawnActor(deps)({
+      task: 't', parentSessionId: parent.sessionId, tools: ['a', 'b'],
+      grantedToolNames: ['a'], grantedOperations: ['turn.test.read'],
+    });
+
+    expect(job.tools.map((tool: any) => tool.name)).toEqual(['a']);
+    expect(store.map.get(out.sessionId!).grantedOperations).toEqual(['turn.test.read']);
+  });
+
+  test('accepts the controller-normalized script pager under a script-only parent manifest', async () => {
+    const store = makeStore();
+    const parent = await store.create({ toolManifest: { allow: ['script'] } });
+    let job: any = null;
+    const { loop } = makeMockLoop();
+    const operations = [
+      'turn.execution.run-script',
+      'turn.execution.spill-script',
+      'turn.resource.read-result',
+    ];
+    const { deps } = baseDeps(store, loop, {
+      projectChildSurface: async (input: any) => {
+        const projected: any = projectControllerToolSurface(input);
+        if (!projected.ok) throw new Error(projected.code);
+        return projected;
+      },
+      runChildOffscreen: async (value: any) => {
+        job = value;
+        return {
+          ok: true, started: true, finalText: 'done',
+          newMessages: [{ role: 'assistant', content: 'done' }],
+        };
+      },
+    });
+    const out = await makeSpawnActor(deps)({
+      task: 't', parentSessionId: parent.sessionId,
+      // The sealed controller normalized the model's tools:['script'] request.
+      tools: ['script', 'read_result'],
+      grantedToolNames: ['script', 'read_result'],
+      grantedOperations: operations,
+    });
+
+    expect(job.tools.map((tool: any) => tool.name)).toEqual(['script', 'read_result']);
+    expect(store.map.get(out.sessionId!).grantedOperations).toEqual(operations);
+  });
+
+  test.each([
+    {
+      name: 'crossed run operation',
+      surface: { tools: [{ name: 'a' }], operations: ['turn.test.read'] },
+      grantedToolNames: ['a'] as string[],
+      grantedOperations: ['turn.test.write'] as string[],
+    },
+    {
+      name: 'crossed controller descriptor',
+      surface: { tools: [{ name: 'b' }], operations: ['turn.test.read'] },
+      grantedToolNames: ['a'] as string[],
+      grantedOperations: ['turn.test.read'] as string[],
+    },
+  ])('fails before session creation on a $name projection', async ({
+    surface, grantedToolNames, grantedOperations,
+  }) => {
+    const store = makeStore();
+    const parent = await store.create({});
+    const { loop } = makeMockLoop();
+    const { deps } = baseDeps(store, loop, {
+      projectChildSurface: async () => surface,
+    });
+    const before = store.map.size;
+
+    await expect(makeSpawnActor(deps)({
+      task: 't', parentSessionId: parent.sessionId, tools: ['a'],
+      grantedToolNames, grantedOperations,
+    })).rejects.toThrow('actor spawn projection mismatch');
+    expect(store.map.size).toBe(before);
+  });
+
+  test('a tool-bearing projection fails before session creation without exact run ceilings', async () => {
+    const store = makeStore();
+    const parent = await store.create({});
+    const { loop } = makeMockLoop();
+    const { deps } = baseDeps(store, loop, {
+      projectChildSurface: async () => ({
+        tools: [{ name: 'a' }], operations: ['turn.test.read'],
+      }),
+    });
+    const before = store.map.size;
+
+    await expect(makeSpawnActor(deps)({ task: 't', parentSessionId: parent.sessionId }))
+      .rejects.toThrow('actor spawn run ceiling unavailable');
+    expect(store.map.size).toBe(before);
+  });
+
+  test('a spawned parent cannot widen a child beyond its persisted operation grant', async () => {
+    const store = makeStore();
+    const parent = await store.create({
+      kind: 'spawned', grantedOperations: ['turn.test.read'], spawnedTrusted: true,
+    });
+    const { loop } = makeMockLoop();
+    const { deps } = baseDeps(store, loop, {
+      projectChildSurface: async () => ({
+        tools: [{ name: 'a' }, { name: 'b' }],
+        operations: ['turn.test.read', 'turn.test.write'],
+      }),
+    });
+    const out = await makeSpawnActor(deps)({
+      task: 't', parentSessionId: parent.sessionId,
+      grantedToolNames: ['a', 'b'],
+      grantedOperations: ['turn.test.read', 'turn.test.write'],
+    });
+
+    expect(store.map.get(out.sessionId!).grantedOperations).toEqual(['turn.test.read']);
   });
 
   test('counts tool calls and reports the result shape', async () => {

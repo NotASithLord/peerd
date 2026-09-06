@@ -6,7 +6,7 @@
 import { describe, test, expect } from 'bun:test';
 import { classifyFailure, FAILURE_KINDS } from '../../extension/peerd-runtime/observability/failure-classify.js';
 import {
-  assembleDebugBundle, childSessionIdsOf, collectFailures, aggregateFailures,
+  assembleDebugBundle, childSessionIdsOf, collectFailures,
   DEBUG_BUNDLE_FORMAT, BUNDLE_MAX_AUDIT_ENTRIES, BUNDLE_MAX_CHILD_SESSIONS,
 } from '../../extension/peerd-runtime/observability/debug-bundle.js';
 import { bundleToOtlp, traceIdFromUuid, spanIdFrom } from '../../extension/peerd-runtime/observability/otel-export.js';
@@ -46,16 +46,16 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
     ['spend limit reached for this session', 'limits'],
     ["Provider 'ollama' HTTP 400: {\"error\":{\"message\":\"bad request\"}}", 'provider'],
     ['provider stream ended early (likely rate limit or network drop)', 'provider'],
-    ["actors.ask: timed out after 5000ms awaiting 'vm-9'", 'timeout'],
+    ["actors.call: timed out after 5000ms awaiting 'vm-9'", 'timeout'],
     ['script_aborted: the turn was stopped before the run started', 'aborted'],
-    ["actors.ask: aborted (Stop) while awaiting 'vm-9'", 'aborted'],
+    ["actors.call: aborted (Stop) while awaiting 'vm-9'", 'aborted'],
     ['the request was aborted (timeout or cancel) before the actor replied.', 'aborted'],
     ['no_option_matching: "Submit order" — available: Cancel | Back', 'environment'],
     ['actor tool relay failed', 'environment'],
     ['The webvm actor builder (vm-9) could not complete your request:', 'agent'],
     // agent beats timeout: the actor REPORTED failure; the timeout detail
     // inside its account must not reclassify who failed
-    ['The web actor could not complete your request: the ask timed out after 120000ms', 'agent'],
+    ['The web actor could not complete your request: the call timed out after 120000ms', 'agent'],
     ['Failed to fetch', 'provider'],
     ['the actor turn failed: pytest exited 1', 'agent'],
     ['(the actor produced no text reply)', 'agent'],
@@ -138,30 +138,6 @@ describe('collectFailures — the "what went wrong" index', () => {
     const turn = failures.find((f: any) => f.scope === 'turn') as any;
     expect(turn.messageId).toBe('a2');
     expect(turn.kind).toBe('provider');
-  });
-});
-
-describe('aggregateFailures — the cross-session error-class analyzer (5d)', () => {
-  test('groups every session\'s failures by scope:kind', () => {
-    // SESSION contributes tool:policy (message_actor) + turn:provider (HTTP 529).
-    const other = {
-      sessionId: 'other',
-      messages: [
-        { role: 'user', id: 'u', when: 1, toolResults: [
-          { tool_use_id: 't1', content: 'egress denied: denylist matched host x', is_error: true },
-        ] },
-        { role: 'assistant', id: 'a', when: 2, content: '', error: "Provider 'anthropic' HTTP 429: rate limited" },
-      ],
-    };
-    const table = aggregateFailures([SESSION, other]);
-    expect(table['tool:policy']).toBe(2);     // message_actor (SESSION) + denylist (other)
-    expect(table['turn:provider']).toBe(1);   // SESSION's HTTP 529
-    expect(table['turn:limits']).toBe(1);     // other's HTTP 429
-  });
-
-  test('safe on empty / non-array input', () => {
-    expect(aggregateFailures([])).toEqual({});
-    expect(aggregateFailures(null as any)).toEqual({});
   });
 });
 

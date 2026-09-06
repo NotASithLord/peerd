@@ -18,38 +18,32 @@ const stripComments = (source: string) => source
   .replace(/\/\/[^\n]*/g, '');
 
 describe('runtime Port receiver exclusivity', () => {
-  test('only the service worker registers runtime.onConnect', () => {
+  test('only the kernel registers runtime.onConnect', () => {
     const registrations = filesUnder(EXTENSION_DIR)
       .filter((path) => path.endsWith('.js') || path.endsWith('.mjs'))
       .flatMap((path) => {
         const source = stripComments(readFileSync(path, 'utf8'));
-        const count = [...source.matchAll(/\bruntime\.onConnect\.addListener\s*\(/g)].length;
+        const direct = [...source.matchAll(/\bruntime\.onConnect\.addListener\s*\(/g)].length;
+        const captured = [...source.matchAll(
+          /\bcoldEvent\(\s*['"]runtime\.onConnect['"]\s*,\s*browser\.runtime\.onConnect\s*\)\.addListener\s*\(/g,
+        )].length;
+        const registered = [...source.matchAll(
+          /\bkernelEvents\.event\(\s*['"]runtime\.onConnect['"]\s*,\s*browser\.runtime\.onConnect\s*,[\s\S]{0,160}?\)\s*\?*\.addListener\s*\(/g,
+        )].length;
+        const count = direct + captured + registered;
         return Array.from({ length: count }, () => relative(EXTENSION_DIR, path));
       });
-    expect(registrations).toEqual(['background/service-worker.js']);
-  });
-
-  test('Chrome actor jobs and relays are absent from runtime messaging', () => {
-    const serviceWorker = stripComments(readFileSync(
-      join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8',
-    ));
-    const offscreen = stripComments(readFileSync(
-      join(EXTENSION_DIR, 'offscreen/offscreen.js'), 'utf8',
-    ));
-    const dispatcher = serviceWorker.slice(
-      serviceWorker.indexOf('browser.runtime.onMessage.addListener'),
-    );
-    expect(dispatcher).not.toContain('actorClient?.routes');
-    expect(offscreen).not.toMatch(/['"]actor\/(?:run|abort)['"]/);
-    expect(serviceWorker).toContain('makeOffscreenActorChannelClient');
-    expect(offscreen).toContain('bindActorChannel');
+    expect(registrations).toEqual(['background/vault-kernel.js']);
   });
 
   test('no source aliases onConnect outside the guarded registration', () => {
     const offenders = filesUnder(EXTENSION_DIR)
       .filter((path) => path.endsWith('.js') || path.endsWith('.mjs'))
-      .filter((path) => relative(EXTENSION_DIR, path) !== 'background/service-worker.js')
       .filter((path) => /\bonConnect\b/.test(stripComments(readFileSync(path, 'utf8'))));
-    expect(offenders.map((path) => relative(EXTENSION_DIR, path))).toEqual([]);
+    expect(offenders.map((path) => relative(EXTENSION_DIR, path))).toEqual([
+      'background/cold-kernel-inventory.js',
+      'background/vault-kernel.js',
+    ]);
   });
+
 });

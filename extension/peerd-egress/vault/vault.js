@@ -100,11 +100,17 @@ import {
   hasPassphraseWrap, withPassphraseWrap,
 } from './kdf.js';
 import { bytesToBase64, base64ToBytes } from '/shared/util.js';
+import { DEFAULT_AUTO_LOCK_MS } from './constants.js';
+export { DEFAULT_AUTO_LOCK_MS } from './constants.js';
+export { purgeVaultBlob } from './purge.js';
 
 const VAULT_KEY = 'vault.v1';
+// Durable, nonsecret marker that makes an explicit/idle lock survive a
+// chrome.storage.session delete failure. A fresh authority realm refuses a DK
+// mirror while this exact marker exists and retries the interrupted cleanup.
+const RESUME_FENCE_KEY = 'vault.resume-fence.v1';
 // IDB object store holding the blob (records: { key: VAULT_KEY, value }).
 const VAULT_STORE = 'vault';
-export const DEFAULT_AUTO_LOCK_MS = 45 * 60 * 1000;
 const SECRET_PREFIX = 'secret:';
 
 /**
@@ -332,6 +338,10 @@ export const createVault = (deps) => {
    * must win, or an in-flight persist would resurrect bytes the user just
    * asked us to forget. */
   let lockEpoch = 0;
+  // A lock call blocks same-realm resume immediately, before either storage
+  // backend settles. Explicit key adoption is the only operation that clears
+  // this in-memory half of the restart fence.
+  let resumeBlocked = false;
   // WHY the vault locked, for the unlock screen's one added sentence (§5g):
   // 'idle' (the auto-lock timer, or a mirror expired past the idle policy),
   // 'manual' (an explicit lock()), or null - a fresh SW that never locked
@@ -364,7 +374,9 @@ export const createVault = (deps) => {
     // The DEFAULT is ON (45min) so the unwrapped DK doesn't sit live for the
     // whole browser session; re-unlock is a single passkey tap.
     if (!(autoLockMs > 0) || !Number.isFinite(autoLockMs)) return;
-    timerHandle = setTimer(() => lock('idle'), autoLockMs);
+    timerHandle = setTimer(() => {
+      void lock('idle').catch((e) => console.error('[vault] auto-lock mirror clear failed', e));
+    }, autoLockMs);
   };
 
   const isLocked = () => dk === null;
@@ -407,6 +419,7 @@ export const createVault = (deps) => {
     rewrapKek = kek;
     rewrappedDK = rewrapped;
     dk = resident;
+    resumeBlocked = false;
     // Every unlock path adopts a DK, so this is the one place the previous
     // lock's reason ends. (A lock racing a resume re-sets it in lock().)
     lockReason = null;
@@ -427,7 +440,7 @@ export const createVault = (deps) => {
   };
 
   /** @param {'idle'|'manual'} [reason] */
-  const lock = (reason = 'manual') => {
+  const lock = async (reason = 'manual') => {
     // why the epoch bump + the clear come FIRST, ABOVE the already-locked
     // early return: the mirror lives in chrome.storage.session, which
     // outlives this service worker's memory. A lock that arrives when `dk`
@@ -435,11 +448,11 @@ export const createVault = (deps) => {
     // resumed yet — must still be able to erase bytes THIS instance never
     // held. Lock is idempotent against STORAGE, not merely against memory.
     lockEpoch += 1;
-    _clearPersistedDK();
-    if (dk === null) return;
+    resumeBlocked = true;
+    const wasUnlocked = dk !== null;
     // Recorded only on a real transition - a double lock keeps the first
     // reason (the one that actually ended the unlocked session).
-    lockReason = reason;
+    if (wasUnlocked) lockReason = reason;
     dk = null;
     rewrapKek = null;
     rewrappedDK = null;
@@ -448,7 +461,49 @@ export const createVault = (deps) => {
       timerHandle = null;
     }
     unlockedAt = 0;
-    notify({ type: 'locked' });
+    if (!sessionCache) {
+      if (wasUnlocked) notify({ type: 'locked' });
+      return;
+    }
+
+    // why the durable fence lands independently of the session delete: either
+    // operation is enough to make this lock final across a realm restart. If
+    // session storage is temporarily unavailable, the surviving raw mirror is
+    // inert until a later boot deletes it. If the fence write fails but the
+    // mirror delete succeeds, there is nothing left to resume.
+    let fenced = false;
+    /** @type {unknown} */
+    let clearFailure = null;
+    // Fence writes, mirror deletes, and successful-unlock fence cleanup share
+    // one queue. Otherwise an unlock finishing concurrently could delete the
+    // newer lock's fence after this write but before a failed mirror delete.
+    await _enqueueMirror(async (cache) => {
+      try {
+        await kv.set(RESUME_FENCE_KEY, { reason, lockedAt: now() });
+        fenced = true;
+      } catch (error) {
+        console.error('[vault] resume fence write failed', error);
+      }
+      try { await cache.sessionDelete(SESSION_DK_KEY); }
+      catch (error) { clearFailure = error; }
+      if (!clearFailure && fenced) {
+        await kv.delete(RESUME_FENCE_KEY).catch((error) => {
+          console.error('[vault] resume fence cleanup failed', error);
+        });
+      }
+    });
+    if (wasUnlocked) notify({ type: 'locked' });
+    if (!clearFailure) {
+      return;
+    }
+    if (fenced) {
+      console.error('[vault] session DK mirror clear deferred behind resume fence', clearFailure);
+      return;
+    }
+    // Memory is already locked and listeners have already reconciled. Surface
+    // the storage failure because neither durable action established restart
+    // finality; callers must not report a clean lock completion.
+    throw clearFailure;
   };
 
   // ---- Blob home (IDB with verified migration off chrome.storage.local) --
@@ -532,6 +587,14 @@ export const createVault = (deps) => {
     }
   };
 
+  const deleteBlob = async () => {
+    if ((await _blobHome()) === 'idb') {
+      await (/** @type {IdbLike} */ (idb)).del(VAULT_STORE, VAULT_KEY);
+    } else {
+      await kv.delete(VAULT_KEY);
+    }
+  };
+
   const isInitialized = async () => {
     return (await getBlob()) !== undefined;
   };
@@ -575,18 +638,20 @@ export const createVault = (deps) => {
    * ORDER — a delete issued after a set can never be overtaken by it,
    * whatever chrome.storage does with two concurrent ops on one key.
    *
-   * @param {(cache: SessionCacheLike) => Promise<void>} op
-   * @returns {Promise<void>}
+   * @template T
+   * @param {(cache: SessionCacheLike) => Promise<T>} op
+   * @returns {Promise<T | undefined>}
    */
   const _enqueueMirror = (op) => {
     const cache = sessionCache;
-    if (!cache) return Promise.resolve();
-    // why the catch is INSIDE the assignment: a rejected link would poison
-    // every later op on the chain, including the lock's delete.
-    mirrorQueue = mirrorQueue
-      .then(() => op(cache))
-      .catch((e) => console.error('[vault] session DK mirror op failed', e));
-    return mirrorQueue;
+    if (!cache) return Promise.resolve(undefined);
+    // Return the real task so a required persist/delete can fail its caller,
+    // while keeping a recovered tail for the next operation on the queue.
+    const task = mirrorQueue.then(() => op(cache));
+    mirrorQueue = task.then(() => undefined, (e) => {
+      console.error('[vault] session DK mirror op failed', e);
+    });
+    return task;
   };
 
   /**
@@ -601,30 +666,70 @@ export const createVault = (deps) => {
    * @param {CryptoKey} wrappable
    */
   const _persistDK = async (wrappable) => {
-    if (!sessionCache || isLocked()) return;
+    if (!sessionCache) return;
+    if (isLocked()) throw new VaultLockedError();
     // Snapshot the state this write belongs to BEFORE the async export: a
     // lock (or a second unlock) can land while exportRawDK is in flight.
     const epoch = lockEpoch;
     const at = unlockedAt;
     const policy = autoLockMs;
-    try {
-      const dkBase64 = bytesToBase64(await exportRawDK(wrappable));
-      await _enqueueMirror(async (cache) => {
-        // why re-check here and not only above: this runs after the export
-        // AND after everything already queued. A lock that landed anywhere
-        // in between wins — it has already issued its delete.
-        if (lockEpoch !== epoch || isLocked()) return;
-        await cache.sessionSet(SESSION_DK_KEY, makeMirrorRecord({
-          dk: dkBase64, unlockedAt: at, autoLockMs: policy,
-        }));
-      });
-    } catch (e) {
-      console.error('[vault] persist DK failed', e);
-    }
+    const dkBase64 = bytesToBase64(await exportRawDK(wrappable));
+    let persisted = false;
+    await _enqueueMirror(async (cache) => {
+      // why re-check here and not only above: this runs after the export
+      // AND after everything already queued. A lock that landed anywhere
+      // in between wins: it has already issued its delete.
+      if (lockEpoch !== epoch || isLocked()) return;
+      await cache.sessionSet(SESSION_DK_KEY, makeMirrorRecord({
+        dk: dkBase64, unlockedAt: at, autoLockMs: policy,
+      }));
+      persisted = true;
+    });
+    if (!persisted || lockEpoch !== epoch || isLocked()) throw new VaultLockedError();
   };
 
-  const _clearPersistedDK = () => {
-    _enqueueMirror((cache) => cache.sessionDelete(SESSION_DK_KEY));
+  const _clearPersistedDK = () =>
+    /** @type {Promise<void>} */ (_enqueueMirror((cache) => cache.sessionDelete(SESSION_DK_KEY)));
+
+  /** A reported unlock must either have its restart mirror or remain locked. */
+  const _persistOrLock = async (/** @type {CryptoKey} */ wrappable,
+    /** @type {number} */ epoch) => {
+    try {
+      // The epoch belongs to the public entry call, before KDF/unwrap/adoption.
+      // A lock during that work must win even though no mirror write existed yet.
+      if (lockEpoch !== epoch) throw new VaultLockedError();
+      await _persistDK(wrappable);
+      // A prior interrupted lock may have left a fail-closed fence. An unlock
+      // is not restart-safe until its fresh mirror is authoritative again. Use
+      // the mirror queue so this cleanup can never overtake a newer lock.
+      if (sessionCache) {
+        await _enqueueMirror(async () => {
+          if (lockEpoch !== epoch || isLocked()) throw new VaultLockedError();
+          await kv.delete(RESUME_FENCE_KEY);
+          if (lockEpoch !== epoch || isLocked()) throw new VaultLockedError();
+        });
+      }
+    } catch (cause) {
+      // Clear memory synchronously before awaiting cleanup. Even if session
+      // storage is unavailable, no caller observes this realm as unlocked.
+      lockEpoch += 1;
+      dk = null;
+      rewrapKek = null;
+      rewrappedDK = null;
+      if (timerHandle !== null) {
+        clearTimer(timerHandle);
+        timerHandle = null;
+      }
+      unlockedAt = 0;
+      // A failed mirror write may leave an older raw DK behind. Establish the
+      // same durable two-backend fence as an explicit lock; a best-effort
+      // session delete alone does not make the failed unlock restart-final.
+      await lock('manual').catch((error) => {
+        console.error('[vault] failed unlock could not establish restart lock', error);
+      });
+      notify({ type: 'locked' });
+      throw cause;
+    }
   };
 
   /**
@@ -640,7 +745,7 @@ export const createVault = (deps) => {
   const _restampMirrorPolicy = () => {
     const epoch = lockEpoch;
     const policy = autoLockMs;
-    _enqueueMirror(async (cache) => {
+    void _enqueueMirror(async (cache) => {
       if (lockEpoch !== epoch || isLocked()) return;
       const plan = planMirrorResume({
         stored: await cache.sessionGet(SESSION_DK_KEY), now: now(), autoLockMs: policy,
@@ -650,7 +755,7 @@ export const createVault = (deps) => {
       await cache.sessionSet(SESSION_DK_KEY, makeMirrorRecord({
         dk: plan.dk, unlockedAt: plan.unlockedAt, autoLockMs: policy,
       }));
-    });
+    }).catch(() => {});
   };
 
   /**
@@ -669,8 +774,46 @@ export const createVault = (deps) => {
   const attemptResume = async () => {
     if (!sessionCache) return false;
     if (!isLocked()) return true;
+    if (resumeBlocked) {
+      // A same-realm lock is already authoritative even if its first storage
+      // attempt failed. Retry cleanup, but never reinterpret the surviving
+      // mirror as permission to resume in this realm.
+      await _enqueueMirror(async (cache) => {
+        await cache.sessionDelete(SESSION_DK_KEY);
+        await kv.delete(RESUME_FENCE_KEY);
+      }).catch((error) => {
+        console.error('[vault] blocked resume cleanup still unavailable', error);
+      });
+      return false;
+    }
     const epoch = lockEpoch;
-    const stored = await sessionCache.sessionGet(SESSION_DK_KEY);
+    let snapshot;
+    try {
+      // Read fence and mirror in one queue slot. A same-realm lock already
+      // queued ahead of resume must finish both durable actions first.
+      snapshot = await _enqueueMirror(async (cache) => ({
+        fence: await kv.get(RESUME_FENCE_KEY),
+        stored: await cache.sessionGet(SESSION_DK_KEY),
+      }));
+    } catch (error) {
+      // Not knowing whether a manual lock completed is a locked state, never
+      // permission to revive the mirrored DK.
+      console.error('[vault] resume state read failed; refusing session DK mirror', error);
+      return false;
+    }
+    const fence = snapshot?.fence;
+    if (fence !== undefined && fence !== null) {
+      const reason = /** @type {any} */ (fence)?.reason;
+      lockReason = reason === 'idle' ? 'idle' : 'manual';
+      try {
+        await _clearPersistedDK();
+        await kv.delete(RESUME_FENCE_KEY);
+      } catch (error) {
+        console.error('[vault] deferred lock cleanup still unavailable', error);
+      }
+      return false;
+    }
+    const stored = snapshot?.stored;
     const plan = planMirrorResume({ stored, now: now(), autoLockMs });
     if (plan.action === 'absent') return false;
     if (plan.action === 'refuse') {
@@ -678,7 +821,7 @@ export const createVault = (deps) => {
       // A mirror past the idle policy IS an idle lock - it just fired while
       // no SW was alive to run the timer. Say so on the unlock screen.
       if (plan.reason === 'expired') lockReason = 'idle';
-      _clearPersistedDK();
+      await _clearPersistedDK();
       return false;
     }
     try {
@@ -689,7 +832,7 @@ export const createVault = (deps) => {
         // A lock landed while we were reading + unwrapping. It wins: drop
         // what we just adopted rather than coming back UNLOCKED after the
         // user asked for locked. lock() also re-purges the mirror.
-        lock();
+        await lock();
         return false;
       }
       // why the ORIGINAL timestamp rather than now(): the deadline is
@@ -702,7 +845,7 @@ export const createVault = (deps) => {
       return true;
     } catch (e) {
       console.error('[vault] resume failed; clearing persisted DK', e);
-      _clearPersistedDK();
+      await _clearPersistedDK();
       return false;
     }
   };
@@ -771,6 +914,7 @@ export const createVault = (deps) => {
 
   /** @param {string} passphrase */
   const initialize = async (passphrase) => {
+    const epoch = lockEpoch;
     if (await isInitialized()) throw new VaultAlreadyInitializedError();
     const newDK = await generateDK();
     const wrap = await _makePassphraseWrap(passphrase, newDK);
@@ -778,10 +922,23 @@ export const createVault = (deps) => {
       ...withPassphraseWrap({}, wrap),
       createdAt: now(),
     });
-    await _adoptDK(newDK);
-    unlockedAt = now();
-    armAutoLock();
-    _persistDK(newDK);
+    try {
+      await _adoptDK(newDK);
+      unlockedAt = now();
+      armAutoLock();
+      // A successful initialize must already be restart-safe. The authority host
+      // may be replaced immediately after this call, so returning before the
+      // session mirror lands can turn a successful unlock into a silent lock.
+      await _persistOrLock(newDK, epoch);
+    } catch (cause) {
+      // First-run is one transaction from the user's perspective. A mirror
+      // failure must not leave an apparently initialized vault behind with no
+      // successful initialization response.
+      await deleteBlob().catch((error) => {
+        console.error('[vault] failed initialization blob rollback', error);
+      });
+      throw cause;
+    }
     notify({ type: 'initialized' });
   };
 
@@ -799,6 +956,7 @@ export const createVault = (deps) => {
    * @param {string[] | null} [args.transports]  getTransports() hints
    */
   const initializeWithPrfOnly = async ({ prfOutput, credentialId, prfSalt, transports }) => {
+    const epoch = lockEpoch;
     if (await isInitialized()) throw new VaultAlreadyInitializedError();
     const newDK = await generateDK();
     const prfKEK = await importPrfKEK(prfOutput);
@@ -818,16 +976,24 @@ export const createVault = (deps) => {
       ...(prfTransports ? { prfTransports } : {}),
       createdAt: now(),
     });
-    await _adoptDK(newDK);
-    unlockedAt = now();
-    armAutoLock();
-    _persistDK(newDK);
+    try {
+      await _adoptDK(newDK);
+      unlockedAt = now();
+      armAutoLock();
+      await _persistOrLock(newDK, epoch);
+    } catch (cause) {
+      await deleteBlob().catch((error) => {
+        console.error('[vault] failed passkey initialization blob rollback', error);
+      });
+      throw cause;
+    }
     notify({ type: 'initialized' });
     notify({ type: 'prf_enrolled' });
   };
 
   /** @param {string} passphrase */
   const unlock = async (passphrase) => {
+    const epoch = lockEpoch;
     const stored = await getBlob();
     if (!stored) throw new VaultNotInitializedError();
     const plan = planPassphraseUnlock({ blob: stored, argon2Available: !!argon2 });
@@ -867,7 +1033,7 @@ export const createVault = (deps) => {
     await _adoptDK(fresh);
     unlockedAt = now();
     armAutoLock();
-    _persistDK(fresh);
+    await _persistOrLock(fresh, epoch);
     notify({ type: 'unlocked' });
   };
 
@@ -992,6 +1158,7 @@ export const createVault = (deps) => {
    * @param {Uint8Array} prfOutput
    */
   const unlockWithPrf = async (prfOutput) => {
+    const epoch = lockEpoch;
     const stored = await getBlob();
     if (!stored) throw new VaultNotInitializedError();
     if (!stored.wrappedDK_prf) throw new PrfNotEnrolledError();
@@ -1009,7 +1176,7 @@ export const createVault = (deps) => {
     await _adoptDK(fresh);
     unlockedAt = now();
     armAutoLock();
-    _persistDK(fresh);
+    await _persistOrLock(fresh, epoch);
     notify({ type: 'unlocked' });
   };
 
@@ -1111,19 +1278,4 @@ export const createVault = (deps) => {
      * without poking the vault first (see session-cache.js header). */
     unlockedAt: () => unlockedAt,
   });
-};
-
-/**
- * Remove the vault blob from BOTH backends. This is the SW chassis's
- * rollback for a failed passkey-first initialization (a half-written
- * blob would wedge the vault in "initialized but un-unlockable") — kept
- * out of the vault instance so there is still no public reset on the
- * object that holds the DK. Best-effort on each backend (same posture
- * as the pre-migration rollback's swallowed kv.delete).
- *
- * @param {{ kv: import('../storage/kv.js').KV, idb?: IdbLike }} deps
- */
-export const purgeVaultBlob = async ({ kv, idb }) => {
-  await kv.delete(VAULT_KEY).catch(() => {});
-  if (idb) await idb.del(VAULT_STORE, VAULT_KEY).catch(() => {});
 };

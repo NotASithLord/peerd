@@ -7,8 +7,6 @@
 // Notebook becomes this chat's current — subsequent js_notebook calls
 // without an explicit `notebook` arg route here.
 
-import { JS_TAB_GROUP_TITLE } from '/background/notebook-client.js';
-import { normalizeGitRemote } from '/peerd-engine/background.js';
 import { oncePerSession } from './once-per-session.js';
 
 // why a Notebook-specific note (the shared CODE_STYLE_NOTE rides the Notebook
@@ -41,9 +39,7 @@ const NOTEBOOK_NOTE = [
   'runAgent({ task }) embeds an agent inside a Notebook you BUILD FOR THE USER',
   '(e.g. a chat box that reasons); for your own work use the actor_create tool.',
   'Keep approval-needing / money-spending actions as discrete tools, not buried',
-  'in a script. A helper you\'ll want again beyond this Notebook? Persist it',
-  'with toolbox_write and import { … } from \'peerd:toolbox/<name>\' in any',
-  'notebook or script run.',
+  'in a script. Persist reusable source in the Notebook workspace.',
   'REPOSITORY: a Notebook created with gitUrl is a lightweight clone with no',
   'Linux boot. Use repo_history, repo_version, and repo_remote for its Git',
   'history; edit/run files with the normal Notebook tools.',
@@ -57,93 +53,29 @@ const NOTEBOOK_NOTE = [
  * @returns {Promise<import('/shared/tool-types.js').ToolResult>}
  */
 export const createNotebookSandbox = async (args, ctx) => {
-    // why: the Notebook registry + tab tracker ride the opaque ctx contract
-    // (not on the ToolContext typedef); narrow to the surface this tool uses.
-    const jsRegistry = /** @type {{ create: (opts: { name?: string, ownerSessionId: string | null }) => Promise<{ id: string, name: string }>, delete: (id: string) => Promise<unknown>, setDefaultForSession: (sessionId: string, id: string) => Promise<unknown> } | undefined} */ (
-      /** @type {any} */ (ctx).jsRegistry);
-    const jsTabTracker = /** @type {{ ensureTab: (id: string, opts: { active?: boolean, groupTitle?: string }) => Promise<unknown>, getTabId?: (id: string) => number | null | undefined } | undefined} */ (
-      /** @type {any} */ (ctx).jsTabTracker);
-    if (!jsRegistry || !jsTabTracker) {
-      return { ok: false, error: 'js_registry_unavailable' };
-    }
-    const repositories = /** @type {any} */ (ctx).repositories;
-    const gitUrl = typeof args?.gitUrl === 'string' ? args.gitUrl.trim() : '';
-    if (gitUrl && !repositories) return { ok: false, error: 'repository_unavailable' };
-    /** @type {ReturnType<typeof normalizeGitRemote> | null} */
-    let remote = null;
-    if (gitUrl) {
-      try { remote = normalizeGitRemote(gitUrl); }
-      catch (error) {
-        return { ok: false, error: `git_clone_failed: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}` };
-      }
-      const confirm = /** @type {any} */ (ctx).confirm;
-      if (!confirm) return { ok: false, error: 'git_confirmation_unavailable' };
-      const answer = await confirm({
-        tool: 'sandbox_create', kind: 'git_clone', sideEffect: 'write', origins: [new URL(remote.url).origin],
-        summary: `Clone ${remote.url} into a lightweight browser Notebook? Repository bytes stay in browser storage; a vault token for this host is used if configured.`,
-      });
-      if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: 'git_clone_declined' };
-    }
     const sessionId = ctx.session?.sessionId;
-    let name = typeof args?.name === 'string' ? args.name.trim().slice(0, 40) : '';
-    if (!name) name = undefined;
-    const record = await jsRegistry.create({
-      name,
-      ownerSessionId: sessionId ?? null,
-    });
-    let repository = null;
-    if (remote) {
-      try {
-        repository = await repositories.clone({ kind: 'notebook', id: record.id }, {
-          url: remote.url,
-          ...(typeof args.gitRef === 'string' && args.gitRef.trim() ? { ref: args.gitRef.trim() } : {}),
-          depth: Math.min(500, Math.max(1, Number(args.gitDepth) || 50)),
-          signal: /** @type {any} */ (ctx).abortSignal,
-        });
-      } catch (error) {
-        await repositories.destroy({ kind: 'notebook', id: record.id }, { worktree: true }).catch(() => {});
-        await jsRegistry.delete(record.id).catch(() => {});
-        const message = /** @type {{ message?: string }} */ (error)?.message ?? String(error);
-        const hint = /(?:ENOSYS|symlink)/i.test(message)
-          ? ' This repository contains symbolic links, which browser storage cannot represent safely; use a WebVM for this project.'
-          : '';
-        return { ok: false, error: `git_clone_failed: ${message}${hint}` };
-      }
-    }
-    // why background: a Notebook tab no longer steals focus (DESIGN-12, owner
-    // 2026-06-18) — it opens quietly and the tab tracker drops a "go there" card
-    // in the chat; the user clicks to open it. A background tab can miss the
-    // readiness timeout but it WAS created + announced — only fail if it truly
-    // didn't open.
-    try {
-      await jsTabTracker.ensureTab(record.id, {
-        active: false,
-        groupTitle: JS_TAB_GROUP_TITLE,
-      });
-    } catch (e) {
-      if (jsTabTracker.getTabId?.(record.id) == null) {
-        await repositories?.destroy?.({ kind: 'notebook', id: record.id }, { worktree: true }).catch(() => {});
-        await jsRegistry.delete(record.id).catch(() => {});
-        return { ok: false, error: `notebook_spawn_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
-      }
-    }
-    if (sessionId) {
-      await jsRegistry.setDefaultForSession(sessionId, record.id);
-    }
+    const authority = /** @type {any} */ (ctx).executionAuthority;
+    if (!authority?.createNotebook) return { ok: false, error: 'js_registry_unavailable' };
+    const created = await authority.createNotebook(args);
+    if (!created?.ok) return created;
+    const { record, repository, isCurrent } = created;
     const summary = JSON.stringify({
       id: record.id,
       name: record.name,
       // why kind: the merged sandbox_create result is the durable-handle
       // carrier — instance-handle.js reads it to label the harvested id.
       kind: 'notebook',
-      isCurrent: !!sessionId,
+      isCurrent,
       ...(repository ? { repository } : {}),
     }, null, 2);
     // The Notebook ACTOR writes + runs the code, so the style + correctness
     // guidance rides ITS prompt (actorBlock), not this orchestrator create-result.
     // The full runtime note is disclosed once per session (schema-diet 6b): a
     // second notebook this session doesn't need it re-stated — a pointer suffices.
-    const note = oncePerSession(sessionId, 'notebook-note')
+    const note = oncePerSession(
+      sessionId, 'notebook-note', ctx.session?.messages,
+      'sandbox_create', NOTEBOOK_NOTE,
+    )
       ? NOTEBOOK_NOTE
       : '(Notebook runtime note shown earlier this session — same rules apply.)';
     return {

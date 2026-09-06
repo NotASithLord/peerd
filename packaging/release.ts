@@ -11,13 +11,14 @@
 // Steps (release mode):
 //   1. preconditions — on main, clean tree, synced with origin, tag free
 //   2. preflight (drift + lint + boundary + tests)
-//   3. signing credentials present (key.pem + AMO_JWT_*) — a release
+//   3. packaged Chrome + Firefox cold-start release lane (secretless)
+//   4. signing credentials present (key.pem + AMO_JWT_*); a release
 //      never ships unsigned preview artifacts (anti-rec §15)
-//   4. package:all WITH signing; store artifacts verify themselves
-//   5. generate the update-feed release assets
-//   6. tag vX.Y.Z; push main + tag
-//   7. gh release create peerd-preview-vX.Y.Z with .crx/.xpi/feeds
-//   8. dispatch peerd-site, whose workflow downloads and deploys the feeds
+//   5. package:all WITH signing; store artifacts verify themselves
+//   6. generate the update-feed release assets
+//   7. tag vX.Y.Z; push main + tag
+//   8. gh release create peerd-preview-vX.Y.Z with .crx/.xpi/feeds
+//   9. dispatch peerd-site, whose workflow downloads and deploys the feeds
 //
 // Keep in sync with the workflow's release job — when Actions billing is
 // healthy, a tag push runs the same flow in CI; this script exists so
@@ -104,6 +105,28 @@ const main = async () => {
 
   step('preflight');
   run('bun', ['packaging/preflight.ts']);
+
+  // Installed-artifact acceptance is part of the release transaction, not a
+  // CI-only courtesy. Each lane packages its exact target and requires the
+  // live kernel assembly ledger to be complete before human credentials or
+  // any irreversible release action is reached.
+  step('installed Chrome Store first-install/controller/recycle');
+  run('bun', ['scripts/cdp/run-passkey-signup.mjs']);
+  step('installed Chrome Store document extraction/paging isolation');
+  run('bun', ['scripts/cdp/read-doc-store-lane.mjs']);
+  step('installed Chrome Store site-client/capture fallback');
+  run('bun', ['run', 'test:e2e:site-client-store:staged']);
+  step('installed Chrome Preview dweb/SW/renderer continuity');
+  run('bun', ['scripts/cdp/feature-lease-dweb-lifecycle.mjs']);
+  step('installed Firefox Store first-install/controller/Git/discard');
+  run('bun', ['scripts/firefox/production-cutover-lane.mjs']);
+
+  // This runs before any signing credential is read or AMO version is burned.
+  // It measures both unsigned channel artifacts with pinned real browsers and
+  // fails on graph growth, missing raw phases, or any timed-out launch/wake.
+  step('packaged cold start (Chrome + Firefox)');
+  const coldLane = dryRun ? 'local' : 'release';
+  run('bun', ['scripts/bench/cold-service-worker.mjs', `--lane=${coldLane}`]);
 
   step('signing credentials');
   const keyPath = process.env.PEERD_CRX_KEY ?? join(REPO_ROOT, 'key.pem');

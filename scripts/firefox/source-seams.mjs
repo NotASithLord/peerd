@@ -21,8 +21,17 @@ const replaceUnique = (source, pattern, replacement, label) => {
 
 export const injectFirefoxLifetimeProbe = (source) => replaceUnique(
   source,
-  /actorHostKeepAlive\s*\.\s*onChanged\s*\(\s*changes\s*\)\s*;?/g,
-  (statement) => `globalThis.peerdFirefoxLifetimeProbe?.record(changes);${statement}`,
+  /(?:const|let|var)\s+([$\w]+)\s*=\s*[$\w]+\s*\?\.\s*[$\w]+\s*\?\.\s*\(\s*['"]storage\.session\.onChanged['"][\s\S]{0,800}?\1\s*\.\s*addListener\(\s*\(\s*(?:\/\*\*[\s\S]*?\*\/\s*)?[$\w]+\s*\)\s*=>\s*\{\s*[$\w]+\s*\?\.\s*onChanged\s*\(\s*[$\w]+\s*\)\s*;?\s*\}\s*\)\s*;?/g,
+  (statement) => {
+    const parameter = statement.match(
+      /\.addListener\(\s*\(\s*(?:\/\*\*[\s\S]*?\*\/\s*)?([$\w]+)\s*\)/,
+    )?.[1];
+    if (!parameter) throw new Error('Firefox lifetime probe parameter is missing');
+    return statement.replace(
+      /([$\w]+\s*\?\.\s*onChanged\s*\(\s*[$\w]+\s*\)\s*;?)/,
+      `globalThis.peerdFirefoxLifetimeProbe?.record(${parameter});$1`,
+    );
+  },
   'Firefox lifetime probe',
 );
 

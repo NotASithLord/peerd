@@ -34,7 +34,7 @@ const makeStore = () => {
         ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
         ...(opts.spawnedTrusted !== undefined ? { spawnedTrusted: opts.spawnedTrusted } : {}),
         ...(opts.task ? { task: opts.task } : {}),
-        ...(opts.grantedTools ? { grantedTools: opts.grantedTools } : {}),
+        ...(opts.grantedOperations ? { grantedOperations: opts.grantedOperations } : {}),
       };
       map.set(s.sessionId, s);
       return s;
@@ -81,7 +81,11 @@ const spawnDeps = (store: any, loop: any, extra: any = {}) => ({
   buildToolContext: async ({ sessionId }: any) => ({ session: { sessionId }, audit: async () => {} }),
   dispatchToolCall: async () => ({ ok: true, content: 'tool ran' }),
   renderSystemPrompt: async ({ taskOverride }: any) => `sys task=${taskOverride}`,
-  getToolDescriptors: () => [{ name: 'a', description: 'A', schema: {} }],
+  projectChildSurface: async ({ toolNames, allowRecursion }: any) => ({
+    tools: toolNames?.includes('a') === false || allowRecursion === false && toolNames?.includes('actor_create')
+      ? [] : [{ name: 'a', description: 'A', schema: {} }],
+    operations: [],
+  }),
   now: (() => { let t = 1000; return () => (t += 25); })(),
   // Lifecycle tests exercise the dedicated-worker contract through a portable
   // fake host. The loop still receives the child's abort signal, but no test
@@ -282,13 +286,13 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
     const out = await spawn({ task: 't', tools: ['a'], parentSessionId: parent.sessionId });
     expect(out.result).toBe('did it');                       // ran offscreen, not the in-SW loop
     expect(offscreenJob.tools.map((t: any) => t.name)).toContain('a');   // descriptors relayed to the worker
-    // the granted set is persisted on the child record for the SW-side dispatch to re-check
+    // Names remain only in the sealed worker job; durable authority is operation-only.
     const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
-    expect(child.grantedTools).toContain('a');
+    expect(child.grantedTools).toBeUndefined();
   });
 
   test('SECURITY: an actor CANNOT be granted actor-only tools (foreground-tab escalation is closed)', async () => {
-    // DESIGN-17: read_page/page_exec/click/navigate/fetch_url are MAIN_AGENT_HIDDEN
+    // DESIGN-17: read_page/click/navigate/fetch_url are MAIN_AGENT_HIDDEN
     // (actor-only), and edit_file is actor-mutating. narrowTools filters from the
     // MAIN-AGENT surface, so requesting them yields a child that holds NONE of them —
     // it must delegate web/DOM work to the web actor via message_actor.
@@ -299,19 +303,22 @@ describe('heap split — routing a child offscreen (reasoning AND tool-bearing)'
       runChildOffscreen: async (job: any) => { offscreenJob = job; return { ok: true, started: true, finalText: 'ok', stopReason: 'end_turn', toolCalls: 0 }; },
       renderSystemPromptForChild: (t: string) => `SYS:${t}`,
       // a registry that DOES include the actor-only tools (the real listTools surface)
-      getToolDescriptors: () => ['read_page', 'page_exec', 'click', 'navigate', 'fetch_url', 'edit_file', 'script', 'read_memory']
-        .map((name) => ({ name, description: name, schema: {} })),
+      projectChildSurface: async () => ({
+        tools: [{ name: 'script', description: 'script', schema: {} }],
+        operations: [],
+      }),
     }) as any);
-    await spawn({ task: 'read the current page', tools: ['read_page', 'page_exec', 'edit_file', 'script'], parentSessionId: parent.sessionId });
-    const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
-    const granted = child.grantedTools ?? [];
+    await spawn({ task: 'read the current page', tools: ['read_page', 'edit_file', 'script'], parentSessionId: parent.sessionId });
     // the actor-only DOM/page + mutating tools were dropped; only the legit one survives
-    expect(granted).toContain('script');
-    for (const forbidden of ['read_page', 'page_exec', 'click', 'navigate', 'fetch_url', 'edit_file']) {
-      expect(granted).not.toContain(forbidden);
+    const visible = offscreenJob.tools.map((t: any) => t.name);
+    expect(visible).toContain('script');
+    for (const forbidden of ['read_page', 'click', 'navigate', 'fetch_url', 'edit_file']) {
+      expect(visible).not.toContain(forbidden);
     }
     // and the worker is only advertised the surviving descriptor
     expect(offscreenJob.tools.map((t: any) => t.name)).toEqual(['script']);
+    const child = [...store.map.values()].find((s: any) => s.kind === 'spawned');
+    expect(child.grantedTools).toBeUndefined();
   });
 
   test('a NEVER-STARTED worker failure fails closed without running in the background heap', async () => {

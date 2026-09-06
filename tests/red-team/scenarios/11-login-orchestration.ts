@@ -28,7 +28,15 @@ import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
 import { classifyLoginAffordance } from '../../../extension/peerd-runtime/tools/login-affordance.js';
-import { loginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+import { performConfirmedOwnedLoginAuthority } from '../../../extension/background/page-authority/login.js';
+import { loginTool as controllerLoginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+
+const loginTool = { execute: (args: any, ctx: any) => controllerLoginTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    performConfirmedOwnedLogin: () => performConfirmedOwnedLoginAuthority(args, ctx),
+  },
+}) };
 import { isKnownIdp } from '../../../extension/peerd-runtime/actor/idp-registry.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
@@ -146,6 +154,10 @@ const makeCtx = (over: Record<string, any> = {}) => {
   const origin = over.origin ?? 'https://acct.example.com';
   const ctx: any = {
     session: { sessionId: 's1' },
+    permission: { mode: 'act', confirmActions: over.settings?.confirmActions !== false },
+    readAuthorityPermission: async () => ({
+      mode: 'act', confirmActions: over.settings?.confirmActions !== false,
+    }),
     activeTab: over.activeTab ?? { id: 1, url: `${origin}/login`, origin },
     tabs: { get: async (id: number) => ({ id, url: `${origin}/login` }) },
     denylist: [],

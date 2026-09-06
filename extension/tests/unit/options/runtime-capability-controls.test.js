@@ -4,6 +4,7 @@ import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { OcrSection } from '/options/sections/ocr.js';
 import { LocalModelsSection, LOCAL_MODEL_POLL } from '/options/sections/local-models.js';
+import { VoiceSection } from '/options/sections/voice.js';
 
 const settle = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -23,6 +24,57 @@ const unsupportedState = () => ({
 });
 
 describe('options runtime capability controls', () => {
+  it('reports and reverts a rejected voice silence threshold without replay', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    /** @type {any[]} */
+    const sent = [];
+    /** @type {number[]} */
+    const thresholds = [];
+    const voiceManager = {
+      subscribe: (/** @type {(state:any)=>void} */ listener) => {
+        listener({ status: 'available', engine: 'web-speech' });
+        return () => {};
+      },
+      getState: () => ({ status: 'available', engine: 'web-speech' }),
+      setSilenceThreshold: (/** @type {number} */ value) => { thresholds.push(value); },
+    };
+    const state = {
+      settings: {
+        voiceEnabled: true, voiceEngine: 'auto', voiceVariant: 'base', voiceSilenceMs: 1500,
+      },
+      capabilities: {
+        moonshineVoiceHost: { status: 'unsupported' },
+        pdfOcr: { status: 'unsupported' },
+      },
+    };
+    m.mount(root, { view: () => m(VoiceSection, {
+      state,
+      voiceManager,
+      send: async (/** @type {any} */ message) => {
+        sent.push(message);
+        return { ok: false, error: 'settings-refused' };
+      },
+    }) });
+    try {
+      const slider = /** @type {HTMLInputElement|null} */ (root.querySelector('input[type="range"]'));
+      expect(slider).toBeTruthy();
+      if (!slider) return;
+      slider.value = '2000';
+      slider.dispatchEvent(new Event('change', { bubbles: true }));
+      await settle();
+      expect(sent).toEqual([{
+        type: 'settings/update', patch: { voiceSilenceMs: 2000 },
+      }]);
+      expect(thresholds).toEqual([2000, 1500]);
+      expect(root.textContent).toContain('The silence threshold could not be changed.');
+      expect(slider.value).toBe('1500');
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
   it('does not offer an OCR download without an OCR host', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);

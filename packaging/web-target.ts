@@ -105,7 +105,7 @@ export const KNOWN_BROWSER_TOUCHES = new Set<string>([
   // there is no extension runtime to message — the button simply does nothing
   // and the pill stays up. The side panel's Stop is the backstop there, exactly
   // as it is when the extension's own SW has been evicted.
-  "peerd-runtime/dom/activity-overlay-injected.js|chrome.runtime.sendMessage({ type: 'agent/stop' });",
+  "peerd-runtime/dom/activity-overlay-injected.js|chrome.runtime.sendMessage({ type: 'agent/stop', activity: 'live' });",
 ]);
 
 // The web shell: a MINIMAL smoke page + the build-stamped service worker.

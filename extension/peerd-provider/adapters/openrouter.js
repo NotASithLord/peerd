@@ -8,29 +8,21 @@
 // adapter each. The wire format is OpenAI /chat/completions, so this
 // adapter reuses to-openai.js / from-openai.js.
 //
-// Same DI contract as the Anthropic adapter: `safeFetch` + `getSecret`
-// are injected; this module never imports peerd-egress.
+// The named model-egress authority injects only fixed provider operations;
+// endpoints, credentials, and authentication policy never enter this module.
 
 import { toOpenAiBody } from '../format/to-openai.js';
 import { fromOpenAiStream } from '../format/from-openai.js';
-import { fetchModelWindow } from '../model-window.js';
-import { abortableSleep, fetchInitialResponseWithRetry } from '../connect-timeout.js';
+import { readModelWindow } from '../model-window.js';
+import { abortableSleep, openInitialResponseWithRetry } from '../connect-timeout.js';
 import {
   ProviderError,
   ProviderHttpError,
-  ProviderKeyMissingError,
   ProviderUsageLimitError,
 } from '../errors.js';
 import { isUsageLimitResponse, apiErrorMessage } from '../error-classify.js';
-
-const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
-// The public models endpoint (same host, already allowlisted). Two readers:
-// the Settings model-curation picker (listOpenRouterModels — the live catalog
-// of every model the gateway exposes; public, but we send a key when present
-// so a provisioning-scoped key sees its own list), and the trim trigger's
-// live window lookup (`context_length` per model).
-const MODELS_ENDPOINT = 'https://openrouter.ai/api/v1/models';
-const VAULT_SECRET_NAME = 'openrouter_api_key';
+import { normalizeOpenRouterModels } from '../semantic-metadata.js';
+export { OPENROUTER_POPULAR } from '../semantic-metadata.js';
 // Connect timeout for the response headers; the SSE body streams untimed.
 const CONNECT_TIMEOUT_MS = 45_000;
 
@@ -56,6 +48,7 @@ const MAX_BACKOFF_MS = 60_000;
 /**
  * @typedef {import('../types.js').InternalMessage} InternalMessage
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
+ * @typedef {import('../model-egress.js').ModelEgress} ModelEgress
  */
 
 /**
@@ -69,8 +62,7 @@ const MAX_BACKOFF_MS = 60_000;
  * @param {string} [args.model]
  * @param {number} [args.maxTokens]
  * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [args.tools]
- * @param {(name: string) => Promise<string | null>} args.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
  * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [args._sleep]
  * @returns {AsyncGenerator<ProviderEvent>}
@@ -81,43 +73,30 @@ export async function* callOpenRouter(args) {
     model = DEFAULT_MODEL,
     maxTokens,
     tools,
-    getSecret, safeFetch,
+    modelEgress,
     signal,
     _sleep = abortableSleep,
   } = args;
 
-  const apiKey = await getSecret(VAULT_SECRET_NAME);
-  if (!apiKey) throw new ProviderKeyMissingError('openrouter');
-
   const body = toOpenAiBody({ model, system, messages, tools, maxTokens });
-  const requestInit = {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'authorization': `Bearer ${apiKey}`,
-      // why: OpenRouter attributes usage to an app by HTTP-Referer (the
-      // app's URL — the ranking key) + X-Title (display name), with
-      // X-OpenRouter-Categories placing it on the right leaderboard. Every
-      // user's BYOK request carries the same referer, so it all rolls up to
-      // one "peerd.ai" app entry on openrouter.ai/apps.
-      'http-referer': 'https://peerd.ai',
-      'x-title': 'peerd.ai',
-      'x-openrouter-categories': 'personal-agent',
-    },
-    body: JSON.stringify(body),
-    signal,
-  };
 
   // why two retry layers: connection-drop retry (TypeError rejections, up to
   // 3 total attempts) rides inside this HTTP loop — orthogonal failure modes;
   // a network drop never produces a Response for the status logic below.
   for (let attempt = 1; ; attempt++) {
-    const res = await fetchInitialResponseWithRetry(safeFetch, ENDPOINT, requestInit, {
+    const res = await openInitialResponseWithRetry(
+      (requestSignal) => modelEgress.openInference({
+        providerId: 'openrouter',
+        modelId: model,
+        nativeBody: body,
+        signal: requestSignal,
+      }), {
       stopSignal: signal,
       timeoutMs: CONNECT_TIMEOUT_MS,
       onTimeout: (ms) => new ProviderError('openrouter', `the API did not respond within ${ms / 1000}s — it may be unreachable or down. Try again.`),
       sleepFn: _sleep,
-    });
+      },
+    );
     if (res.ok) {
       if (!res.body) {
         throw new ProviderError('openrouter', 'response has no body (streaming requires it)');
@@ -177,44 +156,6 @@ const computeBackoffMs = (headers, attempt) => {
 
 export const _computeBackoffMsForTests = computeBackoffMs;
 
-// Curated "popular" seed — the default set the Settings model picker shows
-// BEFORE the user searches the full live catalog. why a curated list and not
-// a live "top N": OpenRouter's /models endpoint carries no popularity rank, so
-// "top 20" needs a concrete source. These ids are intersected with the live
-// catalog at render time, so any that a given account can't reach simply drop
-// out (never a 404 in the chat picker). Maintained by hand — see DECISIONS.
-export const OPENROUTER_POPULAR = Object.freeze([
-  // Current open-weights leaders for agentic tool-calling (mid-2026), surfaced
-  // first so a fresh OpenRouter user sees the best defaults before scrolling.
-  'z-ai/glm-5.1',
-  'z-ai/glm-5.2',
-  'moonshotai/kimi-k2.6',
-  'minimax/minimax-m2',
-  'qwen/qwen3-coder',
-  'anthropic/claude-haiku-4.5',
-  'google/gemini-3-flash',
-  'openai/gpt-4o',
-  'openai/gpt-4o-mini',
-  'openai/o4-mini',
-  'anthropic/claude-3.7-sonnet',
-  'anthropic/claude-3.5-sonnet',
-  'anthropic/claude-3.5-haiku',
-  'google/gemini-2.5-pro',
-  'google/gemini-2.5-flash',
-  'google/gemini-2.0-flash-001',
-  'meta-llama/llama-3.3-70b-instruct',
-  'meta-llama/llama-3.1-8b-instruct',
-  'deepseek/deepseek-chat',
-  'deepseek/deepseek-r1',
-  'mistralai/mistral-large',
-  'mistralai/mistral-nemo',
-  'qwen/qwen-2.5-72b-instruct',
-  'x-ai/grok-2',
-  'x-ai/grok-beta',
-  'cohere/command-r-plus',
-  'nousresearch/hermes-3-llama-3.1-70b',
-]);
-
 /**
  * Live model inventory from GET /api/v1/models — the whole gateway catalog,
  * id-sorted. Powers the Settings curation picker (and doubles as the key
@@ -227,28 +168,13 @@ export const OPENROUTER_POPULAR = Object.freeze([
  * models. So this is a plain export the chassis calls for the picker only.
  *
  * @param {Object} deps
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.safeFetch
- * @param {(name: string) => Promise<string | null>} [deps.getSecret]
+ * @param {ModelEgress} deps.modelEgress
  * @param {AbortSignal} [deps.signal]
  * @returns {Promise<Array<{ model: string, label: string, contextLength: number,
  *   promptPrice: number, completionPrice: number }>>}
  */
-export const listOpenRouterModels = async ({ safeFetch, getSecret, signal } = /** @type {any} */ ({})) => {
-  /** @type {Record<string, string>} */
-  const headers = {
-    'http-referer': 'https://peerd.ai',
-    'x-title': 'peerd.ai',
-    'x-openrouter-categories': 'personal-agent',
-  };
-  // why: send the key when we have one (some accounts get a scoped list), but
-  // don't require it — /models is public, so the picker can preview models
-  // before a key is even saved.
-  let apiKey = null;
-  if (typeof getSecret === 'function') {
-    try { apiKey = await getSecret(VAULT_SECRET_NAME); } catch { apiKey = null; }
-  }
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-  const res = await safeFetch(MODELS_ENDPOINT, { method: 'GET', headers, signal });
+export const listOpenRouterModels = async ({ modelEgress, signal } = /** @type {any} */ ({})) => {
+  const res = await modelEgress.readModelInventory({ providerId: 'openrouter', signal });
   if (!res.ok) {
     // A 401/403 here is exactly the "bad/insufficient key" signal the
     // Settings auto-verify wants to surface; the status rides the error.
@@ -257,21 +183,7 @@ export const listOpenRouterModels = async ({ safeFetch, getSecret, signal } = /*
     catch { excerpt = '<no body>'; }
     throw new ProviderHttpError('openrouter', res.status, excerpt);
   }
-  const data = await res.json();
-  // why any[]: /models JSON is provider-shaped + runtime-validated below, not
-  // a contract we own a type for.
-  /** @type {any[]} */
-  const models = Array.isArray(data?.data) ? data.data : [];
-  return models
-    .filter((entry) => typeof entry?.id === 'string' && entry.id.length > 0)
-    .map((entry) => ({
-      model: entry.id,
-      label: typeof entry.name === 'string' && entry.name.length ? entry.name : entry.id,
-      contextLength: Number(entry?.context_length) || 0,
-      promptPrice: Number(entry?.pricing?.prompt) || 0,
-      completionPrice: Number(entry?.pricing?.completion) || 0,
-    }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+  return normalizeOpenRouterModels(await res.json());
 };
 
 /**
@@ -280,33 +192,20 @@ export const listOpenRouterModels = async ({ safeFetch, getSecret, signal } = /*
  * Best-effort: returns null on any non-OK / unparseable / missing-entry
  * path so the caller falls back to the static table. Never throws.
  *
- * The key is optional for this public endpoint but sent when present (same
- * attribution headers as `call`). Same DI contract: `safeFetch` injected.
- *
  * @param {Object} args
  * @param {string} args.model
- * @param {(name: string) => Promise<string | null>} [args.getSecret]
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
  * @returns {Promise<number | null>}
  */
-export const fetchOpenRouterContextWindow = async ({ model, getSecret, safeFetch, signal }) => {
+export const fetchOpenRouterContextWindow = async ({ model, modelEgress, signal }) => {
   if (typeof model !== 'string' || !model) return null;
-  let apiKey = null;
-  try { apiKey = getSecret ? await getSecret(VAULT_SECRET_NAME) : null; }
-  catch { apiKey = null; }
-  /** @type {Record<string, string>} */
-  const headers = { 'content-type': 'application/json' };
-  if (apiKey) {
-    headers.authorization = `Bearer ${apiKey}`;
-    headers['http-referer'] = 'https://peerd.ai';
-    headers['x-title'] = 'peerd.ai';
-    headers['x-openrouter-categories'] = 'personal-agent';
-  }
-  return fetchModelWindow({
-    safeFetch,
-    url: MODELS_ENDPOINT,
-    init: { method: 'GET', headers },
+  return readModelWindow({
+    readResponse: (requestSignal) => modelEgress.readModelContext({
+      providerId: 'openrouter',
+      modelId: model,
+      signal: requestSignal,
+    }),
     extract: (body) => {
       /** @type {any[] | null} */
       const list = Array.isArray(body?.data) ? body.data : null;
@@ -332,10 +231,8 @@ export const fetchOpenRouterContextWindow = async ({ model, getSecret, safeFetch
 export const openrouterAdapter = Object.freeze({
   name: 'openrouter',
   label: 'OpenRouter',
-  endpoint: ENDPOINT,
   defaultModel: DEFAULT_MODEL,
   defaultRunnerModel: DEFAULT_RUNNER_MODEL,
-  vaultSecretName: VAULT_SECRET_NAME,
   call: callOpenRouter,
   // live per-model window for the trim trigger (providerModelContextWindow).
   contextWindow: fetchOpenRouterContextWindow,

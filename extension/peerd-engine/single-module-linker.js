@@ -17,8 +17,7 @@ const ENTRY_ID = '\0peerd:notebook-entry';
 const loadRollup = async (input) => {
   // why lazy: the engine index is shared by every execution surface. Only
   // Firefox Notebooks should pay the parse and WASM startup cost of the linker.
-  const rollupUrl = new URL('../vendor/rollup/rollup.browser.js', import.meta.url).href;
-  const { rollup } = await import(rollupUrl);
+  const { rollup } = await import('/vendor/rollup/rollup.browser.js');
   return rollup(input);
 };
 

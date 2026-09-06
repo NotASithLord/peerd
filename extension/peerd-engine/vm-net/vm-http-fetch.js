@@ -12,7 +12,9 @@
 // All IO is injected (see makeVmHttpFetch deps) — no browser/IDB/vault import.
 
 import { isRequestCacheable, cacheKey, isFresh, revalidationHeaders, isResponseStorable } from './http-cache.js';
-import { authHostForRequestUrl, gitSecretName, gitAuthHeader } from './git-credentials.js';
+import {
+  authHostForRequestUrl, gitSecretName, gitAuthHeader,
+} from '../../shared/repository-channel.js';
 import { needsWebWriteConfirm } from './http-bridge.js';
 
 export const WEB_WRITE_CONFIRM_KEY = 'web:write';

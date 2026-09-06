@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // vm_import — download a URL and drop it into the VM rootfs.
 //
 // Bridges the agent's web access (denylist + audit) with the VM
@@ -12,96 +14,29 @@
 
 const MAX_BYTES = 50 * 1024 * 1024;  // 50MB cap per fetch
 
-/**
- * The vm writeFile() surface vm_import exercises (offscreen VM client).
- * @typedef {Object} VmWriter
- * @property {(path: string, bytes: Uint8Array, opts: { sessionId?: string }) => Promise<unknown>} writeFile
- */
-
 /** @type {import('/shared/tool-types.js').Tool} */
-export const vmImportTool = {
-  name: 'vm_import',
-  primitive: 'webvm',
-  description: [
-    'Download a URL and write the bytes into a VM at `path`. The fetch',
-    'runs IN PEERD (through peerd-egress: denylist + audit), NOT inside',
-    'the VM. Use it to stage large or binary data, or anything the in-VM',
-    'wrappers cannot fetch — apt packages, native/C-extension pip wheels',
-    'or sdists, raw-socket downloads. (Pure-Python `pip install` and',
-    'npm/gem installs DO work in-VM via vm_boot; only reach for vm_import',
-    'when those cannot.) An error here is peerd-side (denylist, unreachable',
-    'host, VM not booted) — read it verbatim; the VM never tried. Max 50MB.',
-    'Returns the written path and byte count.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      url: {
-        type: 'string',
-        description: 'http(s) URL to fetch.',
-      },
-      path: {
-        type: 'string',
-        description: 'Absolute path inside the VM where the bytes land (e.g. /tmp/repo.zip).',
-      },
-    },
-    required: ['url', 'path'],
-  },
-  sideEffect: 'write',
-  origins: (args) => {
-    try { return [new URL(args.url).origin]; }
-    catch { return []; }
-  },
+export const vmImportTool = composeTool("vm_import", {
 
   execute: async (args, ctx) => {
     if (typeof args?.url !== 'string') return { ok: false, error: 'url_required' };
     if (typeof args?.path !== 'string' || !args.path.startsWith('/')) {
       return { ok: false, error: 'path_required_absolute' };
     }
-    // why: ctx.vm is the opaque `Object` contract slot; narrow it to the
-    // writeFile() surface this tool exercises.
-    const vm = /** @type {VmWriter | undefined} */ (ctx.vm);
-    if (!vm || typeof vm.writeFile !== 'function') {
-      return { ok: false, error: 'vm_not_available' };
-    }
-    if (typeof ctx.webFetch !== 'function') {
-      return { ok: false, error: 'web_fetch_not_available' };
-    }
-    /** @type {Uint8Array} */
-    let bytes;
-    /** @type {number} */
-    let status;
-    let contentType;
+    const authority = /** @type {{ importFile?: (url:string,path:string,maxBytes:number)=>Promise<{bytes:number,status:number,contentType:string}> }} */ (
+      /** @type {any} */ (ctx).vmAuthority);
+    if (!authority?.importFile) return { ok: false, error: 'vm_not_available' };
     try {
-      const res = await ctx.webFetch(args.url);
-      status = res.status;
-      contentType = res.headers.get('content-type') ?? '';
-      if (!res.ok) {
-        return { ok: false, error: `fetch_failed: HTTP ${res.status}` };
-      }
-      const ab = await res.arrayBuffer();
-      if (ab.byteLength > MAX_BYTES) {
-        return { ok: false, error: `payload_too_large: ${ab.byteLength}B > ${MAX_BYTES}B` };
-      }
-      bytes = new Uint8Array(ab);
+      const result = await authority.importFile(args.url, args.path, MAX_BYTES);
+      return {
+        ok: true,
+        content: JSON.stringify({
+          url: args.url, path: args.path, bytes: result.bytes,
+          status: result.status, contentType: result.contentType,
+        }, null, 2),
+      };
     } catch (e) {
       const err = /** @type {{ name?: string, message?: string }} */ (e);
-      return { ok: false, error: `fetch_threw: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+      return { ok: false, error: err?.message ?? String(e) };
     }
-    try {
-      await vm.writeFile(args.path, bytes, {
-        sessionId: ctx.session?.sessionId,
-      });
-    } catch (e) {
-      const err = /** @type {{ name?: string, message?: string }} */ (e);
-      return { ok: false, error: `write_threw: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
-    }
-    return {
-      ok: true,
-      content: JSON.stringify({
-        url: args.url, path: args.path,
-        bytes: bytes.byteLength, status, contentType,
-      }, null, 2),
-    };
   },
-};
+});

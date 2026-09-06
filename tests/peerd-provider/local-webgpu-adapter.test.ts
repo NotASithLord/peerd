@@ -1,7 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import {
-  parseLocalStream, callLocalWebgpu, setLocalGenerate, localWebgpuAdapter, LOCAL_MODEL_ID,
+  parseLocalStream, callLocalWebgpu, localWebgpuAdapter, LOCAL_MODEL_ID,
 } from '../../extension/peerd-provider/adapters/local-webgpu.js';
+import { makeModelEgress } from './model-egress-fixture';
 
 // FEATURE-LOCAL-WEBGPU §3.4. The load-bearing piece is parsing Gemma's token
 // stream into ProviderEvents — Transformers.js leaves <tool_call> parsing to us.
@@ -57,32 +58,31 @@ describe('parseLocalStream', () => {
 });
 
 describe('callLocalWebgpu', () => {
-  test('not loaded → a single error event (no throw)', async () => {
-    setLocalGenerate(null);
-    const out = await collect(callLocalWebgpu({ messages: [], system: '' } as any));
+  test('authority failure → a single error event (no throw)', async () => {
+    const modelEgress = makeModelEgress({ generateLocal: () => (async function* () { throw new Error('model not loaded'); })() });
+    const out = await collect(callLocalWebgpu({ messages: [], system: '', modelEgress } as any));
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ type: 'error' });
-    expect(out[0].error).toContain('Local model');
+    expect(out[0].error).toContain('model not loaded');
   });
 
   test('streams events, then a synthetic usage + message-stop', async () => {
-    setLocalGenerate(() => streamOf(['ok ', '<tool_call>{"name":"snapshot","arguments":{}}</tool_call>']));
-    const out = await collect(callLocalWebgpu({ messages: [], system: 'sys' } as any));
+    const modelEgress = makeModelEgress({ generateLocal: () => streamOf(['ok ', '<tool_call>{"name":"snapshot","arguments":{}}</tool_call>']) });
+    const out = await collect(callLocalWebgpu({ messages: [], system: 'sys', modelEgress } as any));
     expect(out.some((e) => e.type === 'text-delta')).toBe(true);
     expect(out.some((e) => e.type === 'tool-use-start')).toBe(true);
     const usage = out.find((e) => e.type === 'usage');
     expect(usage.usage.outputTokens).toBe(2);            // two streamer chunks
     expect(usage.usage.inputTokens).toBe(0);             // prefill is local + free
     expect(out.at(-1)).toMatchObject({ type: 'message-stop' });
-    setLocalGenerate(null);
   });
 
   test('projects messages before the local provider transport', async () => {
     let received: any = null;
-    setLocalGenerate((request) => {
+    const modelEgress = makeModelEgress({ generateLocal: (request: any) => {
       received = request;
       return streamOf(['ok']);
-    });
+    } });
     await collect(callLocalWebgpu({
       messages: [{
         role: 'user', content: 'tool result', actorDeliveryId: 'actor:private',
@@ -90,17 +90,19 @@ describe('callLocalWebgpu', () => {
         toolResults: [{ content: 'done', actorDeliveryIds: ['actor:private'] }],
       }],
       system: 'sys',
+      modelEgress,
     } as any));
     expect(received.messages).toEqual([{ role: 'user', content: 'tool result' }]);
     expect(JSON.stringify(received)).not.toContain('actor:private');
-    setLocalGenerate(null);
+    expect(received).toMatchObject({ providerId: 'local-webgpu', modelId: LOCAL_MODEL_ID });
   });
 });
 
 describe('localWebgpuAdapter descriptor', () => {
-  test('keyless, zero-secret, defaultRunnerModel = the actor model', () => {
+  test('keyless, authority-free metadata, defaultRunnerModel = the actor model', () => {
     expect(localWebgpuAdapter.keyless).toBe(true);
-    expect(localWebgpuAdapter.vaultSecretName).toBe(null);
+    expect('vaultSecretName' in localWebgpuAdapter).toBe(false);
+    expect('endpoint' in localWebgpuAdapter).toBe(false);
     expect(localWebgpuAdapter.defaultRunnerModel).toBe(LOCAL_MODEL_ID);
     expect(typeof localWebgpuAdapter.call).toBe('function');
   });

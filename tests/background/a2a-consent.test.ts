@@ -41,7 +41,7 @@ describe('a2aConsentOutcome — persist only on yes_session', () => {
 });
 
 // The end-to-end regression, in pure form: the two decisions composed exactly as
-// service-worker.js wires them (confirmAction downgrade → a2aResolveConsent
+// The host wires them (confirmAction downgrade → a2aResolveConsent
 // outcome) for the ephemeral dweb actor answering a2a_contact.
 describe('composed: the dweb actor (ephemeral) answering a2a_contact', () => {
   const resolve = (rawAnswer: string) => {

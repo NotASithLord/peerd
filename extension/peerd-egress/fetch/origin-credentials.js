@@ -3,8 +3,8 @@
 //
 // DESIGN-18 P1. An API integration (a `backing:'api'` web actor) owns ONE origin
 // and may authenticate to it WITHOUT ever holding the key: the key is stored in the
-// vault, decrypted only in the SW at request time, and injected at the egress
-// BOUNDARY — never on the keyless actor's ctx. This is the `origin:<origin>` analog
+// vault, decrypted only in the sealed vault Worker, and returned over its private
+// channel to the exact SW egress handler; never on the keyless actor's ctx. This is the `origin:<origin>` analog
 // of the shipped `git:<host>` injection (peerd-engine/vm-net/git-credentials.js);
 // it copies that battle-tested shape exactly. This module owns the pure decisions;
 // the boundary wrapper (web-fetch.js withApiCredentials) composes it over the vault.
@@ -54,25 +54,6 @@ export const originSecretName = (origin) => `${ORIGIN_SECRET_PREFIX}${origin}`;
 /** Inverse: a vault secret name → its origin, or null if not an origin secret. @param {string} name */
 export const originFromSecretName = (name) =>
   String(name).startsWith(ORIGIN_SECRET_PREFIX) ? String(name).slice(ORIGIN_SECRET_PREFIX.length) : null;
-
-/**
- * THE SEND-TIME BINDING GATE (rules 2 + 3). Given an outbound request URL and the
- * actor's OWNED origin, return the origin whose key may authenticate the request — or
- * null to send anonymously. Authenticates ONLY when the request is https AND its
- * URL.origin EQUALS the owned origin. Cross-origin, http, or a spoof
- * (`owned.evil.com`, userinfo tricks) all land on a different origin → null. Does NOT
- * decide whether a key EXISTS; the caller looks up originSecretName(origin) in the vault.
- * @param {string} url  the outbound request url
- * @param {string | undefined} ownedOrigin  the actor's fixed owned origin (URL.origin form)
- * @returns {string | null}
- */
-export const authOriginForRequestUrl = (url, ownedOrigin) => {
-  if (!ownedOrigin) return null;
-  let u;
-  try { u = new URL(url); } catch { return null; }
-  if (u.protocol !== 'https:') return null;        // rule 2 (send): never over cleartext
-  return u.origin === ownedOrigin ? ownedOrigin : null;   // rule 3: URL.origin equality
-};
 
 /**
  * A plausible API key: non-empty, no whitespace, a sane minimum. Formats vary wildly,

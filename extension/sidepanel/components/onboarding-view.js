@@ -45,7 +45,7 @@
 // after unlock.
 
 import m from '/vendor/mithril/mithril.js';
-import { PEER_NAME_MAX } from '/peerd-runtime/index.js';
+import { PEER_NAME_MAX } from '/peerd-runtime/ui.js';
 import { ProviderStep } from './onboarding-provider-step.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
@@ -88,8 +88,7 @@ const letterSpans = (text) => Array.from(text).map((ch, i) =>
 // Type-and-delete tease cadence (ms). Type slower than delete — the
 // same asymmetry real typing has; holds long enough to read. Exported
 // MUTABLE so tests can shrink the delays to drive the loop in real
-// time (same escape-hatch posture as system-prompt's
-// _setTemplateForTests) — production code never writes it.
+// time; production code never writes it.
 export const TEASE = { type: 95, del: 55, holdFull: 1500, holdEmpty: 450 };
 
 /**
@@ -218,7 +217,8 @@ const goToStep = (ui, next) => {
   ui.stepTimer = setTimeout(swap, 170);
 };
 
-/** @typedef {{ state: OnbState, attrs: { send: Send, state?: ChatState } }} OnbVnode */
+/** @typedef {{ state: OnbState, attrs: { send: Send, state?: ChatState,
+ * reconcileState?:()=>Promise<any> } }} OnbVnode */
 
 export const OnboardingView = {
   /** @param {OnbVnode} vnode */
@@ -246,7 +246,7 @@ export const OnboardingView = {
   },
 
   /** @param {OnbVnode} vnode */
-  view({ attrs: { send }, state: ui }) {
+  view({ attrs: { send, reconcileState }, state: ui }) {
     // why one path for Start AND Skip: both must flip the SW-persisted
     // onboardingComplete latch (the screen never re-fires either way);
     // Skip just sends facts:null so no memory is seeded. An edited peer
@@ -263,10 +263,13 @@ export const OnboardingView = {
         const reply = await send({ type: 'onboarding/complete', peerName: ui.peerName, facts });
         // On success the SW pushes fresh state and the route gate lifts
         // itself — no local navigation here.
-        if (!reply?.ok) ui.error = reply?.error ?? 'Could not save — try again.';
-      } catch (e) {
-        ui.error = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
+        if (!reply?.ok) ui.error = reply?.outcomeKnown === false
+          ? 'Peerd could not confirm the save. Checking your profile before allowing another attempt.'
+          : 'Your onboarding details could not be saved.';
+      } catch {
+        ui.error = 'Peerd could not confirm the save. Checking your profile before allowing another attempt.';
       } finally {
+        try { await reconcileState?.(); } catch {}
         ui.busy = false;
         m.redraw();
       }

@@ -33,12 +33,12 @@
 
 import m from '/vendor/mithril/mithril.js';
 import {
-  MicButton, activeTrigger,
-  classifyAttachment, ATTACHMENT_CAPS, MAX_ATTACHMENTS_PER_MESSAGE, DOC_MEDIA_TYPES,
-  IMAGE_MEDIA_TYPES, formatBytes,
-} from '/peerd-runtime/index.js';
+  MicButton, activeTrigger, classifyAttachment, ATTACHMENT_CAPS, MAX_ATTACHMENTS_PER_MESSAGE,
+  DOC_MEDIA_TYPES, IMAGE_MEDIA_TYPES, formatBytes,
+} from '/peerd-runtime/ui.js';
 import { CommandPalette, visibleCandidates, PALETTE_OPTION_ID } from './command-palette.js';
 import { CostChip } from './cost-meter.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 import {
   composerForState, composerUnavailableCopy, composerWarningCopy,
 } from '../provider-readiness.js';
@@ -50,6 +50,7 @@ import {
 /** @typedef {import('./command-palette.js').PaletteItems} PaletteItems */
 
 /** @typedef {{ name: string, mediaType: string, size: number, data: string }} StagedAttachment */
+/** @typedef {{operationId:string,text:string,goal:boolean,sessionId:string|null,hadAttachments:boolean,source?:'composer'|'starter'}} UnconfirmedSend */
 
 /**
  * Component-local state for InputBar.
@@ -65,6 +66,8 @@ import {
  * @property {HTMLTextAreaElement|null} el
  * @property {StagedAttachment[]} attachments
  * @property {string|null} attachError
+ * @property {string|null} sendError
+ * @property {UnconfirmedSend|null} unconfirmedSend
  * @property {HTMLInputElement|null} fileInputEl
  * @property {string|null} [sendAccent]
  * @property {(() => void)|null} [resizeListener]
@@ -197,6 +200,74 @@ const saveDraft = (sid, text) => {
   try { if (text) localStorage.setItem(draftKey(sid), text); else localStorage.removeItem(draftKey(sid)); }
   catch { /* private mode — drafts are best-effort */ }
 };
+const unconfirmedKey = (/** @type {string|null|undefined} */ sid) =>
+  `peerd.unconfirmed-send.${sid || 'new'}`;
+/** @returns {UnconfirmedSend|null} */
+const loadUnconfirmed = (/** @type {string|null|undefined} */ sid) => {
+  try {
+    const value = JSON.parse(localStorage.getItem(unconfirmedKey(sid)) ?? 'null');
+    return value && typeof value.operationId === 'string' && typeof value.text === 'string'
+      ? {
+        operationId: value.operationId,
+        text: value.text,
+        goal: value.goal === true,
+        sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
+        hadAttachments: value.hadAttachments === true,
+        source: value.source === 'starter' ? 'starter' : 'composer',
+      } : null;
+  } catch { return null; }
+};
+export const hasUnconfirmedAgentSend = (/** @type {string|null|undefined} */ sid) =>
+  loadUnconfirmed(sid) !== null || (!!sid && loadUnconfirmed(null) !== null);
+/** @param {string|null|undefined} sid @param {InputBarState['unconfirmedSend']} value */
+const saveUnconfirmed = (sid, value) => {
+  try {
+    // Never persist attachment bytes. Delivery checks are status-only; if a
+    // reload loses staged bytes, the UI says to reattach only after the kernel
+    // proves the original operation did not settle successfully.
+    if (value) localStorage.setItem(unconfirmedKey(sid), JSON.stringify({
+      operationId: value.operationId,
+      text: value.text,
+      goal: value.goal,
+      sessionId: value.sessionId,
+      hadAttachments: value.hadAttachments,
+      source: value.source,
+    }));
+    else localStorage.removeItem(unconfirmedKey(sid));
+  } catch { /* private mode keeps the in-memory fence */ }
+};
+
+/**
+ * @param {Object} options
+ * @param {Send} options.send
+ * @param {{type:'agent/send'}&Record<string,any>} options.message
+ * @param {UnconfirmedSend} options.pending
+ * @param {()=>string|null|undefined} [options.currentSessionId]
+ */
+export const sendAgentWithCustody = async ({ send, message, pending, currentSessionId }) => {
+  const originalSessionId = pending.sessionId;
+  const settle = (/** @type {UnconfirmedSend|null} */ value) => {
+    saveUnconfirmed(originalSessionId, value);
+    if (value) return;
+    const current = currentSessionId?.();
+    // why: a first send can acquire its durable session id while awaiting the
+    // reply, but the user can also switch to an unrelated chat. Clear only an
+    // adopted copy of this exact operation; never erase that chat's own fence.
+    if (current && current !== originalSessionId
+      && loadUnconfirmed(current)?.operationId === pending.operationId) {
+      saveUnconfirmed(current, null);
+    }
+  };
+  settle(pending);
+  try {
+    const reply = await send(message);
+    if (reply?.outcomeKnown !== false) settle(null);
+    return reply;
+  } catch (cause) {
+    if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) settle(null);
+    throw cause;
+  }
+};
 
 /**
  * @typedef {{
@@ -231,6 +302,19 @@ export const InputBar = {
     // File attachments staged for the next send.
     vnode.state.attachments = [];     // [{ name, mediaType, size, data }]
     vnode.state.attachError = null;   // one-line refusal shown by the chips
+    vnode.state.unconfirmedSend = loadUnconfirmed(vnode.state._sid)
+      ?? (vnode.state._sid ? loadUnconfirmed(null) : null);
+    if (vnode.state.unconfirmedSend && !vnode.state.value) {
+      vnode.state.value = vnode.state.unconfirmedSend.text;
+      saveDraft(vnode.state._sid, vnode.state.value);
+    }
+    if (vnode.state._sid && vnode.state.unconfirmedSend?.sessionId === null) {
+      saveUnconfirmed(vnode.state._sid, vnode.state.unconfirmedSend);
+      saveUnconfirmed(null, null);
+    }
+    vnode.state.sendError = vnode.state.unconfirmedSend
+      ? 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.'
+      : null;
     vnode.state.fileInputEl = null;   // the hidden <input type=file>
   },
 
@@ -246,6 +330,7 @@ export const InputBar = {
     const sid = state.session?.sessionId;
     // Switched chats → save the draft we were holding and load the new chat's.
     if (sid !== ui._sid) {
+      const freshChatPending = ui._sid == null ? ui.unconfirmedSend : null;
       saveDraft(ui._sid, ui.value);
       ui.value = loadDraft(sid);
       ui.transcriptBaseline = '';
@@ -257,7 +342,48 @@ export const InputBar = {
       // re-stages in the new chat if they meant to).
       ui.attachments = [];
       ui.attachError = null;
+      ui.unconfirmedSend = loadUnconfirmed(sid) ?? freshChatPending;
+      if (freshChatPending && sid) {
+        ui.value = freshChatPending.text;
+        saveDraft(sid, ui.value);
+        saveDraft(null, '');
+        saveUnconfirmed(sid, freshChatPending);
+        saveUnconfirmed(null, null);
+      }
+      ui.sendError = ui.unconfirmedSend
+        ? 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.'
+        : null;
       ui._sid = sid;
+    }
+    // A first send creates its session inside the worker. If the state push with
+    // that new id wins the race against a lost send reply, the pending fence was
+    // necessarily persisted under `new`; adopt it conservatively rather than
+    // letting the newly identified chat expose an unfenced Send button.
+    if (!ui.unconfirmedSend && sid) {
+      const freshPending = loadUnconfirmed(null);
+      if (freshPending) {
+        ui.unconfirmedSend = freshPending;
+        ui.value = freshPending.text;
+        saveDraft(sid, ui.value);
+        saveDraft(null, '');
+        ui.sendError = 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.';
+        saveUnconfirmed(sid, freshPending);
+        saveUnconfirmed(null, null);
+      }
+    }
+    const persistedPending = loadUnconfirmed(sid) ?? (sid ? loadUnconfirmed(null) : null);
+    if (!ui.unconfirmedSend && persistedPending) {
+      ui.unconfirmedSend = persistedPending;
+      ui.value = persistedPending.text;
+      saveDraft(sid, ui.value);
+      ui.sendError = 'Message unconfirmed.';
+    } else if (ui.unconfirmedSend && !persistedPending && !ui.busy) {
+      if (ui.unconfirmedSend.source === 'starter' && ui.value === ui.unconfirmedSend.text) {
+        ui.value = '';
+        saveDraft(sid, '');
+      }
+      ui.unconfirmedSend = null;
+      ui.sendError = null;
     }
     // §4c one-shot prefill: a card action typed the user's likely next message
     // into the draft. Nonce-guarded so one click adopts once - after that it is
@@ -284,7 +410,9 @@ export const InputBar = {
     const submit = async (e) => {
       e?.preventDefault?.();
       const text = ui.value.trim();
-      if (!text || ui.busy || !canSend) return;
+      if (!text || ui.busy || ui.unconfirmedSend || !canSend) return;
+      ui.sendError = null;
+      const operationId = `send.${Date.now().toString(36)}.${crypto.randomUUID()}`;
 
       // Goal-armed (mode-row toggle): this send starts an autonomous goal run
       // in THIS chat — the agent keeps taking turns toward the goal until it
@@ -292,21 +420,52 @@ export const InputBar = {
       // normal session. The draft is the (visible) goal; attachments don't
       // apply to a goal, so they stay staged for a later normal send.
       if (goalArmed) {
+        const pending = {
+          operationId, text, goal: true, sessionId: sid ?? null,
+          hadAttachments: false, source: /** @type {const} */ ('composer'),
+        };
         ui.busy = true;
         ui.value = '';
         saveDraft(sid, '');
         ui.transcriptBaseline = '';
         closePalette(ui);
-        const reply = await send({ type: 'agent/send', text, goal: true });
-        ui.busy = false;
-        // Disarm only on a clean launch; on failure restore the draft and
-        // stay armed so the user can retry without re-toggling. Guard the
-        // restore on sid (same reason as the normal send below): a chat switch
-        // during the await must not dump this goal text into another chat.
-        if (reply?.ok) onGoalSent?.();
-        else if (ui._sid === sid) ui.value = text;
-        else saveDraft(sid, text);
-        m.redraw();
+        try {
+          const reply = await sendAgentWithCustody({
+            send,
+            message: {
+              type: 'agent/send', text, goal: true, operationId,
+              sessionId: sid ?? null,
+            },
+            pending,
+            currentSessionId: () => ui._sid,
+          });
+          // Disarm only on a clean launch. A refused pre-dispatch request is
+          // safe to retry; an unknown result is not, because the goal may
+          // already be running even though the reply was lost.
+          if (reply?.ok) onGoalSent?.();
+          else {
+            const unresolved = reply?.outcomeKnown === false ? pending : null;
+            if (ui._sid === sid) {
+              ui.value = text;
+              ui.sendError = reply?.outcomeKnown === false
+                ? 'Peerd could not confirm whether the goal started. Check this chat before sending it again; your goal remains in the composer.'
+                : 'The agent service was unavailable. Your goal is still here; try again.';
+              if (unresolved) ui.unconfirmedSend = unresolved;
+            } else {
+              saveDraft(sid, text);
+            }
+            if (unresolved) saveUnconfirmed(ui._sid ?? sid, unresolved);
+          }
+        } catch {
+          if (ui._sid === sid) ui.value = text;
+          else saveDraft(sid, text);
+          ui.sendError = 'Peerd could not confirm whether the goal started. Check this chat before sending it again; your goal remains in the composer.';
+          if (ui._sid === sid) ui.unconfirmedSend = pending;
+          saveUnconfirmed(ui._sid ?? sid, pending);
+        } finally {
+          ui.busy = false;
+          m.redraw();
+        }
         return;
       }
 
@@ -314,6 +473,10 @@ export const InputBar = {
       // never ride a send the provider can't honor — e.g. the user
       // attached, then switched a fresh chat to Ollama.
       const attachments = canAttach && ui.attachments.length > 0 ? ui.attachments : null;
+      const pending = {
+        operationId, text, goal: false, sessionId: sid ?? null,
+        hadAttachments: !!attachments, source: /** @type {const} */ ('composer'),
+      };
       ui.busy = true;
       ui.value = '';
       saveDraft(sid, '');          // sent → clear the saved draft for this chat
@@ -321,12 +484,23 @@ export const InputBar = {
       ui.attachments = [];
       ui.attachError = null;
       closePalette(ui);
-      const reply = await send({
-        type: 'agent/send', text,
-        ...(attachments ? { attachments } : {}),
-      });
-      ui.busy = false;
-      if (!reply?.ok) {
+      // Render the in-flight ownership immediately. Mithril does not redraw an
+      // async event handler until its promise settles, which can leave the
+      // stale draft and enabled Send button visible for the entire worker/host
+      // wait. The component state already retains the exact recovery copy.
+      m.redraw.sync();
+      try {
+        const reply = await sendAgentWithCustody({
+          send,
+          message: {
+            type: 'agent/send', text, operationId,
+            sessionId: sid ?? null,
+            ...(attachments ? { attachments } : {}),
+          },
+          pending,
+          currentSessionId: () => ui._sid,
+        });
+        if (reply?.ok) return;
         // why guard on sid: the user may have switched chats during the await.
         // Restoring into the shared `ui` would dump THIS send's text / files /
         // error into whatever chat is now in view. Same chat → restore inline
@@ -339,11 +513,90 @@ export const InputBar = {
           if (attachments) ui.attachments = attachments;
           // Surface the SW's fail-closed refusal (e.g. an over-cap file)
           // where the chips are; turn-level errors render in the chat.
-          if (attachments && reply?.error) ui.attachError = reply.error;
+          if (attachments && reply?.error) ui.attachError = reply.outcomeKnown === false
+            ? 'Peerd could not confirm the attachment send.' : reply.error;
+          ui.sendError = reply?.outcomeKnown === false
+            ? 'Peerd could not confirm whether the message started. Check this chat before sending the restored draft again.'
+            : 'The message was not sent. Your draft was restored; try again.';
+          if (reply?.outcomeKnown === false) {
+            ui.unconfirmedSend = pending;
+            saveUnconfirmed(sid, ui.unconfirmedSend);
+          }
         } else {
           saveDraft(sid, text);
+          if (reply?.outcomeKnown === false) {
+            saveUnconfirmed(sid, pending);
+          }
         }
+      } catch {
+        if (ui._sid === sid) {
+          ui.value = text;
+          if (attachments) ui.attachments = attachments;
+          ui.sendError = 'Peerd could not confirm whether the message started. Check this chat before sending the restored draft again.';
+          ui.unconfirmedSend = pending;
+          saveUnconfirmed(sid, ui.unconfirmedSend);
+        } else {
+          saveDraft(sid, text);
+          saveUnconfirmed(sid, pending);
+        }
+      } finally {
+        ui.busy = false;
+        m.redraw();
       }
+    };
+
+    const checkDelivery = async () => {
+      const pending = ui.unconfirmedSend;
+      if (!pending || ui.busy) return;
+      ui.busy = true;
+      try {
+        const reply = await send({
+          type: 'agent/send', checkOnly: true,
+          operationId: pending.operationId, sessionId: pending.sessionId,
+        });
+        if (reply?.ok) {
+          ui.unconfirmedSend = null;
+          saveUnconfirmed(sid, null);
+          ui.sendError = null;
+          if (ui.value.trim() === pending.text.trim()) {
+            ui.value = '';
+            saveDraft(sid, '');
+          }
+          if (pending.hadAttachments) {
+            ui.attachments = [];
+            ui.attachError = null;
+          }
+          if (pending.goal) onGoalSent?.();
+        } else if (reply?.outcomeKnown !== false) {
+          ui.unconfirmedSend = null;
+          saveUnconfirmed(sid, null);
+          ui.sendError = pending.hadAttachments
+            ? 'The earlier message did not start. Your text is restored; reattach the files before sending.'
+            : 'The earlier message did not start. Your draft is ready to send.';
+        } else {
+          ui.sendError = pending.hadAttachments
+            ? 'Delivery is still unconfirmed. Check the chat before retrying; attached files will never be resent by this check.'
+            : 'Delivery is still unconfirmed. Check the chat before sending again.';
+        }
+      } catch {
+        ui.sendError = 'Delivery status is unavailable. The original operation remains fenced.';
+      }
+      finally { ui.busy = false; m.redraw(); }
+    };
+
+    const releaseDeliveryFence = () => {
+      const pending = ui.unconfirmedSend;
+      if (!pending || ui.busy) return;
+      // This is an explicit human acknowledgement, never an automatic replay:
+      // keep any restored draft/attachments untouched, clear only the local
+      // fence, and let a future Send mint a fresh operation id.
+      ui.unconfirmedSend = null;
+      saveUnconfirmed(sid, null);
+      ui.sendError = pending.hadAttachments && ui.attachments.length === 0
+        ? 'Delivery fence cleared. Review this chat and the restored text, then reattach the files before choosing Send.'
+        : pending.hadAttachments
+          ? 'Delivery fence cleared. Review this chat and the restored text and files before choosing Send.'
+        : 'Delivery fence cleared. Review this chat and the restored draft before choosing Send.';
       m.redraw();
     };
 
@@ -353,6 +606,7 @@ export const InputBar = {
     // file individually, unlike the send which commits as a unit.
     /** @param {File[]} files */
     const addFiles = async (files) => {
+      if (ui.unconfirmedSend) return;
       ui.attachError = null;
       for (const f of files) {
         if (ui.attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
@@ -388,7 +642,7 @@ export const InputBar = {
     // stage like picked files. Text pastes fall through untouched.
     /** @param {ClipboardEvent} e */
     const onPaste = (e) => {
-      if (!canAttach) return;
+      if (!canAttach || ui.unconfirmedSend) return;
       const items = e.clipboardData?.items ?? [];
       /** @type {File[]} */
       const files = [];
@@ -404,9 +658,9 @@ export const InputBar = {
     };
 
     /** @param {Event} [e] */
-    const stop = async (e) => {
+    const stop = (e) => {
       e?.preventDefault?.();
-      await send({ type: 'agent/stop' });
+      settleUiEffect(send({ type: 'agent/stop' }));
     };
 
     // Re-derive the trigger from the textarea's value + caret. Called on
@@ -533,11 +787,11 @@ export const InputBar = {
     }
 
     return m('form.input-bar', { onsubmit: submit }, [
-      unavailableCopy || warningCopy ? m('p.composer-readiness-note', {
+      unavailableCopy || warningCopy || ui.sendError ? m('p.composer-readiness-note', {
         id: 'composer-readiness-note',
-        role: unavailableCopy ? 'alert' : 'status',
-        'aria-live': unavailableCopy ? 'assertive' : 'polite',
-      }, unavailableCopy ?? warningCopy) : null,
+        role: unavailableCopy || ui.sendError ? 'alert' : 'status',
+        'aria-live': unavailableCopy || ui.sendError ? 'assertive' : 'polite',
+      }, ui.sendError ?? unavailableCopy ?? warningCopy) : null,
       m('.composer-wrap', [
         paletteOpen ? m(CommandPalette, {
           trigger: ui.trigger,
@@ -558,7 +812,8 @@ export const InputBar = {
             'aria-expanded': paletteOpen ? 'true' : 'false',
             'aria-controls': paletteOpen ? 'composer-palette' : undefined,
             'aria-activedescendant': activeDesc,
-            'aria-describedby': unavailableCopy || warningCopy ? 'composer-readiness-note' : undefined,
+            'aria-describedby': unavailableCopy || warningCopy || ui.sendError
+              ? 'composer-readiness-note' : undefined,
             oncreate: (/** @type {{ dom: HTMLTextAreaElement }} */ vnode) => {
               ui.el = vnode.dom;
               autosize(vnode.dom);
@@ -582,6 +837,7 @@ export const InputBar = {
             onpaste: onPaste,
             oninput: (/** @type {Event} */ e) => {
               ui.value = /** @type {HTMLTextAreaElement} */ (e.target).value;
+              if (!ui.unconfirmedSend) ui.sendError = null;
               saveDraft(sid, ui.value);   // persist the draft as you type (per chat)
               // why: any keyboard edit resets the transcription baseline
               // to the current value so the next voice chunk appends to
@@ -601,9 +857,14 @@ export const InputBar = {
                   m('span.attach-chip-name', a.name),
                   m('span.attach-chip-size', formatBytes(a.size)),
                   m('button.attach-chip-remove', {
-                    type: 'button',
-                    'aria-label': `Remove ${a.name}`,
-                    onclick: () => { ui.attachments.splice(i, 1); ui.attachError = null; },
+                  type: 'button',
+                  'aria-label': `Remove ${a.name}`,
+                  disabled: !!ui.unconfirmedSend,
+                  onclick: () => {
+                    if (ui.unconfirmedSend) return;
+                    ui.attachments.splice(i, 1);
+                    ui.attachError = null;
+                  },
                   }, '×'),
                 ])),
                 ui.attachError ? m('.attach-error', {
@@ -616,12 +877,24 @@ export const InputBar = {
             // Per-chat usage — small text, far left; tap to expand.
             canSend ? m(CostChip, { cost: state.cost, streaming: state.streaming }) : null,
             m('.spacer'),
+            ui.unconfirmedSend ? m('button.secondary', {
+              type: 'button',
+              disabled: ui.busy,
+              onclick: checkDelivery,
+            }, ui.busy ? 'Checking…' : 'Check delivery') : null,
+            ui.unconfirmedSend ? m('button.secondary', {
+              type: 'button',
+              disabled: ui.busy,
+              onclick: releaseDeliveryFence,
+              title: 'This never resends the earlier message or files',
+            }, 'I checked; allow a new message') : null,
             // Attach — hidden entirely off-Anthropic (the gate above):
             // image/document blocks are an Anthropic wire shape, and a
             // button that silently fails is a lie.
             canAttach ? m('input.attach-input', {
               type: 'file',
               multiple: true,
+              disabled: !!ui.unconfirmedSend,
               accept: documentReaderAvailable ? ATTACH_ACCEPT : BASIC_ATTACH_ACCEPT,
               style: 'display:none',
               oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { ui.fileInputEl = v.dom; },
@@ -636,7 +909,10 @@ export const InputBar = {
             }) : null,
             canAttach ? m('button.attach-btn', {
               type: 'button',
-              title: 'Attach files — images, PDF, or text (or paste an image)',
+              disabled: !!ui.unconfirmedSend,
+              title: documentReaderAvailable
+                ? 'Attach files: images, PDFs, office/e-book documents, or text (or paste an image)'
+                : 'Attach files: images, PDF, or text (or paste an image)',
               'aria-label': 'Attach files',
               onclick: () => ui.fileInputEl?.click(),
             }, PAPERCLIP_ICON()) : null,
@@ -661,7 +937,7 @@ export const InputBar = {
               }) : null,
               m('button.send-btn', {
                 type: 'submit',
-                disabled: !canSend || ui.busy || !ui.value.trim(),
+                disabled: !canSend || ui.busy || !!ui.unconfirmedSend || !ui.value.trim(),
                 'aria-label': unavailableCopy ?? (goalArmed ? 'Start an autonomous run on this goal'
                   : streaming ? 'Send and steer the current turn' : 'Send'),
                 title: unavailableCopy ?? (goalArmed

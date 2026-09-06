@@ -9,11 +9,12 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { LINUX_PATH, HTML5_PATH } from '/vendor/simple-icons/brand-paths.js';
-import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runtime/index.js';
+import { manifestLabel, bundleToOtlp, detectVoiceCapability } from '/peerd-runtime/ui.js';
 import { openOptions } from '/shared/open-options.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 import { mapError, errorSettingsTarget } from '../error-display.js';
 import { MessageList } from './message-list.js';
-import { InputBar } from './input-bar.js';
+import { hasUnconfirmedAgentSend, InputBar, sendAgentWithCustody } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { GoalBar } from './goal-bar.js';
 import { TodoCard } from './todo-card.js';
@@ -182,7 +183,7 @@ export const ChatView = {
       showVoiceOnboarding ? m(VoiceOnboardingCard, { send }) : null,
 
       messages.length === 0 ? m(EmptyState, {
-        canSend, composer, send, surface, activeTabStatus,
+        canSend, composer, send, surface, activeTabStatus, sessionId: sid,
         actorExecution: state.capabilities?.actorExecution,
       })
         : m(MessageList, {
@@ -253,7 +254,7 @@ export const ChatView = {
           run: state.goalRuns?.[sid ?? ''] ?? null,
           disabled: !canSend,
           onToggle: (/** @type {boolean} */ next) => { ui.goalArmed = next; },
-          onStop: () => send({ type: 'agent/stop' }),
+          onStop: () => settleUiEffect(send({ type: 'agent/stop' })),
         }),
         m('.spacer'),
         // /system presence chip — the session's custom instructions
@@ -263,9 +264,9 @@ export const ChatView = {
         state.session?.customSystemPrompt ? m('span.session-sys-badge', {
           title: `Session instructions active:\n${state.session.customSystemPrompt}\n\n"/system" shows them - "/system clear" removes them.`,
         }, '/system') : null,
-        // /tools presence chip — a narrowed tool manifest silently changes
-        // what the agent CAN do, so it gets the same visibility contract
-        // as /system: a monochrome chip where the authority is exercised.
+        // /tools presence chip: a narrowed manifest silently changes which
+        // tools the model is offered, so it gets the same visibility contract
+        // as /system: a monochrome chip where the model surface is active.
         state.session?.toolManifest ? m('span.session-sys-badge', {
           title: `Tool manifest active: ${manifestLabel(state.session.toolManifest)} - only that toolset is exposed to the agent this chat.\n\n"/tools" shows it - "/tools full" restores everything.`,
         }, `/tools ${manifestLabel(state.session.toolManifest)}`) : null,
@@ -366,6 +367,9 @@ export const ChatView = {
  * @property {boolean} locked
  * @property {string|undefined} fetchedKey
  * @property {number} requestGeneration
+ * @property {boolean} changing
+ * @property {string|null} error
+ * @property {{value:string,message:Record<string,any>}|null} unconfirmed
  */
 
 /** @typedef {{ state: ModelPickerState, attrs: { send: Send, sessionId?: string|null, optionsKey?: string } }} ModelPickerVnode */
@@ -378,6 +382,9 @@ const ModelPicker = {
     vnode.state.locked = false;      // mid-session: provider fixed, model-only
     vnode.state.fetchedKey = undefined;
     vnode.state.requestGeneration = 0;
+    vnode.state.changing = false;
+    vnode.state.error = null;
+    vnode.state.unconfirmed = null;
     ModelPicker.fetch(vnode);
   },
   /** @param {ModelPickerVnode} vnode */
@@ -408,40 +415,92 @@ const ModelPicker = {
         || ModelPicker.keyOf(vnode) !== requestedKey) return;
       if (r?.ok) {
         vnode.state.options = r.options;
-        vnode.state.selected = r.selected;
         vnode.state.locked = !!r.sessionProvider;
+        if (vnode.state.unconfirmed) {
+          if (r.selected === vnode.state.unconfirmed.value) {
+            vnode.state.selected = r.selected;
+            vnode.state.unconfirmed = null;
+            vnode.state.error = null;
+          }
+        } else vnode.state.selected = r.selected;
         m.redraw();
       }
     }).catch(() => {});
   },
+  /** @param {ModelPickerVnode} vnode @param {string} value @param {Record<string,any>} message */
+  async apply(vnode, value, message) {
+    const ui = vnode.state;
+    if (ui.changing) return;
+    const retrying = !!ui.unconfirmed;
+    const previous = ui.selected;
+    let refetch = false;
+    ui.changing = true;
+    ui.selected = value;
+    ui.error = null;
+    m.redraw();
+    try {
+      const reply = await vnode.attrs.send(message);
+      if (reply?.ok) {
+        ui.selected = value;
+        ui.unconfirmed = null;
+      } else if (reply?.outcomeKnown === false) {
+        ui.unconfirmed = { value, message };
+        ui.error = 'Model change unconfirmed.';
+      } else {
+        if (retrying) ui.unconfirmed = null;
+        ui.selected = previous;
+        ui.error = 'Model change failed.';
+        refetch = retrying;
+      }
+    } catch (cause) {
+      if (/** @type {{outcomeKnown?:unknown}} */ (cause)?.outcomeKnown === true) {
+        if (retrying) ui.unconfirmed = null;
+        ui.selected = previous;
+        ui.error = 'Model change failed.';
+        refetch = retrying;
+      } else {
+        ui.unconfirmed = { value, message };
+        ui.error = 'Model change unconfirmed.';
+      }
+    } finally {
+      ui.changing = false;
+      m.redraw();
+      if (ui.unconfirmed || refetch) ModelPicker.fetch(vnode);
+    }
+  },
   /** @param {ModelPickerVnode} vnode */
-  view: ({ attrs: { send, sessionId }, state: ui }) => {
+  view: (vnode) => {
+    const { attrs: { sessionId }, state: ui } = vnode;
+    const pendingModel = ui.unconfirmed;
     if (!ui.options || ui.options.length < 2) return null;
     const options = ui.options;
     return m('.model-picker', [
       m('span.model-picker-label', 'Model'),
       m('select.model-picker-select', {
         value: ui.selected,
+        disabled: ui.changing || !!ui.unconfirmed,
         onchange: async (/** @type {Event} */ e) => {
           const opt = options.find((o) => o.value === /** @type {HTMLSelectElement} */ (e.target).value);
           if (!opt) return;
-          ui.selected = opt.value;
-          if (ui.locked && sessionId) {
+          const message = ui.locked && sessionId
             // Mid-session, same provider — bind the new model to this session.
-            await send({ type: 'session/setModel', sessionId, model: opt.model });
-          } else {
+            ? { type: 'session/setModel', sessionId, model: opt.model }
             // Fresh chat — set the default the lazy session-create snapshots.
-            await send({
+            : {
               type: 'settings/update',
               patch: { providerName: opt.provider, providerModel: opt.model },
-            });
-          }
-          m.redraw();
+            };
+          await ModelPicker.apply(vnode, opt.value, message);
         },
       }, options.map((o) =>
         // Mid-session shows just the model name (provider is fixed); fresh
         // chats show "Provider · Model" since the provider can change too.
         m('option', { value: o.value }, ui.locked ? o.label : `${o.providerLabel} · ${o.label}`))),
+      ui.error ? m('span.model-picker-status', ui.error) : null,
+      pendingModel ? m('button.secondary.model-picker-finish', {
+        disabled: ui.changing,
+        onclick: () => ModelPicker.apply(vnode, pendingModel.value, pendingModel.message),
+      }, 'Finish same model change') : null,
     ]);
   },
 };
@@ -461,10 +520,10 @@ const VoiceOnboardingCard = {
         onclick: () => openOptions('voice'),
       }, 'Set up voice'),
       m('button.secondary', {
-        onclick: () => send({
+        onclick: () => settleUiEffect(send({
           type: 'settings/update',
           patch: { voiceOnboardingDismissed: true },
-        }),
+        })),
       }, 'Maybe later'),
     ]),
   ]),
@@ -593,11 +652,12 @@ export const PATH_TYPE = { ms: 18, start: 980, cascade: 90 };
  * @typedef {Object} EmptyState_State
  * @property {ReturnType<typeof setTimeout>[]} timers
  * @property {boolean} armed
+ * @property {boolean} busy
  * @property {number[]} shown
  * @property {boolean[]} started
  */
 
-/** @typedef {{ state: EmptyState_State, attrs: { canSend?: boolean, composer?: any, send: Send, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
+/** @typedef {{ state: EmptyState_State, attrs: { canSend?: boolean, composer?: any, send: Send, sessionId?: string|null, surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive', actorExecution?: { status?: string } } }} EmptyStateVnode */
 
 // Arm the one-shot type-in (step 3) for every card. Idempotent via
 // `ui.armed`, so the redraw-driven onupdate can't re-trigger it; only runs
@@ -636,12 +696,13 @@ const armReveal = (vnode) => {
 // while this empty chat stays open (oninit fires once, so without the
 // re-arm the add-key-then-return first-run path would show the menu
 // un-animated). Reduced motion shows the full text at once and never arms.
-const EmptyState = {
+export const EmptyState = {
   /** @param {EmptyStateVnode} vnode */
   oninit(vnode) {
     const ui = vnode.state;
     ui.timers = [];
     ui.armed = false;
+    ui.busy = false;
     // Reduced motion -> full text immediately; otherwise start hidden (0),
     // ready to type. (canSend false means the menu isn't rendered yet, so
     // these only matter once it appears - no full-text flash on the flip.)
@@ -664,6 +725,7 @@ const EmptyState = {
     // wider container and the 3-column track (CSS owns the actual widths).
     const isHome = attrs.surface === 'home';
     const prompts = promptsFor(attrs);
+    const unconfirmed = hasUnconfirmedAgentSend(attrs.sessionId);
     return m('.placeholder', m('.empty-state', {
       class: isHome ? 'empty-state--home' : '',
       'data-active-tab-status': attrs.activeTabStatus ?? 'none',
@@ -696,10 +758,31 @@ const EmptyState = {
               : actorUnavailable
               ? `${p.label}: unavailable while actor work is paused`
               : `${p.label}: ${p.text}`,
-            disabled: blocked || actorUnavailable,
-            // Fire-and-forget: the SW pushes turn state, which flips the
-            // view out of the empty state into the live transcript.
-            onclick: () => send({ type: 'agent/send', text: p.text }),
+            disabled: blocked || actorUnavailable || ui.busy || unconfirmed,
+            onclick: async () => {
+              if (ui.busy) return;
+              ui.busy = true;
+              const operationId = `send.${Date.now().toString(36)}.${crypto.randomUUID()}`;
+              const pending = {
+                operationId, text: p.text, goal: false,
+                sessionId: attrs.sessionId ?? null,
+                hadAttachments: false, source: /** @type {const} */ ('starter'),
+              };
+              try {
+                const delivery = sendAgentWithCustody({
+                  send,
+                  message: {
+                    type: 'agent/send', text: p.text, operationId,
+                    sessionId: attrs.sessionId ?? null,
+                  },
+                  pending,
+                  currentSessionId: () => attrs.sessionId,
+                });
+                m.redraw.sync();
+                await delivery;
+              } catch { /* the composer owns unknown delivery */ }
+              finally { ui.busy = false; m.redraw(); }
+            },
           }, [
             m('.path-card-icon', (PATH_ICONS[p.type] ?? PATH_ICONS.ask)()),
             m('span.path-card-label', p.label),
