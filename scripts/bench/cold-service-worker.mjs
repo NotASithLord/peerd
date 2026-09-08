@@ -601,11 +601,10 @@ const waitChromeExpression = (page, expression, budgetMs = coldTimeoutMs) => wai
   return value === true;
 }, budgetMs, 20);
 
-// The field names still say "staticShell" for report-schema continuity. The
-// comparative milestone is the first visibly rendered Home root in either
-// the historical direct-module UI or the current staged shell.
+// Keep the "staticShell" fields compatible with historical reports.
+// why: the vault can render a decorative canvas before its visible controls.
 const HOME_VISIBLE_EXPRESSION = `(() => {
-  const node = document.querySelector('#app > *');
+  const node = document.querySelector('#app > :not([aria-hidden="true"])');
   const rect = node?.getBoundingClientRect();
   const style = node ? getComputedStyle(node) : null;
   return !!node && node.isConnected && rect.width > 0 && rect.height > 0
@@ -1203,13 +1202,7 @@ const waitFirefoxExpression = async (driver, expression, budgetMs = coldTimeoutM
 
 const verifyFirefoxPaint = (driver) => driver.executeAsync(`
   const done = arguments[arguments.length - 1];
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    const node = document.querySelector('#app > *');
-    const rect = node?.getBoundingClientRect();
-    const style = node ? getComputedStyle(node) : null;
-    done(!!node && rect.width > 0 && rect.height > 0
-      && style.visibility !== 'hidden' && style.display !== 'none');
-  }));
+  requestAnimationFrame(() => requestAnimationFrame(() => done(${HOME_VISIBLE_EXPRESSION})));
 `);
 
 // Firefox's MV3 background is an event page. getBackgroundPage is a Firefox-

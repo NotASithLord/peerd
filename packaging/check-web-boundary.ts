@@ -173,7 +173,7 @@ export const checkWebBoundary = async (): Promise<void> => {
       });
     } else if (rel.endsWith('.html')) {
       const html = readFileSync(join(WEB_DIST, rel), 'utf8');
-      const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+      const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script(?=[\t\n\f\r />])/gi;
       let s: RegExpExecArray | null;
       while ((s = scriptRe.exec(html))) {
         const attrs = s[1];

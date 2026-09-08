@@ -491,6 +491,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile --ignore-scripts
       # why setup-chrome: installs the system libraries headless Chrome needs.
       # We then run the PINNED Chrome for Testing build against them.
       - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
@@ -676,15 +677,11 @@ jobs:
         # the e2e suite (unpacked source) structurally cannot see.
         run: bun run check:pages
 
-  # Secretless performance/correctness gate over the exact packaged artifacts.
-  # It freezes the achieved Store and Preview authority graphs and requires
-  # complete, timeout-free host-clock samples. The graph budgets are durable
-  # architecture boundaries: ordinary controller features cannot grow the SW.
+  # Require complete cold-start samples and preserve the packaged graph limits.
   cold-start:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: packaged cold start (Chrome + Firefox)
-    # Performance evidence is meaningful only on a named runner image. The
-    # harness records ImageOS/ImageVersion plus the kernel release in-report.
+    # Keep the runner image fixed for comparable measurements.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -723,9 +720,17 @@ jobs:
       - name: Run immutable cold-start lane
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+          CHROME_DEVEL_SANDBOX: /opt/google/chrome/chrome-sandbox
           FIREFOX_PATH: ${{ steps.firefox.outputs.firefox-path }}
           COLD_START_LANE: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || (github.event_name == 'pull_request' && 'pr' || 'main') }}
         run: bun run bench:cold-sw -- --lane="$COLD_START_LANE"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: cold-start-diagnostics
+          path: artifacts/performance/cold-service-worker.json
+          if-no-files-found: warn
+          retention-days: 7
 
   package:
     name: package ${{ matrix.channel }}/${{ matrix.browser }}
