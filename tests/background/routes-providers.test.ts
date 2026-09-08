@@ -182,6 +182,26 @@ describe('provider/setKey', () => {
     expect(await r['provider/setKey']({ provider: 'anthropic', plaintext: 'sk-abcdefgh' })).toEqual({ ok: true });
     expect(updated).toBe(null);
   });
+  test('replaces an unreachable explicit Ollama selection with a configured key', async () => {
+    let updated: any = null;
+    const r = makeProviderRoutes(baseDeps({
+      liveProviderModels: async () => null,
+      vault: { setSecret: async () => {}, getSecret: async () => null },
+      settingsStore: { get: () => ({ providerName: 'ollama', providerModel: '' }), update: async (p: any) => { updated = p; } },
+    }));
+    expect(await r['provider/setKey']({ provider: 'anthropic', plaintext: 'sk-abcdefgh' })).toEqual({ ok: true });
+    expect(updated).toEqual({ providerName: 'anthropic', providerModel: '' });
+  });
+  test('replaces an explicit Ollama selection with no models with a configured key', async () => {
+    let updated: any = null;
+    const r = makeProviderRoutes(baseDeps({
+      liveProviderModels: async () => [],
+      vault: { setSecret: async () => {}, getSecret: async () => null },
+      settingsStore: { get: () => ({ providerName: 'ollama', providerModel: '' }), update: async (p: any) => { updated = p; } },
+    }));
+    expect(await r['provider/setKey']({ provider: 'anthropic', plaintext: 'sk-abcdefgh' })).toEqual({ ok: true });
+    expect(updated).toEqual({ providerName: 'anthropic', providerModel: '' });
+  });
 });
 
 describe('models/options + openrouter/models', () => {

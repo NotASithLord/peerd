@@ -32,7 +32,18 @@ export const makeProviderRoutes = (deps) => {
     const active = listProviders().find(
       (/** @type {any} */ p) => p.name === settingsStore.get().providerName);
     if (!active) return false;
-    if (active.keyless) return true;
+    if (active.keyless) {
+      // A resident runner is usable by construction here: its download state
+      // is checked separately by the composer. A daemon-backed provider is
+      // different: keeping an unreachable or empty Ollama selection would
+      // strand the composer on a provider that cannot serve a turn, precisely
+      // the condition this predicate decides.
+      if (!active.liveModels) return true;
+      try {
+        const models = await liveProviderModels(active.name, { force: true });
+        return Array.isArray(models) && models.length > 0;
+      } catch { return false; }
+    }
     if (!active.vaultSecretName) return false;
     try { return !!(await vault.getSecret(active.vaultSecretName)); }
     catch { return false; }
