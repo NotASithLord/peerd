@@ -440,6 +440,7 @@ import {
   setAppBodyWriteGate,
   parseAppManifest,
   createRepositoryService,
+  createKeyedQueue,
   podGitRemoteOperation,
 } from '/peerd-engine/background.js';
 // MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
@@ -5503,32 +5504,18 @@ const WEB_ACTOR_KEY = 'webActorRegistry';
 const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
 const webActorRegistryReady = hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
-// PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
-// web actor makes inside its sealed worker rides here (offscreen job-runner →
-// 'page/call'). SECURITY, the whole point of doing this SW-side:
-//   • The OWNER is the sessionId the offscreen relay attached from the trusted
-//     job params — never anything the worker put in its own message.
-//   • That session must be a tab-backed WEB actor; anything else (a bare js_run
-//     job, an engine actor, a stale id) is refused — the page capability is not
-//     a general worker power.
-//   • The tab is resolved AUTHORITATIVELY from webActorTabBindings.tabFor(owner):
-//     the owner can't name a tab, so it can only ever act on the ONE tab it owns
-//     (fail closed if it owns none).
-// Then makePageCallHandler translates → builds a normal tab web-actor ctx (NO
-// code surface, so the mapped navigate/click/type are allowed) → dispatches
-// through the FULL gate stack (denylist / confirm / audit), so this route adds
-// zero authority over the tool-call actor.
+// The host pins the code worker's owner and tab, then applies the standard tool
+// gates. The worker cannot target a user tab or gain browser authority.
 const pageCallHandler = makePageCallHandler({
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   buildActorContext: ({ sessionId, tabId }) => buildToolContext({
     sessionId, activeTabId: tabId,
     exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: typeof tabId === 'number' ? String(tabId) : 'web', actorBacking: 'tab',
-    // FORCE the tools surface for the INNER mapped-tool dispatch: the actor's own
-    // surface is 'code' (that's how it got here), but navigate/click/type must be
-    // ALLOWED for the page.* translation — else the setting would refuse them.
+    // The translated call needs the normal tool surface to pass its gates.
     actorSurface: 'tools',
   }),
 });
+const pageCallQueue = createKeyedQueue();
 const pageCallRoute = {
   /** @param {{ method?: string, args?: object, ownerSessionId?: string, runId?: string }} msg @param {any} sender */
   'page/call': async ({ method, ownerSessionId, args, runId } = {}, sender = undefined) => {
@@ -5541,46 +5528,39 @@ const pageCallRoute = {
     }
     const runSignal = scriptRuns.signalFor(runId);
     if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-    // The owner MUST be a live tab-backed web actor — the page surface is not a
-    // general worker capability. (findActorSession/get by id; reject otherwise.)
-    const owner = await sessions.get(ownerSessionId).catch(() => null);
-    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
-      return { ok: false, error: 'page_call_not_web_actor' };
-    }
-    // Authoritative tab: the ONE this actor owns (never a worker-supplied id).
-    // A fresh code actor owns none — and unlike the tool-call actor it has no
-    // direct `navigate` to lazily open one, so page.goto() IS its adopt path:
-    // open + bind its first tab here (the SAME adoptWebTab navigate uses), then
-    // dispatch pinned to it. Every other page.* with no tab is refused with an
-    // actionable "open a page first" message. See resolvePageTab.
-    const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
-    if (decision.action === 'refuse') return { ok: false, error: decision.error };
-    /** @type {number | undefined} */
-    let tabId;
-    if (decision.action === 'adopt') {
+    return pageCallQueue.enqueue(`page:${ownerSessionId}`, async () => {
       if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-      const adopted = await adoptWebTab(ownerSessionId, runSignal ?? undefined).catch(() => null);
+      // The owner must be a live tab-backed web actor. The worker cannot use
+      // this route as a general browser capability.
+      const owner = await sessions.get(ownerSessionId).catch(() => null);
       if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-      if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
-      tabId = adopted.tabId;
-    } else {
-      tabId = decision.tabId;
-    }
-    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId, signal: runSignal ?? undefined });
-    // Announce the settled op on the UI ports — pure observability, ZERO added
-    // authority (the gated dispatch already ran; consumers see method/ok only).
-    // why: a page_code call is ONE tool_use whose real page actions happen in
-    // here — invisible to the turn/tool-use stream. The eval harness's OM2W
-    // recorder (and any UI activity view) needs each op as a discrete
-    // after-action event, or a code-surface trajectory records as
-    // [navigate, answer] and a judge can't see the work.
-    uiPorts.broadcast({
-      type: 'page/op', sessionId: ownerSessionId, tabId,
-      method: canonicalCodeTraceLabel('page', method).method, ok: outcome?.ok === true,
+      if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
+        return { ok: false, error: 'page_call_not_web_actor' };
+      }
+      // Resolve the authoritative tab inside the actor lane. A fresh actor can
+      // adopt one tab only through goto. Other tab-bound methods fail closed.
+      const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
+      if (decision.action === 'refuse') return { ok: false, error: decision.error };
+      /** @type {number | undefined} */
+      let tabId;
+      if (decision.action === 'adopt') {
+        if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+        const adopted = await adoptWebTab(ownerSessionId, runSignal ?? undefined).catch(() => null);
+        if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+        if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
+        tabId = adopted.tabId;
+      } else {
+        tabId = decision.tabId;
+      }
+      if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+      const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId, signal: runSignal ?? undefined });
+      // Report each inner page operation because page_code is one outer tool.
+      uiPorts.broadcast({
+        type: 'page/op', sessionId: ownerSessionId, tabId,
+        method: canonicalCodeTraceLabel('page', method).method, ok: outcome?.ok === true,
+      });
+      return outcome;
     });
-    return outcome;
   },
 };
 
@@ -6777,15 +6757,21 @@ const resolveApiActor = async (/** @type {string} */ origin, /** @type {string |
   return { instanceId: origin, kind: 'web', actorSessionId };
 };
 
-// The render-decision hook: a web actor in the 0-tab state OPENS its tab here (called
-// from navigate via ctx.adoptWebTab when the actor owns no tab). Opens BLANK in the
-// BACKGROUND (never yanks the user's focus — the actor-stays-in-background policy);
-// navigate then drives it to the URL with its normal wait. Binds tab→actor in
-// webActorTabBindings (so the next turn pins it, and `to:'<tabId>'` reaches the SAME
-// actor), and tracks it as an agent-tab card. Returns the new tab so navigate can
-// re-pin ctx.activeTab for the rest of THIS turn.
-const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {AbortSignal | undefined} */ signal = undefined) => {
+// A tabless web actor adopts one background tab when navigation needs a render.
+// The binding pins later work and never selects the user's foreground tab.
+const webTabAdoptionQueue = createKeyedQueue();
+const adoptWebTab = (/** @type {string} */ actorSessionId, /** @type {AbortSignal | undefined} */ signal = undefined) => webTabAdoptionQueue.enqueue(`web-tab:${actorSessionId}`, async () => {
   if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+  const bindingsReady = await webActorBindingsReady;
+  if (!bindingsReady.ok) throw new Error('error' in bindingsReady ? bindingsReady.error : 'web_bindings_hydration_failed');
+  if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+  const existingTabId = webActorTabBindings.tabFor(actorSessionId);
+  if (typeof existingTabId === 'number') {
+    const existing = await browser.tabs.get(existingTabId).catch(() => null);
+    if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+    if (existing) return { tabId: existingTabId, windowId: existing.windowId };
+    if (webActorTabBindings.drop(existingTabId)) persistWebBindings();
+  }
   // `chrome.tabs.create({ active:false })` opens chrome://newtab/, which is a
   // browser-owned page and must stay outside automation authority. Create the
   // documented neutral document explicitly so navigate can move only this
@@ -6811,7 +6797,7 @@ const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {Abor
   }
   noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
   return { tabId, windowId: created?.windowId };
-};
+});
 
 // Prune a web actor's binding when its tab closes — for a per-tab actor it then
 // becomes unreachable, and for the chat-scoped web actor this RELEASES its owned tab
