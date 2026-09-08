@@ -95,7 +95,7 @@ export const injectLifecycleFaultKernel = (input) => {
         // Force the production turn owner and its lifecycle reconciler to load;
         // reading storage alone would only prove that old bytes survived.
         await kv.set(${JSON.stringify(PROGRESS_KEY)}, 'recovery:controller-relays');
-        await getControllerRelays();
+        await (await loadDemandPlane()).getControllerRelays();
         await kv.delete(${JSON.stringify(PROGRESS_KEY)});
         return {
           recovered: true,
@@ -112,7 +112,7 @@ export const injectLifecycleFaultKernel = (input) => {
         const onboarded = await kernelProfile.complete({ peerName: 'peerd', facts: null });
         if (onboarded?.ok !== true) throw new Error('lifecycle fault onboarding failed');
         await settingsStore.update({ providerName: 'ollama', providerModel: 'qwen3:8b' });
-        const relays = await getControllerRelays();
+        const relays = await (await loadDemandPlane()).getControllerRelays();
         if (typeof relays.sessions?.create !== 'function') {
           throw new Error('lifecycle fault session authority unavailable');
         }
