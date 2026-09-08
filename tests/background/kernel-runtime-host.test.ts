@@ -85,11 +85,13 @@ const connectRuntime = async ({
   authorizeCall = () => AUTHORITY,
   loadRuntimeHost = async () => ({ createKernelRuntimeHost }),
   handleKernelCall,
+  ...timerOptions
 }: {
   authorizeCall?: (capability: string, payload: unknown) => unknown;
   loadRuntimeHost?: () => Promise<any>;
   handleKernelCall?: (operation: string, payload: unknown, context?: unknown) => unknown;
-} = {}) => {
+} & Pick<Parameters<typeof connectOffscreenController>[0],
+  'setTimeoutFn' | 'clearTimeoutFn'> = {}) => {
   let host: ReturnType<typeof bindControllerChannel> | null = null;
   const controller = await connectOffscreenController({
     ensureOffscreen: async () => {},
@@ -97,6 +99,7 @@ const connectRuntime = async ({
     buildDigest: BUILD_DIGEST,
     authorizeCall,
     handleKernelCall,
+    ...timerOptions,
     findHost: async () => ({
       postMessage: (offer: any, transfer: Transferable[]) => {
         host = bindControllerChannel({
@@ -738,11 +741,18 @@ describe('private runtime controller channel', () => {
   test('keeps a settled model-call commit through channel timeout', async () => {
     let committed!: () => void;
     const settled = new Promise<void>((resolve) => { committed = resolve; });
+    let nextTimer = 0;
+    const timers = new Map<number, () => void>();
     const authority = {
       ...AUTHORITY, target: 'kernel-runtime-rich-relay', replayClass: 'E' as const,
     };
     const controller = await connectRuntime({
       authorizeCall: () => authority,
+      setTimeoutFn: ((callback: () => void) => {
+        timers.set(++nextTimer, callback);
+        return nextTimer;
+      }) as unknown as typeof setTimeout,
+      clearTimeoutFn: ((timer: number) => { timers.delete(timer); }) as unknown as typeof clearTimeout,
       handleKernelCall: async (operation: string) => operation === 'rich.script.admit'
         ? {
           ok: true, outcomeKnown: true,
@@ -776,8 +786,11 @@ describe('private runtime controller channel', () => {
     const pending = controller.call('runtime.dispatch', {
       operation: 'runtime.rich.relay',
       input: { route: 'script/model-call', message: {} },
-    }, { timeoutMs: 20 });
+    });
     await settled;
+    // why: expire the channel only after model-call custody settles.
+    expect(timers.size).toBe(1);
+    timers.values().next().value?.();
     await expect(pending).resolves.toMatchObject({
       ok: false, code: 'controller-call-timeout', outcomeKnown: true, retryable: false,
     });
