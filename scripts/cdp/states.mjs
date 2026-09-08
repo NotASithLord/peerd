@@ -879,16 +879,6 @@ export const STATES = [
           JSON.stringify(productionRules.scoped) === JSON.stringify(productionRules.expected),
           JSON.stringify(productionRules));
 
-        const baselineUrl = `http://127.0.0.1:${probePort}/probe?vector=user-tab`;
-        const userTab = await evalIn(ctx.page, `chrome.tabs.create({ url: ${JSON.stringify(baselineUrl)}, active: false })`, true);
-        await waitFor(() => probeRequests.length > 0, { budgetMs: 5_000, pollMs: 25 });
-        rec.check('an ordinary user tab can still reach the private probe',
-          probeRequests.length > 0 && probeConnections > 0,
-          JSON.stringify({ probeConnections, probeRequests }));
-        if (typeof userTab?.id === 'number') {
-          await evalIn(ctx.page, `chrome.tabs.remove(${userTab.id})`, true).catch(() => {});
-        }
-
         const runTrustedChild = async ({ selector, attempt, label }) => {
           await resetProbe();
           const sensitiveBefore = sensitiveChildRequests;
@@ -953,7 +943,16 @@ export const STATES = [
         ]) {
           await runTrustedChild(child);
         }
-
+        // why: measure protected children before user navigation can leave a late TCP connection.
+        const baselineUrl = `http://127.0.0.1:${probePort}/probe?vector=user-tab`;
+        const userTab = await evalIn(ctx.page, `chrome.tabs.create({ url: ${JSON.stringify(baselineUrl)}, active: false })`, true);
+        await waitFor(() => probeRequests.includes('/probe?vector=user-tab'), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('an ordinary user tab can still reach the private probe',
+          probeRequests.includes('/probe?vector=user-tab') && probeConnections > 0,
+          JSON.stringify({ probeConnections, probeRequests }));
+        if (typeof userTab?.id === 'number') {
+          await evalIn(ctx.page, `chrome.tabs.remove(${userTab.id})`, true).catch(() => {});
+        }
         await resetProbe();
         const activeBeforeOrdinary = await evalIn(ctx.page,
           'chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => tabs[0]?.id)', true);
