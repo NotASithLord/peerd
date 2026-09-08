@@ -471,9 +471,10 @@ Prefer edit_file (SEARCH/REPLACE) over js_write_file to change an existing file.
 canvas, but NO ambient network, remote assets, navigation, forms, downloads or popups.
 Bundle data and assets. Live web/API work belongs to a web actor, not this App actor.
 Build ITERATIVELY and CHUNK work across app_write_file calls; prefer edit_file for an
-existing text file. USE MITHRIL past a trivial demo: \`<script src="./mithril.js"></script>\`
-before your script, then components and m.redraw()/m.route. Cross-file ES module imports
-do not resolve; use ordered classic scripts or one self-contained module. A worker file is
+existing text file. Prefer native HTML/CSS/JS. Mithril remains available when keyed lists,
+reusable components, or app-wide redraws justify it: \`<script src="./mithril.js"></script>\`
+before your script, then components and m.redraw()/m.route. Cross-file ES module imports do
+not resolve; use ordered classic scripts or one self-contained module. A worker file is
 rewritten to a blob worker and must be self-contained. If the goal concerns a dwapp, use
 only the parent-bridge contract supplied in the message; this actor cannot obtain missing
 bridge documentation or network authority.
