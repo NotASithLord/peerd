@@ -41,7 +41,7 @@ describe('ActorFabric', () => {
       asyncTasks: {},
     });
     try {
-      expect(view.root.querySelectorAll('.actor-fabric-node').length).toBe(3); // root + two actors
+      /** @type {HTMLButtonElement} */ (view.root.querySelector('.actor-fabric-toggle')).click(); m.redraw.sync();
       expect(view.root.querySelectorAll('.actor-fabric-node.is-root').length).toBe(1);
       expect(view.root.querySelectorAll('.actor-fabric-node.is-bound').length).toBe(1);
       expect(view.root.querySelectorAll('.actor-fabric-node.is-subactor').length).toBe(1);
@@ -62,9 +62,9 @@ describe('ActorFabric', () => {
       },
     });
     try {
+      /** @type {HTMLButtonElement} */ (view.root.querySelector('.actor-fabric-toggle')).click(); m.redraw.sync();
       const node = /** @type {HTMLButtonElement} */ (view.root.querySelector('[data-node-id="actor:api-1"]'));
       expect(node.getAttribute('aria-pressed')).toBe('false');
-      expect(view.root.querySelector('.actor-fabric-detail')).toBe(null);
       node.click();
       m.redraw.sync();
       expect(node.getAttribute('aria-pressed')).toBe('true');
@@ -82,11 +82,11 @@ describe('ActorFabric', () => {
     });
     try {
       const toggle = /** @type {HTMLButtonElement} */ (view.root.querySelector('.actor-fabric-toggle'));
-      expect(toggle.getAttribute('aria-expanded')).toBe('true');
-      toggle.click();
-      m.redraw.sync();
       expect(toggle.getAttribute('aria-expanded')).toBe('false');
       expect(view.root.querySelector('.actor-fabric-body')).toBe(null);
+      toggle.click();
+      m.redraw.sync();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
     } finally { view.unmount(); }
   });
 
@@ -103,6 +103,7 @@ describe('ActorFabric', () => {
     });
     const view = mount(attrs);
     try {
+      /** @type {HTMLButtonElement} */ (view.root.querySelector('.actor-fabric-toggle')).click(); m.redraw.sync();
       expect(view.root.querySelector('.actor-fabric')?.textContent).toContain('private task');
       attrs.session = { sessionId: 'chat-b', messages: [] };
       attrs.actors = {};

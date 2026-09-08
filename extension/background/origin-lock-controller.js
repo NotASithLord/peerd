@@ -67,7 +67,7 @@ export const makeOriginLockResolver = (deps) => {
             let dropped = false;
             for (const [key, sessionId] of siteActorBindings.entries()) {
               if (sessionId !== actorSessionId) continue;
-              const gap = key.indexOf(' ');
+              const gap = key.indexOf('\u0000');
               if (gap < 0) continue;
               siteActorBindings.drop(key.slice(0, gap), key.slice(gap + 1));
               dropped = true;
