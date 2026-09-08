@@ -52,12 +52,9 @@ export const makeMeshDispatch = (deps) => {
     conversations = null,
   } = deps;
 
-  // reqId → { resolve, timer, did } for asks awaiting a reply. Lives across the
-  // single a2a_run worker call (the worker relays each op to the SW; the pending
-  // map is SW-side so a reply that lands after the op returns still resolves it).
-  // why `did`: a reply is bound to the peer the ask was SENT to — an inbound
-  // 'reply' is only honored when its authenticated mesh sender equals that did,
-  // so a third peer who guesses/observes a reqId can't forge the answer.
+  // Register before send so a fast reply cannot race the pending map.
+  // why `did`: only the authenticated target peer can resolve the ask.
+  // A third peer cannot use an observed reqId.
   /** @type {Map<string, { resolve: (v: any) => void, timer: any, did: string, convId?: string }>} */
   const pendingAsks = new Map();
   // Inbound a2a messages (ask/tell) received during a run, drained by inbox().
@@ -81,11 +78,8 @@ export const makeMeshDispatch = (deps) => {
     const reqId = mkReqId();
     const env = /** @type {A2AEnvelope} */ ({ __a2a: 1, kind: 'ask', reqId, message });
     if (convId) env.convId = convId;
-    const sent = await sendDm(did, env);
-    if (!sent?.ok) return { ok: false, error: sent?.error ?? 'ask: could not reach the peer' };
-    if (signal?.aborted) return { ok: false, error: 'a2a: aborted after send' };
     const ms = typeof timeoutMs === 'number' ? timeoutMs : defaultTimeoutMs;
-    return await new Promise((resolve) => {
+    const reply = new Promise((resolve) => {
       /** @param {any} value */
       const finish = (value) => {
         clearTimeout(timer);
@@ -99,6 +93,14 @@ export const makeMeshDispatch = (deps) => {
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) onAbort();
     });
+    Promise.resolve().then(() => pendingAsks.has(reqId)
+      ? sendDm(did, env) : { ok: true, error: undefined }).then(
+      (sent) => {
+        if (!sent?.ok) pendingAsks.get(reqId)?.resolve({ ok: false, error: sent?.error ?? 'ask: could not reach the peer' });
+      },
+      (error) => pendingAsks.get(reqId)?.resolve(Promise.reject(error)),
+    );
+    return await reply;
   };
 
   /**
@@ -186,8 +188,6 @@ export const makeMeshDispatch = (deps) => {
       // orphan reply is dropped, never resolved — but still CONSUMED, so a forged
       // reply can't wake the actor either.
       if (pending && pending.did === from) {
-        clearTimeout(pending.timer);
-        pendingAsks.delete(env.reqId);
         pending.resolve({ ok: true, from, reply: String(env.message ?? ''), ...(pending.convId ? { convId: pending.convId } : {}) });
       }
       return { consumed: true };   // a reply is plumbing, never a wake
