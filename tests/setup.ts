@@ -6,7 +6,6 @@
 // that import the webextension-polyfill (we only need the surface our
 // tests exercise — list/get/sendMessage). Add more as tests require.
 
-import { mock } from 'bun:test';
 import { plugin } from 'bun';
 import { existsSync } from 'node:fs';
 import { join, sep } from 'node:path';

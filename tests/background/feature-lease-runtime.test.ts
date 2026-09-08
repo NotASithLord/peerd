@@ -817,7 +817,6 @@ describe('production feature-lease runtime', () => {
     });
     await runtime.ready;
     expect(await runtime.acquire('controller')).toMatchObject({ ok: true });
-    const oldHostEpoch = env.host?.hostEpoch;
 
     expect(await runtime.revoke('controller')).toMatchObject({
       ok: false, code: 'feature-lease-stop-unknown', outcomeKnown: false,

@@ -43,13 +43,8 @@ const RICH_UI_GRAPH_CEILINGS = {
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';
 const previewKernelEntry = 'background/vault-kernel-preview.js';
 
-// The prior exact ratchet remains a diagnostic baseline. These are the only
-// cold inputs whose sizes changed since it: the authority hosts gained
-// terminal outcome/audit and engine-loss custody, policy gained the Plan-safe
-// page-program subset, quota gained its matching bound, a2a shed a stale
-// prompt grant, the final dead-surface cleanup narrowed the authority graph,
-// and credentialed repository egress regained its private-host guard.
-// Computing from prior input sizes makes an unrelated offsetting edit fail too.
+// why: exact byte accounting detects unrelated changes that cancel each other.
+// Record each changed cold input with its size before the change.
 const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
   baselineGraphBytes: 4_035_518,
   priorInputBytes: Object.freeze({
@@ -58,6 +53,9 @@ const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
     'background/kernel-demand-plane.js': 18_505,
     'background/kernel-turn-authority-adapter.js': 170_225,
     'background/offscreen-actor-client.js': 162_659,
+    'background/page-authority/click.js': 17_903,
+    'background/page-authority/type.js': 18_159,
+    'background/page-authority/view.js': 6_105,
     'background/vault-kernel-core.js': 20_087,
     'background/vault-kernel.js': 45_777,
     'peerd-egress/fetch/origin-credentials.js': 8_776,
@@ -68,9 +66,11 @@ const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
     'peerd-runtime/errors.js': 2_561,
     'peerd-runtime/kernel-turn-authority.js': 3_002,
     'peerd-runtime/lifecycle/engine-liveness.js': 3_997,
+    'peerd-runtime/loop/turn-authority-driver.js': 36_904,
     'peerd-runtime/permissions/policy.js': 14_942,
     'peerd-runtime/skills/registry.js': 8_780,
     'peerd-runtime/tools/prompt-wrap.js': 5_778,
+    'shared/canonical-clone-digest.js': 5_463,
     'shared/controller-kernel-quota.js': 31_640,
     'shared/kernel-feature-policy.js': 28_696,
     'shared/kernel-feature-route-inventory.js': 4_180,

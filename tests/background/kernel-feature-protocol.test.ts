@@ -4,7 +4,6 @@ import {
   connectOffscreenController,
   makeSemanticControllerClient,
 } from '../../extension/background/offscreen-controller-client.js';
-import { connectDirectController } from '../../extension/background/direct-controller-client.js';
 import { createController } from '../../extension/offscreen/controller-runtime.js';
 import { createKernelFeatureHost } from '../../extension/offscreen/kernel-feature-host.js';
 import { bindControllerChannel } from '../../extension/offscreen/controller-shell.js';

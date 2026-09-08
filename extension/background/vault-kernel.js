@@ -738,7 +738,6 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
   timeoutCode: 'kernel-demand-plane-load-timeout',
 });
 const controllerRelays = () => demandPlane?.controllerRelays() ?? null;
-const getControllerRelays = async () => (await loadDemandPlane()).getControllerRelays();
 const supportAdmitted = (/** @type {string} */ name, /** @type {any} */ message,
   /** @type {any} */ sender) => routeProvenance.get(name)?.(sender, message) === true;
 const loadSessionSupport = makeBoundedModuleLoader(async () => {

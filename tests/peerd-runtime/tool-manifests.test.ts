@@ -471,7 +471,7 @@ describe('makeToolsCommand — grammar over injected IO', () => {
   });
 
   test('full/clear: removes the manifest and audits; without a chat it just explains', async () => {
-    const { cmd, store, notes, audits, current } = harness();
+    const { cmd, store, audits, current } = harness();
     await cmd('research');
     const out = await cmd('full');
     expect('toolManifest' in out.session!).toBe(false);

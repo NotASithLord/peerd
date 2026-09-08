@@ -19,7 +19,6 @@ import {
 } from '../../extension/shared/artifact-channel.js';
 import * as artifactCodec from '../../extension/peerd-engine/export.js';
 
-const offscreenSource = readFileSync(join(EXTENSION_DIR, 'offscreen/offscreen.js'), 'utf8');
 const supervisorSource = readFileSync(
   join(EXTENSION_DIR, 'offscreen/supervisor-channels.js'), 'utf8',
 );

@@ -559,7 +559,6 @@ describe('agent loop — runUserTurn', () => {
         { name: 'a', description: '', schema: {} },
         { name: 'b', description: '', schema: {} },
       ];
-      const secondCall = false;
       ctx.toolDispatch = async (/** @type {any} */ call) => {
         calls.push(call.name);
         return { ok: true, content: `${call.name}-result`, meta: {} };

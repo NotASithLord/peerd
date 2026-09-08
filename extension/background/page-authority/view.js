@@ -52,7 +52,7 @@ export const captureOwnedTabPixelsAuthority = async (args, ctx) => {
       /** @type {{ captureTab?: (tabId: number, opts?: { format?: 'jpeg'|'png', quality?: number }) => Promise<string> } | undefined} */
       const tabs = /** @type {any} */ (ctx).tabs;
 
-      let mediaType = 'image/jpeg';
+      let mediaType;
       let data = '';
       if (pool && typeof pool.captureScreenshot === 'function') {
         // CDP binds the exact browser document before and after the protocol read.

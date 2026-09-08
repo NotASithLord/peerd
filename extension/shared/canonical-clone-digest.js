@@ -59,7 +59,7 @@ export const canonicalStructuredClone = (input, options = {}) => {
       if (Object.is(value, -0)) return ['number', '-0'];
       return ['number', value];
     }
-    if (!value || typeof value !== 'object' || seen.has(value)) {
+    if (typeof value !== 'object' || seen.has(value)) {
       throw new TypeError('authority-arguments-invalid');
     }
     if (value instanceof ArrayBuffer) {

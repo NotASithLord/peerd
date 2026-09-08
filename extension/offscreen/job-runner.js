@@ -1147,7 +1147,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
             // Dynamic import is unsupported, so this host-owned event is
             // terminal. That binds the stable policy code to the run outcome
             // even if user code tries to catch the bridge rejection.
-            if (terminalStarted) return;
             terminalStarted = true;
             const error = new UnsupportedNativeModuleImportError();
             clearTimeout(timer);
@@ -1208,7 +1207,6 @@ const _runJob = async ({ code, timeoutMs = 30000, startedAt, deadlineAt, a2a = f
           return;
         }
         if (m.type === 'done') {
-          if (terminalStarted) return;
           terminalStarted = true;
           clearTimeout(timer);
           // Stop the program from opening more relays, then drain every bridge

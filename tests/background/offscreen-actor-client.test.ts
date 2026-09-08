@@ -1,7 +1,5 @@
 import { describe, test, expect } from 'bun:test';
 import { makeOffscreenActorClient } from '../../extension/background/offscreen-actor-client.js';
-import { makeOffscreenActorChannelClient } from '../../extension/background/offscreen-actor-channel-client.js';
-import { bindActorChannel } from '../../extension/offscreen/actor-channel-host.js';
 import { DWEB_INBOUND_TOOL_NAMES } from '../../extension/peerd-runtime/actor/capability-manifest.js';
 import { nestedActorProgramCallId } from '../../extension/shared/actor-channel-protocol.js';
 import { createReadOnlyOperationGrant } from '../../extension/background/controller-turn-authority-scope.js';
