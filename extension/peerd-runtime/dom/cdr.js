@@ -245,4 +245,10 @@ export const disarmText = (raw) => {
  * @param {unknown} raw  serialized page markup / markdown
  * @returns {string}
  */
-export const disarmMarkup = (raw) => disarmText(raw).replace(HTML_COMMENT_RE, '');
+export const disarmMarkup = (raw) => disarmText(raw).replace(HTML_COMMENT_RE, ' ');
+
+// why a SPACE and not '': deletion lets the residues touch, and one
+// left-to-right pass cannot see a marker that exists only once they do -
+// `<!` + `<!-- -->` + `-- x -->` collapses to a live `<!-- x -->`, a comment
+// manufactured BY the sweep. A space cannot be part of `<!--`, so one pass
+// suffices; looping to a fixpoint is O(n^2) on staggered input, i.e. a DoS.

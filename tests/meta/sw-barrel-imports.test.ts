@@ -180,8 +180,11 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // App-native semantic APIs are document-side adapters over the existing
     // authority verbs; they must not grow this graph. Privileged Git import is
     // one small repository bootstrap verb, not a worker-side UI controller.
+    // Reviewed for the untrusted-content escaping fixes: module count and the
+    // entry file are both UNCHANGED - no dependency added, no worker growth.
+    // The 352 bytes are an escaper plus its rationale in two leaf modules.
     expect(graph.size).toBeLessThanOrEqual(458);
-    expect(bytes).toBeLessThanOrEqual(4_705_000);
+    expect(bytes).toBeLessThanOrEqual(4_706_000);
     expect(statSync(entry).size).toBeLessThanOrEqual(460_000);
   });
 
