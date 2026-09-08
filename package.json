@@ -101,6 +101,7 @@
     "web-ext": "10.6.0"
   },
   "overrides": {
+    "fast-uri": "3.1.6",
     "js-yaml": "4.3.1"
   },
   "patchedDependencies": {
