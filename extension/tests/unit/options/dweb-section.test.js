@@ -9,10 +9,21 @@ const settle = async () => {
   m.redraw.sync?.();
 };
 
-/** @param {HTMLElement} root @param {string} label */
-const button = (root, label) => /** @type {HTMLButtonElement} */ (
-  Array.from(root.querySelectorAll('button')).find((entry) => entry.textContent === label)
+// The switch carries no text - its accessible name is the assertion surface,
+// which is also what a screen reader announces. That is the point of the row:
+// the control states WHERE YOU STAND, so the test can read the same string the
+// user hears instead of an imperative like "Disable dweb".
+/** @param {HTMLElement} root */
+const networkSwitch = (root) => /** @type {HTMLButtonElement} */ (
+  root.querySelector('button[role="switch"]')
 );
+/** @param {HTMLElement} root */
+const rowState = (root) => ({
+  name: networkSwitch(root)?.getAttribute('aria-label') ?? '',
+  checked: networkSwitch(root)?.getAttribute('aria-checked') ?? '',
+  pill: root.querySelector('.set-pill')?.textContent ?? '',
+  badge: root.querySelector('.set-badge')?.textContent ?? '',
+});
 
 describe('options.dweb live-stop status', () => {
   it('reports an incomplete stop and keeps the retry explicit', async () => {
@@ -33,15 +44,24 @@ describe('options.dweb live-stop status', () => {
     };
     m.mount(root, { view: () => m(DwebSection, { state, send, loadStatus: async () => null }) });
     try {
-      button(root, 'Disable dweb').click();
+      expect(rowState(root).pill).toBe('ON');
+      networkSwitch(root).click();
       await settle();
+
+      // The setting persisted Off but the network did not stop. The row must
+      // NOT read as a clean OFF - the badge is what carries the disagreement.
       const alert = root.querySelector('[role="alert"]');
       expect(alert?.textContent).toContain('live network could not be stopped');
-      expect(button(root, 'Retry stopping dweb') instanceof HTMLButtonElement).toBe(true);
-      button(root, 'Retry stopping dweb').click();
+      expect(rowState(root).badge).toBe('STILL RUNNING');
+      expect(rowState(root).name).toContain('retry stopping');
+      expect(networkSwitch(root).disabled).toBe(false);
+
+      networkSwitch(root).click();
       await settle();
       expect(root.querySelector('[role="alert"]')).toBe(null);
-      expect(button(root, 'Enable dweb') instanceof HTMLButtonElement).toBe(true);
+      expect(rowState(root).badge).toBe('');
+      expect(rowState(root).pill).toBe('OFF');
+      expect(rowState(root).checked).toBe('false');
       expect(calls.map((call) => call.patch)).toEqual([
         { dwebEnabled: false },
         { dwebEnabled: false },

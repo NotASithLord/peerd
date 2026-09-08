@@ -16,11 +16,12 @@ const send = async (message) => {
 
 const Fixture = {
   oncreate: () => {
-    const disable = /** @type {HTMLButtonElement | null} */ (
-      Array.from(document.querySelectorAll('button'))
-        .find((button) => button.textContent === 'Disable dweb') ?? null
+    // The switch is a role=switch button with no text content, so it is found
+    // by its accessible name - the same string a screen reader would announce.
+    const toggle = /** @type {HTMLButtonElement | null} */ (
+      document.querySelector('button[role="switch"][aria-checked="true"]')
     );
-    disable?.click();
+    toggle?.click();
   },
   view: () => m(DwebSection, {
     state,
