@@ -135,19 +135,17 @@ describe('dweb custody receipt host', () => {
       type: 'custody/request', requestId: 'request:reserved',
       operationId: 'operation:reserved', operation: 'adopt', args,
     });
-    await nextTask();
+    await waitForPacket(connected.sent, 'request:reserved');
     connected.receive({
       type: 'custody/status', requestId: 'status:plain', operationId: 'operation:plain',
       operation: 'adopt', args: {},
     });
-    await nextTask();
-    expect(connected.sent.at(-1)).toMatchObject({ receipt: { state: 'missing' } });
+    expect(await waitForPacket(connected.sent, 'status:plain')).toMatchObject({ receipt: { state: 'missing' } });
     connected.receive({
       type: 'custody/status', requestId: 'status:reserved', operationId: 'operation:query',
       operation: 'adopt', args,
     });
-    await nextTask();
-    expect(connected.sent.at(-1)).toMatchObject({
+    expect(await waitForPacket(connected.sent, 'status:reserved')).toMatchObject({
       receipt: { operationId: 'operation:reserved', state: 'succeeded' },
     });
   });
@@ -299,16 +297,14 @@ describe('dweb custody receipt host', () => {
       type: 'custody/request', requestId: 'request:recoverable',
       operationId: 'operation:recoverable', operation: 'adopt', args,
     });
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    expect(connected.sent.at(-1)).toMatchObject({
+    expect(await waitForPacket(connected.sent, 'request:recoverable')).toMatchObject({
       outcomeKnown: false, phase: 'commit-dispatched',
     });
     connected.receive({
       type: 'custody/recover', requestId: 'recover:wrong',
       operationId: 'operation:recoverable', operation: 'adopt', args: { ...args, passphrase: 'wrong' },
     });
-    await nextTask();
-    expect(connected.sent.at(-1)).toMatchObject({
+    expect(await waitForPacket(connected.sent, 'recover:wrong')).toMatchObject({
       requestId: 'recover:wrong', ok: false, error: 'custody-recovery-invalid',
     });
     expect(recovered).toHaveLength(0);
@@ -316,8 +312,7 @@ describe('dweb custody receipt host', () => {
       type: 'custody/recover', requestId: 'recover:exact',
       operationId: 'operation:recoverable', operation: 'adopt', args,
     });
-    await nextTask();
-    expect(connected.sent.at(-1)).toMatchObject({ requestId: 'recover:exact', ok: true });
+    expect(await waitForPacket(connected.sent, 'recover:exact')).toMatchObject({ requestId: 'recover:exact', ok: true });
     expect(recovered).toEqual(['operation:recoverable']);
     expect(JSON.stringify(connected.sent)).not.toContain('secret');
   });
