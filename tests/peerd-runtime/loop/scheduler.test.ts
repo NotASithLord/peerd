@@ -104,6 +104,18 @@ describe('makeScheduler — registration', () => {
     expect(writes).toBe(0);
   });
 
+  it('hydrates before a cold list or cancel observes durable routines', async () => {
+    const stored = { saved: routineRecord('saved') };
+    const h = makeHarness({ kv: {
+      get: async () => stored,
+      set: async (_key, value) => { Object.assign(stored, value); },
+    } });
+
+    expect(await h.scheduler.listReady()).toMatchObject([{ id: 'saved' }]);
+    expect(await h.scheduler.removeReady('saved')).toBe(true);
+    expect(await h.scheduler.listReady()).toEqual([]);
+  });
+
   it('an abort during cold hydration prevents the add side effects', async () => {
     const releaseRead = deferred<void>();
     const controller = new AbortController();

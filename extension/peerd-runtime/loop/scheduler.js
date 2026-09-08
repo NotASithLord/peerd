@@ -154,6 +154,14 @@ export const makeScheduler = ({
 
   /** @returns {Routine[]} */
   const list = () => snapshot().map((r) => ({ ...r }));
+  // The service worker can receive a message after boot has started but before
+  // its asynchronous schedule restore finishes. Read and mutation routes use
+  // these ready forms so a cold list never hides a durable routine and a cold
+  // cancel cannot report it missing.
+  const listReady = async () => {
+    if (kv) await hydrate();
+    return list();
+  };
 
   /** Register a validated routine after durable hydration.
    * @param {{ prompt: string, every?: string, dailyAt?: string, mode?: string, signal?: AbortSignal }} req
@@ -195,6 +203,11 @@ export const makeScheduler = ({
     return existed;
   };
 
+  const removeReady = async (id) => {
+    if (kv) await hydrate();
+    return remove(id);
+  };
+
   /** @param {string} id @param {boolean} on */
   const setEnabled = (id, on) => {
     const r = routines.get(id);
@@ -205,6 +218,11 @@ export const makeScheduler = ({
     reschedule();
     emit('schedule/changed', { routines: list() });
     return true;
+  };
+
+  const setEnabledReady = async (id, on) => {
+    if (kv) await hydrate();
+    return setEnabled(id, on);
   };
 
   /** Fire due routines, or defer them while the vault is locked.
@@ -294,7 +312,7 @@ export const makeScheduler = ({
   };
 
   return Object.freeze({
-    add, remove, setEnabled, list, tick, load,
+    add, remove, removeReady, setEnabled, setEnabledReady, list, listReady, tick, load,
     describe: describeSchedule,
   });
 };
