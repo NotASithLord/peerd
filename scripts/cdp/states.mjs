@@ -352,7 +352,7 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
       return chrome.runtime.sendMessage({ type: 'import/apply', envelope });
     })()`, true);
   } finally {
-    await options.closeTarget();
+    await retirePrivateTransferPage(options);
   }
   rec.check('visual fixture App imported with a Git repository', imported?.ok && imported?.kind === 'app', JSON.stringify(imported));
   const appId = imported?.id ?? '';
