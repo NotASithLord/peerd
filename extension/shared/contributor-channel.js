@@ -46,7 +46,7 @@ export const contributorPayloadFits = (payload) => {
     if (value == null || typeof value === 'boolean') return 1;
     if (typeof value === 'number') return 8;
     if (typeof value === 'string') return encoder.encode(value).byteLength;
-    if (!value || typeof value !== 'object' || seen.has(value)) return Infinity;
+    if (typeof value !== 'object' || seen.has(value)) return Infinity;
     if (Array.isArray(value) && value.length > 10_000) return Infinity;
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== Array.prototype

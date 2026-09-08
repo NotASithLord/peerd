@@ -24,9 +24,7 @@ import {
   REPOSITORY_CHANNEL_CANCEL,
   REPOSITORY_CHANNEL_CANCELLED,
 } from '../shared/repository-channel.js';
-import {
-  backgroundScriptUrl, isServiceWorkerSender, isTrustedSender,
-} from './sender-checks.js';
+import { backgroundScriptUrl } from './sender-checks.js';
 
 const ACTOR_CHANNEL_OFFER = 'peerd/actor-channel';
 const ACTOR_CHANNEL_PROTOCOL = 1;

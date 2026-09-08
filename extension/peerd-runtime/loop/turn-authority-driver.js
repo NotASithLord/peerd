@@ -381,7 +381,6 @@ const runAgentTurn = async (/** @type {any} */ input) => {
   // raw calls for hidden/session-disabled tools without routing by tool name.
   const initialToolSurface = await refreshTools();
   const toolDescriptors = initialToolSurface.tools;
-  let lastSession = null;
   /** @type {{ messages: any[], usage: any } | null} */
   let turnSnapshot = null;
   // Turn outcome, returned so an outer driver (goal mode: loop/goal-runner.js)
@@ -538,7 +537,6 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       if (!uiConnected()) continue;
       switch (ev.type) {
         case 'state':
-          lastSession = ev.session;
           uiPorts.broadcast({ type: 'turn/state', session: ev.session });
           break;
         case 'delta':
@@ -637,7 +635,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
         );
         if (typeof trailing?.id === 'string') {
           messageId = trailing.id;
-          lastSession = await sessions.updateAssistantMessage(sessionId, messageId, {
+          const lastSession = await sessions.updateAssistantMessage(sessionId, messageId, {
             streaming: false,
             error,
             ...(typeof detail?.code === 'string' ? { errorCode: detail.code } : {}),

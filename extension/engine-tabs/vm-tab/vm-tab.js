@@ -755,7 +755,6 @@ const handleShellByte = (/** @type {string} */ text) => {
       const holdFrom = partialMarkerHoldIndex(buf);
       out += buf.slice(i, holdFrom);
       httpMarkerPending = buf.slice(holdFrom);
-      i = buf.length;
       break;
     }
     const { index: mStart, kind, marker } = found;
@@ -772,7 +771,6 @@ const handleShellByte = (/** @type {string} */ text) => {
         out += buf.slice(i, mStart);
         httpMarkerPending = pending;
       }
-      i = buf.length;
       break;
     }
     const parsed = parseMarkerLine(kind, buf.slice(mStart + marker.length, nlIdx));

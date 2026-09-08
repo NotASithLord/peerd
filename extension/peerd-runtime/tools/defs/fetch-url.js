@@ -58,7 +58,7 @@ const stripSessionHeaders = (headers) => {
   // header name (`0`) and transmit an array value the policy scanner correctly
   // treated as a malformed/non-header container.
   if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return out;
-  for (const [k, v] of Object.entries(headers ?? {})) {
+  for (const [k, v] of Object.entries(headers)) {
     if (SESSION_HEADERS.has(k.toLowerCase())) continue;
     if (typeof v === 'string') out[k] = v;
   }

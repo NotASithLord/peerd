@@ -161,7 +161,7 @@ describe('offscreen production feature-lease wiring', () => {
     const loading = new Promise<any>((resolve) => { release = resolve; });
     const channels = createServiceWorkerChannels({
       getFeatureLeaseHost: () => ({
-        isActive: () => current !== null,
+        isActive: () => true,
         ownsLease: (scope: string, candidate: unknown) =>
           scope === 'controller' && candidate === current,
       }),
@@ -193,7 +193,7 @@ describe('offscreen production feature-lease wiring', () => {
     const loading = new Promise<any>((resolve) => { release = resolve; });
     const channels = createServiceWorkerChannels({
       getFeatureLeaseHost: () => ({
-        isActive: () => current !== null,
+        isActive: () => true,
         ownsLease: (scope: string, candidate: unknown) =>
           scope === 'controller' && candidate === current,
       }),
@@ -322,7 +322,7 @@ describe('offscreen production feature-lease wiring', () => {
     let closes = 0;
     const channels = createServiceWorkerChannels({
       getFeatureLeaseHost: () => ({
-        isActive: () => current !== null,
+        isActive: () => true,
         ownsLease: (scope: string, candidate: unknown) => {
           checks += 1;
           const owned = scope === 'vault-authority'

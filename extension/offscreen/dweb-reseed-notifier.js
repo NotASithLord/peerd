@@ -96,13 +96,11 @@ export const createDwebReseedNotifier = ({
   const notify = async (/** @type {any} */ notice) => {
     cancel();
     const owner = generation;
-    /** @type {any} */
-    let result = { ok: false, error: 'dweb-reseed-unacknowledged' };
     for (let attempt = 0; ; attempt += 1) {
       if (owner !== generation || !current(notice)) {
         return { ok: false, cancelled: true, error: 'dweb-generation-retired' };
       }
-      result = await runAttempt(notice, owner);
+      const result = await runAttempt(notice, owner);
       // A partial result means the kernel completed this generation's pass.
       // Retry transport/startup failures, not permanently bad individual apps.
       if (result?.ok === true || result?.error === 'dweb-reseed-partial') return result;

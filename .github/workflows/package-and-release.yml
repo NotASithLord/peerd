@@ -723,7 +723,12 @@ jobs:
           CHROME_DEVEL_SANDBOX: /opt/google/chrome/chrome-sandbox
           FIREFOX_PATH: ${{ steps.firefox.outputs.firefox-path }}
           COLD_START_LANE: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || (github.event_name == 'pull_request' && 'pr' || 'main') }}
-        run: bun run bench:cold-sw -- --lane="$COLD_START_LANE"
+        run: |
+          # why: Chromium requires root ownership and mode 4755 for this helper.
+          sudo chown root:root "$CHROME_DEVEL_SANDBOX"
+          sudo chmod 4755 "$CHROME_DEVEL_SANDBOX"
+          stat -c '%U:%G %a %n' "$CHROME_DEVEL_SANDBOX"
+          bun run bench:cold-sw -- --lane="$COLD_START_LANE"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

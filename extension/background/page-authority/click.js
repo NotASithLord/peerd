@@ -228,7 +228,7 @@ export function clickInjected(selector, nth, walkId, expectedCount, allowedCross
   'use strict';
   /** @type {HTMLElement | null} */
   let el;
-  let matchedCount = 1;
+  let matchedCount;
   if (walkId != null) {
     // DOM-walk ref resolution: the walk (walk-injected.js) registered
     // walkId → element in this same isolated world. Element gone or

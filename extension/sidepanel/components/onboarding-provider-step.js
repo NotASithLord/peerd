@@ -165,7 +165,6 @@ export const ProviderStep = {
                   : 'Saved, but the key could not be verified.' };
               return;
             }
-            phase = 'switch';
           }
           const switched = await effect({
             type: 'settings/update', patch: { providerName: selectedRow.name, providerModel: '' },

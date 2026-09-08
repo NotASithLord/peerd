@@ -151,7 +151,7 @@ describe('post-vault feature lease coordinator', () => {
       },
       stop: (lease: any) => receipt(lease),
     };
-    const { coordinator, store } = setup({ dispatchers: hosts.dispatchers });
+    const { coordinator } = setup({ dispatchers: hosts.dispatchers });
     const abort = new AbortController();
     const running = coordinator.acquire('dweb', {
       reason: 'vault-resume', hostEpoch: 'dweb-host-a', signal: abort.signal,

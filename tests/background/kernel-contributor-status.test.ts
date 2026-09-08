@@ -12,8 +12,7 @@ import {
   acceptContributorOffer, dispatchContributorSemanticRoute,
 } from '../../extension/offscreen/semantic-routes/contributor.js';
 import {
-  CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_OFFER, CONTRIBUTOR_CHANNEL_PROTOCOL,
-  CONTRIBUTOR_CHANNEL_RESULT, parseContributorOffer,
+  CONTRIBUTOR_CHANNEL_OFFER, CONTRIBUTOR_CHANNEL_PROTOCOL, parseContributorOffer,
 } from '../../extension/shared/contributor-channel.js';
 import { emptyContributorLocalState } from '../../extension/peerd-runtime/observability/contributor-metrics.js';
 import {
