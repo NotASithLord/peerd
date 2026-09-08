@@ -360,11 +360,8 @@ export function clickInjected(selector, nth, walkId, expectedCount, allowedCross
     }
     el.dispatchEvent(new MouseEvent('mousedown', opts));
     el.dispatchEvent(new MouseEvent('mouseup',   { ...opts, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('click',     { ...opts, buttons: 0 }));
-    // Fallback: also call native click() in case the page only wires
-    // up the HTMLElement.click() activation behaviour (form submit,
-    // <a> navigation). Idempotent for handlers that already fired.
-    try { el.click(); } catch { /* swallow */ }
+    // why: one explicit event supports SVG targets and keeps center coordinates.
+    el.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 }));
     return {
       ok: true,
       clicked: walkId != null ? `walk:${walkId}` : selector,
