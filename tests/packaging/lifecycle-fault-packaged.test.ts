@@ -31,7 +31,7 @@ describe('packaged Chrome lifecycle fault lane', () => {
     expect(assertLifecycleFaultExecutionSeam(executionSources)).toBeUndefined();
     expect(worker).toContain("'lifecycle-fault/dispatch': async (message, sender)");
     expect(worker).toContain('scriptRuns.ownerFor(message.runId) !== message.ownerSessionId');
-    expect(worker).toContain('await getControllerRelays()');
+    expect(worker).toContain('await (await loadDemandPlane()).getControllerRelays()');
     expect(injectLifecycleFaultTurnBudget(source('background/kernel-turn-owner.js')))
       .toContain('const TURN_RUNTIME_LOAD_TIMEOUT_MS = 120_000;');
     expect(worker).toContain('message?.recoverOnly === true');
