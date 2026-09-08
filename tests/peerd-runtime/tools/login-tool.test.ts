@@ -9,7 +9,16 @@
 // different nodes) and never a fake synthetic click.
 
 import { describe, test, expect } from 'bun:test';
-import { loginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+import { performConfirmedOwnedLoginAuthority } from '../../../extension/background/page-authority/login.js';
+import { loginTool as controllerLoginTool } from '../../../extension/peerd-runtime/tools/defs/login.js';
+
+const loginTool = { execute: (args: any, ctx: any) => controllerLoginTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    performConfirmedOwnedLogin: () => performConfirmedOwnedLoginAuthority(args, ctx),
+  },
+}) };
+import { HOST_EFFECT_OUTCOME } from '../../../extension/background/host-effect-verdict.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
 interface Over {
@@ -29,6 +38,7 @@ interface Over {
   authorizeExcursion?: (origin: string, signal?: AbortSignal) => Promise<boolean>;
   revokeExcursion?: (origin: string, signal?: AbortSignal) => Promise<boolean>;
   tabsGet?: (id: number) => Promise<any>;
+  probeUrl?: () => string;
   abortSignal?: AbortSignal;
 }
 
@@ -56,7 +66,7 @@ const makeCtx = (over: Over = {}) => {
         // those are judged against the live resolved tab. It reads nothing back
         // into the turn and drives nothing, so it is not "page-driving" in the
         // sense the counts below pin.
-        const probe = browserProbeResult(opts, { url: `${origin}/login` });
+        const probe = browserProbeResult(opts, { url: over.probeUrl?.() ?? `${origin}/login` });
         if (probe) return probe;
         calls.execute.push(opts);
         if (fn === 'loginTargetReader') {
@@ -88,6 +98,8 @@ const makeCtx = (over: Over = {}) => {
     domRefs: over.domRefs,
     debuggerPool: over.debuggerPool,
     settings: over.settings,
+    permission: { mode: 'act', confirmActions: true },
+    readAuthorityPermission: async () => ({ mode: 'act', confirmActions: true }),
     inbound: over.inbound,
     abortSignal: over.abortSignal,
     _calls: calls,
@@ -226,6 +238,28 @@ describe('login tool — the confirm is UNCONDITIONAL', () => {
     const r = await loginTool.execute({ ref: '@e1' }, ctx);
     expect(r.ok).toBe(false);
     expect((r as any).error).toBe('login_aborted');
+    expect(r).toMatchObject({
+      performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('not-performed');
+    expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
+  });
+
+  test('Stop after the relying-site origin is durably bound remains performed', async () => {
+    const controller = new AbortController();
+    const { ctx, calls } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      abortSignal: controller.signal,
+      authorize: async () => { controller.abort(); return true; },
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r).toMatchObject({
+      ok: false, error: 'login_aborted', performed: true,
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('performed');
     expect(calls.execute.filter((o) => o.func?.name === 'clickInjected').length).toBe(0);
   });
 });
@@ -291,6 +325,10 @@ describe('login tool — SSO auto-click ONLY for a verified IdP + stable walkId'
     const r = await loginTool.execute({ ref: '@e1' }, ctx);
     expect(r.ok).toBe(false);
     expect((r as any).error).toBe('login_excursion_authority_refused');
+    expect(r).toMatchObject({
+      performed: true, outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('performed');
     expect(calls.authorizeExcursion).toEqual(['https://accounts.google.com']);
     expect(calls.execute.filter((o) => o.func?.name === 'clickInjected')).toEqual([]);
   });
@@ -305,6 +343,8 @@ describe('login tool — SSO auto-click ONLY for a verified IdP + stable walkId'
     const r = await loginTool.execute({ ref: '@e1' }, ctx);
     expect(r.ok).toBe(false);
     expect((r as any).error).toContain('login_click_failed');
+    expect(r).toMatchObject({ performed: true, outcomeKnown: false, retryable: false });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('unknown');
     expect(calls.authorizeExcursion).toEqual(['https://accounts.google.com']);
     expect(calls.revokeExcursion).toEqual(['https://accounts.google.com']);
   });
@@ -336,6 +376,8 @@ describe('login tool — post-confirm re-verification aborts on any change', () 
         },
       },
       confirm: async (p: any) => { calls.confirm.push(p); return 'yes_once'; },
+      permission: { mode: 'act', confirmActions: true },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: true }),
       authorizeSignInOrigin: async () => true,
       audit: async (e: any) => { calls.audit.push(e); },
       domRefs: walkDomRefs,
@@ -370,6 +412,8 @@ describe('login tool — post-confirm re-verification aborts on any change', () 
         },
       },
       confirm: async (p: any) => { calls.confirm.push(p); return 'yes_once'; },
+      permission: { mode: 'act', confirmActions: true },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: true }),
       authorizeSignInOrigin: async () => true,
       audit: async (e: any) => { calls.audit.push(e); },
       domRefs: walkDomRefs,
@@ -377,7 +421,77 @@ describe('login tool — post-confirm re-verification aborts on any change', () 
     const r = await loginTool.execute({ ref: '@e1' }, ctx);
     expect(r.ok).toBe(false);
     expect((r as any).error).toBe('login_affordance_changed');
+    expect(r).toMatchObject({
+      performed: true, outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('performed');
     expect(calls.click).toBe(0);
+  });
+
+  test('a target lost after durable origin binding remains performed', async () => {
+    let reads = 0;
+    const { ctx } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      tabsGet: async (id) => {
+        reads += 1;
+        if (reads === 3) throw new Error('gone');
+        return { id, url: 'https://acct.example.com/login' };
+      },
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r).toMatchObject({
+      ok: false, error: 'login_target_gone', performed: true,
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('performed');
+  });
+
+  test('an origin change after durable origin binding remains performed', async () => {
+    let bound = false;
+    let reads = 0;
+    const { ctx } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      authorize: async () => { bound = true; return true; },
+      probeUrl: () => bound
+        ? 'https://changed.example/login' : 'https://acct.example.com/login',
+      tabsGet: async (id) => {
+        reads += 1;
+        return {
+          id,
+          url: bound ? 'https://changed.example/login' : 'https://acct.example.com/login',
+        };
+      },
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(bound).toBe(true);
+    expect(reads).toBe(3);
+    expect(r).toMatchObject({
+      ok: false, error: 'login_origin_changed', performed: true,
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('performed');
+  });
+
+  test('an unproven excursion rollback after Stop is performed and unknown', async () => {
+    const controller = new AbortController();
+    const { ctx } = makeCtx({
+      descriptor: verifiedSsoDescriptor,
+      domRefs: walkDomRefs,
+      confirmAnswer: 'yes_once',
+      abortSignal: controller.signal,
+      authorizeExcursion: async () => { controller.abort(); return true; },
+      revokeExcursion: async () => false,
+    });
+    const r = await loginTool.execute({ ref: '@e1' }, ctx);
+    expect(r).toMatchObject({
+      ok: false, error: 'login_aborted', performed: true,
+      outcomeKnown: false, outcomeKind: 'host-lost', retryable: false,
+    });
+    expect(HOST_EFFECT_OUTCOME.pageMutation.fulfilled(r)).toBe('unknown');
   });
 });
 

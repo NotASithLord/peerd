@@ -87,29 +87,51 @@ export const goalContinuationPrompt = (goal, todoBlock = '') => [
  * @param {(sessionId: string) => Promise<boolean>} [deps.hasUnresolvedSideEffects]
  *   Stops autonomous continuations when an earlier Class D/E dispatch may
  *   have landed. A new user turn can verify or deliberately start fresh work.
+ * @param {(operation: () => Promise<void>) => Promise<void>} [deps.withRun]
  * @param {number} [deps.maxIterations]
  * @param {() => number} [deps.now]
  */
 export const makeGoalRunner = ({
   runTurn, onEvent = () => {}, onRunEnd = () => {}, kv, getTodoBlock,
-  hasUnresolvedSideEffects, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now,
+  hasUnresolvedSideEffects, withRun = (operation) => operation(),
+  maxIterations = GOAL_MAX_ITERATIONS, now = Date.now,
 }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
+  let persistenceQueued = 0;
+  let persistenceLane = Promise.resolve();
+
+  // why: a terminal clear must settle after every older live snapshot.
+  /** @param {()=>Promise<void>} operation */
+  const enqueuePersistence = (operation) => {
+    /** @type {Promise<void>} */
+    let running;
+    if (persistenceQueued === 0) {
+      persistenceQueued = 1;
+      try { running = Promise.resolve(operation()); }
+      catch (error) { running = Promise.reject(error); }
+    } else {
+      persistenceQueued += 1;
+      running = persistenceLane.then(operation);
+    }
+    const settled = running.finally(() => { persistenceQueued -= 1; });
+    persistenceLane = settled.catch(() => {});
+    return running;
+  };
 
   // Mirror the live (non-terminal) runs to storage. Fire-and-forget: the
   // in-memory map is authoritative within an SW lifetime; this is the seam that
   // lets resume() pick up after a restart. Best-effort — a write failure just
   // means that run won't resume, not that the live run breaks.
   const persist = () => {
-    if (!kv) return;
+    if (!kv) return Promise.resolve();
     /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
     const out = {};
     for (const [sid, r] of runs) {
       if (r.completed || r.halted) continue;
       out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt };
     }
-    Promise.resolve(kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
+    return enqueuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
   };
 
   /** @param {string} sid @returns {GoalRun | null} */
@@ -180,14 +202,14 @@ export const makeGoalRunner = ({
   /** @param {string} sid */
   const forget = async (sid) => {
     if (!kv) return;
-    try {
+    await enqueuePersistence(async () => {
       const stored = await kv.get(GOAL_RUNS_KEY);
       if (stored && typeof stored === 'object' && Object.hasOwn(stored, sid)) {
         const next = { ...stored };
         delete next[sid];
         await kv.set(GOAL_RUNS_KEY, next);
       }
-    } catch { /* best-effort — a lost write just means it may resume once more */ }
+    }).catch(() => {});
   };
 
   /**
@@ -206,8 +228,8 @@ export const makeGoalRunner = ({
   };
 
   /** @param {string} sid @param {'running'|'done'|'halted'|'capped'} phase */
-  const emit = (sid, phase) => {
-    const r = runs.get(sid);
+  const emit = (sid, phase, source = runs.get(sid)) => {
+    const r = source;
     onEvent({
       type: 'goal/state', sessionId: sid, phase,
       active: phase === 'running',
@@ -217,7 +239,7 @@ export const makeGoalRunner = ({
   };
 
   /** Run turns until complete / halted / capped, then clean up. @param {string} sid */
-  const drive = async (sid) => {
+  const driveRun = async (sid) => {
     const run = runs.get(sid);
     if (!run) return;
     // why identity check (not just isActive): a fresh start() for the SAME
@@ -290,13 +312,32 @@ export const makeGoalRunner = ({
         } else {
           const phase = run.completed ? 'done' : run.halted ? 'halted'
             : run.iteration >= maxIterations ? 'capped' : 'done';
-          emit(sid, phase);
+          await forget(sid);
+          emit(sid, phase, run);
           try { onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null }); }
           catch (e) { console.error('[goal] onRunEnd threw', e); }
           runs.delete(sid);
-          persist();  // terminal — clear it from the durable mirror
         }
       }
+    }
+  };
+  /** @param {string} sid */
+  const drive = async (sid) => {
+    let entered = false;
+    try {
+      await withRun(() => {
+        entered = true;
+        return driveRun(sid);
+      });
+    } catch (e) {
+      if (entered) throw e;
+      // why re-enter only the local lifecycle: acquisition failed before the
+      // drive could reach its terminal finally, so close the run without work.
+      const run = runs.get(sid);
+      if (!run) return;
+      run.halted = true;
+      run.lastError = /** @type {any} */ (e)?.message ?? String(e);
+      await driveRun(sid);
     }
   };
 
@@ -315,6 +356,7 @@ export const makeGoalRunner = ({
       summary: null, lastError: null, startedAt: now(),
     });
     persist();
+    emit(sessionId, 'running');
     drive(sessionId).catch((e) => {
       console.error('[goal] drive threw', e);
       halt(sessionId);
@@ -353,6 +395,7 @@ export const makeGoalRunner = ({
         completed: false, halted: false, summary: null, lastError: null,
         startedAt: Number(rec.startedAt) || now(),
       });
+      emit(sid, 'running');
       drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
       resumed += 1;
     }

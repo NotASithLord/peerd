@@ -61,4 +61,17 @@ describe('App-native actor chat route', () => {
       .toMatchObject({ ok: false, error: 'app_actor_chat_message_too_large' });
     expect(calls).toEqual([]);
   });
+
+  test('bounds a never-settling actor binding and refuses blind delivery replay', async () => {
+    const { handler, calls, sender } = makeHarness({
+      ensureAppActorBinding: async () => new Promise(() => {}),
+      timeoutMs: 5,
+    });
+    await expect(handler({
+      type: 'app/actor-chat', appId: 'app-1', message: 'change it',
+    }, sender)).resolves.toMatchObject({
+      ok: false, code: 'app-actor-chat-timeout', outcomeKnown: false, retryable: false,
+    });
+    expect(calls).toEqual([]);
+  });
 });

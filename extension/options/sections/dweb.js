@@ -24,6 +24,7 @@ export const DwebSection = {
     vnode.state.dwebBusy = false;
     vnode.state.dwebError = null;
     vnode.state.dwebStopIncomplete = false;
+    vnode.state.dwebOutcomeUnknown = false;
     if (DWEB_ENABLED) {
       const loadStatus = vnode.attrs?.loadStatus
         ?? (() => loadDweb().then((client) => client.getStatus()));
@@ -65,29 +66,40 @@ export const DwebSection = {
           disabled: ui.dwebBusy,
           onclick: async () => {
             if (ui.dwebBusy) return;
+            if (ui.dwebOutcomeUnknown) {
+              location.reload();
+              return;
+            }
             const targetEnabled = ui.dwebStopIncomplete ? false : !dwebEnabled;
             ui.dwebBusy = true;
             ui.dwebError = null;
             try {
               const reply = await send({ type: 'settings/update', patch: { dwebEnabled: targetEnabled } });
-              if (reply?.ok) {
+              if (reply?.outcomeKnown === false) {
+                ui.dwebOutcomeUnknown = true;
+                ui.dwebStopIncomplete = false;
+                ui.dwebError = 'Peerd could not confirm whether the dweb change finished. Reload settings to reconcile before changing it again.';
+              } else if (reply?.ok) {
+                ui.dwebOutcomeUnknown = false;
                 ui.dwebStopIncomplete = false;
               } else if (!targetEnabled && reply?.settings?.dwebEnabled === false) {
                 ui.dwebStopIncomplete = true;
                 ui.dwebError = 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.';
               } else {
-                ui.dwebError = `Could not update dweb: ${reply?.error ?? 'unknown error'}. Try again.`;
+                ui.dwebError = 'Could not update dweb. Try again.';
               }
             } catch {
-              ui.dwebError = ui.dwebStopIncomplete
-                ? 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.'
-                : 'Could not confirm the dweb change. Try again.';
+              ui.dwebOutcomeUnknown = true;
+              ui.dwebStopIncomplete = false;
+              ui.dwebError = 'Peerd could not confirm whether the dweb change finished. Reload settings to reconcile before changing it again.';
             } finally {
               ui.dwebBusy = false;
               m.redraw();
             }
           },
-        }, ui.dwebBusy ? '…' : ui.dwebStopIncomplete
+        }, ui.dwebBusy ? '…' : ui.dwebOutcomeUnknown
+          ? 'Reload dweb status'
+          : ui.dwebStopIncomplete
           ? 'Retry stopping dweb'
           : dwebEnabled ? 'Disable dweb' : 'Enable dweb'),
       ]),

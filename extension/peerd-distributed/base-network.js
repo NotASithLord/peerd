@@ -27,7 +27,7 @@ import { packTransportBundle } from './content/bundle.js';
 import { chunkBytes, sha256hex as sha256ChunkHex } from './content/chunk.js';
 import { swarmFetch } from './content/swarm.js';
 import { formatPeerdUri, parsePeerdUri } from './content/uri.js';
-import { utf8, toHex } from '/shared/bundle/bytes.js';
+import { concat, utf8, toHex } from '/shared/bundle/bytes.js';
 import { createLibrary } from './apps/library.js';
 import { createDiscovery } from './apps/discovery.js';
 import { buildMeta, dwappId, verifyMeta } from './apps/meta.js';
@@ -273,7 +273,41 @@ export const createBaseNetwork = async ({
     const channelFor = (did) => node.mesh.contentChannel(did);
     /** @type {string | null | undefined} */
     let publisher = null;
-    try { ({ did: publisher } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
+    let localHash = null;
+    try { ({ did: publisher, hash: localHash } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
+    // A freshly re-seeded renderer may be the only provider. Read its announced
+    // bytes directly instead of requiring a nonsensical mesh channel to self.
+    if (publisher === identity.did && localHash && node.content.isAnnounced(localHash)) {
+      const manifest = node.content.getManifest(localHash);
+      if (!manifest || await manifestHash(manifest) !== localHash) {
+        throw new Error('local manifest hash mismatch');
+      }
+      assertBundleWithinLimits(manifest);
+      const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) =>
+        node.content.getChunk(chunk.hash));
+      if (chunks.some((chunk) => !(chunk instanceof Uint8Array))) {
+        throw new Error('local bundle chunk unavailable');
+      }
+      const payload = concat(.../** @type {Uint8Array[]} */ (chunks));
+      assertBundlePayloadWithinLimits(payload, maxBundleBytes);
+      if (payload.byteLength !== manifest.size) throw new Error('local bundle size mismatch');
+      if (manifest.v === 2 && await sha256ChunkHex(payload) !== manifest.bundle.compressedHash) {
+        throw new Error('local compressed bundle hash mismatch');
+      }
+      return { manifest, payload, providers: [identity.did] };
+    }
+    if (publisher === identity.did) {
+      // why: a local generation still rebuilding its served bytes cannot fetch
+      // them from itself through mesh/DHT. Refuse before any effect so a caller
+      // may retry after the background reseed announces this exact hash.
+      throw Object.assign(new Error('local shared App bytes are not available yet'), {
+        code: 'dweb-local-content-unavailable',
+        performed: false,
+        outcomeKnown: true,
+        outcomeKind: 'pre-effect-failure',
+        retryable: true,
+      });
+    }
     const linked = node.mesh.peers().map((/** @type {{ did: string }} */ p) => p.did);
 
     // 1. Fast path: the named publisher, if we're linked to them.
@@ -373,12 +407,12 @@ export const createBaseNetwork = async ({
       // peers SEE it, and it's fast (point-to-point sends). The DHT put is the
       // durable cold-lookup copy; awaiting it (with the dialer unwired) is what made
       // share take minutes AND delayed this announce. Background, best-effort.
-      const { dwapp_id } = await discovery.announce(card);
+      const { dwapp_id, propagated } = await discovery.announce(card);
       dlog('base', `published dwapp meta "${name}" → ${dwapp_id.slice(0, 12)}…`);
       node.dht.put(card) // card IS a signed DHT item (records.js shape)
         .then((/** @type {{ stored: number }} */ { stored }) => dlog('base', `DHT put ${dwapp_id.slice(0, 8)}…: stored to ${stored} peer(s)`))
         .catch((/** @type {unknown} */ e) => dlog('base', `DHT put for ${dwapp_id.slice(0, 8)}… failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`));
-      return { dwapp_id, card };
+      return { dwapp_id, card, propagated };
     },
     /** @param {(card: any) => void} cb */
     onDwappAnnounce: (cb) => { dwappCbs.add(cb); return () => dwappCbs.delete(cb); },

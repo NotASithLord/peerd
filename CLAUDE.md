@@ -295,10 +295,12 @@ exists today:
    runs the Notebook's sealed worker in the offscreen document with no tab
    (`offscreen/job-runner.js`) — the agent's own quick compute, same
    substrate as a Notebook, different host.
-5. **`peerd-runtime`** — agent loop, tool dispatcher, and the tool
-   inventory. Registered tools are assembled from `BUILTIN_TOOLS`, clock,
-   web tools, and service-worker wiring; do not pin the live counts in
-   prose. Exposure is decided in `tools/exposure.js`: the low-level
+5. **`peerd-runtime`** — agent loop, tool dispatcher, and the controller-owned
+   tool inventory. The sealed semantic catalog in `tools/metadata/catalog.js`
+   is the model-facing source of truth; `controller-tool-ownership.js` maps
+   that same inventory to finite authority families. The service worker sees
+   only compact projections and exact operations, never a tool registry.
+   Exposure is decided in `tools/exposure.js`: the low-level
    DOM/page tools are actor-only, never on the main agent — the
    orchestrator delegates plain-language goals to per-environment
    actors (web / webvm / notebook / app) via `message_actor`
@@ -310,12 +312,7 @@ exists today:
    are invisible where `DWEB_ENABLED` is false. Plus sessions, clock
    (temporal grounding), actor orchestrator, voice (Moonshine WASM
    + Web Speech fallback).
-6. **Wire it together** in `background/service-worker.js` — message
-   routing, dependency injection, lifecycle wiring. The SW is wiring
-   plus per-route message handlers (one per RPC the side panel /
-   offscreen doc / tab pages dispatch in); the logic lives in
-   modules. If a new handler needs more than a few lines of glue,
-   push the logic INTO a module and keep the handler thin.
+6. **Wire it together** in `background/vault-kernel.js`; keep the kernel thin.
 
 ---
 
@@ -354,10 +351,9 @@ gotchas to know going in:
   is wired into a tool context only when `advancedAutomationOn()` =
   `debuggerApiAvailable()` (namespace present) AND the
   `advancedAutomationEnabled` SETTING (default ON preview/dev, OFF store;
-  Settings → Advanced). Genuinely CDP-only (correctly NOT faked):
-  `page_exec`'s `Runtime.evaluate` with `allowUnsafeEvalBlockedByCSP:
-  true` on Trusted-Types pages (Gmail/Notion/Slack), and `page_keys`'
-  trusted (`isTrusted`) input. Pool lives in
+  Settings → Advanced). The pool supplies exact-tab screenshots,
+  accessibility snapshots, framework-state inspection, node actions, and
+  site-client network capture where CDP ships. Pool lives in
   `background/debugger-pool.js`.
 - Spawned actors — depth-bounded recursion, tool
   narrowing, output cap. Real implementation at
@@ -381,9 +377,11 @@ gotchas to know going in:
   a narrowed-general toolset). The worker holds NO key, NO `chrome.*`, NO
   engine clients; its only outward edges are two SW-gated relays — the model
   call (the SW adds `getSecret`+`safeFetch`; the key never enters the worker)
-  and every tool call (the SW rebuilds the caller's instance-pinned or
-  `grantedTools`-restricted ctx and re-checks it, NEVER trusting the worker's
-  args). Chrome pins both relays to the offscreen document and a per-run grant.
+  and every tool call (the SW rebuilds the caller's instance-pinned context,
+  intersects its exact operation grant, and re-checks final args without ever
+  trusting the worker). The narrower tool-name list is semantic/model surface,
+  not host authority. Chrome pins both relays to the offscreen document and a
+  per-run grant.
   Firefox keeps the runner and relay calls inside the background page behind a
   private object-identity sender. The grant adds run identity and liveness on
   both hosts, so a replayed relay from a settled run is refused. A run-scoped,
@@ -421,7 +419,7 @@ gotchas to know going in:
   permits pure URL loads only, never clicks (enforced in `gates.js`).
 - The feature buildout — memory, edit + checkpoints, Plan/Act,
   composer (slash commands + @-refs), goal mode (autonomous loop), cost
-  telemetry, skills, review actor, and hooks — all integrated.
+  telemetry, skills, and hooks — all integrated.
   (do/get/check was CULLED: the web actor drives pages directly, so one
   delegation reaches the page instead of two.) Per-feature
   detail lives in the code under `peerd-runtime/`.
@@ -487,8 +485,7 @@ gotchas to know going in:
   `actor/a2a-api.js` (the page-api.js twin: `meshCallToOp`/
   `shapeMeshResult`, a `MESH_METHODS` table); the ask/reply CORRELATION —
   tag a request DM, await the matching reply bound to the target did, time
-  out — is `actor/a2a-dispatch.js`; the SW singleton + consent live in
-  `background/service-worker.js` (`a2aCallRoute`). We RHYME with A2A's data
+  out — is `actor/a2a-dispatch.js`. We RHYME with A2A's data
   model (`peerd-distributed/agent-card.js` — Agent Card, message shape) for
   future interop, but REJECT its HTTP+SSE transport: the mesh is the
   transport, did:key the address, the fenced inbound wake the stream. Signing

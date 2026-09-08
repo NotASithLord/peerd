@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // remember — propose a persistent memory write (AGENTS.md), gated on
 // USER CONFIRMATION.
 //
@@ -31,46 +33,7 @@
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const rememberTool = {
-  name: 'remember',
-  primitive: 'memory',
-  description: [
-    'Propose a durable write to project memory (AGENTS.md) — the user must',
-    'CONFIRM the exact diff before it saves; a rejection saves nothing.',
-    '✅ conventions, commands, decisions, gotchas to keep across sessions.',
-    '❌ chat history or transient state. Scope: "user" (global, about the',
-    'user — expand frugally), "project" (this workspace), or "subtree" (a',
-    'path within it). The body REPLACES that scope\'s doc, so read it first',
-    '(read_memory) before appending. An empty body deletes it.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      scope: {
-        type: 'string',
-        enum: ['user', 'project', 'subtree'],
-        description: 'Memory scope: user (global), project (workspace), or subtree (path within workspace).',
-      },
-      body: {
-        type: 'string',
-        description: 'Full markdown body for the scope. Replaces the existing doc. Empty string deletes it.',
-      },
-      workspace: {
-        type: 'string',
-        description: 'Workspace key for project/subtree scope (origin, vm:id, app:id). Defaults to the active tab origin.',
-      },
-      subpath: {
-        type: 'string',
-        description: 'Path within the workspace for subtree scope, e.g. "src/api".',
-      },
-    },
-    required: ['scope', 'body'],
-  },
-  sideEffect: 'write',
-  // why: memory writes touch IDB, not a web origin — the origin/egress
-  // gates have nothing to check. Return [] so they trivially pass; the
-  // real safety is the confirmation round-trip in execute().
-  origins: () => [],
+export const rememberTool = composeTool("remember", {
 
   execute: async (args, ctx) => {
     // why: ctx.memory is the opaque `Object` contract slot; narrow it to the
@@ -137,4 +100,4 @@ export const rememberTool = {
       return { ok: false, error: `remember_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

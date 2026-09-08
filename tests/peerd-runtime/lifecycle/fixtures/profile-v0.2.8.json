@@ -8,7 +8,7 @@
       "67d46d5 (#178, 2026-07-06, shipped 0.2.6) renamed SessionKind 'subagent' -> 'spawned'. Records written before it keep 'subagent' forever (see the v0.1.0 / v0.2.2 fixtures) — there is no rewrite pass.",
       "65bac25 (#210, 2026-07-15, shipped 0.2.8) added session.todos (todo/core.js TodoItem[]) and session.prewalk (loop/prewalk.js PrewalkState), plus the prewalkEnabled / enginePrewalkEnabled / prewalkExecutorModel settings; a94df66 (#216) extended prewalk to engine actors.",
       "9f9d0bc (#219, 2026-07-19) added the watchAgentTab setting.",
-      "STILL ABSENT at this version: review (419ecb6, #228, 0.3.0) and originState (1455923, #255, 0.3.0) — so a 0.2.8 review child and a 0.2.8 bound web actor both read as unmarked/unbound today, fail-closed.",
+      "STILL ABSENT at this version: originState (1455923, #255, 0.3.0), so a 0.2.8 bound web actor reads as unbound today, fail-closed.",
       "exportEnvelope still carries no `durability` block (added 70f6e42, 2026-08-05).",
       "storeVersions is null: the lifecycle store registry landed 2026-08-05, after 0.4.0."
     ]

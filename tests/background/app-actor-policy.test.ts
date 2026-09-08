@@ -14,7 +14,7 @@ const contract = {
   agent: { kind: 'bound-app', profile: 'developer', surface: 'code', runtime: ['observe'] },
 };
 
-describe('manifest-defined App actor authority identity', () => {
+describe('manifest-defined App actor owner execution identity', () => {
   test('reconnects only the same owner, App, and manifest digest', () => {
     const session = {
       kind: 'actor', actorType: 'app', parentSessionId: 'chat-a', instanceId: 'app-1',
@@ -31,21 +31,15 @@ describe('manifest-defined App actor authority identity', () => {
     expect(appActorSessionMatches(session, { ...provenance, ...authority, publisher: 'did:key:other', ownerChatId: 'chat-a', appId: 'app-1', manifestDigest: 'digest-a' })).toBe(false);
   });
 
-  test('owner authority canonicalization changes with allow, permission, or confirmation posture', () => {
+  test('owner surface posture changes only with the effective model surface', () => {
     const base = canonicalAppOwnerAuthority({
-      allow: ['app_code', 'edit_file'], permissionMode: 'act', confirmActions: true,
+      allow: ['app_code', 'edit_file'],
     });
     expect(base).toBe(canonicalAppOwnerAuthority({
-      allow: ['edit_file', 'app_code'], permissionMode: 'act', confirmActions: true,
+      allow: ['edit_file', 'app_code'],
     }));
     expect(base).not.toBe(canonicalAppOwnerAuthority({
-      allow: ['app_code'], permissionMode: 'act', confirmActions: true,
-    }));
-    expect(base).not.toBe(canonicalAppOwnerAuthority({
-      allow: ['app_code', 'edit_file'], permissionMode: 'plan', confirmActions: true,
-    }));
-    expect(base).not.toBe(canonicalAppOwnerAuthority({
-      allow: ['app_code', 'edit_file'], permissionMode: 'act', confirmActions: false,
+      allow: ['app_code'],
     }));
   });
 

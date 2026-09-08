@@ -6,14 +6,28 @@
 // suite (extension/tests/unit/peerd-runtime/dom-walk.test.js).
 
 import { describe, test, expect } from 'bun:test';
-import { snapshotTool } from '../../../extension/peerd-runtime/tools/defs/snapshot.js';
-import { clickTool, clickInjected } from '../../../extension/peerd-runtime/tools/defs/click.js';
-import { typeTool, typeInjected } from '../../../extension/peerd-runtime/tools/defs/type.js';
+import { captureOwnedAccessibilityTreeAuthority } from '../../../extension/background/page-authority/snapshot.js';
+import { clickOwnedTargetAuthority, clickInjected } from '../../../extension/background/page-authority/click.js';
+import { fillOwnedTargetAuthority, typeInjected } from '../../../extension/background/page-authority/type.js';
+import { snapshotTool as controllerSnapshotTool } from '../../../extension/peerd-runtime/tools/defs/snapshot.js';
+import { clickTool as controllerClickTool } from '../../../extension/peerd-runtime/tools/defs/click.js';
+import { typeTool as controllerTypeTool } from '../../../extension/peerd-runtime/tools/defs/type.js';
+
+const snapshotTool = { execute: (args: any, ctx: any) => controllerSnapshotTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    captureOwnedAccessibilityTree: () => captureOwnedAccessibilityTreeAuthority(args, ctx),
+  },
+}) };
+const clickTool = { execute: (args: any, ctx: any) => controllerClickTool.execute(args, {
+  ...ctx, pageAuthority: { clickOwnedTarget: () => clickOwnedTargetAuthority(args, ctx) },
+}) };
+const typeTool = { execute: (args: any, ctx: any) => controllerTypeTool.execute(args, {
+  ...ctx, pageAuthority: { fillOwnedTarget: () => fillOwnedTargetAuthority(args, ctx) },
+}) };
 import { createRefRegistry } from '../../../extension/peerd-runtime/dom/ref-registry.js';
 import {
   FORM_SUBMISSION_CODES,
-  crossOriginFormSubmissionRefusalResult,
-  formSubmissionRefusalFrom,
 } from '../../../extension/peerd-runtime/tools/browser-automation-policy.js';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 
@@ -229,36 +243,6 @@ describe('click/type — walk-ref dispatch', () => {
   });
 });
 
-describe('cross-origin form submission refusal: fixed policy receipt', () => {
-  test('the receipt is terminal, content-free, and says the effect did not run', () => {
-    const r = crossOriginFormSubmissionRefusalResult();
-    expect(r).toEqual({
-      ok: false,
-      error: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
-      content: FORM_REFUSAL_COPY,
-      structured: {
-        code: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
-        reason: 'cross_origin_form_submission',
-        outcome: 'not_run',
-        performed: false,
-        retryable: false,
-      },
-      outcomeKind: 'pre-effect-failure',
-      endTurn: true,
-    });
-    expect(JSON.stringify(r)).not.toContain('evil.example');
-  });
-
-  test('only the exact host-authored code is promoted to the terminal receipt', () => {
-    expect(formSubmissionRefusalFrom({
-      error: FORM_SUBMISSION_CODES.CROSS_ORIGIN,
-      content: 'attacker-controlled page text',
-    })).toEqual(crossOriginFormSubmissionRefusalResult());
-    expect(formSubmissionRefusalFrom({ error: 'click_failed' })).toBeNull();
-    expect(formSubmissionRefusalFrom(null)).toBeNull();
-  });
-});
-
 describe('cross-origin form submission refusal: scripting/CDP parity', () => {
   const expectTerminalFormRefusal = (r: any) => {
     expect(r.ok).toBe(false);
@@ -387,6 +371,33 @@ describe('injected bodies — walk-ref cardinality guard (real functions)', () =
       const r: any = typeInjected(null, 'hi', false, 99, null);
       expect(r.ok).toBe(false);
       expect(r.error).toContain('stale_ref');
+    });
+  });
+
+  test('typeInjected validates a select option before a hostile focus handler can run', () => {
+    let focusCalls = 0;
+    const select = {
+      isConnected: true, tagName: 'SELECT',
+      options: [{ label: 'Safe', text: 'Safe', value: 'safe' }],
+      focus: () => { focusCalls += 1; },
+    };
+    withRegistry([[3, select]], () => {
+      const result: any = typeInjected(null, 'missing', false, 3, 1);
+      expect(result).toEqual({ ok: false, error: 'no_option_matching' });
+      expect(focusCalls).toBe(0);
+    });
+  });
+
+  test('typeInjected proves typability before a hostile focus handler can run', () => {
+    let focusCalls = 0;
+    const element = {
+      isConnected: true, tagName: 'DIV', isContentEditable: false,
+      focus: () => { focusCalls += 1; },
+    };
+    withRegistry([[4, element]], () => {
+      const result: any = typeInjected(null, 'payload', false, 4, 1);
+      expect(result).toEqual({ ok: false, error: 'not_typable' });
+      expect(focusCalls).toBe(0);
     });
   });
 });

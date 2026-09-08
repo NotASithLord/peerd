@@ -14,16 +14,61 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT, parseArgs } from './lib.ts';
+import {
+  CONTROLLER_BUILD_STAMP_MODULES,
+} from './controller-build-identity.ts';
 
 const run = (label: string, cmd: string, args: string[]) => {
   console.log(`\n── preflight: ${label} ──`);
   execFileSync(cmd, args, { cwd: REPO_ROOT, stdio: 'inherit' });
 };
 
-const main = () => {
+type SyncRunner = typeof execFileSync;
+
+export const PREFLIGHT_GENERATED_FILES = Object.freeze([
+  'extension/manifest.json', 'extension/shared/channel-config.js',
+  ...CONTROLLER_BUILD_STAMP_MODULES.map((name) => `extension/shared/${name}`),
+  'badges/tscheck.json',
+  // The supply-chain badges ride gen:dev too: pure reads of package.json,
+  // vendor.lock.json and the workflows, so they drift exactly like a manifest.
+  'badges/vendor-integrity.json', 'badges/actions-pinned.json',
+  'badges/no-build.json',
+]);
+
+export const regenerateDevIdentity = async (
+  generate: () => void = () => run(
+    'regenerate dev generated files + controller identity', 'bun', ['run', 'gen:dev'],
+  ),
+) => {
+  // gen:dev owns build-config generation and both identity stamps. Keeping
+  // preflight on that one path prevents CI, E2E, and local drift checks from
+  // observing different generated trees.
+  generate();
+};
+
+/** One pathspec-batched diff preserves the old any-file-drift verdict. */
+export const generatedFilesDifferFromHead = (
+  root: string,
+  files: string[],
+  runner: SyncRunner = execFileSync,
+): boolean => {
+  if (files.length === 0) return false;
+  try {
+    runner('git', ['diff', '--quiet', '--exit-code', 'HEAD', '--', ...files], {
+      cwd: root,
+      stdio: 'ignore',
+    });
+    return false;
+  } catch {
+    // Exit 1 means drift; command/path/repository errors also stay fail-closed.
+    return true;
+  }
+};
+
+const main = async () => {
   const args = parseArgs(process.argv.slice(2));
 
-  // Drift check. gen:dev rewrites the two generated files, so snapshot
+  // Drift check. gen:dev rewrites the generated files, so snapshot
   // their current bytes first: if they were already modified in the
   // working tree (e.g. a regen the user intends to commit), we must not
   // silently clobber that — we compare the freshly-generated output to
@@ -33,28 +78,19 @@ const main = () => {
   // badge changes whenever the tscheck coverage denominator moves (it did when
   // the web-shell template joined the scan), and preflight passing while CI fails on badge
   // drift is exactly the out-of-sync trap this mirror exists to prevent.
-  const genFiles = [
-    'extension/manifest.json', 'extension/shared/channel-config.js', 'badges/tscheck.json',
-    // The supply-chain badges ride gen:dev too: pure reads of package.json,
-    // vendor.lock.json and the workflows, so they drift exactly like a manifest.
-    'badges/vendor-integrity.json', 'badges/actions-pinned.json',
-    'badges/no-build.json',
-  ].map((p) => join(REPO_ROOT, p));
+  // why derive both identity leaves from the stamper: preflight must restore
+  // every file it mutates, and drift in either copy must fail the same gate.
+  const genFiles = PREFLIGHT_GENERATED_FILES.map((p) => join(REPO_ROOT, p));
   const before = genFiles.map((f) => readFileSync(f));
-  run('regenerate dev manifest + channel-config', 'bun', ['run', 'gen:dev']);
-  let drift = false;
-  for (const f of genFiles) {
-    try {
-      execFileSync('git', ['diff', '--quiet', '--exit-code', 'HEAD', '--', f], { cwd: REPO_ROOT });
-    } catch { drift = true; }
-  }
+  await regenerateDevIdentity();
+  const drift = generatedFilesDifferFromHead(REPO_ROOT, genFiles);
   // Restore the pre-run bytes (whatever they were) — the generated output
   // we just wrote was only needed for the comparison above.
   genFiles.forEach((f, i) => writeFileSync(f, before[i]));
   if (drift) {
     console.error(
       '\npreflight FAILED: a generated file (extension/manifest.json, '
-      + 'shared/channel-config.js, or badges/tscheck.json) differs from '
+      + 'shared/channel-config.js, a controller identity leaf, or badges/tscheck.json) differs from '
       + '`bun run gen:dev` output vs HEAD. Run `bun run gen:dev` and commit '
       + 'the regenerated files (sources: manifests/*.json, '
       + 'packaging/default-settings.mjs, the // @ts-check coverage scan).',
@@ -65,7 +101,8 @@ const main = () => {
 
   run('eslint', 'npm', ['run', 'lint']);
   run('typecheck (bun suite + // @ts-check extension files)', 'bun', ['run', 'typecheck']);
-  run('typecheck coverage floor', 'bun', ['run', 'check:tscheck']);
+  run('complete typecheck coverage', 'bun', ['run', 'check:tscheck']);
+  run('cold-entry graph, policy, and artifact ratchets', 'bun', ['run', 'check:cold-static']);
   run('dweb boundary', 'bun', ['run', 'check:boundary']);
   run('packaged import graph (no pruned-but-imported file)', 'bun', ['run', 'check:imports']);
   // MUST follow check:imports, which is what stages the four channel×browser
@@ -121,4 +158,4 @@ const main = () => {
   console.log('\npreflight OK');
 };
 
-main();
+if (import.meta.main) await main();

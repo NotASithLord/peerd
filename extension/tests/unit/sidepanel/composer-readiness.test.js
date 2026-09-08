@@ -79,4 +79,40 @@ describe('session-aware composer readiness', () => {
       localStorage.removeItem('peerd.draft.composer-missing-openai');
     }
   });
+
+  it('keeps a startup draft editable while blocking send with honest recovery copy', async () => {
+    const mounted = mountInput({
+      session: { sessionId: 'composer-controller-startup', provider: 'openai' },
+      providers: { current: 'openai', hasKey: true, model: 'gpt-5' },
+      composer: {
+        provider: 'openai', model: 'gpt-5', canSend: false, reason: 'controller-not-ready',
+      },
+      capabilities: {},
+    });
+    try {
+      await settle();
+      const textarea = mounted.root.querySelector('textarea');
+      if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('textarea missing');
+      expect(textarea.disabled).toBe(false);
+      expect(textarea.placeholder).toBe('Starting up. Try again in a moment.');
+      textarea.value = 'keep this startup draft';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      m.redraw.sync?.();
+      expect(mounted.root.querySelector('#composer-readiness-note')?.textContent)
+        .toBe('Starting up. Try again in a moment.');
+      const sendButton = /** @type {HTMLButtonElement|null} */ (
+        mounted.root.querySelector('button.send-btn')
+      );
+      expect(sendButton?.disabled).toBe(true);
+      mounted.root.querySelector('form')?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await settle();
+      expect(mounted.sent.some((msg) => msg.type === 'agent/send')).toBe(false);
+      expect(textarea.value).toBe('keep this startup draft');
+    } finally {
+      mounted.unmount();
+      localStorage.removeItem('peerd.draft.composer-controller-startup');
+    }
+  });
 });

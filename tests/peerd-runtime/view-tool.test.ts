@@ -5,7 +5,14 @@
 // never falls back to captureVisibleTab.
 
 import { describe, test, expect } from 'bun:test';
-import { viewTool } from '../../extension/peerd-runtime/tools/web/view.js';
+import { captureOwnedTabPixelsAuthority } from '../../extension/background/page-authority/view.js';
+import { viewTool as controllerViewTool } from '../../extension/peerd-runtime/tools/web/view.js';
+import { CONTROLLER_PAGE_IMAGE_MAX_BASE64_CHARS } from '../../extension/shared/controller-kernel-quota.js';
+
+const viewTool = { execute: (args: any, ctx: any) => controllerViewTool.execute(args, {
+  ...ctx,
+  pageAuthority: { captureOwnedTabPixels: () => captureOwnedTabPixelsAuthority(args, ctx) },
+}) };
 import {
   browserProbeResult,
   TEST_DOCUMENT_ID,
@@ -79,6 +86,25 @@ describe('view tool — captures the gated tab, not the foreground tab', () => {
     expect(r.ok).toBe(true);
     expect(r.images[0].data).toBe('Zm9v');
     expect(captured).toEqual([7, { format: 'jpeg', quality: 70 }]);
+  });
+
+  test('admits the exact encoded transport boundary and refuses one byte over it', async () => {
+    let data = 'A'.repeat(CONTROLLER_PAGE_IMAGE_MAX_BASE64_CHARS);
+    const ctx = baseCtx({
+      debuggerPool: {
+        captureScreenshot: async () => ({ data, mediaType: 'image/jpeg' }),
+      },
+    });
+    const boundary: any = await captureOwnedTabPixelsAuthority({}, ctx);
+    expect(boundary.ok).toBe(true);
+    expect(boundary.receipt.data.length).toBe(CONTROLLER_PAGE_IMAGE_MAX_BASE64_CHARS);
+
+    data += 'A';
+    const oversized: any = await captureOwnedTabPixelsAuthority({}, ctx);
+    expect(oversized).toEqual({ ok: false, error: 'view_screenshot_too_large' });
+    const presented: any = await viewTool.execute({}, ctx);
+    expect(presented).toMatchObject({ ok: false, error: 'view_screenshot_too_large' });
+    expect(presented.content).toContain('Zoom out');
   });
 
   test('Firefox discards pixels when the exact document changes during capture', async () => {

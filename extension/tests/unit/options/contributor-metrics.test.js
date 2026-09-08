@@ -30,7 +30,7 @@ describe('Contributor Metrics human UI', () => {
       return {
         ok: true,
         status: {
-          enabled, disclosureVersion: 1, diagnostic: null,
+          enabled, disclosureVersion: 1, schemaVersion: 1, diagnostic: null,
           rowCount: 0, bytes: enabled ? exactBytes : null,
         },
       };
@@ -92,6 +92,47 @@ describe('Contributor Metrics human UI', () => {
       expect(calls.map((call) => call.type)).toEqual([
         'contributor/status', 'contributor/disable',
       ]);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  it('keeps an unknown enable explicit through status refresh until the user retries', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    let statusCalls = 0;
+    let enableCalls = 0;
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'contributor/status') {
+        statusCalls += 1;
+        return { ok: true,
+          status: { enabled: false, disclosureVersion: 1, diagnostic: null } };
+      }
+      enableCalls += 1;
+      if (enableCalls > 1) return { ok: true,
+        status: { enabled: true, disclosureVersion: 1, diagnostic: null, bytes: '{}' } };
+      return {
+        ok: false, error: 'raw-private-generation',
+        outcomeKnown: false, outcomeKind: 'transport-lost',
+      };
+    };
+    m.mount(root, { view: () => m(ContributorMetricsSection, { send }) });
+    try {
+      await settle();
+      expect(root.textContent).toContain('payload schema version unknown');
+      button(root, 'Enable Contributor Metrics').click();
+      await settle();
+      await settle();
+      expect(statusCalls).toBe(2);
+      expect(root.textContent).toContain('could not confirm whether enabling Contributor Metrics finished');
+      expect(root.textContent?.includes('raw-private-generation')).toBe(false);
+      expect(button(root, 'Retry enable').disabled).toBe(false);
+      button(root, 'Retry enable').click();
+      await settle();
+      expect(enableCalls).toBe(2);
+      expect(root.textContent).toContain('Enabled locally');
+      expect(root.textContent?.includes('could not confirm whether enabling')).toBe(false);
     } finally {
       m.mount(root, null);
       root.remove();

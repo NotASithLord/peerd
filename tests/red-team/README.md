@@ -78,8 +78,8 @@ bun test ./tests/red-team        # the CI gate. Every probe must be blocked.
 bun run red-team:report          # regenerate docs/security/RED-TEAM-RESULTS.md
 ```
 
-The report prints a per-scenario summary and exits non-zero if any probe leaked, so
-it also works as a stricter local check.
+The report distinguishes fully held scenarios from partial coverage with named
+platform residuals, and exits non-zero if any scoped probe leaked.
 
 ## Adding a scenario
 

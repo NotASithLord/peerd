@@ -18,8 +18,11 @@ import {
   PrfCancelledError,
   PrfNotSupportedError,
   PrfUnsupportedByAuthenticatorError,
-} from '/peerd-egress/index.js';
+} from '/peerd-egress/ui.js';
 import { bytesToBase64 } from '/shared/util.js';
+import {
+  isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,
+} from '../mutation-custody.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 
@@ -27,6 +30,7 @@ export const VaultSection = {
   /** @param {{ state: any }} vnode */
   oninit(vnode) {
     vnode.state.prfBusy = false;
+    vnode.state.prfUncertain = false;
     vnode.state.prfMessage = null;
     vnode.state.prfError = null;
     // Capability probe → enrollment plan (pure planEnrollment in
@@ -41,8 +45,12 @@ export const VaultSection = {
     vnode.state.recoveryPass = '';
     vnode.state.recoveryConfirm = '';
     vnode.state.recoveryBusy = false;
+    vnode.state.recoveryUncertain = false;
     vnode.state.recoveryMessage = null;
     vnode.state.recoveryError = null;
+    vnode.state.autoLockBusy = false;
+    vnode.state.autoLockUncertain = false;
+    vnode.state.autoLockError = null;
   },
 
   /** @param {{ attrs: { state: any, send: Send }, state: any }} vnode */
@@ -63,13 +71,15 @@ export const VaultSection = {
     // flavor: 'platform' | 'security-key' | undefined (browser's picker).
     /** @param {import('/peerd-egress/vault/enroll-options.js').EnrollFlavor} [flavor] */
     const enrollPasskey = async (flavor) => {
-      if (ui.prfBusy) return;
+      if (ui.prfBusy || ui.prfUncertain) return;
       ui.prfBusy = true;
       ui.prfError = null;
       ui.prfMessage = null;
+      let commitDispatched = false;
       try {
         const { credentialId, prfSalt, prfOutput, transports } =
           await enrollWithPrf({ flavor });
+        commitDispatched = true;
         const reply = await send({
           type: 'vault/enrollPrf',
           credentialId: bytesToBase64(credentialId),
@@ -78,14 +88,20 @@ export const VaultSection = {
           transports,
         });
         if (reply?.ok) {
+          ui.prfUncertain = false;
           ui.prfMessage = 'Passkey added. You can now unlock with a tap.';
         } else {
-          ui.prfError = reply?.error === 'locked'
-            ? 'Vault is locked — unlock in the peerd panel first.'
-            : reply?.error ?? 'Could not add the passkey.';
+          ui.prfUncertain = isUnknownMutationOutcome(reply);
+          ui.prfError = mutationFailureCopy(reply, {
+            action: 'adding the passkey', fallback: 'The passkey could not be added.',
+            messages: { locked: 'Vault is locked; unlock in the peerd panel first.' },
+          });
         }
       } catch (e) {
-        if (e instanceof PrfCancelledError) {
+        if (commitDispatched) {
+          ui.prfUncertain = true;
+          ui.prfError = unknownMutationCopy('adding the passkey');
+        } else if (e instanceof PrfCancelledError) {
           // User cancelled — silent.
         } else if (e instanceof PrfUnsupportedByAuthenticatorError) {
           // PRF honesty: the ceremony worked but THIS authenticator can't
@@ -106,26 +122,36 @@ export const VaultSection = {
     };
 
     const disableTouchId = async () => {
-      if (ui.prfBusy) return;
+      if (ui.prfBusy || ui.prfUncertain) return;
       ui.prfBusy = true;
       ui.prfError = null;
       ui.prfMessage = null;
-      const reply = await send({ type: 'vault/disablePrf' });
-      ui.prfBusy = false;
-      if (reply?.ok) {
-        ui.prfMessage = 'Passkey removed. Your recovery passphrase is now required to unlock.';
-      } else if (reply?.error === 'recovery-not-set') {
-        ui.prfError = 'Set a recovery passphrase first — it would be your only way back in.';
-      } else {
-        ui.prfError = reply?.error ?? 'Could not remove the passkey.';
+      try {
+        let reply;
+        try { reply = await send({ type: 'vault/disablePrf' }); }
+        catch { reply = { ok: false, outcomeKnown: false }; }
+        if (reply?.ok) {
+          ui.prfUncertain = false;
+          ui.prfMessage = 'Passkey removed. Your recovery passphrase is now required to unlock.';
+        } else {
+          ui.prfUncertain = isUnknownMutationOutcome(reply);
+          ui.prfError = mutationFailureCopy(reply, {
+            action: 'removing the passkey', fallback: 'The passkey could not be removed.',
+            messages: {
+              'recovery-not-set': 'Set a recovery passphrase first; it would be your only way back in.',
+            },
+          });
+        }
+      } finally {
+        ui.prfBusy = false;
+        m.redraw();
       }
-      m.redraw();
     };
 
     /** @param {Event} [e] */
     const setRecovery = async (e) => {
       e?.preventDefault?.();
-      if (ui.recoveryBusy) return;
+      if (ui.recoveryBusy || ui.recoveryUncertain) return;
       ui.recoveryError = null;
       ui.recoveryMessage = null;
       if (ui.recoveryPass.length < 8) {
@@ -137,20 +163,30 @@ export const VaultSection = {
         return;
       }
       ui.recoveryBusy = true;
-      const reply = await send({ type: 'vault/setRecoveryPassphrase', passphrase: ui.recoveryPass });
-      ui.recoveryBusy = false;
-      if (reply?.ok) {
-        ui.recoveryPass = '';
-        ui.recoveryConfirm = '';
-        ui.recoveryMessage = hasRecovery
-          ? 'Recovery passphrase updated.'
-          : 'Recovery passphrase set. Keep it somewhere safe — we can\'t recover it for you.';
-      } else {
-        ui.recoveryError = reply?.error === 'locked'
-          ? 'Vault is locked — unlock in the peerd panel first.'
-          : reply?.error ?? 'Could not save the recovery passphrase.';
+      try {
+        let reply;
+        try {
+          reply = await send({ type: 'vault/setRecoveryPassphrase', passphrase: ui.recoveryPass });
+        } catch { reply = { ok: false, outcomeKnown: false }; }
+        if (reply?.ok) {
+          ui.recoveryUncertain = false;
+          ui.recoveryPass = '';
+          ui.recoveryConfirm = '';
+          ui.recoveryMessage = hasRecovery
+            ? 'Recovery passphrase updated.'
+            : 'Recovery passphrase set. Keep it somewhere safe; we can\'t recover it for you.';
+        } else {
+          ui.recoveryUncertain = isUnknownMutationOutcome(reply);
+          ui.recoveryError = mutationFailureCopy(reply, {
+            action: 'saving the recovery passphrase',
+            fallback: 'The recovery passphrase could not be saved.',
+            messages: { locked: 'Vault is locked; unlock in the peerd panel first.' },
+          });
+        }
+      } finally {
+        ui.recoveryBusy = false;
+        m.redraw();
       }
-      m.redraw();
     };
 
     return m('div', [
@@ -175,7 +211,7 @@ export const VaultSection = {
           // vault would be unrecoverable. The SW enforces this too.
           ? m('button.secondary', {
               type: 'button',
-              disabled: ui.prfBusy || !hasRecovery,
+              disabled: ui.prfBusy || ui.prfUncertain || !hasRecovery,
               title: hasRecovery ? '' : 'Set a recovery passphrase first',
               onclick: disableTouchId,
             }, ui.prfBusy ? '…' : 'Remove passkey')
@@ -190,12 +226,12 @@ export const VaultSection = {
               ? prfPlan.paths.map((flavor, i) =>
                   m(i === 0 ? 'button' : 'button.secondary', {
                     type: 'button',
-                    disabled: ui.prfBusy,
+                    disabled: ui.prfBusy || ui.prfUncertain,
                     onclick: () => enrollPasskey(flavor),
                   }, ui.prfBusy ? '…'
                     : flavor === 'platform' ? `Add ${platformLabel ?? 'a passkey (this device)'}`
                     : 'Add a security key (YubiKey or other FIDO2 key)'))
-              : [m('button', { type: 'button', disabled: ui.prfBusy, onclick: () => enrollPasskey(undefined) },
+              : [m('button', { type: 'button', disabled: ui.prfBusy || ui.prfUncertain, onclick: () => enrollPasskey(undefined) },
                   ui.prfBusy ? '…' : 'Add passkey')])
       ) : null,
       // why "recent" and no version trivia: PRF via Windows Hello
@@ -221,7 +257,7 @@ export const VaultSection = {
             type: 'password',
             autocomplete: 'new-password',
             value: ui.recoveryPass,
-            disabled: ui.recoveryBusy,
+            disabled: ui.recoveryBusy || ui.recoveryUncertain,
             oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.recoveryPass = e.target.value; },
           }),
         ]),
@@ -232,12 +268,12 @@ export const VaultSection = {
             type: 'password',
             autocomplete: 'new-password',
             value: ui.recoveryConfirm,
-            disabled: ui.recoveryBusy,
+            disabled: ui.recoveryBusy || ui.recoveryUncertain,
             oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.recoveryConfirm = e.target.value; },
           }),
         ]),
         m('div', { style: 'display:flex; gap:8px; align-items:center;' }, [
-          m('button', { type: 'submit', disabled: ui.recoveryBusy },
+          m('button', { type: 'submit', disabled: ui.recoveryBusy || ui.recoveryUncertain },
             ui.recoveryBusy ? '…' : hasRecovery ? 'Update recovery passphrase' : 'Set recovery passphrase'),
         ]),
         ui.recoveryError   ? m('p.error', ui.recoveryError) : null,
@@ -251,10 +287,31 @@ export const VaultSection = {
         m('label', { for: 'autolock' }, 'Lock when idle for'),
         m('select', {
           id: 'autolock',
+          disabled: ui.autoLockBusy || ui.autoLockUncertain,
           value: String(state.settings?.vaultAutoLockMs ?? 2700000),
           onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
-            await send({ type: 'settings/update', patch: { vaultAutoLockMs: Number(e.target.value) } });
-            m.redraw();
+            if (ui.autoLockBusy || ui.autoLockUncertain) return;
+            ui.autoLockBusy = true;
+            ui.autoLockError = null;
+            try {
+              let reply;
+              try {
+                reply = await send({
+                  type: 'settings/update', patch: { vaultAutoLockMs: Number(e.target.value) },
+                });
+              } catch { reply = { ok: false, outcomeKnown: false }; }
+              if (reply?.ok) ui.autoLockUncertain = false;
+              else {
+                ui.autoLockUncertain = isUnknownMutationOutcome(reply);
+                ui.autoLockError = mutationFailureCopy(reply, {
+                  action: 'changing the auto-lock policy',
+                  fallback: 'The auto-lock policy could not be changed.',
+                });
+              }
+            } finally {
+              ui.autoLockBusy = false;
+              m.redraw();
+            }
           },
         }, [
           [60000, '1 minute'],
@@ -266,6 +323,7 @@ export const VaultSection = {
           [0, 'Never'],
         ].map(([ms, label]) => m('option', { value: String(ms) }, label))),
       ]),
+      ui.autoLockError ? m('p.error', ui.autoLockError) : null,
     ]);
   },
 };

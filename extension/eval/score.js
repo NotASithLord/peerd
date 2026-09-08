@@ -190,7 +190,7 @@ export const compare = (before, after) => {
 // Read-ish tools whose repeat-on-the-same-target is the truncation-reread
 // signal. A HEURISTIC allowlist — it drifts as tools are added; a read tool
 // missing here is a false NEGATIVE (undercounts), never a false positive.
-const READ_TOOLS = new Set(['read_file', 'read_memory', 'fetch_url', 'read_web_cache', 'read_state']);
+const READ_TOOLS = new Set(['read_file', 'read_memory', 'fetch_url', 'read_result', 'read_state']);
 // Arg keys tried, in order, as a read's "primary target" (the thing re-read).
 const PRIMARY_ARG_KEYS = ['path', 'url', 'file', 'target', 'query', 'id', 'handle'];
 

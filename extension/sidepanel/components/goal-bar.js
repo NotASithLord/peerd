@@ -10,6 +10,7 @@
 // Calm + monochrome per the brand rule; the spinning orb is the only color.
 
 import m from '/vendor/mithril/mithril.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 
 /** @typedef {(msg: object) => Promise<any>} Send */
 /** @typedef {{ active: boolean, iteration: number, maxIterations: number, goal: string } | null | undefined} GoalState */
@@ -18,7 +19,7 @@ export const GoalBar = {
   /** @param {{ attrs: { goal?: GoalState, send: Send } }} vnode */
   view: ({ attrs: { goal, send } }) => {
     if (!goal || !goal.active) return null;
-    const stop = () => send({ type: 'agent/stop' });
+    const stop = () => settleUiEffect(send({ type: 'agent/stop' }));
     const turns = `turn ${goal.iteration}${goal.maxIterations ? ` / ${goal.maxIterations}` : ''}`;
     return m('.goal-bar', { role: 'status', 'aria-live': 'polite' }, [
       m('span.peerd-spinner.peerd-spinner--sm', { 'aria-hidden': 'true' }),

@@ -1,6 +1,6 @@
 // @ts-check
-// Track CDP execution contexts by tab so page_exec can select the checked
-// main document instead of evaluating against whichever context is current.
+// Track CDP execution contexts by tab so exact document-bound operations use
+// the checked main document instead of whichever context is current.
 
 export const createRuntimeContextRegistry = () => {
   /** @type {Map<number, Map<number, { origin: string, frameId: string, isDefault: boolean }>>} */

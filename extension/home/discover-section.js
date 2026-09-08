@@ -55,6 +55,8 @@ export const DiscoverSection = () => {
   const busy = {};         // dwapp_id -> 'installing' | 'installed' | <error string>
   /** @type {Record<string, string>} */
   const notices = {};      // committed success warnings that still need user attention
+  /** @type {Map<string, {action:'install'|'update', versionId:string|null, seq:number|null, uri:string|null}>} */
+  const unconfirmed = new Map(); // exact Class-E targets awaiting catalog reconciliation
   /** @type {Record<string, string | null>} */
   const installedId = {};  // dwapp_id -> the local app id created by THIS session's install
   /** @type {string | null} */
@@ -63,6 +65,12 @@ export const DiscoverSection = () => {
   let installedByUri = new Map(); // peerd:// uri -> local app id, for apps already in the Library
   /** @type {Map<string, { appId: string, version_id: string | null, seq: number }>} */
   let installedByDwappId = new Map(); // dwapp_id -> { appId, version_id, seq } — for version compare
+  /** @type {Promise<boolean> | null} */
+  let localInFlight = null;
+  /** @type {Promise<boolean> | null} */
+  let refreshInFlight = null;
+  let refreshEpoch = 0;
+  let appliedRefreshEpoch = 0;
 
   // Cross-reference the local side so Discover doesn't offer to "install" what's
   // already here (or what WE published) AND can tell an installed app apart from a
@@ -70,32 +78,96 @@ export const DiscoverSection = () => {
   // metadata, refreshed alongside the heard list. Best-effort — a failure just
   // falls back to the old "everything installable" view.
   /** @param {Send} send */
-  const loadLocal = async (send) => {
-    try {
+  const loadLocal = (send) => {
+    if (localInFlight) return localInFlight;
+    localInFlight = (async () => {
+      try {
       if (!myDid) { const s = await send({ type: 'dweb/base/status' }); if (s?.did) myDid = s.did; }
       const list = await send({ type: 'apps/list' });
+      if (!list?.ok || !Array.isArray(list.apps)) throw new Error('app-catalog-unavailable');
       /** @type {Map<string, string>} */
       const byUri = new Map();
       /** @type {Map<string, { appId: string, version_id: string | null, seq: number }>} */
       const byId = new Map();
-      for (const a of (list?.apps ?? [])) {
+      for (const a of list.apps) {
         if (a?.dweb?.uri) byUri.set(a.dweb.uri, a.id);
         if (a?.dweb?.dwapp_id) byId.set(a.dweb.dwapp_id, { appId: a.id, version_id: a.dweb.version_id ?? null, seq: a.dweb.seq ?? 0 });
       }
       installedByUri = byUri;
       installedByDwappId = byId;
-    } catch { /* best-effort — leave prior values */ }
+      for (const [id, target] of unconfirmed) {
+        const local = byId.get(id);
+        const identityMatches = !!local
+          && (target.versionId === null || local.version_id === target.versionId)
+          && (target.seq === null || local.seq >= target.seq);
+        const uriOnlyMatches = target.action === 'install' && target.versionId === null
+          && target.seq === null && !!target.uri && !!byUri.get(target.uri);
+        if (identityMatches || uriOnlyMatches) {
+          installedId[id] = local?.appId ?? /** @type {string} */ (byUri.get(/** @type {string} */ (target.uri)));
+          busy[id] = 'installed';
+          unconfirmed.delete(id);
+        }
+        // Absence is not a causal receipt: the original install/update send
+        // may still be alive after the UI deadline and can commit later. Keep
+        // the effect fenced until the exact App identity appears. Re-enabling
+        // on an empty poll can mint duplicate installs with fresh App ids.
+      }
+      return true;
+      } catch { return false; /* best effort; leave prior values */ }
+      finally { localInFlight = null; }
+    })();
+    return localInFlight;
+  };
+
+  /** @param {string} id @param {'install'|'update'} action @param {DwebApp} app */
+  const markUnknown = (id, action, app) => {
+    unconfirmed.set(id, {
+      action,
+      versionId: typeof app.version_id === 'string' ? app.version_id : null,
+      seq: Number.isSafeInteger(app.seq) && /** @type {number} */ (app.seq) >= 0
+        ? /** @type {number} */ (app.seq) : null,
+      uri: typeof app.uri === 'string' ? app.uri : null,
+    });
+    busy[id] = `Peerd could not confirm whether the ${action} finished. Refresh to reconcile before trying again.`;
+  };
+
+  /** @param {string} id @param {'install'|'update'} action @param {DwebApp} app @param {unknown} result */
+  const markFailure = (id, action, app, result) => {
+    if (/** @type {{outcomeKnown?:boolean}} */ (result)?.outcomeKnown === false) {
+      markUnknown(id, action, app);
+      return;
+    }
+    unconfirmed.delete(id);
+    busy[id] = `Peerd could not ${action} this App. Try again.`;
   };
 
   /** @param {Send} send */
-  const refresh = async (send) => {
-    try {
-      const r = await send({ type: 'dweb/base/heard' });
-      if (r && r.ok === false) { error = r.error || 'unavailable'; }
-      else { apps = dedupe(r?.apps); error = null; }
-    } catch (e) { error = /** @type {{ message?: string }} */ (e)?.message || String(e); }
-    loading = false;
-    if (!dead) m.redraw();
+  const refresh = (send) => {
+    if (refreshInFlight) return refreshInFlight;
+    const epoch = ++refreshEpoch;
+    refreshInFlight = (async () => {
+      try {
+        const r = await send({ type: 'dweb/base/heard' });
+        if (r?.ok === false || !Array.isArray(r?.apps)) throw new Error('discover-unavailable');
+        if (epoch >= appliedRefreshEpoch) {
+          appliedRefreshEpoch = epoch;
+          apps = dedupe(r.apps);
+          error = null;
+        }
+        return true;
+      } catch (cause) {
+        if (epoch >= appliedRefreshEpoch) {
+          error = 'Peerd could not refresh peer apps. Retry when the network is available.';
+        }
+        void cause;
+        return false;
+      } finally {
+        loading = false;
+        refreshInFlight = null;
+        if (!dead) m.redraw();
+      }
+    })();
+    return refreshInFlight;
   };
 
   /**
@@ -127,9 +199,9 @@ export const DiscoverSection = () => {
         try { window.dispatchEvent(new CustomEvent('peerd:app-installed', { detail: { appId: installedId[id] } })); } catch { /* no-op */ }
         loadLocal(send); // refresh the installed maps so this card flips to "Open"
       } else {
-        busy[id] = r?.error || 'install failed';
+        markFailure(id, 'install', app, r);
       }
-    } catch (e) { busy[id] = /** @type {{ message?: string }} */ (e)?.message || 'install failed'; }
+    } catch (cause) { markUnknown(id, 'install', app); void cause; }
     if (!dead) m.redraw();
   };
 
@@ -166,9 +238,9 @@ export const DiscoverSection = () => {
         try { window.dispatchEvent(new CustomEvent('peerd:app-installed', { detail: { appId } })); } catch { /* no-op */ }
         loadLocal(send); // pick up the new version_id so the "update" state clears
       } else {
-        busy[id] = r?.error || 'update failed';
+        markFailure(id, 'update', app, r);
       }
-    } catch (e) { busy[id] = /** @type {{ message?: string }} */ (e)?.message || 'update failed'; }
+    } catch (cause) { markUnknown(id, 'update', app); void cause; }
     if (!dead) m.redraw();
   };
 
@@ -193,6 +265,7 @@ export const DiscoverSection = () => {
   // toggles `refreshing`.
   /** @param {Send} send */
   const manualRefresh = async (send) => {
+    if (refreshing) return;
     refreshing = true; if (!dead) m.redraw();
     await Promise.allSettled([loadLocal(send), refresh(send)]);
     refreshing = false; if (!dead) m.redraw();
@@ -217,22 +290,23 @@ export const DiscoverSection = () => {
     const updatable = !!tracked && !!app.version_id
       && app.version_id !== tracked.version_id && (app.seq ?? 0) > (tracked.seq ?? 0);
     const failed = typeof state === 'string' && !['installing', 'installed', 'updating'].includes(state);
+    const uncertain = unconfirmed.has(id);
     const label = app.name || id.slice(0, 12);
 
     // the single trailing action (mirrors the prior row's branch ladder)
     let action;
     if (mine) action = m('span.peerd-disc-done', 'in your Library');
     else if (installed && updatable) action = m('button.disc-open', {
-      disabled: state === 'updating',
+      disabled: state === 'updating' || uncertain,
       onclick: () => update(send, app, /** @type {string} */ (localId)),
-    }, state === 'updating' ? 'Updating…' : failed ? 'Retry update' : 'Update');
+    }, state === 'updating' ? 'Updating…' : uncertain ? 'Refresh to reconcile' : failed ? 'Retry update' : 'Update');
     else if (installed) action = localId
       ? m('button.disc-open', { onclick: () => open(send, localId, id) }, 'Open ↗')
       : m('span.peerd-disc-done', 'installed ✓');
     else action = m('button.disc-open', {
-      disabled: state === 'installing' || !app.uri,
+      disabled: state === 'installing' || uncertain || !app.uri,
       onclick: () => install(send, app),
-    }, state === 'installing' ? 'Installing…' : failed ? 'Retry' : 'Install');
+    }, state === 'installing' ? 'Installing…' : uncertain ? 'Refresh to reconcile' : failed ? 'Retry' : 'Install');
 
     return m('.disc-card', { key: id }, [
       m('.disc-head', [
@@ -280,6 +354,7 @@ export const DiscoverSection = () => {
         m('button.icon.disc-refresh', {
           title: 'Refresh',
           class: refreshing ? 'is-spinning' : '',
+          disabled: refreshing,
           onclick: () => manualRefresh(send),
         }, '↻'),
       ]);
@@ -287,8 +362,11 @@ export const DiscoverSection = () => {
       if (loading && !apps.length) {
         return m('.peerd-disc', [header, m('.peerd-net-empty', 'Listening for apps your peers are running…')]);
       }
+      const errorBanner = error
+        ? m('p.peerd-disc-err', { role: 'alert', 'aria-live': 'assertive' }, error)
+        : null;
       if (!apps.length) {
-        return m('.peerd-disc', [header, m('.peerd-net-empty',
+        return m('.peerd-disc', [header, errorBanner, error ? null : m('.peerd-net-empty',
           'Nothing shared yet. Share an app from your Library, or ask the agent to build and '
           + 'share one, and it spreads to your peers. Or wait for one of theirs to arrive.')]);
       }
@@ -302,6 +380,7 @@ export const DiscoverSection = () => {
 
       return m('.peerd-disc', [
         header,
+        errorBanner,
         m('input.disc-search', {
           type: 'search',
           placeholder: 'Filter shared apps… (name, peer)',

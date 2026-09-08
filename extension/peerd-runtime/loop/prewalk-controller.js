@@ -44,16 +44,16 @@ import {
  *   isActive — the live in-memory run map. isPersisted — the durable mirror
  *   (optional; absent → treated as false, i.e. in-memory only).
  * @property {{ get: () => { prewalkEnabled?: boolean, enginePrewalkEnabled?: boolean, prewalkExecutorModel?: string } }} settings
- * @property {() => Array<{ name?: string, defaultRunnerModel?: string }>} listProviders
+ * @property {(sessionId:string) => Promise<{ name?: string, defaultRunnerModel?: string }|null>} resolveProvider
  * @property {(name: string) => ({ sideEffect?: string } | undefined)} getTool
  * @property {(entry: { type: string, sessionId?: string, details?: object }) => unknown} [appendAudit]
- * @property {(text: string) => void} [postChatNote]
+ * @property {(text: string, action?: unknown, sessionId?: string|null) => void} [postChatNote]
  * @property {() => number} [now]
  */
 
 /** @param {PrewalkControllerDeps} deps */
 export const makePrewalkController = ({
-  sessions, goalRunner, settings, listProviders, getTool,
+  sessions, goalRunner, settings, resolveProvider, getTool,
   appendAudit = () => {}, postChatNote = () => {}, now = () => 0,
 }) => {
   const audit = (/** @type {string} */ type, /** @type {string} */ sessionId, /** @type {object} */ details) => {
@@ -86,8 +86,8 @@ export const makePrewalkController = ({
         if (!session) return;
       }
       if (!settings.get().prewalkEnabled) return;
-      const provider = listProviders().find((p) => p.name === session.provider);
-      const executor = resolvePrewalkExecutor({ settings: settings.get(), provider });
+      const provider = await resolveProvider(sessionId);
+      const executor = resolvePrewalkExecutor({ settings: settings.get(), provider: provider ?? undefined });
       const armed = armPrewalk(session, executor, now());
       if (!armed) return;
       await sessions.setPrewalk(sessionId, armed);
@@ -118,7 +118,9 @@ export const makePrewalkController = ({
         && (session.provider !== pw.executorProvider || session.model !== pw.executorModel)) {
       const swapped = await sessions.update(sid, { provider: pw.executorProvider, model: pw.executorModel });
       audit('prewalk_swap_applied', sid, { executorProvider: pw.executorProvider, executorModel: pw.executorModel });
-      try { postChatNote(`Prewalk: plan landed — continuing on ${pw.executorModel}.`); } catch { /* UI-only */ }
+      try {
+        postChatNote(`Prewalk: plan landed; continuing on ${pw.executorModel}.`, null, sid);
+      } catch { /* UI-only */ }
       return swapped;
     }
     return session;
@@ -183,8 +185,8 @@ export const makePrewalkController = ({
       const session = await sessions.get(sessionId);
       if (!session || session.kind !== 'actor' || !isEngineActorKind(session.actorType)) return;
       if (session.prewalk) return;
-      const provider = listProviders().find((p) => p.name === session.provider);
-      const executor = resolvePrewalkExecutor({ settings: settings.get(), provider });
+      const provider = await resolveProvider(sessionId);
+      const executor = resolvePrewalkExecutor({ settings: settings.get(), provider: provider ?? undefined });
       const armed = armPrewalk(session, executor, now());
       if (!armed) return;
       await sessions.setPrewalk(sessionId, armed);

@@ -15,9 +15,10 @@ import {
 } from '../../extension/peerd-egress/dpop/proof.js';
 import {
   generateDpopKeypair, getOrCreateDpopKey, makeDpopKeyStore, dpopJkt,
-  accessTokenHashFor, signDpopProof, DPOP_KEY_STORE,
+  DPOP_KEY_STORE,
   usableDpopPrivateKey, loadDpopJkt, ensureDpopJkt,
 } from '../../extension/peerd-egress/dpop/keys.js';
+import { accessTokenHashFor, signDpopProof } from '../../extension/peerd-egress/dpop/sign.js';
 import { buildOriginSecret, parseOriginAuth } from '../../extension/peerd-egress/fetch/origin-credentials.js';
 import { withApiCredentials, withDpopCredentials } from '../../extension/peerd-egress/fetch/web-fetch.js';
 import { makeOriginCredentialRoutes } from '../../extension/peerd-egress/fetch/origin-credential-routes.js';

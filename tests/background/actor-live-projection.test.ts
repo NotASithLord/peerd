@@ -59,7 +59,7 @@ describe('actor live projection', () => {
     const start = live.foldSpawned({
       type: 'actor-start', rootSessionId: 'root', parentSessionId: 'root',
       parentToolUseId: 'tu', sessionId: 'child', depth: 1, task: 'inspect',
-      grantedTools: ['read_page'],
+      visibleTools: ['read_page'],
     });
     expect(start).toMatchObject({ type: 'turn/spawned-start', rootSessionId: 'root' });
     live.foldSpawned({ type: 'state', session: { sessionId: 'child', messages: [{ id: 'm' }] } });

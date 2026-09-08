@@ -9,13 +9,17 @@
 //   - any call whose verdict says confirm:true is NEVER raced (serialized
 //     confirms — stacked modals are a UX failure);
 //   - writes are barriers: a read emitted after a write waits for it;
-//   - without a classifier, only actor_create keeps its parallel path.
+//   - without a classifier, dispatch fails closed to serial execution.
 
 import { describe, test, expect } from 'bun:test';
 import { runUserTurn } from '../../../extension/peerd-runtime/loop/agent-loop.js';
-import { dispatchToolCall } from '../../../extension/peerd-runtime/tools/dispatcher.js';
-import { registerTool, clearTools } from '../../../extension/peerd-runtime/tools/registry.js';
+import { createExplicitToolFixture } from '../tools/explicit-tool-fixture';
+import { detectInterruptedTurn } from '../../../extension/peerd-runtime/loop/resume-detect.js';
 import { INITIAL_STATE, reduceChat } from '../../../extension/sidepanel/chat-reducer.js';
+
+const fixture = createExplicitToolFixture();
+const dispatchToolCall = fixture.dispatch;
+const setFixtureTool = fixture.set;
 
 // ---- harness ----------------------------------------------------------------
 
@@ -182,35 +186,28 @@ describe('runUserTurn — concurrent tool dispatch', () => {
   });
 
   test('outer actor uncertainty survives dispatcher, persistence, and reducer replay', async () => {
-    clearTools();
-    registerTool({
+    fixture.clear();
+    setFixtureTool({
       name: 'message_actor', description: '', primitive: 'spawned', sideEffect: 'write',
       schema: { type: 'object', properties: {} },
       origins: () => [],
       execute: async () => ({
         ok: false,
-        error: 'inner policy stop',
+        error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
+        outcomeKnown: false,
+        retryable: false,
         actorCorrelationId: 'correlation-outer-unknown',
         actorTerminal: true,
-        actorOutcomeKnown: true,
+        actorOutcomeKnown: false,
         actorPerformed: true,
-        actorAborted: true,
       }),
     } as any);
     try {
-      const lifecycle = {
-        beginTracking: async () => ({ handle: { operationId: 'op-outer-unknown' } }),
-        settleTracking: async () => ({
-          error: 'outcome_unknown: This action may have completed, but peerd did not receive confirmation.',
-          recovery: { state: 'outcome_unknown', category: 'verify_before_retry' },
-        }),
-      };
       const dispatchCtx: any = {
         audit: async () => {},
         confirm: async () => 'yes_once',
         session: { sessionId: 's1', kind: 'chat' },
         permission: { mode: 'act', confirmActions: false },
-        lifecycle,
       };
       const store = makeStore();
       store.seed('s1');
@@ -223,7 +220,9 @@ describe('runUserTurn — concurrent tool dispatch', () => {
         toolDispatch: (call: any) => dispatchToolCall(call, dispatchCtx),
       });
 
-      await drain(runUserTurn(loopCtx));
+      await expect(drain(runUserTurn(loopCtx))).rejects.toMatchObject({
+        code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+      });
       const session = await store.get('s1');
       const block = session.messages.find((m: any) => Array.isArray(m.toolResults)).toolResults[0];
       expect(block.content).toStartWith('outcome_unknown:');
@@ -253,7 +252,7 @@ describe('runUserTurn — concurrent tool dispatch', () => {
         error: 'the actor turn ended with an unknown outcome',
       });
     } finally {
-      clearTools();
+      fixture.clear();
     }
   });
 
@@ -285,7 +284,7 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     ]);
   });
 
-  test('confirm-gated calls are NEVER raced — even actor_create serializes its confirms', async () => {
+  test('confirm-gated calls are NEVER raced', async () => {
     const store = makeStore();
     store.seed('s1');
     const calls = [{ id: 't_1', name: 'actor_create' }, { id: 't_2', name: 'actor_create' }];
@@ -306,48 +305,44 @@ describe('runUserTurn — concurrent tool dispatch', () => {
     expect(log).toEqual(['start:t_1', 'end:t_1', 'start:t_2', 'end:t_2']);
   });
 
-  test('no classifier injected: actor_create keeps its parallel path, other tools stay serial', async () => {
+  test('no classifier injected: every tool stays serial', async () => {
     const store = makeStore();
     store.seed('s1');
-    // Two spawns → concurrent (the pre-existing behavior).
+    // A tool name cannot grant itself concurrency without semantic policy.
     const spawnCalls = [{ id: 't_1', name: 'actor_create' }, { id: 't_2', name: 'actor_create' }];
-    const started: string[] = [];
+    const log: string[] = [];
     const ctx = baseCtx(store, {
       callModel: makeToolModel(spawnCalls),
       tools: [{ name: 'actor_create', description: '', schema: {} }],
       toolDispatch: async (call: any) => {
-        started.push(call.id);
-        if (call.id === 't_1') {
-          await Promise.race([
-            (async () => { while (started.length < 2) await sleep(5); })(),
-            sleep(1500).then(() => { throw new Error('serialized: second spawn never started'); }),
-          ]);
-        }
+        log.push(`start:${call.id}`);
+        await sleep(5);
+        log.push(`end:${call.id}`);
         return { ok: true, content: 'r', meta: {} };
       },
     });
     await drain(runUserTurn(ctx));
-    expect(started).toEqual(['t_1', 't_2']);
+    expect(log).toEqual(['start:t_1', 'end:t_1', 'start:t_2', 'end:t_2']);
 
-    // Two unknown tools → serial (no classifier, not in CONCURRENT_TOOLS).
+    // Unknown names are equally serial.
     const store2 = makeStore();
     store2.seed('s1');
-    const log: string[] = [];
+    const unknownLog: string[] = [];
     const ctx2 = baseCtx(store2, {
       callModel: makeToolModel([{ id: 'u_1', name: 'a' }, { id: 'u_2', name: 'b' }]),
       tools: [{ name: 'a', description: '', schema: {} }, { name: 'b', description: '', schema: {} }],
       toolDispatch: async (call: any) => {
-        log.push(`start:${call.name}`);
+        unknownLog.push(`start:${call.name}`);
         await sleep(5);
-        log.push(`end:${call.name}`);
+        unknownLog.push(`end:${call.name}`);
         return { ok: true, content: 'r', meta: {} };
       },
     });
     await drain(runUserTurn(ctx2));
-    expect(log).toEqual(['start:a', 'end:a', 'start:b', 'end:b']);
+    expect(unknownLog).toEqual(['start:a', 'end:a', 'start:b', 'end:b']);
   });
 
-  test('Stop mid-batch halts the remaining side-effecting waves and ends on a deliberate abort', async () => {
+  test('Stop after a known ToolResult halts later waves and conservatively persists custody', async () => {
     const store = makeStore();
     store.seed('s1');
     // Three writes → three sequential waves (writes are barriers).
@@ -365,59 +360,110 @@ describe('runUserTurn — concurrent tool dispatch', () => {
       signal: ac.signal,
       toolDispatch: async (call: any) => {
         dispatched.push(call.id);
-        if (call.id === 't_w1') ac.abort(); // user presses Stop while wave 1 is in flight
         return { ok: true, content: 'r', meta: {} };
       },
     });
 
-    const events = await drain(runUserTurn(ctx));
+    const events: any[] = [];
+    let failure: any = null;
+    try {
+      for await (const event of runUserTurn(ctx)) {
+        events.push(event);
+        if (event.type === 'tool-result' && event.toolUseId === 't_w1') ac.abort();
+      }
+    } catch (cause) { failure = cause; }
 
     // waves 2 + 3 must NOT have dispatched their side effects after Stop.
     expect(dispatched).toEqual(['t_w1']);
-    // the turn ENDS on a deliberate abort (there's a pre-dispatch segment stop
-    // carrying the model's tool_use; the terminal one must be the abort).
-    const stops = events.filter((e: any) => e.type === 'stop');
-    expect(stops.at(-1)?.stopReason).toBe('aborted');
+    expect(failure).toMatchObject({
+      code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+    });
     const s = await store.get('s1');
-    // the partial batch is dropped (no tool_result message appended)...
     expect(s.messages.some((m: any) => Array.isArray(m.toolResults))).toBe(false);
-    // ...and the assistant message is marked aborted so resume won't re-drive it.
-    expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error', code: 'tool-outcome-unknown',
+      outcomeKnown: false, retryable: false,
+    }));
+    expect(s.messages.at(-1)).toMatchObject({
+      errorCode: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+    });
+    expect(detectInterruptedTurn(s).resumable).toBe(false);
   });
 
-  test('an abort landing DURING the final dispatch drops the tool-results message', async () => {
-    // The steer-race that bricked sessions in the field: claim() aborts the
-    // old turn and starts the new one immediately, so if the abort lands
-    // while the batch's LAST dispatch is in flight, no per-wave check ever
-    // sees it — the old loop would fall through and append its tool-results
-    // message AFTER the steering turn's messages, leaving a history whose
-    // tool_result no longer follows its tool_use (Anthropic 400s on every
-    // later call). The post-batch guard must catch it and drop the results.
+  test('Stop before the first tool dispatch remains an ordinary abort', async () => {
     const store = makeStore();
     store.seed('s1');
     const ac = new AbortController();
+    let dispatches = 0;
+    const events: any[] = [];
+    for await (const event of runUserTurn(baseCtx(store, {
+      callModel: makeToolModel([{ id: 't_w1', name: 'click' }]),
+      tools: [{ name: 'click', description: '', schema: {} }],
+      classifyToolCall: () => WRITE_VERDICT,
+      signal: ac.signal,
+      toolDispatch: async () => { dispatches += 1; return { ok: true, content: 'r' }; },
+    }))) {
+      events.push(event);
+      if (event.type === 'stop' && event.stopReason === 'tool_use') ac.abort();
+    }
+    const session = await store.get('s1');
+    expect(dispatches).toBe(0);
+    expect(events.at(-1)).toMatchObject({ type: 'stop', stopReason: 'aborted' });
+    expect(session.messages.at(-1)).toMatchObject({ streaming: false, stopReason: 'aborted' });
+    expect(session.messages.at(-1).outcomeKnown).toBeUndefined();
+  });
+
+  test('Stop during an admitted tool persists non-retryable unknown custody', async () => {
+    const store = makeStore();
+    store.seed('s1');
+    const ac = new AbortController();
+    let started = () => {};
+    let release = () => {};
+    const admitted = new Promise<void>((resolve) => { started = resolve; });
     const ctx = baseCtx(store, {
       callModel: makeToolModel([{ id: 't_w1', name: 'click' }]),
       tools: [{ name: 'click', description: '', schema: {} }],
       classifyToolCall: () => WRITE_VERDICT,
       signal: ac.signal,
-      toolDispatch: async () => {
-        // The abort arrives while the ONLY (hence final) dispatch runs.
-        ac.abort();
-        await sleep(5);
-        return { ok: true, content: 'r', meta: {} };
-      },
+      toolDispatch: () => new Promise((resolve) => {
+        release = () => resolve({ ok: true, content: 'RAW LATE EFFECT', meta: {} });
+        started();
+      }),
     });
 
-    const events = await drain(runUserTurn(ctx));
+    const events: any[] = [];
+    const running = (async () => {
+      try {
+        for await (const event of runUserTurn(ctx)) events.push(event);
+        return { ok: true as const, error: null };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    })();
+    await admitted;
+    ac.abort();
+    const settlement = await running;
+    release();
 
     const s = await store.get('s1');
-    // No tool-results message may be appended after the abort...
     expect(s.messages.some((m: any) => Array.isArray(m.toolResults))).toBe(false);
-    // ...and the turn ends on a deliberate abort.
-    const stops = events.filter((e: any) => e.type === 'stop');
-    expect(stops.at(-1)?.stopReason).toBe('aborted');
-    expect(s.messages.some((m: any) => m.stopReason === 'aborted')).toBe(true);
+    expect(settlement).toMatchObject({
+      ok: false,
+      error: { code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false },
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error', code: 'tool-outcome-unknown',
+      outcomeKnown: false, retryable: false,
+      error: expect.stringContaining('outcome unknown'),
+    }));
+    expect(JSON.stringify(events)).not.toContain('RAW LATE EFFECT');
+    expect(s.messages.at(-1)).toMatchObject({
+      role: 'assistant', streaming: false,
+      errorCode: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+      error: expect.stringContaining('outcome unknown'),
+    });
+    expect(s.messages.at(-1).stopReason).not.toBe('aborted');
+    expect(detectInterruptedTurn(s).resumable).toBe(false);
   });
 
   test('a failure with authored content renders `code: content`; without content, the code alone', async () => {
@@ -457,7 +503,9 @@ describe('runUserTurn — concurrent tool dispatch', () => {
       // never settles — the abort is the only thing that ends the dispatch
       toolDispatch: () => { ac.abort(); return new Promise(() => {}); },
     });
-    await drain(runUserTurn(ctx));
+    await expect(drain(runUserTurn(ctx))).rejects.toMatchObject({
+      code: 'tool-outcome-unknown', outcomeKnown: false, retryable: false,
+    });
     const failed = audited.find((e) => e.type === 'tool_failed');
     expect(failed).toBeTruthy();
     expect(failed.details.tool).toBe('click');

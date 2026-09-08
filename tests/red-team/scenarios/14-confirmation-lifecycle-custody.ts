@@ -3,7 +3,7 @@
 import {
   type Probe, type Scenario, blocked, leaked, summarize,
 } from '../harness.ts';
-import { makeVaultRoutes } from '../../../extension/background/routes/vault.js';
+import { makeConfirmAnswerRoute } from '../../../extension/background/routes/vault.js';
 import { makeConfirmCoordinator } from '../../../extension/peerd-egress/confirm/protocol.js';
 import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
 import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
@@ -18,7 +18,7 @@ const confirmationProbe = async (): Promise<Probe> => {
     sideEffect: 'write', ownerSessionId: 'chat-a', sessionId: 'actor-a',
     dispatchId: 'tool-use-a',
   } as any);
-  const routes = makeVaultRoutes({
+  const answer = makeConfirmAnswerRoute({
     sessionCache: { sessionGet: async () => 'chat-a' },
     isActualSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
     isActualHomeSender: (sender: any) => sender?.surface === 'home',
@@ -28,11 +28,11 @@ const confirmationProbe = async (): Promise<Probe> => {
     type: 'confirm/answer', id: prompt.id, answer: 'yes_once',
     ownerSessionId: 'chat-a', sessionId: 'actor-a', dispatchId: 'tool-use-a',
   };
-  const engine = await routes['confirm/answer'](base, { surface: 'engine' });
-  const foreignOwner = await routes['confirm/answer'](
+  const engine = await answer(base, { surface: 'engine' });
+  const foreignOwner = await answer(
     { ...base, ownerSessionId: 'chat-b' }, { surface: 'home' },
   );
-  const foreignExecution = await routes['confirm/answer'](
+  const foreignExecution = await answer(
     { ...base, sessionId: 'actor-b' }, { surface: 'sidepanel' },
   );
   coordinator.resolve({

@@ -1,39 +1,6 @@
-// Heap-split phase 2 — the pure core of an offscreen BOUND-actor loop: the
-// relayed tool dispatch (the new piece vs phase 1) and the actor loop-driver.
+// Pure core of an offscreen BOUND-actor loop.
 import { describe, test, expect } from 'bun:test';
-import { makeRelayedToolDispatch, runActorLoop, makeInMemorySessions, makeActorSummaryFence } from '../../extension/peerd-runtime/actor/actor-worker-core.js';
-
-describe('makeRelayedToolDispatch', () => {
-  test('delegates the call across the boundary and returns the SW ToolResult', async () => {
-    let sent: any = null;
-    const requestTool = async (call: any) => { sent = call; return { ok: true, result: { ok: true, content: 'ran in VM' } }; };
-    const dispatch = makeRelayedToolDispatch(requestTool);
-    const out = await dispatch({ name: 'vm_boot', args: { cmd: 'ls' }, id: 't1' });
-    expect(sent).toEqual({ name: 'vm_boot', args: { cmd: 'ls' }, id: 't1' });
-    expect(out).toEqual({ ok: true, content: 'ran in VM' });
-  });
-
-  test('a relay failure becomes a ToolResult error (never throws the loop)', async () => {
-    const dispatch = makeRelayedToolDispatch(async () => ({ ok: false, error: 'gate refused' }));
-    const out = await dispatch({ name: 'vm_delete', args: {} });
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('gate refused');
-  });
-
-  test('a thrown relay becomes a ToolResult error', async () => {
-    const dispatch = makeRelayedToolDispatch(async () => { throw new Error('port died'); });
-    const out = await dispatch({ name: 'vm_boot', args: {} });
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain('port died');
-  });
-
-  test('the call args crossing the boundary carry no functions (cloneable)', async () => {
-    let sent: any = null;
-    const dispatch = makeRelayedToolDispatch(async (c: any) => { sent = c; return { ok: true, result: {} }; });
-    await dispatch({ name: 'js_notebook', args: { code: 'x' }, id: 'n1' });
-    expect(() => structuredClone(sent)).not.toThrow();
-  });
-});
+import { runActorLoop, makeInMemorySessions, makeActorSummaryFence } from '../../extension/peerd-runtime/actor/actor-worker-core.js';
 
 describe('runActorLoop', () => {
   // A fake actor loop: append the user message + a tool round + a NEW final
@@ -53,7 +20,7 @@ describe('runActorLoop', () => {
   test('runs the actor loop, relays tool dispatch, returns finalText + FULL new transcript + usage', async () => {
     const sessions = makeInMemorySessions({ sessionId: 'act-1', provider: 'anthropic', model: 'm' });
     const forwarded: any[] = [];
-    const toolDispatch = makeRelayedToolDispatch(async () => ({ ok: true, result: { ok: true, content: 'hi' } }));
+    const toolDispatch = async () => ({ ok: true, content: 'hi' });
     const out = await runActorLoop(
       { runUserTurn: fakeActorLoop('the VM did the thing') as any, sessions, callModel: (async function* () {})() as any, toolDispatch, getSystemPrompt: () => 'ACTOR SYS', appendAudit: () => {} /* sync stub — must be tolerated */, onEvent: (e) => forwarded.push(e), tools: [{ name: 'vm_boot', description: 'boot', schema: {} }] },
       { sessionId: 'act-1', userText: 'run echo', maxSteps: 20 },

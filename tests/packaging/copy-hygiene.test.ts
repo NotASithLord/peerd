@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   collectRepositoryViolations,
   extractAddedLines,
+  extractAddedLinesByPath,
   hasAuthorshipMarker,
   hasDashPunctuation,
   isCopyPath,
@@ -133,6 +134,30 @@ describe('added-line extraction', () => {
       { line: 4, text: 'new two' },
       { line: 11, text: 'last' },
     ]);
+  });
+
+  test('groups one batched diff by file without mixing line numbers', () => {
+    const patch = [
+      'diff --git first.md first.md',
+      '--- first.md',
+      '+++ first.md',
+      '@@ -1 +1,2 @@',
+      ' old',
+      '+first addition',
+      'diff --git nested/second.md nested/second.md',
+      '--- nested/second.md',
+      '+++ nested/second.md',
+      '@@ -3,0 +4,2 @@',
+      '+second addition',
+      '+second follow-up',
+    ].join('\n');
+    expect(extractAddedLinesByPath(patch)).toEqual(new Map([
+      ['first.md', [{ line: 2, text: 'first addition' }]],
+      ['nested/second.md', [
+        { line: 4, text: 'second addition' },
+        { line: 5, text: 'second follow-up' },
+      ]],
+    ]));
   });
 });
 

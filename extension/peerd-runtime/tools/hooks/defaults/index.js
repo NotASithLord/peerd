@@ -9,7 +9,7 @@ import { egressTripwireHook } from './egress-tripwire.js';
 
 /** @type {readonly import('../runner.js').Hook[]} */
 export const DEFAULT_HOOKS = Object.freeze([
-  egressAllowlistHook,
+  Object.freeze(egressAllowlistHook),
   // why the pair: the allowlist EXEMPTS browser-session (primitive 'tab')
   // tools, because reaching the user's own logged-in apps is the whole point.
   // The tripwire covers that exemption — an off-origin tab navigation carrying
@@ -17,7 +17,7 @@ export const DEFAULT_HOOKS = Object.freeze([
   // also skips non-mutate_external calls, and fetch_url falls in that gap
   // (egress-tripwire.js documents it). The two tile most of the surface, not
   // all of it.
-  egressTripwireHook,
+  Object.freeze(egressTripwireHook),
 ]);
 
 export { egressAllowlistHook, egressTripwireHook };

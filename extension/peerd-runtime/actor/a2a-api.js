@@ -5,8 +5,8 @@
 // The bet (owner call 2026-07-04): models write "talk to a peer" code most
 // fluently in the DEEPEST idiom — promise request/response — not in Google A2A's
 // brand-new wire (too young to be in the training corpus). So the dweb actor
-// drives the mesh by WRITING JS against a `mesh` client (mesh.peers/card/ask/
-// send/publishCard/inbox), and THIS pure core maps each call to a gated mesh OP
+// drives the mesh by WRITING JS against a `mesh` client (mesh.peers/card/call/
+// cast/publishCard/inbox), and THIS pure core maps each call to a gated mesh OP
 // and shapes the reply back. We RHYME with A2A's DATA MODEL (the Agent Card,
 // message shape — see the dweb agent-card module) so future interop with a
 // non-peerd A2A agent is a thin adapter; we REJECT A2A's HTTP+SSE transport (the
@@ -22,7 +22,7 @@
 
 import { codeClientMethod, codeClientMethods } from './capability-manifest.js';
 
-/** A failed mesh op REJECTS like a thrown call — so `await mesh.ask(...)` throws. */
+/** A failed mesh op REJECTS like a thrown call, so `await mesh.call(...)` throws. */
 export class MeshApiError extends Error {
   /** @param {string} message */
   constructor(message) { super(message); this.name = 'MeshApiError'; }
@@ -43,7 +43,7 @@ const nonEmptyString = (v, what) => {
  */
 
 // The method table. `signs:true` marks an op that SIGNS AS THE USER + emits onto
-// the mesh (send/ask/publishCard) — the SW route holds those behind the
+// the mesh (cast/call/publishCard); the SW route holds those behind the
 // first-contact consent gate (the notWired boundary: reads wire freely, writes
 // need a grant). Reads (peers/card/inbox) are side-effect-free.
 /** @type {Record<string, MeshMethodSpec>} */
@@ -103,20 +103,6 @@ const MESH_METHODS = {
     shape: (c) => ({ sent: c?.ok === true, ...(c?.id ? { id: c.id } : {}) }),
     signs: true,
   },
-  // Compatibility names for existing 0.x scripts. They are accepted by the
-  // relay but omitted from generated prompt references.
-  ask: {
-    op: 'ask',
-    toArgs: (a) => MESH_METHODS.call.toArgs(a),
-    shape: (c) => ({ from: c?.from ?? null, reply: c?.reply ?? null, ...(c?.timedOut ? { timedOut: true } : {}) }),
-    signs: true,
-  },
-  send: {
-    op: 'send',
-    toArgs: (a) => MESH_METHODS.cast.toArgs(a),
-    shape: (c) => MESH_METHODS.cast.shape(c),
-    signs: true,
-  },
   // Drain inbound DMs received DURING this run (a code loop can poll it). Read —
   // the durable inbound path is still the fenced actor wake; this is for a script
   // that wants to converse within one a2a_run. Returns [{ from, message, ts }].
@@ -125,7 +111,7 @@ const MESH_METHODS = {
     toArgs: () => ({}),
     shape: (c) => Array.isArray(c?.messages) ? c.messages : [],
   },
-  // CONVERSE — open a STANDING conversation with a peer: like ask, but the SW
+  // CONVERSE: open a STANDING conversation with a peer like call, but the SW
   // mints a convId and remembers the thread, so a later peer message continues
   // it (waking the dweb actor with the prior turns as context) and the actor's
   // answers go back to the peer under per-conversation consent. Returns the
@@ -160,7 +146,7 @@ const MESH_METHODS = {
 /** The method names — drives the worker stub + the lore. */
 export const MESH_API_METHODS = Object.freeze(codeClientMethods('mesh'));
 
-/** Names of the SIGNING ops (send/ask/publishCard) — the SW gates these. */
+/** Names of the SIGNING methods; the SW gates these. */
 export const MESH_SIGNING_METHODS = Object.freeze(
   codeClientMethods('mesh').filter((name) => MESH_METHODS[name]?.signs === true),
 );

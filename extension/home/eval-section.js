@@ -15,7 +15,7 @@
 // NB: a run takes over the agent session (session/reset) + drives a hidden window.
 
 import m from '/vendor/mithril/mithril.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { openOptions } from '/shared/open-options.js';
 import { createEvalEngine } from '../eval/eval-engine.js';
 import { SUITES } from '../eval/tasks.js';

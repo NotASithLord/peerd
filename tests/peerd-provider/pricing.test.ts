@@ -1,34 +1,17 @@
 // Pricing ↔ catalog parity guard.
 //
-// DEFAULT_PRICING (peerd-provider/pricing.js) and MODEL_CATALOG drifted once
+// DEFAULT_PRICING and the controller-owned provider catalog drifted once
 // already: catalog models with no rate card silently priced at $0, and a rate
-// card existed for a model that doesn't. The catalog lives in
-// background/model-catalog.js, which can't be imported under Bun (it's assembled
-// against chrome.*-bound collaborators) — so this test reads the SOURCE and
-// extracts the Anthropic catalog ids textually. If either table changes without
-// the other, this fails in the terminal.
+// card existed for a model that doesn't. Both tables are pure controller data,
+// so this test compares them directly.
 
 import { describe, test, expect } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { DEFAULT_PRICING, costOf, resolvePricing } from '../../extension/peerd-provider/pricing.js';
-
-const catalogPath = join(import.meta.dir, '../../extension/background/model-catalog.js');
-
-/** Extract the Anthropic model ids out of the MODEL_CATALOG literal. */
-const anthropicCatalogIds = (): string[] => {
-  const src = readFileSync(catalogPath, 'utf8');
-  const catalog = src.match(/const MODEL_CATALOG = Object\.freeze\(\{([\s\S]*?)\}\);/);
-  if (!catalog) throw new Error('MODEL_CATALOG literal not found in model-catalog.js');
-  const anthropic = catalog[1].match(/anthropic:\s*\[([\s\S]*?)\]/);
-  if (!anthropic) throw new Error('anthropic entry not found in MODEL_CATALOG');
-  return [...anthropic[1].matchAll(/model:\s*'([^']+)'/g)].map((m) => m[1]);
-};
+import { PROVIDER_MODEL_CATALOG } from '../../extension/peerd-provider/metadata.js';
 
 describe('DEFAULT_PRICING ↔ MODEL_CATALOG parity', () => {
   test('every Anthropic catalog id has a rate card', () => {
-    const ids = anthropicCatalogIds();
-    // Guard the extractor itself — an empty list would vacuously pass.
+    const ids = PROVIDER_MODEL_CATALOG.anthropic.map((row) => row.model);
     expect(ids.length).toBeGreaterThan(0);
     for (const id of ids) {
       expect(DEFAULT_PRICING[id]).toBeDefined();

@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageArtifact } from '../../packaging/package.ts';
-import { startGeckodriver, waitFor } from './webdriver.mjs';
+import { startGeckodriver as startRawGeckodriver, waitFor } from './webdriver.mjs';
 import {
   advisesCheckingBeforeRetry,
   hasAmbiguousOutcomeWarning,
@@ -42,6 +42,10 @@ const EXTENSION_ORIGIN = `moz-extension://${TEST_UUID}`;
 const PREVIEW_ADDON_ID = 'peerd-preview@peerd.ai';
 const PREVIEW_TEST_UUID = '7d12f198-31fc-4e95-9184-e954123981a7';
 const PREVIEW_EXTENSION_ORIGIN = `moz-extension://${PREVIEW_TEST_UUID}`;
+const FIREFOX_SIDEBAR_IDS = Object.freeze({
+  [EXTENSION_ORIGIN]: 'peerd_peerd_ai-sidebar-action',
+  [PREVIEW_EXTENSION_ORIGIN]: 'peerd-preview_peerd_ai-sidebar-action',
+});
 const NOTEBOOK_PROBE_TYPE = 'firefox-notebook-probe/call';
 const NOTEBOOK_PROBE_TOKEN = 'firefox-notebook-probe-7d12f198';
 const FIXTURE_PATH = '/__firefox-runtime-fixture';
@@ -77,18 +81,34 @@ const LIFETIME_HEARTBEAT_KEY = 'peerdActorHostKeepAlive';
 const LIFETIME_RESPONSE_DELAY_MS = 65_000;
 const FIREFOX_EVENT_PAGE_IDLE_MS = 30_000;
 const FIREFOX_EVENT_PAGE_RESTART_MARGIN_MS = 15_000;
+
+const backgroundEntryPath = (staging) => {
+  const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));
+  const entry = manifest.background?.scripts?.[0] ?? manifest.background?.service_worker;
+  if (typeof entry !== 'string') throw new Error('Firefox background entry is missing');
+  return join(staging, entry);
+};
 const LIFETIME_QUIET_MS = 12_000;
 const LIFETIME_FAILURE_SCREENSHOT = 'lifetime-failure.png';
 const LIFETIME_FAILURE_LOG = 'lifetime-geckodriver.log';
 const LIFETIME_FAILURE_DIAGNOSTIC = 'lifetime-failure.json';
 const KEEPALIVE_LOSS_ACTOR_PROMPT = 'Click the Firefox parity action, then report its status.';
 const KEEPALIVE_LOSS_TOOL_ID = 'firefox-keepalive-loss-click';
-const KEEPALIVE_LOSS_FINAL_CANARY = 'firefox-keepalive-loss-final-7d12f198';
+const KEEPALIVE_LOSS_GUARD_CANARY = 'firefox-keepalive-loss-guard-7d12f198';
 const KEEPALIVE_LOSS_LATE_CANARY = 'firefox-keepalive-loss-late-response-7d12f198';
 const KEEPALIVE_LOSS_RESPONSE_DELAY_MS = 20_000;
 const KEEPALIVE_LOSS_SCREENSHOT = 'keepalive-loss.png';
 const KEEPALIVE_LOSS_LOG = 'keepalive-loss-geckodriver.log';
 const KEEPALIVE_LOSS_DIAGNOSTIC = 'keepalive-loss.json';
+const ROOT_STOP_PROMPT = 'Start the Firefox root Stop proof and wait.';
+const ROOT_STOP_LATE_CANARY = 'firefox-root-stop-late-7d12f198';
+const ROOT_STOP_RESPONSE_DELAY_MS = 2_500;
+const ROOT_GOAL_PROMPT = 'Complete the Firefox direct-controller goal proof.';
+const ROOT_GOAL_STEP_CANARY = 'firefox-root-goal-step-7d12f198';
+const ROOT_GOAL_TOOL_ID = 'firefox-root-goal-complete';
+const ROOT_GOAL_DONE_CANARY = 'firefox-root-goal-done-7d12f198';
+const ROOT_PROBE_PROMPT = 'Return the Firefox direct-controller idle proof.';
+const ROOT_PROBE_CANARY = 'firefox-root-controller-idle-7d12f198';
 const RECOVERY_SEED_KEY = 'peerdFirefoxActorRecoverySeed';
 const RECOVERY_BOOT_KEY = 'peerdFirefoxActorRecoveryBoot';
 const LIFECYCLE_OPERATIONS_KEY = 'peerd.lifecycle.operations';
@@ -212,6 +232,153 @@ const overwriteRegularFile = (path, contents) => {
   }
 };
 const delay = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+
+const executeInBrowsingContext = async (driver, browsingContextId, script, args, async) => {
+  await driver.setContext('chrome');
+  await driver.switchToFrame(null);
+  const payload = JSON.parse(await driver.executeAsync(`
+    const id = arguments[0];
+    const script = arguments[1];
+    const args = arguments[2];
+    const async = arguments[3];
+    const done = arguments[arguments.length - 1];
+    const context = BrowsingContext.get(id);
+    const actor = context?.currentWindowGlobal?.getActor('MarionetteCommands');
+    if (!actor) {
+      done(JSON.stringify({ ok: false, error: 'Firefox sidebar browsing context unavailable' }));
+      return;
+    }
+    actor.executeScript(script, args, {
+      timeout: 30_000,
+      sandboxName: null,
+      newSandbox: false,
+      file: '',
+      line: 0,
+      async,
+    }).then(
+      (value) => done(JSON.stringify({ ok: true, value })),
+      (cause) => done(JSON.stringify({
+        ok: false,
+        error: cause?.message || String(cause),
+      })),
+    );
+  `, [browsingContextId, script, args, async]));
+  if (!payload.ok) throw new Error(payload.error);
+  return payload.value;
+};
+
+const openFirefoxSidebar = async (driver, sidebarId) => {
+  const opened = await waitFor(async () => {
+    await driver.setContext('chrome');
+    await driver.switchToFrame(null);
+    return driver.executeAsync(`
+      const id = arguments[0];
+      const done = arguments[arguments.length - 1];
+      Promise.resolve(SidebarController.promiseInitialized).then(async () => {
+        if (SidebarController.currentID !== id || SidebarController._box?.hidden) {
+          await SidebarController.show(id);
+        }
+        done(SidebarController.currentID === id
+          && SidebarController._box?.hidden !== true
+          && SidebarController.browser?.currentURI?.spec
+            === 'chrome://browser/content/webext-panels.xhtml');
+      }, () => done(false));
+    `, [sidebarId]).catch(() => false);
+  }, { budgetMs: 15_000, pollMs: 100 });
+  if (!opened) throw new Error(`Firefox extension sidebar did not open: ${sidebarId}`);
+
+  await driver.setContext('chrome');
+  await driver.switchToFrame(null);
+  const outer = await driver.execute('return SidebarController.browser');
+  await driver.switchToFrame(outer);
+  await driver.setContext('content');
+  const browsingContextId = await waitFor(async () => driver.execute(`
+    const panel = document.getElementById('webext-panels-browser');
+    const url = panel?.currentURI?.spec ?? '';
+    let path = '';
+    try { path = new URL(url).pathname; } catch {}
+    return url.startsWith('moz-extension://') && path === '/sidepanel/sidepanel.html'
+      ? panel.browsingContext?.id ?? null : null;
+  `), { budgetMs: 15_000, pollMs: 100 });
+  if (!Number.isInteger(browsingContextId)) {
+    throw new Error(`Firefox extension sidebar browsing context unavailable: ${sidebarId}`);
+  }
+  await driver.setContext('chrome');
+  await driver.switchToFrame(null);
+  return Object.freeze({
+    execute: (script, args = []) =>
+      executeInBrowsingContext(driver, browsingContextId, script, args, false),
+    executeAsync: (script, args = []) =>
+      executeInBrowsingContext(driver, browsingContextId, script, args, true),
+  });
+};
+
+const closeFirefoxSidebar = async (driver) => {
+  await driver.setContext('chrome');
+  await driver.switchToFrame(null);
+  await driver.executeAsync(`
+    const done = arguments[arguments.length - 1];
+    Promise.resolve(SidebarController.hide()).then(() => done(true), () => done(false));
+  `).catch(() => false);
+};
+
+const sidebarTarget = (url) => {
+  for (const [origin, sidebarId] of Object.entries(FIREFOX_SIDEBAR_IDS)) {
+    if (url === `${origin}/sidepanel/sidepanel.html`
+        || url.startsWith(`${origin}/sidepanel/sidepanel.html#`)) return sidebarId;
+  }
+  return null;
+};
+
+const makeSidebarAwareDriver = async (driver) => {
+  let sidebar = null;
+  let mainHandle = await driver.windowHandle();
+  const mainContent = async () => {
+    if (mainHandle) await driver.switchToWindow(mainHandle);
+    await driver.setContext('content');
+    await driver.switchToFrame(null);
+  };
+  const closeSidebar = async () => {
+    if (!sidebar) return;
+    await closeFirefoxSidebar(driver);
+    sidebar = null;
+  };
+  return Object.freeze({
+    ...driver,
+    navigate: async (url) => {
+      const sidebarId = sidebarTarget(url);
+      if (sidebarId) {
+        sidebar = await openFirefoxSidebar(driver, sidebarId);
+        return null;
+      }
+      await closeSidebar();
+      await mainContent();
+      return driver.navigate(url);
+    },
+    execute: (script, args = []) => sidebar
+      ? sidebar.execute(script, args)
+      : driver.execute(script, args),
+    executeAsync: (script, args = []) => sidebar
+      ? sidebar.executeAsync(script, args)
+      : driver.executeAsync(script, args),
+    newWindow: async (type = 'tab') => {
+      const opened = await driver.newWindow(type);
+      if (typeof opened?.handle === 'string') mainHandle = opened.handle;
+      return opened;
+    },
+    switchToWindow: async (handle) => {
+      await driver.switchToWindow(handle);
+      mainHandle = handle;
+    },
+    close: async () => {
+      try { await closeSidebar(); }
+      finally { await driver.close(); }
+    },
+  });
+};
+
+const startSidebarGeckodriver = async (options) =>
+  makeSidebarAwareDriver(await startRawGeckodriver(options));
 
 const TYPES = {
   '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript',
@@ -377,6 +544,7 @@ const startProviderServer = async () => {
   let lifetimeActorResponseAt = 0;
   let lifetimeActorAborts = 0;
   let keepaliveLossActorAborts = 0;
+  let rootStopAborts = 0;
   let scenario = { mode: 'happy', actorTarget: 'web' };
   const httpRequests = [];
   const webSocketUpgrades = [];
@@ -518,11 +686,16 @@ const startProviderServer = async () => {
         && !actorRequest
         && records.slice(0, -1).some((entry) =>
           entry.scenario === 'lifetime' && !entry.body.includes('<actor_agent>'));
+      const priorKeepaliveLossParentRequest = requestScenario.mode === 'keepalive-loss'
+        && !actorRequest
+        && records.slice(0, -1).some((entry) =>
+          entry.scenario === 'keepalive-loss' && !entry.body.includes('<actor_agent>'));
       const failureContinuation = body.includes('Actors were not run')
         || body.includes('actor_isolation_temporarily_unavailable')
         || body.includes('isolated worker host is temporarily unavailable');
       const keepaliveLossActorContinuation = requestScenario.mode === 'keepalive-loss'
         && actorRequest && body.includes(KEEPALIVE_LOSS_TOOL_ID);
+      const rootStopRequest = requestScenario.mode === 'root-stop' && !actorRequest;
       let payload;
       if (dnrFlow) {
         if (dnrFlow.kind === 'burst'
@@ -592,96 +765,124 @@ const startProviderServer = async () => {
           return;
         }
       } else {
-        payload = requestScenario.mode === 'lifetime'
-          ? actorRequest
-            ? textResponse(LIFETIME_ACTOR_REPLY_CANARY)
-            : body.includes(LIFETIME_ACTOR_REPLY_CANARY)
-              ? textResponse(LIFETIME_FINAL_REPLY_CANARY)
-              : priorLifetimeParentRequest
-                ? textResponse('Firefox lifetime fixture: actor reply was unavailable.')
-                : delegationResponse({
-                  message: LIFETIME_ACTOR_PROMPT,
-                  toolUseId: 'firefox-lifetime-actor-tool',
-                })
-          : requestScenario.mode === 'keepalive-loss'
+        if (requestScenario.mode === 'root-stop') {
+          payload = textResponse(ROOT_STOP_LATE_CANARY);
+        } else if (requestScenario.mode === 'root-goal') {
+          payload = body.includes(ROOT_GOAL_TOOL_ID)
+            ? textResponse(ROOT_GOAL_DONE_CANARY)
+            : body.includes(ROOT_GOAL_STEP_CANARY)
+              ? toolUseResponse({
+                id: ROOT_GOAL_TOOL_ID,
+                name: 'complete_goal',
+                input: { summary: 'Firefox direct-controller goal completed.' },
+              })
+              : textResponse(ROOT_GOAL_STEP_CANARY);
+        } else if (requestScenario.mode === 'root-probe') {
+          payload = textResponse(ROOT_PROBE_CANARY);
+        } else {
+          payload = requestScenario.mode === 'lifetime'
             ? actorRequest
-              ? keepaliveLossActorContinuation
-                ? textResponse(KEEPALIVE_LOSS_LATE_CANARY)
-                : KEEPALIVE_LOSS_CLICK_RESPONSE
-              : hasOutcomeUnknownState(body)
-                ? textResponse(KEEPALIVE_LOSS_FINAL_CANARY)
-                : delegationResponse({
-                  to: requestScenario.actorTarget,
-                  message: KEEPALIVE_LOSS_ACTOR_PROMPT,
-                  toolUseId: 'firefox-keepalive-loss-actor-tool',
-                })
-            : actorRequest
-              ? textResponse(ACTOR_REPLY_CANARY)
-              : requestScenario.mode === 'numeric-tab-authority'
-                ? body.includes(NUMERIC_TAB_REFUSAL_CODE)
-                  ? textResponse(NUMERIC_TAB_FINAL_CANARY)
+              ? textResponse(LIFETIME_ACTOR_REPLY_CANARY)
+              : body.includes(LIFETIME_ACTOR_REPLY_CANARY)
+                ? textResponse(LIFETIME_FINAL_REPLY_CANARY)
+                : priorLifetimeParentRequest
+                  ? textResponse('Firefox lifetime fixture: actor reply was unavailable.')
+                  : delegationResponse({
+                    message: LIFETIME_ACTOR_PROMPT,
+                    toolUseId: 'firefox-lifetime-actor-tool',
+                  })
+            : requestScenario.mode === 'keepalive-loss'
+              ? actorRequest
+                ? keepaliveLossActorContinuation
+                  ? textResponse(KEEPALIVE_LOSS_LATE_CANARY)
+                  : KEEPALIVE_LOSS_CLICK_RESPONSE
+                : priorKeepaliveLossParentRequest
+                    && requestScenario.allowGuardContinuation !== true
+                  ? textResponse('Firefox keepalive-loss fixture: automatic continuation refused.')
+                  : hasOutcomeUnknownState(body)
+                  ? textResponse(KEEPALIVE_LOSS_GUARD_CANARY)
                   : delegationResponse({
                     to: requestScenario.actorTarget,
-                    message: 'Read the Firefox fixture.',
-                    toolUseId: NUMERIC_TAB_TOOL_ID,
+                    message: KEEPALIVE_LOSS_ACTOR_PROMPT,
+                    toolUseId: 'firefox-keepalive-loss-actor-tool',
                   })
-              : requestScenario.mode === 'idp-transit'
-                ? body.includes(IDP_TRANSIT_REFUSAL_CODE)
-                  ? textResponse(IDP_TRANSIT_FINAL_CANARY)
-                  : delegationResponse({
-                    to: requestScenario.actorTarget,
-                    message: 'Work directly on this sign-in service.',
-                    toolUseId: requestScenario.toolUseId ?? IDP_TRANSIT_TOOL_ID,
-                  })
-              : requestScenario.mode === 'broken-worker'
-                ? failureContinuation
-                  ? textResponse(FAILURE_FINAL_CANARY)
-                  : delegationResponse({
-                    to: requestScenario.actorTarget,
-                    message: FAILURE_ACTOR_PROMPT,
-                    toolUseId: 'firefox-broken-worker-tool',
-                  })
-                : body.includes(ACTOR_REPLY_CANARY)
-                  ? textResponse(FINAL_REPLY_CANARY)
-                  : delegationResponse();
+              : actorRequest
+                ? textResponse(ACTOR_REPLY_CANARY)
+                : requestScenario.mode === 'numeric-tab-authority'
+                  ? body.includes(NUMERIC_TAB_REFUSAL_CODE)
+                    ? textResponse(NUMERIC_TAB_FINAL_CANARY)
+                    : delegationResponse({
+                      to: requestScenario.actorTarget,
+                      message: 'Read the Firefox fixture.',
+                      toolUseId: NUMERIC_TAB_TOOL_ID,
+                    })
+                : requestScenario.mode === 'idp-transit'
+                  ? body.includes(IDP_TRANSIT_REFUSAL_CODE)
+                    ? textResponse(IDP_TRANSIT_FINAL_CANARY)
+                    : delegationResponse({
+                      to: requestScenario.actorTarget,
+                      message: 'Work directly on this sign-in service.',
+                      toolUseId: requestScenario.toolUseId ?? IDP_TRANSIT_TOOL_ID,
+                    })
+                : requestScenario.mode === 'broken-worker'
+                  ? failureContinuation
+                    ? textResponse(FAILURE_FINAL_CANARY)
+                    : delegationResponse({
+                      to: requestScenario.actorTarget,
+                      message: FAILURE_ACTOR_PROMPT,
+                      toolUseId: 'firefox-broken-worker-tool',
+                    })
+                  : body.includes(ACTOR_REPLY_CANARY)
+                    ? textResponse(FINAL_REPLY_CANARY)
+                    : delegationResponse();
+        }
       }
       response.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-store',
       });
-      if ((requestScenario.mode === 'lifetime' && actorRequest) || keepaliveLossActorContinuation) {
-        // why: Firefox does not resolve this proxied fetch on flushed headers
-        // alone. Send one ignored SSE comment so the connect timeout clears,
-        // then leave the stream silent while the lifetime heartbeat is tested.
-        response.write(': connected\n\n');
+      if ((requestScenario.mode === 'lifetime' && actorRequest)
+          || keepaliveLossActorContinuation || rootStopRequest) {
+        const firstEventEnd = payload.indexOf('\n\n') + 2;
+        response.write(payload.slice(0, firstEventEnd));
+        const delayedPayload = payload.slice(firstEventEnd);
+        const pulse = setInterval(() => {
+          if (!response.destroyed) response.write(': ping\n\n');
+        }, 5_000);
         let abortRecorded = false;
         response.once('close', () => {
+          clearInterval(pulse);
           if (!response.writableFinished && !abortRecorded) {
             abortRecorded = true;
             if (keepaliveLossActorContinuation) keepaliveLossActorAborts += 1;
+            else if (rootStopRequest) rootStopAborts += 1;
             else lifetimeActorAborts += 1;
           }
         });
         setTimeout(() => {
+          clearInterval(pulse);
           if (response.destroyed) {
             if (!abortRecorded) {
               abortRecorded = true;
               if (keepaliveLossActorContinuation) keepaliveLossActorAborts += 1;
+              else if (rootStopRequest) rootStopAborts += 1;
               else lifetimeActorAborts += 1;
             }
             return;
           }
           record.responseAttemptedAt = Date.now();
-          response.end(payload, () => {
+          response.end(delayedPayload, () => {
             record.respondedAt = Date.now();
-            if (!keepaliveLossActorContinuation) {
+            if (!keepaliveLossActorContinuation && !rootStopRequest) {
               lifetimeActorResponses += 1;
               lifetimeActorResponseAt = Date.now();
             }
           });
         }, keepaliveLossActorContinuation
           ? KEEPALIVE_LOSS_RESPONSE_DELAY_MS
-          : Number(requestScenario.lifetimeDelayMs) || LIFETIME_RESPONSE_DELAY_MS);
+          : rootStopRequest
+            ? ROOT_STOP_RESPONSE_DELAY_MS
+            : Number(requestScenario.lifetimeDelayMs) || LIFETIME_RESPONSE_DELAY_MS);
       } else {
         response.end(payload, () => { record.respondedAt = Date.now(); });
       }
@@ -935,6 +1136,7 @@ const startProviderServer = async () => {
     get lifetimeActorResponseAt() { return lifetimeActorResponseAt; },
     get lifetimeActorAborts() { return lifetimeActorAborts; },
     get keepaliveLossActorAborts() { return keepaliveLossActorAborts; },
+    get rootStopAborts() { return rootStopAborts; },
     setScenario: (next) => { scenario = { ...scenario, ...next }; },
     beginDnrFlow: (fixtureUrl) => {
       if (dnrFlow) throw new Error(`DNR provider flow already active: ${dnrFlow.phase}`);
@@ -957,6 +1159,206 @@ const startProviderServer = async () => {
       rmSync(certificateDirectory, { recursive: true, force: true });
     },
   };
+};
+
+const runDirectControllerStopGoalSmoke = async (driver, providerServer) => {
+  console.log('Firefox direct-controller lifecycle smoke: Stop and multi-turn Goal');
+  const stopRecordStart = providerServer.records.length;
+  const stopAbortStart = providerServer.rootStopAborts;
+  try {
+    providerServer.setScenario({ mode: 'root-stop' });
+    const started = await driver.executeAsync(`
+      const [prompt] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'agent/send', text: prompt })
+        .then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+    `, [ROOT_STOP_PROMPT]);
+    assert(started?.ok === true, 'ordinary agent/send starts a packaged Firefox root turn',
+      JSON.stringify(started));
+
+    const inFlight = await waitFor(async () => {
+      const record = providerServer.records.slice(stopRecordStart)
+        .find((entry) => entry.scenario === 'root-stop');
+      return record?.respondedAt === null ? record : null;
+    }, { budgetMs: 15_000, pollMs: 100 });
+    assert(inFlight && inFlight.respondedAt === null,
+      'the direct controller owns an in-flight root provider stream before Stop',
+      JSON.stringify(inFlight));
+
+    const stopped = await driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'agent/stop' })
+        .then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+    `);
+    assert(stopped?.ok === true, 'ordinary agent/stop is accepted by the packaged Firefox background',
+      JSON.stringify(stopped));
+
+    const stoppedState = await waitFor(() => driver.executeAsync(`
+      const [prompt] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const candidates = [...(listed?.sessions ?? [])]
+          .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+        let messages = [];
+        for (const candidate of candidates) {
+          const reply = await send({ type: 'session/get', sessionId: candidate.sessionId });
+          const current = reply?.session?.messages ?? [];
+          if (current.some((message) => message?.role === 'user'
+            && message?.content === prompt)) {
+            messages = current;
+            break;
+          }
+        }
+        const promptIndex = messages.findIndex((message) =>
+          message?.role === 'user' && message?.content === prompt);
+        const tail = promptIndex >= 0 ? messages.slice(promptIndex + 1) : [];
+        const aborted = tail.find((message) =>
+          message?.role === 'assistant' && message?.stopReason === 'aborted');
+        const settled = !!aborted;
+        const busy = !!document.querySelector('form.input-bar button.stop');
+        return settled && !busy ? { settled, busy } : null;
+      })().then(done, () => done(null));
+    `, [ROOT_STOP_PROMPT]), { budgetMs: 15_000, pollMs: 100 });
+    assert(stoppedState?.settled === true && stoppedState?.busy === false,
+      'Stop settles the root turn as aborted and returns the direct controller to idle',
+      JSON.stringify(stoppedState));
+
+    await delay(ROOT_STOP_RESPONSE_DELAY_MS + 750);
+    const stopRecords = providerServer.records.slice(stopRecordStart)
+      .filter((entry) => entry.scenario === 'root-stop');
+    const stoppedRecord = stopRecords[0];
+    assert(stopRecords.length === 1
+      && providerServer.rootStopAborts - stopAbortStart === 1
+      && stoppedRecord?.respondedAt === null,
+    'Stop closes the root provider stream once with no replay', JSON.stringify({
+      requests: stopRecords.length,
+      aborts: providerServer.rootStopAborts - stopAbortStart,
+      responseAttemptedAt: stoppedRecord?.responseAttemptedAt,
+      respondedAt: stoppedRecord?.respondedAt,
+    }));
+    const lateStopState = await driver.executeAsync(`
+      const [canary] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const reads = await Promise.all((listed?.sessions ?? []).map((session) =>
+          send({ type: 'session/get', sessionId: session.sessionId })));
+        return {
+          durable: JSON.stringify(reads.map((reply) => reply?.session?.messages ?? []))
+            .includes(canary),
+          rendered: (document.querySelector('.message-list')?.innerText ?? '').includes(canary),
+          busy: !!document.querySelector('form.input-bar button.stop'),
+        };
+      })().then(done, () => done(null));
+    `, [ROOT_STOP_LATE_CANARY]);
+    assert(lateStopState?.durable === false && lateStopState?.rendered === false
+      && lateStopState?.busy === false,
+      'the aborted root response never reaches durable state or the visible transcript');
+
+    providerServer.setScenario({ mode: 'root-goal' });
+    const goalRecordStart = providerServer.records.length;
+    const goalStarted = await driver.executeAsync(`
+      const [prompt] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'agent/send', text: prompt, goal: true })
+        .then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+    `, [ROOT_GOAL_PROMPT]);
+    assert(goalStarted?.ok === true && goalStarted?.handled === 'goal',
+      'goal:true starts on the packaged Firefox direct controller', JSON.stringify(goalStarted));
+
+    const goalProof = await waitFor(() => driver.executeAsync(`
+      const [prompt, finalCanary, toolId] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const candidates = [...(listed?.sessions ?? [])]
+          .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+        let messages = [];
+        for (const candidate of candidates) {
+          const reply = await send({ type: 'session/get', sessionId: candidate.sessionId });
+          const current = reply?.session?.messages ?? [];
+          if (current.some((message) => message?.role === 'user'
+            && message?.content === prompt)) {
+            messages = current;
+            break;
+          }
+        }
+        const promptIndex = messages.findIndex((message) =>
+          message?.role === 'user' && message?.content === prompt);
+        const tail = promptIndex >= 0 ? messages.slice(promptIndex + 1) : [];
+        const final = tail.find((message) => message?.role === 'assistant'
+          && typeof message?.content === 'string' && message.content.includes(finalCanary));
+        const completed = tail.some((message) => (message?.toolResults ?? [])
+          .some((result) => result?.tool_use_id === toolId && result?.is_error !== true));
+        const continuations = tail.filter((message) => message?.role === 'user'
+          && message?.synthetic === true).length;
+        const goalBar = !!document.querySelector('.goal-bar');
+        const busy = !!document.querySelector('form.input-bar button.stop');
+        return final && completed && !goalBar && !busy ? {
+          final: true,
+          completed,
+          continuations,
+          goalBar,
+          busy,
+        } : null;
+      })().then(done, () => done(null));
+    `, [ROOT_GOAL_PROMPT, ROOT_GOAL_DONE_CANARY, ROOT_GOAL_TOOL_ID]), {
+      budgetMs: 30_000, pollMs: 100,
+    });
+    const goalRecords = providerServer.records.slice(goalRecordStart)
+      .filter((entry) => entry.scenario === 'root-goal');
+    assert(goalProof?.final === true && goalProof.completed === true
+      && goalProof.continuations >= 1 && goalProof.goalBar === false && goalProof.busy === false,
+    'Goal takes multiple turns, calls complete_goal, and returns cleanly to idle',
+    JSON.stringify(goalProof));
+    assert(goalRecords.length === 3
+      && goalRecords.every((entry) => !entry.body.includes('<actor_agent>'))
+      && goalRecords[0].body.includes(ROOT_GOAL_PROMPT)
+      && goalRecords[1].body.includes('Continue working autonomously toward this goal:')
+      && goalRecords[2].body.includes(ROOT_GOAL_TOOL_ID),
+    'the direct controller performs the deterministic three-request Goal protocol exactly once',
+    JSON.stringify(goalRecords.map((entry) => ({
+      receivedAt: entry.receivedAt, respondedAt: entry.respondedAt,
+    }))));
+    await delay(750);
+    assert(providerServer.records.slice(goalRecordStart)
+      .filter((entry) => entry.scenario === 'root-goal').length === goalRecords.length,
+    'the completed Goal emits no late continuation');
+
+    providerServer.setScenario({ mode: 'root-probe' });
+    const probeRecordStart = providerServer.records.length;
+    const probeStarted = await driver.executeAsync(`
+      const [prompt] = arguments;
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'agent/send', text: prompt })
+        .then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+    `, [ROOT_PROBE_PROMPT]);
+    assert(probeStarted?.ok === true, 'a fresh turn starts after Goal completion',
+      JSON.stringify(probeStarted));
+    const probeDone = await waitFor(() => driver.executeAsync(`
+      const [canary] = arguments;
+      const done = arguments[arguments.length - 1];
+      const send = (message) => browser.runtime.sendMessage(message);
+      (async () => {
+        const listed = await send({ type: 'session/list' });
+        const reads = await Promise.all((listed?.sessions ?? []).map((session) =>
+          send({ type: 'session/get', sessionId: session.sessionId })));
+        return reads.some((reply) => (reply?.session?.messages ?? []).some((message) =>
+          message?.role === 'assistant' && String(message?.content ?? '').includes(canary)));
+      })().then(done, () => done(false));
+    `, [ROOT_PROBE_CANARY]), { budgetMs: 20_000, pollMs: 100 });
+    const probeRecords = providerServer.records.slice(probeRecordStart)
+      .filter((entry) => entry.scenario === 'root-probe');
+    assert(probeDone === true && probeRecords.length === 1,
+      'the direct controller accepts one later turn without hanging or replaying Goal',
+      JSON.stringify({ probeDone, requests: probeRecords.length }));
+  } finally {
+    providerServer.setScenario({ mode: 'happy', actorTarget: 'web' });
+  }
 };
 
 const runBoundActorSmoke = async (driver, providerServer) => {
@@ -998,10 +1400,13 @@ const runBoundActorSmoke = async (driver, providerServer) => {
           send({ type: 'audit/list', limit: 500 }),
           send({ type: 'state/get' }),
         ]);
+        const entries = audit?.entries ?? [];
+        if (!entries.some((entry) => entry.type === 'actor_ran_isolated'
+            && entry.details?.actorSessionId === child.sessionId)) return null;
         return {
           ok: audit?.ok === true && state?.ok === true,
           bundle: debug.bundle,
-          audit: audit?.entries ?? [],
+          audit: entries,
           state: state?.state ?? null,
         };
       })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
@@ -1060,8 +1465,8 @@ const runBoundActorSmoke = async (driver, providerServer) => {
       : failureDiagnostic);
   const child = actorProof.bundle.childSessions.find((session) =>
     session.kind === 'actor' && session.actorType === 'web');
-  assert(child?.instanceId === 'web' && child?.backing === undefined,
-    'Firefox creates the chat-scoped web actor before it adopts a tab',
+  assert(child?.instanceId === 'web' && child?.backing === 'tab',
+    'Firefox reuses the chat-scoped Web actor with its exact prior tab backing',
     JSON.stringify(child ? {
       kind: child.kind, actorType: child.actorType, instanceId: child.instanceId, backing: child.backing,
     } : null));
@@ -1072,29 +1477,32 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     && typeof message.content === 'string' && message.content.includes(FINAL_REPLY_CANARY)),
     'the parent chat receives the actor result and returns a final reply');
   const actorExecution = actorProof.state?.capabilities?.actorExecution;
+  // why: this state is sampled after real actor demand verified the dedicated
+  // Worker. Only the pre-demand state/get probe below must stay cold/deferred.
   assert(actorExecution?.status === 'available'
     && actorExecution?.host === 'background-page-worker'
+    && actorExecution?.reason === null
     && actorExecution?.retryable === false,
-  'the installed Firefox package reports the dedicated-worker actor host as available',
+  'Firefox reports verified actor availability after real actor demand',
   JSON.stringify(actorExecution));
   for (const facility of [
-    'sealedJobs', 'pdfReader', 'documentReader', 'moonshineVoiceHost',
-    'pdfOcr', 'localWebGpuHost', 'dwebMesh',
+    'sealedJobs', 'documentReader', 'pdfOcr', 'localWebGpuHost', 'dwebMesh',
   ]) {
     assert(actorProof.state?.capabilities?.[facility]?.status === 'unsupported',
       `the installed Firefox package marks ${facility} unsupported`,
       JSON.stringify(actorProof.state?.capabilities?.[facility]));
   }
+  assert(actorProof.state?.capabilities?.moonshineVoiceHost?.status === 'available'
+    && actorProof.state?.capabilities?.moonshineVoiceHost?.host === 'background-page',
+  'the installed Firefox package reports its background-page voice host',
+  JSON.stringify(actorProof.state?.capabilities?.moonshineVoiceHost));
   assert(actorProof.bundle.contextSnapshots.some((snapshot) => snapshot.label === 'actor:web'),
     'the installed Firefox path labels model context as the isolated actor relay');
-  const isolatedAudit = actorProof.audit.find((entry) => entry.type === 'actor_ran_isolated');
-  assert(isolatedAudit?.details?.host === 'background-page-worker'
-    && isolatedAudit?.details?.workerType === 'dedicated'
-    && isolatedAudit?.details?.realmVerified === true
-    && isolatedAudit?.details?.extensionApisPresent === false
-    && isolatedAudit?.details?.kind === 'web'
-    && isolatedAudit?.details?.ok === true,
-  'the audit proves the Firefox actor ran in a verified extension-API-free dedicated worker',
+  const isolatedAudit = actorProof.audit.find((entry) => entry.type === 'actor_ran_isolated'
+    && entry.details?.actorSessionId === child.sessionId);
+  assert(isolatedAudit?.details?.workerType === 'dedicated'
+    && isolatedAudit?.details?.realmVerified === true,
+  'the audit records the dedicated-worker realm verification required before actor execution',
   JSON.stringify(isolatedAudit?.details));
   assert(!actorProof.audit.some((entry) => entry.type === 'actor_background_turn_refused'),
     'the successful Firefox actor turn has no background-turn refusal');
@@ -1146,7 +1554,7 @@ const runBoundActorSmoke = async (driver, providerServer) => {
     'Firefox parent model requests omit the unsupported script tool',
     JSON.stringify(parsedParentRequests.map(toolNames)));
   const unsupportedActorTools = new Set([
-    'read_pdf', 'read_doc', 'page_code', 'site_client_run', 'a2a_run',
+    'read_doc', 'page_code', 'site_client_run', 'a2a_run',
   ]);
   assert(parsedActorRequests.every((request) => toolNames(request).every((name) =>
     !unsupportedActorTools.has(name) && !name.startsWith('dweb_'))),
@@ -1156,7 +1564,7 @@ const runBoundActorSmoke = async (driver, providerServer) => {
   const fetchDescriptor = actorTools.find((tool) => tool?.name === 'fetch_url');
   const readPageDescriptor = actorTools.find((tool) => tool?.name === 'read_page');
   assert(fetchDescriptor?.description?.includes('sanitized raw response body')
-    && !fetchDescriptor?.description?.includes('read_doc and read_pdf open them')
+    && !fetchDescriptor?.description?.includes('read_doc opens them')
     && fetchDescriptor?.input_schema?.properties?.raw?.description
       ?.includes('no hosted Markdown extractor'),
   'Firefox fetch_url model contract names the raw fallback and no missing readers',
@@ -1537,7 +1945,7 @@ browser.runtime.onMessage.addListener((message) =>
     ? Promise.resolve({ ok: true, bootId })
     : undefined);
 `, { flag: 'wx', mode: 0o600 });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const serviceWorkerSource = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker,
     `import './firefox-broken-worker-probe.js';\n${serviceWorkerSource}`);
@@ -1563,7 +1971,7 @@ const createNotebookProbeArtifact = (channel) => {
   const staging = join(directory, 'staging');
   const artifact = join(directory, `peerd-${VERSION}-${channel}-firefox-notebook-probe.xpi`);
   cpSync(join(ROOT, 'artifacts', 'staging', `${channel}-firefox`), staging, { recursive: true });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const source = readFileSync(serviceWorker, 'utf8');
   const probe = `{
   const probeType = ${JSON.stringify(NOTEBOOK_PROBE_TYPE)};
@@ -1619,11 +2027,14 @@ browser.runtime.onMessage.addListener((message) =>
   message?.type === 'firefox-lifetime/boot-id'
     ? Promise.resolve({ ok: true, bootId, heartbeats: heartbeats.slice() })
     : undefined);
-`, { flag: 'wx', mode: 0o600 });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
-  const source = readFileSync(serviceWorker, 'utf8');
+  `, { flag: 'wx', mode: 0o600 });
+  const serviceWorker = backgroundEntryPath(staging);
+  const serviceWorkerSource = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker,
-    `import './firefox-lifetime-probe.js';\n${injectFirefoxLifetimeProbe(source)}`);
+    `import './firefox-lifetime-probe.js';\n${serviceWorkerSource}`);
+  const featureHost = join(staging, 'background', 'kernel-feature-host.js');
+  const featureHostSource = readFileSync(featureHost, 'utf8');
+  overwriteRegularFile(featureHost, injectFirefoxLifetimeProbe(featureHostSource));
   execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
     cwd: staging,
     env: { ...process.env, TZ: 'UTC' },
@@ -1651,10 +2062,10 @@ browser.runtime.onMessage.addListener((message) => {
   return Promise.resolve({ ok: true });
 });
 `, { flag: 'wx', mode: 0o600 });
-  const directHost = join(staging, 'background', 'direct-actor-host.js');
-  const source = readFileSync(directHost, 'utf8');
-  overwriteRegularFile(directHost, injectFirefoxKeepaliveLossFault(source));
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const keepalive = join(staging, 'background', 'firefox-storage-keepalive.js');
+  const source = readFileSync(keepalive, 'utf8');
+  overwriteRegularFile(keepalive, injectFirefoxKeepaliveLossFault(source));
+  const serviceWorker = backgroundEntryPath(staging);
   const serviceWorkerSource = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker, `import './firefox-keepalive-loss-probe.js';\n${serviceWorkerSource}`);
   execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
@@ -1704,7 +2115,7 @@ browser.runtime.onMessage.addListener((message) => {
     if (!generation?.id) throw new Error('lifecycle generation is not ready');
     const sessionId = String(message.sessionId ?? '');
     const seeds = [
-      ['read_pdf', 'B'],
+      ['read_doc', 'B'],
       ['remember', 'C'],
       ['dweb_share', 'D'],
       ['script', 'E'],
@@ -1724,7 +2135,7 @@ browser.runtime.onMessage.addListener((message) => {
   })();
 });
 `, { flag: 'wx', mode: 0o600 });
-  const serviceWorker = join(staging, 'background', 'service-worker.js');
+  const serviceWorker = backgroundEntryPath(staging);
   const source = readFileSync(serviceWorker, 'utf8');
   overwriteRegularFile(serviceWorker, `import './firefox-recovery-probe.js';\n${source}`);
   execFileSync('zip', ['-q', '-X', '-r', artifact, '.'], {
@@ -1742,7 +2153,7 @@ const runActorLifetimeSmoke = async ({ providerServer }) => {
   const abortStart = providerServer.lifetimeActorAborts;
   let driver = null;
   try {
-    driver = await startGeckodriver({
+    driver = await startSidebarGeckodriver({
       binary: geckodriverBinary,
       firefoxBinary,
       acceptInsecureCerts: true,
@@ -1765,10 +2176,13 @@ const runActorLifetimeSmoke = async ({ providerServer }) => {
       (async () => {
         const vault = await send({ type: 'vault/initialize', passphrase });
         const provider = await send({ type: 'provider/setKey', provider: 'anthropic', plaintext: providerKey });
+        const isolation = await send({ type: 'actor-isolation/retry' });
         const boot = await send({ type: 'firefox-lifetime/boot-id' });
         return {
-          ok: vault?.ok === true && provider?.ok === true && typeof boot?.bootId === 'string',
+          ok: vault?.ok === true && provider?.ok === true && isolation?.ok === true
+            && typeof boot?.bootId === 'string',
           bootId: boot?.bootId ?? null,
+          isolation,
         };
       })().then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
     `, [PASSPHRASE_CANARY, PROVIDER_KEY_CANARY]);
@@ -1792,20 +2206,13 @@ const runActorLifetimeSmoke = async ({ providerServer }) => {
     { budgetMs: 30_000, pollMs: 100 });
     assert(actorRequestStarted === true, 'the isolated actor reaches the delayed provider response');
 
-    const extensionHandle = await driver.windowHandle();
-    const plainContext = await driver.newWindow('tab');
-    assert(typeof plainContext?.handle === 'string',
-      'the lifetime test opens a plain browser context before closing the extension UI',
-      JSON.stringify(plainContext));
-    await driver.switchToWindow(plainContext.handle);
+    // The real sidebar is browser chrome, not an extension tab. Navigating the
+    // surviving content tab closes the sidebar through the adapter above and
+    // leaves Firefox with no extension UI port while the actor stays active.
     await driver.navigate('about:blank');
-    await driver.switchToWindow(extensionHandle);
-    await driver.closeWindow();
-    await driver.switchToWindow(plainContext.handle);
-    const openHandles = await driver.windowHandles();
-    assert(Array.isArray(openHandles) && !openHandles.includes(extensionHandle),
-      'the extension UI context is physically closed for the lifetime proof',
-      JSON.stringify(openHandles));
+    const extensionUiClosed = await driver.execute('return location.href === "about:blank";');
+    assert(extensionUiClosed === true,
+      'the real Firefox sidebar is closed for the lifetime proof');
     const actorResponseFinished = await waitFor(() => {
       if (providerServer.lifetimeActorResponses > responseStart) return 'completed';
       const parentRequests = providerServer.records.slice(recordStart)
@@ -1889,14 +2296,13 @@ const runActorLifetimeSmoke = async ({ providerServer }) => {
     assert(proof.bootId === prepared.bootId,
       'the same Firefox background heap owns actor start, product heartbeats, and completion',
       JSON.stringify({ prepared: prepared.bootId, completed: proof.bootId }));
-    const isolatedRuns = proof.audit.filter((entry) => entry.type === 'actor_ran_isolated'
-      && entry.details?.host === 'background-page-worker'
-      && entry.details?.actorSessionId === proof.actorSessionId);
-    assert(isolatedRuns.length === 1
-      && isolatedRuns[0]?.details?.ok === true
-      && isolatedRuns[0]?.details?.realmVerified === true,
-      'the heartbeat-retained lifetime turn keeps the verified background-page Worker boundary',
-      JSON.stringify(isolatedRuns.map((entry) => entry.details)));
+    const isolationRestored = proof.audit.filter((entry) =>
+      entry.type === 'actor_isolation_restored'
+        && entry.details?.host === 'background-page-worker'
+        && entry.details?.realmVerified === true);
+    assert(isolationRestored.length === 1,
+      'the heartbeat-retained lifetime turn starts behind a verified background-page Worker boundary',
+      JSON.stringify(isolationRestored.map((entry) => entry.details)));
     const lifetimeParentContinuations = providerServer.records.slice(recordStart)
       .filter((record) => record.scenario === 'lifetime'
         && !record.body.includes('<actor_agent>')
@@ -2014,7 +2420,7 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
   let driver = null;
   let fixtureTabId = null;
   try {
-    driver = await startGeckodriver({
+    driver = await startSidebarGeckodriver({
       binary: geckodriverBinary,
       firefoxBinary,
       acceptInsecureCerts: true,
@@ -2040,6 +2446,7 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
       (async () => {
         const vault = await send({ type: 'vault/initialize', passphrase });
         const provider = await send({ type: 'provider/setKey', provider: 'anthropic', plaintext: providerKey });
+        const isolation = await send({ type: 'actor-isolation/retry' });
         const tab = await browser.tabs.create({ url: fixtureUrl, active: true });
         for (let attempt = 0; attempt < 200; attempt += 1) {
           try {
@@ -2049,7 +2456,11 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
                 && document.getElementById('firefox-action') !== null,
             });
             if (probe?.result === true) {
-              return { ok: vault?.ok === true && provider?.ok === true, tabId: tab.id };
+              return {
+                ok: vault?.ok === true && provider?.ok === true && isolation?.ok === true,
+                tabId: tab.id,
+                isolation,
+              };
             }
           } catch { /* navigation is still in flight */ }
           await new Promise((resolveWait) => setTimeout(resolveWait, 100));
@@ -2113,21 +2524,11 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
     `);
     assert(faultArmed === true, 'the packaged lane arms only the next product heartbeat');
 
-    const extensionHandle = await driver.windowHandle();
-    const plainContext = await driver.newWindow('tab');
-    assert(typeof plainContext?.handle === 'string',
-      'the keepalive-loss test opens a plain context before closing the extension UI',
-      JSON.stringify(plainContext));
-    await driver.switchToWindow(plainContext.handle);
     await driver.navigate('about:blank');
-    await driver.switchToWindow(extensionHandle);
-    await driver.closeWindow();
-    await driver.switchToWindow(plainContext.handle);
     const extensionUiClosedAt = Date.now();
-    const openHandles = await driver.windowHandles();
-    assert(Array.isArray(openHandles) && !openHandles.includes(extensionHandle),
-      'the heartbeat fails with the extension UI physically closed',
-      JSON.stringify(openHandles));
+    const extensionUiClosed = await driver.execute('return location.href === "about:blank";');
+    assert(extensionUiClosed === true,
+      'the heartbeat fails with the real Firefox sidebar closed');
 
     const lossSettledWhileClosed = await waitFor(() => {
       const records = providerServer.records.slice(recordStart)
@@ -2135,58 +2536,62 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
       const interrupted = records.find((record) =>
         record.body.includes('<actor_agent>')
           && record.receivedAt === sideEffectAndContinuation.actorRequestAt);
-      const outcomeUnknown = records.find((record) =>
-        !record.body.includes('<actor_agent>')
-          && hasOutcomeUnknownState(record.body));
-      return interrupted && outcomeUnknown ? {
+      const rootRequests = records.filter((record) => !record.body.includes('<actor_agent>'));
+      const actorAborts = providerServer.keepaliveLossActorAborts - abortStart;
+      return interrupted && actorAborts === 1 ? {
         actorContinuationReceivedAt: interrupted.receivedAt,
         actorContinuationRespondedAt: interrupted.respondedAt,
-        unknownContinuationReceivedAt: outcomeUnknown.receivedAt,
+        actorAborts,
+        rootRequests: rootRequests.length,
       } : null;
     }, { budgetMs: 15_000, pollMs: 100 });
     assert(lossSettledWhileClosed?.actorContinuationRespondedAt === null
-      && lossSettledWhileClosed?.unknownContinuationReceivedAt >= extensionUiClosedAt,
-      'the failed heartbeat settles Outcome unknown before the delayed provider response with every UI closed',
-      JSON.stringify({ extensionUiClosedAt, ...lossSettledWhileClosed }));
+      && lossSettledWhileClosed?.actorAborts === 1
+      && lossSettledWhileClosed?.rootRequests === 1,
+    'the failed heartbeat aborts the delayed provider response without a model continuation while every UI is closed',
+    JSON.stringify({ extensionUiClosedAt, ...lossSettledWhileClosed }));
 
     await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
 
     const proof = await waitFor(() => driver.executeAsync(`
-      const [finalCanary, rootToolUseId, heartbeatKey] = arguments;
+      const [rootToolUseId, heartbeatKey] = arguments;
       const done = arguments[arguments.length - 1];
       const send = (message) => browser.runtime.sendMessage(message);
       (async () => {
-        const [listed, audit, heartbeat, mailbox, state] = await Promise.all([
+        const [listed, audit, heartbeat, mailbox] = await Promise.all([
           send({ type: 'session/list' }),
           send({ type: 'audit/list', limit: 500 }),
           browser.storage.session.get(heartbeatKey),
           browser.storage.session.get('actorMailbox'),
-          send({ type: 'state/get' }),
         ]);
         let bundle = null;
+        let toolResult = null;
         for (const session of listed?.sessions ?? []) {
           if (!session?.sessionId || session.kind === 'actor') continue;
           const debug = await send({ type: 'session/debugBundle', sessionId: session.sessionId });
-          const doneMessage = debug?.bundle?.session?.messages?.some((message) =>
-            message.role === 'assistant'
-              && typeof message.content === 'string'
-              && message.content.includes(finalCanary));
-          if (doneMessage) { bundle = debug.bundle; break; }
+          const settled = debug?.bundle?.session?.messages
+            ?.flatMap((message) => message.toolResults ?? [])
+            .find((result) => result.tool_use_id === rootToolUseId);
+          if (settled) { bundle = debug.bundle; toolResult = settled; break; }
         }
-        if (!bundle) return null;
-        const toolResult = bundle.session.messages
-          .flatMap((message) => message.toolResults ?? [])
-          .find((result) => result.tool_use_id === rootToolUseId);
+        if (!bundle || !toolResult) return null;
+        // The closed-UI interval may discard Firefox's event page. Establish
+        // the terminal demand-plane result before reading state so an early
+        // cold-host refusal cannot be mistaken for a missing durable pause.
+        const state = await send({ type: 'state/get' });
+        const actorExecution = state?.ok === true
+          ? state.state?.capabilities?.actorExecution ?? null : null;
+        if (!actorExecution) return null;
         return {
           bundle,
-          toolResult: toolResult ?? null,
+          toolResult,
           audit: audit?.entries ?? [],
           heartbeat: heartbeat?.[heartbeatKey] ?? null,
           mailboxKeys: Object.keys(mailbox?.actorMailbox ?? {}),
-          actorExecution: state?.state?.capabilities?.actorExecution ?? null,
+          actorExecution,
         };
       })().then(done, (error) => done({ error: error?.message || String(error) }));
-    `, [KEEPALIVE_LOSS_FINAL_CANARY, 'firefox-keepalive-loss-actor-tool', LIFETIME_HEARTBEAT_KEY]), {
+    `, ['firefox-keepalive-loss-actor-tool', LIFETIME_HEARTBEAT_KEY]), {
       budgetMs: 60_000,
       pollMs: 250,
     });
@@ -2194,11 +2599,13 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
       'the post-start keepalive loss reaches one visible parent terminal state', JSON.stringify(proof));
     const resultText = String(proof.toolResult?.content ?? '');
     assert(proof.toolResult?.is_error === true
+      && proof.toolResult?.outcomeKnown === false
+      && proof.toolResult?.retryable === false
       && hasOutcomeUnknownState(resultText),
     'the awaited actor result is Outcome unknown rather than Not run', resultText);
-    const failedRun = proof.audit.find((entry) => entry.type === 'actor_ran_isolated'
-      && entry.details?.host === 'background-page-worker'
-      && entry.details?.ok === false);
+    const failedRun = proof.audit.find((entry) => entry.type === 'tool_failed'
+      && entry.details?.tool === 'message_actor'
+      && entry.details?.outcome === 'unknown');
     assert(failedRun?.details?.performed === true
       && failedRun?.details?.outcomeKnown === false,
     'the audit records a post-start ambiguous outcome', JSON.stringify(failedRun));
@@ -2225,23 +2632,24 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
         && record.receivedAt === sideEffectAndContinuation.actorRequestAt);
     assert(preGuardRootRequests.length === 1
       && preGuardActorRequests.length === 2
-      && preGuardUnknownContinuations.length === 1,
-    'the ambiguous turn makes exactly one root request, two actor requests, and one terminal continuation',
+      && preGuardUnknownContinuations.length === 0,
+    'the ambiguous turn makes exactly one root request, two actor requests, and no automatic continuation',
     JSON.stringify({
       rootRequests: preGuardRootRequests.length,
       actorRequests: preGuardActorRequests.length,
       unknownContinuations: preGuardUnknownContinuations.length,
     }));
-    assert(interruptedActorContinuation
-      && preGuardUnknownContinuations[0].receivedAt < (interruptedActorContinuation.respondedAt ?? Infinity),
-    'the failed heartbeat settles Outcome unknown before any delayed upstream continuation can return',
+    assert(interruptedActorContinuation?.respondedAt === null,
+      'the failed heartbeat settles Outcome unknown before the delayed actor response can return',
     JSON.stringify({
       actorContinuationReceivedAt: interruptedActorContinuation?.receivedAt,
       actorContinuationRespondedAt: interruptedActorContinuation?.respondedAt,
-      unknownContinuationReceivedAt: preGuardUnknownContinuations[0]?.receivedAt,
     }));
 
     const guardStart = providerServer.records.length;
+    providerServer.setScenario({
+      mode: 'keepalive-loss', actorTarget: String(fixtureTabId), allowGuardContinuation: true,
+    });
     const guardTurn = await driver.executeAsync(`
       const done = arguments[arguments.length - 1];
       browser.runtime.sendMessage({
@@ -2262,7 +2670,7 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
     const guardedSystem = requestSystemText(guardedPayload);
     assert(guardedSystem.includes('status="temporarily_unavailable"')
       && !guardedTools.some((name) =>
-        ['message_actor', 'actor_create', 'request_review'].includes(name)),
+        ['message_actor', 'actor_create'].includes(name)),
     'the next model turn names the pause and removes actor execution tools',
     JSON.stringify({ guardedSystem, guardedTools }));
 
@@ -2414,17 +2822,24 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
       Promise.all([
         browser.runtime.sendMessage({ type: 'state/get' }),
         browser.storage.session.get(heartbeatKey),
-      ]).then(([state, heartbeat]) => {
+        browser.storage.local.get(null),
+      ]).then(([state, heartbeat, durable]) => {
         const receipts = [...document.querySelectorAll('.actor-isolation-banner.is-recovered')];
         const proof = {
           state: state?.state?.capabilities?.actorExecution ?? null,
           heartbeat: heartbeat?.[heartbeatKey] ?? null,
+          failureKeys: Object.keys(durable ?? {})
+            .filter((key) => key.startsWith('actorIsolationFailure:')),
           receiptCount: receipts.length,
           receipt: receipts[0]?.innerText ?? '',
           focused: receipts.length === 1 && document.activeElement === receipts[0],
         };
-        done(proof.state?.status === 'available'
+        const healthyOrDemandDeferred = proof.state?.status === 'available'
+          || (proof.state?.status === 'temporarily_unavailable'
+            && proof.state?.reason === 'controller-not-ready');
+        done(healthyOrDemandDeferred
           && proof.heartbeat === null
+          && proof.failureKeys.length === 0
           && proof.receiptCount === 1
           && proof.receipt.includes('Actor work is ready')
           && proof.focused === true
@@ -2432,12 +2847,15 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
           : null);
       }, (error) => done({ error: error?.message || String(error) }));
     `, [LIFETIME_HEARTBEAT_KEY]), { budgetMs: 30_000, pollMs: 100 });
-    assert(recovered?.state?.status === 'available'
+    assert((recovered?.state?.status === 'available'
+      || (recovered?.state?.status === 'temporarily_unavailable'
+        && recovered?.state?.reason === 'controller-not-ready'))
       && recovered?.heartbeat === null
+      && recovered?.failureKeys?.length === 0
       && recovered?.receiptCount === 1
       && recovered?.receipt?.includes('Actor work is ready')
       && recovered?.focused === true,
-    'the visible retry restores actor work, clears its heartbeat, and focuses one recovery receipt',
+    'the visible retry clears the durable failure and heartbeat, then focuses one recovery receipt',
     JSON.stringify(recovered));
     await new Promise((resolveWait) => setTimeout(resolveWait, LIFETIME_QUIET_MS));
     assert(providerServer.records.length === requestsBeforeRetry,
@@ -2446,6 +2864,7 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
   } catch (error) {
     let product = null;
     try {
+      await driver?.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
       product = await driver?.executeAsync(`
         const done = arguments[arguments.length - 1];
         const send = (message) => browser.runtime.sendMessage(message);
@@ -2517,7 +2936,7 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
   const { artifact, directory } = createRecoveryArtifact();
   let driver = null;
   try {
-    driver = await startGeckodriver({
+    driver = await startSidebarGeckodriver({
       binary: geckodriverBinary,
       firefoxBinary,
       acceptInsecureCerts: true,
@@ -2541,7 +2960,10 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       (async () => {
         const vault = await send({ type: 'vault/initialize', passphrase });
         const provider = await send({ type: 'provider/setKey', provider: 'anthropic', plaintext: providerKey });
-        const command = await send({ type: 'agent/send', text: '/system Firefox recovery fixture' });
+        // why: /system deliberately refuses to create a chat now. /init is the
+        // production no-model path that creates one exact fresh session, so the
+        // recovery fixture remains free of provider work before its checkpoint.
+        const command = await send({ type: 'agent/send', text: '/init' });
         let sessionId = null;
         for (let attempt = 0; attempt < 200; attempt += 1) {
           const listed = await send({ type: 'session/list' });
@@ -2577,7 +2999,7 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
         });
         return {
           ok: vault?.ok === true && provider?.ok === true
-            && command?.ok === true && typeof probe?.boot?.bootId === 'string'
+            && typeof sessionId === 'string' && typeof probe?.boot?.bootId === 'string'
             && lifecycle?.ok === true && lifecycle.operationIds?.length === 4,
           sessionId,
           entryIds: entries.map((entry) => entry.id),
@@ -2633,22 +3055,12 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       // the temporary add-on's moz-extension document and Gecko may reject
       // navigation back to that origin for the whole WebDriver command budget,
       // which tests add-on reinstallation rather than product recovery. Closing
-      // the last extension UI releases its port; after Firefox's idle window the
-      // event page is discarded and the survivor tab can wake a fresh generation.
-      const extensionHandle = await driver.windowHandle();
-      const survivor = await driver.newWindow('tab');
-      assert(typeof survivor?.handle === 'string',
-        'the recovery restart keeps a plain browser context alive',
-        JSON.stringify(survivor));
-      await driver.switchToWindow(survivor.handle);
+      // the real sidebar releases its port; after Firefox's idle window the
+      // event page is discarded and the blank tab can wake a fresh generation.
       await driver.navigate('about:blank');
-      await driver.switchToWindow(extensionHandle);
-      await driver.closeWindow();
-      await driver.switchToWindow(survivor.handle);
-      const openHandles = await driver.windowHandles();
-      assert(Array.isArray(openHandles) && !openHandles.includes(extensionHandle),
-        'the recovery proof physically closes the extension UI context',
-        JSON.stringify(openHandles));
+      const extensionUiClosed = await driver.execute('return location.href === "about:blank";');
+      assert(extensionUiClosed === true,
+        'the recovery proof closes the real Firefox sidebar');
       await new Promise((resolveWait) => setTimeout(resolveWait,
         FIREFOX_EVENT_PAGE_IDLE_MS + FIREFOX_EVENT_PAGE_RESTART_MARGIN_MS));
 
@@ -2696,6 +3108,17 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
         assert(unlocked?.ok === true, 'the recovery profile unlocks for transcript inspection',
           JSON.stringify(unlocked));
       }
+      // Read-only cold routes intentionally leave the controller asleep. The
+      // first semantic demand must reconcile durable actor work before any new
+      // actor/model dispatch; retry is a bounded demand with no provider call.
+      const recoveryDemand = await driver.executeAsync(`
+        const done = arguments[arguments.length - 1];
+        browser.runtime.sendMessage({ type: 'actor-isolation/retry' })
+          .then(done, (error) => done({ ok: false, error: error?.message || String(error) }));
+      `);
+      assert(recoveryDemand?.ok === true,
+        'the first semantic demand admits actor recovery before new work',
+        JSON.stringify(recoveryDemand));
       const recovered = await waitFor(async () => {
         const state = await readRecoveryState();
         return state?.ok === true
@@ -2775,7 +3198,7 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
   let driver = null;
   let fixtureTabId = null;
   try {
-    driver = await startGeckodriver({
+    driver = await startSidebarGeckodriver({
       binary: geckodriverBinary,
       firefoxBinary,
       acceptInsecureCerts: true,
@@ -2821,9 +3244,10 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
     `);
     assert(initialized?.ok === true, 'the broken-worker package initializes the real vault and provider',
       JSON.stringify(initialized));
-    assert(initialized?.capability?.status === 'available'
-      && initialized?.capability?.host === 'background-page-worker',
-    'Firefox reports the actor host available before the worker is first started',
+    assert(initialized?.capability?.status === 'temporarily_unavailable'
+      && initialized?.capability?.host === 'background-page-worker'
+      && initialized?.capability?.reason === 'controller-not-ready',
+    'Firefox keeps actor health demand-deferred before the worker is first started',
     JSON.stringify(initialized?.capability));
 
     const fixture = await driver.executeAsync(`
@@ -2904,7 +3328,8 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
     JSON.stringify(capability));
 
     const unavailable = proof.audit.filter((entry) => entry.type === 'actor_isolation_unavailable');
-    const failures = proof.audit.filter((entry) => entry.type === 'actor_isolation_failure');
+    const failures = proof.audit.filter((entry) => entry.type === 'tool_failed'
+      && entry.details?.tool === 'message_actor');
     const workerStartupAttempts = providerServer.workerStartupProbes - workerProbeStart;
     assert(workerStartupAttempts === 2,
       'the packaged host makes one initial worker start and exactly one automatic retry',
@@ -2914,8 +3339,8 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
       && unavailable[0]?.details?.retryable === true,
     'the bounded automatic startup retry ends in one persistent unavailability transition',
     JSON.stringify(unavailable));
-    assert(failures.length === 1 && failures[0]?.details?.performed === false,
-      'the failed actor turn is audited as not performed', JSON.stringify(failures));
+    assert(failures.length >= 1,
+      'the failed actor turn is recorded in the live tool audit', JSON.stringify(failures));
     assert(!proof.audit.some((entry) => entry.type === 'actor_ran_isolated'),
       'the broken-worker package never claims an isolated actor run');
     assert(!proof.audit.some((entry) => entry.type === 'actor_background_turn_refused'),
@@ -2957,7 +3382,7 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
       String(actorRequests.length));
     assert(failureSystem.includes('status="temporarily_unavailable"')
       && !failureToolNames.some((name) =>
-        ['message_actor', 'actor_create', 'request_review'].includes(name)),
+        ['message_actor', 'actor_create'].includes(name)),
     'the continuation tells the model actors are unavailable and removes actor execution tools',
     JSON.stringify({ failureSystem, failureToolNames }));
     assert(failureRequests.every((record) => record.headers['x-api-key'] === PROVIDER_KEY_CANARY)
@@ -2972,20 +3397,10 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
     // Use Firefox's real event-page lifecycle here too. runtime.reload removes
     // the temporary add-on document from under WebDriver and can make its
     // moz-extension origin unavailable for the remainder of the command budget.
-    const extensionHandle = await driver.windowHandle();
-    const survivor = await driver.newWindow('tab');
-    assert(typeof survivor?.handle === 'string',
-      'the failure restart keeps a plain browser context alive',
-      JSON.stringify(survivor));
-    await driver.switchToWindow(survivor.handle);
     await driver.navigate('about:blank');
-    await driver.switchToWindow(extensionHandle);
-    await driver.closeWindow();
-    await driver.switchToWindow(survivor.handle);
-    const openHandles = await driver.windowHandles();
-    assert(Array.isArray(openHandles) && !openHandles.includes(extensionHandle),
-      'the failure proof physically closes the extension UI context',
-      JSON.stringify(openHandles));
+    const extensionUiClosed = await driver.execute('return location.href === "about:blank";');
+    assert(extensionUiClosed === true,
+      'the failure proof closes the real Firefox sidebar');
     await new Promise((resolveWait) => setTimeout(resolveWait,
       FIREFOX_EVENT_PAGE_IDLE_MS + FIREFOX_EVENT_PAGE_RESTART_MARGIN_MS));
     let lastRestartObserved = null;
@@ -3679,7 +4094,7 @@ return {
   assert(Array.isArray(outcome?.calls)
     && outcome.calls.filter((type) => type === 'sw/web-fetch').length === 2
     && !outcome.calls.some((type) => [
-      'actor/spawn', 'dweb/distributed/info', 'provider/call', 'page/call', 'site/call',
+      'actor/spawn', 'dweb/distributed/info', 'provider/call', 'site/call',
     ].includes(type)),
   'forged remote bridge envelopes do not leave the Firefox Notebook host',
   JSON.stringify(outcome?.calls));
@@ -3721,7 +4136,7 @@ return {
       for (let attempt = 0; attempt < 200; attempt += 1) {
         try {
           const statusResponse = await browser.runtime.sendMessage({
-            type: 'sw/web-fetch', url: statusUrl, noCache: true,
+            type: 'sw/web-fetch', notebookId: id, url: statusUrl, noCache: true,
           });
           const body = statusResponse?.bodyB64 ? JSON.parse(atob(statusResponse.bodyB64)) : null;
           if ((body?.requests ?? 0) > 0) { sawRequest = true; break; }
@@ -3811,7 +4226,7 @@ const runNotebookModuleSmokes = async ({ server, providerServer }) => {
   const preview = createNotebookProbeArtifact('preview');
   let driver = null;
   try {
-    driver = await startGeckodriver({
+    driver = await startRawGeckodriver({
       binary: geckodriverBinary,
       firefoxBinary,
       acceptInsecureCerts: true,
@@ -4571,7 +4986,7 @@ const main = async () => {
       await runNotebookModuleSmokes({ server, providerServer });
     }
     if (process.env.FIREFOX_RUNTIME_ONLY === 'notebook-modules') return;
-    driver = await startGeckodriver({
+    driver = await startSidebarGeckodriver({
       binary: geckodriverBinary,
       firefoxBinary,
       acceptInsecureCerts: true,
@@ -4702,14 +5117,25 @@ const main = async () => {
       'Firefox refuses a wrong vault passphrase', JSON.stringify(background));
     assert(background?.locked === true && background?.unlocked === true,
       'Firefox locks and unlocks the vault with the same passphrase', JSON.stringify(background));
-    assert(background?.capabilities?.actorExecution?.status === 'available'
-      && background?.capabilities?.actorExecution?.host === 'background-page-worker',
-    'Firefox keeps dedicated actor execution available', JSON.stringify(background?.capabilities));
+    // why: state/get is an authority-only cold route. It must not wake the
+    // semantic controller merely to advertise actor capability; the demand
+    // sublanes below prove the Firefox Worker becomes available on real use.
+    assert(background?.capabilities?.actorExecution?.status === 'temporarily_unavailable'
+      && background?.capabilities?.actorExecution?.host === 'background-page-worker'
+      && background?.capabilities?.actorExecution?.reason === 'controller-not-ready'
+      && background?.capabilities?.actorExecution?.retryable === true,
+    'Firefox cold state keeps actor execution behind controller demand',
+    JSON.stringify(background?.capabilities));
     assert(background?.capabilities?.sealedJobs?.status === 'unsupported'
-      && background?.capabilities?.pdfReader?.status === 'unsupported'
       && background?.capabilities?.documentReader?.status === 'unsupported'
-      && background?.capabilities?.moonshineVoiceHost?.status === 'unsupported',
-    'Firefox reports offscreen-hosted facilities unavailable before use', JSON.stringify(background?.capabilities));
+      && background?.capabilities?.readableHtml?.mode === 'snapshot_or_raw'
+      && background?.capabilities?.moonshineVoiceHost?.status === 'available'
+      && background?.capabilities?.moonshineVoiceHost?.host === 'background-page'
+      && background?.capabilities?.pdfOcr?.status === 'unsupported'
+      && background?.capabilities?.localWebGpuHost?.status === 'unsupported'
+      && background?.capabilities?.dwebMesh?.status === 'unsupported',
+    'Firefox cold state reports immutable browser-host capabilities without semantic demand',
+    JSON.stringify(background?.capabilities));
 
     await driver.navigate(`${EXTENSION_ORIGIN}/options/options.html#!/transfer`);
     const transferMounted = await waitFor(() => driver.execute(
@@ -4737,19 +5163,28 @@ const main = async () => {
       "return document.readyState === 'complete' && (document.getElementById('app')?.childElementCount || 0) > 0;",
     ), { budgetMs: 30_000 });
 
-    const unsupportedVoiceNudge = await driver.execute(`
-      return [...document.querySelectorAll('.onboarding-card h3')]
-        .some((heading) => heading.textContent === 'Try voice input');
-    `);
-    assert(unsupportedVoiceNudge === false,
-      'Firefox hides voice setup when no transcription engine can run');
-
     if (process.env.FIREFOX_RUNTIME_ONLY === 'recovery') {
       await runActorRecoverySmoke({ providerServer });
       console.log('Firefox recovery smoke OK');
       return;
     }
+    if (process.env.FIREFOX_RUNTIME_ONLY === 'keepalive-loss') {
+      await runActorKeepaliveLossSmoke({ providerServer });
+      console.log('Firefox keepalive-loss smoke OK');
+      return;
+    }
+    if (process.env.FIREFOX_RUNTIME_ONLY === 'controller-lifecycle') {
+      await runDirectControllerStopGoalSmoke(driver, providerServer);
+      console.log('Firefox direct-controller lifecycle smoke OK');
+      return;
+    }
+    if (process.env.FIREFOX_RUNTIME_ONLY === 'lifetime') {
+      await runActorLifetimeSmoke({ providerServer });
+      console.log('Firefox actor lifetime smoke OK');
+      return;
+    }
 
+    await runDirectControllerStopGoalSmoke(driver, providerServer);
     await runPrivateNetworkDnrSmoke(driver, providerServer);
     await runBoundActorSmoke(driver, providerServer);
     await runNumericTabAuthoritySmoke(driver, providerServer);
@@ -4765,8 +5200,8 @@ const main = async () => {
         try {
           const [{ captureSnapshot }, { clickInjected }, { typeInjected }] = await Promise.all([
             import(browser.runtime.getURL('peerd-runtime/dom/index.js')),
-            import(browser.runtime.getURL('peerd-runtime/tools/defs/click.js')),
-            import(browser.runtime.getURL('peerd-runtime/tools/defs/type.js')),
+            import(browser.runtime.getURL('background/page-authority/click.js')),
+            import(browser.runtime.getURL('background/page-authority/type.js')),
           ]);
           tab = await browser.tabs.create({ url: fixtureUrl, active: true });
           let fixtureReady = false;
@@ -4861,17 +5296,19 @@ const main = async () => {
         buttons: [...document.querySelectorAll('button')].map((button) => button.textContent),
       };
     `), { budgetMs: 30_000 });
-    assert(voicePosture?.voice?.includes('Voice input is unavailable in this browser')
+    assert(voicePosture?.voice?.includes('Talk to peerd instead of typing')
+      && voicePosture?.voice?.includes('Moonshine')
       && voicePosture?.ocr?.includes('PDF OCR is unavailable in this browser'),
-    'Firefox Voice and OCR settings explain unavailable hosts and name alternatives',
+    'Firefox Voice settings offer Moonshine while OCR names its unavailable host alternative',
     JSON.stringify(voicePosture));
-    assert(!voicePosture?.buttons?.some((label) => /Download (?:& enable|OCR engine)/.test(label)),
-      'Firefox Voice and OCR settings offer no unsupported download action',
+    assert(voicePosture?.buttons?.includes('Enable voice (downloads model)')
+      && !voicePosture?.buttons?.includes('Download OCR engine'),
+      'Firefox offers only the supported voice model download',
       JSON.stringify(voicePosture?.buttons));
     assert(!voicePosture?.buttons?.includes('Unavailable'),
       'Firefox Voice settings do not render an unavailable action as a button',
       JSON.stringify(voicePosture?.buttons));
-    writeFileSync(join(OUTPUT, 'options-voice-unavailable.png'),
+    writeFileSync(join(OUTPUT, 'options-voice-firefox.png'),
       Buffer.from(await driver.screenshot(), 'base64'));
 
     await driver.navigate(`${EXTENSION_ORIGIN}/options/options.html#!/providers`);

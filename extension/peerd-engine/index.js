@@ -39,9 +39,6 @@ export {
   buildEntry,
   isRemoteSpecifier,
   makeFetchRemote,
-  // design js-superpower/06: the `peerd:toolbox/<name>` specifier family the
-  // resolver recognizes; hosts use it to spot toolbox entries in a module cache.
-  TOOLBOX_SPECIFIER_PREFIX,
 } from './module-resolver.js';
 export { linkSingleModuleWorker, linkSingleModuleWorkerDetailed } from './single-module-linker.js';
 
@@ -63,7 +60,6 @@ export {
   inferAppFileKind,
   isLosslessUtf8Text,
   MAX_MODEL_APP_FILE_BYTES,
-  appFileCheckpointContent,
 } from './app-assets.js';
 
 // --- App composition (multi-file → single HTML body for the runner) ---
@@ -149,7 +145,6 @@ export {
   runControlOp,
   makeVmHttpFetch,
   makeInjectGitAuth,
-  makeGitCredentialRoutes,
   WEB_WRITE_CONFIRM_KEY,
   bannerText,
   peerdNetBash,
@@ -199,12 +194,3 @@ export {
   createAppRegistry,
   APP_TAB_PATH,
 } from './app-registry.js';
-
-// The IDB body store (./app-store.js) is reserved for the future
-// SNAPSHOT tier. Not re-exported here -- consumers should import
-// directly when they need it, to keep the public engine surface
-// focused on what's actually wired up today. The ONE exception is its
-// §11.5 write gate: the SW must be able to install the newer-schema
-// refusal even while the store is dormant, so a future consumer can
-// never ship ungated.
-export { setAppBodyWriteGate } from './app-store.js';

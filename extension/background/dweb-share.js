@@ -4,6 +4,13 @@
 // drift apart again.
 
 import { toBase64 } from '../shared/bundle/bytes.js';
+import { sha256Hex } from '../shared/util.js';
+
+/**
+ * @typedef {Readonly<{ok:true,appId:string,name:string,entryFile:string,
+ * fileKinds:Record<string,unknown>,files:Record<string,{base64:string}>,digest:string,
+ * fileCount:number,totalBytes:number}>|Readonly<{ok:false,error:string}>} PublishDescriptor
+ */
 
 /**
  * @param {Object} deps
@@ -14,7 +21,7 @@ import { toBase64 } from '../shared/bundle/bytes.js';
  * @param {<T>(appId: string, operation: () => Promise<T>) => Promise<T>} deps.withAppLifecycle
  * @param {<T>(appId: string, operation: () => Promise<T>) => Promise<T>} [deps.withAppWriteLock]
  * @param {{ get: (id: string) => Promise<any>, update: (id: string, patch: any) => Promise<any> }} deps.appRegistry
- * @param {{ statusApp: (id: string) => Promise<any>, commitApp: (id: string, opts: {message: string}) => Promise<any>, historyApp: (id: string, opts: {depth: number}) => Promise<any[]>, snapshot: (ref: {kind: string, id: string}, opts: {at: string}) => Promise<Record<string, Uint8Array>> }} [deps.repositories]
+ * @param {{ statusApp: (id: string) => Promise<any>, commitApp: (id: string, opts: {message: string}) => Promise<any>, historyApp: (id: string, opts: {depth: number}) => Promise<any[]>, snapshot: (ref: {kind: string, id: string}, opts: {at: string}) => Promise<Record<string, Uint8Array>>, workingSnapshot?: (ref:{kind:string,id:string})=>Promise<Record<string,Uint8Array>> }} [deps.repositories]
  * @param {() => Promise<any>} deps.prepareRuntime
  * @param {(message: any) => Promise<any>} deps.sendMessage
  */
@@ -22,8 +29,54 @@ export const makeDwebShare = ({
   enabled, active, withDwebPublication, withIdentityMutation, withAppLifecycle, appRegistry,
   withAppWriteLock = (_appId, operation) => operation(), repositories,
   prepareRuntime, sendMessage,
-}) => async (/** @type {string} */ appId, /** @type {string | undefined} */ slug) => {
+}) => {
+  /** @returns {Promise<PublishDescriptor>} */
+  const descriptorFor = async (/** @type {string} */ appId, /** @type {any} */ record,
+    /** @type {Record<string,Uint8Array>|null} */ snapshot) => {
+    if (!record) return { ok: false, error: 'app-not-found' };
+    /** @type {Record<string,{base64:string}>} */
+    const files = Object.create(null);
+    let totalBytes = 0;
+    for (const [path, bytes] of Object.entries(snapshot ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+      totalBytes += bytes.byteLength;
+      files[path] = { base64: toBase64(bytes) };
+    }
+    if (snapshot && !Object.hasOwn(snapshot, record.entryFile)) {
+      return { ok: false, error: 'release-entry-missing' };
+    }
+    const identity = {
+      appId, name: String(record.name ?? ''), entryFile: String(record.entryFile ?? ''),
+      fileKinds: { ...(record.fileKinds ?? {}) }, files,
+    };
+    const digest = await sha256Hex(JSON.stringify(identity));
+    return Object.freeze({
+      ok: true, ...identity, digest, fileCount: Object.keys(files).length, totalBytes,
+    });
+  };
+
+  const snapshotDescriptorUnlocked = async (/** @type {string} */ appId) => {
+    const record = await appRegistry.get(appId);
+    const snapshot = repositories?.workingSnapshot
+      ? await repositories.workingSnapshot({ kind: 'app', id: appId }) : null;
+    return descriptorFor(appId, record, snapshot);
+  };
+
+  const prepare = (/** @type {string} */ appId) => withAppLifecycle(
+    appId,
+    () => withAppWriteLock(appId, () => snapshotDescriptorUnlocked(appId)),
+  );
+
+  const share = async (
+    /** @type {string} */ appId,
+    /** @type {string | undefined} */ slug,
+    /** @type {any} */ preparedInput = null,
+  ) => {
   if (!enabled || !active()) return { ok: false, error: 'dweb-disabled' };
+  const prepared = preparedInput ?? await prepare(appId);
+  if (prepared?.ok !== true || prepared.appId !== appId
+      || typeof prepared.digest !== 'string') {
+    return { ok: false, error: prepared?.error ?? 'share-preparation-invalid' };
+  }
 
   return withDwebPublication(async (isCurrent) => {
     if (!isCurrent() || !active()) return { ok: false, error: 'dweb-disabled' };
@@ -31,11 +84,19 @@ export const makeDwebShare = ({
     // it before owning that lane or first-share waits on its own queued mint.
     const started = await prepareRuntime();
     if (!started?.ok) return started ?? { ok: false, error: 'dweb-start-failed' };
-
-    return withIdentityMutation(() => withAppLifecycle(appId, () => withAppWriteLock(appId, async () => {
+    let commitDispatched = false;
+    let durableCommitPerformed = false;
+    try {
+      const result = await withIdentityMutation(() => withAppLifecycle(
+        appId, () => withAppWriteLock(appId, async () => {
     if (!enabled || !isCurrent() || !active()) return { ok: false, error: 'dweb-disabled' };
     const record = await appRegistry.get(appId);
     if (!record) return { ok: false, error: 'app-not-found' };
+    const current = await snapshotDescriptorUnlocked(appId);
+    if (current.ok !== true || current.digest !== prepared.digest) return {
+      ok: false, error: 'share-prepared-snapshot-changed',
+      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+    };
     let release = null;
     let releaseSnapshot = null;
     if (repositories) {
@@ -44,6 +105,7 @@ export const makeDwebShare = ({
       const changedPaths = changes.slice(0, 3)
         .map((/** @type {{path?: unknown}} */ change) => change?.path)
         .filter((/** @type {unknown} */ path) => typeof path === 'string');
+      commitDispatched = true;
       const committed = await repositories.commitApp(appId, {
         message: changedPaths.length
           ? `release: update ${changedPaths.join(', ')}${changes.length > changedPaths.length ? ', …' : ''}`
@@ -52,6 +114,7 @@ export const makeDwebShare = ({
       if (typeof committed?.oid !== 'string' || !/^[a-f0-9]{40}$/.test(committed.oid)) {
         throw new Error('release Git commit identity invalid');
       }
+      durableCommitPerformed = true;
       const history = await repositories.historyApp(appId, { depth: 100 });
       const messages = [];
       for (const item of history) {
@@ -61,13 +124,20 @@ export const makeDwebShare = ({
       }
       const changelog = messages.reverse().join('\n').slice(0, 1200);
       const snapshot = await repositories.snapshot({ kind: 'app', id: appId }, { at: committed.oid });
-      if (!Object.hasOwn(snapshot, record.entryFile)) throw new Error('release-entry-missing');
-      /** @type {Record<string, {base64: string}>} */
-      const encodedFiles = Object.create(null);
-      let totalBytes = 0;
-      for (const [path, bytes] of Object.entries(snapshot)) {
-        totalBytes += bytes.byteLength;
-        encodedFiles[path] = { base64: toBase64(bytes) };
+      const committedDescriptor = await descriptorFor(appId, record, snapshot);
+      if (committedDescriptor.ok !== true) {
+        return {
+          ok: false, error: committedDescriptor.error,
+          performed: true, outcomeKnown: true,
+          outcomeKind: 'effect-completed', retryable: false,
+        };
+      }
+      if (repositories.workingSnapshot && committedDescriptor.digest !== prepared.digest) {
+        return {
+          ok: false, error: 'share-prepared-snapshot-changed',
+          performed: true, outcomeKnown: true,
+          outcomeKind: 'effect-completed', retryable: false,
+        };
       }
       release = {
         previousVersionId: record.dweb?.version_id ?? null,
@@ -77,41 +147,60 @@ export const makeDwebShare = ({
       releaseSnapshot = {
         ok: true,
         oid: committed.oid,
-        totalBytes,
+        totalBytes: committedDescriptor.totalBytes,
         record: {
           name: record.name,
           entryFile: record.entryFile,
           fileKinds: { ...(record.fileKinds ?? {}) },
         },
-        files: encodedFiles,
+        files: committedDescriptor.files,
       };
     }
     const useSlug = record.dweb?.slug || slug || undefined;
     const previousHash = record.dweb?.hash ?? null;
     const previousShareHash = record.dweb?.local === true ? previousHash : null;
     const previousSeedHash = record.dweb && record.dweb.local !== true ? previousHash : null;
-    const reply = await sendMessage({
-      type: 'dweb/base-host/share-app',
-      appId,
-      name: record.name,
-      entry: record.entryFile,
-      fileKinds: record.fileKinds ?? {},
-      slug: useSlug,
-      previousHash: previousShareHash,
-      ...(release ? { release, releaseSnapshot } : {}),
-    });
-    if (!reply?.ok) return reply;
-    const rollbackShare = async () => {
+    // why: the SW must know the rollback handle before the offscreen effect
+    // begins. Runtime messaging may lose a success reply after publication.
+    const transactionId = crypto.randomUUID();
+    const rollbackShare = async (failedSeq = undefined) => {
       let rollback = null;
       for (let attempt = 0; attempt < 2 && !rollback?.ok; attempt += 1) {
         rollback = await sendMessage({
           type: 'dweb/base-host/rollback-share',
-          transactionId: reply.transactionId,
-          failedSeq: reply.seq,
+          transactionId,
+          ...(Number.isInteger(failedSeq) ? { failedSeq } : {}),
         }).catch(() => null);
       }
       return rollback;
     };
+    let reply;
+    try {
+      reply = await sendMessage({
+        type: 'dweb/base-host/share-app', transactionId,
+        appId,
+        name: record.name,
+        entry: record.entryFile,
+        fileKinds: record.fileKinds ?? {},
+        slug: useSlug,
+        previousHash: previousShareHash,
+        ...(release ? { release, releaseSnapshot } : {}),
+      });
+    } catch {
+      const rollback = await rollbackShare();
+      const rollbackComplete = rollback?.ok
+        && (!previousShareHash || rollback.restored === true);
+      return rollbackComplete ? {
+        ok: false, error: 'share-response-lost-rolled-back',
+        performed: true, outcomeKnown: true,
+        outcomeKind: 'effect-completed', retryable: false,
+      } : {
+        ok: false, error: 'share-response-lost',
+        performed: true, outcomeKnown: false,
+        outcomeKind: 'transport-lost', retryable: false,
+      };
+    }
+    if (!reply?.ok) return reply;
     const persistUncertainHash = async () => {
       if (typeof reply.hash !== 'string') return false;
       const recoveryHashes = [...new Set([
@@ -127,8 +216,23 @@ export const makeDwebShare = ({
         dweb: { ...(record.dweb ?? {}), pending_unserve_hashes: recoveryHashes },
       }).catch(() => null));
     };
+    if (reply.transactionId !== transactionId) {
+      // why: never leave the transaction named by the request live merely
+      // because the reply named something else. Only the SW-minted id is ours
+      // to compensate; the returned id may belong to an unrelated transaction.
+      const rollback = await rollbackShare(reply.seq);
+      const rollbackComplete = rollback?.ok
+        && (!previousShareHash || rollback.restored === true);
+      if (!rollbackComplete) await persistUncertainHash();
+      return {
+        ok: false, error: 'share-transaction-mismatch',
+        performed: true, outcomeKnown: rollbackComplete,
+        outcomeKind: rollbackComplete ? 'effect-completed' : 'host-lost',
+        retryable: false,
+      };
+    }
     if (!isCurrent() || !active()) {
-      const rollback = await rollbackShare();
+      const rollback = await rollbackShare(reply.seq);
       if (!rollback?.ok) await persistUncertainHash();
       return rollback?.ok
         ? { ok: false, error: 'dweb-disabled' }
@@ -177,7 +281,7 @@ export const makeDwebShare = ({
     } catch (cause) {
       // Retry with the same host transaction. Its state remains pending until
       // metadata restoration and byte revocation both finish.
-      const rollback = await rollbackShare();
+      const rollback = await rollbackShare(reply.seq);
       const rollbackComplete = rollback?.ok && (!previousShareHash || rollback.restored === true);
       if (!rollbackComplete) await persistUncertainHash();
       return {
@@ -186,13 +290,34 @@ export const makeDwebShare = ({
         cause: /** @type {{ message?: string }} */ (cause)?.message ?? String(cause),
       };
     }
-    if (typeof reply.transactionId === 'string') {
-      let committed = null;
-      for (let attempt = 0; attempt < 2 && !committed?.ok; attempt += 1) {
+    let committed = null;
+    let commitOutcomeKind = null;
+    for (let attempt = 0;
+      attempt < 2 && !(committed?.ok === true && committed?.committed === true);
+      attempt += 1) {
+      try {
         committed = await sendMessage({
-          type: 'dweb/base-host/commit-share', transactionId: reply.transactionId,
-        }).catch(() => null);
+          type: 'dweb/base-host/commit-share', transactionId,
+        });
+        if (committed?.outcomeKnown === false
+            && ['host-lost', 'transport-lost'].includes(committed?.outcomeKind)) {
+          commitOutcomeKind ??= committed.outcomeKind;
+        }
+      } catch {
+        // why: a later explicit refusal cannot make an earlier lost terminal
+        // reply known. A successful retry is the only proof the rollback handle
+        // is no longer pending.
+        commitOutcomeKind = 'transport-lost';
+        committed = null;
       }
+    }
+    if (!(committed?.ok === true && committed?.committed === true)) {
+      return {
+        ok: false, error: 'share-commit-finality-failed',
+        cause: committed?.error ?? 'commit response lost',
+        performed: true, outcomeKnown: false,
+        outcomeKind: commitOutcomeKind ?? 'host-lost', retryable: false,
+      };
     }
     /** @param {string[]} hashes @param {'share' | 'seed'} slot */
     const cleanSlot = async (hashes, slot) => {
@@ -222,9 +347,41 @@ export const makeDwebShare = ({
         remainingSeed.splice(0, remainingSeed.length, ...pendingSeedHashes);
       }
     }
+    if (reply.propagated === false) return {
+      ...reply,
+      ok: false,
+      error: 'share-propagation-failed',
+      warning: 'published-locally-but-not-forwarded',
+      performed: true,
+      outcomeKnown: true,
+      outcomeKind: 'effect-completed',
+      retryable: false,
+      ...(remaining.length || remainingSeed.length ? { cleanupPending: true } : {}),
+    };
     return remaining.length || remainingSeed.length
       ? { ...reply, warning: 'previous-version-cleanup-pending', cleanupPending: true }
       : reply;
-    })));
+        })),
+      );
+      if (durableCommitPerformed && result?.ok === false) {
+        const unknown = result.outcomeKnown === false
+          || result.error === 'share-rollback-failed';
+        return {
+          ...result, performed: true, outcomeKnown: !unknown,
+          outcomeKind: unknown ? result.outcomeKind ?? 'host-lost' : 'effect-completed',
+          retryable: false,
+        };
+      }
+      return result;
+    } catch (cause) {
+      if (!commitDispatched) throw cause;
+      const failure = cause instanceof Error ? cause : new Error(String(cause));
+      throw Object.assign(failure, {
+        ...(durableCommitPerformed ? { performed: true } : {}),
+        outcomeKnown: false, outcomeKind: 'host-lost', retryable: false,
+      });
+    }
   });
+  };
+  return Object.assign(share, { prepare });
 };

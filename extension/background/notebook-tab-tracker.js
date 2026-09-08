@@ -11,7 +11,7 @@
 
 import { createTabTracker } from './tab-tracker.js';
 import { NOTEBOOK_TAB_PATH } from '/peerd-engine/background.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 const READY_TIMEOUT_MS = 15_000;       // Notebooks boot fast; tighter than VMs
 const QUIESCE_TIMEOUT_MS = 5_000;

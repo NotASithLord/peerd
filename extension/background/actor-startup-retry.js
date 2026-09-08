@@ -27,6 +27,7 @@ export const isActorHostStartupFailure = (/** @type {any} */ result) =>
 export const runActorWithStartupRetry = async ({ run, isStartupFailure, signal }) => {
   let result = await run();
   if (!isStartupFailure(result)) return { result, exhausted: false };
+  if (result?.code === 'actor_host_load_timeout') return { result, exhausted: true };
   if (signal?.aborted) return { result: { ...result, aborted: true }, exhausted: false };
   result = await run();
   return { result, exhausted: isStartupFailure(result) };

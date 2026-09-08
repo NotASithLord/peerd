@@ -4,9 +4,7 @@
 // An App is a multi-file artifact peerd built FOR the user: a
 // calculator, a chart, a one-off tool. Files (index.html + style.css
 // + script.js + ...) live in OPFS at `peerd-apps/<appId>/`. Only the
-// CATALOG (name, tags, entry filename, timestamps) lives here. The
-// old IDB body store (app-store.js) is reserved for the future
-// snapshot tier and isn't on the new-app hot path anymore.
+// CATALOG (name, tags, entry filename, timestamps) lives here.
 //
 // Mirrors vm-registry's session-default pattern (each chat tracks the
 // last app it touched, so "make the title bigger" without args edits
@@ -159,8 +157,7 @@ export const createAppRegistry = (deps) => {
   const base = createRegistry(config, deps);
 
   /**
-   * Cheap metadata search (name + tags). For body-text search, callers
-   * combine this with app-store.searchBodies.
+   * Cheap metadata search (name + tags). Repository file search owns bodies.
    *
    * @param {string} query
    */

@@ -14,11 +14,12 @@
 // instead of seven.
 //
 // Split across contexts, like pdf:
-//   SW         — the read_doc tool dispatches to the offscreen client
-//   offscreen  — fetches the bytes under the SSRF rules, runs the conversion
+//   controller: read_doc owns the model-facing semantics and formatting
+//   SW: exact extraction custody and the offscreen client
+//   offscreen: fetches the bytes under the SSRF rules, runs the conversion
 //
-// The conversion core itself is PURE and context-agnostic — it needs only
-// TextDecoder and DecompressionStream — so it is exercised from Bun in
+// The conversion core itself is PURE and context-agnostic. It needs only
+// TextDecoder and DecompressionStream, so it is exercised from Bun in
 // tests/doc/*.test.ts. Nothing here is vendored: DEFLATE is the platform's,
 // and the ZIP/XML readers are small enough to own.
 

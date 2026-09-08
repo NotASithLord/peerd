@@ -1,6 +1,6 @@
 // The shared repeat-injection dedup guard (schema-diet 6b). oncePerSession is
 // the flat "disclose a note once per session" gate the create-result notes and
-// dweb_guide use; shouldInjectBody is the trim-AWARE variant load_skill uses —
+// large one-shot tool bodies; shouldInjectBody is the trim-AWARE variant load_skill uses :
 // it re-injects a scrolled-out body once the rolling-summary watermark passes
 // the prior load. Pure logic, module-scope registries — reset between cases.
 
@@ -34,6 +34,24 @@ describe('oncePerSession', () => {
     expect(oncePerSession(null, 'note')).toBe(true);
     expect(oncePerSession(undefined, 'note')).toBe(true);
     expect(oncePerSession('', 'note')).toBe(true);
+  });
+
+  test('a fresh Worker derives an earlier disclosure from the persisted transcript', () => {
+    const messages = [{
+      role: 'user',
+      toolResults: [{
+        content: 'prefix UNIQUE RUNTIME NOTE suffix',
+        meta: { toolName: 'script' },
+      }],
+    }];
+    _resetOncePerSession();
+    expect(oncePerSession(
+      's1', 'note', messages, 'script', 'UNIQUE RUNTIME NOTE',
+    )).toBe(false);
+    // An unrelated tool cannot forge/suppress the disclosure marker.
+    expect(oncePerSession(
+      's2', 'note', messages, 'sandbox_create', 'UNIQUE RUNTIME NOTE',
+    )).toBe(true);
   });
 });
 

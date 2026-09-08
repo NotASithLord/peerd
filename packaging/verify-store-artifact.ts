@@ -12,8 +12,8 @@
 //
 // Checks, in order:
 //   a. no path in the zip is under peerd-distributed/
-//   b. shared/dweb-loader.js is byte-identical to the committed
-//      store template (stub-only, no module path string)
+//   b. shared/dweb-loader.js and both cold dweb route factories are
+//      byte-identical to their committed disabled templates
 //   c. NO file in the artifact contains the string "peerd-distributed"
 //   d. manifest sanity: name "peerd", no update_url, no key
 //   e. identifier sweep: identifiers that appear ONLY in dweb
@@ -23,28 +23,108 @@
 // Run: bun packaging/verify-store-artifact.ts artifacts/peerd-store-chrome.zip
 // (package.ts runs it automatically for every store artifact)
 
-import { existsSync, readFileSync, rmSync, mkdtempSync, readdirSync, statSync } from 'node:fs';
+import {
+  existsSync, readFileSync, writeFileSync, rmSync, mkdtempSync, readdirSync, statSync,
+} from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { plugin } from 'bun';
-import { REPO_ROOT, EXTENSION_DIR } from './lib.ts';
+import {
+  REPO_ROOT, STORE_LOADER_TEMPLATE,
+  DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
+  STORE_ACTOR_WORKER_TEMPLATE, STORE_OPTIONS_APP_TEMPLATE,
+  STORE_SEMANTIC_HOST_TEMPLATE,
+} from './lib.ts';
 import { STORE_STRIPPED_PERMISSIONS } from './gen-manifest.ts';
 
-const DWEB_DIR = join(EXTENSION_DIR, 'peerd-distributed');
-const STORE_LOADER_TEMPLATE = join(REPO_ROOT, 'packaging', 'templates', 'dweb-loader.store.js');
+const DWEB_DISABLED_TEMPLATE_TARGETS = Object.freeze([
+  ['shared/dweb-loader.js', STORE_LOADER_TEMPLATE],
+  ['background/routes/dweb.js', DWEB_ROUTES_DISABLED_TEMPLATE],
+  ['background/routes/dweb-self.js', DWEB_SELF_ROUTES_DISABLED_TEMPLATE],
+  ['offscreen/actor-worker.js', STORE_ACTOR_WORKER_TEMPLATE],
+  ['options/components/options-app.js', STORE_OPTIONS_APP_TEMPLATE],
+  ['offscreen/semantic-route-host.js', STORE_SEMANTIC_HOST_TEMPLATE],
+] as const);
+const DWEB_ABSENT_TARGETS = Object.freeze([
+  'background/kernel-preview-addon.js', 'background/vault-kernel-preview.js',
+  'background/kernel-contributor-owner.js',
+  'background/kernel-firefox-contributor-addon.js',
+  'background/vault-kernel-firefox-preview.js',
+  'offscreen/contributor-channel-addon.js',
+  'offscreen/semantic-routes/contributor.js',
+  'options/sections/contributor-metrics.js',
+  'peerd-runtime/controller-contributor.js',
+  'peerd-runtime/observability/contributor-metrics.js',
+  'peerd-runtime/observability/contributor-store.js',
+  'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
+  'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
+]);
+const STORE_CONTRIBUTOR_FREE_TARGETS = Object.freeze([
+  'offscreen/actor-worker-runtime.js',
+]);
 
-let stagedImportRoot = '';
-plugin({
-  name: 'peerd-staged-artifact-imports',
-  setup(build) {
-    build.onResolve({ filter: /^\// }, (args) => {
-      const candidate = join(stagedImportRoot, args.path.slice(1));
-      return stagedImportRoot && existsSync(candidate) ? { path: candidate } : undefined;
-    });
-  },
-});
+/** Byte-for-byte package boundary shared by the verifier and focused tests. */
+export const dwebDisabledTemplateFailures = (artifactRoot: string): string[] => {
+  const failures: string[] = [];
+  for (const [relativePath, templatePath] of DWEB_DISABLED_TEMPLATE_TARGETS) {
+    try {
+      const shipped = readFileSync(join(artifactRoot, relativePath));
+      const template = readFileSync(templatePath);
+      if (!shipped.equals(template)) failures.push(`${relativePath} is NOT the committed disabled template`);
+    } catch {
+      failures.push(`${relativePath} missing from artifact`);
+    }
+  }
+  for (const relativePath of DWEB_ABSENT_TARGETS) {
+    if (existsSync(join(artifactRoot, relativePath))) {
+      failures.push(`${relativePath} present in dweb-disabled artifact`);
+    }
+  }
+  return failures;
+};
+
+/** Store workers retain no Contributor projection code or semantic import. */
+export const storeContributorBoundaryFailures = (artifactRoot: string): string[] => {
+  const failures: string[] = [];
+  for (const relativePath of STORE_CONTRIBUTOR_FREE_TARGETS) {
+    try {
+      if (/contributor/i.test(readFileSync(join(artifactRoot, relativePath), 'utf8'))) {
+        failures.push(`${relativePath} contains Contributor code`);
+      }
+    } catch { failures.push(`${relativePath} missing from artifact`); }
+  }
+  return failures;
+};
+
+/** Execute the exact staged resolver graph without teaching Bun that browser
+ * root imports are host filesystem roots. The plugin is build-scoped because
+ * a process-global resolver can retain a deleted verification directory. */
+export const loadStagedModuleResolver = async (
+  artifactRoot: string,
+  scratchRoot: string,
+): Promise<typeof import('../extension/peerd-engine/module-resolver.js')> => {
+  const built = await Bun.build({
+    entrypoints: [join(artifactRoot, 'peerd-engine', 'module-resolver.js')],
+    target: 'bun',
+    format: 'esm',
+    plugins: [{
+      name: 'peerd-staged-artifact-imports',
+      setup(build) {
+        build.onResolve({ filter: /^\// }, (args) => {
+          const candidate = join(artifactRoot, args.path.slice(1));
+          return existsSync(candidate) ? { path: candidate } : undefined;
+        });
+      },
+    }],
+  });
+  if (!built.success || built.outputs.length !== 1) {
+    throw new Error('could not assemble staged module resolver');
+  }
+  const executable = join(scratchRoot, '.store-module-resolver-verifier.mjs');
+  writeFileSync(executable, await built.outputs[0].text());
+  return await import(pathToFileURL(executable).href);
+};
 
 const walk = (dir: string, out: string[] = []): string[] => {
   for (const entry of readdirSync(dir)) {
@@ -61,22 +141,30 @@ const identifiersOf = (text: string): Set<string> => new Set(text.match(IDENT_RE
 /** Identifiers that occur in dweb source and NOWHERE else in
  *  extension/ — if any shows up in a store artifact, dweb content
  *  leaked. Derived fresh per run so the set tracks the code. */
-const dwebOnlyIdentifiers = (): Set<string> => {
+const dwebOnlyIdentifiers = (extensionDir: string): Set<string> => {
+  const dwebDir = join(extensionDir, 'peerd-distributed');
   const fed = new Set<string>();
-  for (const f of walk(DWEB_DIR)) {
+  for (const f of walk(dwebDir)) {
     if (/\.(js|mjs|html)$/.test(f)) for (const id of identifiersOf(readFileSync(f, 'utf8'))) fed.add(id);
   }
-  for (const f of walk(EXTENSION_DIR)) {
-    if (f.startsWith(DWEB_DIR)) continue;
+  for (const f of walk(extensionDir)) {
+    if (f.startsWith(dwebDir)) continue;
     if (!/\.(js|mjs|html|json|css|txt)$/.test(f)) continue;
     for (const id of identifiersOf(readFileSync(f, 'utf8'))) fed.delete(id);
   }
   return fed;
 };
 
-export const verifyStoreArtifact = async (artifactPath: string): Promise<void> => {
+export const verifyStoreArtifact = async (
+  artifactPath: string,
+  { sourceRoot = REPO_ROOT }: { sourceRoot?: string } = {},
+): Promise<void> => {
   const failures: string[] = [];
   const tmp = mkdtempSync(join(tmpdir(), 'peerd-verify-'));
+  // why: Bun caches the extracted root's directory while bundling it, so a
+  // verifier module written back into that same directory is not importable
+  // reliably in the current process.
+  const runtimeTmp = mkdtempSync(join(tmpdir(), 'peerd-verify-runtime-'));
   try {
     execFileSync('unzip', ['-q', artifactPath, '-d', tmp]);
     const files = walk(tmp);
@@ -88,15 +176,10 @@ export const verifyStoreArtifact = async (artifactPath: string): Promise<void> =
       }
     }
 
-    // b. the loader must be the stub-only store template, byte for byte
-    const loaderPath = join(tmp, 'shared', 'dweb-loader.js');
-    try {
-      const shipped = readFileSync(loaderPath, 'utf8');
-      const template = readFileSync(STORE_LOADER_TEMPLATE, 'utf8');
-      if (shipped !== template) failures.push('shared/dweb-loader.js is NOT the store template');
-    } catch {
-      failures.push('shared/dweb-loader.js missing from artifact');
-    }
+    // b. every dweb-disabled runtime entry is a committed reviewed template,
+    // byte for byte. Route keys remain present so stale callers fail typed.
+    failures.push(...dwebDisabledTemplateFailures(tmp));
+    failures.push(...storeContributorBoundaryFailures(tmp));
 
     // c. no file may contain the module's name at all
     for (const f of files) {
@@ -137,9 +220,8 @@ export const verifyStoreArtifact = async (artifactPath: string): Promise<void> =
         }
       }
 
-      stagedImportRoot = tmp;
       const stagedConfig = await import(pathToFileURL(join(tmp, 'shared', 'channel-config.js')).href);
-      const stagedResolver = await import(pathToFileURL(join(tmp, 'peerd-engine', 'module-resolver.js')).href);
+      const stagedResolver = await loadStagedModuleResolver(tmp, runtimeTmp);
       let moduleRequests = 0;
       const resolverDeps = {
         remoteModulesEnabled: stagedConfig.REMOTE_MODULE_IMPORTS_ENABLED,
@@ -207,7 +289,7 @@ export const verifyStoreArtifact = async (artifactPath: string): Promise<void> =
     }
 
     // e. identifier sweep against dweb-unique tokens
-    const fedIds = dwebOnlyIdentifiers();
+    const fedIds = dwebOnlyIdentifiers(join(sourceRoot, 'extension'));
     for (const f of files) {
       if (!/\.(js|mjs|html|json)$/.test(f)) continue;
       const ids = identifiersOf(readFileSync(f, 'utf8'));
@@ -217,6 +299,7 @@ export const verifyStoreArtifact = async (artifactPath: string): Promise<void> =
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+    rmSync(runtimeTmp, { recursive: true, force: true });
   }
 
   if (failures.length > 0) {

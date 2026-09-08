@@ -17,6 +17,43 @@
 
 import m from '/vendor/mithril/mithril.js';
 
+export const CONTACTS_REQUEST_TIMEOUT_MS = 35_000;
+
+/**
+ * Bound a Home request even if browser messaging never settles while a cold
+ * worker is being restarted. Late replies are ignored by this caller.
+ * @param {Promise<any>} promise
+ * @param {number} timeoutMs
+ * @param {boolean} outcomeKnown
+ */
+const boundedRequest = (promise, timeoutMs, outcomeKnown) => new Promise((resolve) => {
+  let settled = false;
+  /** @param {any} value */
+  const finish = (value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve(value);
+  };
+  const timer = setTimeout(() => finish({
+    ok: false,
+    code: 'contacts-ui-timeout',
+    outcomeKnown,
+    ...(outcomeKnown ? {} : { outcomeKind: 'unknown', retryable: false }),
+  }), timeoutMs);
+  Promise.resolve(promise).then(finish, () => finish({
+    ok: false,
+    code: 'contacts-message-rejected',
+    outcomeKnown,
+    ...(outcomeKnown ? {} : { outcomeKind: 'unknown', retryable: false }),
+  }));
+});
+
+/** @param {any} result @param {string} action */
+const mutationFailureCopy = (result, action) => result?.outcomeKnown !== true
+  ? `Peerd could not confirm whether ${action} finished. Peerd requested a read-only contacts refresh to reconcile. Review the current state before trying again.`
+  : `Peerd could not ${action}. Review the current contacts and try again if needed.`;
+
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
 /** @typedef {{ linked?: boolean | string, path?: string, lastSeen?: number, name?: string, did?: string }} LivePeer */
 /**
@@ -83,14 +120,19 @@ const liveStatus = (live) => {
 /** @param {Contact} row */
 const displayName = (row) => (row.name && row.name.trim() ? row.name.trim() : null);
 
-/** The Contacts section. attrs: { send } */
+/** The Contacts section. attrs: { send, requestTimeoutMs? } */
 export const ContactsSection = () => {
   /** @type {Contact[] | null} */
   let contacts = null;          // null = loading; else the contacts/list rows
   /** @type {Map<string, LivePeer>} */
   let liveByDid = new Map();    // did -> live peer { linked, path, lastSeen, name }
   /** @type {string | null} */
-  let error = null;
+  let listFailure = null;
+  /** @type {string | null} */
+  let mutationNotice = null;
+  let listPending = false;
+  /** @type {Promise<void> | null} */
+  let listRequest = null;
   /** @type {string | null} */
   let expandedDid = null;
   /** @type {string | null} */
@@ -98,18 +140,42 @@ export const ContactsSection = () => {
   let editValue = '';
   /** @type {string | null} */
   let busyDid = null;
+  const unconfirmedDids = new Set();
   /** @type {ReturnType<typeof setInterval> | number} */
   let timer = 0;
   let dead = false;
 
-  /** @param {Send} send */
-  const refresh = async (send) => {
-    try {
-      const r = await send({ type: 'contacts/list' });
-      if (r?.ok) { contacts = r.contacts ?? []; error = null; }
-      else error = r?.error || 'failed to load contacts';
-    } catch (e) { error = /** @type {{ message?: string }} */ (e)?.message || String(e); }
-    if (!dead) m.redraw();
+  /**
+   * @param {Send} send
+   * @param {number} [timeoutMs]
+   * @param {boolean} [afterCurrent] true only for a post-mutation reconciliation
+   * @returns {Promise<void>}
+   */
+  const refresh = (send, timeoutMs = CONTACTS_REQUEST_TIMEOUT_MS, afterCurrent = false) => {
+    if (listRequest) {
+      // A read that began before an unknown mutation is not reconciliation.
+      // Wait for it, then issue one fresh read; ordinary callers share it.
+      return afterCurrent
+        ? listRequest.then(() => refresh(send, timeoutMs))
+        : listRequest;
+    }
+    listPending = true;
+    listRequest = (async () => {
+      try {
+        const r = await boundedRequest(
+          Promise.resolve().then(() => send({ type: 'contacts/list' })), timeoutMs, true,
+        );
+        if (r?.ok && r?.outcomeKnown !== false) { contacts = r.contacts ?? []; listFailure = null; }
+        else listFailure = 'Contacts took too long to load. Nothing was changed.';
+      } catch {
+        listFailure = 'Contacts took too long to load. Nothing was changed.';
+      }
+    })().finally(() => {
+      listPending = false;
+      listRequest = null;
+      if (!dead) m.redraw();
+    });
+    return listRequest;
   };
 
   // Live presence enrichment — best-effort; a failure just drops the status dot.
@@ -151,49 +217,86 @@ export const ContactsSection = () => {
    * @param {Send} send
    * @param {Contact} row
    */
-  const commitEdit = async (send, row) => {
+  const commitEdit = async (send, row, timeoutMs = CONTACTS_REQUEST_TIMEOUT_MS) => {
     if (editingDid !== row.did) return;
     const name = editValue.trim();
     editingDid = null;
     // No-op if unchanged (and don't create an empty overlay for a live-only peer).
     if (name === (displayName(row) || '')) { m.redraw(); return; }
     busyDid = row.did;
-    const r = await send({ type: 'contacts/set', did: row.did, name });
-    busyDid = null;
-    if (!r?.ok) error = r?.error || 'could not save name';
-    await refresh(send);
+    try {
+      const r = await boundedRequest(
+        Promise.resolve().then(() => send({ type: 'contacts/set', did: row.did, name })),
+        timeoutMs,
+        false,
+      );
+      mutationNotice = r?.ok && r?.outcomeKnown !== false
+        ? null : mutationFailureCopy(r, 'saving this name');
+      if (!r?.ok && r?.outcomeKnown !== true) unconfirmedDids.add(row.did);
+    } catch {
+      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, 'saving this name');
+      unconfirmedDids.add(row.did);
+    } finally {
+      busyDid = null;
+      await refresh(send, timeoutMs, true); // one post-operation read, never a mutation replay
+    }
   };
 
   /**
    * @param {Send} send
    * @param {Contact} row
    */
-  const toggleFavorite = async (send, row) => {
+  const toggleFavorite = async (send, row, timeoutMs = CONTACTS_REQUEST_TIMEOUT_MS) => {
     busyDid = row.did;
-    const r = await send({ type: 'contacts/set', did: row.did, favorite: !row.favorite });
-    busyDid = null;
-    if (!r?.ok) error = r?.error || 'could not update';
-    await refresh(send);
+    try {
+      const r = await boundedRequest(Promise.resolve().then(() => send({
+        type: 'contacts/set', did: row.did, favorite: !row.favorite,
+      })), timeoutMs, false);
+      mutationNotice = r?.ok && r?.outcomeKnown !== false
+        ? null : mutationFailureCopy(r, 'updating this favorite');
+      if (!r?.ok && r?.outcomeKnown !== true) unconfirmedDids.add(row.did);
+    } catch {
+      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, 'updating this favorite');
+      unconfirmedDids.add(row.did);
+    } finally {
+      busyDid = null;
+      await refresh(send, timeoutMs, true); // one post-operation read, never a mutation replay
+    }
   };
 
   /**
    * @param {Send} send
    * @param {Contact} row
    */
-  const forget = async (send, row) => {
+  const forget = async (send, row, timeoutMs = CONTACTS_REQUEST_TIMEOUT_MS) => {
     busyDid = row.did;
-    const r = await send({ type: 'contacts/forget', did: row.did });
-    busyDid = null;
-    if (!r?.ok && r?.error !== 'contact-not-found') error = r?.error || 'could not forget';
-    expandedDid = null;
-    await refresh(send);
+    try {
+      const r = await boundedRequest(
+        Promise.resolve().then(() => send({ type: 'contacts/forget', did: row.did })),
+        timeoutMs,
+        false,
+      );
+      mutationNotice = (r?.ok && r?.outcomeKnown !== false) || r?.error === 'contact-not-found'
+        ? null : mutationFailureCopy(r, 'forgetting this contact');
+      if (!r?.ok && r?.error !== 'contact-not-found' && r?.outcomeKnown !== true) {
+        unconfirmedDids.add(row.did);
+      }
+    } catch {
+      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, 'forgetting this contact');
+      unconfirmedDids.add(row.did);
+    } finally {
+      busyDid = null;
+      expandedDid = null;
+      await refresh(send, timeoutMs, true); // one post-operation read, never a mutation replay
+    }
   };
 
   /**
    * @param {Send} send
    * @param {Contact} row
+   * @param {number} timeoutMs
    */
-  const detail = (send, row) => {
+  const detail = (send, row, timeoutMs) => {
     /** @type {any} */
     const a = row.activity || {};
     return m('.contact-detail', [
@@ -211,10 +314,17 @@ export const ContactsSection = () => {
         a.firstEventAt ? m('.muted.contact-counts', `First met ${fmtWhen(a.firstEventAt)} · last activity ${fmtWhen(a.lastEventAt)}`) : null,
       ]),
       m('.contact-detail-actions', [
-        m('button.peerd-net-btn', { disabled: busyDid === row.did, onclick: () => toggleFavorite(send, row) }, row.favorite ? '★ Favorited' : '☆ Favorite'),
+        m('button.peerd-net-btn', { disabled: busyDid === row.did || unconfirmedDids.has(row.did), onclick: () => toggleFavorite(send, row, timeoutMs) }, row.favorite ? '★ Favorited' : '☆ Favorite'),
         row.saved
-          ? m('button.peerd-net-btn', { disabled: busyDid === row.did, onclick: () => forget(send, row) }, 'Forget')
+          ? m('button.peerd-net-btn', { disabled: busyDid === row.did || unconfirmedDids.has(row.did), onclick: () => forget(send, row, timeoutMs) }, 'Forget')
           : null,
+        unconfirmedDids.has(row.did) ? m('button.peerd-net-btn', {
+          onclick: () => {
+            unconfirmedDids.delete(row.did);
+            mutationNotice = null;
+            m.redraw();
+          },
+        }, 'I checked this contact; allow changes') : null,
       ]),
     ]);
   };
@@ -222,8 +332,9 @@ export const ContactsSection = () => {
   /**
    * @param {Send} send
    * @param {Contact} r
+   * @param {number} timeoutMs
    */
-  const row = (send, r) => {
+  const row = (send, r, timeoutMs) => {
     const name = displayName(r);
     const status = liveStatus(r.live);
     const expanded = expandedDid === r.did;
@@ -239,10 +350,10 @@ export const ContactsSection = () => {
               oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => v.dom.focus(),
               oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { editValue = e.target.value; },
               onkeydown: (/** @type {KeyboardEvent} */ e) => {
-                if (e.key === 'Enter') commitEdit(send, r);
+                if (e.key === 'Enter') commitEdit(send, r, timeoutMs);
                 if (e.key === 'Escape') { editingDid = null; m.redraw(); }
               },
-              onblur: () => commitEdit(send, r),
+              onblur: () => commitEdit(send, r, timeoutMs),
             })
           : m('.contact-name-line', [
               m('span.peerd-disc-name', name || m('span.muted', `peer ${short(r.did)}`)),
@@ -254,42 +365,57 @@ export const ContactsSection = () => {
           : (r.activity?.appCount ? `${r.activity.appCount} app${r.activity.appCount === 1 ? '' : 's'} · …${short(r.did)}` : `…${short(r.did)}`)),
       ]),
       m('.contact-row-actions', [
-        m('button.peerd-net-btn', { title: 'Edit name', disabled: busyDid === r.did, onclick: () => startEdit(r) }, name ? 'Rename' : 'Name'),
+        m('button.peerd-net-btn', { title: 'Edit name', disabled: busyDid === r.did || unconfirmedDids.has(r.did), onclick: () => startEdit(r) }, name ? 'Rename' : 'Name'),
         m('button.peerd-net-btn', {
           'aria-expanded': String(expanded),
           title: expanded ? 'Hide activity' : 'Show activity',
           onclick: () => { expandedDid = expanded ? null : r.did; },
         }, expanded ? 'Hide' : 'Activity'),
       ]),
-      expanded ? detail(send, r) : null,
+      expanded ? detail(send, r, timeoutMs) : null,
     ]);
   };
 
   return {
-    /** @param {{ attrs: { send: Send } }} vnode */
-    oninit(vnode) { refresh(vnode.attrs.send); refreshLive(vnode.attrs.send); },
-    /** @param {{ attrs: { send: Send } }} vnode */
+    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number } }} vnode */
+    oninit(vnode) {
+      refresh(vnode.attrs.send, vnode.attrs.requestTimeoutMs);
+      refreshLive(vnode.attrs.send);
+    },
+    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number } }} vnode */
     oncreate(vnode) {
       timer = setInterval(() => {
         if (document.hidden) return;
-        refresh(vnode.attrs.send);
+        if (!listFailure) refresh(vnode.attrs.send, vnode.attrs.requestTimeoutMs);
         refreshLive(vnode.attrs.send);
       }, 5000);
     },
     onremove() { dead = true; if (timer) clearInterval(timer); },
-    /** @param {{ attrs: { send: Send } }} vnode */
+    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number } }} vnode */
     view(vnode) {
       const send = vnode.attrs.send;
+      const timeoutMs = vnode.attrs.requestTimeoutMs ?? CONTACTS_REQUEST_TIMEOUT_MS;
       const list = contacts === null ? [] : rows();
       return m('.peerd-disc.contacts', [
-        error ? m('p.peerd-disc-err', { style: 'padding:8px;' }, error) : null,
-        contacts === null
+        mutationNotice ? m('p.peerd-disc-err', {
+          style: 'padding:8px;', role: 'alert', 'aria-live': 'assertive',
+        }, mutationNotice) : null,
+        listFailure ? m('.contacts-load-failure', { style: 'padding:8px;' }, [
+          m('p.peerd-disc-err', { role: 'alert' }, listFailure),
+          m('button.peerd-net-btn', {
+            type: 'button', disabled: listPending,
+            onclick: () => refresh(send, timeoutMs),
+          }, listPending ? 'Retrying…' : 'Retry'),
+        ]) : null,
+        contacts === null && !listFailure
           ? m('.peerd-net-empty', 'Loading contacts…')
-          : list.length === 0
+          : contacts === null
+            ? null
+            : list.length === 0
             ? m('.peerd-net-empty',
                 'No known peers yet. Peers you meet on the network — and anyone you '
                 + 'install an app from — show up here, ready to name.')
-            : m('ul.peerd-disc-list', list.map((r) => row(send, r))),
+            : m('ul.peerd-disc-list', list.map((r) => row(send, r, timeoutMs))),
       ]);
     },
   };

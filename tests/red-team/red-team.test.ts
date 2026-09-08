@@ -1,9 +1,8 @@
 // The red-team CI gate.
 //
-// Every scenario in the catalog must HOLD: each drives a real peerd defense with
-// hostile input and every probe must be blocked. A regression that weakens a
-// defense turns a probe red and fails this test, the security claim is wired to
-// CI, not just asserted in prose. Runs under the ordinary `bun test ./tests`.
+// Every scoped probe in the catalog must HOLD. A scenario with a known platform
+// residual stays green only when it declares partial coverage and names the
+// residual instead of claiming a global block.
 //
 // The report artifact (docs/security/RED-TEAM-RESULTS.md) is produced separately
 // by `bun run red-team:report`, which reuses this same catalog.
@@ -15,7 +14,7 @@ import { runScenario } from './harness.ts';
 describe('peerd red-team suite', () => {
   for (const s of CATALOG) {
     describe(`${s.id}, ${s.title}`, () => {
-      test(`holds: ${s.claim}`, async () => {
+      test(`scoped probes hold: ${s.claim}`, async () => {
         const ran = await runScenario(s);
         // Surface every leaked probe by name so a failure points at the exact vector.
         const leaks = ran.result.probes.filter((p) => !p.blocked).map((p) => `${p.vector} :: ${p.evidence}`);
@@ -47,5 +46,13 @@ describe('peerd red-team suite', () => {
 
   test('every scenario references a threat-model invariant', () => {
     for (const s of CATALOG) expect(s.threatModelRef).toMatch(/^INV-\d+$/);
+  });
+
+  test('partial scenarios name their platform residuals', async () => {
+    const ran = await Promise.all(CATALOG.map(runScenario));
+    const partial = ran.filter((entry) => entry.result.coverage === 'partial');
+    expect(partial.map((entry) => entry.id)).toEqual(['07-ssrf-private-network']);
+    expect(partial[0]?.result.held).toBe(true);
+    expect(partial[0]?.result.residuals?.length).toBeGreaterThan(0);
   });
 });

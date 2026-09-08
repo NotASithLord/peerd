@@ -79,6 +79,19 @@ describe('home.network', () => {
     } finally { unmount(); }
   });
 
+  it('status failure never masquerades as offline or enables Start', async () => {
+    const send = makeSend({
+      'dweb/distributed/info': () => ({ ok: false, error: 'raw status transport' }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      expect(root.textContent).toContain('could not refresh network status');
+      expect(root.textContent.includes('raw status transport')).toBe(false);
+      expect(byText(root, '.peerd-net-btn', 'Retry status')).toBeTruthy();
+      expect(byText(root, '.peerd-net-btn', 'Start the network')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
   // The regression. The offscreen host answers a failed dweb/base/start with a
   // RESOLVED { ok:false, error } reply (not a rejection); a naive `await send()`
   // swallows it and the button silently snaps back to "Start the network" with
@@ -99,11 +112,111 @@ describe('home.network', () => {
       // wiring fired
       expect(send.calls.some((c) => c.type === 'dweb/base/start')).toBe(true);
       // the failure is SURFACED, not swallowed
-      expect(root.textContent).toContain('websocket error');
+      expect(root.textContent).toContain('could not start the network');
+      expect(root.textContent.includes('websocket error')).toBe(false);
       // and the button is usable again (not stuck on "Starting…")
       expect(byText(root, '.peerd-net-btn', 'Starting…')).toBeFalsy();
       expect(byText(root, '.peerd-net-btn', 'Start the network')).toBeTruthy();
     } finally { unmount(); }
+  });
+
+  it('an unknown start stays fenced across a stale status read', async () => {
+    const send = makeSend({
+      'dweb/base/start': () => ({
+        ok: false, error: 'raw private host failure', outcomeKnown: false,
+        outcomeKind: 'unknown', retryable: false,
+      }),
+      'dweb/distributed/info': () => ({ running: false }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      clickText(root, '.peerd-net-btn', 'Start the network');
+      await flush();
+      expect(root.textContent).toContain('could not confirm whether the network start finished');
+      expect(root.textContent.includes('raw private host failure')).toBe(false);
+      expect(send.calls.filter((call) => call.type === 'dweb/base/start').length).toBe(1);
+      expect(send.calls.some((call) => call.type === 'dweb/distributed/info')).toBe(true);
+      expect(byText(root, '.peerd-net-btn', 'Recheck network status')).toBeTruthy();
+      expect(byText(root, '.peerd-net-btn', 'Finish same start')).toBeTruthy();
+      expect(byText(root, '.peerd-net-btn', 'Start the network')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
+  it('unknown start plus failed status permits only another status read', async () => {
+    let infoCalls = 0;
+    const send = makeSend({
+      'dweb/base/start': () => ({ ok: false, outcomeKnown: false, retryable: false }),
+      'dweb/distributed/info': () => {
+        infoCalls += 1;
+        return infoCalls === 1 ? { running: false } : { ok: false, error: 'gone' };
+      },
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      clickText(root, '.peerd-net-btn', 'Start the network');
+      await flush();
+      expect(byText(root, '.peerd-net-btn', 'Recheck network status')).toBeTruthy();
+      clickText(root, '.peerd-net-btn', 'Recheck network status');
+      await flush();
+      expect(send.calls.filter((call) => call.type === 'dweb/base/start').length).toBe(1);
+      expect(send.calls.filter((call) => call.type === 'dweb/distributed/info').length).toBe(3);
+      expect(byText(root, '.peerd-net-btn', 'Finish same start')).toBeTruthy();
+    } finally { unmount(); }
+  });
+
+  it('repeats only the same idempotent start after an unknown receipt', async () => {
+    let starts = 0;
+    let running = false;
+    const send = makeSend({
+      'dweb/base/start': () => {
+        starts += 1;
+        if (starts === 1) return { ok: false, outcomeKnown: false, retryable: false };
+        running = true;
+        return { ok: true };
+      },
+      'dweb/distributed/info': () => ({ running }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      clickText(root, '.peerd-net-btn', 'Start the network');
+      await flush();
+      clickText(root, '.peerd-net-btn', 'Finish same start');
+      await flush();
+      expect(starts).toBe(2);
+      expect(root.querySelector('.peerd-net-facts')).toBeTruthy();
+      expect(byText(root, '.peerd-net-btn', 'Finish same start')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
+  it('keeps an unknown stop fenced and repeats only that same stop', async () => {
+    let stops = 0;
+    let running = true;
+    const send = makeSend({
+      'dweb/base/stop': () => {
+        stops += 1;
+        if (stops === 1) return { ok: false, outcomeKnown: false, retryable: false };
+        running = false;
+        return { ok: true };
+      },
+      'dweb/distributed/info': () => (running ? LIVE_INFO : { running: false }),
+    });
+    const priorConfirm = globalThis.confirm;
+    globalThis.confirm = () => true;
+    const { root, unmount } = await mountView(send);
+    try {
+      clickText(root, '.peerd-net-btn', 'Stop the network');
+      await flush();
+      expect(byText(root, '.peerd-net-btn', 'Recheck network status')).toBeTruthy();
+      expect(byText(root, '.peerd-net-btn', 'Finish same stop')).toBeTruthy();
+      expect(byText(root, '.peerd-net-btn', 'Stop the network')).toBeFalsy();
+      clickText(root, '.peerd-net-btn', 'Finish same stop');
+      await flush();
+      expect(stops).toBe(2);
+      expect(byText(root, '.peerd-net-btn', 'Start the network')).toBeTruthy();
+    } finally {
+      globalThis.confirm = priorConfirm;
+      unmount();
+    }
   });
 
   it('a successful start dispatches dweb/base/start and shows the live view', async () => {

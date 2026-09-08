@@ -7,11 +7,14 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { CHANNEL } from '/shared/channel-config.js';
-import { bundleToOtlp, EXPORT_PASSPHRASE_MIN_LENGTH } from '/peerd-runtime/index.js';
-import { EXPORT_FILE_LIMIT_BYTES } from '/peerd-engine/index.js';
+import { bundleToOtlp } from '/peerd-runtime/options.js';
 import { PrivateTransferPortError } from '../private-transfer-client.js';
+import {
+  isUnknownMutationOutcome, mutationFailureCopy, unknownMutationCopy,
+} from '../mutation-custody.js';
 
 const MAX_BACKUP_FILE_BYTES = 32 * 1024 * 1024;
+const EXPORT_PASSPHRASE_MIN_LENGTH = 16;
 const IMPORT_NOT_STARTED_CODES = new Set([
   'channel-unavailable', 'channel-request-failed', 'channel-timeout', 'post-failed',
 ]);
@@ -95,20 +98,36 @@ export const TransferSection = {
     // separate state island: artifacts and settings never mix.
     vnode.state.artifactEnvelope = null;      // parsed .peerd envelope
     vnode.state.artifactSummary = null;       // import/inspect summary
+    vnode.state.artifactInspectGeneration = 0;
     vnode.state.artifactBusy = false;
     vnode.state.artifactMsg = null;           // { ok, text } | null
     // Debug bundle (the debug surface's options-page entry point): a session
     // picker over ALL chats — unlike the in-chat debug chip, this reaches any
     // past session without opening it.
     vnode.state.debugSessions = null;         // null = loading; [] = none
+    vnode.state.debugSessionsError = '';
     vnode.state.debugSessionId = '';
     vnode.state.debugBusy = false;
     vnode.state.debugMsg = null;              // { ok, text } | null
-    Promise.resolve(vnode.attrs.send({ type: 'session/list' })).then((reply) => {
-      vnode.state.debugSessions = reply?.ok !== false && Array.isArray(reply?.sessions) ? reply.sessions : [];
-      vnode.state.debugSessionId = vnode.state.debugSessions[0]?.sessionId ?? '';
-      m.redraw();
-    }).catch(() => { vnode.state.debugSessions = []; m.redraw(); });
+    vnode.state.loadDebugSessions = () => {
+      vnode.state.debugSessions = null;
+      vnode.state.debugSessionsError = '';
+      Promise.resolve(vnode.attrs.send({ type: 'session/list' })).then((reply) => {
+        if (reply?.ok !== false && Array.isArray(reply?.sessions)) {
+          vnode.state.debugSessions = reply.sessions;
+          vnode.state.debugSessionId = reply.sessions[0]?.sessionId ?? '';
+        } else {
+          vnode.state.debugSessions = [];
+          vnode.state.debugSessionsError = reply?.error ?? 'Temporarily unavailable. Try again.';
+        }
+        m.redraw();
+      }).catch(() => {
+        vnode.state.debugSessions = [];
+        vnode.state.debugSessionsError = 'Temporarily unavailable. Try again.';
+        m.redraw();
+      });
+    };
+    vnode.state.loadDebugSessions();
   },
 
   /** @param {{ attrs: { send: Send }, state: any }} vnode */
@@ -126,7 +145,9 @@ export const TransferSection = {
         if (!reply?.ok) {
           ui.debugMsg = {
             ok: false,
-            text: reply?.error === 'locked' ? 'Vault is locked \u2014 unlock in the peerd panel first.' : (reply?.error ?? 'Export failed.'),
+            text: reply?.error === 'locked'
+              ? 'Vault is locked; unlock in the peerd panel first.'
+              : 'The debug bundle could not be created.',
           };
           return;
         }
@@ -188,7 +209,7 @@ export const TransferSection = {
             text: reply?.error === 'vault-locked' ? 'Vault is locked — unlock in the peerd panel first.'
               : reply?.error === 'passphrase-required' ? `A long passphrase (${EXPORT_PASSPHRASE_MIN_LENGTH}+ characters) is required to protect credentials and peer identity.`
               : reply?.error === 'identity-export-failed' ? 'Backup stopped because your peer identity could not be protected. Nothing was downloaded; retry after reopening peerd.'
-              : reply?.error ?? 'Export failed.',
+              : 'The backup could not be created.',
           };
         }
       } catch {
@@ -253,15 +274,27 @@ export const TransferSection = {
     };
 
     const onArtifactFile = async (/** @type {{ target: HTMLInputElement }} */ e) => {
+      const generation = ++ui.artifactInspectGeneration;
       ui.artifactMsg = null;
       ui.artifactSummary = null;
       ui.artifactEnvelope = null;
       const file = e.target.files?.[0];
       if (!file) return;
-      if (file.size > EXPORT_FILE_LIMIT_BYTES) {
+      let exportFileLimitBytes;
+      try {
+        ({ EXPORT_FILE_LIMIT_BYTES: exportFileLimitBytes } = await import('/peerd-engine/artifact.js'));
+      } catch {
+        if (generation !== ui.artifactInspectGeneration) return;
+        ui.artifactMsg = { ok: false, text: 'Artifact import is unavailable in this build.' };
+        e.target.value = '';
+        m.redraw();
+        return;
+      }
+      if (generation !== ui.artifactInspectGeneration) return;
+      if (file.size > exportFileLimitBytes) {
         ui.artifactMsg = {
           ok: false,
-          text: `That artifact is too large to import safely (${Math.round(EXPORT_FILE_LIMIT_BYTES / 1024 / 1024)} MB maximum).`,
+          text: `That artifact is too large to import safely (${Math.round(exportFileLimitBytes / 1024 / 1024)} MB maximum).`,
         };
         e.target.value = '';
         m.redraw();
@@ -269,24 +302,29 @@ export const TransferSection = {
       }
       let envelope;
       try {
-        envelope = JSON.parse(await file.text());
+        const text = await file.text();
+        if (generation !== ui.artifactInspectGeneration) return;
+        envelope = JSON.parse(text);
       } catch {
+        if (generation !== ui.artifactInspectGeneration) return;
         ui.artifactMsg = { ok: false, text: 'Could not parse that file as a .peerd envelope.' };
         m.redraw();
         return;
       }
       try {
         const reply = await send({ type: 'import/inspect', envelope });
+        if (generation !== ui.artifactInspectGeneration) return;
         if (reply?.ok) {
           ui.artifactEnvelope = envelope;
           ui.artifactSummary = reply.summary;
         } else {
-          ui.artifactMsg = { ok: false, text: reply?.error ?? 'Could not read that file.' };
+          ui.artifactMsg = { ok: false, text: 'That artifact could not be inspected.' };
         }
       } catch {
+        if (generation !== ui.artifactInspectGeneration) return;
         ui.artifactMsg = { ok: false, text: 'peerd became unavailable while inspecting the artifact. Reopen peerd and retry.' };
       }
-      m.redraw();
+      if (generation === ui.artifactInspectGeneration) m.redraw();
     };
 
     const doArtifactApply = async () => {
@@ -305,11 +343,23 @@ export const TransferSection = {
           };
           ui.artifactEnvelope = null;
           ui.artifactSummary = null;
+        } else if (isUnknownMutationOutcome(reply)) {
+          ui.artifactMsg = {
+            ok: false, text: unknownMutationCopy('importing the artifact'),
+          };
+          // Re-inspection is the safe reconciliation boundary. Never leave the
+          // same Class-E apply payload armed after an unknown result.
+          ui.artifactEnvelope = null;
+          ui.artifactSummary = null;
         } else {
-          ui.artifactMsg = { ok: false, text: reply?.error ?? 'Import failed.' };
+          ui.artifactMsg = { ok: false, text: mutationFailureCopy(reply, {
+            action: 'importing the artifact', fallback: 'The artifact could not be imported.',
+          }) };
         }
       } catch {
-        ui.artifactMsg = { ok: false, text: 'peerd became unavailable during the artifact import. Reopen peerd and retry.' };
+        ui.artifactMsg = { ok: false, text: unknownMutationCopy('importing the artifact') };
+        ui.artifactEnvelope = null;
+        ui.artifactSummary = null;
       } finally {
         ui.artifactBusy = false;
         m.redraw();
@@ -356,7 +406,7 @@ export const TransferSection = {
             'not-present': '',
           }))[reply.identityOutcome ?? 'not-present'] ?? '';
           const recoveryText = reply.runtimeRecoveryPending
-            ? ' The peer network is still recovering. Keep peerd open; it will retry automatically.'
+            ? ' Peer network restart pending.'
             : '';
           ui.importMsg = {
             ok: true,
@@ -371,6 +421,12 @@ export const TransferSection = {
           ui.replacementPending = false;
           ui.focusImportStatusOnUpdate = true;
           if (ui.importFileInput) ui.importFileInput.value = '';
+        } else if (isUnknownMutationOutcome(reply)) {
+          ui.importMsg = {
+            ok: false,
+            text: 'Peerd could not confirm the restore’s final state. Inspect local state, then choose the backup file again.',
+          };
+          clearImportSelection(true);
         } else if (reply?.partial) {
           ui.identityConflict = null;
           ui.replacementPending = false;
@@ -625,7 +681,9 @@ export const TransferSection = {
         + 'anywhere; stored credentials cannot appear in either file.'),
       m('.input-row', [
         m('label', { for: 'dbgsess' }, 'Chat'),
-        ui.debugSessions === null
+        ui.debugSessionsError
+          ? m('button.muted', { type: 'button', onclick: ui.loadDebugSessions }, ui.debugSessionsError)
+          : ui.debugSessions === null
           ? m('span.muted', 'loading\u2026')
           : ui.debugSessions.length === 0
             ? m('span.muted', 'no chats yet')
@@ -680,7 +738,11 @@ export const TransferSection = {
             ui.artifactBusy ? '…' : 'Apply import'),
           m('button.secondary', {
             type: 'button',
-            onclick: () => { ui.artifactEnvelope = null; ui.artifactSummary = null; },
+            onclick: () => {
+              ui.artifactInspectGeneration += 1;
+              ui.artifactEnvelope = null;
+              ui.artifactSummary = null;
+            },
           }, 'Cancel'),
         ]),
       ]) : null,

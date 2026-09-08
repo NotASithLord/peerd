@@ -1,18 +1,10 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const podStatusTool = {
-  name: 'pod_status', primitive: 'pod',
-  description: 'Inspect this Pod without creating or starting one. The default job table is metadata-only. Pass jobId plus stream and the returned next offset to page retained stdout/stderr (up to 16000 characters per call).',
-  schema: { type: 'object', properties: {
-    podId: { type: 'string' },
-    jobId: { type: 'string' },
-    stream: { type: 'string', enum: ['stdout', 'stderr'] },
-    offset: { type: 'integer', description: 'Character offset for the selected stream.' },
-    limit: { type: 'integer', description: 'Characters to return, capped at 16000.' },
-  } },
-  sideEffect: 'read', origins: () => [],
+export const podStatusTool = composeTool("pod_status", {
   execute: async (args, ctx) => {
     const client = /** @type {any} */ (ctx).podClient;
     if (!client?.status) return { ok: false, error: 'pod_unavailable' };
@@ -25,4 +17,4 @@ export const podStatusTool = {
     }
     catch (error) { return { ok: false, error: `pod_status_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
   },
-};
+});

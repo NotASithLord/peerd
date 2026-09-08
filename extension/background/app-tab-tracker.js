@@ -12,7 +12,7 @@
 
 import { createTabTracker } from './tab-tracker.js';
 import { APP_TAB_PATH } from '/peerd-engine/background.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 const READY_TIMEOUT_MS = 15_000;
 const QUIESCE_TIMEOUT_MS = 5_000;
@@ -116,10 +116,42 @@ export const createAppTabTracker = ({
     return removed;
   };
 
+  /** Clear a stale rich claim only after a complete browser tab snapshot proves it left. */
+  /** @param {string} appId @param {number} claimantTabId */
+  const reconcileTabClaim = async (appId, claimantTabId) => {
+    const liveTabId = tracker.getTabId(appId);
+    if (liveTabId == null || liveTabId === claimantTabId) return liveTabId;
+    let liveTabs;
+    try { liveTabs = await tabs.query({}); }
+    catch { return liveTabId; }
+    const live = liveTabs.find((tab) => tab?.id === liveTabId);
+    if (live && tracker.parseIdFromUrl(live.url ?? '') === appId) return liveTabId;
+    onTabRemoved(liveTabId);
+    return null;
+  };
+
+  /** @param {string} appId */
+  const closeTab = async (appId) => {
+    const tabId = tracker.getTabId(appId);
+    if (tabId == null) return false;
+    let liveTabs;
+    try { liveTabs = await tabs.query({}); }
+    catch { throw new Error('app-tab-state-unavailable'); }
+    const live = liveTabs.find((tab) => tab?.id === tabId);
+    if (!live || tracker.parseIdFromUrl(live.url ?? '') !== appId) {
+      onTabRemoved(tabId);
+      return false;
+    }
+    await tabs.remove(tabId);
+    return true;
+  };
+
   /** @param {string} appId @param {string} ownerRoot */
   const getOwnedTabId = (appId, ownerRoot) => ownerRootByApp.get(appId) === ownerRoot
     ? tracker.getTabId(appId)
     : null;
+  /** Preserve the exact chat-root claim when lifecycle work closes/reopens a tab. */
+  const getOwnerClaim = (/** @type {string} */ appId) => ownerClaimByApp.get(appId) ?? null;
 
   /** Refuse ambient appId-only reuse across chat roots. */
   const ensureTab = async (/** @type {string} */ appId, /** @type {{active?:boolean,groupTitle?:string,hashSuffix?:string,ownerSessionId?:string}} */ opts = {}) => {
@@ -172,9 +204,11 @@ export const createAppTabTracker = ({
     parseIdFromUrl: tracker.parseIdFromUrl,
     parseOwnerFromUrl,
     getTabId: tracker.getTabId,
+    reconcileTabClaim,
     getOwnedTabId,
+    getOwnerClaim,
     ensureTab,
-    closeTab: tracker.closeTab,
+    closeTab,
     quiesceTab,
     resumeTab,
     reloadTab: tracker.reloadTab,

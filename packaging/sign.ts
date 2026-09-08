@@ -40,14 +40,18 @@ const signChromeCrx = async (zipArtifact: string): Promise<void> => {
   console.log(`signed ${relative(REPO_ROOT, crxPath)}`);
 };
 
-const signFirefoxXpi = async (xpiArtifact: string, stagingDir: string): Promise<void> => {
+const signFirefoxXpi = async (
+  xpiArtifact: string,
+  stagingDir: string,
+  artifactRoot: string,
+): Promise<void> => {
   const issuer = process.env.AMO_JWT_ISSUER;
   const secret = process.env.AMO_JWT_SECRET;
   if (!issuer || !secret) {
     console.warn('WARN sign: UNSIGNED firefox preview — AMO_JWT_ISSUER/AMO_JWT_SECRET not set.');
     return;
   }
-  const amoOut = join(ARTIFACTS_DIR, 'amo');
+  const amoOut = join(artifactRoot, 'amo');
   rmSync(amoOut, { recursive: true, force: true });
   // web-ext signs from the source dir (the staged preview-firefox tree),
   // polls AMO until validation+signing completes, downloads the signed
@@ -116,12 +120,21 @@ const signFirefoxXpi = async (xpiArtifact: string, stagingDir: string): Promise<
 };
 
 export const signPreviewArtifact = async (
-  { browser, artifact }: { browser: Browser; artifact: string; version: string },
+  { browser, artifact, artifactRoot = ARTIFACTS_DIR, stagingDir }: {
+    browser: Browser;
+    artifact: string;
+    version: string;
+    artifactRoot?: string;
+    stagingDir?: string;
+  },
 ): Promise<void> => {
   if (browser === 'chrome') {
     await signChromeCrx(artifact);
   } else {
-    const stagingDir = join(ARTIFACTS_DIR, 'staging', 'preview-firefox');
-    await signFirefoxXpi(artifact, stagingDir);
+    await signFirefoxXpi(
+      artifact,
+      stagingDir ?? join(artifactRoot, 'staging', 'preview-firefox'),
+      artifactRoot,
+    );
   }
 };

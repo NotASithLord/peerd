@@ -10,7 +10,7 @@ import {
   shapeSettingsSurface,
   shapeAppsSurface, captureAppsSurface, applyAppsSurface,
   shapeWorkspacesSurface, applyWorkspacesSurface,
-  shapeSecretsSurface, applySecretsSurface,
+  shapeSecretsSurface,
   encodeSurface, decodeSurface,
 } from '../../extension/peerd-runtime/transfer/self-sync-surfaces.js';
 
@@ -22,7 +22,7 @@ describe('session projection', () => {
       cost: { total: 10 },
       // Device-local bookkeeping that must NOT travel:
       grantedTools: ['x'], spawnedTrusted: true, instanceId: 'vm-1', actorType: 'webvm',
-      backing: 'tab', originState: { mode: 'bound' }, review: true, prewalk: { phase: 'planning' },
+      backing: 'tab', originState: { mode: 'bound' }, prewalk: { phase: 'planning' },
       permissionMode: 'act', confirmActions: false, parentSessionId: 'p1', task: 'do it', depth2: 9,
       trimSummary: { rolling: 'source-only model context' }, toolManifest: { tools: ['dangerous'] },
       messages: [
@@ -32,7 +32,7 @@ describe('session projection', () => {
     };
     const portable: any = portableSession(session);
     for (const field of ['grantedTools', 'spawnedTrusted', 'instanceId', 'actorType', 'backing',
-      'originState', 'review', 'prewalk', 'permissionMode', 'confirmActions', 'parentSessionId', 'task',
+      'originState', 'prewalk', 'permissionMode', 'confirmActions', 'parentSessionId', 'task',
       'trimSummary', 'toolManifest']) {
       expect(portable).not.toHaveProperty(field);
     }
@@ -106,7 +106,7 @@ describe('session projection', () => {
 });
 
 describe('secret custody boundary', () => {
-  test('filters protected keys on both shape and apply', async () => {
+  test('filters protected keys while shaping', () => {
     const shaped = shapeSecretsSurface({ secrets: {
       'provider/anthropic': 'portable',
       'distributed/identity/v1': 'root',
@@ -116,14 +116,6 @@ describe('secret custody boundary', () => {
     } });
     expect(shaped.secrets).toEqual({ 'provider/anthropic': 'portable' });
 
-    const written: Array<[string, string]> = [];
-    const result = await applySecretsSurface({ secrets: {
-      'provider/openai': 'ok',
-      'distributed/device-key/v1': 'injected-device-key',
-      'distributed/identity/future': 'injected-root',
-    } }, { setSecret: async (name, value) => { written.push([name, value]); } });
-    expect(result).toEqual({ written: 1, refused: 2 });
-    expect(written).toEqual([['provider/openai', 'ok']]);
   });
 });
 

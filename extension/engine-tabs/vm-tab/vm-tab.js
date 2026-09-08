@@ -15,7 +15,7 @@
 // registry via the SW (vm/get-meta → idbKV('vms')) on boot, keyed by the
 // `#<vmId>` fragment in the URL. No URL params for cleanliness.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import {
   VMBootFailedError,
   IMAGE_PIN_HEAD_BYTES,
@@ -755,7 +755,6 @@ const handleShellByte = (/** @type {string} */ text) => {
       const holdFrom = partialMarkerHoldIndex(buf);
       out += buf.slice(i, holdFrom);
       httpMarkerPending = buf.slice(holdFrom);
-      i = buf.length;
       break;
     }
     const { index: mStart, kind, marker } = found;
@@ -772,7 +771,6 @@ const handleShellByte = (/** @type {string} */ text) => {
         out += buf.slice(i, mStart);
         httpMarkerPending = pending;
       }
-      i = buf.length;
       break;
     }
     const parsed = parseMarkerLine(kind, buf.slice(mStart + marker.length, nlIdx));

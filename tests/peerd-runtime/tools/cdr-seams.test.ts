@@ -8,8 +8,8 @@
 //
 //   IN  — disarm the raw body BEFORE windowing, excerpting, and CACHING. Skip
 //         this and a zero-width run can split a word the excerpt matcher is
-//         looking for, and undisarmed bytes get PERSISTED into the web cache to
-//         be served later by read_web_cache, past every boundary.
+//         looking for, and undisarmed bytes get PERSISTED into the result store
+//         to be served later by read_result, past every boundary.
 //   OUT — disarm the extracted markdown AFTER extraction. Extraction PARSES the
 //         HTML, so `&#8203;` — seven plain ASCII characters the first pass has
 //         no reason to touch — comes out the far side as a literal zero-width
@@ -21,7 +21,12 @@
 import { describe, test, expect } from 'bun:test';
 import { browserProbeResult } from '../../helpers/browser-scripting.ts';
 import { fetchUrlTool } from '../../../extension/peerd-runtime/tools/defs/fetch-url.js';
-import { readPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
+import { readOwnedPageAuthority } from '../../../extension/background/page-authority/read-page.js';
+import { readPageTool as controllerReadPageTool } from '../../../extension/peerd-runtime/tools/defs/read-page.js';
+
+const readPageTool = { execute: (args: any, ctx: any) => controllerReadPageTool.execute(args, {
+  ...ctx, pageAuthority: { readOwnedPage: () => readOwnedPageAuthority(args, ctx) },
+}) };
 
 const ZW = '​';
 const SOFT_HYPHEN = '­';
@@ -40,12 +45,30 @@ const mockResponse = ({ body = '', headers = {}, url = 'https://site.test/a' } =
   url,
 });
 
-const fetchCtx = (body: string, over: any = {}) => ({
-  session: { sessionId: 't' },
-  audit: async () => {},
-  webFetch: async () => mockResponse({ body, headers: { 'content-type': 'text/html' } }),
-  ...over,
-});
+const fetchCtx = (body: string, over: any = {}) => {
+  const webFetch = over.webFetch
+    ?? (async () => mockResponse({ body, headers: { 'content-type': 'text/html' } }));
+  const authority: any = {
+    requestWebText: async (request: any) => {
+      const response = await webFetch(request.url, request);
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value: string, name: string) => { headers[name] = value; });
+      return { status: response.status, body: await response.text(), headers, finalUrl: response.url };
+    },
+  };
+  if (over.webOffscreenClient?.extractMarkdown) {
+    authority.extractReadableMarkdown = (html: string, url: string) =>
+      over.webOffscreenClient.extractMarkdown({ html, url });
+  }
+  if (over.resultStore?.key && over.resultStore?.put) {
+    authority.spillResult = async (record: any) => {
+      const key = over.resultStore.key();
+      await over.resultStore.put({ ...record, key, ownerSessionId: 't' });
+      return key;
+    };
+  }
+  return { resourceAuthority: authority };
+};
 
 describe('CDR at the fetch_url boundary (issue 244)', () => {
   test('invisible bytes are gone from the body the agent reads', async () => {
@@ -122,14 +145,14 @@ describe('CDR at the fetch_url boundary (issue 244)', () => {
   });
 
   test('the SPILLED cache record is disarmed too — the pass is before the write', async () => {
-    // read_web_cache serves this record on a later turn, through a different
+    // read_result serves this record on a later turn, through a different
     // code path. Disarming only the windowed excerpt would leave the payload
     // sitting in storage waiting for the paging call that reads past it.
     const stored: any[] = [];
     const big = `${SMUGGLED} ${'M'.repeat(60_000)}`;
     const ctx = fetchCtx(big, {
       webFetch: async () => mockResponse({ body: big, headers: { 'content-type': 'text/plain' } }),
-      webCache: { key: () => 'wc-1', put: async (rec: any) => { stored.push(rec); } },
+      resultStore: { key: () => 'result:opaque-cdr', put: async (rec: any) => { stored.push(rec); } },
     });
     const r = await fetchUrlTool.execute({ url: 'https://site.test/a' }, ctx as any);
     if (!r.ok) throw new Error('expected ok');

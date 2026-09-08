@@ -9,9 +9,10 @@ import {
 import { exposureGate } from '../../extension/peerd-runtime/tools/gates.js';
 import { fetchUrlTool } from '../../extension/peerd-runtime/tools/defs/fetch-url.js';
 import { readPageTool } from '../../extension/peerd-runtime/tools/defs/read-page.js';
+import { getToolMetadata } from '../../extension/peerd-runtime/semantic.js';
 
 const names = [
-  'script', 'read_run_cache', 'page_code', 'app_code', 'site_client_run', 'read_pdf',
+  'script', 'read_result', 'page_code', 'app_code', 'site_client_run',
   'read_doc', 'dweb_discover', 'a2a_run', 'message_actor',
 ];
 const descriptors = names.map((name) => ({ name }));
@@ -21,7 +22,6 @@ describe('runtime host capabilities', () => {
     const capability = resolveRuntimeCapabilities({ offscreenDocument: true, dwebPackaged: true });
     expect(capability.version).toBe(1);
     expect(capability.sealedJobs.status).toBe('available');
-    expect(capability.pdfReader.status).toBe('available');
     expect(capability.documentReader.status).toBe('available');
     expect(capability.moonshineVoiceHost.status).toBe('available');
     expect(capability.pdfOcr.status).toBe('available');
@@ -35,15 +35,30 @@ describe('runtime host capabilities', () => {
     const capability = resolveRuntimeCapabilities({ offscreenDocument: false });
     const filtered = filterByRuntimeCapabilities(descriptors, capability);
     expect(filtered.map((tool) => tool.name)).toEqual([
-      'read_run_cache',
+      'read_result',
       'message_actor',
     ]);
     expect(runtimeCapabilityPromptBlock(capability)).toContain('visible Notebook actor');
   });
 
+  test('a Firefox background document can host voice without claiming other offscreen facilities', () => {
+    const capability = resolveRuntimeCapabilities({
+      offscreenDocument: false,
+      moonshineVoiceDocument: true,
+    });
+    expect(capability.moonshineVoiceHost).toMatchObject({
+      status: 'available', host: 'background-page',
+    });
+    expect(capability.documentReader.status).toBe('unsupported');
+    expect(capability.sealedJobs.status).toBe('unsupported');
+  });
+
   test('web descriptors describe the snapshot and raw fallbacks without naming absent readers', () => {
     const capability = resolveRuntimeCapabilities({ offscreenDocument: false });
-    const webDescriptors = filterByRuntimeCapabilities([fetchUrlTool, readPageTool], capability);
+    const webDescriptors = filterByRuntimeCapabilities([
+      { ...fetchUrlTool, ...getToolMetadata('fetch_url') },
+      { ...readPageTool, ...getToolMetadata('read_page') },
+    ], capability);
     expect(webDescriptors[0].description).toContain('sanitized raw response body');
     expect(webDescriptors[0].description).not.toContain('read_doc');
     expect(webDescriptors[0].schema.properties.raw.description).toContain('no hosted Markdown extractor');

@@ -1,11 +1,9 @@
 // @ts-check
 // peerd-provider — public surface.
 //
-// Exports the registry helpers (callModel, listProviders, getProvider,
-// registerProvider) plus error classes and adapter metadata. The
-// agent loop in peerd-runtime calls into this module via callModel
-// and never imports adapter modules directly — that keeps runtime
-// agnostic to which providers exist.
+// Exports the provider semantic surface: registry helpers, error classes,
+// adapter metadata, and controller-owned model behavior. Privileged hosts use
+// the narrower environment entry points instead of importing this aggregate.
 //
 // Shipped (cloud, BYOK): Anthropic, OpenRouter, OpenAI, Z.ai GLM.
 // Local (keyless): Ollama, plus the WebGPU on-device runner (gated on the
@@ -43,7 +41,7 @@ export { isUsageLimitResponse, apiErrorMessage } from './error-classify.js';
 // Provider failover (switch-and-continue): shouldFailover classifies a
 // failure as one a DIFFERENT provider could get past (exhausted overload /
 // hard usage limit); planFailoverChain orders the candidate {provider,model}
-// list. The SW wraps callModel with these. See failover.js.
+// list. The sealed controller applies both decisions. See failover.js.
 export { shouldFailover, planFailoverChain } from './failover.js';
 
 // Adapter metadata + default model are exposed so chassis UI (settings
@@ -67,14 +65,9 @@ export {
 export { ollamaAdapter, DEFAULT_MODEL as OLLAMA_DEFAULT_MODEL } from './adapters/ollama.js';
 // Z.ai GLM — OpenAI-compatible direct endpoint (api.z.ai/api/paas/v4).
 export { glmAdapter, DEFAULT_MODEL as GLM_DEFAULT_MODEL } from './adapters/glm.js';
-// local WebGPU runner (FEATURE-LOCAL-WEBGPU B). setLocalGenerate wires the
-// offscreen engine bridge at SW boot; LOCAL_MODEL_ID is the resident model.
-export {
-  localWebgpuAdapter, LOCAL_MODEL_ID, setLocalGenerate,
-  // future-proof seam: lets the offscreen engine report the resident model's
-  // live context window through the unified provider context-window seam.
-  setLocalModelInfo,
-} from './adapters/local-webgpu.js';
+// local WebGPU runner (FEATURE-LOCAL-WEBGPU B). Its engine access uses the
+// same exact model-egress interface as the network-backed adapters.
+export { localWebgpuAdapter, LOCAL_MODEL_ID } from './adapters/local-webgpu.js';
 // Hardware gate for local WebGPU models: the probe (document contexts only) +
 // the pure capable/not judge + per-model min-specs. Powers the Settings "Test" button.
 // The spec table is also the ENGINE's load recipe (repo/class/dtype), so a new

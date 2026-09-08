@@ -74,15 +74,9 @@ Other network-loaded assets that a scan may flag are listed below:
 4. **Skills (`peerd-runtime/skills/`)** let the user import a SKILL.md
    instruction file. It contains markdown instructions for the model, in the
    same category as a user typing a long prompt. It is parsed and stored locally,
-   never evaluated as code. In the store build the only install path is
-   pasting text: remote install (fetch a SKILL.md from a git/manifest
-   URL) is gated OFF via `extension/shared/flags.js`
-   (`REMOTE_SKILL_INSTALL = false`). The side panel hides the URL tabs
-   and, more importantly, the service worker refuses the
-   `skills/installGit` / `skills/installManifest` messages outright, so
-   no remote fetch of agent-actioned files can happen, even from a
-   crafted message. The installer code ships but is unreachable; the
-   remote paths return in a later version with their own review.
+   never evaluated as code. The only install path is pasting text; there
+   are no remote-install routes or URL controls, so a crafted message cannot
+   cause the extension to fetch agent-actioned instruction files.
 5. **WASI modules (`engine-tabs/notebook-tab/notebook-wasi.js`)**. The JavaScript
    sandbox can run wasm32-wasi programs (e.g. query a SQLite file the
    user provides, decode an archive) via `WebAssembly.compile`, under

@@ -18,21 +18,39 @@ const ROWS = [
 ];
 
 /**
- * @param {{ testOk?: boolean, ollamaOk?: boolean, settingsOk?: boolean }} [opts]
+ * @param {{ testOk?: boolean, ollamaOk?: boolean, ollamaModels?:number, settingsOk?: boolean,
+ *   unknownOnce?: 'save'|'test'|'switch' }} [opts]
  */
-const makeHarness = ({ testOk = true, ollamaOk = false, settingsOk = true } = {}) => {
+const makeHarness = ({
+  testOk = true, ollamaOk = false, ollamaModels = 2, settingsOk = true, unknownOnce,
+} = {}) => {
   /** @type {Msg[]} */
   const sends = [];
   let doneCount = 0;
+  let unknownSent = false;
   /** @param {Msg} msg */
   const send = async (msg) => {
     sends.push(msg);
     if (msg.type === 'provider/status') return { ok: true, providers: ROWS };
+    if (msg.type === 'provider/setKey' && unknownOnce === 'save' && !unknownSent) {
+      unknownSent = true;
+      return { ok: false, outcomeKnown: false };
+    }
     if (msg.type === 'provider/test') {
-      if (msg.provider === 'ollama') return { ok: ollamaOk, models: 2 };
+      if (msg.provider === 'ollama') return {
+        ok: ollamaOk, reachable: true, models: ollamaModels,
+      };
+      if (unknownOnce === 'test' && !unknownSent) {
+        unknownSent = true;
+        return { ok: false, outcomeKnown: false };
+      }
       return testOk ? { ok: true } : { ok: false, error: 'invalid-key' };
     }
     if (msg.type === 'settings/update') {
+      if (unknownOnce === 'switch' && !unknownSent) {
+        unknownSent = true;
+        return { ok: false, outcomeKnown: false };
+      }
       return settingsOk ? { ok: true } : { ok: false, error: 'settings-unavailable' };
     }
     return { ok: true };
@@ -64,6 +82,37 @@ const typeKey = (root, value) => {
 };
 
 describe('sidepanel.onboarding provider step (§5h)', () => {
+  it('turns an initial status failure into a bounded visible retry', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    let attempts = 0;
+    const send = async (/** @type {Msg} */ msg) => {
+      if (msg.type !== 'provider/status') return { ok: true };
+      attempts += 1;
+      if (attempts === 1) throw new Error('worker unavailable');
+      return { ok: true, providers: ROWS };
+    };
+    m.mount(root, { view: () => m(ProviderStep, { send, onDone: () => {} }) });
+    try {
+      await tick();
+      m.redraw.sync();
+      expect(root.textContent).toContain('could not load provider choices');
+      expect(root.textContent?.includes('Loading…')).toBe(false);
+      const retry = [...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Retry loading providers');
+      if (!(retry instanceof HTMLButtonElement)) throw new Error('provider retry missing');
+      retry.click();
+      await tick();
+      m.redraw.sync();
+      expect(root.querySelectorAll('.onb-provider-row').length).toBe(3);
+      expect(root.textContent?.includes('could not load provider choices')).toBe(false);
+      expect(attempts).toBe(2);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
   it('renders the six-row shape: chips, an unusable on-device row, key input for the keyed lead', async () => {
     const h = makeHarness();
     try {
@@ -130,6 +179,39 @@ describe('sidepanel.onboarding provider step (§5h)', () => {
     } finally { h.unmount(); }
   });
 
+  for (const phase of ['save', 'test', 'switch']) {
+    it(`an unconfirmed ${phase} resumes only that exact phase`, async () => {
+      const h = makeHarness({ unknownOnce: /** @type {'save'|'test'|'switch'} */ (phase) });
+      try {
+        await tick();
+        m.redraw.sync();
+        typeKey(h.root, 'sk-ant-api03-resume-key');
+        need(h.root, '.onboarding-actions button').click();
+        await tick(); await tick(); await tick();
+        m.redraw.sync();
+        const label = phase === 'save' ? 'Finish the same save'
+          : phase === 'test' ? 'Verify again' : 'Finish selection';
+        expect(need(h.root, '.onboarding-actions button').textContent).toBe(label);
+        expect(/** @type {HTMLInputElement} */ (need(h.root, '#onb-key')).disabled).toBe(true);
+        const before = h.sends.filter((msg) => msg.provider === 'anthropic' || msg.type === 'settings/update');
+        need(h.root, '.onboarding-actions button').click();
+        await tick(); await tick(); await tick(); await tick();
+        m.redraw.sync();
+        expect(h.doneCount()).toBe(1);
+        const after = h.sends.filter((msg) => msg.provider === 'anthropic' || msg.type === 'settings/update');
+        const added = after.slice(before.length).map((msg) => msg.type);
+        expect(added).toEqual(phase === 'save'
+          ? ['provider/setKey', 'provider/test', 'settings/update']
+          : phase === 'test' ? ['provider/test', 'settings/update'] : ['settings/update']);
+        const saves = h.sends.filter((msg) => msg.type === 'provider/setKey');
+        if (phase === 'save') {
+          expect(saves.length).toBe(2);
+          expect(saves[1]).toEqual(saves[0]);
+        } else expect(saves.length).toBe(1);
+      } finally { h.unmount(); }
+    });
+  }
+
   it('REACHED is earned: the chip appears only when the live probe answered ok', async () => {
     const reached = makeHarness({ ollamaOk: true });
     try {
@@ -146,6 +228,24 @@ describe('sidepanel.onboarding provider step (§5h)', () => {
     } finally { down.unmount(); }
   });
 
+  it('a reachable Ollama with zero models cannot finish onboarding', async () => {
+    const h = makeHarness({ ollamaOk: false, ollamaModels: 0 });
+    try {
+      await tick(); await tick();
+      m.redraw.sync();
+      const ollama = [...h.root.querySelectorAll('.onb-provider-row')]
+        .find((row) => row.textContent?.includes('Ollama'));
+      if (!(ollama instanceof HTMLElement)) throw new Error('missing Ollama row');
+      ollama.click();
+      m.redraw.sync();
+      expect(ollama.textContent).toContain('NO MODELS');
+      expect(/** @type {HTMLButtonElement} */ (
+        need(h.root, '.onboarding-actions button')
+      ).disabled).toBe(true);
+      expect(h.doneCount()).toBe(0);
+    } finally { h.unmount(); }
+  });
+
   it('a failed keyless switch stays on the provider step', async () => {
     const h = makeHarness({ settingsOk: false });
     try {
@@ -160,7 +260,8 @@ describe('sidepanel.onboarding provider step (§5h)', () => {
       await tick(); await tick();
       m.redraw.sync();
       expect(h.doneCount()).toBe(0);
-      expect(need(h.root, '.key-msg').textContent).toContain('settings-unavailable');
+      expect(need(h.root, '.key-msg').textContent).toContain('selection could not be saved');
+      expect(need(h.root, '.key-msg').textContent?.includes('settings-unavailable')).toBe(false);
     } finally { h.unmount(); }
   });
 });

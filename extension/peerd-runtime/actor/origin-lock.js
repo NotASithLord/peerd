@@ -25,7 +25,7 @@
 //
 // That covers the DOM surface. It does NOT cover every way the actor's session
 // authority can be spent, and an earlier draft of this header wrongly implied it
-// did. The web actor also holds `fetch_url`, `read_web_cache` and the
+// did. The web actor also holds `fetch_url`, `read_result` and the
 // `site_client_*` tools, none of which pass through `resolveTargetTab`. Their
 // credential scope is `ctx.activeTab.origin`, read live — so a page that
 // redirects itself to a credentialed origin moves that scope with no tool call

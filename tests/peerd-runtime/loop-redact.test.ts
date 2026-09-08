@@ -56,8 +56,8 @@ describe('redactToolResult', () => {
   });
 });
 
-// 4a: the paged ceiling. A deliberately-sized reader slice (read_web_cache /
-// read_run_cache / the self-paging file reads flag result.paged) is redacted at
+// 4a: the paged ceiling. A deliberately-sized reader slice (read_result or the
+// self-paging file reads flag result.paged) is redacted at
 // PAGED_MAX_CHARS instead of the 8k backstop — the agent-loop passes it when the
 // dispatch result is flagged paged. Here we assert the ceiling itself: a full
 // SPILL_PAGE_CHARS slice PLUS its fence/footer framing survives INTACT at the

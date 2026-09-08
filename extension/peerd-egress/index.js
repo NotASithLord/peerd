@@ -56,11 +56,12 @@ export {
 export {
   makeWebFetch, sessionScopedCredentials, withSessionScopedCredentials,
   withApiCredentials, withDpopCredentials,
+  authOriginForRequestUrl,
 } from './fetch/web-fetch.js';
 // DESIGN-18 P1: origin-bound API-key policy (the origin:<origin> analog of git:<host>).
 export {
   ORIGIN_SECRET_PREFIX, originSecretName, originFromSecretName,
-  normalizeKeyedOrigin, authOriginForRequestUrl, isPlausibleApiKey,
+  normalizeKeyedOrigin, isPlausibleApiKey,
   buildOriginSecret, parseOriginAuth,
 } from './fetch/origin-credentials.js';
 export { makeOriginCredentialRoutes } from './fetch/origin-credential-routes.js';
@@ -77,8 +78,9 @@ export {
 export {
   DPOP_KEY_STORE, generateDpopKeypair, makeDpopKeyStore, getOrCreateDpopKey,
   usableDpopPrivateKey, loadDpopJkt, ensureDpopJkt,
-  dpopJkt, accessTokenHashFor, signDpopProof,
+  dpopJkt,
 } from './dpop/keys.js';
+export { accessTokenHashFor, signDpopProof } from './dpop/sign.js';
 // The §8 server-nonce half: the pure retry decisions + the per-origin cache the
 // boundary consults. The sequencing lives in fetch/web-fetch.js.
 export {

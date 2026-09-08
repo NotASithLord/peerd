@@ -223,6 +223,7 @@ describe('home.library', () => {
     const send = makeSend({
       'apps/delete': () => ({
         ok: false,
+        code: 'dweb-unshare-failed',
         error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
       }),
     });
@@ -526,6 +527,81 @@ describe('home.library', () => {
     } finally { unmount(); }
   });
 
+  it('keeps an unknown Git mutation fenced until an explicit human acknowledgement', async () => {
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'script.js', status: 'modified' }] }, remote: null }),
+      'apps/repository/history': () => ({ ok: true, commits: [] }),
+      'apps/repository/commit': () => ({ ok: false, error: 'controller-channel-closed', outcomeKnown: false }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      clickText(root, '.library-repository-dirty button', 'Checkpoint');
+      await flush();
+      expect(root.textContent).toContain('could not confirm whether save this checkpoint finished');
+      expect(root.textContent).toContain('Recheck Git, inspect the result');
+      expect(root.textContent?.includes('controller-channel-closed')).toBe(false);
+      const checkpoint = need(root, '.library-repository-dirty button', HTMLButtonElement);
+      expect(checkpoint.disabled).toBe(true);
+      checkpoint.click();
+      await flush();
+      expect(send.calls.filter((call) => call.type === 'apps/repository/commit').length).toBe(1);
+      clickText(root, '.library-repository-head button', 'Recheck Git');
+      await flush();
+      expect(need(root, '.library-repository-dirty button', HTMLButtonElement).disabled).toBe(true);
+      clickText(root, '.library-repository-warning button', 'I checked Git; allow changes');
+      await flush();
+      expect(need(root, '.library-repository-dirty button', HTMLButtonElement).disabled).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('treats a rejected Git mutation transport as unknown after Firefox discard', async () => {
+    const send = makeSend({
+      'apps/repository/status': () => ({ ok: true, status: { oid: 'abcdef123456', branch: 'main', dirty: true, changed: [{ path: 'script.js', status: 'modified' }] }, remote: null }),
+      'apps/repository/history': () => ({ ok: true, commits: [] }),
+      'apps/repository/commit': () => Promise.reject(new Error('message channel closed')),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      clickText(root, '.library-repository-dirty button', 'Checkpoint');
+      await flush();
+      expect(root.textContent).toContain('could not confirm whether save this checkpoint finished');
+      expect(root.textContent).toContain('Recheck Git, inspect the result');
+      expect(root.textContent?.includes('message channel closed')).toBe(false);
+      expect(need(root, '.library-repository-dirty button', HTMLButtonElement).disabled).toBe(true);
+      expect(root.textContent).toContain('Recheck Git');
+      expect(send.calls.filter((call) => call.type === 'apps/repository/commit').length).toBe(1);
+    } finally { unmount(); }
+  });
+
+  it('shows bounded Retry and Close controls when a Git read transport disappears', async () => {
+    const send = makeSend({
+      'apps/repository/status': () => Promise.reject(new Error('raw-worker-port-error')),
+      'apps/repository/history': () => ({ ok: true, commits: [] }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      need(root, '.library-kebab').click();
+      await flush();
+      clickText(root, '.library-menu-item', 'History & Git');
+      await flush();
+      expect(root.textContent).toContain('Git took too long to respond');
+      expect(root.textContent?.includes('raw-worker-port-error')).toBe(false);
+      expect(root.textContent?.includes('Loading repository')).toBe(false);
+      expect(byText(root, 'button', 'Retry')).toBeTruthy();
+      clickText(root, 'button', 'Close');
+      await flush();
+      expect(root.querySelector('.library-repository')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
   it('Open dispatches apps/open with the app id', async () => {
     const send = makeSend();
     const { root, unmount } = await mountView(send);
@@ -611,7 +687,35 @@ describe('home.library', () => {
       // the optimistic star reverted to outline (title back to 'Favorite').
       expect(root.querySelector('button[title="Favorite"]')).toBeTruthy();
       expect(names(root).length).toBe(2);
-      expect(root.textContent).toContain('nope');
+      expect(root.textContent).toContain('Peerd could not update this favorite. Try again.');
+      expect(root.textContent.includes('nope')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('unknown favorite custody survives stale Refresh until explicit inspection', async () => {
+    const send = makeSend({
+      'apps/favorite': () => ({
+        ok: false, code: 'semantic-channel-lost', error: 'raw private transport text',
+        outcomeKnown: false, outcomeKind: 'unknown', retryable: false,
+      }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      const star = need(root, 'button[title="Favorite"]', HTMLButtonElement);
+      star.click();
+      await flush();
+      expect(root.textContent).toContain('could not confirm whether update this favorite finished');
+      expect(root.textContent.includes('raw private transport text')).toBe(false);
+      expect(star.disabled).toBe(true);
+      star.click();
+      await flush();
+      expect(send.calls.filter((call) => call.type === 'apps/favorite').length).toBe(1);
+      need(root, 'button[title="Refresh"]').click();
+      await flush();
+      expect(need(root, 'button[title="Favorite"]', HTMLButtonElement).disabled).toBe(true);
+      clickText(root, 'button', 'I checked this App; allow changes');
+      await flush();
+      expect(need(root, 'button[title="Favorite"]', HTMLButtonElement).disabled).toBe(false);
     } finally { unmount(); }
   });
 

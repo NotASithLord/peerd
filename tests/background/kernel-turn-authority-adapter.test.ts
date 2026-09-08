@@ -1,0 +1,1909 @@
+import 'fake-indexeddb/auto';
+import { describe, expect, test } from 'bun:test';
+import { createKernelTurnAuthorityAdapter } from '../../extension/background/kernel-turn-authority-adapter.js';
+import {
+  actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
+} from '../../extension/background/kernel-turn-authority-adapter.js';
+import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime/kernel-custody.js';
+import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
+import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
+import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
+import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
+import { planToolsCommand } from '../../extension/peerd-runtime/tools/manifest-command.js';
+import { canonicalActorOwnerPosture } from '../../extension/background/app-actor-policy.js';
+import { sha256Hex } from '../../extension/shared/util.js';
+import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
+import { composeTurn } from '../../extension/offscreen/controller-compose-runtime.js';
+import { browserProbeResult, TEST_DOCUMENT_ID } from '../helpers/browser-scripting.ts';
+import { ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
+import { ENGINE_LIVENESS_KEY } from '../../extension/peerd-runtime/lifecycle/engine-liveness.js';
+import { PENDING_NOTICES_KEY } from '../../extension/peerd-runtime/lifecycle/boot.js';
+
+const event = () => {
+  const listeners = new Set<(...args: any[]) => void>();
+  return {
+    addListener: (listener: (...args: any[]) => void) => listeners.add(listener),
+    removeListener: (listener: (...args: any[]) => void) => listeners.delete(listener),
+    emit: (...args: any[]) => listeners.forEach((listener) => listener(...args)),
+  };
+};
+
+const memoryStore = () => {
+  const stores = new Map<string, Map<string, any>>();
+  const table = (name: string) => {
+    if (!stores.has(name)) stores.set(name, new Map());
+    return stores.get(name)!;
+  };
+  return {
+    get: async (store: string, key: string) => table(store).get(key),
+    getMany: async (store: string, keys: string[]) => keys.map((key) => table(store).get(key)),
+    getAll: async (store: string) => [...table(store).values()],
+    put: async (store: string, value: any) => {
+      const key = value.id ?? value.sessionId ?? value.key ?? value.origin;
+      table(store).set(key, structuredClone(value));
+    },
+    del: async (store: string, key: string) => table(store).delete(key),
+  };
+};
+
+const registry = (records: any[]) => {
+  const byId = new Map(records.map((record) => [record.id, record]));
+  const actorSessions = new Map<string, string>();
+  const defaults = new Map<string, string>();
+  return {
+    get: async (id: string) => byId.get(id) ?? null,
+    list: async () => [...byId.values()],
+    create: async (record: any) => { byId.set(record.id, record); return record; },
+    remove: async (id: string) => byId.delete(id),
+    delete: async (id: string) => byId.delete(id),
+    getActorSession: async (id: string) => actorSessions.get(id) ?? null,
+    setActorSession: async (id: string, sessionId: string) => { actorSessions.set(id, sessionId); },
+    getDefaultForSession: async (sessionId: string) => defaults.get(sessionId) ?? null,
+    setDefaultForSession: async (sessionId: string, id: string) => { defaults.set(sessionId, id); },
+  };
+};
+
+const tracker = (kind: 'vm'|'notebook'|'pod'|'app') => {
+  const tabs = new Map<string, number>();
+  const owners = new Map<string, string>();
+  const prefix = `${kind}://`;
+  const parse = (url: string) => typeof url === 'string' && url.startsWith(prefix)
+    ? url.slice(prefix.length).split('?', 1)[0] : null;
+  return {
+    parseVmIdFromUrl: parse,
+    parseIdFromUrl: parse,
+    parseOwnerFromUrl: (url: string) => {
+      try { return new URL(url.replace(prefix, 'https://host/')).searchParams.get('owner'); }
+      catch { return null; }
+    },
+    onTabPending: (id: string, tabId: number, owner?: string) => {
+      tabs.set(id, tabId);
+      if (owner) owners.set(id, owner);
+    },
+    onTabReady: (id: string, tabId: number, owner?: string, ownerRoot?: string) => {
+      tabs.set(id, tabId);
+      if (ownerRoot || owner) owners.set(id, ownerRoot ?? owner!);
+    },
+    onTabFailed: (id: string) => tabs.delete(id),
+    onTabRemoved: (tabId: number) => {
+      const found = [...tabs].find(([, value]) => value === tabId);
+      if (!found) return null;
+      tabs.delete(found[0]); owners.delete(found[0]); return found[0];
+    },
+    markReloading: () => {},
+    getTabId: (id: string) => tabs.get(id) ?? null,
+    reconcileTabClaim: async (id: string, _claimantTabId?: number) => tabs.get(id) ?? null,
+    getOwnedTabId: (id: string, owner: string) => owners.get(id) === owner
+      ? tabs.get(id) ?? null : null,
+    listLive: () => [...tabs.keys()],
+  };
+};
+
+const harness = async (
+  actorRun?: (job: any, options: any, config: any) => Promise<any>,
+  options: {
+    restoredApp?: boolean,
+    networkSync?: () => Promise<void>,
+    networkAdmission?: (tabId: number, url: string) => Promise<{ ok: boolean }>,
+    firefox?: boolean,
+    firefoxActorLifetime?: any,
+    loadDirectActorHost?: () => Promise<any>,
+    contributor?: any,
+    durableApiOrigin?: string,
+    composeTurn?: (payload: any, options: any) => Promise<any>,
+    executeScript?: (request: any) => Promise<any[]>,
+    postChatNote?: (...args: any[]) => void,
+    pushState?: () => Promise<any>,
+    confirm?: (prompt: any, signal?: AbortSignal) => Promise<any>,
+    dweb?: boolean,
+    runtimeSendMessage?: (message: any) => Promise<any>,
+    sessionCache?: {
+      sessionGet: (key: string) => Promise<any>,
+      sessionSet: (key: string, value: any) => Promise<void>,
+    },
+    sessionReadsUnavailable?: () => boolean,
+    engineRecovery?: boolean,
+  } = {},
+) => {
+  const toolProjections: any[] = [];
+  const audits: any[] = [];
+  const idb = memoryStore();
+  if (options.sessionReadsUnavailable) {
+    const read = idb.get;
+    idb.get = async (store: string, key: string) => {
+      if (store === 'sessions' && options.sessionReadsUnavailable?.()) {
+        throw new Error('session storage unavailable');
+      }
+      return read(store, key);
+    };
+  }
+  let sessionSequence = 0;
+  const sessions = createSessionStore({
+    idb, now: () => 1_000, makeId: () => `session-${++sessionSequence}`,
+  });
+  const root = await sessions.create({
+    provider: 'anthropic', model: 'claude-sonnet-4-6',
+    permissionMode: 'act', confirmActions: false,
+    toolManifest: {
+      allow: [
+        'message_actor', 'actor_list', 'actor_create',
+        'app_observe', 'app_act', 'app_code',
+      ],
+    },
+  });
+  const durableApiActor = options.durableApiOrigin
+    ? await sessions.create({
+      kind: 'actor', parentSessionId: root.sessionId,
+      provider: root.provider, model: root.model,
+      permissionMode: root.permissionMode, confirmActions: root.confirmActions,
+      toolManifest: root.toolManifest, depth: 1,
+      actorType: 'web', backing: 'api', instanceId: options.durableApiOrigin,
+      ownerSemanticPostureDigest: await sha256Hex(canonicalActorOwnerPosture({
+        // The durable posture follows the actor's projected model surface,
+        // not unrelated names from the owning chat manifest.
+        allow: [],
+      })),
+    })
+    : null;
+  if (durableApiActor) {
+    await sessions.appendMessage(durableApiActor.sessionId, {
+      role: 'assistant', content: 'durable context', id: 'api-before-restart', when: 1_500,
+    });
+  }
+  const appManifest = JSON.stringify({
+    ...buildAppManifest({ entry: 'index.html', dwapp: true }),
+    agent: {
+      kind: 'bound-app', profile: 'developer', surface: 'code',
+      name: 'Todo builder', instructions: 'Maintain the todo app.',
+      runtime: ['observe', 'act'],
+    },
+  });
+  const appNetworkAdmissions: [number, string][] = [];
+  const appNetworkTabs = new Set<number>();
+  const vmRegistry = registry([{
+    id: 'vm-1', name: 'VM',
+    ...(options.engineRecovery ? { ownerSessionId: root.sessionId } : {}),
+  }]);
+  const jsRegistry = registry([{ id: 'notebook-1', name: 'Notebook' }]);
+  const podRegistry = registry([{
+    id: 'pod-1', name: 'Pod',
+    ...(options.engineRecovery ? {
+      ownerSessionId: root.sessionId, persistent: false,
+    } : {}),
+  }]);
+  const appRegistry = registry([{
+    id: 'app-1', name: 'Todo', ownerSessionId: root.sessionId,
+    source: 'dweb', dweb: { publisher: 'did:key:alice' },
+  }]);
+  const vmTabTracker = tracker('vm');
+  const jsTabTracker = tracker('notebook');
+  const podTabTracker = tracker('pod');
+  const appTabTracker = tracker('app');
+  const tabs = new Map<number, any>([
+    [9, { id: 9, windowId: 1, url: 'https://example.com/work', title: 'Example', active: true }],
+    [17, { id: 17, windowId: 1, url: `app://app-1?owner=${root.sessionId}`, active: false }],
+  ]);
+  appTabTracker.reconcileTabClaim = async (id: string, claimantTabId?: number) => {
+    const liveTabId = appTabTracker.getTabId(id);
+    if (liveTabId == null || liveTabId === claimantTabId) return liveTabId;
+    const live = tabs.get(liveTabId);
+    if (live && appTabTracker.parseIdFromUrl(live.url) === id) return liveTabId;
+    appTabTracker.onTabRemoved(liveTabId);
+    return null;
+  };
+  const notifications: any[] = [];
+  const panelBehavior: any[] = [];
+  const siteCaptureEvents: any[] = [];
+  let providerRevision = 0;
+  const tabEvents = { onCreated: event(), onUpdated: event(), onRemoved: event(), onActivated: event() };
+  const browser: any = {
+    runtime: {
+      getURL: (path: string) => `chrome-extension://test/${path}`,
+      getManifest: () => ({ manifest_version: 3 }),
+      sendMessage: options.runtimeSendMessage ?? (async () => ({ ok: true })),
+    },
+    tabs: {
+      ...tabEvents,
+      get: async (tabId: number) => {
+        const tab = tabs.get(tabId);
+        if (!tab) throw new Error('tab-not-found');
+        return tab;
+      },
+      query: async (query: any = {}) => {
+        const all = [...tabs.values()];
+        if (typeof query.url === 'string') {
+          const prefix = query.url.replace(/\*$/, '');
+          return all.filter((tab) => tab.url.startsWith(prefix));
+        }
+        if (query.active) return all.filter((tab) => tab.active);
+        return all;
+      },
+      create: async ({ url, active }: any) => {
+        const id = 100 + tabs.size;
+        const tab = { id, windowId: 1, url, active };
+        tabs.set(id, tab);
+        return tab;
+      },
+      remove: async (tabId: number) => { tabs.delete(tabId); },
+      update: async (tabId: number, patch: any) => Object.assign(tabs.get(tabId), patch),
+      reload: async () => {},
+      sendMessage: async () => ({ ok: true, value: { text: 'app response' } }),
+    },
+    scripting: { executeScript: options.executeScript ?? (async () => []) },
+    windows: {
+      WINDOW_ID_NONE: -1, onFocusChanged: event(),
+      getLastFocused: async () => ({ id: 1, focused: true }), update: async () => {},
+    },
+    action: { onClicked: event() },
+    commands: { onCommand: event(), getAll: async () => [] },
+    sidePanel: {
+      setOptions: async () => {},
+      setPanelBehavior: async (value: any) => { panelBehavior.push(value); },
+    },
+    alarms: { create: () => {}, clear: async () => {} },
+    notifications: { create: (value: any) => { notifications.push(value); } },
+  };
+  const storageState: Record<string, any> = {};
+  browser.storage = { local: {
+    get: async (key: string) => ({ [key]: storageState[key] }),
+    set: async (items: Record<string, any>) => Object.assign(storageState, items),
+    remove: async (key: string) => { delete storageState[key]; },
+  } };
+  const cache = new Map<string, any>([['currentSessionId', root.sessionId]]);
+  const kvState = new Map<string, any>();
+  if (options.engineRecovery) {
+    kvState.set(ENGINE_LIVENESS_KEY, {
+      'vm:vm-1': { kind: 'vm', id: 'vm-1', tabId: 31, at: 10 },
+      'pod:pod-1': { kind: 'pod', id: 'pod-1', tabId: 32, at: 11 },
+      'app:app-1': { kind: 'app', id: 'app-1', tabId: 17, at: 12 },
+    });
+  }
+  const broadcasts: any[] = [];
+  const sourceProjections: any[] = [];
+  const destroyedRepositories: any[] = [];
+  let actorConfig: any;
+  const engine: any = {
+    vmRegistry, jsRegistry, podRegistry, appRegistry,
+    vmTabTracker, jsTabTracker, podTabTracker, appTabTracker,
+    vmClient: { onTabClosed: () => {} }, jsClient: {}, podClient: {},
+    appClient: {
+      readFile: async ({ path }: any) => path === 'peerd.json' ? appManifest : '',
+      withWriteLock: async (_id: string, operation: () => any) => operation(),
+    },
+    appQuiescence: {
+      run: async (_id: string, operation: () => any) => operation(),
+      runUnlocked: async (_id: string, operation: () => any) => operation(),
+    },
+    appCandidates: options.restoredApp ? [{
+      appId: 'app-1', tabId: 17, ownerSessionId: root.sessionId,
+      url: `app://app-1?owner=${root.sessionId}`,
+    }] : [],
+    repositories: {
+      coordinate: async (_scope: any, operation: () => any) => operation(),
+      statusApp: async () => ({ oid: null, changed: [] }),
+      commitApp: async () => ({ oid: 'commit-1' }),
+      diffApp: async () => ({ files: [] }),
+      destroy: async (...args: any[]) => { destroyedRepositories.push(args); },
+    },
+    opfsHelpers: () => ({ nuke: async () => {} }),
+    withDwebPublication: async (operation: (current: () => boolean) => any) => operation(() => true),
+    dwebPublicationGeneration: () => 1,
+  };
+  const settings: any = {
+    providerName: 'anthropic', providerModel: 'claude-sonnet-4-6',
+    permissionMode: 'act', confirmActions: false, reasoningEnabled: false,
+    reasoningEffort: 'low', schemaValidatedReplies: false,
+    spendLimitUsd: 20, dwebEnabled: options.dweb === true,
+    dwebAgentEnabled: options.dweb === true,
+    webActorActionSurface: 'tools', watchAgentTab: false, frontDoorView: 'panel',
+  };
+  const scriptRuns = createScriptRunRegistry();
+  const dependencies: any = {
+    engine, browser, idb,
+    vault: {
+      isLocked: () => false, getSecret: async () => 'secret',
+      listSecretNames: async () => [],
+      subscribe: () => () => {},
+    },
+    settingsStore: {
+      get: () => settings,
+      update: async (patch: any) => Object.assign(settings, patch),
+    },
+    seams: {
+      renderSystemPrompt: async () => 'system',
+      projectTurnTools: async (input: unknown) => {
+        toolProjections.push(structuredClone(input));
+        const result = projectControllerToolSurface(input);
+        if (result.ok !== true) throw new Error(result.code);
+        return result;
+      },
+      planToolsCommand: async ({ argument, currentManifest }: any) =>
+        planToolsCommand(argument, currentManifest),
+      composeTurn: (payload: any, composeOptions: any) => options.composeTurn
+        ? options.composeTurn(payload, composeOptions)
+        : Promise.reject(new Error('compose-unavailable-in-test')),
+    },
+    confirmation: { confirm: options.confirm ?? (async () => 'yes_once') },
+    denylist: { ready: async () => ({ ok: true }), patterns: () => [] },
+    featureHost: {
+      ensureOffscreen: async () => {},
+      runtime: {
+        ready: Promise.resolve(),
+        runWithLease: async (_scope: string, operation: (lease?: any) => any) => operation({}),
+      },
+    },
+    auditLog: { append: async (entry: any) => { audits.push(entry); } },
+    kv: {
+      get: async (key: string) => kvState.get(key) ?? null,
+      set: async (key: string, value: any) => { kvState.set(key, structuredClone(value)); },
+    },
+    sessionCache: options.sessionCache ?? {
+      sessionGet: async (key: string) => cache.get(key) ?? null,
+      sessionSet: async (key: string, value: any) => { cache.set(key, structuredClone(value)); },
+    },
+    canWrite: () => {}, ready: Promise.resolve(),
+    contextSnapshots: createContextSnapshots(),
+    scriptRuns,
+    postChatNote: options.postChatNote ?? (() => {}),
+    pushState: options.pushState ?? (async () => {}),
+    closePanel: async () => ({ ok: true }),
+    dwebEnabled: options.dweb === true,
+    ensureDwebFeature: async () => {},
+    firefox: options.firefox === true,
+    firefoxActorLifetime: options.firefoxActorLifetime,
+    loadDirectActorHost: options.loadDirectActorHost ?? (options.firefox
+      ? async () => ({
+        makeDirectActorHost: () => ({
+          sendMessage: async () => ({ ok: true }),
+          bindRelayRoutes: () => {}, isRelaySender: () => false,
+          failKeepAlive: () => {},
+        }),
+      })
+      : undefined),
+    channel: 'dev', offscreenUrl: 'offscreen.html',
+    contributor: options.contributor ?? null,
+    dispatchEffectsRequired: true,
+    isOffscreenSender: () => true,
+    isTrustedSender: (sender: any) => typeof sender?.tab?.id === 'number',
+    networkCustody: {
+      sync: options.networkSync ?? (async () => {}),
+      admitAppTab: async (tabId: number, url: string) => {
+        appNetworkAdmissions.push([tabId, url]);
+        const result = await (options.networkAdmission?.(tabId, url)
+          ?? Promise.resolve({ ok: true }));
+        if (result.ok) appNetworkTabs.add(tabId);
+        return result;
+      },
+      state: () => ({
+        supported: true, lastError: null, tabs: [...appNetworkTabs],
+      }),
+    },
+    updateBrowserSourceProjection: async (bindings: any, projection: any) => {
+      sourceProjections.push(structuredClone({ bindings, projection }));
+    },
+    providerProjection: { bumpRevision: () => { providerRevision += 1; } },
+    providerEgress: {},
+    resolveProviderSelection: async () => ({
+      ok: true, selected: 'anthropic::claude-sonnet-4-6',
+    }),
+    siteCapture: {
+      has: (tabId: number) => tabId === 9,
+      cancel: async (value: any) => { siteCaptureEvents.push(['cancel', value]); },
+      release: (tabId: number) => { siteCaptureEvents.push(['release', tabId]); },
+    },
+    makeActorClient: (config: any) => {
+      actorConfig = config;
+      return {
+        routes: {},
+        run: (job: any, options: any) => actorRun
+          ? actorRun(job, options, config)
+          : Promise.resolve({
+            ok: true, started: true,
+            newMessages: [{ role: 'assistant', content: 'done', id: `a-${Date.now()}`, when: Date.now() }],
+            usage: { inputTokens: 3, outputTokens: 2 },
+          }),
+      };
+    },
+  };
+  const factories = createKernelTurnAuthorityAdapter(dependencies);
+  const shared: any = {
+    sessions,
+    memory: { list: async () => [], get: async () => null, search: async () => [] },
+    turnSlots: makeTurnSlots(),
+    pageActivity: {
+      begin: async () => {}, end: async () => {}, idle: async () => {},
+      release: async () => {}, markedTabs: () => [],
+    },
+    uiPorts: {
+      size: 1, broadcast: (message: any) => broadcasts.push(message), hasNamed: () => false,
+    },
+  };
+  const runtime = await factories.makeActorRuntime(shared);
+  return {
+    factories, runtime, shared, root, durableApiActor, sessions, engine, browser, tabs,
+    broadcasts, storageState, kvState, cache, settings, notifications, panelBehavior,
+    siteCaptureEvents, providerRevision: () => providerRevision,
+    sourceProjections,
+    toolProjections,
+    audits,
+    scriptRuns,
+    appNetworkAdmissions,
+    destroyedRepositories,
+    actorConfig: () => actorConfig,
+  };
+};
+
+const dependencies = () => ({
+  engine: {},
+  browser: { runtime: { sendMessage: async () => null }, tabs: {} },
+  vault: { listSecretNames: async () => [] },
+  settingsStore: { get: () => ({}) },
+  seams: {},
+  confirmation: {},
+  denylist: { patterns: () => [] },
+  featureHost: {
+    ensureOffscreen: async () => {},
+    runtime: { runWithLease: async (_scope: string, operation: () => any) => operation() },
+  },
+  auditLog: { append: async () => {} },
+  kv: { get: async () => null, set: async () => {} },
+  sessionCache: {
+    sessionGet: async () => null,
+    sessionSet: async () => {},
+  },
+  canWrite: () => {},
+  contextSnapshots: createContextSnapshots(),
+  scriptRuns: createScriptRunRegistry(),
+  providerEgress: {},
+  closePanel: async () => ({ ok: true }),
+  resolveProviderSelection: async () => ({
+    ok: true, selected: 'anthropic::claude-sonnet-4-6',
+  }),
+});
+
+describe('kernel turn authority adapter', () => {
+  test.each([
+    [
+      'success',
+      { ok: true, started: true },
+      {
+        type: 'actor_ran_isolated',
+        details: expect.objectContaining({ workerType: 'dedicated', realmVerified: true }),
+      },
+    ],
+    [
+      'terminal error',
+      { ok: false, started: true, error: 'worker stopped', outcomeKnown: false },
+      {
+        type: 'actor_isolated_error',
+        details: expect.objectContaining({
+          error: 'worker stopped', performed: true, outcomeKnown: false,
+        }),
+      },
+    ],
+    [
+      'startup refusal',
+      { ok: false, started: false, error: 'host unavailable', code: 'actor_host_unavailable' },
+      {
+        type: 'actor_isolation_failure',
+        details: expect.objectContaining({
+          error: 'host unavailable', code: 'actor_host_unavailable', performed: false,
+        }),
+      },
+    ],
+  ])('SW-owned bound actor isolation audit records %s with lineage', async (
+    _label, result, expected,
+  ) => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      result,
+      { kind: 'actor', sessionId: 'actor-1', parentSessionId: 'chat-1', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([{
+      ...expected,
+      details: expect.objectContaining({
+        ...expected.details,
+        parentSessionId: 'chat-1', actorSessionId: 'actor-1', depth: 2,
+      }),
+    }]);
+  });
+
+  test('bound actor failure custody uses host verdicts, never provider prose', () => {
+    expect(boundActorFailureCustody({
+      outcomeKnown: true,
+      error: 'actor-provider-boundary-blocked: model says not run',
+    })).toEqual({ outcomeKnown: true, performed: false });
+    expect(boundActorFailureCustody({
+      outcomeKnown: true, performed: true,
+      error: 'actor-provider-boundary-blocked: model says not run',
+    })).toEqual({ outcomeKnown: true, performed: true });
+    expect(boundActorFailureCustody({
+      outcomeKnown: false, authorityPerformed: false,
+      error: 'model says safe to retry',
+    })).toEqual({ outcomeKnown: false, performed: false });
+    expect(boundActorFailureCustody({
+      outcomeKnown: false,
+      error: 'model says safe to retry',
+    })).toEqual({ outcomeKnown: false, performed: true });
+  });
+
+  test('the parentless dweb daemon keeps only its fixed stored permission', async () => {
+    const dweb = {
+      sessionId: 'dweb-1', kind: 'actor', actorType: 'dweb',
+      permissionMode: 'act', confirmActions: false,
+    };
+    let rootReads = 0;
+    let sessionReads = 0;
+    expect(await actorPermissionAuthoritySession(
+      dweb,
+      async () => { rootReads += 1; return 'chat-1'; },
+      async () => { sessionReads += 1; return null; },
+    )).toBe(dweb);
+    expect({ rootReads, sessionReads }).toEqual({ rootReads: 0, sessionReads: 0 });
+
+    const child = { sessionId: 'actor-1', kind: 'actor', actorType: 'web' };
+    const root = { sessionId: 'chat-1', kind: 'chat', permissionMode: 'plan' };
+    expect(await actorPermissionAuthoritySession(
+      child, async () => root.sessionId, async () => root,
+    )).toBe(root);
+    expect(await actorPermissionAuthoritySession(
+      child, async () => null, async () => root,
+    )).toBeNull();
+  });
+
+  test.each([
+    ['absent record', null],
+    ['spawned record', { kind: 'spawned', sessionId: 'spawn-1', parentSessionId: 'chat-1', depth: 1 }],
+    ['wrong-kind record', { kind: 'chat', sessionId: 'chat-1', depth: 0 }],
+    ['unidentified actor record', { kind: 'actor', parentSessionId: 'chat-1', depth: 1 }],
+  ])('does not mint an isolation proof from an %s', async (_label, record) => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      { ok: true, started: true }, record,
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([]);
+  });
+
+  test('does not claim success when ok and started disagree', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      { ok: true, started: false },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([{
+      type: 'actor_isolation_failure',
+      details: {
+        error: 'actor isolation unavailable', code: 'unknown', performed: false,
+        parentSessionId: 'chat-real', actorSessionId: 'actor-real', depth: 2,
+      },
+    }]);
+  });
+
+  test('does not audit a known pre-start actor cancellation as an isolation failure', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+      true,
+    );
+    expect(audits).toEqual([]);
+  });
+
+  test('does not infer a known pre-start cancellation without explicit outcome proof', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([expect.objectContaining({
+      type: 'actor_isolation_failure',
+      details: expect.objectContaining({ performed: false }),
+    })]);
+    expect(audits[0].details).not.toHaveProperty('outcomeKnown');
+  });
+
+  test('does not trust a cancellation-shaped transport result without a local abort', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([expect.objectContaining({
+      type: 'actor_isolation_failure',
+      details: expect.objectContaining({ performed: false, outcomeKnown: true }),
+    })]);
+  });
+
+  test('does not hide a performed actor effect behind a contradictory pre-start cancellation', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      {
+        ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+        error: 'actor run aborted', aborted: true, outcomeKnown: true, performed: true,
+      },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([expect.objectContaining({
+      type: 'actor_isolation_failure',
+      details: expect.objectContaining({ performed: true, outcomeKnown: true }),
+    })]);
+  });
+
+  test('takes every isolation-proof identity field from the persisted actor record', async () => {
+    const audits: any[] = [];
+    await appendBoundActorIsolationAudit(
+      { ok: true, started: true, actorSessionId: 'spoofed', depth: 99 },
+      { kind: 'actor', sessionId: 'actor-real', parentSessionId: 'chat-real', depth: 2 },
+      async (entry) => { audits.push(entry); },
+    );
+    expect(audits).toEqual([{
+      type: 'actor_ran_isolated',
+      details: {
+        workerType: 'dedicated', realmVerified: true,
+        parentSessionId: 'chat-real', actorSessionId: 'actor-real', depth: 2,
+      },
+    }]);
+  });
+
+  test.each([
+    ['Chrome', false], ['Firefox', true],
+  ])('%s executable actor wiring records the same authoritative isolation proof', async (
+    _browserName, firefox,
+  ) => {
+    const h = await harness(async () => ({
+      ok: true, started: true,
+      newMessages: [{ role: 'assistant', content: 'done', id: 'done-parity', when: 2_000 }],
+      usage: { inputTokens: 1, outputTokens: 1 },
+      price: { cost: 0, estimated: true },
+    }), { firefox });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    expect(await ctx.messageActor({
+      to: '9', message: 'inspect', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-parity', awaitReply: true,
+    })).toMatchObject({ ok: true });
+    const actor = (await h.sessions.list()).find((record: any) => record.kind === 'actor');
+    expect(h.audits.filter((entry) => entry.type === 'actor_ran_isolated')).toEqual([{
+      type: 'actor_ran_isolated',
+      details: {
+        workerType: 'dedicated', realmVerified: true,
+        parentSessionId: h.root.sessionId,
+        actorSessionId: actor?.sessionId,
+        depth: actor?.depth,
+      },
+    }]);
+  });
+
+  test('constructs the complete production factory surface without host effects', () => {
+    const factories = createKernelTurnAuthorityAdapter(dependencies());
+    expect(Object.keys(factories).sort()).toEqual([
+      'buildToolContext', 'composeAuthority', 'goalMaxIterations', 'makeActorRuntime', 'makeDriver',
+      'makeDriverDeps', 'makeGoals', 'makeRouteDeps',
+    ]);
+  });
+
+  test('real system and tools handlers mutate only their exact bound session', async () => {
+    const notes: any[] = [];
+    const h = await harness(undefined, {
+      postChatNote: (...args: any[]) => { notes.push(args); },
+    });
+    const other = await h.sessions.create({
+      provider: 'anthropic', model: 'claude-sonnet-4-6',
+      permissionMode: 'act', confirmActions: false,
+    });
+    h.cache.set('currentSessionId', other.sessionId);
+    const routeDeps = h.factories.makeRouteDeps(h.shared).turn;
+    await routeDeps.handleSystemCommand('bound instructions', h.root.sessionId);
+    await routeDeps.handleToolsCommand('research', h.root.sessionId);
+    expect(await h.sessions.get(h.root.sessionId)).toMatchObject({
+      customSystemPrompt: 'bound instructions',
+      toolManifest: { preset: 'research' },
+    });
+    expect(notes.at(-1)?.[2]).toBe(h.root.sessionId);
+    let untouched = await h.sessions.get(other.sessionId);
+    expect(untouched?.customSystemPrompt).toBeUndefined();
+    expect(untouched?.toolManifest).toBeUndefined();
+
+    await routeDeps.handleSystemCommand('must not land', null);
+    await routeDeps.handleToolsCommand('coding', null);
+    expect(notes.slice(-2).map((note) => note[2])).toEqual([null, null]);
+    untouched = await h.sessions.get(other.sessionId);
+    expect(untouched?.customSystemPrompt).toBeUndefined();
+    expect(untouched?.toolManifest).toBeUndefined();
+  });
+
+  test('real bare and explicit @tab composition never substitutes a later foreground tab', async () => {
+    const executed: number[] = [];
+    let invokeCompose: (payload: any, options: any) => Promise<any> = async () => {
+      throw new Error('compose-not-bound');
+    };
+    let blockCapture = false;
+    let releaseCapture = () => {};
+    let captureStarted = () => {};
+    let captureGate = Promise.resolve();
+    let h: Awaited<ReturnType<typeof harness>>;
+    h = await harness(undefined, {
+      composeTurn: (payload, options) => invokeCompose(payload, options),
+      executeScript: async (request: any) => {
+        executed.push(request.target.tabId);
+        const tab = h.tabs.get(request.target.tabId);
+        if (!tab) throw new Error('tab-closed');
+        const probe = browserProbeResult(request, { url: tab.url });
+        if (probe) return probe;
+        if (blockCapture && request.func?.name === 'captureComposerTabInjected') {
+          captureStarted();
+          await captureGate;
+        }
+        return [{
+          documentId: TEST_DOCUMENT_ID,
+          result: { title: tab.title ?? '', url: tab.url, text: `body-${tab.id}` },
+        }];
+      },
+    });
+    let switchMode: 'foreground'|'close' = 'foreground';
+    let composeAttempts = 0;
+    invokeCompose = async (payload, options) => {
+      composeAttempts += 1;
+      if (switchMode === 'foreground') {
+        h.tabs.get(9).active = false;
+        h.tabs.get(17).active = true;
+      } else {
+        h.tabs.delete(9);
+        h.tabs.get(17).active = true;
+      }
+      const authority = h.factories.composeAuthority.authorize(payload);
+      const composed = await composeTurn(payload, {
+        ...options,
+        kernelCall: (operation: string, effectPayload: any) =>
+          h.factories.composeAuthority.handleKernelCall(operation, effectPayload, {
+            capability: 'turn.compose', outerPayload: payload, authority,
+            signal: options?.signal,
+          }),
+      });
+      return composed?.ok === true ? composed.value : composed;
+    };
+    const turns: any[] = [];
+    let admitted = true;
+    const routes = makeSessionRoutes({
+      ...h.factories.makeRouteDeps(h.shared).turn,
+      runAgentTurn: async (input: any) => { turns.push(input); },
+      actorRecoveryReady: async () => true,
+      admitSend: () => admitted,
+    });
+    const firstCompose = await routes['agent/send']({
+      text: 'inspect @tab', sessionId: h.root.sessionId,
+    });
+    expect(firstCompose).toMatchObject({ ok: true });
+    expect(turns[0].userText).toContain('body-9');
+    expect(executed).not.toContain(17);
+
+    h.tabs.set(9, {
+      id: 9, windowId: 1, url: 'https://example.com/work', title: 'Example', active: true,
+    });
+    h.tabs.get(17).active = false;
+    executed.length = 0;
+    switchMode = 'close';
+    await expect(routes['agent/send']({
+      text: 'inspect @tab:9', sessionId: h.root.sessionId, activeTabId: 9,
+    })).resolves.toMatchObject({ ok: true });
+    expect(turns[1].userText).toContain('could not resolve');
+    expect(executed).not.toContain(17);
+
+    h.tabs.set(9, {
+      id: 9, windowId: 1, url: 'https://example.com/work', title: 'Example', active: true,
+    });
+    h.tabs.get(17).active = false;
+    switchMode = 'foreground';
+    blockCapture = true;
+    captureGate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+    const captureEntered = new Promise<void>((resolve) => { captureStarted = resolve; });
+    const abort = new AbortController();
+    const attemptBeforeStop = composeAttempts;
+    const stopped = routes['agent/send'](
+      { text: 'stop @tab', sessionId: h.root.sessionId }, { signal: abort.signal },
+    );
+    await captureEntered;
+    admitted = false;
+    abort.abort();
+    releaseCapture();
+    await expect(stopped).resolves.toMatchObject({
+      ok: false, code: 'agent-send-stopped-before-dispatch', outcomeKnown: true,
+    });
+    expect(turns).toHaveLength(2);
+    expect(composeAttempts).toBe(attemptBeforeStop + 1);
+  });
+
+  test('rejects a partial production graph before creating state', () => {
+    expect(() => createKernelTurnAuthorityAdapter({})).toThrow(
+      'kernel-turn-live-config-invalid',
+    );
+  });
+
+  test('routes Firefox heartbeat loss into the direct actor host and durable isolation state', async () => {
+    let onLost = (_error: Error) => {};
+    const losses: string[] = [];
+    const h = await harness(undefined, {
+      firefox: true,
+      firefoxActorLifetime: {
+        createHandle: (options: any) => {
+          onLost = options.onLost;
+          return { start: async () => {}, stop: async () => {} };
+        },
+      },
+      loadDirectActorHost: async () => ({
+        makeDirectActorHost: (config: any) => ({
+          sendMessage: async () => ({ ok: true }),
+          bindRelayRoutes: () => {},
+          isRelaySender: () => false,
+          failKeepAlive: (error: Error) => {
+            losses.push(error.message);
+            void config.onKeepAliveLost(error);
+          },
+        }),
+      }),
+    });
+
+    onLost(new Error('storage heartbeat failed'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(losses).toEqual(['storage heartbeat failed']);
+    expect(Object.values(h.storageState)).toEqual([
+      expect.objectContaining({
+        status: 'temporarily_unavailable', code: 'actor_host_keepalive_lost',
+      }),
+    ]);
+  });
+
+  test('validates every engine attach and binds App provenance to one owner generation', async () => {
+    const h = await harness();
+    const routes = h.runtime.relays.engineRoutes;
+    expect(await routes['vm/tab-ready'](
+      { vmId: 'vm-1' }, { tab: { id: 21, url: 'vm://vm-1' } },
+    )).toBe(false);
+    expect(await routes['js/tab-ready'](
+      { notebookId: 'notebook-1' }, { tab: { id: 22, url: 'notebook://notebook-1' } },
+    )).toBe(false);
+    expect(await routes['pod/tab-adopt'](
+      { podId: 'pod-1' }, { tab: { id: 23, url: 'pod://pod-1' } },
+    )).toEqual({ ok: true });
+    expect(await routes['vm/tab-ready'](
+      { vmId: 'vm-1' }, { tab: { id: 24, url: 'vm://other' } },
+    )).toBe(false);
+
+    const attached: any = await routes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: h.root.sessionId },
+      { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
+    );
+    expect(attached.ok).toBe(true);
+    expect(h.appNetworkAdmissions).toEqual([
+      [17, `app://app-1?owner=${h.root.sessionId}`],
+    ]);
+    const actor = await h.sessions.get(attached.actorSessionId);
+    expect(actor).toMatchObject({
+      kind: 'actor', actorType: 'app', instanceId: 'app-1',
+      parentSessionId: h.root.sessionId, actorSurface: 'code',
+      appRole: { source: 'dweb', publisher: 'did:key:alice', name: 'Todo builder' },
+    });
+    expect(actor?.appManifestDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(actor?.appOwnerAuthorityDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(await routes['app/actor-retry'](
+      { appId: 'app-1', ownerSessionId: 'wrong-owner' },
+      { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
+    )).toEqual({ ok: false, error: 'app-tab-owner-mismatch' });
+  });
+
+  test('attaches a Firefox App only after exact network admission', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const url = `app://app-1?owner=${h.root.sessionId}`;
+    const attached: any = await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: h.root.sessionId },
+      { tab: { id: 17, url } },
+    );
+    expect(attached.ok).toBe(true);
+    expect(h.appNetworkAdmissions).toEqual([[17, url]]);
+    expect(h.engine.appTabTracker.getTabId('app-1')).toBe(17);
+  });
+
+  test('reconciles a navigated App claim before accepting its replacement tab', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const owner = h.root.sessionId;
+    expect((await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: owner },
+      { tab: { id: 17, url: `app://app-1?owner=${owner}` } },
+    ) as any).ok).toBe(true);
+    h.tabs.get(17).url = 'home://root';
+    h.tabs.set(18, { id: 18, url: `app://app-1?owner=${owner}` });
+    expect((await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: owner },
+      { tab: { id: 18, url: `app://app-1?owner=${owner}` } },
+    ) as any).ok).toBe(true);
+    expect(h.engine.appTabTracker.getTabId('app-1')).toBe(18);
+  });
+
+  test('refuses an App when exact network admission fails', async () => {
+    const h = await harness(undefined, {
+      firefox: true,
+      networkAdmission: async () => ({ ok: false }),
+    });
+    const attached: any = await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: h.root.sessionId },
+      { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
+    );
+    expect(attached).toMatchObject({ ok: false });
+    expect(h.engine.appTabTracker.getTabId('app-1')).toBeNull();
+  });
+
+  test('persists a fingerprinted web source projection and refreshes it on navigation', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: h.root.sessionId,
+      actorType: 'web', actorBacking: 'tab', exposure: 'actor',
+    });
+    const adopted = await ctx.adoptWebTab();
+    const first = h.cache.get('webActorSourceProjection.v1');
+    expect(first).toEqual([{
+      tabId: adopted.tabId, sessionId: h.root.sessionId, url: 'about:blank',
+      openerTabId: null, cookieStoreId: null,
+    }]);
+    expect(h.sourceProjections.at(-1)?.projection).toEqual(first);
+    const tab = h.tabs.get(adopted.tabId);
+    tab.url = 'https://public.example/next';
+    await h.runtime.relays.eventOwners.onUpdated(adopted.tabId, { url: tab.url }, tab);
+    expect(h.cache.get('webActorSourceProjection.v1')?.[0]?.url).toBe(tab.url);
+    expect(h.sourceProjections.at(-1)?.projection?.[0]?.url).toBe(tab.url);
+  });
+
+  test('re-reads a bound actor permission from its live root owner', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      actorType: 'notebook', instanceId: 'notebook-1', depth: 1,
+    });
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'plan', confirmActions: true,
+    });
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: actor.sessionId, exposure: 'actor',
+      actorType: 'notebook', actorInstanceId: 'notebook-1',
+    });
+    expect(ctx.permission).toEqual({ mode: 'plan', confirmActions: true });
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'act', confirmActions: false,
+    });
+    expect(await ctx.readAuthorityPermission()).toEqual({
+      mode: 'act', confirmActions: false,
+    });
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'plan', confirmActions: true,
+    });
+    expect(await ctx.readAuthorityPermission()).toEqual({
+      mode: 'plan', confirmActions: true,
+    });
+  });
+
+  test('an exact actor relay reuses its latched surface without reacquiring semantics', async () => {
+    const h = await harness(undefined, { firefox: true });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      actorType: 'web', backing: 'tab', instanceId: 'site:https://example.com', depth: 1,
+    });
+    const projectionsBefore = h.toolProjections.length;
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: actor.sessionId, exposure: 'actor',
+      actorType: 'web', actorBacking: 'tab', actorInstanceId: actor.instanceId,
+      actorSurface: 'code', lifecycleTurnId: 'actor-run-1',
+    });
+
+    expect(ctx.actorSurface).toBe('code');
+    expect(h.toolProjections).toHaveLength(projectionsBefore);
+  });
+
+  test('binds an actor confirmation to its active root chat owner', async () => {
+    const prompts: any[] = [];
+    const h = await harness(undefined, {
+      firefox: true,
+      confirm: async (prompt) => { prompts.push(prompt); return 'yes_once'; },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      actorType: 'web', backing: 'tab', instanceId: 'site:https://example.com', depth: 1,
+    });
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: actor.sessionId, exposure: 'actor',
+      actorType: 'web', actorBacking: 'tab', actorInstanceId: actor.instanceId,
+    });
+
+    expect(await ctx.confirm({
+      tool: 'site_client_write', sessionId: actor.sessionId,
+      origins: ['https://example.com'],
+    }, new AbortController().signal)).toBe('yes_once');
+    expect(prompts).toEqual([expect.objectContaining({
+      tool: 'site_client_write',
+      sessionId: actor.sessionId,
+      ownerSessionId: h.root.sessionId,
+      ephemeral: true,
+    })]);
+  });
+
+  test.each(['actor', 'spawned'] as const)(
+    'never reuses a standing mutation grant for a %s helper',
+    async (kind) => {
+      const prompts: any[] = [];
+      const h = await harness(undefined, {
+        firefox: true,
+        confirm: async (prompt) => { prompts.push(prompt); return 'yes_session'; },
+      });
+      const helper = await h.sessions.create({
+        kind, parentSessionId: h.root.sessionId,
+        provider: h.root.provider, model: h.root.model,
+        permissionMode: 'act', confirmActions: true, depth: 1,
+        ...(kind === 'actor'
+          ? { actorType: 'web', backing: 'tab', instanceId: 'web' }
+          : { task: 'schedule two exact mutations', grantedOperations: [] }),
+      });
+      const ctx: any = await h.factories.buildToolContext({
+        sessionId: helper.sessionId,
+        ...(kind === 'actor'
+          ? { exposure: 'actor', actorType: 'web', actorBacking: 'tab', actorInstanceId: 'web' }
+          : {}),
+      });
+      const mutation = {
+        tool: 'schedule_create', sessionId: helper.sessionId,
+        origins: [], summary: 'Create one scheduled task',
+      };
+
+      expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+      expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+      expect(prompts).toEqual([
+        expect.objectContaining({
+          tool: 'schedule_create', sessionId: helper.sessionId,
+          ownerSessionId: h.root.sessionId, ephemeral: true,
+        }),
+        expect.objectContaining({
+          tool: 'schedule_create', sessionId: helper.sessionId,
+          ownerSessionId: h.root.sessionId, ephemeral: true,
+        }),
+      ]);
+    },
+  );
+
+  test('does not cache a helper mutation when durable session identity is unavailable', async () => {
+    const prompts: any[] = [];
+    let readsUnavailable = false;
+    const h = await harness(undefined, {
+      firefox: true,
+      confirm: async (prompt) => { prompts.push(prompt); return 'yes_session'; },
+      sessionReadsUnavailable: () => readsUnavailable,
+    });
+    const helper = await h.sessions.create({
+      kind: 'spawned', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: true, depth: 1,
+      task: 'schedule two exact mutations', grantedOperations: [],
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: helper.sessionId });
+    readsUnavailable = true;
+    const mutation = {
+      tool: 'schedule_create', sessionId: helper.sessionId,
+      origins: [], summary: 'Create one scheduled task',
+    };
+
+    expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+    expect(await ctx.confirm(mutation, new AbortController().signal)).toBe('yes_once');
+    expect(prompts).toEqual([
+      expect.objectContaining({
+        tool: 'schedule_create', sessionId: helper.sessionId,
+        ownerSessionId: null, ephemeral: true,
+      }),
+      expect.objectContaining({
+        tool: 'schedule_create', sessionId: helper.sessionId,
+        ownerSessionId: null, ephemeral: true,
+      }),
+    ]);
+  });
+
+  test('restored App network admission waits only for hydrated trackers', async () => {
+    let pending!: ReturnType<typeof harness>;
+    const stages: string[] = [];
+    pending = harness(undefined, {
+      restoredApp: true,
+      networkAdmission: async () => {
+        stages.push('network-start');
+        const h = await pending;
+        await h.runtime.relays.eventOwners.reconcileTrackers();
+        stages.push('network-ready');
+        return { ok: true };
+      },
+    });
+    const h = await pending;
+    expect(h.runtime.relays.engineTrackersHydrated)
+      .not.toBe(h.runtime.relays.engineReady);
+    const settled = await Promise.race([
+      h.runtime.relays.engineReady.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    expect(settled).toBe(true);
+    expect(stages).toEqual(['network-start', 'network-ready']);
+    expect(h.engine.appTabTracker.getTabId('app-1')).toBe(17);
+  });
+
+  test('reaps lost engine hosts after restored App hydration', async () => {
+    const notes: any[] = [];
+    const h = await harness(undefined, {
+      restoredApp: true,
+      engineRecovery: true,
+      postChatNote: (...args) => { notes.push(args); },
+    });
+
+    await h.runtime.relays.engineReady;
+
+    expect(h.kvState.get(ENGINE_LIVENESS_KEY)).toEqual({
+      'app:app-1': { kind: 'app', id: 'app-1', tabId: 17, at: 12 },
+    });
+    expect(h.audits.filter((entry: any) =>
+      entry.type === 'lifecycle.engine.orphan-reaped').map((entry: any) => entry.details))
+      .toEqual([
+        { kind: 'vm', id: 'vm-1' },
+        { kind: 'pod', id: 'pod-1' },
+      ]);
+    expect(h.destroyedRepositories).toEqual([
+      [{ kind: 'pod', id: 'pod-1' }, { worktree: true }],
+    ]);
+    expect(await h.engine.podRegistry.get('pod-1')).toBeNull();
+    const notices = h.kvState.get(PENDING_NOTICES_KEY)?.[h.root.sessionId];
+    expect(notices).toHaveLength(1);
+    expect(notices[0].recoveryRecord).toMatchObject({
+      recoveryState: 'interrupted',
+      resourceLost: true,
+      resources: [{ kind: 'vm', id: 'vm-1' }],
+    });
+    expect(notes).toEqual([[
+      expect.stringContaining('VM'), null, h.root.sessionId,
+    ]]);
+  });
+
+  test('runs a bound actor with projection and spend gates, then replays live state', async () => {
+    let releaseRun!: () => void;
+    const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
+    const jobs: any[] = [];
+    const h = await harness(async (job, options) => {
+      if (job.probeOnly) return { ok: true };
+      jobs.push(job);
+      options.onEvent?.({ type: 'state', session: {
+        sessionId: job.actorSessionId,
+        messages: [{ role: 'assistant', content: 'working', id: 'state-1' }],
+      } });
+      await runGate;
+      return {
+        ok: true, started: true,
+        newMessages: [{ role: 'assistant', content: 'finished', id: 'done-1', when: 2_000 }],
+        usage: { inputTokens: 7, outputTokens: 5 },
+        price: { cost: 0.000096, estimated: true },
+      };
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const reply = ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-1', awaitReply: true,
+    });
+    for (let attempt = 0; jobs.length === 0 && attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(h.broadcasts.some((message) => message.type === 'turn/actor-start')).toBe(true);
+    expect(h.broadcasts.some((message) => message.type === 'turn/actor-state')).toBe(true);
+    const replay: any[] = [];
+    await h.runtime.relays.onUiConnect({ postMessage: (message: any) => replay.push(message) });
+    expect(replay.some((message) => message.type === 'turn/actor-start')).toBe(true);
+    const actorSessionId = jobs[0].actorSessionId;
+    expect(jobs[0].maxOutputTokens).toBe(4096);
+    await h.sessions.update(actorSessionId, { cost: { cost: 25 } });
+    expect(await h.actorConfig().spendRefusalFor(actorSessionId)).toContain('spend limit');
+    releaseRun();
+    expect(await reply).toMatchObject({ ok: true, content: expect.stringContaining('finished') });
+    expect(h.broadcasts.some((message) => message.type === 'turn/actor-cost')).toBe(true);
+    expect(h.broadcasts.some((message) => message.type === 'turn/actor-done')).toBe(true);
+  });
+
+  test('projects a known pre-start bound actor abort as cancelled with no effect', async () => {
+    const cancelled = {
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    };
+    const h = await harness(async (job, options) => {
+      if (job.probeOnly) return { ok: true };
+      if (options.signal.aborted) return cancelled;
+      return new Promise((resolve) => options.signal.addEventListener(
+        'abort', () => resolve(cancelled), { once: true },
+      ));
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const pendingReply = ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-pre-start-stop', awaitReply: true,
+    });
+    for (let attempt = 0; !h.broadcasts.some((message) =>
+      message.type === 'turn/actor-start') && attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const actorStart = h.broadcasts.find((message) => message.type === 'turn/actor-start');
+    expect(h.shared.turnSlots.stop(actorStart.sessionId)).toBe(true);
+    const reply = await pendingReply;
+
+    expect(reply).toMatchObject({
+      ok: false, actorAborted: true, actorOutcomeKnown: true, actorPerformed: false,
+    });
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-start', parentToolUseId: 'tool-pre-start-stop',
+    }));
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-done', parentToolUseId: 'tool-pre-start-stop',
+      ok: false, aborted: true,
+    }));
+    expect(h.broadcasts.some((message) =>
+      message.type === 'turn/actor-error'
+        && message.parentToolUseId === 'tool-pre-start-stop')).toBe(false);
+    expect(h.audits.some((entry) => entry.type === 'actor_isolation_failure')).toBe(false);
+  });
+
+  test('preserves a host-known empty actor ledger when Stop lands after inference starts', async () => {
+    const cancelled = {
+      ok: false, started: true, error: 'aborted', aborted: true,
+      performed: false, outcomeKnown: true, newMessages: [],
+    };
+    const h = await harness(async (job, options) => {
+      if (job.probeOnly) return { ok: true };
+      if (options.signal.aborted) return cancelled;
+      return new Promise((resolve) => options.signal.addEventListener(
+        'abort', () => resolve(cancelled), { once: true },
+      ));
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const pendingReply = ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-inference-stop', awaitReply: true,
+    });
+    for (let attempt = 0; !h.broadcasts.some((message) =>
+      message.type === 'turn/actor-start') && attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const actorStart = h.broadcasts.find((message) => message.type === 'turn/actor-start');
+    expect(h.shared.turnSlots.stop(actorStart.sessionId)).toBe(true);
+
+    expect(await pendingReply).toMatchObject({
+      ok: false, actorTerminal: true, actorAborted: true,
+      actorOutcomeKnown: true, actorPerformed: false,
+    });
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-done', parentToolUseId: 'tool-inference-stop',
+      ok: false, aborted: true,
+    }));
+  });
+
+  test('a cancellation-shaped actor reply cannot replace the local Stop signal', async () => {
+    const h = await harness(async (job) => job.probeOnly ? { ok: true } : ({
+      ok: false, started: false, phase: 'startup', code: 'actor_run_aborted',
+      error: 'actor run aborted', aborted: true, outcomeKnown: true,
+    }));
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    await ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-forged-stop', awaitReply: true,
+    });
+    expect(h.audits).toContainEqual(expect.objectContaining({
+      type: 'actor_isolation_failure',
+    }));
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-error', parentToolUseId: 'tool-forged-stop',
+    }));
+    expect(h.broadcasts).toContainEqual(expect.objectContaining({
+      type: 'turn/actor-done', parentToolUseId: 'tool-forged-stop', aborted: false,
+    }));
+  });
+
+  test('serializes Stop cleanup behind a stalled durable started write', async () => {
+    const stored = new Map<string, any>([['currentSessionId', 'session-1']]);
+    let actorMailboxWrites = 0;
+    let releaseStartedWrite!: () => void;
+    let startedWriteEntered!: () => void;
+    let removePersisted!: () => void;
+    const startedWriteGate = new Promise<void>((resolve) => { releaseStartedWrite = resolve; });
+    const startedWrite = new Promise<void>((resolve) => { startedWriteEntered = resolve; });
+    const removed = new Promise<void>((resolve) => { removePersisted = resolve; });
+    let actorRuns = 0;
+    const h = await harness(async () => {
+      actorRuns += 1;
+      return { ok: true, started: true };
+    }, {
+      sessionCache: {
+        sessionGet: async (key) => structuredClone(stored.get(key) ?? null),
+        sessionSet: async (key, value) => {
+          if (key === 'actorMailbox' && ++actorMailboxWrites === 2) {
+            startedWriteEntered();
+            await startedWriteGate;
+          }
+          stored.set(key, structuredClone(value));
+          if (key === 'actorMailbox' && actorMailboxWrites === 3) removePersisted();
+        },
+      },
+    });
+    const controller = new AbortController();
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const pending = ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-mailbox-stop', awaitReply: true, awaitSignal: controller.signal,
+    });
+    await startedWrite;
+    controller.abort(ABORT_STOP);
+    h.factories.makeRouteDeps(h.shared).turn.actorMessaging.stopActorsFor(h.root.sessionId);
+
+    expect(await pending).toMatchObject({
+      ok: false, code: 'actor_message_stopped', performed: false, outcomeKnown: true,
+      actorTerminal: true, actorOutcomeKnown: true, actorPerformed: false,
+      actorAborted: true, outcomeKind: 'pre-effect-failure',
+    });
+    expect(actorMailboxWrites).toBe(2);
+    expect(Object.values(stored.get('actorMailbox'))).toEqual([
+      expect.objectContaining({ state: 'queued' }),
+    ]);
+    releaseStartedWrite();
+    await removed;
+    expect(stored.get('actorMailbox')).toEqual({});
+    expect(actorMailboxWrites).toBe(3);
+    expect(actorRuns).toBe(0);
+  });
+
+  test('records an armed tab-Web actor settlement through the production owner', async () => {
+    const calls: any[] = [];
+    const contributor = {
+      arm: async () => ({ enabled: true, generation: 'generation-1' }),
+      recordWebSettlement: async (input: any) => {
+        calls.push(input);
+        return { ok: true, recorded: true };
+      },
+    };
+    const h = await harness(async (job) => ({
+      ok: true, started: true,
+      newMessages: [{
+        role: 'assistant', content: 'finished', id: 'done-contributor', when: 2_000,
+        stopReason: 'end_turn', toolUses: [{ id: 'page-1', name: 'snapshot', input: {} }],
+      }],
+      usage: { inputTokens: 7, outputTokens: 5 },
+      price: { cost: 0.000096, estimated: true },
+      contributor: {
+        providerCode: 0, modelFamilyCode: 1,
+        outcome: 'completed', failure: 'none', actions: ['page_action'],
+      },
+    }), { contributor });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    expect(await ctx.messageActor({
+      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      toolUseId: 'tool-contributor', awaitReply: true,
+    })).toMatchObject({ ok: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      version: 1,
+      consentGeneration: 'generation-1', feedbackContextKey: `${h.root.sessionId}:tool-contributor`,
+      decision: { requested: 'tools', resolved: 'tools', fallback: 'none' },
+      browser: 'chrome', channel: 'dev', providerCode: 0, modelFamilyCode: 1,
+      actions: ['page_action'], outcome: 'completed', failure: 'none', tokens: 12,
+    });
+    expect(calls[0].operationKey).toBeString();
+  });
+
+  test('reconnects a durable API actor when the ephemeral binding is absent', async () => {
+    const origin = 'https://api.example.com';
+    const jobs: any[] = [];
+    const h = await harness(async (job) => {
+      jobs.push(job);
+      return {
+        ok: true, started: true,
+        newMessages: [{ role: 'assistant', content: 'reconnected', id: 'api-1', when: 2_000 }],
+      };
+    }, { durableApiOrigin: origin });
+    if (!h.durableApiActor) throw new Error('durable-api-actor-not-seeded');
+    expect(h.cache.has('apiActorBindings')).toBe(false);
+
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    expect(await ctx.messageActor({
+      to: origin, message: 'continue', senderSessionId: h.root.sessionId,
+      toolUseId: 'api-reconnect-1', awaitReply: true,
+    })).toMatchObject({ ok: true, content: expect.stringContaining('reconnected') });
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].actorSessionId).toBe(h.durableApiActor.sessionId);
+    expect(jobs[0].priorMessages).toContainEqual(expect.objectContaining({
+      id: 'api-before-restart', content: 'durable context',
+    }));
+    expect((await h.sessions.list()).filter((session: any) =>
+      session.kind === 'actor' && session.backing === 'api')).toHaveLength(1);
+    expect(h.cache.get('apiActorBindings')).toContainEqual([
+      `${h.root.sessionId}\0${origin}`, h.durableApiActor.sessionId,
+    ]);
+  });
+
+  test('remints every bound actor when its owner model-surface posture changes', async () => {
+    const jobs: any[] = [];
+    let h: Awaited<ReturnType<typeof harness>>;
+    let widenDuringRun = false;
+    h = await harness(async (job) => {
+      jobs.push(structuredClone(job));
+      if (widenDuringRun) {
+        widenDuringRun = false;
+        await h.sessions.setToolManifest(h.root.sessionId, {
+          allow: ['message_actor', 'snapshot', 'click'],
+        });
+      }
+      return {
+        ok: true, started: true,
+        newMessages: [{
+          role: 'assistant', content: `generation-${jobs.length}`,
+          id: `posture-${jobs.length}`, when: 2_000 + jobs.length,
+        }],
+      };
+    });
+    await h.sessions.setToolManifest(h.root.sessionId, {
+      allow: ['message_actor', 'snapshot', 'click'],
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const send = (id: string) => ctx.messageActor({
+      to: '9', message: id, senderSessionId: h.root.sessionId,
+      toolUseId: id, awaitReply: true,
+    });
+
+    expect(await send('surface-full')).toMatchObject({ ok: true });
+    expect(jobs[0].tools.map((tool: any) => tool.name)).toContain('click');
+    const fullActorId = jobs[0].actorSessionId;
+
+    await h.sessions.update(h.root.sessionId, {
+      permissionMode: 'plan', confirmActions: true,
+    });
+    expect(await send('live-policy-change')).toMatchObject({ ok: true });
+    expect(jobs[1].actorSessionId).toBe(fullActorId);
+    expect(jobs[1].priorMessages).toContainEqual(expect.objectContaining({
+      id: 'posture-1',
+    }));
+
+    await h.sessions.setToolManifest(h.root.sessionId, {
+      allow: ['message_actor', 'actor_list', 'snapshot', 'click'],
+    });
+    expect(await send('irrelevant-owner-surface-change')).toMatchObject({ ok: true });
+    expect(jobs[2].actorSessionId).toBe(fullActorId);
+    expect(jobs[2].priorMessages).toContainEqual(expect.objectContaining({
+      id: 'posture-2',
+    }));
+
+    await h.sessions.setToolManifest(h.root.sessionId, {
+      allow: ['message_actor', 'snapshot'],
+    });
+    widenDuringRun = true;
+    expect(await send('surface-narrow')).toMatchObject({ ok: true });
+    expect(jobs[3].actorSessionId).not.toBe(fullActorId);
+    expect(jobs[3].tools.map((tool: any) => tool.name)).not.toContain('click');
+    expect(jobs[3].priorMessages).not.toContainEqual(expect.objectContaining({
+      id: 'posture-3',
+    }));
+
+    // The owner widened while the second run was already admitted. That run
+    // stays narrowed; the next address resolution gets a fresh generation.
+    expect(jobs[3].tools.map((tool: any) => tool.name)).not.toContain('click');
+    expect(await send('surface-fresh-wide')).toMatchObject({ ok: true });
+    expect(jobs[4].actorSessionId).not.toBe(jobs[3].actorSessionId);
+    expect(jobs[4].tools.map((tool: any) => tool.name)).toContain('click');
+
+    const otherOwner = await h.sessions.create({
+      provider: 'anthropic', model: 'claude-sonnet-4-6',
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['message_actor', 'snapshot'] },
+    });
+    h.cache.set('currentSessionId', otherOwner.sessionId);
+    const otherCtx: any = await h.factories.buildToolContext({ sessionId: otherOwner.sessionId });
+    expect(await otherCtx.messageActor({
+      to: '9', message: 'other chat', senderSessionId: otherOwner.sessionId,
+      toolUseId: 'other-owner', awaitReply: true,
+    })).toMatchObject({ ok: true });
+    expect(jobs[5].actorSessionId).not.toBe(jobs[4].actorSessionId);
+    expect(jobs[5].priorMessages).not.toContainEqual(expect.objectContaining({
+      id: 'posture-5',
+    }));
+    const crossChatActor = await h.sessions.get(jobs[5].actorSessionId);
+    expect(crossChatActor?.parentSessionId).toBe(otherOwner.sessionId);
+  });
+
+  test('pins App runtime calls to the exact owner tab', async () => {
+    const h = await harness();
+    const attached: any = await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: h.root.sessionId },
+      { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
+    );
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: attached.actorSessionId, exposure: 'actor',
+      actorType: 'app', actorInstanceId: 'app-1', actorSurface: 'tools',
+    });
+    expect(await ctx.appAgentCall('observe', {}, undefined)).toEqual({
+      ok: true, value: { text: 'app response' },
+    });
+    h.engine.appTabTracker.onTabRemoved(17);
+    expect(await ctx.appAgentCall('act', {}, undefined)).toMatchObject({
+      ok: false, error: 'app_runtime_tab_not_open_or_wrong_owner', outcomeKnown: true,
+    });
+  });
+
+  test('injects an origin-pinned dossier and stops a bound helper on a foreign landing', async () => {
+    let runNumber = 0;
+    const jobs: any[] = [];
+    const h = await harness(async (job, _options, config) => {
+      runNumber += 1;
+      jobs.push(job);
+      const actorCtx = await config.buildToolContext({
+        sessionId: job.actorSessionId, exposure: 'actor', actorType: 'web',
+        actorBacking: 'tab', actorInstanceId: '9', activeTabId: 9,
+      });
+      if (runNumber === 1) {
+        await actorCtx.siteClients.put({
+          dossier: {
+            origin: 'https://example.com', summary: 'Use the JSON task endpoint.',
+            endpoints: [{ method: 'GET', path: '/api/tasks' }],
+            auth: 'session', deriver: 'probe',
+          },
+          body: 'return { list: async () => [] };',
+        });
+      } else {
+        await actorCtx.judgeLanding('https://elsewhere.example/');
+      }
+      return {
+        ok: true, started: true,
+        newMessages: [{ role: 'assistant', content: 'done', id: `site-${runNumber}`, when: 2_000 }],
+      };
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    expect(await ctx.messageActor({
+      to: '9', message: 'learn the site', senderSessionId: h.root.sessionId,
+      toolUseId: 'site-1', awaitReply: true,
+    })).toMatchObject({ ok: true });
+    const stopped = await ctx.messageActor({
+      to: '9', message: 'continue', senderSessionId: h.root.sessionId,
+      toolUseId: 'site-2', awaitReply: true,
+    });
+    expect(jobs[1].message).toContain('Use the JSON task endpoint.');
+    expect(jobs[1].message).toContain('<untrusted_web_content');
+    expect(stopped).toMatchObject({
+      ok: false, actorOutcomeKnown: true, actorPerformed: true, actorTerminal: true,
+    });
+    expect(stopped.error).toContain('elsewhere.example');
+  });
+
+  test('tracks and transitively cancels an async child through the production context', async () => {
+    let releaseChild!: () => void;
+    const childGate = new Promise<void>((resolve) => { releaseChild = resolve; });
+    const h = await harness(async (job) => {
+      await childGate;
+      return {
+        ok: true, started: true,
+        newMessages: [{ role: 'assistant', content: 'child result', id: 'child-1', when: 2_000 }],
+      };
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const handle = await ctx.actorAuthority.spawnAsync({
+      task: 'research safely', parentSessionId: h.root.sessionId,
+      parentDepth: 0, parentToolUseId: 'spawn-1',
+      tools: [], grantedToolNames: [], grantedOperations: [],
+    });
+    expect(handle).toMatchObject({ ok: true, taskId: 'as-1' });
+    expect(ctx.actorAuthority.listTasks()).toEqual([
+      expect.objectContaining({ taskId: 'as-1', status: 'running', childSessionId: expect.any(String) }),
+    ]);
+    expect(ctx.actorAuthority.cancelTask(handle.taskId)).toEqual({
+      ok: true,
+      content: expect.stringContaining('cancelled'),
+    });
+    expect(ctx.actorAuthority.listTasks()[0].status).toBe('cancelled');
+    releaseChild();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.broadcasts.some((message) => message.type === 'turn/spawned-start')).toBe(true);
+    expect(h.broadcasts.some((message) => message.type === 'async-tasks/update')).toBe(true);
+  });
+
+  test('persists an exhausted actor startup failure and clears it only after a healthy probe', async () => {
+    let healthy = false;
+    let attempts = 0;
+    const h = await harness(async (job) => {
+      attempts += 1;
+      if (healthy || job.probeOnly) return { ok: true, started: true };
+      return {
+        ok: false, started: false, phase: 'startup', outcomeKnown: true,
+        code: 'actor_worker_spawn_failed', error: 'worker failed to start',
+      };
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const refused = await ctx.messageActor({
+      to: '9', message: 'inspect', senderSessionId: h.root.sessionId,
+      toolUseId: 'isolation-1', awaitReply: true,
+    });
+    expect(refused).toMatchObject({ ok: false, actorTerminal: true, actorPerformed: false });
+    expect(refused.error).toContain('isolated worker is temporarily unavailable');
+    expect(attempts).toBe(2);
+    const [failureKey] = Object.keys(h.storageState);
+    expect(h.storageState[failureKey]).toMatchObject({
+      status: 'temporarily_unavailable', code: 'actor_worker_spawn_failed',
+    });
+    healthy = true;
+    const routeDeps = h.factories.makeRouteDeps(h.shared);
+    expect(await routeDeps.isolation.retryActorIsolation()).toMatchObject({ ok: true });
+    expect(h.storageState).toEqual({});
+  });
+
+  test('restores actor isolation before the state broadcast reacquires controller ownership', async () => {
+    let pushStarted = false;
+    const h = await harness(async (job) => job.probeOnly
+      ? { ok: true, started: false, code: 'actor_worker_ready' }
+      : { ok: false }, {
+      pushState: async () => {
+        pushStarted = true;
+      },
+    });
+    const routeDeps = h.factories.makeRouteDeps(h.shared);
+
+    const result = await Promise.race([
+      routeDeps.isolation.retryActorIsolation(),
+      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 25)),
+    ]);
+
+    expect(result).toMatchObject({ ok: true, capability: { status: 'available' } });
+    expect(pushStarted).toBe(false);
+  });
+
+  test.serial('site-client fetch keeps the exact bounded text prefix and cancels the body', async () => {
+    const previousFetch = globalThis.fetch;
+    const origin = 'https://api.example.test';
+    let cancelled = false;
+    try {
+      const bytes = new TextEncoder().encode(`${'x'.repeat(200_000)}tail`);
+      let sent = false;
+      globalThis.fetch = (async () => ({
+        status: 200, statusText: 'OK', type: 'basic', url: `${origin}/items`,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        body: { getReader: () => ({
+          read: async () => {
+            if (sent) return { done: true, value: undefined };
+            sent = true;
+            return { done: false, value: bytes };
+          },
+          cancel: () => { cancelled = true; },
+          releaseLock: () => {},
+        }) },
+      })) as any;
+      const h = await harness(undefined, { durableApiOrigin: origin });
+      const owner = h.durableApiActor;
+      if (!owner) throw new Error('API actor fixture was not created');
+      const runId = h.scriptRuns.mintRunId(owner.sessionId);
+      h.scriptRuns.register(runId, undefined, owner.sessionId, { site: true });
+      const result = await h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: owner.sessionId, siteOrigin: origin,
+        pathOrUrl: '/items', method: 'GET', headers: {}, runId,
+      }, {});
+      h.scriptRuns.release(runId);
+      expect(result).toMatchObject({
+        ok: true,
+        value: { status: 200, body: 'x'.repeat(200_000) },
+      });
+      expect(cancelled).toBe(true);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  test.serial('Stop interrupts an endless site-client response and cancels its reader', async () => {
+    const previousFetch = globalThis.fetch;
+    const origin = 'https://api.example.test';
+    let cancelled = false;
+    let reading!: () => void;
+    const readStarted = new Promise<void>((resolve) => { reading = resolve; });
+    try {
+      globalThis.fetch = (async () => ({
+        status: 200, statusText: 'OK', type: 'basic', url: `${origin}/endless`,
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        body: { getReader: () => ({
+          read: () => {
+            reading();
+            return new Promise(() => {});
+          },
+          cancel: () => { cancelled = true; },
+          releaseLock: () => {},
+        }) },
+      })) as any;
+      const h = await harness(undefined, { durableApiOrigin: origin });
+      const owner = h.durableApiActor;
+      if (!owner) throw new Error('API actor fixture was not created');
+      const outer = new AbortController();
+      const runId = h.scriptRuns.mintRunId(owner.sessionId);
+      h.scriptRuns.register(runId, outer.signal, owner.sessionId, { site: true });
+      const pending = h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: owner.sessionId, siteOrigin: origin,
+        pathOrUrl: '/endless', method: 'GET', headers: {}, runId,
+      }, {});
+      await readStarted;
+      outer.abort();
+      await expect(pending).resolves.toMatchObject({ ok: false, outcomeKnown: true });
+      expect(cancelled).toBe(true);
+      h.scriptRuns.release(runId);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  test('an ungranted a2a confirmation is not mislabeled as a user decline', async () => {
+    let meshMessages = 0;
+    const h = await harness(undefined, {
+      dweb: true,
+      confirm: async () => 'no',
+      runtimeSendMessage: async (message) => {
+        if (message?.type === 'dweb/base-host/room' && message?.op === 'dm') {
+          meshMessages += 1;
+        }
+        return { ok: true };
+      },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['a2a_run'] }, depth: 1,
+      actorType: 'dweb', instanceId: 'dweb',
+    });
+    const runId = h.scriptRuns.mintRunId(actor.sessionId);
+    h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+    const result = await h.runtime.relays.relayRoutes['a2a/call']({
+      method: 'cast', args: { did: 'did:key:zPeer', message: 'hello' },
+      ownerSessionId: actor.sessionId, runId,
+    }, {});
+    expect(result).toEqual({
+      ok: false,
+      error: 'a2a: confirmation was not granted for send to did:key:zPeer',
+    });
+    expect((result as any).error).not.toContain('user declined');
+    expect(meshMessages).toBe(0);
+  });
+
+  test('a lost a2a mutation response remains unknown through the SW relay', async () => {
+    const h = await harness(undefined, {
+      dweb: true,
+      runtimeSendMessage: async (message) => {
+        if (message?.type === 'dweb/base-host/room' && message?.op === 'dm') {
+          throw new Error('response port closed after commit');
+        }
+        return { ok: true };
+      },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['a2a_run'] }, depth: 1,
+      actorType: 'dweb', instanceId: 'dweb',
+    });
+    const runId = h.scriptRuns.mintRunId(actor.sessionId);
+    h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+    const result = await h.runtime.relays.relayRoutes['a2a/call']({
+      method: 'cast', args: { did: 'did:key:zPeer', message: 'hello' },
+      ownerSessionId: actor.sessionId, runId,
+    }, {});
+    expect(result).toMatchObject({
+      ok: false, performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    });
+  });
+
+  test('a failed known-performed a2a result keeps its exact receipt through the SW relay', async () => {
+    const h = await harness(undefined, {
+      dweb: true,
+      runtimeSendMessage: async (message) => message?.type === 'dweb/base-host/room'
+        && message?.op === 'dm'
+        ? {
+            ok: false, error: 'peer refused after delivery', performed: true,
+            outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+          }
+        : { ok: true },
+    });
+    const actor = await h.sessions.create({
+      kind: 'actor', parentSessionId: h.root.sessionId,
+      provider: h.root.provider, model: h.root.model,
+      permissionMode: 'act', confirmActions: false,
+      toolManifest: { allow: ['a2a_run'] }, depth: 1,
+      actorType: 'dweb', instanceId: 'dweb',
+    });
+    const runId = h.scriptRuns.mintRunId(actor.sessionId);
+    h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+    const result = await h.runtime.relays.relayRoutes['a2a/call']({
+      method: 'cast', args: { did: 'did:key:zPeer', message: 'hello' },
+      ownerSessionId: actor.sessionId, runId,
+    }, {});
+    expect(result).toEqual({
+      ok: false, error: 'peer refused after delivery', performed: true,
+      outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false,
+    });
+  });
+
+  test('rehydrates scheduler custody, repairs provider selection, and applies live settings and capture transitions', async () => {
+    const h = await harness();
+    h.settings.providerName = 'missing-provider';
+    h.settings.providerModel = '';
+    const selected = await h.factories.makeDriverDeps(h.shared).ensureActiveProvider();
+    expect(selected.name).toBe('anthropic');
+    expect(h.settings.providerName).toBe('anthropic');
+    expect(h.providerRevision()).toBe(1);
+
+    const goalStarts: any[] = [];
+    h.runtime.relays.bindGoalRunner({
+      isActive: () => false,
+      isPersisted: async () => false,
+      activeStates: () => [],
+      resume: async () => {},
+      start: async (request: any) => { goalStarts.push(request); },
+    });
+    const now = Date.now();
+    h.kvState.set('schedule.routines.v1', {
+      routine: {
+        id: 'routine', prompt: 'check the build',
+        schedule: { kind: 'interval', everyMs: 60_000 }, mode: 'goal', enabled: true,
+        createdAt: now - 120_000, nextRunAt: now - 1,
+        lastRunAt: null, lastSessionId: null, runCount: 0,
+        pendingRunAt: null, lastOutcomeUnknownAt: null,
+      },
+    });
+    await h.runtime.relays.resumeSchedules();
+    expect(goalStarts).toHaveLength(1);
+    expect(goalStarts[0].goal).toBe('check the build');
+    const scheduled = (await h.sessions.list()).find((record: any) => record.routineId === 'routine');
+    expect(scheduled).toMatchObject({ permissionMode: 'act', confirmActions: false });
+    expect(h.notifications).toContainEqual(expect.objectContaining({ title: 'peerd routine running' }));
+
+    await h.runtime.relays.onSettingsChanged({ frontDoorView: 'home' });
+    expect(h.panelBehavior.length).toBeGreaterThan(0);
+    h.runtime.relays.eventOwners.onUpdated(9, { status: 'loading' }, h.tabs.get(9));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.siteCaptureEvents).toContainEqual(['cancel', { tabId: 9, reason: 'page_changed' }]);
+    await h.runtime.relays.eventOwners.onRemoved(9);
+    expect(h.siteCaptureEvents).toContainEqual(['release', 9]);
+  });
+});

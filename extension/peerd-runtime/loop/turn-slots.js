@@ -42,10 +42,11 @@ export const ABORT_STEER = 'peerd:steer';
 
 /**
  * @returns {{
- *   claim: (sessionId: string) => { controller: AbortController, release: () => void },
+ *   claim: (sessionId: string) => { controller: AbortController, release: () => void, setActivity:(text:string)=>void },
  *   stop: (sessionId: string) => boolean,
  *   isBusy: (sessionId: string) => boolean,
  *   busySessionIds: () => string[],
+ *   activityFor: (sessionId: string) => string|null,
  *   runWhenIdle: (sessionId: string, fn: () => void) => void,
  *   runWhenIdleClaimed: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void,
  *   advanceQueue: (sessionId: string) => void,
@@ -62,6 +63,8 @@ export const ABORT_STEER = 'peerd:steer';
 export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
   /** @type {Map<string, AbortController>} */
   const slots = new Map();
+  /** @type {Map<string, {controller:AbortController,text:string}>} */
+  const activities = new Map();
   /** @type {Map<string, Array<() => void>>} idle-wake queue per session */
   const idleQueues = new Map();
   // Explicit Stop epoch per session. A direct shell wake can capture this when
@@ -104,6 +107,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     setTimeout(() => {
       if (slots.get(sessionId) === controller) {
         slots.delete(sessionId);
+        if (activities.get(sessionId)?.controller === controller) activities.delete(sessionId);
         drainIdle(sessionId);
       }
     }, forceReleaseMs);
@@ -120,11 +124,16 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     slots.set(sessionId, controller);
     return {
       controller,
+      setActivity: (/** @type {string} */ text) => {
+        if (slots.get(sessionId) !== controller) return;
+        activities.set(sessionId, { controller, text: String(text ?? '').slice(0, 4_096) });
+      },
       release: () => {
         // Only clear our own claim. If a steer already replaced this
         // controller, the newer turn owns the slot.
         if (slots.get(sessionId) === controller) {
           slots.delete(sessionId);
+          if (activities.get(sessionId)?.controller === controller) activities.delete(sessionId);
           drainIdle(sessionId);
         }
       },
@@ -153,6 +162,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
     // A monitor can enumerate the already-in-memory slot keys without scanning
     // every durable chat just to ask which orchestrators are currently active.
     busySessionIds: () => [...slots.keys()],
+    activityFor: (sessionId) => activities.get(sessionId)?.text ?? null,
 
     runWhenIdle(sessionId, fn) {
       if (!slots.has(sessionId)) { fn(); return; }

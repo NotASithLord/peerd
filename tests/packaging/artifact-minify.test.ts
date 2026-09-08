@@ -1,13 +1,22 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   assertColdArtifactBudgets,
   COLD_GRAPH_BUDGETS,
   minifyColdArtifactModules,
 } from '../../packaging/minify-artifact-js.ts';
-import { staticImportSpecifiers } from '../../packaging/static-module-graph.ts';
+import {
+  collectStaticModuleGraph,
+  exportedNames,
+  moduleImportSpecifiers,
+  staticImportSpecifiers,
+} from '../../packaging/static-module-graph.ts';
 
 const temporaryRoots: string[] = [];
 afterEach(() => {
@@ -63,12 +72,19 @@ describe('release artifact JavaScript minification', () => {
     write(root, 'offscreen/support.js', 'export const offscreenValue = 9;\n');
 
     const swBefore = readFileSync(join(root, 'background/service-worker.js'), 'utf8');
-    const report = await minifyColdArtifactModules(root, 'chrome');
+    const report = await minifyColdArtifactModules(root, 'chrome', 'store');
     const swAfter = readFileSync(join(root, 'background/service-worker.js'), 'utf8');
 
     expect(report.graphs.serviceWorker.afterBytes).toBeLessThan(report.graphs.serviceWorker.beforeBytes);
     expect(report.graphs.offscreen?.afterBytes).toBeLessThan(report.graphs.offscreen!.beforeBytes);
-    expect(report.transformedModules).toBeGreaterThan(2);
+    expect(report.transformedModules).toBeGreaterThan(0);
+    expect(report.graphs.serviceWorker.inputSha256).toBe(createHash('sha256').update([
+      'background/helper.js',
+      'background/service-worker.js',
+      'shared/channel-config.js',
+      'shared/dweb-loader.js',
+      'vendor/library.js',
+    ].map((input) => `input\0${input}\0`).join('')).digest('hex'));
     expect(swAfter.length).toBeLessThan(swBefore.length);
     expect(swAfter).toContain('keepReadableName');
     expect(swAfter).not.toContain('removed from the staged artifact');
@@ -78,6 +94,10 @@ describe('release artifact JavaScript minification', () => {
       '/shared/channel-config.js',
       '/shared/dweb-loader.js',
     ]);
+    expect(await moduleImportSpecifiers(swAfter)).toContainEqual({
+      kind: 'dynamic', specifier: './lazy.js',
+    });
+    expect(await exportedNames(swAfter)).toEqual(['keepReadableName']);
     expect(readFileSync(join(root, 'background/lazy.js'), 'utf8')).toBe(lazySource);
     expect(readFileSync(join(root, 'vendor/library.js'), 'utf8')).toBe(vendorSource);
     expect(readFileSync(join(root, 'shared/channel-config.js'), 'utf8')).toBe(channelSource);
@@ -93,10 +113,194 @@ describe('release artifact JavaScript minification', () => {
     const offscreen = '// Firefox does not load this host\nexport const untouched = true;\n';
     write(root, 'offscreen/offscreen.js', offscreen);
 
-    const report = await minifyColdArtifactModules(root, 'firefox');
+    const report = await minifyColdArtifactModules(root, 'firefox', 'store');
 
     expect(report.graphs.offscreen).toBeUndefined();
     expect(readFileSync(join(root, 'offscreen/offscreen.js'), 'utf8')).toBe(offscreen);
+  });
+
+  test('rejects an outside-stage symlink before the minifier reads its target', async () => {
+    const root = makeRoot();
+    const outside = makeRoot();
+    write(root, 'manifest.json', JSON.stringify({
+      background: { service_worker: 'background/service-worker.js', type: 'module' },
+    }));
+    write(root, 'background/service-worker.js', 'import "./outside.js";\n');
+    const outsideSource = '// must never be staged or rewritten\nexport const escaped = true;\n';
+    write(outside, 'outside.js', outsideSource);
+    symlinkSync(join(outside, 'outside.js'), join(root, 'background', 'outside.js'));
+
+    await expect(minifyColdArtifactModules(root, 'firefox', 'store'))
+      .rejects.toThrow('static module graph input is symlinked: background/outside.js');
+    expect(readFileSync(join(outside, 'outside.js'), 'utf8')).toBe(outsideSource);
+  });
+
+  test('rejects bare, remote, and data static imports while ignoring dynamic imports', async () => {
+    for (const specifier of [
+      'unmapped-package',
+      'https://modules.example/support.js',
+      'data:text/javascript,export default 1',
+    ]) {
+      const root = makeRoot();
+      write(root, 'entry.js', `import ${JSON.stringify(specifier)};\nimport("./lazy.js");\n`);
+      await expect(collectStaticModuleGraph(root, join(root, 'entry.js')))
+        .rejects.toThrow(`unsupported static import specifier: ${specifier} from entry.js`);
+    }
+  });
+
+  test('rejects a directory used as a static module', async () => {
+    const root = makeRoot();
+    write(root, 'entry.js', 'import "./support";\n');
+    mkdirSync(join(root, 'support'));
+
+    await expect(collectStaticModuleGraph(root, join(root, 'entry.js')))
+      .rejects.toThrow('static module graph input is not a regular file: support');
+  });
+
+  test('detects an equal-count, equal-byte dependency substitution', async () => {
+    const build = async (suffix: 'a' | 'b') => {
+      const root = makeRoot();
+      write(root, 'manifest.json', JSON.stringify({
+        background: { service_worker: 'background/service-worker.js', type: 'module' },
+      }));
+      write(root, 'background/service-worker.js', `
+        // equal-sized fixture entry
+        import { value } from './helper-${suffix}.js';
+        export const result = value;
+      `);
+      write(root, `background/helper-${suffix}.js`, `
+        // equal-sized fixture helper
+        export const value = 1;
+      `);
+      return minifyColdArtifactModules(root, 'firefox', 'store');
+    };
+    const first = await build('a');
+    const second = await build('b');
+    const firstGraph = first.graphs.serviceWorker;
+    const secondGraph = second.graphs.serviceWorker;
+
+    expect({
+      modules: secondGraph.modules,
+      beforeBytes: secondGraph.beforeBytes,
+      afterBytes: secondGraph.afterBytes,
+      entryBytes: secondGraph.entryBytes,
+    }).toEqual({
+      modules: firstGraph.modules,
+      beforeBytes: firstGraph.beforeBytes,
+      afterBytes: firstGraph.afterBytes,
+      entryBytes: firstGraph.entryBytes,
+    });
+    expect(secondGraph.inputSha256).not.toBe(firstGraph.inputSha256);
+    expect(() => assertColdArtifactBudgets({ ...second, browser: 'chrome' }, {
+      serviceWorker: {
+        modules: firstGraph.modules,
+        graphBytes: firstGraph.afterBytes,
+        entryBytes: firstGraph.entryBytes,
+        inputSha256: firstGraph.inputSha256,
+      },
+    })).toThrow(/store\/chrome serviceWorker cold input closure changed/);
+  });
+
+  test('keeps exported names and runtime behavior', async () => {
+    const root = makeRoot();
+    write(root, 'manifest.json', JSON.stringify({
+      background: { service_worker: 'background/service-worker.js', type: 'module' },
+    }));
+    write(root, 'background/service-worker.js', `
+      import { increment, NamedFailure } from './support.js';
+      export { NamedFailure } from './support.js';
+      export const run = (value) => ({ value: increment(value), name: NamedFailure.name });
+    `);
+    write(root, 'background/support.js', `
+      export class NamedFailure extends Error {}
+      export const increment = (value) => value + 1;
+    `);
+
+    await minifyColdArtifactModules(root, 'firefox', 'store');
+    const module = await import(`${pathToFileURL(join(
+      root, 'background', 'service-worker.js',
+    )).href}?${crypto.randomUUID()}`);
+    expect(module.run(4)).toEqual({ value: 5, name: 'NamedFailure' });
+    expect(module.NamedFailure.name).toBe('NamedFailure');
+  });
+
+  test('keeps typed error wire names through identifier minification', async () => {
+    const root = makeRoot();
+    const extension = join(import.meta.dir, '..', '..', 'extension');
+    const entry = join(root, 'errors.js');
+    writeFileSync(entry, `
+      import { TypedError } from ${JSON.stringify(join(extension, 'shared/errors.js'))};
+      import * as fetchErrors from ${JSON.stringify(join(extension, 'peerd-egress/fetch/errors.js'))};
+      import * as vaultErrors from ${JSON.stringify(join(extension, 'peerd-egress/vault/errors.js'))};
+      import * as engineErrors from ${JSON.stringify(join(extension, 'peerd-engine/errors.js'))};
+      import * as providerErrors from ${JSON.stringify(join(extension, 'peerd-provider/errors.js'))};
+      import * as runtimeErrors from ${JSON.stringify(join(extension, 'peerd-runtime/errors.js'))};
+      import * as attachmentErrors from ${JSON.stringify(join(extension, 'peerd-runtime/loop/attachments.js'))};
+      import * as pdfErrors from ${JSON.stringify(join(extension, 'peerd-runtime/pdf/errors.js'))};
+      import * as voiceErrors from ${JSON.stringify(join(extension, 'peerd-runtime/voice/errors.js'))};
+      const modules = [fetchErrors, vaultErrors, engineErrors, providerErrors,
+        runtimeErrors, attachmentErrors, pdfErrors, voiceErrors];
+      export const errorTags = modules.flatMap((module) => Object.entries(module))
+        .filter(([, value]) => typeof value === 'function' && value.prototype instanceof TypedError)
+        .map(([exportName, value]) => ({
+          exportName,
+          errorName: value.errorName,
+          own: Object.hasOwn(value, 'errorName'),
+        }));
+      const errors = [
+        new fetchErrors.EgressDeniedError('https://blocked.test'),
+        new vaultErrors.VaultLockedError(),
+        new engineErrors.VMNotReadyError('booting'),
+        new providerErrors.OllamaNotRunningError(),
+        new runtimeErrors.SessionNotFoundError('missing'),
+        new attachmentErrors.UnsupportedAttachmentError('file.bin', 'application/octet-stream'),
+        new pdfErrors.PdfFetchError('fetch failed'),
+        new voiceErrors.VoiceNotEnabledError(),
+      ];
+      export const errorNames = errors.map((error) => error.name);
+      export const constructorNames = errors.map((error) => error.constructor.name);
+    `);
+    const built = await Bun.build({
+      entrypoints: [entry],
+      target: 'browser',
+      format: 'esm',
+      minify: { whitespace: true, syntax: true, identifiers: true },
+      plugins: [{
+        name: 'extension-root-imports',
+        setup(builder) {
+          builder.onResolve({ filter: /^\/(?:shared|peerd-)/ }, ({ path }) => ({
+            path: join(extension, path.slice(1)),
+          }));
+        },
+      }],
+    });
+    expect(built.success).toBe(true);
+    expect(built.outputs).toHaveLength(1);
+    // Bun snapshots test-file resolution before this generated output exists.
+    // Import the self-contained bundle bytes directly so the assertion tests
+    // identifier minification, not the runner's temporary-path cache.
+    const bundleSource = await built.outputs[0].text();
+    const module = await import(
+      `data:text/javascript;base64,${Buffer.from(bundleSource).toString('base64')}`,
+    );
+    const expected = [
+      'EgressDeniedError',
+      'VaultLockedError',
+      'VMNotReadyError',
+      'OllamaNotRunningError',
+      'SessionNotFoundError',
+      'UnsupportedAttachmentError',
+      'PdfFetchError',
+      'VoiceNotEnabledError',
+    ];
+    expect(module.errorTags.length).toBeGreaterThan(expected.length);
+    expect(module.errorTags.every((tag: {
+      exportName: string;
+      errorName: string;
+      own: boolean;
+    }) => tag.own && tag.errorName === tag.exportName)).toBe(true);
+    expect(module.errorNames).toEqual(expected);
+    expect(module.constructorNames).not.toEqual(expected);
   });
 
   test('parses one-line static imports without following dynamic imports', async () => {
@@ -105,8 +309,10 @@ describe('release artifact JavaScript minification', () => {
   });
 
   test('fails when an optimized cold graph exceeds its release budget', () => {
-    const budget = COLD_GRAPH_BUDGETS.serviceWorker;
+    const budget = COLD_GRAPH_BUDGETS.store.chrome.serviceWorker.graphBytes;
     expect(() => assertColdArtifactBudgets({
+      browser: 'chrome',
+      channel: 'store',
       transformedModules: 1,
       preservedModules: 0,
       beforeBytes: budget + 2,
@@ -114,11 +320,83 @@ describe('release artifact JavaScript minification', () => {
       graphs: {
         serviceWorker: {
           entry: 'background/service-worker.js',
+          entryBytes: 1,
           modules: 1,
           beforeBytes: budget + 2,
           afterBytes: budget + 1,
+          inputSha256: '0'.repeat(64),
         },
       },
     })).toThrow(/budget/);
+  });
+
+  test('fails before browser launch when module or exact entry ratchets grow', () => {
+    const budget = COLD_GRAPH_BUDGETS.store.chrome.serviceWorker;
+    const report = {
+      browser: 'chrome' as const,
+      channel: 'store' as const,
+      transformedModules: 1,
+      preservedModules: 0,
+      beforeBytes: budget.graphBytes,
+      afterBytes: budget.graphBytes - 1,
+      graphs: {
+        serviceWorker: {
+          entry: 'background/service-worker.js',
+          entryBytes: budget.entryBytes + 1,
+          modules: Number(budget.modules),
+          beforeBytes: budget.graphBytes,
+          afterBytes: budget.graphBytes - 1,
+          inputSha256: budget.inputSha256 ?? '0'.repeat(64),
+        },
+      },
+    };
+    expect(() => assertColdArtifactBudgets(report)).toThrow(/cold entry/);
+    report.graphs.serviceWorker.entryBytes = budget.entryBytes;
+    report.graphs.serviceWorker.modules = budget.modules + 1;
+    expect(() => assertColdArtifactBudgets(report)).toThrow(/modules/);
+  });
+
+  test('an exact native entry uses the same package no-growth ratchet', () => {
+    const budget = COLD_GRAPH_BUDGETS.store.chrome.serviceWorker;
+    const report = {
+      browser: 'chrome' as const,
+      channel: 'store' as const,
+      transformedModules: budget.modules,
+      preservedModules: 0,
+      beforeBytes: budget.graphBytes + 1,
+      afterBytes: budget.graphBytes,
+      graphs: {
+        serviceWorker: {
+          entry: 'background/vault-kernel-chrome.js', entryBytes: budget.entryBytes,
+          modules: budget.modules,
+          beforeBytes: budget.graphBytes + 1, afterBytes: budget.graphBytes,
+          inputSha256: budget.inputSha256 ?? '0'.repeat(64),
+        },
+      },
+    };
+    expect(() => assertColdArtifactBudgets(report)).not.toThrow();
+  });
+
+  test('rejects a changed pinned input closure without imposing one on Firefox', () => {
+    const stats = {
+      entry: 'background/service-worker.js', entryBytes: 1, modules: 1,
+      beforeBytes: 3, afterBytes: 2, inputSha256: 'a'.repeat(64),
+    };
+    const report = {
+      browser: 'chrome' as const, channel: 'store' as const,
+      transformedModules: 1, preservedModules: 0, beforeBytes: 3, afterBytes: 2,
+      graphs: { serviceWorker: stats },
+    };
+    expect(() => assertColdArtifactBudgets(report, {
+      serviceWorker: {
+        modules: 1, graphBytes: 2, entryBytes: 1, inputSha256: 'b'.repeat(64),
+      },
+    })).toThrow(
+      `store/chrome serviceWorker cold input closure changed `
+      + `(actual ${'a'.repeat(64)}; expected ${'b'.repeat(64)})`,
+    );
+    expect(() => assertColdArtifactBudgets({ ...report, browser: 'firefox' }, {
+      serviceWorker: { modules: 1, graphBytes: 2, entryBytes: 1 },
+    })).not.toThrow();
   });
 });

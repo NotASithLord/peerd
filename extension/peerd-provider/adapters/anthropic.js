@@ -1,37 +1,25 @@
 // @ts-check
 // Anthropic adapter.
 //
-// Glues together the format helpers (pure) with the IO shell (fetch,
-// secret lookup, error mapping). The adapter's `call` is an async
+// Glues together the format helpers with the named model-egress authority.
+// The adapter's `call` is an async
 // generator yielding internal ProviderEvent values.
 //
-// Dependency injection (architecture.md §2.1): the adapter takes
-// `safeFetch` and `getSecret` from its caller — it does NOT import
-// peerd-egress. This is enforced at the type level (caller passes
-// concrete functions) and at the architectural level (provider is
-// Layer 1, egress is Layer 1, and Layer 1 modules don't import each
-// other).
+// The adapter owns body encoding, retry policy, and stream interpretation. It
+// never sees endpoints, vault bindings, credentials, authentication headers,
+// or arbitrary fetch options.
 
 import { toAnthropicBody } from '../format/to-anthropic.js';
 import { fromAnthropicStream } from '../format/from-anthropic.js';
-import { fetchModelWindow } from '../model-window.js';
-import { abortableSleep, fetchInitialResponseWithRetry } from '../connect-timeout.js';
+import { readModelWindow } from '../model-window.js';
+import { abortableSleep, openInitialResponseWithRetry } from '../connect-timeout.js';
 import {
   ProviderError,
   ProviderHttpError,
-  ProviderKeyMissingError,
   ProviderUsageLimitError,
 } from '../errors.js';
 import { isUsageLimitResponse, apiErrorMessage } from '../error-classify.js';
 
-const ENDPOINT = 'https://api.anthropic.com/v1/messages';
-// why: the Models API (same host, already allowlisted) reports the live
-// context window per model id (`max_input_tokens`, GA since 2026-03) — the
-// authoritative source for the trim trigger, since a model's window can
-// change without an id change and a static table drifts.
-const MODELS_ENDPOINT = 'https://api.anthropic.com/v1/models';
-const API_VERSION = '2023-06-01';
-const VAULT_SECRET_NAME = 'anthropic_api_key';
 // Connect timeout: how long to wait for the API's response HEADERS before
 // giving up. Generous — headers arrive fast even when token generation is slow,
 // so this only fires when the server is truly unresponsive. The body stream is
@@ -70,6 +58,7 @@ export const DEFAULT_RUNNER_MODEL = 'claude-haiku-4-5';
 /**
  * @typedef {import('../types.js').InternalMessage} InternalMessage
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
+ * @typedef {import('../model-egress.js').ModelEgress} ModelEgress
  */
 
 /**
@@ -90,8 +79,7 @@ export const DEFAULT_RUNNER_MODEL = 'claude-haiku-4-5';
  *   User-driven cancellation (Stop button / new message mid-stream).
  *   Flows into fetch — cuts the SSE socket — and into the retry sleep,
  *   so an abort during a backoff wait unwinds immediately.
- * @param {(name: string) => Promise<string | null>} args.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [args._sleep]
  *   Test seam: overrides the real setTimeout-based sleep so unit tests
  *   for the retry paths (429 backoff AND connection-drop) don't wait
@@ -105,54 +93,35 @@ export async function* callAnthropic(args) {
     maxTokens,
     tools,
     reasoning,
-    getSecret, safeFetch,
+    modelEgress,
     signal,
     _sleep = abortableSleep,
   } = args;
 
-  const apiKey = await getSecret(VAULT_SECRET_NAME);
-  if (!apiKey) throw new ProviderKeyMissingError('anthropic');
-
   const body = toAnthropicBody({ model, system, messages, tools, maxTokens, reasoning });
-  const requestInit = {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': API_VERSION,
-      // Anthropic blocks browser-origin requests by default and
-      // requires this header as an explicit ack that the caller knows
-      // the API key is exposed to client-side code. peerd is built
-      // exactly for this model — the key lives encrypted in the
-      // vault, the SW handles requests, and the user understands
-      // they're shipping their own credentials. We acknowledge.
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify(body),
-    // AbortSignal flows through to native fetch. Stop or a new message cuts
-    // the local SSE consumer and prevents late bytes from re-entering the
-    // agent. Physical socket teardown remains browser-managed.
-    signal,
-  };
 
-  // safeFetch enforces the egress allowlist. The endpoint is on the
-  // hardcoded list (peerd-egress/fetch/allowlist.js), so this always
-  // gets through unless the user has somehow rebuilt the extension.
   // Retry loop: 429 (token-bucket exhausted), 529 (overloaded), and
   // the transient server faults 500 (api_error) / 503 are retryable.
   // Everything else falls through to the throw path immediately.
   // why two retry layers: connection-drop retry (TypeError rejections,
-  // up to 3 total attempts — fetchInitialResponseWithRetry) rides INSIDE
+  // up to 3 total attempts through openInitialResponseWithRetry) rides INSIDE
   // this HTTP loop. They are orthogonal failure modes: a network drop
   // never produces a Response, so it never reaches the status-code logic
   // below, and an HTTP error never re-enters the connect retry.
   for (let attempt = 1; ; attempt++) {
-    const res = await fetchInitialResponseWithRetry(safeFetch, ENDPOINT, requestInit, {
+    const res = await openInitialResponseWithRetry(
+      (requestSignal) => modelEgress.openInference({
+        providerId: 'anthropic',
+        modelId: model,
+        nativeBody: body,
+        signal: requestSignal,
+      }), {
       stopSignal: signal,
       timeoutMs: CONNECT_TIMEOUT_MS,
       onTimeout: (ms) => new ProviderError('anthropic', `the API did not respond within ${ms / 1000}s — it may be unreachable or down. Try again.`),
       sleepFn: _sleep,
-    });
+      },
+    );
     if (res.ok) {
       if (!res.body) {
         throw new ProviderError('anthropic', 'response has no body (streaming requires it)');
@@ -246,32 +215,20 @@ export const _computeBackoffMsForTests = computeBackoffMs;
  * non-OK response, an unparseable body, or a field that isn't a positive
  * number — the caller falls back to the static table. Never throws.
  *
- * Same DI contract as `call`: `getSecret` + `safeFetch` are injected.
- *
  * @param {Object} args
  * @param {string} args.model                          model id (e.g. 'claude-opus-4-8')
- * @param {(name: string) => Promise<string | null>} args.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
  * @returns {Promise<number | null>}
  */
-export const fetchAnthropicContextWindow = async ({ model, getSecret, safeFetch, signal }) => {
+export const fetchAnthropicContextWindow = async ({ model, modelEgress, signal }) => {
   if (typeof model !== 'string' || !model) return null;
-  let apiKey;
-  try { apiKey = await getSecret(VAULT_SECRET_NAME); }
-  catch { return null; }
-  if (!apiKey) return null;
-  return fetchModelWindow({
-    safeFetch,
-    url: `${MODELS_ENDPOINT}/${encodeURIComponent(model)}`,
-    init: {
-      method: 'GET',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': API_VERSION,
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-    },
+  return readModelWindow({
+    readResponse: (requestSignal) => modelEgress.readModelContext({
+      providerId: 'anthropic',
+      modelId: model,
+      signal: requestSignal,
+    }),
     // max_input_tokens IS the input/context budget the trim trigger cares
     // about (output cap is a separate `max_tokens` field) — the right
     // quantity, not just the nominal total.
@@ -287,10 +244,8 @@ export const fetchAnthropicContextWindow = async ({ model, getSecret, safeFetch,
 export const anthropicAdapter = Object.freeze({
   name: 'anthropic',
   label: 'Anthropic',
-  endpoint: ENDPOINT,
   defaultModel: DEFAULT_MODEL,
   defaultRunnerModel: DEFAULT_RUNNER_MODEL,
-  vaultSecretName: VAULT_SECRET_NAME,
   call: callAnthropic,
   // why: the registry's providerModelContextWindow uses this when present to
   // get the live window for the trim trigger; adapters without it fall back

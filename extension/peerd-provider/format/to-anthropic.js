@@ -489,9 +489,9 @@ export const usesAdaptiveThinking = (model) => {
 // reasoning and got truncated (stop_reason max_tokens) before emitting
 // a single tool_use — observed in the field as a "silent timeout".
 // 64000 is the platform-recommended streaming default and within every
-// current model's streamed output cap. Explicit maxTokens (e.g. the
-// actor output cap) still wins.
-export const toAnthropicBody = ({ model, system, messages, tools, maxTokens = 64000, reasoning }) => {
+// current model's streamed output cap. An explicit maxTokens is an authority
+// ceiling, so it remains hard even when reasoning is enabled.
+export const toAnthropicBody = ({ model, system, messages, tools, maxTokens, reasoning }) => {
   const thinkingEnabled = !!reasoning?.enabled;
   const wireMessages = toAnthropicMessages(messages, thinkingEnabled);
   // why: tag the last content block of the last message with
@@ -520,9 +520,13 @@ export const toAnthropicBody = ({ model, system, messages, tools, maxTokens = 64
   const budgetTokens = thinkingEnabled
     ? Math.max(1024, Math.floor(reasoning?.budgetTokens ?? 2048))
     : 0;
-  const effectiveMaxTokens = thinkingEnabled
-    ? Math.max(maxTokens, budgetTokens + 4096)
-    : maxTokens;
+  // why: bound actors carry an exact SW-minted output grant. Raising an
+  // explicit semantic request above it makes the authority layer correctly
+  // refuse every actor inference. Only the unbounded/default path adds
+  // reasoning headroom; callers with a finite cap budget within that cap.
+  const effectiveMaxTokens = maxTokens ?? (thinkingEnabled
+    ? Math.max(64_000, budgetTokens + 4096)
+    : 64_000);
 
   /** @type {Record<string, any>} */
   const body = {

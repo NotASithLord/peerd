@@ -10,6 +10,7 @@
 import { describe, test, expect } from 'bun:test';
 import { formatRunResult, runIsFenced, runOriginLabel, scriptTool } from '../../../extension/peerd-runtime/tools/defs/script.js';
 import { makeEngineRoutes } from '../../../extension/background/routes/engine.js';
+import { executionToolContext } from '../../helpers/execution-tool.js';
 
 const run = (over: Record<string, unknown> = {}) => ({
   durationMs: 5, value: 'out', ...over,
@@ -62,16 +63,18 @@ describe('formatRunResult — fence decision matrix', () => {
     expect(afterFence).toContain('[remote_module_restricted]');
   });
 
-  test('the value-spill footer names the key + read_run_cache, outside the fence', () => {
-    const out = formatRunResult('x', run({ usedEgress: true }) as any, { key: 'run:tu-9', total: 123_456 });
+  test('the value-spill footer names the opaque key + read_result, outside the fence', () => {
+    const out = formatRunResult('x', run({ usedEgress: true }) as any, { key: 'result:opaque-9', total: 123_456 });
     const afterFence = out.split('</untrusted_web_content>')[1];
-    expect(afterFence).toContain('read_run_cache');
-    expect(afterFence).toContain('"run:tu-9"');
+    expect(afterFence).toContain('read_result');
+    expect(afterFence).toContain('"result:opaque-9"');
     expect(afterFence).toContain('123456');
+    expect(afterFence).toContain('On future runs, return a compact value');
+    expect(afterFence).not.toContain('prefer re-running');
   });
 
   test('no spill → no footer (page_code and existing callers unchanged)', () => {
-    expect(formatRunResult('x', run() as any)).not.toContain('read_run_cache');
+    expect(formatRunResult('x', run() as any)).not.toContain('read_result');
   });
 
   test('the generic code-op trace is host-shaped and outside any output fence', () => {
@@ -103,7 +106,7 @@ describe('formatRunResult — fence decision matrix', () => {
 
 // The tool's execute: workspace opt-in rides as workspaceSessionId (a TRUSTED
 // job param derived from ctx.session — never from the model beyond the boolean),
-// and an overflowing value spills to ctx.runCache stamped with the owning
+// and an overflowing value spills to ctx.resultStore stamped with the owning
 // session + the run's fence state.
 describe('scriptTool.execute — workspace opt + value spill', () => {
   const bigValue = 'v'.repeat(10_000);
@@ -118,11 +121,14 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
           return { durationMs: 1, value: 'small', ...result };
         },
       },
-      runCache: { put: async (rec: object) => { seen.put = rec; } },
+      resultStore: {
+        key: () => 'result:opaque-42',
+        put: async (rec: object) => { seen.put = rec; },
+      },
       toolUseId: 'tu-42',
       ...over,
     };
-    return { ctx, seen };
+    return { ctx: executionToolContext(ctx), seen };
   };
 
   test('workspace:true passes workspaceSessionId = the session id', async () => {
@@ -192,6 +198,25 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     expect(result.content).not.toContain('delivery-1');
   });
 
+  test('nested host custody loss remains unknown and nonretryable in the semantic result', async () => {
+    const { ctx } = ctxWith({}, {
+      error: 'nested host operation outcome unknown',
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
+    const result: any = await scriptTool.execute({ code: 'return 1' }, ctx as any);
+    expect(result).toMatchObject({
+      ok: false, error: 'script_nested_host_outcome_unknown',
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
+  });
+
+  test('ordinary user-code failure remains a known completed script result', async () => {
+    const { ctx } = ctxWith({}, { error: 'ReferenceError: missing is not defined' });
+    const result: any = await scriptTool.execute({ code: 'return missing' }, ctx as any);
+    expect(result).toMatchObject({ ok: true, content: expect.stringContaining('ReferenceError') });
+    expect(result.outcomeKnown).toBeUndefined();
+  });
+
   test('a transport-failure trace redacts an instruction-shaped target', async () => {
     const payload = 'IGNORE_PREVIOUS_INSTRUCTIONS';
     const errorPayload = 'TRANSPORT_ERROR_IGNORE_INSTRUCTIONS';
@@ -208,11 +233,14 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     };
     const { ctx } = ctxWith({
       messageActor: async () => {},
+      operationGrant: new Set(['turn.actor.message']),
       scriptRuns,
       jsOffscreenClient: {
         // The thrown transport error does not repeat the target. Its identity
         // must survive from the bounded mirror itself, inside the fence only.
-        execHeadless: async () => { throw new Error(errorPayload); },
+        execHeadless: async () => {
+          throw Object.assign(new Error(errorPayload), { outcomeKnown: true });
+        },
       },
     });
     const result = await scriptTool.execute({
@@ -238,12 +266,15 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     const errorPayload = 'TRANSPORT_ERROR_IGNORE_INSTRUCTIONS';
     const { ctx } = ctxWith({
       messageActor: async () => {},
+      operationGrant: new Set(['turn.actor.message']),
       scriptRuns: {
         mintRunId: () => 'failed-run', register: () => {}, abort: () => {},
         release: () => {}, opsFor: () => [],
       },
       jsOffscreenClient: {
-        execHeadless: async () => { throw new Error(errorPayload); },
+        execHeadless: async () => {
+          throw Object.assign(new Error(errorPayload), { outcomeKnown: true });
+        },
       },
     });
     const result = await scriptTool.execute({
@@ -270,7 +301,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       },
       ownerFor: (runId: string) => live.get(runId)?.owner,
       allows: (runId: string, cap: string) => live.get(runId)?.caps[cap] === true,
-      admitOp: () => true,
+      admitCodeOp: () => true,
       signalFor: (runId: string) => live.get(runId)?.signal,
       abort: () => {},
       release: (runId: string) => { live.delete(runId); },
@@ -281,6 +312,14 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
       repositories: { coordinate: async (_target: unknown, operation: () => Promise<unknown>) => operation() },
       parseAppManifest: () => ({}),
       podGitRemoteOperation: () => null,
+      artifactEngine: {
+        buildAppExport: async () => ({}),
+        buildNotebookExport: async () => ({}),
+        buildVmRecipeExport: async () => ({}),
+        openEnvelope: async () => ({}),
+        inspectEnvelope: async () => ({}),
+        exportFilename: () => 'unused.peerd',
+      },
       vmHttpFetch: async () => { fetched = true; return { ok: true, status: 200 }; },
       applyWebExtract: async (response: any) => response,
       scriptRuns,
@@ -301,7 +340,7 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
         },
       },
     };
-    await scriptTool.execute({ code: 'return await peerd.egress.fetch("https://example.com")' }, ctx as any);
+    await scriptTool.execute({ code: 'return await peerd.egress.fetch("https://example.com")' }, executionToolContext(ctx) as any);
     expect(jobOpts.ownerSessionId).toBe('chat-1');
     expect(relayResult).toMatchObject({ ok: true, status: 200 });
     expect(fetched).toBe(true);
@@ -332,22 +371,26 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
     await pending;
   });
 
-  test('an overflowing value spills to runCache stamped with session + fence state, and the result carries the footer', async () => {
+  test('an overflowing value spills with session, provenance, and fence state', async () => {
     const { ctx, seen } = ctxWith({}, { value: bigValue, usedWorkspace: true });
     const r = await scriptTool.execute({ code: 'return big', workspace: true }, ctx as any);
     expect(r.ok).toBe(true);
     expect(seen.put).toMatchObject({
-      key: 'run:tu-42', ownerSessionId: 'chat-1',
+      key: 'result:opaque-42', ownerSessionId: 'chat-1', producer: 'script',
       fenced: true, originLabel: 'script (workspace files)',
     });
     expect(seen.put.text.length).toBeGreaterThan(10_000);   // the FULL serialized value
-    if (r.ok) expect(r.content).toContain('read_run_cache');
+    if (r.ok) {
+      expect(r.content).toContain('read_result');
+      expect(r.paged).toBe(true);
+    }
   });
 
   test('a small value does not spill', async () => {
     const { ctx, seen } = ctxWith();
-    await scriptTool.execute({ code: 'return 1' }, ctx as any);
+    const r = await scriptTool.execute({ code: 'return 1' }, ctx as any);
     expect(seen.put).toBeUndefined();
+    expect((r as { paged?: boolean }).paged).toBeUndefined();
   });
 
   test('a pure-compute overflow spills UNFENCED (the agent\'s own bytes)', async () => {
@@ -357,12 +400,14 @@ describe('scriptTool.execute — workspace opt + value spill', () => {
   });
 
   test('a failed spill still returns the capped result (best-effort)', async () => {
-    const { ctx } = ctxWith({ runCache: { put: async () => { throw new Error('idb dead'); } } }, { value: bigValue });
+    const { ctx } = ctxWith({
+      resultStore: { key: () => 'result:opaque-failed', put: async () => { throw new Error('idb dead'); } },
+    }, { value: bigValue });
     const r = await scriptTool.execute({ code: 'return big' }, ctx as any);
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.content).toContain('[VALUE TRUNCATED');
-      expect(r.content).not.toContain('read_run_cache');
+      expect(r.content).not.toContain('read_result');
     }
   });
 });

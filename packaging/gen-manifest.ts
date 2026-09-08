@@ -31,7 +31,17 @@ import {
 type GenChannel = 'store' | 'preview' | 'dev';
 type GenBrowser = 'chrome' | 'firefox';
 
-const PREVIEW_PUBKEY_FILE = join(MANIFESTS_DIR, 'preview-chrome-key.pub');
+export const NATIVE_BACKGROUND_ENTRY = 'background/vault-kernel-chrome.js';
+export const PREVIEW_CHROME_BACKGROUND_ENTRY = 'background/vault-kernel-preview.js';
+export const FIREFOX_BACKGROUND_ENTRY = 'background/vault-kernel-firefox.js';
+export const PREVIEW_FIREFOX_BACKGROUND_ENTRY =
+  'background/vault-kernel-firefox-preview.js';
+export const targetBackgroundEntry = (
+  entry: string, channel: GenChannel, browser: GenBrowser,
+): string => entry !== NATIVE_BACKGROUND_ENTRY ? entry
+  : browser === 'firefox' ? channel === 'store'
+      ? FIREFOX_BACKGROUND_ENTRY : PREVIEW_FIREFOX_BACKGROUND_ENTRY
+  : channel !== 'store' ? PREVIEW_CHROME_BACKGROUND_ENTRY : entry;
 
 // Keys Chrome doesn't know (would log warnings on load) get stripped from
 // chromium manifests; keys Chrome owns get stripped from Firefox ones.
@@ -41,7 +51,7 @@ const FIREFOX_ONLY_KEYS = ['browser_specific_settings', 'sidebar_action'];
 // them as manifest keys — left in, they're dead weight an AMO validator can
 // flag. (The WebVM is already non-functional on Firefox without isolation;
 // stripping the keys just keeps the manifest clean.)
-const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel', 'sandbox',
+const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel',
   'cross_origin_embedder_policy', 'cross_origin_opener_policy'];
 
 // Permissions Firefox doesn't implement. Stripping them keeps AMO
@@ -149,12 +159,22 @@ const orderKeys = (manifest: Record<string, any>): Record<string, any> => {
 };
 
 export const generateManifest = (
-  { channel, browser, version }: { channel: GenChannel; browser: GenBrowser; version: string },
+  { channel, browser, version, manifestsDir = MANIFESTS_DIR }: {
+    channel: GenChannel;
+    browser: GenBrowser;
+    version: string;
+    manifestsDir?: string;
+  },
 ): Record<string, any> => {
-  const base = readJson(join(MANIFESTS_DIR, 'base.json'));
-  const patch = readJson(join(MANIFESTS_DIR, `${channel}.patch.json`));
+  const base = readJson(join(manifestsDir, 'base.json'));
+  const patch = readJson(join(manifestsDir, `${channel}.patch.json`));
   let manifest = deepMerge(base, patch);
   manifest.version = version;
+  if (typeof manifest.background?.service_worker === 'string') {
+    manifest.background.service_worker = targetBackgroundEntry(
+      manifest.background.service_worker, channel, browser,
+    );
+  }
   manifest = applyBrowserTransform(manifest, browser);
 
   if (channel === 'preview' && browser === 'firefox') {
@@ -182,13 +202,14 @@ export const generateManifest = (
   }
 
   if (channel === 'preview' && browser === 'chrome') {
-    if (fileExists(PREVIEW_PUBKEY_FILE)) {
-      manifest.key = readFileSync(PREVIEW_PUBKEY_FILE, 'utf8').trim();
+    const previewPubkeyFile = join(manifestsDir, 'preview-chrome-key.pub');
+    if (fileExists(previewPubkeyFile)) {
+      manifest.key = readFileSync(previewPubkeyFile, 'utf8').trim();
     } else {
       // Packaging still succeeds (useful before the key exists / on a fresh
       // clone) but the artifact won't keep a stable extension ID — say so.
       console.warn(
-        `WARN gen-manifest: ${PREVIEW_PUBKEY_FILE} not found — preview chrome `
+        `WARN gen-manifest: ${previewPubkeyFile} not found; preview chrome `
         + 'manifest has no "key"; the unpacked extension ID will not be stable.',
       );
     }

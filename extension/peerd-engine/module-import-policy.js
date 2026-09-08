@@ -12,7 +12,6 @@ import {
 } from './errors.js';
 
 const ALLOWED_PEERD_MODULES = new Set(['peerd:std', 'peerd:wasi']);
-const TOOLBOX_PREFIX = 'peerd:toolbox/';
 
 /**
  * Apply the string cleanup required before URL parsing. The canonicalizer
@@ -45,11 +44,11 @@ export const isRemoteModuleSpecifier = (specifier) =>
 
 /** @param {string} specifier */
 const isAllowedLocalSpecifier = (specifier) => {
-  if (ALLOWED_PEERD_MODULES.has(specifier) || specifier.startsWith(TOOLBOX_PREFIX)) return true;
+  if (ALLOWED_PEERD_MODULES.has(specifier)) return true;
   const normalized = canonicalModuleSpecifier(specifier);
   if (normalized.startsWith('./') || normalized.startsWith('../')) return true;
-  // A plain bare name is left to the static native loader. Known builtins and
-  // toolbox modules are rewritten by the resolver before that point.
+  // A plain bare name is left to the static native loader. Known builtins are
+  // rewritten by the resolver before that point.
   return !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(normalized)
     && !normalized.startsWith('/')
     && !normalized.startsWith('\\');
@@ -159,7 +158,7 @@ export const assertRemoteModulePolicy = (source, remoteModulesEnabled, options) 
       if (remoteModulesEnabled === true) continue;
       throw new RemoteModuleImportsUnavailableError(specifier);
     }
-    // The resolver only routes local paths, builtins, toolbox modules, and
+    // The resolver only routes local paths, builtins, and
     // audited HTTP(S). Every other scheme or absolute path would reach the
     // native loader directly.
     throw new UnsupportedNativeModuleImportError();

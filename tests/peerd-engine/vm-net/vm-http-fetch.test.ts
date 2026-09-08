@@ -1,6 +1,6 @@
-// Tests for the SW-side egress orchestration extracted from service-worker.js:
+// Tests for the background egress orchestration:
 // makeVmHttpFetch (the anti-exfil write gate + host-bound git-auth + the
-// revalidating IDB cache) and makeGitCredentialRoutes (token provisioning).
+// revalidating IDB cache) and the shared Git credential route core.
 //
 // This is security-critical glue that previously lived inline in a service
 // worker (un-runnable under bun). The extraction made the IO injectable, so
@@ -11,7 +11,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { makeVmHttpFetch, makeInjectGitAuth, WEB_WRITE_CONFIRM_KEY, MAX_VM_FETCH_BODY } from '../../../extension/peerd-engine/vm-net/vm-http-fetch.js';
-import { makeGitCredentialRoutes } from '../../../extension/peerd-engine/vm-net/git-credential-routes.js';
+import { createGitCredentialRoutes } from '../../../extension/shared/repository-channel.js';
 
 // A minimal Response-like object the factory consumes: it reads .status,
 // .statusText, .ok, .headers (iterable of [k,v]), and .arrayBuffer().
@@ -330,7 +330,7 @@ class FakeLocked extends Error {}
 function buildRoutes(overrides: any = {}) {
   const vault = overrides.vault ?? fakeVault();
   const audit: any[] = [];
-  const routes = makeGitCredentialRoutes({
+  const routes = createGitCredentialRoutes({
     vault,
     isLockedError: (e: any) => e instanceof FakeLocked,
     audit: (e: any) => audit.push(e),
@@ -339,7 +339,7 @@ function buildRoutes(overrides: any = {}) {
   return { routes, vault, audit };
 }
 
-describe('makeGitCredentialRoutes', () => {
+describe('createGitCredentialRoutes', () => {
   test('list returns canonical host NAMES only, sorted, never values', async () => {
     const vault = fakeVault();
     vault.secrets.set('git:github.com', 'tok-a');

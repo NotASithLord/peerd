@@ -29,6 +29,9 @@ const EVENT_META = {
   tool_failed:                { label: 'tool failed',           level: 'danger' },
   tool_confirmed:             { label: 'action confirmed',      level: 'ok' },
   tool_executed:              { label: 'tool ran',              level: 'ok' },
+  semantic_report:            { label: 'semantic call completed', level: 'info' },
+  authority_effect:           { label: 'authority effect',       level: 'info' },
+  authority_effect_failed:    { label: 'authority effect failed', level: 'danger' },
   vault_initialized:          { label: 'vault created',         level: 'ok' },
   vault_unlocked:             { label: 'vault unlocked',        level: 'ok' },
   vault_locked:               { label: 'vault locked',          level: 'info' },
@@ -69,6 +72,50 @@ const EVENT_META = {
   dweb_bridge_join_denied:    { label: 'dweb room join denied',  level: 'warn' },
   dweb_app_install_denied:    { label: 'dweb app install denied', level: 'warn' },
   dweb_peer_muted_by_app:     { label: 'muted a dweb peer',      level: 'info' },
+};
+
+/** The exact host receipt decides authority severity; operation labels are
+ * presentation only and never an allowlist. @param {AuditEntry} entry */
+export const activityEventMeta = (entry) => {
+  if (entry.details?.semantic === true) {
+    if (entry.details.outcomeKnown === false || entry.details.outcome === 'unknown') {
+      return { label: 'semantic call outcome unverified', level: 'danger' };
+    }
+    if (entry.details.outcome === 'performed') {
+      return { label: 'host effect performed', level: 'ok' };
+    }
+    if (entry.details.outcome === 'performed-refused') {
+      return { label: 'host effect partly performed', level: 'warn' };
+    }
+    if (entry.details.outcome === 'refused' || entry.details.outcome === 'semantic-failure') {
+      return { label: 'semantic call failed', level: 'warn' };
+    }
+    if (entry.details.outcome === 'no-op') {
+      return { label: 'semantic call completed; no host effect', level: 'info' };
+    }
+    return { label: 'semantic call completed', level: 'info' };
+  }
+  if (entry.type === 'authority_effect') {
+    if (entry.details?.outcome === 'performed') {
+      return { label: 'authority effect performed', level: 'ok' };
+    }
+    if (entry.details?.outcomeKnown === false || entry.details?.outcome === 'unknown') {
+      return { label: 'authority effect unverified', level: 'danger' };
+    }
+    if (entry.details?.refused === true) {
+      return { label: 'authority effect refused', level: 'warn' };
+    }
+    return { label: 'authority checked; no effect', level: 'info' };
+  }
+  if (entry.type === 'authority_effect_failed') {
+    if (entry.details?.outcomeKnown === true) {
+      return entry.details?.refused === true || entry.details?.outcome === 'not-performed'
+        ? { label: 'authority effect refused', level: 'warn' }
+        : { label: 'authority effect failed', level: 'warn' };
+    }
+    return { label: 'authority effect unverified', level: 'danger' };
+  }
+  return EVENT_META[entry.type] ?? { label: entry.type, level: 'info' };
 };
 
 /** @param {number} [ms] */
@@ -128,6 +175,8 @@ const detailLine = (entry) => {
   // Keep it compact — tool name + the one or two fields that matter.
   const bits = [];
   if (d.tool) bits.push(d.tool);
+  if (d.operation) bits.push(d.operation);
+  if (d.outcome) bits.push(d.outcome);
   // why: hook audit events carry the hook id in details.id — show it the
   // way denylist events show their pattern.
   if (d.id) bits.push(d.id);
@@ -211,7 +260,7 @@ export const ActivityView = {
     // is instant.
     const q = ui.actQuery.trim().toLowerCase();
     const shown = ui.entries.filter((/** @type {AuditEntry} */ e) => {
-      const meta = EVENT_META[e.type] ?? { label: e.type, level: 'info' };
+      const meta = activityEventMeta(e);
       if (ui.actLevel === 'warn' && meta.level !== 'warn' && meta.level !== 'danger') return false;
       if (ui.actLevel === 'ok' && meta.level !== 'ok') return false;
       if (ui.actLevel === 'info' && meta.level !== 'info') return false;
@@ -244,7 +293,7 @@ export const ActivityView = {
       shown.length === 0
         ? m('p.muted', 'Nothing matches the current filter.')
         : m('.log-list', shown.map((/** @type {AuditEntry} */ e) => {
-            const meta = EVENT_META[e.type] ?? { label: e.type, level: 'info' };
+            const meta = activityEventMeta(e);
             const detail = detailLine(e);
             return m('.log-row', { key: e.id }, [
               m(`span.log-dot.log-${meta.level}`),

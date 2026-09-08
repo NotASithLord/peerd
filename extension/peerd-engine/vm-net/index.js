@@ -71,4 +71,3 @@ export { runControlOp } from './control-ops.js';
 // Both are IO-injected factories — the imperative shell the SW used to inline,
 // pulled here so it's bun-testable (a SW can't run under bun).
 export { makeVmHttpFetch, makeInjectGitAuth, WEB_WRITE_CONFIRM_KEY, MAX_VM_FETCH_BODY } from './vm-http-fetch.js';
-export { makeGitCredentialRoutes } from './git-credential-routes.js';

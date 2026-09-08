@@ -6,9 +6,10 @@
 //
 // For each channel, this stages the real packaged tree (reusing packageArtifact's
 // prune + generated manifest/channel-config), then walks every page's static
-// import graph and asserts every target ships. Dynamic import() is intentionally
-// NOT followed: a lazy import of a pruned module is the CORRECT pattern (it's
-// runtime-guarded), which is exactly how the home Lab was fixed.
+// import graph and asserts every target ships. Fixed literal import() and module
+// Worker roots are separately reconciled with the target-aware lazy inventory;
+// only named, channel-gated unavailable roots such as Store's Home Lab may stay
+// outside the selected graph.
 //
 // Run: bun packaging/check-packaged-imports.ts   (also wired into CI + preflight)
 
@@ -21,6 +22,13 @@ import {
   resolveStaticSpecifier,
   staticImportSpecifiers,
 } from './static-module-graph.ts';
+import {
+  PACKAGED_LAZY_ASSET_ENTRIES,
+  packagedLazyModuleEntries,
+  packagedUnavailableRuntimeModuleEdges,
+} from './lazy-entry-manifest.ts';
+import { uninventoriedRuntimeModuleEdges } from './runtime-module-roots.ts';
+import { dwebEnabledForTarget } from './gen-channel-config.ts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = String(JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version);
@@ -41,7 +49,9 @@ const unresolved = async (
   root: string,
 ): Promise<Array<{ spec: string; from: string }>> => {
   const miss: Array<{ spec: string; from: string }> = [];
-  if (!existsSync(entry)) return [{ spec: relative(root, entry), from: '(html entry)' }];
+  if (!existsSync(entry) || !statSync(entry).isFile()) {
+    return [{ spec: relative(root, entry), from: '(html entry)' }];
+  }
   const seen = new Set<string>([entry]);
   const queue: string[] = [entry];
   while (queue.length) {
@@ -50,8 +60,7 @@ const unresolved = async (
     try { src = readFileSync(file, 'utf8'); } catch { continue; }
     for (const spec of await staticImportSpecifiers(src, relative(root, file))) {
       const r = resolveStaticSpecifier(spec, file, root);
-      if (!r) continue;
-      if (!pathIsInside(root, r) || !existsSync(r)) {
+      if (!pathIsInside(root, r) || !existsSync(r) || !statSync(r).isFile()) {
         miss.push({ spec, from: relative(root, file) });
         continue;
       }
@@ -62,7 +71,7 @@ const unresolved = async (
 };
 
 /** Every module entry point that ships: each page's <script src> + the SW. */
-const entryPoints = (root: string): string[] => {
+const entryPoints = (root: string, dweb: boolean, contributor: boolean): string[] => {
   const entries = new Set<string>();
   for (const f of walk(root)) {
     if (!f.endsWith('.html')) continue;
@@ -84,15 +93,18 @@ const entryPoints = (root: string): string[] => {
       for (const s of bg.scripts) if (typeof s === 'string') entries.add(join(root, s));
     }
   } catch { /* no manifest — staging always writes one */ }
-  // Static Worker entry points loaded via `new Worker(getURL('…'))` — a STRING,
-  // so the <script src> / manifest scan above never sees them and their import
-  // graph would be a blind spot. Seed it explicitly so agent-loop.js + the worker
-  // core (which must ship + resolve in the package) get walked. The heap split
-  // uses ONE worker entry for every offscreen loop (reasoning + bound actors).
-  const WORKER_ENTRIES = ['offscreen/actor-worker.js'];
-  for (const w of WORKER_ENTRIES) { const p = join(root, w); if (existsSync(p)) entries.add(p); }
+  // Fixed module Workers and post-vault dynamic imports are not reachable from
+  // the cold static graph by design. Seed the reviewed inventory explicitly;
+  // unlike the old actor-worker special case, missing entries must fail instead
+  // of being silently skipped.
+  for (const lazyEntry of packagedLazyModuleEntries(dweb, contributor)) {
+    entries.add(join(root, lazyEntry));
+  }
   return [...entries];
 };
+
+const missingLazyAssets = (root: string): string[] =>
+  PACKAGED_LAZY_ASSET_ENTRIES.filter((entry) => !existsSync(join(root, entry)));
 
 /**
  * Manifest-declared asset paths that must ship in the pruned tree: icons,
@@ -151,7 +163,10 @@ for (const channel of ['preview', 'store'] as const) {
   for (const browser of ['chrome', 'firefox'] as const) {
     await packageArtifact({ channel, browser, version, sign: false, verify: false });
     const root = join(REPO_ROOT, 'artifacts', 'staging', `${channel}-${browser}`);
-    const entries = entryPoints(root);
+    const dweb = dwebEnabledForTarget(channel, browser);
+    const contributor = channel === 'preview';
+    const runtimeEntries = packagedLazyModuleEntries(dweb, contributor);
+    const entries = entryPoints(root, dweb, contributor);
     let chMiss = 0;
     for (const entry of entries) {
       const miss = await unresolved(entry, root);
@@ -163,12 +178,23 @@ for (const channel of ['preview', 'store'] as const) {
     }
     const assetMiss = missingManifestAssets(root);
     for (const a of assetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] manifest asset missing — ${a}`); }
-    console.log(`[${channel}/${browser}] ${entries.length} entry points · ${chMiss} unresolved import(s) · ${assetMiss.length} missing manifest asset(s)`);
+    const lazyAssetMiss = missingLazyAssets(root);
+    for (const a of lazyAssetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] lazy asset missing: ${a}`); }
+    const runtimeMiss = await uninventoriedRuntimeModuleEdges(
+      root, runtimeEntries, packagedUnavailableRuntimeModuleEdges(channel, browser),
+    );
+    for (const edge of runtimeMiss) {
+      failed = true;
+      console.error(
+        `✗ [${channel}/${browser}] unseeded ${edge.kind}: ${edge.target} (from ${edge.from})`,
+      );
+    }
+    console.log(`[${channel}/${browser}] ${entries.length} entry points · ${chMiss} unresolved import(s) · ${runtimeMiss.length} unseeded runtime root(s) · ${assetMiss.length} missing manifest asset(s) · ${lazyAssetMiss.length} missing lazy asset(s)`);
   }
 }
 
 if (failed) {
-  console.error('\nPACKAGED IMPORT CHECK FAILED — a pruned file is still statically imported; that page will 404 + blank in the packaged build. Lazy-import it (guarded) or stop pruning it for that channel.');
+  console.error('\nPACKAGED IMPORT CHECK FAILED: a shipped static or fixed runtime module graph is incomplete for its target.');
   process.exit(1);
 }
-console.log('packaged import check OK — every page\'s static import graph resolves in all channel×browser builds.');
+console.log('packaged import check OK: every page\'s static import graph resolves in all channel×browser builds.');

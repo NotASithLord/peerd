@@ -37,6 +37,28 @@ describe('driven popup network guard', () => {
     ]);
   });
 
+  test('the event receipt remains pending until child custody and resume settle', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const guard = makeDrivenPopupGuard({
+      sourceState: () => 'driven',
+      neutralize: async () => {},
+      adoptFromSource: async () => { await gate; return { ok: true, adopted: true }; },
+      classifyTarget: () => ({ allowed: true }),
+      resume: async () => {},
+    });
+    const receipt = guard.onNavigationTarget({
+      sourceTabId: 7, tabId: 9, url: 'https://example.com/popup',
+    });
+    let settled = false;
+    void receipt?.then(() => { settled = true; });
+    await tick();
+    expect(settled).toBe(false);
+    release();
+    await receipt;
+    expect(settled).toBe(true);
+  });
+
   test('never changes a child of a positively user-owned source', async () => {
     const events: string[] = [];
     const guard = makeDrivenPopupGuard({
@@ -280,5 +302,57 @@ describe('driven popup network guard', () => {
     guard.onCreated({ id: 9, openerTabId: 7, url: 'about:blank' });
     await tick();
     expect(events).toEqual(['blank', 'guard', 'resume:https://example.com/early']);
+  });
+
+  test('does not blank a reused tab after the original protected close rejects', async () => {
+    const events: string[] = [];
+    let rejectClose!: (cause: Error) => void;
+    const closeGate = new Promise<void>((_resolve, reject) => { rejectClose = reject; });
+    let source: 'driven'|'user' = 'driven';
+    const guard = makeDrivenPopupGuard({
+      sourceState: () => source,
+      neutralize: async () => { events.push('blank'); },
+      close: async () => { events.push('close'); await closeGate; },
+      adoptFromSource: async () => ({ ok: true, adopted: true }),
+      classifyTarget: () => ({ allowed: false, reason: 'private_network' }),
+      resume: async () => {},
+    });
+    const original = guard.onNavigationTarget({
+      sourceTabId: 7, tabId: 9, url: 'http://127.0.0.1/',
+    });
+    await tick();
+    expect(events).toEqual(['blank', 'close']);
+    guard.onRemoved(9);
+    source = 'user';
+    guard.onNavigationTarget({ sourceTabId: 8, tabId: 9, url: 'https://user.example/' });
+    rejectClose(new Error('old tab gone'));
+    await original;
+    expect(events).toEqual(['blank', 'close']);
+  });
+
+  test('does not contain a reused tab after the original resume rejects', async () => {
+    const events: string[] = [];
+    let rejectResume!: (cause: Error) => void;
+    const resumeGate = new Promise<void>((_resolve, reject) => { rejectResume = reject; });
+    let source: 'driven'|'user' = 'driven';
+    const guard = makeDrivenPopupGuard({
+      sourceState: () => source,
+      neutralize: async () => { events.push('blank'); },
+      close: async () => { events.push('close'); },
+      adoptFromSource: async () => ({ ok: true, adopted: true }),
+      classifyTarget: () => ({ allowed: true }),
+      resume: async () => { events.push('resume'); await resumeGate; },
+    });
+    const original = guard.onNavigationTarget({
+      sourceTabId: 7, tabId: 9, url: 'https://public.example/',
+    });
+    await tick();
+    expect(events).toEqual(['blank', 'resume']);
+    guard.onRemoved(9);
+    source = 'user';
+    guard.onNavigationTarget({ sourceTabId: 8, tabId: 9, url: 'https://user.example/' });
+    rejectResume(new Error('old tab gone'));
+    await original;
+    expect(events).toEqual(['blank', 'resume']);
   });
 });

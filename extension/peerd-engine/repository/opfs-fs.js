@@ -175,8 +175,11 @@ export const createOpfsGitFs = ({ getRoot = () => navigator.storage.getDirectory
         const { parent, leaf } = await parentAndLeaf(await root(), path);
         await parent.removeEntry(leaf, { recursive: options?.recursive === true });
       } catch (error) {
-        if (options?.force && (/** @type {{ code?: string }} */ (error)).code === 'ENOENT') return;
-        throw error;
+        const normalized = typeof /** @type {{code?:unknown}} */ (error)?.code === 'string'
+          ? error : mapDomError(error, path);
+        if (options?.force
+            && (/** @type {{ code?: string }} */ (normalized)).code === 'ENOENT') return;
+        throw normalized;
       }
     },
     stat,

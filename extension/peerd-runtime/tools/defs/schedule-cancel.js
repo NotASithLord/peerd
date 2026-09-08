@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // schedule_cancel — remove a background Routine by id (loop/scheduler.js
 // singleton, via ctx.scheduleRemove). sideEffect 'write' so it rides the same
 // gate chain as scheduling; no web origin is touched (origins → []).
@@ -9,30 +11,18 @@
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'schedule', execute: (args: any, ctx: ToolContext) => Promise<ScheduleToolResult> }} ScheduleTool */
 
 /** @type {ScheduleTool} */
-export const scheduleCancelTool = {
-  name: 'schedule_cancel',
-  primitive: 'schedule',
-  description: 'Remove a background routine by its id (from schedule_list). The routine stops firing immediately.',
-  schema: {
-    type: 'object',
-    properties: {
-      id: { type: 'string', description: 'The routine id to remove (from schedule_list).' },
-    },
-    required: ['id'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const scheduleCancelTool = composeTool("schedule_cancel", {
 
   execute: async (args, ctx) => {
-    const scheduleRemove = /** @type {((id: string) => boolean) | undefined} */ (
-      /** @type {{ scheduleRemove?: unknown }} */ (ctx).scheduleRemove);
-    if (typeof scheduleRemove !== 'function') {
+    const authority = /** @type {{ cancelRoutine?:(id:string)=>Promise<boolean> }|undefined} */ (
+      /** @type {{ scheduleAuthority?: unknown }} */ (ctx).scheduleAuthority);
+    if (typeof authority?.cancelRoutine !== 'function') {
       return { ok: false, error: 'schedule_unavailable', content: 'Background scheduling is not available in this context.' };
     }
     if (typeof args?.id !== 'string' || !args.id) return { ok: false, error: 'id_required' };
-    const removed = scheduleRemove(args.id);
+    const removed = await authority.cancelRoutine(args.id);
     return removed
       ? { ok: true, content: `Removed routine ${args.id}.` }
       : { ok: false, error: 'not_found', content: `No routine with id ${args.id}.` };
   },
-};
+});

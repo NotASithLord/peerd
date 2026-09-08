@@ -1,11 +1,9 @@
 // @ts-check
 // Skills view — list / install / remove progressive-disclosure skills.
 //
-// Minimal management surface for feature 07. Local install pastes a
-// SKILL.md directly. The remote sources (git URL, static manifest URL)
-// are gated behind REMOTE_SKILL_INSTALL (off for store V1 — see
-// docs/store/OPEN-DECISIONS.md); when off, only the paste source shows
-// and the tab bar is hidden. The list shows each installed skill's name,
+// Minimal management surface for feature 07. Install pastes a SKILL.md
+// directly; remote instruction fetch is intentionally not a product surface.
+// The list shows each installed skill's name,
 // one-line description, source badge, size, and an enable toggle + remove
 // button — including skills installed earlier from a remote source, which
 // keep working.
@@ -18,7 +16,7 @@
 // line; no animation, so prefers-reduced-motion is moot here.
 
 import m from '/vendor/mithril/mithril.js';
-import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 
 /**
  * One installed skill's metadata from `skills/list`.
@@ -37,10 +35,7 @@ import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
  * Component-local state for SkillsView.
  * @typedef {Object} SkillsState
  * @property {SkillMeta[]|null} skills
- * @property {'local'|'git'|'manifest'} tab
  * @property {string} localText
- * @property {string} gitUrl
- * @property {string} manifestUrl
  * @property {boolean} busy
  * @property {{ ok: boolean, text: string }|null} status
  */
@@ -48,14 +43,21 @@ import { REMOTE_SKILL_INSTALL } from '/shared/flags.js';
 /** @typedef {(msg: object) => Promise<any>} Send */
 /** @typedef {{ state: SkillsState, attrs: { send: Send } }} SkillsVnode */
 
+/** @param {SkillsVnode} vnode @param {object} message */
+const settleMutationAndRefresh = (vnode, message) => {
+  const effect = vnode.attrs.send(message);
+  settleUiEffect(effect);
+  void effect.then(
+    () => SkillsView.refresh(vnode),
+    () => SkillsView.refresh(vnode),
+  ).catch(() => {});
+};
+
 export const SkillsView = {
   /** @param {SkillsVnode} vnode */
   oninit(vnode) {
     vnode.state.skills = null;          // null = loading; [] = none
-    vnode.state.tab = 'local';          // 'local' | 'git' | 'manifest'
     vnode.state.localText = '';
-    vnode.state.gitUrl = '';
-    vnode.state.manifestUrl = '';
     vnode.state.busy = false;
     vnode.state.status = null;          // { ok, text }
     SkillsView.refresh(vnode);
@@ -71,28 +73,15 @@ export const SkillsView = {
 
   /**
    * @param {SkillsVnode} vnode
-   * @param {'local'|'git'|'manifest'} type
    */
-  install(vnode, type) {
+  install(vnode) {
     const ui = vnode.state;
     ui.busy = true; ui.status = null;
-    /** @type {object} */
-    let msg;
-    if (type === 'local') msg = { type: 'skills/installLocal', text: ui.localText };
-    else if (type === 'git') msg = { type: 'skills/installGit', url: ui.gitUrl.trim() };
-    else msg = { type: 'skills/installManifest', url: ui.manifestUrl.trim() };
-
-    vnode.attrs.send(msg).then((r) => {
+    vnode.attrs.send({ type: 'skills/installLocal', text: ui.localText }).then((r) => {
       ui.busy = false;
       if (r?.ok) {
-        if (type === 'manifest') {
-          const n = r.installed?.length ?? 0;
-          const f = r.failed?.length ?? 0;
-          ui.status = { ok: true, text: `Installed ${n} skill(s)${f ? `, ${f} failed` : ''}.` };
-        } else {
-          ui.status = { ok: true, text: `Installed “${r.skill?.name}”.` };
-          if (type === 'local') ui.localText = '';
-        }
+        ui.status = { ok: true, text: `Installed “${r.skill?.name}”.` };
+        ui.localText = '';
         SkillsView.refresh(vnode);
       } else {
         ui.status = { ok: false, text: r?.detail || r?.error || 'Install failed.' };
@@ -111,9 +100,7 @@ export const SkillsView = {
    * @param {boolean} enabled
    */
   toggle(vnode, name, enabled) {
-    vnode.attrs.send({ type: 'skills/setEnabled', name, enabled }).then(() => {
-      SkillsView.refresh(vnode);
-    });
+    settleMutationAndRefresh(vnode, { type: 'skills/setEnabled', name, enabled });
   },
 
   /**
@@ -121,9 +108,7 @@ export const SkillsView = {
    * @param {string} name
    */
   remove(vnode, name) {
-    vnode.attrs.send({ type: 'skills/remove', name }).then(() => {
-      SkillsView.refresh(vnode);
-    });
+    settleMutationAndRefresh(vnode, { type: 'skills/remove', name });
   },
 
   /** @param {SkillsVnode} vnode */
@@ -139,20 +124,7 @@ export const SkillsView = {
 
       // --- install panel ---
       m('.skills-install', { style: 'border:1px solid var(--border,#333); border-radius:8px; padding:10px; margin-bottom:14px;' }, [
-        // Remote sources (git/manifest) are gated for store V1; with only
-        // the paste source live, the tab bar is noise — hide it entirely.
-        REMOTE_SKILL_INSTALL
-          ? m('.skills-tabs', { role: 'tablist', style: 'display:flex; gap:6px; margin-bottom:8px;' },
-              /** @type {Array<'local'|'git'|'manifest'>} */ (['local', 'git', 'manifest']).map((t) => m('button', {
-                role: 'tab',
-                'aria-selected': ui.tab === t ? 'true' : 'false',
-                class: ui.tab === t ? 'active' : '',
-                style: `flex:1; padding:4px; ${ui.tab === t ? 'font-weight:600;' : 'opacity:.6;'}`,
-                onclick: () => { ui.tab = t; ui.status = null; },
-              }, t === 'local' ? 'Paste' : t === 'git' ? 'Git URL' : 'Manifest')))
-          : null,
-
-        ui.tab === 'local' ? m('label', { style: 'display:block;' }, [
+        m('label', { style: 'display:block;' }, [
           m('span.sr-only', 'SKILL.md text'),
           m('textarea', {
             'aria-label': 'SKILL.md text',
@@ -162,30 +134,12 @@ export const SkillsView = {
             value: ui.localText,
             oninput: (/** @type {Event} */ e) => { ui.localText = /** @type {HTMLTextAreaElement} */ (e.target).value; },
           }),
-        ]) : null,
-
-        ui.tab === 'git' ? m('input', {
-          type: 'url',
-          'aria-label': 'Git URL to a SKILL.md',
-          placeholder: 'https://github.com/user/repo/.../SKILL.md',
-          style: 'width:100%;',
-          value: ui.gitUrl,
-          oninput: (/** @type {Event} */ e) => { ui.gitUrl = /** @type {HTMLInputElement} */ (e.target).value; },
-        }) : null,
-
-        ui.tab === 'manifest' ? m('input', {
-          type: 'url',
-          'aria-label': 'Static manifest URL',
-          placeholder: 'https://example.com/skills.json',
-          style: 'width:100%;',
-          value: ui.manifestUrl,
-          oninput: (/** @type {Event} */ e) => { ui.manifestUrl = /** @type {HTMLInputElement} */ (e.target).value; },
-        }) : null,
+        ]),
 
         m('button', {
           style: 'margin-top:8px;',
           disabled: ui.busy,
-          onclick: () => SkillsView.install(vnode, ui.tab),
+          onclick: () => SkillsView.install(vnode),
         }, ui.busy ? 'Installing…' : 'Install'),
 
         ui.status ? m('.skills-status', {

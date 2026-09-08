@@ -36,16 +36,16 @@ const toolUseFor = (messages, toolUseId) => {
   return null;
 };
 
-/** @param {any[]} messages @param {unknown} grantedTools */
-const latestActivity = (messages, grantedTools) => {
-  const allowed = new Set(Array.isArray(grantedTools)
-    ? grantedTools.filter((tool) => typeof tool === 'string') : []);
+/** @param {any[]} messages @param {unknown} visibleTools */
+const latestActivity = (messages, visibleTools) => {
+  const allowed = new Set(Array.isArray(visibleTools)
+    ? visibleTools.filter((tool) => typeof tool === 'string') : []);
   const rows = Array.isArray(messages) ? messages : [];
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const uses = Array.isArray(rows[index]?.toolUses) ? rows[index].toolUses : [];
     const tool = uses[uses.length - 1];
     // A model can request any string. Show it as activity only when it was in
-    // the server-resolved grant advertised to that worker.
+    // the host-projected semantic surface advertised to that worker.
     if (typeof tool?.name === 'string' && allowed.has(tool.name)) {
       return `Requested ${tool.name.replaceAll('_', ' ')}…`;
     }
@@ -54,8 +54,8 @@ const latestActivity = (messages, grantedTools) => {
 };
 
 /** @param {unknown} tools */
-const exactGrants = (tools) => {
-  if (!Array.isArray(tools)) return 'authority loading';
+const toolsShown = (tools) => {
+  if (!Array.isArray(tools)) return 'model surface loading';
   if (tools.length === 0) return 'reasoning only';
   return tools
     .filter((tool) => typeof tool === 'string')
@@ -65,14 +65,14 @@ const exactGrants = (tools) => {
 const CAPABILITY_LABELS = /** @type {Readonly<Record<string, string>>} */ (Object.freeze({
   actor_create: 'spawn subactors', actor_list: 'list actors', message_actor: 'delegate',
   fetch_url: 'fetch URL', navigate: 'navigate', read_page: 'read page',
-  click: 'click page', type: 'type on page', page_keys: 'send page keys',
+  click: 'click page', type: 'type on page',
   page_code: 'run page code', site_client_run: 'use site client',
   script: 'run local code',
 }));
 
 /** @param {unknown} tools */
 const capabilitySummary = (tools) => {
-  if (!Array.isArray(tools)) return 'authority loading';
+  if (!Array.isArray(tools)) return 'model surface loading';
   if (tools.length === 0) return 'reasoning only';
   return tools
     .filter((tool) => typeof tool === 'string')
@@ -189,10 +189,10 @@ export const buildActorFabric = ({ rootSession, actors = {}, spawned = {}, async
       name: compact(session.task ?? taskRow?.task?.task ?? 'Temporary task'),
       status: live ? (taskRow?.task?.status === 'done' ? 'finishing' : 'working') : 'handed-off',
       activity: live
-        ? latestActivity(session.messages, session.grantedTools ?? taskRow?.task?.grantedTools)
+        ? latestActivity(session.messages, session.visibleTools ?? taskRow?.task?.visibleTools)
         : 'Its child is still working…',
-      scope: capabilitySummary(session.grantedTools ?? taskRow?.task?.grantedTools),
-      access: exactGrants(session.grantedTools ?? taskRow?.task?.grantedTools),
+      scope: capabilitySummary(session.visibleTools ?? taskRow?.task?.visibleTools),
+      access: toolsShown(session.visibleTools ?? taskRow?.task?.visibleTools),
       boundaryChip: live ? 'separate worker' : 'lineage only',
       boundary: live
         ? 'Dedicated keyless worker. Its separate transcript persists; only a fenced reply enters the parent context.'
@@ -220,8 +220,8 @@ export const buildActorFabric = ({ rootSession, actors = {}, spawned = {}, async
       name: compact(task.task ?? 'Temporary task'),
       status: task.status === 'done' ? 'finishing' : 'working',
       activity: task.status === 'done' ? 'Preparing its reply…' : 'Starting its separate worker…',
-      scope: capabilitySummary(task.grantedTools),
-      access: exactGrants(task.grantedTools),
+      scope: capabilitySummary(task.visibleTools),
+      access: toolsShown(task.visibleTools),
       boundaryChip: 'separate worker',
       boundary: 'Dedicated keyless worker. Its separate transcript persists; only a fenced reply enters the parent context.',
       cost: null,
@@ -254,9 +254,9 @@ export const buildActorFabric = ({ rootSession, actors = {}, spawned = {}, async
       label: integration ? 'integration actor' : `${kindName(kind)} actor`,
       name: compact(task || fallbackName),
       status: 'working',
-      activity: latestActivity(card.messages, card.grantedTools),
-      scope: boundGrant(kind, instanceId, capabilitySummary(card.grantedTools)),
-      access: boundGrant(kind, instanceId, exactGrants(card.grantedTools)),
+      activity: latestActivity(card.messages, card.visibleTools),
+      scope: boundGrant(kind, instanceId, capabilitySummary(card.visibleTools)),
+      access: boundGrant(kind, instanceId, toolsShown(card.visibleTools)),
       boundaryChip: 'separate worker',
       boundary: 'Dedicated keyless worker with no key or extension APIs. Its transcript stays outside the main model context; only a fenced reply enters.',
       cost: typeof card.cost?.cost === 'number' ? card.cost.cost : null,
@@ -294,8 +294,8 @@ export const buildActorFabric = ({ rootSession, actors = {}, spawned = {}, async
     name: 'Coordinates work; actor memory stays separate.',
     status: 'working',
     activity: activeActors === 1 ? 'Coordinating one isolated actor…' : `Coordinating ${activeActors} isolated actors…`,
-    scope: 'holds chat authority',
-    access: 'chat authority',
+    scope: 'coordinates the chat',
+    access: 'orchestrator model surface',
     boundaryChip: 'main context',
     boundary: 'The main agent holds chat authority. Actor transcripts stay outside its model context; only fenced replies enter.',
     cost: null,

@@ -3,7 +3,7 @@
 // driver. Live service-worker wiring is covered by the packaged Firefox smoke.
 
 import { describe, it, expect } from '../../framework.js';
-import { createSessionStore, makeTurnDriver } from '/peerd-runtime/index.js';
+import { createSessionStore, makeTurnAuthorityDriver } from '/peerd-runtime/index.js';
 import { makeMockIdb } from '../../mocks/idb.js';
 
 /** @param {any} value */
@@ -38,7 +38,7 @@ describe('bound actor background-heap refusal', () => {
       ollamaHost: '',
       dwebEnabled: false,
     };
-    const driver = makeTurnDriver({
+    const driver = makeTurnAuthorityDriver({
       vault: { isLocked: () => false },
       sessionCache: {
         /** @param {string} key */
@@ -46,7 +46,6 @@ describe('bound actor background-heap refusal', () => {
         sessionSet: async () => {},
       },
       sessions,
-      sessionState: { set: () => {} },
       turnSlots: {
         claim: () => ({ controller: new AbortController(), release: () => { releases++; } }),
         isBusy: () => false,
@@ -101,8 +100,6 @@ describe('bound actor background-heap refusal', () => {
       trimEnricher: { queue: () => {}, drain: async () => {} },
       contextWindowFor: () => null,
       liveContextWindow: () => null,
-      currentAppScope: async () => null,
-      checkpointMgr: { capture: async () => {} },
       detectInterruptedTurn: () => ({ resumable: false }),
     });
 

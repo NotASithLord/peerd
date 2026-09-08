@@ -309,6 +309,20 @@ describe('topic sync (late-join backfill)', () => {
     close([pa, pb]);
   });
 
+  test('publish retains its own topic without a separate retain call', async () => {
+    const [peer] = await clique(1);
+    const sync = createTopicSync({
+      mesh: peer.mesh, gossip: peer.gossip, store: createMemoryTopicStore(),
+    });
+
+    await sync.publish('feed', { post: 'kept by publish' });
+
+    expect(sync.history('feed').map((entry: any) => entry.body.data.post))
+      .toEqual(['kept by publish']);
+    sync.close();
+    close([peer]);
+  });
+
   test('sync is symmetric: a rejoiner pushes its offline posts forward', async () => {
     // d wrote a post while disconnected; on link-up, the ROOM backfills d's
     // post because d's side answers the other peer's SYNC_REQ.

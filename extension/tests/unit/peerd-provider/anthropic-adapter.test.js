@@ -60,6 +60,14 @@ const okStreamingResponse = (events = []) => {
   }));
 };
 
+/** @param {()=>Promise<Response>} openInference */
+const modelEgress = (openInference) => ({
+  openInference,
+  readModelInventory: async () => new Response(null, { status: 404 }),
+  readModelContext: async () => new Response(null, { status: 404 }),
+  async *generateLocal() {},
+});
+
 /**
  * @param {Partial<CallAnthropicArgs>} [overrides]
  * @returns {CallAnthropicArgs}
@@ -68,9 +76,7 @@ const baseArgs = (overrides = {}) => ({
   /** @type {InternalMessage[]} */
   messages: [{ role: 'user', content: 'hi', id: 'u', when: 0 }],
   system: 'sys',
-  getSecret: async () => 'sk-test',
-  // Tests pass their own safeFetch via overrides.
-  safeFetch: async () => { throw new Error('safeFetch not set'); },
+  modelEgress: modelEgress(async () => { throw new Error('model egress not set'); }),
   _sleep: async () => {},  // no-op so tests run instantly
   ...overrides,
 });
@@ -95,7 +101,7 @@ describe('callAnthropic — transient-status retry path', () => {
         { event: 'message_stop', data: { type: 'message_stop' } },
       ]);
     };
-    const events = await drain(callAnthropic(baseArgs({ safeFetch })));
+    const events = await drain(callAnthropic(baseArgs({ modelEgress: modelEgress(safeFetch) })));
     expect(calls).toBe(2);
     expect(events[0].type).toBe('rate-limit-pause');
     const pause = /** @type {RateLimitPause} */ (events[0]);
@@ -110,7 +116,7 @@ describe('callAnthropic — transient-status retry path', () => {
       if (calls === 1) return stubResponse(529, { 'retry-after': '0' });
       return okStreamingResponse();
     };
-    const events = await drain(callAnthropic(baseArgs({ safeFetch })));
+    const events = await drain(callAnthropic(baseArgs({ modelEgress: modelEgress(safeFetch) })));
     expect(calls).toBe(2);
     expect(events[0].type).toBe('rate-limit-pause');
   });
@@ -123,7 +129,7 @@ describe('callAnthropic — transient-status retry path', () => {
         if (calls === 1) return stubResponse(status, {}, '{"error":{"type":"api_error"}}');
         return okStreamingResponse();
       };
-      const events = await drain(callAnthropic(baseArgs({ safeFetch })));
+      const events = await drain(callAnthropic(baseArgs({ modelEgress: modelEgress(safeFetch) })));
       expect(calls).toBe(2);
       // No rate-limit headers on a 500 — falls through to the
       // exponential default (2s on attempt 1).
@@ -141,7 +147,7 @@ describe('callAnthropic — transient-status retry path', () => {
       };
       /** @type {unknown} */
       let thrown;
-      try { await drain(callAnthropic(baseArgs({ safeFetch }))); }
+      try { await drain(callAnthropic(baseArgs({ modelEgress: modelEgress(safeFetch) }))); }
       catch (e) { thrown = e; }
       expect(calls).toBe(1);
       expect(thrown instanceof ProviderHttpError).toBe(true);
@@ -160,7 +166,7 @@ describe('callAnthropic — transient-status retry path', () => {
     /** @type {unknown} */
     let thrown;
     try {
-      for await (const ev of callAnthropic(baseArgs({ safeFetch }))) {
+      for await (const ev of callAnthropic(baseArgs({ modelEgress: modelEgress(safeFetch) }))) {
         events.push(ev);
       }
     } catch (e) { thrown = e; }
@@ -178,7 +184,7 @@ describe('callAnthropic — transient-status retry path', () => {
       if (calls <= 2) return stubResponse(429, { 'retry-after': '0' });
       return okStreamingResponse();
     };
-    const events = await drain(callAnthropic(baseArgs({ safeFetch })));
+    const events = await drain(callAnthropic(baseArgs({ modelEgress: modelEgress(safeFetch) })));
     const pauses = /** @type {RateLimitPause[]} */ (
       events.filter(e => e.type === 'rate-limit-pause'));
     expect(pauses.length).toBe(2);
@@ -211,7 +217,7 @@ describe('callAnthropic — transient-status retry path', () => {
     let thrown;
     try {
       await drain(callAnthropic(baseArgs({
-        safeFetch, _sleep, signal: ctrl.signal,
+        modelEgress: modelEgress(safeFetch), _sleep, signal: ctrl.signal,
       })));
     } catch (e) { thrown = /** @type {{ name?: string }} */ (e); }
     expect(calls).toBe(1);

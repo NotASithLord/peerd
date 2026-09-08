@@ -1,7 +1,7 @@
-// Connection-drop retry — decision table + retrying fetch wrapper.
+// Connection-drop retry decision table and named initial-response effect.
 //
 // Owner request: "bake in model retries if a connection drops when you
-// try to send a message, just 3 times max" — read conservatively as
+// try to send a message, just 3 times max", read conservatively as
 // 3 TOTAL attempts (initial + up to 2 retries). These tests pin that
 // reading, the retry-only-on-TypeError rule, and every deliberate
 // non-retry case (user abort, connect timeout, HTTP responses). All
@@ -12,10 +12,11 @@ import {
   MAX_CONNECT_ATTEMPTS,
   CONNECT_RETRY_BACKOFF_MS,
   decideConnectRetry,
-  fetchInitialResponseWithRetry,
+  openInitialResponseWithRetry,
   abortableSleep,
 } from '../../extension/peerd-provider/connect-timeout.js';
 import { callOpenRouter } from '../../extension/peerd-provider/adapters/openrouter.js';
+import { makeModelEgress } from './model-egress-fixture';
 
 const networkError = () => new TypeError('Failed to fetch');
 const abortError = () => new DOMException('Aborted', 'AbortError');
@@ -30,6 +31,12 @@ describe('decideConnectRetry — decision table', () => {
       .toEqual({ retry: true, waitMs: 500 });
     expect(decideConnectRetry({ error: networkError(), attempt: 2 }))
       .toEqual({ retry: true, waitMs: 1500 });
+  });
+
+  test('retries the exact network failure projected by model authority', () => {
+    const error = Object.assign(new Error('connection failed'), { code: 'model-egress-connect-failed' });
+    expect(decideConnectRetry({ error, attempt: 1 }))
+      .toEqual({ retry: true, waitMs: 500 });
   });
 
   test('"just 3 times max" = 3 TOTAL attempts: no retry after the third try', () => {
@@ -77,16 +84,16 @@ describe('decideConnectRetry — decision table', () => {
   });
 });
 
-describe('fetchInitialResponseWithRetry', () => {
+describe('openInitialResponseWithRetry', () => {
   test('recovers when the connection drop heals: 2 failures → success on attempt 3', async () => {
     const waits: number[] = [];
     let calls = 0;
-    const fetchFn = (async () => {
+    const openResponse = async () => {
       calls++;
       if (calls < 3) throw networkError();
       return new Response('ok');
-    }) as any;
-    const res = await fetchInitialResponseWithRetry(fetchFn, 'https://x', {}, {
+    };
+    const res = await openInitialResponseWithRetry(openResponse, {
       timeoutMs: 1000, onTimeout, sleepFn: recordingSleep(waits),
     });
     expect(await res.text()).toBe('ok');
@@ -97,10 +104,10 @@ describe('fetchInitialResponseWithRetry', () => {
   test('a dead connection surfaces the original TypeError after exactly 3 attempts', async () => {
     const waits: number[] = [];
     let calls = 0;
-    const fetchFn = (async () => { calls++; throw networkError(); }) as any;
+    const openResponse = async () => { calls++; throw networkError(); };
     let thrown: any;
     try {
-      await fetchInitialResponseWithRetry(fetchFn, 'https://x', {}, {
+      await openInitialResponseWithRetry(openResponse, {
         timeoutMs: 1000, onTimeout, sleepFn: recordingSleep(waits),
       });
     } catch (e) { thrown = e; }
@@ -112,10 +119,10 @@ describe('fetchInitialResponseWithRetry', () => {
   test('a user abort is NOT retried — rethrown after a single attempt', async () => {
     const waits: number[] = [];
     let calls = 0;
-    const fetchFn = (async () => { calls++; throw abortError(); }) as any;
+    const openResponse = async () => { calls++; throw abortError(); };
     let thrown: any;
     try {
-      await fetchInitialResponseWithRetry(fetchFn, 'https://x', {}, {
+      await openInitialResponseWithRetry(openResponse, {
         timeoutMs: 1000, onTimeout, sleepFn: recordingSleep(waits),
       });
     } catch (e) { thrown = e; }
@@ -128,10 +135,10 @@ describe('fetchInitialResponseWithRetry', () => {
     const stop = new AbortController();
     stop.abort();
     let calls = 0;
-    const fetchFn = (async () => { calls++; return new Response('ok'); }) as any;
+    const openResponse = async () => { calls++; return new Response('ok'); };
     let thrown: any;
     try {
-      await fetchInitialResponseWithRetry(fetchFn, 'https://x', {}, {
+      await openInitialResponseWithRetry(openResponse, {
         stopSignal: stop.signal, timeoutMs: 1000, onTimeout, sleepFn: recordingSleep([]),
       });
     } catch (e) { thrown = e; }
@@ -142,14 +149,14 @@ describe('fetchInitialResponseWithRetry', () => {
   test('a Stop during the backoff sleep unwinds immediately — no further attempt', async () => {
     const stop = new AbortController();
     let calls = 0;
-    const fetchFn = (async () => { calls++; throw networkError(); }) as any;
+    const openResponse = async () => { calls++; throw networkError(); };
     // Real abortableSleep + a Stop fired while the 500ms backoff is pending.
     // why a macrotask (not queueMicrotask): the abort must land DURING the
     // sleep — a microtask would fire while the fetch rejection is still
     // propagating, exercising the stop-aborted guard instead (which rethrows
     // the original error rather than retrying; also correct, but not this
     // test's subject).
-    const p = fetchInitialResponseWithRetry(fetchFn, 'https://x', {}, {
+    const p = openInitialResponseWithRetry(openResponse, {
       stopSignal: stop.signal, timeoutMs: 1000, onTimeout,
     });
     setTimeout(() => stop.abort(), 5);
@@ -161,8 +168,8 @@ describe('fetchInitialResponseWithRetry', () => {
 
   test('HTTP error responses are returned, not retried (status logic lives in the adapters)', async () => {
     let calls = 0;
-    const fetchFn = (async () => { calls++; return new Response('overloaded', { status: 529 }); }) as any;
-    const res = await fetchInitialResponseWithRetry(fetchFn, 'https://x', {}, {
+    const openResponse = async () => { calls++; return new Response('overloaded', { status: 529 }); };
+    const res = await openInitialResponseWithRetry(openResponse, {
       timeoutMs: 1000, onTimeout, sleepFn: recordingSleep([]),
     });
     expect(calls).toBe(1);
@@ -172,13 +179,13 @@ describe('fetchInitialResponseWithRetry', () => {
   test('a connect TIMEOUT is not retried — it already burned its full waiting budget', async () => {
     let calls = 0;
     // Hangs until the connect timer aborts it.
-    const fetchFn = ((_url: any, init: any) => new Promise((_res, rej) => {
+    const openResponse = ((signal: AbortSignal) => new Promise((_res, rej) => {
       calls++;
-      init.signal.addEventListener('abort', () => rej(abortError()));
+      signal.addEventListener('abort', () => rej(abortError()));
     })) as any;
     let thrown: any;
     try {
-      await fetchInitialResponseWithRetry(fetchFn, 'https://x', {}, {
+      await openInitialResponseWithRetry(openResponse, {
         timeoutMs: 10, onTimeout, sleepFn: recordingSleep([]),
       });
     } catch (e) { thrown = e; }
@@ -224,7 +231,7 @@ describe('callOpenRouter — connection-drop wiring', () => {
 
   test('recovers from a single dropped connection', async () => {
     let calls = 0;
-    const safeFetch = async () => {
+    const openInference = async () => {
       calls++;
       if (calls === 1) throw networkError();
       return okStreamingResponse();
@@ -233,8 +240,7 @@ describe('callOpenRouter — connection-drop wiring', () => {
     for await (const ev of callOpenRouter({
       messages: [{ role: 'user', content: 'hi', id: 'u', when: 0 }],
       system: 'sys',
-      getSecret: async () => 'sk-or',
-      safeFetch,
+      modelEgress: makeModelEgress({ openInference }),
       _sleep: async () => {},
     } as any)) events.push(ev);
     expect(calls).toBe(2);
@@ -243,14 +249,13 @@ describe('callOpenRouter — connection-drop wiring', () => {
 
   test('persistent drop surfaces the TypeError after 3 total attempts', async () => {
     let calls = 0;
-    const safeFetch = async () => { calls++; throw networkError(); };
+    const openInference = async () => { calls++; throw networkError(); };
     let thrown: any;
     try {
       for await (const _ of callOpenRouter({
         messages: [{ role: 'user', content: 'hi', id: 'u', when: 0 }],
         system: 'sys',
-        getSecret: async () => 'sk-or',
-        safeFetch,
+        modelEgress: makeModelEgress({ openInference }),
         _sleep: async () => {},
       } as any)) { /* drain */ }
     } catch (e) { thrown = e; }

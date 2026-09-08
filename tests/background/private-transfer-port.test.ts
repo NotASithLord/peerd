@@ -3,6 +3,9 @@ import {
   makePrivateTransferOpenRoute, makePrivateTransferPort,
 } from '../../extension/background/private-transfer-port.js';
 import { makePrivateTransferClient } from '../../extension/options/private-transfer-client.js';
+import {
+  applyImport, encryptWithPassphrase, EXPORT_FORMAT, EXPORT_VERSION,
+} from '/peerd-runtime/transfer/transfer.js';
 
 describe('private transfer MessageChannel', () => {
   test('offers a channel only to the exact requesting options WindowClient', async () => {
@@ -107,6 +110,74 @@ describe('private transfer MessageChannel', () => {
     await expect(client.call({ type: 'transfer/export' })).resolves.toEqual({ ok: true });
     await expect(client.call({ type: 'transfer/export' })).resolves.toEqual({ ok: true });
     expect(offers).toBe(2);
+  });
+
+  test('gives multi-stage transfer operations one end-to-end deadline', async () => {
+    let commits = 0;
+    let secrets = 0;
+    const encryptedSecrets = await encryptWithPassphrase(
+      'backup-passphrase', { 'provider:test': 'secret' },
+    );
+    const record = {
+      format: 'peerd-identity-record', version: 1, did: 'did:key:zIncoming',
+      capsule: 'AAAA', wrappers: [{ kind: 'passphrase', wrappedKey: 'BBBB' }], updatedAt: 1,
+    };
+    const server = makePrivateTransferPort({
+      authorization: Symbol('transfer'),
+      handlers: {
+        'transfer/export': async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return { ok: true };
+        },
+        'transfer/inspectImport': async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return { ok: true };
+        },
+        'transfer/import': (message) => applyImport({
+          ...message, channel: 'preview', knownSettingKeys: [],
+          io: {
+            applySettings: async () => {}, setProviderEndpoints: async () => {},
+            setSecret: async () => { secrets += 1; },
+            importMemory: async () => ({ written: 0, skipped: 0 }),
+            saveHook: async () => {},
+            adoptDwebIdentity: async (_record, _passphrase, options) => {
+              await new Promise((resolve) => setTimeout(resolve, 15));
+              if (!options?.prepareOnly) commits += 1;
+              return {
+                adopted: true, did: record.did, incomingDid: record.did,
+                existingDid: null, reason: 'recovered',
+              };
+            },
+          },
+        }),
+      },
+    });
+    let client: ReturnType<typeof makePrivateTransferClient>;
+    client = makePrivateTransferClient({
+      requestChannel: (requestId) => {
+        const channel = new MessageChannel();
+        server.attach(channel.port1);
+        client.acceptChannel(requestId, channel.port2);
+      },
+      timeoutMs: 20,
+      transferTimeoutMs: 2_000,
+    });
+    await expect(client.call({ type: 'transfer/export' })).resolves.toEqual({ ok: true });
+    await expect(client.call({
+      type: 'transfer/import',
+      payload: {
+        format: EXPORT_FORMAT, version: EXPORT_VERSION,
+        exportedAt: '2026-08-25T00:00:00.000Z', channel: 'preview', settings: {},
+        providerEndpoints: null, secrets: encryptedSecrets,
+        memory: null, hooks: [], skills: [],
+        dweb: { identityRecord: record },
+      },
+      passphrase: 'backup-passphrase',
+    })).resolves.toMatchObject({ ok: true, identityOutcome: 'restored' });
+    expect(commits).toBe(1);
+    expect(secrets).toBe(1);
+    await expect(client.call({ type: 'transfer/inspectImport' }))
+      .rejects.toMatchObject({ code: 'timeout' });
   });
 
   test('ignores non-transfer operations and resets the channel after timeout', async () => {

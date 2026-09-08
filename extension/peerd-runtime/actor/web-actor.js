@@ -5,7 +5,7 @@
 // This module is the PURE core (functional core / imperative shell): the
 // tab→session binding store, the action-log rolling-summary prompt, and the
 // SELF-FENCE that wraps the actor's own accumulated summary as untrusted data.
-// The SW (service-worker.js) wires persistence (chrome.storage.session), session
+// The host wires persistence (chrome.storage.session), session
 // creation, and the relay; the loop reuses `rolling-summary.js` verbatim. All of
 // the security knobs the spec calls out live here so they're unit-testable.
 //
@@ -234,32 +234,8 @@ export const retireStoppedRoamingWebActorDurably = async ({
 // why a SEPARATE store from the tab bindings: those are tabId-keyed because a tab's
 // origin moves; an API origin is stable, and the actor exists per (chat, origin).
 
-// A real public DNS host: dotted labels ending in an alpha TLD (the git precedent's
-// rule). Rejects bare IPs (a numeric `42` is parsed as the IP 0.0.0.42 — dots but a
-// numeric TLD), `localhost`, and engine-id / tabId shapes, so the dispatch can't
-// mistake one for an origin.
-const API_HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/;
-/**
- * Normalize an addressed API origin to a canonical `scheme://host[:port]`, or null
- * if it isn't a usable public origin. Accepts a bare host (assumes https) or a full
- * URL. Requires a DOTTED public host so it can't collide with `'web'`, a numeric
- * tabId, or an engine instance id (`vm-…`/`notebook-…`/`app-…`). The canonical form
- * is `new URL(x).origin` (lowercased host, default ports dropped) — the same value
- * the egress boundary compares against, immune to `host.evil.com` / userinfo tricks.
- * NOTE: P0 accepts http OR https (public APIs); the P1 KEYED-grant path is https-only.
- * @param {unknown} input
- * @returns {string | null}
- */
-export const normalizeApiOrigin = (input) => {
-  let s = String(input ?? '').trim();
-  if (!s) return null;
-  if (!/^https?:\/\//i.test(s)) s = `https://${s}`;   // bare host → assume https
-  let u;
-  try { u = new URL(s); } catch { return null; }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-  if (!API_HOSTNAME_RE.test(u.hostname)) return null;
-  return u.origin;
-};
+import { normalizeApiOrigin } from '/shared/api-origin.js';
+export { normalizeApiOrigin };
 
 /**
  * issue 251 — the handle for a SITE actor: a web actor BOUND to one origin,

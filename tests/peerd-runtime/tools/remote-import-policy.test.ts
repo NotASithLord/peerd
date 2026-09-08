@@ -9,6 +9,7 @@ import {
   UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
   UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE,
 } from '../../../extension/peerd-engine/errors.js';
+import { executionToolContext } from '../../helpers/execution-tool.js';
 
 const policyError = `${REMOTE_MODULE_IMPORTS_UNAVAILABLE_CODE}: ${REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE}`;
 const unsupportedFormError = `${UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE}: ${UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE}`;
@@ -22,10 +23,10 @@ const policyResult = {
 
 describe('remote module package policy reaches the model as a tool failure', () => {
   test('script does not present the host policy refusal as a successful code result', async () => {
-    const result = await scriptTool.execute({ code: "import('https://example.test/mod.js')" }, {
+    const result = await scriptTool.execute({ code: "import('https://example.test/mod.js')" }, executionToolContext({
       session: { sessionId: 'session-1', kind: 'chat' },
       jsOffscreenClient: { execHeadless: async () => policyResult },
-    } as any);
+    }) as any);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe(policyError);
@@ -36,13 +37,13 @@ describe('remote module package policy reaches the model as a tool failure', () 
   });
 
   test('script preserves actor reply custody when policy ends the run', async () => {
-    const result = await scriptTool.execute({ code: 'return actors; await import(path)' }, {
+    const result = await scriptTool.execute({ code: 'return actors; await import(path)' }, executionToolContext({
       session: { sessionId: 'session-1', kind: 'chat' },
       jsOffscreenClient: { execHeadless: async () => ({
         ...policyResult,
         actorDeliveryIds: ['delivery-1', 'delivery-2', 'delivery-1'],
       }) },
-    } as any);
+    }) as any);
     expect(result.ok).toBe(false);
     expect((result as any).actorDeliveryIds).toEqual(['delivery-1', 'delivery-2']);
   });
@@ -50,7 +51,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
   test('Notebook keeps code exceptions in-band but returns package policy as a failure', async () => {
     const result = await jsNotebookTool.execute({ code: "import('https://example.test/mod.js')" }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      jsClient: { eval: async () => policyResult },
+      notebookAuthority: { runNotebook: async () => policyResult },
     } as any);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toBe(policyError);
@@ -60,10 +61,9 @@ describe('remote module package policy reaches the model as a tool failure', () 
     const controller = new AbortController();
     const result = await jsNotebookTool.execute({ code: 'while (true) {}' }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      abortSignal: controller.signal,
-      jsClient: {
-        eval: async (_code: string, options: { signal?: AbortSignal }) => {
-          expect(options.signal).toBe(controller.signal);
+      notebookAuthority: {
+        runNotebook: async () => {
+          expect(controller.signal.aborted).toBe(false);
           return { durationMs: 0, stopped: true };
         },
       },
@@ -78,7 +78,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
   test('Notebook busy is a non-code result and does not invite an automatic retry', async () => {
     const result = await jsNotebookTool.execute({ code: 'return 1;' }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      jsClient: { eval: async () => ({ errorCode: 'notebook_run_busy' }) },
+      notebookAuthority: { runNotebook: async () => ({ errorCode: 'notebook_run_busy' }) },
     } as any);
     expect(result.ok).toBe(true);
     expect(result.content).toContain('[BUSY]');
@@ -90,7 +90,7 @@ describe('remote module package policy reaches the model as a tool failure', () 
   test('Notebook timeout is a non-code result with explicit retry guidance', async () => {
     const result = await jsNotebookTool.execute({ code: 'while (true) {}' }, {
       session: { sessionId: 'session-1', kind: 'chat' },
-      jsClient: { eval: async () => ({ errorCode: 'notebook_run_timeout' }) },
+      notebookAuthority: { runNotebook: async () => ({ errorCode: 'notebook_run_timeout' }) },
     } as any);
     expect(result.ok).toBe(true);
     expect(result.content).toContain('[TIMEOUT]');
@@ -103,17 +103,22 @@ describe('remote module package policy reaches the model as a tool failure', () 
     ['script', scriptTool],
     ['Notebook', jsNotebookTool],
   ])('%s tells the model how to repair an unsupported import', async (_name, tool) => {
-    const result = await tool.execute({ code: "const path = './local.js'; await import(path)" }, {
+    const rawContext = {
       session: { sessionId: 'session-1', kind: 'chat' },
       jsOffscreenClient: { execHeadless: async () => ({
         ...policyResult,
         errorCode: UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
       }) },
-      jsClient: { eval: async () => ({
+      notebookAuthority: { runNotebook: async () => ({
         ...policyResult,
         errorCode: UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE,
       }) },
-    } as any);
+    };
+    const context = _name === 'script'
+      ? executionToolContext(rawContext) : rawContext;
+    const result = await tool.execute(
+      { code: "const path = './local.js'; await import(path)" }, context as any,
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe(unsupportedFormError);

@@ -112,7 +112,7 @@ const SCHEMA_VALIDATED_KINDS = new Set(['web', 'api']);
 
 /**
  * @param {Object} deps
- * @param {(instanceId: string, opts?: { senderSessionId?: string | null }) => Promise<{ instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number } | { resolutionRefusal: { ok: false, error: string, content?: string, structured?: Record<string, unknown>, outcomeKind?: 'pre-effect-failure' } } | null>} deps.resolveActor
+ * @param {(instanceId: string, opts?: { senderSessionId?: string | null, signal?: AbortSignal }) => Promise<{ instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number } | { resolutionRefusal: { ok: false, error: string, content?: string, structured?: Record<string, unknown>, outcomeKind?: 'pre-effect-failure' } } | null>} deps.resolveActor
  *   Resolve an instance id to its (lazily-minted) actor. Returns null when no
  *   instance with that id exists across the three registries. `senderSessionId` is the
  *   chat that sent this message — the chat-scoped WEB actor (to:'web') is owned by it,
@@ -231,6 +231,11 @@ export const makeActorMessaging = (deps) => {
   // — so Stop reaches not just the RUNNING actor slot (turnSlots.stop) but also
   // actor turns still queued behind it on the same slot. @type {Map<string, number>}
   const stopGen = new Map();
+  // A process-wide monotonic token lets messageActor snapshot Stop state before
+  // its first await, when the lineage root is not known yet. The per-root map
+  // still prevents an unrelated chat's Stop from cancelling this admission.
+  let stopEpoch = 0;
+  const ADMISSION_STOPPED = Symbol('actor-admission-stopped');
   // Phase 7 (mechanical dedupe): rootSessionId → the (to + message) intents
   // currently in flight for that lineage. An IDENTICAL request while its twin is
   // still running is almost always a double-fire (a parent and its child both
@@ -290,7 +295,7 @@ export const makeActorMessaging = (deps) => {
   // turns skip) and return the RUNNING ones (so the caller aborts their slots).
   /** @param {string} root @returns {string[]} */
   const stopActorsFor = (root) => {
-    stopGen.set(root, (stopGen.get(root) ?? 0) + 1);
+    stopGen.set(root, ++stopEpoch);
     return actorsFor(root);
   };
 
@@ -431,9 +436,18 @@ export const makeActorMessaging = (deps) => {
           // generation is rechecked at the exact parent dequeue boundary so an
           // explicit Stop cannot be followed by a fresh synthetic model turn.
           if (shouldSkip()) {
-            Promise.resolve(onSkip())
+            // Stop suppresses the MODEL wake, not the durable terminal receipt.
+            // Persist the host-stamped result passively so a panel reload does
+            // not resurrect an accepted message_actor call as "working".
+            const record = actorDeliveryId
+              ? Promise.resolve(recordRecovery({
+                  userText, actorReply, sessionId: senderSessionId,
+                  synthetic: true, recoveryId: actorDeliveryId,
+                }))
+              : Promise.resolve(false);
+            record.then((recorded) => recorded ? onSkip() : false)
               .then(
-                () => resolve(true),
+                (recorded) => resolve(recorded !== false),
                 (e) => { log('stopped reply cleanup failed', e); resolve(false); },
               )
               .finally(() => turnLease?.release());
@@ -496,8 +510,8 @@ export const makeActorMessaging = (deps) => {
   //
   // Bookkeeping is keyed by rootSessionId (phase 4/5): the lineage root shares
   // one budget and one Stop generation, whoever in the tree actually sent.
-  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, via?: string, onReply?: (text: string, failed: boolean, outcomeUnknown: boolean, performed?: boolean, aborted?: boolean) => boolean|void, deliverInstead?: () => boolean }} o */
-  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, actor, message, parentToolUseId, oneShot, bare, via, onReply, deliverInstead }) => {
+  /** @param {{ correlationId: string, senderSessionId: string, rootSessionId: string, stopGeneration: number, actor: { instanceId: string, kind: string, actorSessionId: string, name?: string, tabId?: number }, message: string, parentToolUseId?: string, oneShot?: boolean, bare?: boolean, via?: string, onReply?: (text: string, failed: boolean, outcomeUnknown: boolean, performed?: boolean, aborted?: boolean) => boolean|void, deliverInstead?: () => boolean }} o */
+  const runEngineDelivery = ({ correlationId, senderSessionId, rootSessionId, stopGeneration, actor, message, parentToolUseId, oneShot, bare, via, onReply, deliverInstead }) => {
     const { instanceId, kind, actorSessionId, name, tabId } = actor;
     trackActor(rootSessionId, actorSessionId);
     // Keyed on actorSessionId, NOT instanceId — must match the live-path track
@@ -505,11 +519,10 @@ export const makeActorMessaging = (deps) => {
     // see the dedupe note in messageActor). clearTracking() uses THIS key, so
     // the track/untrack pair stays symmetric across both paths (#4/#8).
     const intentK = intentKey(actorSessionId, message);
-    // Capture the root's Stop generation NOW — if the user Stops while this turn is
-    // queued behind another on the same actor slot, the generation advances and we
-    // skip it when the slot finally frees (so Stop reaches queued work, not just the
-    // running slot turnSlots.stop aborts). The bookkeeping is cleared either way.
-    const genAtQueue = stopGen.get(rootSessionId) ?? 0;
+    // Admission captured the root's Stop token before any privileged setup. If
+    // Stop lands after that point, queued work skips even when it was not yet
+    // trackable at the instant Stop inspected the actor set.
+    const genAtQueue = stopGeneration;
     const clearTracking = () => {
       decInFlight(rootSessionId);
       untrackActor(rootSessionId, actorSessionId);
@@ -597,7 +610,7 @@ export const makeActorMessaging = (deps) => {
       void deliver(
         senderSessionId, instanceId, kind, name, outBody, outFailed, via,
         outcomeUnknown, performed, correlationId, parentToolUseId,
-        () => (stopGen.get(rootSessionId) ?? 0) !== genAtQueue,
+        () => (stopGen.get(rootSessionId) ?? 0) > genAtQueue,
         removeMailbox,
         aborted,
         landingStop,
@@ -639,7 +652,7 @@ export const makeActorMessaging = (deps) => {
       // so the wake path stays silent — but an AWAITING caller (onReply) must
       // still resolve, or its tool call would hang past the Stop/abort that was
       // meant to end it.
-      if ((stopGen.get(rootSessionId) ?? 0) !== genAtQueue || cancelledDeliveries.has(correlationId)) {
+      if ((stopGen.get(rootSessionId) ?? 0) > genAtQueue || cancelledDeliveries.has(correlationId)) {
         if (onReply) {
           onReply(
             bare ? 'the request was stopped before the actor ran it.' : replyText(instanceId, kind, name, 'the request was stopped before the actor ran it.', true),
@@ -648,9 +661,21 @@ export const makeActorMessaging = (deps) => {
             false,
             true,
           );
+          clearMailbox();
+        } else {
+          // The sender must not be woken after Stop, but its transcript still
+          // needs a durable, correlated terminal receipt for reload/recovery.
+          trackPendingReply(rootSessionId);
+          void deliver(
+            senderSessionId, instanceId, kind, name,
+            'the request was stopped before the actor ran it.', true, via,
+            false, false, correlationId, parentToolUseId,
+            () => true, removeMailbox, true,
+          ).then((recorded) => {
+            if (recorded) clearPendingReply(rootSessionId);
+          });
         }
         clearTracking();
-        clearMailbox();
         if (turnLease) turnLease.release();
         // We were handed the idle actor slot but are DECLINING to run a turn
         // (Stopped after we queued). No claim/release will happen, so nothing
@@ -660,13 +685,6 @@ export const makeActorMessaging = (deps) => {
         if (!turnLease) turnSlots.advanceQueue?.(actorSessionId);
         return;
       }
-      // Instrumentation (temporary): the actor turn's wall-clock. It spans the
-      // tool work (e.g. a VM command — logged separately as [vm.timing]) PLUS the
-      // model inference to compose the reply. (actorTurnMs − the tool's own ms) is
-      // that reply inference — the extra turn a delegation spends to summarize one
-      // result, which (with the orchestrator's own turn) is the two-inference cost
-      // a simple "run X and report" pays over running it inline.
-      const turnStartedAt = now();
       // Stamp WHOSE delivery now runs on this actor, so an awaitReply abort can
       // tell "my own turn is running (stop the slot)" from "a sibling's is
       // (leave it alone)". Cleared self-scoped in clearTracking().
@@ -678,7 +696,6 @@ export const makeActorMessaging = (deps) => {
         ...(turnLease ? { turnLease } : {}),
       }))
         .then((res) => {
-          log('actor.timing', { kind, instanceId, actorTurnMs: now() - turnStartedAt });
           const isolationFailure = res?.isolationFailure;
           const performed = typeof res?.performed === 'boolean'
             ? res.performed
@@ -739,6 +756,7 @@ export const makeActorMessaging = (deps) => {
    * @returns {Promise<{ ok: boolean, content?: string, error?: string, code?: string, performed?: boolean, outcomeKnown?: boolean, targetRead?: boolean, targetChanged?: boolean, retryable?: boolean, actorDeliveryId?: string, actorCorrelationId?: string, actorTerminal?: boolean, actorOutcomeKnown?: boolean, actorPerformed?: boolean, actorAborted?: boolean }>}
    */
   const messageActor = async (req) => {
+    const admissionStopEpoch = stopEpoch;
     const { to, message, senderSessionId, inbound, toolUseId, oneShot, awaitReply, awaitSignal, awaitCapMs, degradeToAsync, via, bareReply, trustedAppTab } = req;
     if (typeof to !== 'string' || !to.trim()) {
       return { ok: false, error: 'message_actor: `to` (a tab-hosted instance id) is required' };
@@ -807,6 +825,56 @@ export const makeActorMessaging = (deps) => {
     // the mailbox can arbitrate (dedupe here; reroute on redrain).
     const provenance = messageProvenance({ senderSessionId: sender, ancestry });
     const rootSessionId = provenance.rootSessionId;
+    const stoppedDuringAdmission = () =>
+      (stopGen.get(rootSessionId) ?? 0) > admissionStopEpoch
+      || awaitSignal?.aborted === true && abortReasonOf(awaitSignal) !== ABORT_STEER;
+    // Resolve Stop immediately while a durable mailbox write is still pending.
+    // The promise remains observed, and mailbox cleanup is serialized by its
+    // authority owner behind any write that was already admitted.
+    const awaitAdmissionStep = (/** @type {Promise<any>} */ operation) => {
+      if (stoppedDuringAdmission()) return Promise.resolve(ADMISSION_STOPPED);
+      if (typeof awaitSignal?.addEventListener !== 'function') {
+        return operation.then((value) =>
+          stoppedDuringAdmission() ? ADMISSION_STOPPED : value);
+      }
+      return new Promise((resolve, reject) => {
+        const cleanup = () => {
+          try { awaitSignal.removeEventListener?.('abort', onAbort); } catch { /* test stub */ }
+        };
+        const onAbort = () => {
+          if (abortReasonOf(awaitSignal) !== ABORT_STEER) {
+            cleanup();
+            resolve(ADMISSION_STOPPED);
+          }
+        };
+        awaitSignal.addEventListener('abort', onAbort, { once: true });
+        operation.then(
+          (/** @type {any} */ value) => {
+            cleanup();
+            resolve(stoppedDuringAdmission() ? ADMISSION_STOPPED : value);
+          },
+          (/** @type {unknown} */ error) => { cleanup(); reject(error); },
+        );
+        if (awaitSignal.aborted) onAbort();
+      });
+    };
+    /** @param {boolean} [targetTouched] @param {string|undefined} [actorDeliveryId] */
+    const stoppedResult = (targetTouched = false, actorDeliveryId = undefined) => ({
+      ok: false,
+      code: 'actor_message_stopped',
+      error: 'message_actor: stopped before the actor started',
+      performed: false,
+      outcomeKnown: true,
+      retryable: false,
+      actorTerminal: true,
+      actorOutcomeKnown: true,
+      actorPerformed: false,
+      actorAborted: true,
+      outcomeKind: /** @type {const} */ ('pre-effect-failure'),
+      ...(actorDeliveryId ? { actorDeliveryId } : {}),
+      ...(targetTouched ? { targetRead: true, targetChanged: true } : {}),
+    });
+    if (stoppedDuringAdmission()) return stoppedResult();
 
     // Runaway guard (per lineage ROOT) — a burst means a likely loop, so refuse
     // past the rate cap within the window; a long, legit session spreads out.
@@ -826,10 +894,15 @@ export const makeActorMessaging = (deps) => {
     // chat (live path: they're equal — the gate above proved it; redrain: they differ).
     let actor;
     try {
-      actor = await resolveActor(to, { senderSessionId });
+      actor = await resolveActor(to, {
+        senderSessionId,
+        ...(awaitSignal instanceof AbortSignal ? { signal: awaitSignal } : {}),
+      });
     } catch (e) {
+      if (stoppedDuringAdmission()) return stoppedResult(true);
       return { ok: false, error: `message_actor: could not resolve instance '${to}': ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
+    if (stoppedDuringAdmission()) return stoppedResult(true);
     if (actor && 'resolutionRefusal' in actor) return actor.resolutionRefusal;
     if (!actor) {
       return { ok: false, error: `message_actor: no tab-hosted instance found for id '${to}' (use the create/list tools to find one)` };
@@ -879,6 +952,10 @@ export const makeActorMessaging = (deps) => {
     recentSends.set(rootSessionId, recent);
     inFlight.set(rootSessionId, (inFlight.get(rootSessionId) ?? 0) + 1);
     trackIntent(rootSessionId, intentK);
+    const releaseAdmission = () => {
+      decInFlight(rootSessionId);
+      untrackIntent(rootSessionId, intentK);
+    };
     appendAudit({ type: 'actor_message', details: { to: instanceId, kind, senderSessionId, rootSessionId, lineagePath: provenance.lineagePath, ...(typeof via === 'string' ? { via } : {}) } }).catch(() => {});
 
     // ASYNC for EVERY long-lived sender, including web, unless the caller opted
@@ -903,7 +980,7 @@ export const makeActorMessaging = (deps) => {
     // Persist oneShot for diagnostics. The provenance rides the envelope so boot
     // recovery can reroute a notice whose awaiting sender was ephemeral.
     try {
-      await Promise.resolve(mailbox.append({
+      const appended = await awaitAdmissionStep(Promise.resolve(mailbox.append({
         id: correlationId, senderSessionId: sender, to: instanceId, message, createdAt: nowMs,
         state: 'queued', kind, ...(name ? { name } : {}),
         ...(typeof toolUseId === 'string' && toolUseId.length <= 512
@@ -911,10 +988,15 @@ export const makeActorMessaging = (deps) => {
           : {}),
         provenance: { rootSessionId, lineagePath: provenance.lineagePath },
         ...(oneShot === true ? { oneShot: true } : {}),
-      }));
+      })));
+      if (appended === ADMISSION_STOPPED) {
+        releaseAdmission();
+        mailbox.remove(correlationId).catch(() => {});
+        return stoppedResult(true, correlationId);
+      }
     } catch (error) {
-      decInFlight(rootSessionId);
-      untrackIntent(rootSessionId, intentK);
+      releaseAdmission();
+      if (stoppedDuringAdmission()) return stoppedResult(true, correlationId);
       appendAudit({ type: 'actor_message_persist_failed', details: { to: instanceId, kind } }).catch(() => {});
       return {
         ok: false,
@@ -926,6 +1008,11 @@ export const makeActorMessaging = (deps) => {
         retryable: true,
       };
     }
+    if (stoppedDuringAdmission()) {
+      releaseAdmission();
+      await mailbox.remove(correlationId).catch(() => {});
+      return stoppedResult(true, correlationId);
+    }
 
     // Commit the no-replay boundary before the delivery can enter the actor's
     // slot. If this heap disappears after this write, boot recovery reports an
@@ -933,11 +1020,18 @@ export const makeActorMessaging = (deps) => {
     // The small append-to-started window remains safely replayable because no
     // actor work is queued until both writes finish.
     try {
-      await Promise.resolve(mailbox.markStarted(correlationId));
+      const started = await awaitAdmissionStep(
+        Promise.resolve(mailbox.markStarted(correlationId)),
+      );
+      if (started === ADMISSION_STOPPED) {
+        releaseAdmission();
+        mailbox.remove(correlationId).catch(() => {});
+        return stoppedResult(true, correlationId);
+      }
     } catch (error) {
-      decInFlight(rootSessionId);
-      untrackIntent(rootSessionId, intentK);
+      releaseAdmission();
       await mailbox.remove(correlationId).catch(() => {});
+      if (stoppedDuringAdmission()) return stoppedResult(true, correlationId);
       appendAudit({ type: 'actor_message_start_persist_failed', details: { to: instanceId, kind } }).catch(() => {});
       return {
         ok: false,
@@ -948,6 +1042,11 @@ export const makeActorMessaging = (deps) => {
         targetChanged: true,
         retryable: true,
       };
+    }
+    if (stoppedDuringAdmission()) {
+      releaseAdmission();
+      await mailbox.remove(correlationId).catch(() => {});
+      return stoppedResult(true, correlationId);
     }
 
     // PR #134 — the ACTOR reply mode. An ephemeral child has no later turn
@@ -1041,7 +1140,8 @@ export const makeActorMessaging = (deps) => {
         // exists before onAbort consults it: an already-aborted signal then either
         // marks the still-queued delivery cancelled or stops its own running turn.
         runEngineDelivery({
-          correlationId, senderSessionId: sender, rootSessionId, actor, message,
+          correlationId, senderSessionId: sender, rootSessionId,
+          stopGeneration: admissionStopEpoch, actor, message,
           parentToolUseId: toolUseId, oneShot: oneShot === true, bare: bareReply === true,
           onReply: (text, failed, outcomeUnknown, performed, aborted) => finish({
             text, failed, outcomeUnknown, performed, actorTerminal: true,
@@ -1093,7 +1193,11 @@ export const makeActorMessaging = (deps) => {
         };
     }
 
-    runEngineDelivery({ correlationId, senderSessionId: sender, rootSessionId, actor, message, parentToolUseId: toolUseId, oneShot: oneShot === true, via });
+    runEngineDelivery({
+      correlationId, senderSessionId: sender, rootSessionId,
+      stopGeneration: admissionStopEpoch, actor, message,
+      parentToolUseId: toolUseId, oneShot: oneShot === true, via,
+    });
 
     const recipient = (String(kind) === String(instanceId))
       ? `the ${kind} actor`

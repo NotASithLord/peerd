@@ -84,10 +84,10 @@ const SWAP_SIDE_EFFECTS = new Set(['write', 'mutate_external', 'destructive']);
 
 // Bookkeeping and recon writes that must NOT fire the gate — they are not
 // evidence the plan works. open_tab is Plan-mode-legal navigation (recon);
-// remember is memory bookkeeping; wait_until is waiting; actor_cancel is
+// remember is memory bookkeeping; actor_cancel is
 // cleanup; the todo/goal tools are the plan itself.
 export const PREWALK_EXEMPT_TOOLS = Object.freeze(new Set([
-  'open_tab', 'remember', 'wait_until', 'actor_cancel',
+  'open_tab', 'remember', 'actor_cancel',
   'todo_init', 'todo_check', 'todo_add', 'complete_goal',
 ]));
 

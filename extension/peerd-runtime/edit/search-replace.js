@@ -25,8 +25,8 @@
 //   • Blocks apply IN ORDER against the running text, so a later block
 //     can match text a previous block just wrote.
 //
-// Everything here is pure: (text, blocks) -> text, or throws a typed
-// error. No IO. The OPFS/IDB shell lives in checkpoint.js and the tool.
+// Everything here is pure: (text, blocks) -> text, or throws a typed error.
+// The edit tool's exact workspace authority owns all IO and policy.
 
 import {
   EditParseError,

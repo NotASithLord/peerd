@@ -37,6 +37,8 @@ import m from '/vendor/mithril/mithril.js';
  * @property {string} [kind]
  * @property {string} [match]
  * @property {string} [doc]
+ * @property {boolean} [unsupported]
+ * @property {string} [unsupportedReason]
  */
 
 /**
@@ -71,7 +73,7 @@ const ADD_PLACEHOLDER = [
   'match: type',
   'rule:',
   '  matchArg: text',
-  '  pattern: sk-[a-zA-Z0-9]{20,}',
+  '  contains: sk-',
   '  reason: looks like an API key',
   '---',
   'Block the type tool from typing anything that looks like a secret.',
@@ -188,7 +190,11 @@ export const HooksView = {
  */
 const hookRow = (vnode, h) => {
   const ui = vnode.state;
-  return m('.hook-row', { key: h.id, class: h.enabled ? '' : 'is-off' }, [
+  // why: an upgraded profile can contain a now-reserved user ID. The host
+  // surfaces that record as a retired, fail-closed row alongside the real
+  // built-in so the user can remove it; provenance keeps the virtual-DOM keys
+  // distinct until cleanup.
+  return m('.hook-row', { key: `${h.isDefault ? 'builtin' : 'user'}:${h.id}`, class: h.enabled ? '' : 'is-off' }, [
     m('.hook-main', [
       m('.hook-line', [
         m('code.hook-name', h.id),
@@ -199,11 +205,13 @@ const hookRow = (vnode, h) => {
           h.event === 'pre-tool-use' ? 'pre' : 'post'),
         m('span.hook-badge', { title: h.isDefault
             ? 'Built-in: trusted in-tree code, registered at boot'
-            : `Your config (${h.kind})` },
-          h.isDefault ? 'built-in' : 'user'),
+            : h.unsupported ? h.unsupportedReason : `Your config (${h.kind})` },
+          h.isDefault ? 'built-in' : h.unsupported ? 'retired' : 'user'),
         m('code.hook-match', { title: 'Tool-name match' }, h.match ?? '*'),
       ]),
       h.doc ? m('p.hook-doc', h.doc) : null,
+      h.unsupported ? m('p.hook-doc', h.unsupportedReason
+        ?? 'This hook format is unsupported. Replace it with a declarative rule.') : null,
     ]),
     m('.hook-controls', h.isDefault
       // Built-ins: visibly NOT disableable. The doc line above carries
@@ -214,6 +222,7 @@ const hookRow = (vnode, h) => {
               : 'It cannot be disabled or removed here.'}`,
         }, 'always on')
       : [
+          h.unsupported ? null :
           m('label.hook-toggle', [
             m('input', {
               type: 'checkbox',

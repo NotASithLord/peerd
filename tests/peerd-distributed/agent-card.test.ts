@@ -77,7 +77,10 @@ describe('agent-card caps are wired into the card paths (not dead code)', () => 
   test('dweb-base.js validates on card-set and clamps on card-get', () => {
     const src = readFileSync(join(import.meta.dir, '../../extension/offscreen/dweb-base.js'), 'utf8');
     // card-set must reject/strip via validateCard; card-get must clamp via parsePeerCard.
-    expect(src).toContain('validateCard');
+    const cardSet = src.slice(src.indexOf("case 'card-set'"), src.indexOf("case 'card-get'"));
+    expect(cardSet).toContain('validateCard');
+    expect(cardSet).toContain('performed: false, outcomeKnown: true');
+    expect(cardSet).toContain("outcomeKind: 'pre-effect-failure', retryable: false");
     expect(src).toContain('parsePeerCard');
   });
   test('the privileged base host accepts commands only from the exact service worker', () => {

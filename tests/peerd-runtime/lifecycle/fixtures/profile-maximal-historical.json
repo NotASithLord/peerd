@@ -8,7 +8,7 @@
       "Do NOT cite this file as evidence of what any version wrote. Its per-record shapes are all real (see the sibling fixtures for their provenance); their CO-EXISTENCE is the fabrication, and it is the point.",
       "MIXED ERAS: two pre-per-message-store v1 records (inline `messages`, no messagesV2/msgIndex) carrying the pre-collapse Codex-style `actTier` — one 'auto-edit', one 'full-auto' — sit next to v2 records (msgIndex + messagesV2:true). Reading the v1 pair migrates ONLY them; the v2 neighbours are not touched.",
       "actTier per bd7a135:docs/DECISIONS.md §18 (deleted in 5b386dd, restored in behavior): suggest AND auto-edit → confirm ON, only full-auto → OFF, unknown tiers fail safe to ON — \"a migration must never widen authority\".",
-      "MODERN ACTORS: a tab-backed web actor with originState (actor/origin-lock.js ActorOriginState — mode/ownedOrigin/provisional/excursion/excursionsUsed, persisted through actor/origin-state-store.js), a DESIGN-18 API actor (backing:'api', instanceId = the owned ORIGIN, no tab), the dweb daemon actor (actorType:'dweb'), and a #160 review child (review:true).",
+      "MODERN ACTORS: a tab-backed web actor with persisted originState (actor/origin-lock.js), a DESIGN-18 API actor (backing:'api', instanceId = the owned ORIGIN, no tab), the dweb daemon actor (actorType:'dweb'), and a spawned child with deliberately narrow file-read grants.",
       "PARTIALLY STAMPED: storeVersions carries SOME surfaces at 1 and omits the rest — the state a profile is in when a stamping run was interrupted (or when the registry grew a surface after the last stamp). The stamped ones must classify from their stamp; the absent ones must read as firstRun, never as a skew.",
       "hooks is the ARRAY stored under HOOKS_STORAGE_KEY (tools/hooks/registry.js, `hooks.user.v1`); hooksStorageKey below pins that name so a rename shows up here.",
       "dpop-keys appears ONLY as an EXPORT-side omission: rung 2 of the credential ladder is a non-extractable keypair HANDLE, so there is nothing to put in a fixture — the honest representation is durability.omittedDeviceBound naming it (§12: \"the export format must identify omitted device-bound state\").",
@@ -286,13 +286,12 @@
       "task": "review the VAT totals notebook",
       "depth": 1,
       "spawnedTrusted": true,
-      "review": true,
       "grantedTools": [
         "js_read_file",
         "app_read_file",
         "read_doc"
       ],
-      "futureReviewFieldFromANewerBuild": "keep-me",
+      "futureSpawnedFieldFromANewerBuild": "keep-me",
       "messagesV2": true,
       "msgIndex": [
         "01990b00-5001-7000-8000-000000021006"

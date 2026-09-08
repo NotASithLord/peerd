@@ -42,8 +42,6 @@ export const pageActionFor = (name, input = {}) => {
     }
     case 'type':
       return { verb: 'TYPE', target: selTarget(), description: `type "${clip(String(input.text ?? ''))}"` };
-    case 'page_keys':
-      return { verb: 'PRESS_KEY', target: 'page', description: `press ${clip(String(input.keys ?? ''))}` };
     default:
       // Everything else — snapshot/read_page/read_state/query_dom/watch_changes
       // (perception), message_actor/actor_list (orchestration), fetch_url (HTTP,
@@ -55,7 +53,7 @@ export const pageActionFor = (name, input = {}) => {
 
 /**
  * The page-action mapping for one page.* op (the CODE surface's real actions,
- * announced by the SW page/call route as 'page/op' events). A page_code tool
+ * reported as 'page/op' events). A page_code tool
  * call is ONE opaque tool_use; its factual page actions are these inner ops —
  * without them a code-arm trajectory records as [navigate, answer] and the
  * judge can't see the work. goto/click/fill act; snapshot/content perceive

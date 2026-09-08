@@ -175,7 +175,245 @@ describe('sidepanel.attachments', () => {
     } finally { unmount(); }
   });
 
+  it('worker loss restores the draft but fences replay behind exact delivery status', async () => {
+    /** @type {(reason?: unknown) => void} */
+    let rejectSend = () => {};
+    let agentCalls = 0;
+    /** @type {Msg[]} */
+    const sent = [];
+    /** @param {Msg} msg */
+    const send = (msg) => {
+      sent.push(msg);
+      if (msg.type !== 'agent/send') return Promise.resolve({ ok: true });
+      agentCalls += 1;
+      if (agentCalls > 1) return Promise.resolve({ ok: true, duplicate: true });
+      return new Promise((_, reject) => { rejectSend = reject; });
+    };
+    const { root, unmount } = await mountInputBar(baseState(), send);
+    try {
+      pasteImage(need(root, 'textarea'));
+      await until(() => root.querySelector('.attach-chip'));
+
+      const ta = need(root, 'textarea', HTMLTextAreaElement);
+      ta.value = 'continue after the worker wakes';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      m.redraw.sync();
+      need(root, 'form.input-bar')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await until(() => sent.some((msg) => msg.type === 'agent/send'));
+
+      // The in-flight request owns the composer, but the human text and bytes
+      // are retained in component state for a deterministic recovery.
+      expect(ta.value).toBe('');
+      expect(need(root, '.send-btn', HTMLButtonElement).disabled).toBe(true);
+      rejectSend(new Error('service worker context invalidated'));
+
+      await until(() => root.querySelector('.composer-readiness-note'));
+      expect(need(root, 'textarea', HTMLTextAreaElement).value)
+        .toBe('continue after the worker wakes');
+      expect(need(root, '.attach-chip-name').textContent).toBe('shot.png');
+      const note = need(root, '.composer-readiness-note');
+      expect(note.getAttribute('role')).toBe('alert');
+      expect(note.textContent).toContain('could not confirm whether the message started');
+      expect(note.textContent).toContain('restored draft');
+      expect(note.textContent?.includes('try again')).toBe(false);
+      expect(need(root, '.send-btn', HTMLButtonElement).disabled).toBe(true);
+      expect(need(root, '.attach-btn', HTMLButtonElement).disabled).toBe(true);
+      expect(need(root, '.attach-chip-remove', HTMLButtonElement).disabled).toBe(true);
+      const check = /** @type {HTMLButtonElement} */ (
+        [...root.querySelectorAll('button')].find((entry) => entry.textContent === 'Check delivery')
+      );
+      expect(check).toBeTruthy();
+      const persistedFence = localStorage.getItem('peerd.unconfirmed-send.new') ?? '';
+      expect(persistedFence).toContain('"hadAttachments":true');
+      expect(persistedFence.includes('attachments')).toBe(false);
+      expect(persistedFence.includes('data')).toBe(false);
+      expect(persistedFence.includes('imgbytes')).toBe(false);
+      check.click();
+      await until(() => sent.filter((msg) => msg.type === 'agent/send').length === 2);
+      await until(() => !root.textContent?.includes('Check delivery'));
+      const sends = sent.filter((msg) => msg.type === 'agent/send');
+      expect(sends[1].operationId).toBe(sends[0].operationId);
+      expect(sends[0].attachments?.[0]?.data).toBeTruthy();
+      expect(sends[1].checkOnly).toBe(true);
+      expect(sends[1].text).toBe(undefined);
+      expect(sends[1].attachments).toBe(undefined);
+      expect(need(root, 'textarea', HTMLTextAreaElement).value).toBe('');
+    } finally { unmount(); }
+  });
+
+  it('a settling send cannot clear another chat delivery fence', async () => {
+    for (const id of ['new', 'A', 'B']) {
+      localStorage.removeItem(`peerd.draft.${id}`);
+      localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+    }
+    let settleA = (/** @type {any} */ _reply) => {};
+    const send = () => new Promise((resolve) => { settleA = resolve; });
+    const state = baseState();
+    state.session = { sessionId: 'A' };
+    const { root, unmount } = await mountInputBar(state, send);
+    try {
+      const textarea = need(root, 'textarea', HTMLTextAreaElement);
+      textarea.value = 'send from A';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      need(root, 'form.input-bar')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await until(() => localStorage.getItem('peerd.unconfirmed-send.A'));
+
+      localStorage.setItem('peerd.unconfirmed-send.B', JSON.stringify({
+        operationId: 'send.from-b', text: 'send from B', goal: false,
+        sessionId: 'B', hadAttachments: false, source: 'composer',
+      }));
+      state.session = { sessionId: 'B' };
+      m.redraw.sync();
+      await flush();
+      expect(root.textContent).toContain('Check delivery');
+
+      settleA({ ok: true });
+      await until(() => localStorage.getItem('peerd.unconfirmed-send.A') === null);
+      await flush();
+      expect(localStorage.getItem('peerd.unconfirmed-send.B')).toContain('send.from-b');
+      expect(root.textContent).toContain('Check delivery');
+      expect(need(root, '.send-btn', HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      unmount();
+      for (const id of ['new', 'A', 'B']) {
+        localStorage.removeItem(`peerd.draft.${id}`);
+        localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+      }
+    }
+  });
+
+  it('an unresolved delivery fence can be released only by an explicit bodyless acknowledgement', async () => {
+    /** @type {(reason?: unknown) => void} */
+    let rejectFirst = () => {};
+    /** @type {Msg[]} */
+    const sent = [];
+    /** @param {Msg} msg */
+    const send = (msg) => {
+      sent.push(msg);
+      if (msg.type !== 'agent/send') return Promise.resolve({ ok: true });
+      if (sent.filter((entry) => entry.type === 'agent/send').length === 1) {
+        return new Promise((_, reject) => { rejectFirst = reject; });
+      }
+      if (msg.checkOnly) return Promise.resolve({
+        ok: false, outcomeKnown: false, error: 'agent-send-operation-expired',
+      });
+      return Promise.resolve({ ok: true });
+    };
+    const { root, unmount } = await mountInputBar(baseState(), send);
+    try {
+      const ta = need(root, 'textarea', HTMLTextAreaElement);
+      ta.value = 'new intent after checking the transcript';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      m.redraw.sync();
+      need(root, 'form.input-bar')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await until(() => sent.some((entry) => entry.type === 'agent/send'));
+      const first = sent.find((entry) => entry.type === 'agent/send');
+      rejectFirst(new Error('worker lost after dispatch'));
+      await until(() => root.textContent?.includes('Check delivery'));
+
+      const check = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((entry) => entry.textContent === 'Check delivery'));
+      check.click();
+      await until(() => root.textContent?.includes('Delivery is still unconfirmed'));
+      const beforeRelease = sent.length;
+      const release = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((entry) => entry.textContent === 'I checked; allow a new message'));
+      release.click();
+      await flush();
+      expect(sent.length).toBe(beforeRelease);
+      expect(root.textContent?.includes('Check delivery')).toBe(false);
+      expect(need(root, 'textarea', HTMLTextAreaElement).value)
+        .toBe('new intent after checking the transcript');
+      expect(need(root, '.send-btn', HTMLButtonElement).disabled).toBe(false);
+
+      need(root, 'form.input-bar')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await until(() => sent.filter((entry) => entry.type === 'agent/send').length === 3);
+      const fresh = sent.filter((entry) => entry.type === 'agent/send').at(-1);
+      if (!fresh) throw new Error('fresh agent/send missing');
+      expect(fresh.operationId === first?.operationId).toBe(false);
+      expect(fresh.checkOnly === true).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('reload recovery says to reattach files whose bytes were not persisted', async () => {
+    localStorage.setItem('peerd.unconfirmed-send.new', JSON.stringify({
+      operationId: 'send.reloaded', text: 'review this document', goal: false,
+      sessionId: null, hadAttachments: true, source: 'composer',
+    }));
+    const { root, unmount } = await mountInputBar(baseState(), async () => ({ ok: true }));
+    try {
+      expect(root.querySelector('.attach-chip')).toBeFalsy();
+      const release = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((entry) => entry.textContent === 'I checked; allow a new message'));
+      release.click();
+      await flush();
+      expect(root.textContent).toContain('reattach the files before choosing Send');
+      expect(root.textContent?.includes('restored text and files')).toBe(false);
+    } finally {
+      unmount();
+      localStorage.removeItem('peerd.unconfirmed-send.new');
+      localStorage.removeItem('peerd.draft.new');
+    }
+  });
+
+  for (const order of ['rejection-first', 'state-first']) {
+    it(`keeps a first-message draft when the new session arrives ${order}`, async () => {
+      localStorage.removeItem('peerd.draft.new');
+      localStorage.removeItem('peerd.draft.created-session');
+      localStorage.removeItem('peerd.unconfirmed-send.new');
+      localStorage.removeItem('peerd.unconfirmed-send.created-session');
+      let rejectSend = (/** @type {unknown} */ _reason) => {};
+      const sent = [];
+      const send = (/** @type {Msg} */ msg) => {
+        sent.push(msg);
+        return new Promise((_, reject) => { rejectSend = reject; });
+      };
+      const state = baseState();
+      const { root, unmount } = await mountInputBar(state, send);
+      try {
+        const textarea = need(root, 'textarea', HTMLTextAreaElement);
+        textarea.value = 'first message survives';
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        need(root, 'form.input-bar')
+          .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        await until(() => sent.length === 1);
+        if (order === 'state-first') {
+          state.session = { sessionId: 'created-session' };
+          m.redraw.sync();
+          await flush();
+        }
+        rejectSend(new Error('worker lost'));
+        await until(() => root.textContent?.includes('Check delivery'));
+        if (order === 'rejection-first') {
+          state.session = { sessionId: 'created-session' };
+          m.redraw.sync();
+          await flush();
+        }
+        expect(need(root, 'textarea', HTMLTextAreaElement).value)
+          .toBe('first message survives');
+        expect(localStorage.getItem('peerd.draft.created-session'))
+          .toBe('first message survives');
+        expect(localStorage.getItem('peerd.unconfirmed-send.created-session'))
+          .toContain('first message survives');
+      } finally {
+        unmount();
+        localStorage.removeItem('peerd.draft.new');
+        localStorage.removeItem('peerd.draft.created-session');
+        localStorage.removeItem('peerd.unconfirmed-send.new');
+        localStorage.removeItem('peerd.unconfirmed-send.created-session');
+      }
+    });
+  }
+
   it('staged attachments do NOT bleed into another chat on switch', async () => {
+    for (const id of ['new', 'A', 'B']) {
+      localStorage.removeItem(`peerd.draft.${id}`);
+      localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+    }
     // Cross-session leak: a file staged in chat A must not ride chat B's send.
     /** @type {Msg[]} */
     const sent = [];
@@ -206,7 +444,13 @@ describe('sidepanel.attachments', () => {
       await until(() => sent.length > 0);
       expect(sent[0].text).toBe('hi from B');
       expect(sent[0].attachments).toBe(undefined);
-    } finally { unmount(); }
+    } finally {
+      unmount();
+      for (const id of ['new', 'A', 'B']) {
+        localStorage.removeItem(`peerd.draft.${id}`);
+        localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+      }
+    }
   });
 
   it('user messages render attachment chips from stripped records', async () => {

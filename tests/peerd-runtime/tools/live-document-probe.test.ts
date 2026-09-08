@@ -14,7 +14,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   passwordFieldSignalFromProbe,
   resolveTargetTab,
-} from '../../../extension/peerd-runtime/tools/defs/dom-helpers.js';
+} from '../../../extension/peerd-runtime/browser-authority/dom-helpers.js';
 
 const tabsApi = (byId: Record<number, any>) => ({
   get: async (id: number) => { if (!byId[id]) throw new Error('no tab'); return byId[id]; },

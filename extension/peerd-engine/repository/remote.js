@@ -53,11 +53,18 @@ export const smartHttpAuthHeader = (host, token) => {
   return `Basic ${btoa(binary)}`;
 };
 
-const MAX_GIT_HTTP_BODY = 32 * 1024 * 1024;
 const GIT_HTTP_TIMEOUT_MS = 60_000;
+/** @param {number} value */
+const bodyCeiling = (value) => {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError('Git transport requires a positive body ceiling');
+  }
+  return value;
+};
 
-/** @param {AsyncIterable<Uint8Array>|Iterable<Uint8Array>|undefined} body @param {AbortSignal} [signal] */
-const collectBody = async (body, signal) => {
+/** @param {AsyncIterable<Uint8Array>|Iterable<Uint8Array>|undefined} body
+ * @param {number} maxBodyBytes @param {AbortSignal} [signal] */
+const collectBody = async (body, maxBodyBytes, signal) => {
   if (!body) return undefined;
   /** @type {Uint8Array[]} */ const chunks = [];
   let total = 0;
@@ -65,7 +72,9 @@ const collectBody = async (body, signal) => {
     if (signal?.aborted) throw new Error('git operation aborted');
     const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
     total += bytes.byteLength;
-    if (total > MAX_GIT_HTTP_BODY) throw new Error('git request body exceeds the transfer ceiling');
+    if (total > maxBodyBytes) {
+      throw new Error('git request body exceeds the transfer ceiling');
+    }
     chunks.push(bytes);
   }
   const out = new Uint8Array(total);
@@ -74,8 +83,9 @@ const collectBody = async (body, signal) => {
   return out;
 };
 
-/** @param {ReadableStream<Uint8Array>|null} stream @param {() => void} done */
-const boundedResponseBody = async function* (stream, done) {
+/** @param {ReadableStream<Uint8Array>|null} stream @param {number} maxBodyBytes
+ * @param {() => void} done */
+const boundedResponseBody = async function* (stream, maxBodyBytes, done) {
   if (!stream) { done(); return; }
   const reader = stream.getReader();
   let total = 0;
@@ -85,7 +95,7 @@ const boundedResponseBody = async function* (stream, done) {
       const { done: isDone, value } = await reader.read();
       if (isDone) { complete = true; return; }
       total += value.byteLength;
-      if (total > MAX_GIT_HTTP_BODY) {
+      if (total > maxBodyBytes) {
         await reader.cancel('git response body exceeds the transfer ceiling').catch(() => {});
         throw new Error('git response body exceeds the transfer ceiling');
       }
@@ -99,12 +109,17 @@ const boundedResponseBody = async function* (stream, done) {
 };
 
 /**
- * @param {{ remote: { url: string, host: string }, webFetch: (url: string, init?: RequestInit) => Promise<Response>,
- *   getSecret?: (name: string) => Promise<string|null>, audit?: (event: any) => void, signal?: AbortSignal }} deps
+ * @param {{ remote: { url: string, host: string }, webFetch: (url: string, init?: RequestInit,
+ *   context?: { gitRemote: { url: string, host: string } }) => Promise<Response>,
+ *   maxBodyBytes: number, getSecret?: (name: string) => Promise<string|null>,
+ *   audit?: (event: any) => void, signal?: AbortSignal }} deps
  */
-export const createGitHttpClient = ({ remote, webFetch, getSecret, audit, signal }) => ({
+export const createGitHttpClient = ({
+  remote, webFetch, maxBodyBytes, getSecret, audit, signal,
+}) => ({
   /** @param {{ url: string, method?: string, headers?: Record<string,string>, body?: AsyncIterable<Uint8Array>|Iterable<Uint8Array> }} request */
   request: async ({ url, method = 'GET', headers = {}, body }) => {
+    const maxBytes = bodyCeiling(maxBodyBytes);
     if (!gitRemoteOwnsRequest(remote, url)) throw new Error('git transport escaped its bound repository');
     /** @type {Record<string,string>} */ const cleanHeaders = {};
     for (const [name, value] of Object.entries(headers)) {
@@ -123,7 +138,7 @@ export const createGitHttpClient = ({ remote, webFetch, getSecret, audit, signal
     if (signal?.aborted) onAbort();
     else signal?.addEventListener('abort', onAbort, { once: true });
     let payload;
-    try { payload = await collectBody(body, controller.signal); }
+    try { payload = await collectBody(body, maxBytes, controller.signal); }
     catch (error) {
       clearTimeout(timeoutId);
       signal?.removeEventListener('abort', onAbort);
@@ -138,7 +153,7 @@ export const createGitHttpClient = ({ remote, webFetch, getSecret, audit, signal
         credentials: 'omit',
         redirect: 'manual',
         signal: controller.signal,
-      });
+      }, { gitRemote: remote });
     } catch (error) {
       clearTimeout(timeoutId);
       signal?.removeEventListener('abort', onAbort);
@@ -150,6 +165,7 @@ export const createGitHttpClient = ({ remote, webFetch, getSecret, audit, signal
       headers: Object.fromEntries(response.headers.entries()),
       body: boundedResponseBody(
         /** @type {ReadableStream<Uint8Array>|null} */ (response.body),
+        maxBytes,
         () => { clearTimeout(timeoutId); signal?.removeEventListener('abort', onAbort); },
       ),
       statusCode: response.status,

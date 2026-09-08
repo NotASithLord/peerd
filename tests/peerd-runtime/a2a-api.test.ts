@@ -48,14 +48,15 @@ describe('meshCallToOp — mapping + validation', () => {
 
   test('an unknown method throws', () => {
     expect(() => meshCallToOp({ method: 'sudo' })).toThrow(MeshApiError);
+    expect(() => meshCallToOp({ method: 'ask' })).toThrow(MeshApiError);
+    expect(() => meshCallToOp({ method: 'send' })).toThrow(MeshApiError);
   });
 });
 
 describe('shapeMeshResult — reply shaping', () => {
-  test('call shapes { from, reply } and rejects timeout; ask alias preserves 0.x shape', () => {
+  test('call shapes { from, reply } and rejects timeout', () => {
     expect(shapeMeshResult('call', { ok: true, from: DID, reply: 'yes' })).toEqual({ from: DID, reply: 'yes' });
     expect(() => shapeMeshResult('call', { ok: true, from: null, reply: null, timedOut: true })).toThrow(/timed out/);
-    expect(shapeMeshResult('ask', { ok: true, from: null, reply: null, timedOut: true })).toEqual({ from: null, reply: null, timedOut: true });
   });
 
   test('a failed op REJECTS like a throw (so await mesh.call() throws)', () => {

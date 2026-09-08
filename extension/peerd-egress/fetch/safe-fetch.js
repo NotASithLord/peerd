@@ -21,7 +21,7 @@
 //     per-host allowlist. So exfil/C2 to an arbitrary PUBLIC domain over
 //     the open-web path is NOT prevented here; the architectural
 //     mitigation is that fetch_url is web-actor-only and that context is
-//     KEYLESS — the capability strip (actor/spawn.js) removes getSecret /
+//     KEYLESS: the isolated actor relay never receives getSecret /
 //     safeFetch, so an injected page can't launder the user's credentials
 //     out over webFetch (see web-fetch.js).
 //   - Network requests originating from web pages the agent is browsing
@@ -30,6 +30,9 @@
 //     emulated socket layer, which we route through webFetch when the VM
 //     has network enabled (off by default per DECISIONS.md)
 //
+import { originOf } from '/shared/url-origin.js';
+export { originOf } from '/shared/url-origin.js';
+
 // What is on the allowlist:
 //   - The "hardcoded" set (Anthropic, OpenAI, Ollama loopback) — these
 //     are non-negotiable in code; turning them off requires editing this
@@ -56,14 +59,6 @@ export { HARDCODED_ALLOWLIST } from './allowlist.js';
  * @param {string | URL | Request} resource
  * @returns {string}
  */
-export const originOf = (resource) => {
-  const urlString = resource instanceof Request ? resource.url
-    : resource instanceof URL ? resource.toString()
-    : resource;
-  const u = new URL(urlString);
-  return `${u.protocol}//${u.host}`;
-};
-
 /**
  * @param {string} origin
  * @param {readonly string[]} allowlist
@@ -72,7 +67,7 @@ export const isAllowed = (origin, allowlist) => allowlist.includes(origin);
 
 /**
  * Factory for a safeFetch bound to a specific allowlist source and audit
- * sink. The production wiring (see service-worker.js) builds one of these
+ * sink. Production builds one of these
  * with the hardcoded list + user-added endpoints; tests build one with
  * a fixed allowlist and a recording audit.
  *

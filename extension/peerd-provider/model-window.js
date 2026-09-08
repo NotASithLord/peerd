@@ -1,14 +1,15 @@
 // @ts-check
-// Shared envelope for the adapters' live context-window lookups.
+// Shared response envelope for adapters' live context-window lookups.
 //
 // Anthropic / OpenRouter / Ollama each fetch the model's window from their
-// own endpoint, but the IO envelope is identical: fetch (reject → null),
+// own authority operation, but the response envelope is identical: read
+// (reject → null),
 // drain a non-OK body → null, parse JSON → null, run a provider-specific
 // `extract`, then guard the result to a positive integer. Centralising it
 // here means a fix to that envelope (or the positive-number guard) is one
 // edit, not three — only the URL, request init, and `extract` differ per
-// provider. `safeFetch` is injected (DI rule); this module never imports
-// peerd-egress.
+// provider. Destination, authentication, and request shape remain hidden in
+// the injected named effect.
 
 /**
  * A positive finite integer, or null. The single guard all callers share.
@@ -19,21 +20,19 @@ export const asWindow = (w) =>
   typeof w === 'number' && Number.isFinite(w) && w > 0 ? Math.floor(w) : null;
 
 /**
- * Fetch a model's context window from a JSON endpoint. Best-effort: every
+ * Read a model's context window from a JSON response. Best-effort: every
  * failure path returns null so the caller falls back to the static table.
  * Never throws.
  *
  * @param {Object} args
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
- * @param {string} args.url
- * @param {RequestInit} [args.init]               method/headers/body (signal merged in)
+ * @param {(signal?: AbortSignal) => Promise<Response>} args.readResponse
  * @param {(body: any) => (number | null | undefined)} args.extract  provider-specific field pluck
  * @param {AbortSignal} [args.signal]
  * @returns {Promise<number | null>}
  */
-export const fetchModelWindow = async ({ safeFetch, url, init = {}, extract, signal }) => {
+export const readModelWindow = async ({ readResponse, extract, signal }) => {
   let res;
-  try { res = await safeFetch(url, { ...init, signal }); }
+  try { res = await readResponse(signal); }
   catch { return null; }
   if (!res.ok) {
     try { await res.text(); } catch { /* drain so the socket can be reused */ }

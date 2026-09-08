@@ -32,11 +32,43 @@ const mockResponse = ({ status = 200, body = '', headers = {}, url = 'https://x.
 // Records what webFetch was handed so the sessionless invariants are assertable.
 const recordingCtx = (over: any = {}) => {
   const seen: { url?: string; init?: any } = {};
+  const webFetch = over.webFetch ?? (async (url: string, init: any) => {
+    seen.url = url; seen.init = init; return mockResponse({ body: 'ok' });
+  });
+  const resourceAuthority: any = {
+    requestWebText: async (request: any) => {
+      seen.url = request.url;
+      seen.init = { method: request.method, headers: request.headers, body: request.body };
+      const response = await webFetch(request.url, seen.init);
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value: string, name: string) => { headers[name] = value; });
+      return {
+        status: response.status, body: await response.text(),
+        bodyTruncated: over.bodyTruncated === true, headers, finalUrl: response.url,
+      };
+    },
+  };
+  if (typeof over.confirm === 'function') {
+    resourceAuthority.confirmWebWrite = (request: { url: string, method: string }) => over.confirm({
+      tool: 'web:write', kind: 'web_write', origins: [new URL(request.url).origin],
+      summary: `Allow a ${request.method} request to ${new URL(request.url).host}? This can send data out of the browser.`,
+      sessionId: 't',
+    });
+  }
+  if (over.webOffscreenClient?.extractMarkdown) {
+    resourceAuthority.extractReadableMarkdown = (html: string, url: string) =>
+      over.webOffscreenClient.extractMarkdown({ html, url });
+  }
+  if (over.resultStore?.key && over.resultStore?.put) {
+    resourceAuthority.spillResult = async (record: any) => {
+      const key = over.resultStore.key();
+      await over.resultStore.put({ ...record, key, ownerSessionId: 't' });
+      return key;
+    };
+  }
   const ctx: any = {
-    session: { sessionId: 't' },
-    audit: async () => {},
-    webFetch: async (url: string, init: any) => { seen.url = url; seen.init = init; return mockResponse({ body: 'ok' }); },
-    ...over,
+    resourceAuthority,
+    runtimeCapabilities: over.runtimeCapabilities,
   };
   return { ctx, seen };
 };
@@ -226,18 +258,21 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     const stored: any[] = [];
     const { ctx } = recordingCtx({
       webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/big' }),
-      webCache: { key: () => 'wc-test-1', put: async (rec: any) => { stored.push(rec); } },
+      resultStore: { key: () => 'result:opaque-fetch', put: async (rec: any) => { stored.push(rec); } },
     });
     const r = await fetchUrlTool.execute({ url: 'https://site.example/big' }, ctx);
     if (!r.ok) throw new Error('expected ok');
     // The FULL text was spilled.
     expect(stored).toHaveLength(1);
-    expect(stored[0].key).toBe('wc-test-1');
+    expect(stored[0]).toMatchObject({
+      key: 'result:opaque-fetch', ownerSessionId: 't', producer: 'fetch_url',
+      fenced: true, originLabel: 'https://site.example',
+    });
     expect(stored[0].text.length).toBe(60_000);
     // The fenced body is the head+tail window with the elision marker.
     const afterFence = r.content!.split('</untrusted_web_content>')[1];
-    expect(afterFence).toContain('read_web_cache');
-    expect(afterFence).toContain('"key": "wc-test-1"');
+    expect(afterFence).toContain('read_result');
+    expect(afterFence).toContain('"key": "result:opaque-fetch"');
     // unwrap() anchors the close tag at $ — with a footer after the fence,
     // parse the fenced JSON by splitting at the tags instead.
     const body = JSON.parse(r.content!.split(/<untrusted_web_content [^>]*>\n/)[1].split('\n</untrusted_web_content>')[0]);
@@ -247,13 +282,30 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     expect(body.body.endsWith('T'.repeat(100))).toBe(true);
   });
 
-  test('no webCache capability → the pre-spill head-only slice, no footer', async () => {
+  test('labels a host-capped response as a retained prefix, never the full text', async () => {
+    const stored: any[] = [];
+    const { ctx } = recordingCtx({
+      bodyTruncated: true,
+      webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/capped' }),
+      resultStore: { key: () => 'result:opaque-capped', put: async (rec: any) => { stored.push(rec); } },
+    });
+    const result = await fetchUrlTool.execute({ url: 'https://site.example/capped' }, ctx);
+    if (!result.ok) throw new Error('expected ok');
+    const fenced = JSON.parse(result.content!.split(/<untrusted_web_content [^>]*>\n/)[1].split('\n</untrusted_web_content>')[0]);
+    expect(fenced.bodyTruncated).toBe(true);
+    expect(result.content).toContain('retained text prefix');
+    expect(result.content).toContain('extraction cap reached');
+    expect(result.content).not.toContain('The full text');
+    expect(stored[0].text).toBe(BIG);
+  });
+
+  test('no resultStore capability → the pre-spill head-only slice, no footer', async () => {
     const { ctx } = recordingCtx({
       webFetch: async () => mockResponse({ body: BIG, headers: { 'content-type': 'text/plain' }, url: 'https://site.example/big' }),
     });
     const r = await fetchUrlTool.execute({ url: 'https://site.example/big' }, ctx);
     if (!r.ok) throw new Error('expected ok');
-    expect(r.content).not.toContain('read_web_cache');
+    expect(r.content).not.toContain('read_result');
     const body = unwrap(r.content!);
     expect(body.truncated).toBe(true);
     expect(body.body.length).toBe(16_000);
@@ -263,7 +315,7 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
   test('a small body is untouched: no spill, no footer, truncated:false', async () => {
     const stored: any[] = [];
     const { ctx } = recordingCtx({
-      webCache: { key: () => 'wc-x', put: async (rec: any) => { stored.push(rec); } },
+      resultStore: { key: () => 'result:opaque-small', put: async (rec: any) => { stored.push(rec); } },
     });
     const r = await fetchUrlTool.execute({ url: 'https://x.com/' }, ctx);
     if (!r.ok) throw new Error('expected ok');
@@ -285,7 +337,7 @@ describe('fetch_url — spill-and-page for an oversized body', () => {
     if (result.ok) throw new Error('expected a binary document refusal');
     expect(result.error).toBe('binary_document');
     expect((result as any).readerAvailable).toBe(false);
-    expect(result.content).not.toContain('read_pdf');
+    expect(result.content).not.toContain('read_doc');
     expect(result.content).toContain('Ask the user to attach this PDF directly');
   });
 });

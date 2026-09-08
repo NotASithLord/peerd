@@ -22,6 +22,30 @@ const SEP = '\u0000';
 /** @type {Set<string>} */
 const disclosed = new Set();
 
+const priorToolResultIndex = (
+  /** @type {unknown} */ messages,
+  /** @type {string|undefined} */ toolName,
+  /** @type {string|undefined} */ marker,
+  /** @type {boolean} */ requireFullBody = false,
+) => {
+  if (!Array.isArray(messages) || !toolName || !marker) return -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const results = Array.isArray(message?.toolResults) ? message.toolResults
+      : Array.isArray(message?.content)
+        ? message.content.filter((/** @type {any} */ block) => block?.type === 'tool_result') : [];
+    for (const result of results) {
+      if (result?.meta?.toolName !== toolName || typeof result?.content !== 'string'
+          || !result.content.includes(marker)
+          || requireFullBody && result.content.includes('already-loaded="this session"')) {
+        continue;
+      }
+      return index;
+    }
+  }
+  return -1;
+};
+
 /**
  * Record a (sessionId, key) disclosure. Returns true the FIRST time this pair
  * is seen in the current SW lifetime — the caller should emit the full note —
@@ -29,10 +53,14 @@ const disclosed = new Set();
  * returns true: an unkeyed call can't be deduped, so it errs toward disclosing.
  * @param {string | null | undefined} sessionId
  * @param {string} key
+ * @param {unknown} [messages]
+ * @param {string} [toolName]
+ * @param {string} [marker]
  * @returns {boolean}
  */
-export const oncePerSession = (sessionId, key) => {
+export const oncePerSession = (sessionId, key, messages, toolName, marker) => {
   if (!sessionId) return true;
+  if (priorToolResultIndex(messages, toolName, marker) >= 0) return false;
   const id = `${sessionId}${SEP}${key}`;
   if (disclosed.has(id)) return false;
   disclosed.add(id);
@@ -61,10 +89,17 @@ const bodyLoads = new Map();
  * @param {string} key                distinguishes bodies (e.g. a skill name)
  * @param {number} messageCount       session message count at this load (its position)
  * @param {number} trimCovered        leading messages folded out of the sent slice
+ * @param {unknown} [messages]
+ * @param {string} [toolName]
+ * @param {string} [marker]
  * @returns {boolean}
  */
-export const shouldInjectBody = (sessionId, key, messageCount, trimCovered) => {
+export const shouldInjectBody = (
+  sessionId, key, messageCount, trimCovered, messages, toolName, marker,
+) => {
   if (!sessionId) return true;
+  const transcriptAt = priorToolResultIndex(messages, toolName, marker, true);
+  if (transcriptAt >= 0) return trimCovered > transcriptAt;
   const id = `${sessionId}${SEP}${key}`;
   const priorAt = bodyLoads.get(id);
   // Still within the sent slice (watermark hasn't reached the prior load) → dedup.

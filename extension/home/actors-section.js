@@ -271,7 +271,9 @@ export const ActorsSection = {
         ui.inFlight = false;
         ui.loading = false;
         if (!ui.active) return;
-        m.redraw();
+        // why: Actor Space can remain mounted in a background Home tab, where
+        // Chrome may indefinitely defer Mithril's frame-scheduled redraw.
+        m.redraw.sync();
         if (moveFocus) requestAnimationFrame(() => {
           const refresh = ui.root?.querySelector('.actor-space-refresh');
           if (refresh instanceof HTMLElement) refresh.focus();

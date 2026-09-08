@@ -1,7 +1,8 @@
 // @ts-check
 // offscreen/doc-extract.js — convert an office/publishing document in the
-// OFFSCREEN document. The read_doc tool (SW) calls in via
-// background/offscreen-doc-client.js → a 'doc/extract' message → here.
+// OFFSCREEN document. The controller-owned read_doc tool requests an exact
+// extraction effect through background/offscreen-doc-client.js → a
+// 'doc/extract' message → here.
 //
 // Why here and not the SW: not because the conversion needs a DOM (it does not
 // — peerd-runtime/doc is pure and would run anywhere), but because of what
@@ -9,9 +10,9 @@
 // tens of megabytes; holding that in the service worker fights the MV3
 // lifecycle, and it is exactly the buffer the SW should not be sitting on when
 // it is also the context that holds the vault DK. The offscreen document is
-// where peerd already puts untrusted heavy parsing (pdf.js, Readability, the
-// sealed worker), so a hostile .docx lands in the same place a hostile PDF does
-// rather than in a new one.
+// where peerd already puts untrusted heavy parsing. Structured conversion then
+// enters a disposable Worker so a hostile .docx cannot stall this host's Stop
+// route or feature-lease lifecycle.
 //
 // SECURITY: the bytes are UNTRUSTED web content, and the conversion is entirely
 // declarative — a ZIP index read, an XML tokenizer, and string building. There
@@ -19,21 +20,27 @@
 // resolution (xml.js SKIPS doctypes and never resolves an entity it did not
 // define — so XXE and billion-laughs have no surface here). A hostile document
 // can at worst make the parse fail, which is surfaced as an error. The text
-// crosses back wrapped in <untrusted_web_content> by the read_doc tool.
+// crosses back as a raw bounded receipt; the sealed read_doc tool wraps it in
+// <untrusted_web_content> before exposing it to the model.
 
-import browser from '/vendor/browser-polyfill.js';
 import { base64ToBytes } from '/shared/util.js';
-import { isTrustedSender } from '/shared/messaging.js';
 import {
-  convertToDocument, sniffDocFormat,
-  DocFetchError, DocParseError, UnsupportedDocFormatError, LegacyDocFormatError, ZipError,
+  sniffDocFormat, DocFetchError,
 } from '/peerd-runtime/offscreen.js';
+import { extractPdfBytes } from './pdf-extract.js';
+import {
+  readBoundedResponseBytes, ResponseTooLargeError,
+} from '/shared/abort.js';
+import {
+  convertDocumentInWorker, MAX_DOCUMENT_CONVERSION_BYTES,
+} from './document-conversion-host.js';
+import { abortError, throwIfAborted } from '/shared/abort.js';
 
-// A hard ceiling on the bytes we will pull. Lower than the PDF reader's 75MB:
-// a PDF is often a scan whose size is pixels, whereas a .docx or .xlsx that
-// large is overwhelmingly embedded media we are going to discard anyway, and
-// the ZIP index read touches the whole buffer.
-const MAX_BYTES = 40 * 1024 * 1024;
+// Fetch far enough to preserve the PDF reader's existing ceiling, then apply
+// the lower structured-document cap after content sniffing. A large PDF is
+// often image data; a same-sized OOXML archive is overwhelmingly discarded
+// media and makes the ZIP index needlessly expensive.
+const MAX_FETCH_BYTES = 75 * 1024 * 1024;
 
 /**
  * Fetch the document bytes. Mirrors offscreen/pdf-extract.js exactly, and the
@@ -44,42 +51,73 @@ const MAX_BYTES = 40 * 1024 * 1024;
  * becomes an opaqueredirect we reject rather than follow.
  *
  * @param {{ url?: string, bytesB64?: string }} source
+ * @param {{signal?:AbortSignal,fetchImpl?:typeof fetch}} [options]
  * @returns {Promise<{ bytes: Uint8Array, contentType: string }>}
  */
-const fetchDocBytes = async ({ url, bytesB64 } = {}) => {
-  if (bytesB64) return { bytes: base64ToBytes(bytesB64), contentType: '' };
+const fetchDocBytes = async ({ url, bytesB64 } = {}, { signal, fetchImpl = fetch } = {}) => {
+  throwIfAborted(signal, 'Document extraction stopped.');
+  if (bytesB64) {
+    // Reject obviously oversized inline input before decoding creates another
+    // large buffer. The post-decode check remains authoritative around base64
+    // padding and any unusual encoder spelling.
+    if (bytesB64.length > Math.ceil(MAX_FETCH_BYTES / 3) * 4 + 4) {
+      throw new DocFetchError(`document too large (limit ${MAX_FETCH_BYTES} bytes)`);
+    }
+    const bytes = base64ToBytes(bytesB64);
+    if (bytes.length > MAX_FETCH_BYTES) {
+      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_FETCH_BYTES})`);
+    }
+    return { bytes, contentType: '' };
+  }
   if (!url || typeof url !== 'string') throw new DocFetchError('no document url provided');
   if (url.startsWith('blob:')) {
     throw new DocFetchError('blob: URLs are not reachable from the extension; use the document\'s http(s) URL');
   }
   let res;
   try {
-    res = await fetch(url, { redirect: 'manual' });
+    res = await fetchImpl(url, { redirect: 'manual', signal });
   } catch (e) {
+    if (signal?.aborted || (/** @type {{name?:string}} */ (e))?.name === 'AbortError') {
+      throw abortError(signal, 'Document extraction stopped.');
+    }
     throw new DocFetchError(`could not fetch the document: ${(/** @type {{ message?: string }} */ (e))?.message ?? e}`);
   }
+  throwIfAborted(signal, 'Document extraction stopped.');
   if (res.type === 'opaqueredirect' || res.status === 0) {
     throw new DocFetchError('the URL redirected; redirects are refused to prevent SSRF to internal hosts');
   }
   if (!res.ok) throw new DocFetchError(`HTTP ${res.status} fetching the document`, { status: res.status });
-  const buf = await res.arrayBuffer();
-  if (buf.byteLength > MAX_BYTES) {
-    throw new DocFetchError(`document too large: ${buf.byteLength} bytes (limit ${MAX_BYTES})`);
+  let bytes;
+  try {
+    bytes = await readBoundedResponseBytes(res, MAX_FETCH_BYTES, { signal });
+  } catch (error) {
+    if (signal?.aborted || (/** @type {{name?:string}} */ (error))?.name === 'AbortError') {
+      throw abortError(signal, 'Document extraction stopped.');
+    }
+    if (error instanceof ResponseTooLargeError) {
+      throw new DocFetchError(`document too large: ${error.bytes} bytes (limit ${MAX_FETCH_BYTES})`);
+    }
+    throw new DocFetchError(`could not read the document response: ${(/** @type {{message?:string}} */ (error))?.message ?? error}`);
   }
-  return { bytes: new Uint8Array(buf), contentType: res.headers.get('content-type') ?? '' };
+  return { bytes, contentType: res.headers.get('content-type') ?? '' };
 };
 
 /**
- * @param {{ source: any, opts?: { maxChars?: number, format?: string } }} msg
+ * @param {{ source: any, opts?: { maxChars?: number, format?: string, engine?: string, dev?: boolean } }} msg
+ * @param {{signal?:AbortSignal,fetchImpl?:typeof fetch,createConversionWorker?:()=>Worker}} [options]
  */
-const extractDoc = async ({ source, opts = {} }) => {
+export const handleDocExtract = async (
+  { source, opts = {} },
+  { signal, fetchImpl, createConversionWorker } = {},
+) => {
   // Stage rides every failure so the returned error pinpoints WHERE it broke.
   let stage = 'fetch';
   const where = source?.url ? String(source.url).slice(0, 120) : '(inline bytes)';
   try {
-    const { bytes, contentType } = await fetchDocBytes(source);
+    const { bytes, contentType } = await fetchDocBytes(source, { signal, fetchImpl });
 
     stage = 'sniff';
+    throwIfAborted(signal, 'Document extraction stopped.');
     const hints = {
       name: source?.name || source?.url || '',
       // An explicit content-type from the response beats the caller's guess.
@@ -88,17 +126,24 @@ const extractDoc = async ({ source, opts = {} }) => {
     };
     const sniffed = sniffDocFormat(bytes, hints);
 
-    // These two redirects are DETECTION-driven, so an explicit opts.format
-    // skips them: overriding a wrong detection is the only reason that
-    // parameter exists, and refusing on the detected format would make the
-    // override unreachable in exactly the case it is for.
-    //
-    // PDF has a BETTER reader in this build (pdf.js text layer + opt-in OCR),
-    // so read_doc refuses it by NAME rather than by failure — the agent gets a
-    // route, not a dead end. Same for a URL that served HTML: that is the
-    // ordinary web path, and fetch_url/read_page do it far better.
+    // Detection selects the internal engine. An explicit structured-document
+    // format still overrides a mistaken sniff, but PDF needs no public sibling:
+    // it continues through the dedicated pdf.js/OCR engine behind read_doc.
     if (!opts.format && sniffed.format === 'pdf') {
-      return { ok: false, error: 'is_pdf', detail: 'This is a PDF. Use read_pdf, which has a text layer and OCR.' };
+      const extracted = await extractPdfBytes(bytes, {
+        engine: opts.engine,
+        dev: opts.dev,
+        sourceLabel: where,
+        signal,
+      });
+      throwIfAborted(signal, 'Document extraction stopped.');
+      if (!extracted.ok) return extracted;
+      return {
+        ok: true,
+        result: {
+          format: 'pdf', pdf: extracted.result, bytes: bytes.length, sniffedVia: sniffed.via,
+        },
+      };
     }
     if (!opts.format && (sniffed.format === 'html' || sniffed.format === 'text')) {
       return {
@@ -110,34 +155,28 @@ const extractDoc = async ({ source, opts = {} }) => {
     }
 
     stage = 'convert';
-    const doc = await convertToDocument(bytes, hints);
-    console.debug(`[offscreen/doc-extract] ${where}: ${doc.format}, ${doc.blocks.length} blocks, ${bytes.length} bytes`);
-    return { ok: true, result: { doc, bytes: bytes.length, sniffedVia: sniffed.via } };
+    if (bytes.length > MAX_DOCUMENT_CONVERSION_BYTES) {
+      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_DOCUMENT_CONVERSION_BYTES})`);
+    }
+    const byteLength = bytes.length;
+    const converted = await convertDocumentInWorker(bytes, hints, {
+      signal, createWorker: createConversionWorker,
+    });
+    throwIfAborted(signal, 'Document extraction stopped.');
+    if ('ok' in converted && converted.ok === false) return converted;
+    const doc = /** @type {import('/peerd-runtime/doc/model.js').Document} */ (converted);
+    console.debug(`[offscreen/doc-extract] ${where}: ${doc.format}, ${doc.blocks.length} blocks, ${byteLength} bytes`);
+    return { ok: true, result: { format: doc.format, doc, bytes: byteLength, sniffedVia: sniffed.via } };
   } catch (e) {
     const err = /** @type {{ name?: string, message?: string, format?: string }} */ (e);
+    if (signal?.aborted || err?.name === 'AbortError') {
+      return { ok: false, error: 'doc_extract_aborted', detail: 'Document extraction stopped.' };
+    }
     console.error(`[offscreen/doc-extract] FAILED at stage=${stage} for ${where}:`, e);
-    // The typed errors carry the agent's next move, so they cross the wire as
-    // themselves rather than collapsing into one opaque failure string.
-    if (e instanceof LegacyDocFormatError) return { ok: false, error: 'legacy_binary_format', detail: err.message, format: err.format };
-    if (e instanceof UnsupportedDocFormatError) return { ok: false, error: 'unsupported_format', detail: err.message, format: err.format };
-    if (e instanceof ZipError) return { ok: false, error: 'unreadable_container', detail: err.message };
-    if (e instanceof DocParseError) return { ok: false, error: 'parse_failed', detail: err.message, format: err.format };
-    if (e instanceof DocFetchError) return { ok: false, error: 'fetch_failed', detail: err.message };
-    return { ok: false, error: `doc_extract_failed[${stage}]`, detail: `${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
+    // why details do not cross the wire: archive member names and parser error
+    // messages are producer-controlled. The controller maps these stable codes
+    // to tool-authored recovery guidance outside the untrusted-content fence.
+    if (e instanceof DocFetchError) return { ok: false, error: 'fetch_failed' };
+    return { ok: false, error: 'doc_extract_failed' };
   }
 };
-
-// Message route: SW → offscreen. Gated on isTrustedSender like every sibling
-// handler (pdf/extract, job/run, voice) — fail-closed: externally_connectable
-// is unset today, so this is defense-in-depth, but the gate is what keeps this
-// from being an open fetch proxy if it is ever enabled.
-// why cast: the polyfill's OnMessageListener return type is stricter than this
-// fire-and-respond handler (mirrors the pdf/extract listener).
-browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ msg, /** @type {any} */ sender, /** @type {any} */ sendResponse) => {
-  if (msg?.type !== 'doc/extract') return undefined;
-  if (!isTrustedSender(sender)) { sendResponse({ ok: false, error: 'untrusted-sender' }); return true; }
-  extractDoc(msg)
-    .then((out) => sendResponse(out))
-    .catch((e) => sendResponse({ ok: false, error: e?.name ? `${e.name}: ${e.message}` : (e?.message ?? String(e)) }));
-  return true;     // async sendResponse contract
-}));

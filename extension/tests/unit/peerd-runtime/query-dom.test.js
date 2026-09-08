@@ -6,8 +6,13 @@
 // scripting plumbing, formatting of the returned matches.
 
 import { describe, it, expect } from '../../framework.js';
-import { queryDomTool } from '/peerd-runtime/tools/defs/index.js';
-import { BUILTIN_TOOLS } from '/peerd-runtime/index.js';
+import { queryOwnedDomAuthority } from '/background/page-authority/query-dom.js';
+import { queryDomTool as controllerQueryDomTool } from '/peerd-runtime/tools/defs/query-dom.js';
+
+const queryDomTool = { execute: (/** @type {any} */ args, /** @type {any} */ ctx) => controllerQueryDomTool.execute(args, {
+  ...ctx, pageAuthority: { queryOwnedDom: () => queryOwnedDomAuthority(args, ctx) },
+}) };
+import { controllerHostsPageTool } from '/peerd-runtime/controller-page-tools.js';
 import {
   browserProbeResult,
   TEST_DOCUMENT_ID,
@@ -196,10 +201,9 @@ describe('query_dom — outer tool', () => {
     expect(errOf(r).includes('frame removed')).toBe(true);
   });
 
-  it('is registered in BUILTIN_TOOLS', () => {
-    const found = BUILTIN_TOOLS.find(t => t.name === 'query_dom');
-    expect(!!found).toBe(true);
-    expect(found?.primitive).toBe('tab');
-    expect(found?.sideEffect).toBe('read');
+  it('is registered only in the controller catalog', () => {
+    expect(controllerHostsPageTool('query_dom')).toBe(true);
+    expect(controllerQueryDomTool.primitive).toBe('tab');
+    expect(controllerQueryDomTool.sideEffect).toBe('read');
   });
 });

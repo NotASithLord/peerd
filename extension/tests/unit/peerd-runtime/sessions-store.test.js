@@ -3,6 +3,7 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { createSessionStore } from '/peerd-runtime/index.js';
+import { createSessionTurnStore } from '/shared/session-turn-store.js';
 import { makeMockIdb } from '../../mocks/idb.js';
 
 /** @typedef {import('/peerd-runtime/sessions/types.js').Session} Session */
@@ -36,7 +37,98 @@ const fresh = (overrides = {}) => {
   });
 };
 
+const openBrowserSessionIdb = async () => {
+  const name = `peerd-test-session-turn-${crypto.randomUUID()}`;
+  const opening = indexedDB.open(name, 1);
+  opening.onupgradeneeded = () => {
+    opening.result.createObjectStore('sessions', { keyPath: 'sessionId' });
+    opening.result.createObjectStore('session_messages', { keyPath: 'id' });
+  };
+  const db = await new Promise((resolve, reject) => {
+    opening.onsuccess = () => resolve(opening.result);
+    opening.onerror = () => reject(opening.error);
+  });
+  /** @param {string} store @param {string} key */
+  const get = (store, key) => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly');
+    const request = tx.objectStore(store).get(key);
+    /** @type {any} */
+    let value;
+    request.onsuccess = () => { value = request.result; };
+    tx.oncomplete = () => resolve(value);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+  /** @param {string} store @param {any} value */
+  const put = (store, value) => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(value);
+    tx.oncomplete = () => resolve(undefined);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+  return {
+    idb: {
+      get,
+      /** @param {string} store @param {string[]} keys */
+      getMany: (store, keys) => Promise.all(keys.map((key) => get(store, key))),
+      put,
+    },
+    close: async () => {
+      db.close();
+      await new Promise((resolve, reject) => {
+        const deleting = indexedDB.deleteDatabase(name);
+        deleting.onsuccess = () => resolve(undefined);
+        deleting.onerror = () => reject(deleting.error);
+        deleting.onblocked = () => reject(new Error('session-test-idb-delete-blocked'));
+      });
+    },
+  };
+};
+
 describe('session store', () => {
+  it('shared turn primitives preserve their contract over browser IndexedDB', async () => {
+    const backend = await openBrowserSessionIdb();
+    const turns = createSessionTurnStore({
+      idb: backend.idb,
+      notFound: (sessionId) => new Error(`missing:${sessionId}`),
+    });
+    try {
+      await backend.idb.put('sessions', {
+        sessionId: 'legacy-real', createdAt: 1, provider: 'anthropic', model: 'm',
+        messages: [{ id: 'v1', role: 'user', content: 'legacy', when: 1 }],
+      });
+      await Promise.all([
+        turns.appendMessage('legacy-real', {
+          id: 'u1', role: 'user', content: 'one', when: 2,
+        }),
+        turns.appendMessage('legacy-real', {
+          id: 'a1', role: 'assistant', content: '', streaming: true, when: 3,
+        }),
+      ]);
+      await turns.appendMessage('legacy-real', {
+        id: 'u1', role: 'user', content: 'must not replace', when: 99,
+      });
+      await turns.updateAssistantMessage('legacy-real', 'a1', {
+        content: 'two', streaming: false,
+      });
+      const trim = { v: 1, covered: 1, coveredLastId: 'v1' };
+      await turns.setTrimSummary('legacy-real', trim);
+
+      const raw = await backend.idb.get('sessions', 'legacy-real');
+      expect(raw.messagesV2).toBe(true);
+      expect(raw.messages).toBe(undefined);
+      expect(raw.msgIndex).toEqual(['v1', 'u1', 'a1']);
+      expect(raw.trimSummary).toEqual(trim);
+      expect((await backend.idb.get('session_messages', 'u1')).message.content).toBe('one');
+      expect((await backend.idb.get('session_messages', 'a1')).message).toEqual({
+        id: 'a1', role: 'assistant', content: 'two', streaming: false, when: 3,
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   it('creates a session with sensible defaults', async () => {
     const s = fresh();
     const session = await s.create();

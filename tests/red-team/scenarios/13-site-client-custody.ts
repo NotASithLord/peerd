@@ -18,6 +18,7 @@ import {
 import { actorTierGate } from '../../../extension/peerd-runtime/tools/gates.js';
 import { siteClientReadTool } from '../../../extension/peerd-runtime/tools/defs/site-client-read.js';
 import { siteClientRunTool } from '../../../extension/peerd-runtime/tools/defs/site-client-run.js';
+import { executeSiteClientTool } from '../../helpers/site-client-tool.js';
 import { siteClientWriteTool } from '../../../extension/peerd-runtime/tools/defs/site-client-write.js';
 
 const foreignToolProbe = async (kind: 'read' | 'run' | 'write' | 'delete'): Promise<Probe> => {
@@ -41,14 +42,14 @@ const foreignToolProbe = async (kind: 'read' | 'run' | 'write' | 'delete'): Prom
     jsOffscreenClient: { execHeadless: async () => { effects.push('execute(B sentinel source)'); return {}; } },
   };
   const result = kind === 'read'
-    ? await siteClientReadTool.execute({ origin: 'https://b.test' }, ctx)
+    ? await executeSiteClientTool(siteClientReadTool, { origin: 'https://b.test' }, ctx)
     : kind === 'write'
-      ? await siteClientWriteTool.execute({
+      ? await executeSiteClientTool(siteClientWriteTool, {
         origin: 'https://b.test', summary: 'poison', auth: 'none', deriver: 'probe', body: 'return { poisoned: true };',
       }, ctx)
       : kind === 'delete'
-        ? await siteClientWriteTool.execute({ origin: 'https://b.test', body: '' }, ctx)
-      : await siteClientRunTool.execute({ origin: 'https://b.test', code: 'return client.sentinel' }, ctx);
+        ? await executeSiteClientTool(siteClientWriteTool, { origin: 'https://b.test', body: '' }, ctx)
+      : await executeSiteClientTool(siteClientRunTool, { origin: 'https://b.test', code: 'return client.sentinel' }, ctx);
   const deniedBeforeEffect = result.ok === false
     && result.error.startsWith('site_client_origin_refused')
     && effects.length === 0;
@@ -66,7 +67,7 @@ export const scenario: Scenario = {
   title: 'Retargeting durable site-client code across actor origins (issue #274)',
   adversary: 'malicious page content steering a bound web actor',
   asset: 'stored executable client definitions and their origin-scoped integrity',
-  claim: 'A web actor cannot read, execute, overwrite, delete, or relay through another origin\'s stored client. The dispatch gate and final tool boundary fail before foreign effects; worker relays recheck durable/live custody; canonical own-origin use remains available; and roaming actors are limited to their exact ordinary live tab.',
+  claim: 'At the policy and final tool boundaries, a web actor cannot read, execute, overwrite, or delete another origin\'s stored client. The pure worker-relay policy also refuses lost custody; the production actor-to-authority vertical is covered separately. Canonical own-origin use remains available, and roaming actors are limited to their exact ordinary live tab.',
   threatModelRef: 'INV-18',
   tier: 'unit',
   async run() {
@@ -129,7 +130,7 @@ export const scenario: Scenario = {
 
     let releaseAllowed = true;
     let releaseChecks = 0;
-    const lateResult = await siteClientRunTool.execute({
+    const lateResult = await executeSiteClientTool(siteClientRunTool, {
       origin: 'https://a.test', code: 'return client.value',
     }, {
       session: { sessionId: 'bound-a' },

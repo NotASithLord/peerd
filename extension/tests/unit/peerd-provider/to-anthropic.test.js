@@ -208,13 +208,12 @@ describe('to-anthropic', () => {
       expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
     });
 
-    it('lifts max_tokens for thinking headroom on both shapes', () => {
+    it('keeps an explicit max_tokens authority ceiling on both thinking shapes', () => {
       for (const model of ['claude-opus-4-8', 'claude-haiku-4-5-20251001']) {
         const body = toAnthropicBody({
-          model, system: 's', messages: [userMsg('hi')], maxTokens: 1024, reasoning,
+          model, system: 's', messages: [userMsg('hi')], maxTokens: 4096, reasoning,
         });
-        // budget (2048) + 4096 answer headroom.
-        expect(body.max_tokens).toBe(6144);
+        expect(body.max_tokens).toBe(4096);
       }
     });
 

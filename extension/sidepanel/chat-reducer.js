@@ -1,4 +1,5 @@
 // @ts-check
+import { validateKernelStateProjection } from '/shared/kernel-state-contract.js';
 // chat-reducer.js — the SW-message → UI-state reducer shared by every live
 // surface (the side panel AND the full-page home, DESIGN-12).
 //
@@ -28,6 +29,9 @@
  * @property {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [actorReply]
  * @property {string} [stopReason]
  * @property {string} [error]
+ * @property {string} [errorCode]
+ * @property {boolean} [outcomeKnown]
+ * @property {boolean} [retryable]
  * @property {unknown[]} [toolResults]
  * @property {unknown[]} [toolUses]
  * @property {unknown[]} [attachments]
@@ -43,8 +47,9 @@
  * @property {string} [task]
  * @property {string} [parentSessionId]
  * @property {string} [rootSessionId]
- * @property {string[]} [grantedTools]
+ * @property {string[]} [visibleTools]
  * @property {boolean} [running]
+ * @property {string} [loadError]
  * @property {any} [cost]
  */
 
@@ -127,6 +132,7 @@
  *   stopReason?: string,
  *   session?: any,
  *   state?: any,
+ *   authorityReplacement?: boolean,
  *   prompt?: any,
  *   id?: string,
  *   turn?: any,
@@ -220,6 +226,26 @@ export const INITIAL_STATE = Object.freeze({
   // a run continuing in a background chat tracks independently of the one in
   // view. goal/state pushes set/clear each entry.
   goalRuns: Object.freeze({}),
+});
+
+/** Drop live worker projections while preserving durable display posture. */
+export const resetChatAfterRuntimeLoss = (/** @type {ChatState} */ state) => ({
+  ...state,
+  projection: null,
+  hydrated: false,
+  vault: { ...state.vault, locked: true, unlockedAt: 0 },
+  providers: { ...state.providers, hasKey: false },
+  lastError: null,
+  pendingConfirm: null,
+  rateLimit: null,
+  streaming: false,
+  notices: INITIAL_STATE.notices,
+  goalRuns: INITIAL_STATE.goalRuns,
+  actors: INITIAL_STATE.actors,
+  actorProjectionEpoch: INITIAL_STATE.actorProjectionEpoch,
+  actorProjectionRevision: INITIAL_STATE.actorProjectionRevision,
+  spawned: INITIAL_STATE.spawned,
+  asyncTasks: INITIAL_STATE.asyncTasks,
 });
 
 // One quiet sentence per confirm settle (§4e - the four undrawn states). The
@@ -321,17 +347,24 @@ const applyStop = (state, { sessionId, messageId, stopReason }) => {
 
 /**
  * @param {ChatState} state
- * @param {{ sessionId?: string, messageId?: string, error?: string }} msg
+ * @param {{ sessionId?: string, messageId?: string, error?: string, code?: string, outcomeKnown?:boolean, retryable?:boolean }} msg
  * @returns {ChatState}
  */
-const applyError = (state, { sessionId, messageId, error }) => {
+const applyError = (state, {
+  sessionId, messageId, error, code, outcomeKnown, retryable,
+}) => {
   // Per-session guard first — a background chat's failure shouldn't banner
   // the chat being viewed (its transcript carries the error).
   if (state.session.sessionId && sessionId && state.session.sessionId !== sessionId) return state;
   if (messageId === undefined) return { ...state, lastError: error };
   return { ...state, lastError: error, session: { ...state.session,
     messages: state.session.messages.map((mm) =>
-      mm.id === messageId ? { ...mm, streaming: false, error } : mm) } };
+      mm.id === messageId ? {
+        ...mm, streaming: false, error,
+        ...(typeof code === 'string' ? { errorCode: code } : {}),
+        ...(typeof outcomeKnown === 'boolean' ? { outcomeKnown } : {}),
+        ...(typeof retryable === 'boolean' ? { retryable } : {}),
+      } : mm) } };
 };
 
 // ---- actor nested-transcript reducers ----------------------------------
@@ -347,7 +380,7 @@ export const putSpawnedSession = (state, session) => {
     ...state,
     spawned: { ...state.spawned,
       // why merge: a turn/spawned-state snapshot is the durable session shape,
-      // but the live projection adds parent/running/grantedTools from the start
+      // but the live projection adds parent/running/visibleTools from the start
       // event. Replacing the record made the Actor Fabric forget its boundary
       // exactly when the first transcript snapshot arrived.
       sessions: { ...state.spawned.sessions,
@@ -502,19 +535,41 @@ const reconcileActorTerminals = (actors, messages) => {
   let next = actors ?? {};
   let changed = false;
 
-  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorCorrelationId?: string }} terminal */
+  /** @param {any} call @param {{ failed: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorCorrelationId?: string, kind?: string, instanceId?: string, name?: string }} terminal */
   const settle = (call, terminal) => {
     if (!call) return;
-    const card = next[call.id];
-    if (!card) return;
-    const callCorrelationIds = [
+    const acknowledgedCorrelationIds = [
       call.result?.actorCorrelationId,
       call.result?.actorDeliveryId,
       ...(Array.isArray(call.result?.actorDeliveryIds) ? call.result.actorDeliveryIds : []),
-      terminal.actorCorrelationId,
     ].filter((id) => typeof id === 'string');
+    let card = next[call.id];
+    if (!card) {
+      // A fresh panel has no live actor projection. Rebuild only from an exact
+      // host correlation present in both the immediate acknowledgement and the
+      // later durable receipt; bare tool ids are provider-controlled and may be
+      // reused across turns.
+      if (typeof terminal.actorCorrelationId !== 'string'
+          || !acknowledgedCorrelationIds.includes(terminal.actorCorrelationId)
+          || typeof terminal.kind !== 'string'
+          || typeof terminal.instanceId !== 'string') return;
+      card = {
+        kind: terminal.kind, instanceId: terminal.instanceId,
+        ...(typeof terminal.name === 'string' ? { name: terminal.name } : {}),
+        actorCorrelationId: terminal.actorCorrelationId,
+        fromIndex: 0, messages: [], streaming: true, error: null,
+      };
+    }
     if (typeof card.actorCorrelationId === 'string') {
-      if (!callCorrelationIds.includes(card.actorCorrelationId)) return;
+      // A mounted live card is itself host-authored evidence, so it can settle
+      // after a crash lost the acknowledgement. Hydrating a missing card above
+      // is stricter: only the acknowledgement may authenticate the receipt.
+      if (typeof terminal.actorCorrelationId === 'string'
+          && terminal.actorCorrelationId !== card.actorCorrelationId) return;
+      if (acknowledgedCorrelationIds.length > 0
+          && !acknowledgedCorrelationIds.includes(card.actorCorrelationId)) return;
+      if (typeof terminal.actorCorrelationId !== 'string'
+          && acknowledgedCorrelationIds.length === 0) return;
     } else {
       // Legacy cards without host correlation can only use the conservative
       // latest-occurrence fallback. A correlated older call may still own the
@@ -524,7 +579,8 @@ const reconcileActorTerminals = (actors, messages) => {
     }
     // Uncertainty outranks a cancellation pulse: Stop can race with a dispatched
     // effect, and showing "cancelled" would hide that the target may have changed.
-    const aborted = terminal.aborted === true && terminal.outcomeKnown !== false;
+    const aborted = terminal.aborted === true
+      && terminal.outcomeKnown !== false && terminal.performed !== true;
     const failed = terminal.failed === true && !aborted;
     const error = failed
       ? terminal.outcomeKnown === false
@@ -596,6 +652,9 @@ const reconcileActorTerminals = (actors, messages) => {
       failed: reply.failed === true,
       ...(typeof reply.actorDeliveryId === 'string'
         ? { actorCorrelationId: reply.actorDeliveryId } : {}),
+      ...(typeof reply.kind === 'string' ? { kind: reply.kind } : {}),
+      ...(typeof reply.instanceId === 'string' ? { instanceId: reply.instanceId } : {}),
+      ...(typeof reply.name === 'string' ? { name: reply.name } : {}),
       ...(reply.outcomeKnown !== undefined ? { outcomeKnown: reply.outcomeKnown } : {}),
       ...(reply.performed !== undefined ? { performed: reply.performed } : {}),
       ...(reply.aborted === true ? { aborted: true } : {}),
@@ -659,11 +718,12 @@ export const reduceChat = (state, msg) => {
     case 'turn/spawned-start': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       // why these casts: an actor-start message always carries a string
       // sessionId (and parentToolUseId when present) by contract — the
       // permissive ReducerMsg types them optional, so name the invariant.
       const sid = /** @type {string} */ (msg.sessionId);
-      return { ...state, spawned: { ...state.spawned,
+      return stampActorProjectionRevision({ ...state, spawned: { ...state.spawned,
         byToolUse: msg.parentToolUseId
           ? { ...state.spawned.byToolUse, [msg.parentToolUseId]: sid }
           : state.spawned.byToolUse,
@@ -675,15 +735,18 @@ export const reduceChat = (state, msg) => {
             sessionId: sid, kind: 'spawned', depth: msg.depth,
             task: msg.task, parentSessionId: msg.parentSessionId,
             rootSessionId: typeof msg.rootSessionId === 'string' ? msg.rootSessionId : undefined,
-            grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+            visibleTools: Array.isArray(msg.visibleTools) ? msg.visibleTools : undefined,
             running: true,
             messages: state.spawned.sessions[sid]?.messages ?? [],
-          } } } };
+          } } } }, msg);
     }
     case 'turn/spawned-state':
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
-      return putSpawnedSession(state, { ...msg.session, running: true });
+      if (actorEventIsStale(state, msg)) return state;
+      return stampActorProjectionRevision(
+        putSpawnedSession(state, { ...msg.session, running: true }), msg,
+      );
     case 'turn/spawned-delta':
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
@@ -702,9 +765,12 @@ export const reduceChat = (state, msg) => {
     case 'turn/spawned-done': {
       if (msg.rootSessionId && state.session.sessionId
         && msg.rootSessionId !== state.session.sessionId) return state;
+      if (actorEventIsStale(state, msg)) return state;
       const sid = /** @type {string} */ (msg.sessionId);
       const session = state.spawned.sessions[sid];
-      return session ? putSpawnedSession(state, { ...session, running: false }) : state;
+      return session ? stampActorProjectionRevision(
+        putSpawnedSession(state, { ...session, running: false }), msg,
+      ) : stampActorProjectionRevision(state, msg);
     }
     case 'turn/spawned-tool-use':
     case 'turn/spawned-tool-result':
@@ -724,7 +790,7 @@ export const reduceChat = (state, msg) => {
         actorCorrelationId: msg.actorCorrelationId,
         rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
         task: msg.task,
-        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+        visibleTools: Array.isArray(msg.visibleTools) ? msg.visibleTools : undefined,
         fromIndex: msg.fromIndex ?? 0, messages: [], streaming: true, error: null,
         aborted: false, outcomeKnown: undefined, performed: undefined, cost: null,
       }), msg);
@@ -746,7 +812,7 @@ export const reduceChat = (state, msg) => {
         actorCorrelationId: msg.actorCorrelationId,
         rootSessionId: msg.rootSessionId, parentSessionId: msg.parentSessionId,
         task: msg.task,
-        grantedTools: Array.isArray(msg.grantedTools) ? msg.grantedTools : undefined,
+        visibleTools: Array.isArray(msg.visibleTools) ? msg.visibleTools : undefined,
         streaming: true, error: null, cost: null,
       };
       return stampActorProjectionRevision(
@@ -835,9 +901,20 @@ export const reduceChat = (state, msg) => {
       if (state.session.sessionId
         && msg.parentSessionId !== state.session.sessionId
         && !state.spawned.sessions[/** @type {string} */ (msg.parentSessionId)]) return state;
-      return { ...state, asyncTasks: { ...state.asyncTasks,
-        [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } };
+      if (actorEventIsStale(state, msg)) return state;
+      return stampActorProjectionRevision({ ...state, asyncTasks: { ...state.asyncTasks,
+        [/** @type {string} */ (msg.parentSessionId)]: msg.tasks } }, msg);
     case 'state': {
+      const incomingProjection = msg.state?.projection;
+      if (incomingProjection !== undefined) {
+        const checked = validateKernelStateProjection(msg.state);
+        if (!checked.ok) return state;
+        const priorProjection = /** @type {any} */ (state).projection;
+        if (priorProjection
+            && (incomingProjection.authorityEpoch !== priorProjection.authorityEpoch
+              ? msg.authorityReplacement !== true
+              : incomingProjection.generation < priorProjection.generation)) return state;
+      }
       // Full snapshot. Replace, seeding the cost meter from the persisted
       // session tally + the configured limit. (Voice-restore is the surface's
       // job — see the module header.) why preserve pendingConfirm: confirm
@@ -896,10 +973,10 @@ export const reduceChat = (state, msg) => {
                 : state.actors,
               snapshotMessages,
             ),
-            spawned: msg.state?.spawned && !actorEpochMismatch
+            spawned: msg.state?.spawned && !staleActorSnapshot
               ? reconcileSpawned(state.spawned, msg.state.spawned)
               : state.spawned,
-            asyncTasks: msg.state?.asyncTasks && !actorEpochMismatch
+            asyncTasks: msg.state?.asyncTasks && !staleActorSnapshot
               ? msg.state.asyncTasks : state.asyncTasks,
           };
       const notices = sessionChanged

@@ -22,6 +22,8 @@ import {
 } from './lib.ts';
 import { defaults } from './default-settings.mjs';
 
+type ChannelDefaults = Record<string, Record<string, unknown>>;
+
 const DEV_OUT = join(EXTENSION_DIR, 'shared', 'channel-config.js');
 
 export const dwebEnabledForTarget = (channel: ConfigChannel, browser?: Browser): boolean =>
@@ -36,9 +38,13 @@ export const remoteModuleImportsEnabledForTarget = (channel: ConfigChannel, brow
 export const notebookModuleLoaderForTarget = (browser?: Browser): 'blob-graph' | 'single-bundle' =>
   browser === 'firefox' ? 'single-bundle' : 'blob-graph';
 
-export const flattenDefaults = (channel: ConfigChannel, browser?: Browser): Record<string, unknown> => {
+export const flattenDefaults = (
+  channel: ConfigChannel,
+  browser?: Browser,
+  sourceDefaults: ChannelDefaults = defaults,
+): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
-  for (const [key, perChannel] of Object.entries(defaults)) {
+  for (const [key, perChannel] of Object.entries(sourceDefaults)) {
     if (!dwebEnabledForTarget(channel, browser)
         && (key === 'dwebEnabled' || key === 'dwebAgentEnabled')) continue;
     const channels = Object.keys(perChannel);
@@ -57,8 +63,12 @@ export const flattenDefaults = (channel: ConfigChannel, browser?: Browser): Reco
   return out;
 };
 
-export const genChannelConfigSource = (channel: ConfigChannel, browser?: Browser): string => {
-  const flat = flattenDefaults(channel, browser);
+export const genChannelConfigSource = (
+  channel: ConfigChannel,
+  browser?: Browser,
+  sourceDefaults: ChannelDefaults = defaults,
+): string => {
+  const flat = flattenDefaults(channel, browser, sourceDefaults);
   const entries = Object.entries(flat)
     .map(([k, v]) => `  ${k}: ${JSON.stringify(v)},`)
     .join('\n');

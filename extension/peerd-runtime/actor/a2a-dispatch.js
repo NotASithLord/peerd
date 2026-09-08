@@ -31,11 +31,11 @@ export const isA2AEnvelope = (d) =>
 
 /**
  * @param {Object} deps
- * @param {(toDid: string, envelope: A2AEnvelope) => Promise<{ ok: boolean, id?: string, error?: string }>} deps.sendDm
+ * @param {(toDid: string, envelope: A2AEnvelope) => Promise<{ ok: boolean, id?: string, error?: string, performed?:boolean, outcomeKnown?:boolean, outcomeKind?:string, retryable?:boolean }>} deps.sendDm
  *   Send one direct message on the peerd-agent room (offscreen op:'dm').
  * @param {() => Promise<Array<{ did: string, name?: string }>>} deps.listPeers
  * @param {(did: string) => Promise<any | null>} deps.fetchCard   fetch a peer's advertised card
- * @param {(card: object) => Promise<{ ok: boolean, did?: string, error?: string }>} deps.publishCard
+ * @param {(card: object) => Promise<{ ok: boolean, did?: string, error?: string, performed?:boolean, outcomeKnown?:boolean, outcomeKind?:string, retryable?:boolean }>} deps.publishCard
  * @param {() => number} [deps.now]
  * @param {() => string} [deps.newReqId]
  * @param {number} [deps.defaultTimeoutMs]
@@ -77,13 +77,17 @@ export const makeMeshDispatch = (deps) => {
    * @param {string} did @param {string} message @param {string} [convId] @param {number} [timeoutMs] @param {AbortSignal} [signal]
    */
   const sendAndAwait = async (did, message, convId, timeoutMs, signal) => {
-    if (signal?.aborted) return { ok: false, error: 'a2a: aborted before send' };
+    if (signal?.aborted) return { ok: false, error: 'a2a: aborted before peer request' };
     const reqId = mkReqId();
     const env = /** @type {A2AEnvelope} */ ({ __a2a: 1, kind: 'ask', reqId, message });
     if (convId) env.convId = convId;
     const sent = await sendDm(did, env);
-    if (!sent?.ok) return { ok: false, error: sent?.error ?? 'ask: could not reach the peer' };
-    if (signal?.aborted) return { ok: false, error: 'a2a: aborted after send' };
+    if (!sent?.ok) return { ...sent, ok: false, error: sent?.error ?? 'mesh.call: could not reach the peer' };
+    const sentReceipt = {
+      performed: true, outcomeKnown: true,
+      outcomeKind: 'effect-completed', retryable: false,
+    };
+    if (signal?.aborted) return { ok: false, error: 'a2a: aborted after peer request', ...sentReceipt };
     const ms = typeof timeoutMs === 'number' ? timeoutMs : defaultTimeoutMs;
     return await new Promise((resolve) => {
       /** @param {any} value */
@@ -93,7 +97,9 @@ export const makeMeshDispatch = (deps) => {
         signal?.removeEventListener('abort', onAbort);
         resolve(value);
       };
-      const onAbort = () => finish({ ok: false, error: 'a2a: aborted while awaiting reply' });
+      const onAbort = () => finish({
+        ok: false, error: 'a2a: aborted while awaiting reply', ...sentReceipt,
+      });
       const timer = setTimeout(() => finish({ ok: true, from: null, reply: null, timedOut: true }), ms);
       pendingAsks.set(reqId, { resolve: finish, timer, did, convId });
       signal?.addEventListener('abort', onAbort, { once: true });
@@ -130,12 +136,14 @@ export const makeMeshDispatch = (deps) => {
       case 'publishCard': {
         if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted before publish' };
         const r = await publishCard(args.card);
-        return r?.ok ? { ok: true, ...(r.did ? { did: r.did } : {}) } : { ok: false, error: r?.error ?? 'publishCard failed' };
+        return r?.ok ? { ok: true, ...(r.did ? { did: r.did } : {}) }
+          : { ...r, ok: false, error: r?.error ?? 'publishCard failed' };
       }
       case 'send': {
         if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted before cast' };
         const r = await sendDm(args.did, { __a2a: 1, kind: 'tell', reqId: mkReqId(), message: args.message });
-        return r?.ok ? { ok: true, ...(r.id ? { id: r.id } : {}) } : { ok: false, error: r?.error ?? 'send failed' };
+        return r?.ok ? { ok: true, ...(r.id ? { id: r.id } : {}) }
+          : { ...r, ok: false, error: r?.error ?? 'mesh.cast failed' };
       }
       case 'ask':
         // Single-shot: no convId, no registry recording — the legacy exchange.

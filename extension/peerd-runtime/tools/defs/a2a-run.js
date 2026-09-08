@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // a2a_run — the dweb actor's CODE surface for agent-to-agent over the mesh.
 //
 // The #119 lesson applied to p2p: the model talks to other agents by WRITING JS
@@ -14,19 +16,19 @@
 // The mesh client the code drives (see worker-source.js a2a bridge):
 //   await mesh.peers()                     // [{ did, name }] — who's present
 //   await mesh.card(did)                   // a peer's Agent Card, or null
-//   await mesh.call(did, "…", { timeoutMs })// send + await ONE reply (needs consent)
+//   await mesh.call(did, "…", { timeoutMs })// request + await ONE reply (needs consent)
 //   await mesh.cast(did, "…")              // fire-and-forget (needs consent)
 //   await mesh.publishCard({ name, … })    // advertise MY card (needs consent)
 //   await mesh.inbox()                     // drain DMs received during this run
 //   await mesh.converse(did, "…", {timeoutMs}) // open a STANDING conversation:
-//                                          // like ask, but returns { convId } so a
+//                                          // like call, but returns { convId } so a
 //                                          // LATER peer message continues the thread
 //   await mesh.say(convId, "…", {timeoutMs})   // send the next turn on a convId
 
 import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { codeClientReference, renderCodeOpTrace } from '../../actor/capability-manifest.js';
+import { renderCodeOpTrace } from '../../actor/capability-manifest.js';
 
 // why 135s: the job wall-clock is the OUTERMOST timer above the SW call cap
 // (a2a-api.js). The generated mesh bridge now shares this outer deadline, so a
@@ -39,75 +41,18 @@ const MAX_TIMEOUT_MS = 180_000;
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'dweb', dweb: boolean, execute: (args: any, ctx: ToolContext) => Promise<import('/shared/tool-types.js').ToolResult | { ok: false, error: string }> }} DwebTool */
 
 /** @type {DwebTool} */
-export const a2aRunTool = {
-  name: 'a2a_run',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Talk to OTHER agents on the mesh by writing JS against the `mesh` client',
-    '(agent-to-agent). Runs in a sealed worker — async body, top-level await +',
-    `\`return\`. Exact client: ${codeClientReference('mesh')}.`,
-    'call awaits one reply and rejects on timeout; cast is fire-and-forget; converse',
-    'opens a standing thread and say continues it.',
-    'FIRST contact to a peer needs the user\'s ok (a signing call is refused until',
-    'approved); replying to a peer on a thread needs per-conversation consent.',
-    'Write ONE script that does the whole exchange and RETURN the outcome.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      code: { type: 'string', description: 'JS to run; drives the `mesh` client and returns the outcome.' },
-      timeoutMs: { type: 'number', description: `Wall-clock cap (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}).` },
-    },
-    required: ['code'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const a2aRunTool = composeTool("a2a_run", {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || !args.code.trim()) return { ok: false, error: 'code_required' };
-    const c = /** @type {{ jsOffscreenClient?: { execHeadless?: (code: string, opts: object) => Promise<any>, abortHeadless?: (runId: string, ownerSessionId?: string) => Promise<void> }, scriptRuns?: { mintRunId: (owner: string) => string, register: (runId: string, signal: any, owner: string, caps: Record<string, boolean>) => void, release: (runId: string) => void }, abortSignal?: { aborted: boolean, addEventListener: Function, removeEventListener?: Function } }} */ (
-      /** @type {unknown} */ (ctx));
-    const jsOffscreenClient = c.jsOffscreenClient;
-    if (!jsOffscreenClient?.execHeadless) return { ok: false, error: 'a2a_unavailable' };
-    const ownerSessionId = ctx.session?.sessionId;
-    if (!ownerSessionId) return { ok: false, error: 'a2a: no owner session' };
-    if (!c.scriptRuns) return { ok: false, error: 'a2a_run_registry_unavailable' };
-    // A turn that is ALREADY stopped must not launch a worker at all — the
-    // 'abort' event never re-fires on an aborted signal, so a run started now
-    // would hold a shared headless slot for its full 135s wall-clock (#153).
-    if (c.abortSignal?.aborted) {
-      return { ok: false, error: 'a2a_aborted: the turn was stopped before the run started' };
-    }
+    const authority = /** @type {any} */ (ctx).dwebAuthority;
+    if (!authority?.runMeshProgram) return { ok: false, error: 'a2a_unavailable' };
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
-    // Stop plumbing (#153, mirrors the script tool): a runId-carrying job is
-    // registered by the offscreen runner, so aborting the dweb-actor turn
-    // terminates the worker promptly instead of orphaning it to its timeout.
-    const runId = c.scriptRuns.mintRunId(ownerSessionId);
-    c.scriptRuns.register(runId, c.abortSignal, ownerSessionId, { a2a: true });
-    /** @type {(() => void) | undefined} */
-    let onAbort;
-    if (c.abortSignal && jsOffscreenClient.abortHeadless) {
-      onAbort = () => { jsOffscreenClient.abortHeadless?.(runId, ownerSessionId); };
-      if (c.abortSignal.aborted) onAbort();
-      else c.abortSignal.addEventListener('abort', onAbort, { once: true });
-    }
-    try {
-      const result = await jsOffscreenClient.execHeadless(args.code, {
-        timeoutMs, a2a: true, ownerSessionId, runId, signal: c.abortSignal,
-      });
-      return { ok: true, content: formatA2AResult(args.code, result) };
-    } catch (e) {
-      const err = /** @type {{ name?: string, message?: string }} */ (e);
-      return { ok: false, error: `a2a_run_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
-    } finally {
-      c.scriptRuns.release(runId);
-      if (onAbort && c.abortSignal) {
-        try { c.abortSignal.removeEventListener?.('abort', onAbort); } catch { /* stub signal in tests */ }
-      }
-    }
+    const run = await authority.runMeshProgram(args.code, timeoutMs);
+    if (!run?.ok) return run;
+    return { ok: true, content: formatA2AResult(args.code, run.result) };
   },
-};
+});
 
 /**
  * The run's output carries PEER-supplied bytes (replies, cards) — always fence

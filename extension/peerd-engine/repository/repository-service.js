@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createKeyedQueue } from '../command-queue.js';
+import { REPOSITORY_MAX_GIT_HTTP_BODY_BYTES } from '/shared/repository-channel.js';
 import { createOpfsGitFs } from './opfs-fs.js';
 import { repositoryPaths, appRepositoryRef } from './paths.js';
 import { createGitHttpClient, normalizeGitRemote } from './remote.js';
@@ -225,7 +226,8 @@ const snapshotsEqual = (left, right) => {
 
 /**
  * @param {{ loadGit?: () => Promise<any>, fs?: any,
- *   webFetch?: (url:string, init?:RequestInit)=>Promise<Response>,
+ *   webFetch?: (url:string, init?:RequestInit,
+ *     context?:{gitRemote:{url:string,host:string}})=>Promise<Response>,
  *   getSecret?: (name:string)=>Promise<string|null>, audit?: (event:any)=>void }} [deps]
  */
 export const createRepositoryService = ({
@@ -239,6 +241,14 @@ export const createRepositoryService = ({
   const mutationQueue = createKeyedQueue();
   /** @type {Promise<any>|null} */ let gitPromise = null;
   const getGit = () => (gitPromise ??= loadGit());
+  /** @param {{url:string,host:string}} remote @param {AbortSignal|undefined} signal */
+  const gitHttp = (remote, signal) => {
+    if (!webFetch) throw new Error('git remote transport unavailable');
+    return createGitHttpClient({
+      remote, webFetch, maxBodyBytes: REPOSITORY_MAX_GIT_HTTP_BODY_BYTES,
+      getSecret, audit, signal,
+    });
+  };
   /** @param {{kind:string,id:string}} ref */
   const key = (ref) => `${ref.kind}:${ref.id}`;
   /** @param {{kind:string,id:string}} ref @param {(ctx:{git:any,fs:any,dir:string,gitdir:string})=>Promise<any>} operation */
@@ -461,35 +471,67 @@ export const createRepositoryService = ({
     try { return await remoteFor(ctx); } catch { return null; }
   });
 
-  /** @param {{kind:string,id:string}} ref @param {{signal?:AbortSignal}} [opts] */
-  const fetchRemote = (ref, { signal } = {}) => run(ref, async (ctx) => {
+  /** @param {RepositoryContext} ctx @param {{http:any,remote:{url:string},ref?:string|null,
+   * depth?:number,prune?:boolean,tags?:boolean,fs?:any}} options */
+  const fetchBranch = async (ctx, { http, remote, ref, depth, prune = false, tags = false,
+    fs: transportFs = quotaFsFor(ctx) }) => {
+    let result;
+    try {
+      result = await ctx.git.fetch({
+        fs: transportFs, http, dir: ctx.dir, gitdir: ctx.gitdir,
+        remote: 'origin', url: remote.url, singleBranch: true, prune, tags,
+        ...(ref ? { ref } : {}),
+        ...(Number.isFinite(depth) ? { depth } : {}),
+      });
+    } catch (cause) {
+      const missing = /** @type {{code?:unknown,data?:{what?:unknown}}} */ (cause);
+      if (missing?.code !== 'NotFoundError' || missing.data?.what !== 'HEAD' || !ref) {
+        throw cause;
+      }
+      const fetchHead = await ctx.git.resolveRef({
+        fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir,
+        ref: `refs/remotes/origin/${ref}`,
+      });
+      result = { defaultBranch: null, fetchHead, fetchHeadDescription: null };
+    }
+    return result;
+  };
+
+  /** @param {{kind:string,id:string}} ref @param {{signal?:AbortSignal,expectedRemote?:string}} [opts] */
+  const fetchRemote = (ref, { signal, expectedRemote } = {}) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx);
-    if (!webFetch) throw new Error('git remote transport unavailable');
     const remote = await remoteFor(ctx);
-    const http = createGitHttpClient({ remote, webFetch, getSecret, audit, signal });
-    const result = await ctx.git.fetch({ fs: quotaFsFor(ctx), http, dir: ctx.dir, gitdir: ctx.gitdir, remote: 'origin', url: remote.url, singleBranch: true, prune: true });
+    if (expectedRemote !== undefined && normalizeGitRemote(expectedRemote).url !== remote.url) {
+      throw new Error('Git remote changed before fetch');
+    }
+    const current = await ctx.git.currentBranch({
+      fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, fullname: false,
+    });
+    const http = gitHttp(remote, signal);
+    const result = await fetchBranch(ctx, { http, remote, ref: current, prune: true });
     return { remote, fetchHead: result.fetchHead ?? null, fetchHeadDescription: result.fetchHeadDescription ?? null };
   });
 
-  /** @param {{kind:string,id:string}} ref @param {{ref?:string,signal?:AbortSignal}} [opts] */
-  const push = (ref, { ref: branchName, signal } = {}) => run(ref, async (ctx) => {
+  /** @param {{kind:string,id:string}} ref @param {{ref?:string,signal?:AbortSignal,expectedRemote?:string}} [opts] */
+  const push = (ref, { ref: branchName, signal, expectedRemote } = {}) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx);
-    if (!webFetch) throw new Error('git remote transport unavailable');
     const remote = await remoteFor(ctx);
+    if (expectedRemote !== undefined && normalizeGitRemote(expectedRemote).url !== remote.url) {
+      throw new Error('Git remote changed before push');
+    }
     const current = branchName ? validBranch(branchName) : await ctx.git.currentBranch({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, fullname: false });
     if (!current) throw new Error('cannot push a detached HEAD');
-    const http = createGitHttpClient({ remote, webFetch, getSecret, audit, signal });
+    const http = gitHttp(remote, signal);
     const result = await ctx.git.push({ fs: ctx.fs, http, dir: ctx.dir, gitdir: ctx.gitdir, remote: 'origin', ref: current, force: false });
     return { remote, branch: current, ok: result.ok === true, error: result.error ?? null, refs: result.refs ?? [] };
   });
 
   /** @param {{kind:string,id:string}} ref @param {{url:string,ref?:string,depth?:number,signal?:AbortSignal}} opts */
   const clone = (ref, { url, ref: branchName, depth = 50, signal }) => run(ref, async (ctx) => {
-    if (!webFetch) throw new Error('git remote transport unavailable');
     const remote = normalizeGitRemote(url);
     const existing = await readWorkingTree(ctx.fs, ctx.dir);
     if (Object.keys(existing).length || await resolveHead(ctx)) throw new Error('clone target is not empty');
-    const http = createGitHttpClient({ remote, webFetch, getSecret, audit, signal });
+    const http = gitHttp(remote, signal);
     const quotaFs = quotaFsFor(ctx);
     try {
       await ctx.git.clone({ fs: quotaFs, http, dir: ctx.dir, gitdir: ctx.gitdir, url: remote.url, ...(branchName ? { ref: validBranch(branchName), singleBranch: true } : {}), depth: Math.min(500, Math.max(1, depth)) });
@@ -509,8 +551,15 @@ export const createRepositoryService = ({
   /** Return immutable bytes from a commit, never a concurrently mutable tree. */
   /** @param {{kind:string,id:string}} ref @param {{at?:string}} [opts] */
   const snapshot = (ref, { at = 'HEAD' } = {}) => run(ref, async (ctx) => {
-    await ensureUnlocked(ctx);
+    if (!await resolveHead(ctx)) throw new Error('repository is not initialized');
     return snapshotAtUnlocked(ctx, at);
+  });
+
+  /** Return a copy of the visible live worktree without creating a commit. */
+  /** @param {{kind:string,id:string}} ref */
+  const workingSnapshot = (ref) => run(ref, async (ctx) => {
+    await ensureUnlocked(ctx);
+    return readVisibleWorkingTree(ctx, {});
   });
 
   /** Compare every live byte (including ignored files) with one commit tree. */
@@ -577,7 +626,8 @@ export const createRepositoryService = ({
   return {
     coordinate,
     init, stage, commit, status, branches, history, diff, restore, branch, checkout,
-    setRemote, getRemote, fetch: fetchRemote, push, clone, snapshot, matches, fork: forkRepository,
+    setRemote, getRemote, fetch: fetchRemote, push, clone, snapshot, workingSnapshot,
+    matches, fork: forkRepository,
     replaceWorkingTree, destroy,
     initApp: (/** @type {string} */ appId, /** @type {{message?:string}} */ opts) => init(appRepositoryRef(appId), opts),
     commitApp: (/** @type {string} */ appId, /** @type {{message?:string}} */ opts) => commit(appRepositoryRef(appId), opts),

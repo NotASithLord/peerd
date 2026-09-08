@@ -1,56 +1,31 @@
 // @ts-check
-// Ollama adapter — native local inference.
+// Ollama adapter for native local inference.
 //
-// Ollama serves an OpenAI-compatible /v1/chat/completions (SSE streaming,
-// tool calls included) on http://localhost:11434, so this adapter reuses
+// Ollama serves an OpenAI-compatible chat stream with tool calls, so this adapter reuses
 // the same to-openai.js / from-openai.js format layer the OpenRouter
 // adapter does. What's DIFFERENT about local inference:
 //
-//   - KEYLESS. There is no API key; `keyless: true` on the descriptor
-//     tells the chassis to skip vault checks instead of storing a fake
-//     secret. callOllama never calls getSecret.
+//   - KEYLESS. There is no API key; `keyless: true` on the descriptor tells
+//     the controller that credential setup is unnecessary.
 //   - LIVE MODEL INVENTORY. The available models are whatever the user
-//     has pulled — a static catalog would lie. listOllamaModels reads
-//     GET /api/tags so the model picker shows the real local inventory.
+//     has pulled; a static catalog would lie.
 //   - LEGIBLE FAILURE. The most common failure mode by far is "the
 //     daemon isn't running": fetch rejects with a bare TypeError. That
 //     maps to OllamaNotRunningError so the user sees the one-command fix
 //     instead of "Failed to fetch".
 //
-// Same DI contract as the other adapters: `safeFetch` is injected; this
-// module never imports peerd-egress. (localhost:11434 is on the
-// hardcoded egress allowlist — see peerd-egress/fetch/allowlist.js.)
+// The injected model-egress authority owns the configured host, fixed paths,
+// network policy, and request limits. This module never receives that host.
 
 import { toOpenAiBody } from '../format/to-openai.js';
 import { fromOpenAiStream } from '../format/from-openai.js';
-import { fetchModelWindow } from '../model-window.js';
-import { abortableSleep, fetchInitialResponseWithRetry } from '../connect-timeout.js';
+import { readModelWindow } from '../model-window.js';
+import { abortableSleep, openInitialResponseWithRetry } from '../connect-timeout.js';
 import {
   ProviderError,
   ProviderHttpError,
   OllamaNotRunningError,
 } from '../errors.js';
-
-// The default daemon origin (local loopback). A user with a remote/LAN Ollama
-// box overrides it via the `ollamaHost` setting (issue #104), threaded into each
-// call below. localhost:11434 + 127.0.0.1:11434 are on the hardcoded egress
-// allowlist; a custom host is added to the allowlist from its setting.
-const DEFAULT_ORIGIN = 'http://localhost:11434';
-
-/**
- * Build the three Ollama endpoints from a host. `host` is a normalized origin
- * (settings-patch validates it to `new URL(...).origin`); we still strip a
- * trailing slash and fall back to the loopback default defensively.
- * @param {string} [host]
- */
-const endpointsFor = (host) => {
-  const origin = String(host || DEFAULT_ORIGIN).replace(/\/+$/, '');
-  return {
-    completions: `${origin}/v1/chat/completions`,
-    tags: `${origin}/api/tags`,
-    show: `${origin}/api/show`,
-  };
-};
 
 // why 120s (vs the 45s the cloud adapters use): Ollama sends response
 // headers only after the model is LOADED into memory — a cold start on a
@@ -67,12 +42,13 @@ export const DEFAULT_MODEL = 'qwen3:8b';
 /**
  * @typedef {import('../types.js').InternalMessage} InternalMessage
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
+ * @typedef {import('../model-egress.js').ModelEgress} ModelEgress
  */
 
 /**
  * Call the local Ollama daemon and stream events back. Mirrors the
- * OpenRouter adapter's signature; `getSecret` and `reasoning` are
- * accepted but ignored (keyless; no signed thinking blocks).
+ * OpenRouter adapter's signature; `reasoning` is accepted but ignored
+ * (keyless; no signed thinking blocks).
  *
  * @param {Object} args
  * @param {readonly InternalMessage[]} args.messages
@@ -80,12 +56,8 @@ export const DEFAULT_MODEL = 'qwen3:8b';
  * @param {string} [args.model]
  * @param {number} [args.maxTokens]
  * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [args.tools]
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
- * @param {string} [args.ollamaHost]
- *   Daemon base URL (issue #104). Defaults to the local loopback; a remote/LAN
- *   host is threaded in from the `ollamaHost` setting. Must already be on the
- *   egress allowlist (the SW adds the configured host).
  * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [args._sleep]
  *   Test seam for the connection-drop retry backoff — same contract as the
  *   other adapters' _sleep. Production callers leave it undefined.
@@ -97,24 +69,22 @@ export async function* callOllama(args) {
     model = DEFAULT_MODEL,
     maxTokens,
     tools,
-    safeFetch,
+    modelEgress,
     signal,
-    ollamaHost,
     _sleep = abortableSleep,
   } = args;
 
-  const { completions: ENDPOINT } = endpointsFor(ollamaHost);
   const body = toOpenAiBody({ model, system, messages, tools, maxTokens });
-  const requestInit = {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  };
 
   let res;
   try {
-    res = await fetchInitialResponseWithRetry(safeFetch, ENDPOINT, requestInit, {
+    res = await openInitialResponseWithRetry(
+      (requestSignal) => modelEgress.openInference({
+        providerId: 'ollama',
+        modelId: model,
+        nativeBody: body,
+        signal: requestSignal,
+      }), {
       stopSignal: signal,
       timeoutMs: CONNECT_TIMEOUT_MS,
       onTimeout: (ms) => new ProviderError('ollama', `no response within ${ms / 1000}s — the daemon may be hung, or the model is still loading. Try again.`),
@@ -126,7 +96,8 @@ export async function* callOllama(args) {
       // one-command fix message.
       maxAttempts: 2,
       sleepFn: _sleep,
-    });
+      },
+    );
   } catch (e) {
     // fetch rejects with a bare TypeError on connection-refused — the
     // "daemon not running" case (after the single connect retry above gave
@@ -158,16 +129,14 @@ export async function* callOllama(args) {
  * user has actually pulled, name-sorted, so pickers reflect reality.
  *
  * @param {Object} deps
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} deps.safeFetch
+ * @param {ModelEgress} deps.modelEgress
  * @param {AbortSignal} [deps.signal]
- * @param {string} [deps.ollamaHost] daemon base URL (issue #104); defaults to loopback.
  * @returns {Promise<Array<{ model: string, label: string, sizeBytes: number }>>}
  */
-export const listOllamaModels = async ({ safeFetch, signal, ollamaHost }) => {
-  const { tags: TAGS_ENDPOINT } = endpointsFor(ollamaHost);
+export const listOllamaModels = async ({ modelEgress, signal }) => {
   let res;
   try {
-    res = await safeFetch(TAGS_ENDPOINT, { method: 'GET', signal });
+    res = await modelEgress.readModelInventory({ providerId: 'ollama', signal });
   } catch (e) {
     if (e instanceof TypeError) throw new OllamaNotRunningError();
     throw e;
@@ -211,22 +180,18 @@ export const listOllamaModels = async ({ safeFetch, signal, ollamaHost }) => {
  *
  * @param {Object} args
  * @param {string} args.model
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
- * @param {string} [args.ollamaHost] daemon base URL (issue #104); defaults to loopback.
  * @returns {Promise<number | null>}
  */
-export const fetchOllamaContextWindow = async ({ model, safeFetch, signal, ollamaHost }) => {
+export const fetchOllamaContextWindow = async ({ model, modelEgress, signal }) => {
   if (typeof model !== 'string' || !model) return null;
-  const { show: SHOW_ENDPOINT } = endpointsFor(ollamaHost);
-  return fetchModelWindow({
-    safeFetch,
-    url: SHOW_ENDPOINT,
-    init: {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model }),
-    },
+  return readModelWindow({
+    readResponse: (requestSignal) => modelEgress.readModelContext({
+      providerId: 'ollama',
+      modelId: model,
+      signal: requestSignal,
+    }),
     extract: (body) => {
       // 1) Configured num_ctx from the parameters blob (the effective
       //    window). Format is one "name value" per line; num_ctx may be
@@ -252,23 +217,18 @@ export const fetchOllamaContextWindow = async ({ model, safeFetch, signal, ollam
 
 /**
  * Adapter descriptor — the shape the provider registry stores.
- * `keyless: true` + `vaultSecretName: null` mark local inference: the
- * chassis skips key checks rather than storing a placeholder secret.
- * `listModels` marks a live inventory source (vs a static catalog).
+ * `keyless: true` marks local inference; `listModels` marks a live inventory
+ * source instead of a static catalog.
  */
 export const ollamaAdapter = Object.freeze({
   name: 'ollama',
   label: 'Ollama',
-  // Informational default; the live endpoint is built per-call from the
-  // `ollamaHost` setting (endpointsFor) so a remote daemon works (issue #104).
-  endpoint: `${DEFAULT_ORIGIN}/v1/chat/completions`,
   defaultModel: DEFAULT_MODEL,
   // why: Ollama has no separate fast/cheap tier the way the cloud gateways
   // do — the runner rides the same local model as chat. Set it explicitly
   // (rather than leaving it undefined) so every adapter carries a runner
   // default; the resolver treats "same as chat" as the correct local posture.
   defaultRunnerModel: DEFAULT_MODEL,
-  vaultSecretName: null,
   keyless: true,
   call: callOllama,
   listModels: listOllamaModels,

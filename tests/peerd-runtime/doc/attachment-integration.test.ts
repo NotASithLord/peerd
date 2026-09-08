@@ -21,7 +21,7 @@ const toBase64 = (bytes: Uint8Array): string => {
   return btoa(bin);
 };
 
-// Exactly what background/service-worker.js's convertDocAttachment does, minus
+// Exactly what convertDocAttachment does, minus
 // the offscreen hop (which only moves bytes).
 const realConvert = async (att: { name: string; mediaType: string; data?: string }) => {
   const bin = atob(att.data ?? '');

@@ -338,11 +338,11 @@ describe('buildAppEgressBlockRule: App tabs have no remote network edge', () => 
     expect(buildAppEgressBlockRule({ tabIds: [] })).toBeNull();
   });
 
-  test('the rule is tab-scoped and blocks every HTTP(S) resource type', () => {
+  test('the rule is tab-scoped and blocks every HTTP(S)/WebSocket resource type', () => {
     const rule: any = buildAppEgressBlockRule({ tabIds: [11, 11, -1, 12] });
     expect(rule.id).toBe(APP_EGRESS_RULE_ID);
     expect(rule.action).toEqual({ type: 'block' });
-    expect(rule.condition.regexFilter).toBe('^https?://');
+    expect(rule.condition.regexFilter).toBe('^(?:https?|wss?)://');
     expect(rule.condition.tabIds).toEqual([11, 12]);
     expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
   });
@@ -362,11 +362,11 @@ describe('buildAppEgressBlockRule — App tabs have no remote network edge', () 
     expect(buildAppEgressBlockRule({ tabIds: [] })).toBeNull();
   });
 
-  test('the rule is tab-scoped and blocks every HTTP(S) resource type', () => {
+  test('the rule is tab-scoped and blocks every HTTP(S)/WebSocket resource type', () => {
     const rule: any = buildAppEgressBlockRule({ tabIds: [11, 11, -1, 12] });
     expect(rule.id).toBe(APP_EGRESS_RULE_ID);
     expect(rule.action).toEqual({ type: 'block' });
-    expect(rule.condition.regexFilter).toBe('^https?://');
+    expect(rule.condition.regexFilter).toBe('^(?:https?|wss?)://');
     expect(rule.condition.tabIds).toEqual([11, 12]);
     expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
   });

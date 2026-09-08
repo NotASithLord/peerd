@@ -1,0 +1,576 @@
+import { describe, expect, test } from 'bun:test';
+import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
+import { createControllerTurnRuntime } from '../../extension/offscreen/controller-turn-runtime.js';
+import { createControllerModelEgress } from '../../extension/offscreen/model-egress-client.js';
+import { runUserTurn as runDirectTurn } from '../../extension/peerd-runtime/loop/agent-loop.js';
+import {
+  buildTemporalBlock, buildTemporalContext,
+} from '../../extension/peerd-runtime/controller.js';
+import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
+import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
+
+const clone = <T>(value: T): T => structuredClone(value);
+const turnRuntime = createControllerTurnRuntime();
+
+const makeSessions = () => {
+  let record: any = {
+    sessionId: 'session-1', provider: 'anthropic', model: 'claude-sonnet-4-6', messages: [],
+  };
+  return {
+    get: async (sessionId: string) => sessionId === record.sessionId ? clone(record) : undefined,
+    appendMessage: async (sessionId: string, message: any) => {
+      if (sessionId !== record.sessionId) throw new Error('session not found');
+      record = { ...record, messages: [...record.messages, clone(message)] };
+      return clone(record);
+    },
+    updateAssistantMessage: async (sessionId: string, messageId: string, patch: any) => {
+      if (sessionId !== record.sessionId) throw new Error('session not found');
+      const index = record.messages.findIndex((message: any) => message.id === messageId);
+      if (index < 0) throw new Error('assistant message not found');
+      const messages = [...record.messages];
+      messages[index] = { ...messages[index], ...clone(patch) };
+      record = { ...record, messages };
+      return clone(record);
+    },
+    setTrimSummary: async (sessionId: string, state: any) => {
+      if (sessionId !== record.sessionId) throw new Error('session not found');
+      record = { ...record, trimSummary: clone(state) };
+      return clone(record);
+    },
+    snapshot: () => clone(record),
+  };
+};
+
+const normalize = (value: any): any => {
+  if (Array.isArray(value)) return value.map(normalize);
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, any> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === 'when') out[key] = 0;
+    else if ((key === 'id' || key === 'messageId')
+        && typeof entry === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(entry)) {
+      out[key] = '<generated-id>';
+    } else out[key] = normalize(entry);
+  }
+  return out;
+};
+
+const withoutProjectedPrice = (events: any[]) => events.map((event) => {
+  if (event?.type !== 'usage') return event;
+  const { price: _price, ...rest } = event;
+  return rest;
+});
+
+const drain = async (iterable: AsyncIterable<any>) => {
+  const values: any[] = [];
+  for await (const value of iterable) values.push(value);
+  return values;
+};
+
+type HarnessOptions = {
+  ctx: any;
+  providerEgress?: any;
+  inspectOuter?: (payload: any) => void;
+  inspectModelRequest?: (request: any, grant: any) => void;
+  interceptKernel?: (
+    operation: string,
+    payload: any,
+    next: () => Promise<any>,
+    invoke: (operation: string, payload: any) => Promise<any>,
+  ) => Promise<any>;
+  recordModelCall?: (call: Record<string, any>) => void;
+};
+
+const runPrototype = async ({
+  ctx, providerEgress, inspectOuter, inspectModelRequest, interceptKernel, recordModelCall,
+}: HarnessOptions) => {
+  let bridge: ReturnType<typeof makeControllerTurnBridge>;
+  let id = 0;
+  const getClient = async () => ({
+    call: async (capability: string, payload: any, options: { signal?: AbortSignal }) => {
+      inspectOuter?.(payload);
+      if (options.signal?.aborted) {
+        return {
+          ok: false, code: 'controller-call-aborted', outcomeKnown: true, phase: 'startup',
+        };
+      }
+      const authority = bridge.authorize(payload);
+      if (!authority) return { ok: false, code: 'authority-invalid', outcomeKnown: true };
+      return turnRuntime.runControllerTurn(payload, {
+        signal: options.signal ?? new AbortController().signal,
+        authority,
+        kernelCall: (operation: string, kernelPayload: any) => {
+          const invoke = (candidateOperation: string, candidatePayload: any) =>
+            Promise.resolve(bridge.handleKernelCall(
+              candidateOperation,
+              candidatePayload,
+              {
+                capability,
+                authority,
+                signal: new AbortController().signal,
+                deadlineAt: Date.now() + 60_000,
+              },
+            ));
+          const next = () => invoke(operation, kernelPayload);
+          return interceptKernel
+            ? interceptKernel(operation, kernelPayload, next, invoke)
+            : next();
+        },
+      });
+    },
+  });
+  bridge = makeControllerTurnBridge({
+    getClient,
+    newId: () => `prototype-${++id}`,
+    providerEgress: providerEgress ?? makeScriptedProviderAuthority(
+      () => ctx.callModel,
+      (request, grant) => inspectModelRequest?.(request, grant),
+    ) as any,
+    ...(recordModelCall ? { recordModelCall } : {}),
+  });
+  try {
+    const events = [];
+    for await (const event of bridge.runUserTurn(ctx)) events.push(event);
+    return events;
+  } finally {
+    bridge.close();
+  }
+};
+
+const makeSimpleCtx = (sessions: ReturnType<typeof makeSessions>, capture: any[]) => ({
+  sessionId: 'session-1',
+  userText: 'inspect the image',
+  attachments: [{
+    name: 'pixel.png', mediaType: 'image/png', kind: 'image' as const, size: 3,
+    data: 'RAW-IMAGE-BYTES',
+  }],
+  sessions,
+  tools: [],
+  allowedOperations: [],
+  refreshTools: async () => [],
+  classifyToolCall: () => ({ actionClass: 'read', confirm: false }),
+  getSystemPrompt: async () => 'PINNED-SYSTEM',
+  appendAudit: async () => {},
+  enrichTrimSummary: () => {},
+  getSecret: async () => 'RAW-PROVIDER-SECRET',
+  safeFetch: async () => new Response('unused'),
+  signal: new AbortController().signal,
+  now: () => 1_700_000_000_000,
+  previousTurnAt: null,
+  turnNow: 1_700_000_000_000,
+  activeTabContext: null,
+  protectedTabContext: null,
+  recoveryBlock: '',
+  contextMessage: buildTemporalContext({
+    temporalBlock: buildTemporalBlock({ lastTurnAt: null, nowMs: 1_700_000_000_000 }),
+  }),
+  reasoning: { enabled: false },
+  callModel: async function* () {
+    capture.push({ called: true });
+    yield { type: 'text-delta', text: 'done' };
+    yield {
+      type: 'usage',
+      usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    };
+    yield { type: 'message-stop', stopReason: 'end_turn' };
+  },
+});
+
+const makeFailoverProviderAuthority = () => {
+  const encoder = new TextEncoder();
+  const remoteStreams = new Map<string, { sent: boolean }>();
+  const localStreams = new Map<string, { sent: boolean }>();
+  const known = (value: any) => ({ ok: true, value, outcomeKnown: true });
+  return {
+    openInference: async (request: any) => {
+      const streamId = 'primary-usage-limit';
+      remoteStreams.set(streamId, { sent: false });
+      return known({
+        streamId, status: 402, statusText: 'Payment Required', headers: {}, hasBody: true,
+        providerId: request.providerId,
+      });
+    },
+    readInferenceChunk: async ({ streamId }: any) => {
+      const stream = remoteStreams.get(streamId);
+      if (!stream || stream.sent) {
+        remoteStreams.delete(streamId);
+        return known({ done: true });
+      }
+      stream.sent = true;
+      return known({
+        done: false,
+        chunk: encoder.encode(JSON.stringify({ error: { message: 'credit balance exhausted' } })),
+      });
+    },
+    cancelInference: async ({ streamId }: any) => {
+      remoteStreams.delete(streamId);
+      return known(null);
+    },
+    readModelInventory: async () => known(null),
+    readModelContext: async () => known(null),
+    openLocalGeneration: async () => {
+      const streamId = 'local-fallback';
+      localStreams.set(streamId, { sent: false });
+      return known({ streamId });
+    },
+    readLocalGeneration: async ({ streamId }: any) => {
+      const stream = localStreams.get(streamId);
+      if (!stream || stream.sent) {
+        localStreams.delete(streamId);
+        return known({ done: true });
+      }
+      stream.sent = true;
+      return known({ done: false, token: 'fallback reply' });
+    },
+    cancelLocalGeneration: async ({ streamId }: any) => {
+      localStreams.delete(streamId);
+      return known(null);
+    },
+    closeOwner: async () => {
+      remoteStreams.clear();
+      localStreams.clear();
+    },
+  };
+};
+
+describe('orchestrator controller turn boundary', () => {
+  test('captures the bounded main model context at the controller-to-egress boundary', async () => {
+    const ring = createContextSnapshots();
+    const sessions = makeSessions();
+    await runPrototype({
+      ctx: makeSimpleCtx(sessions, []),
+      recordModelCall: ring.record,
+    });
+
+    const snapshots = ring.snapshotsFor('session-1');
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      label: 'main', provider: 'anthropic', model: 'claude-sonnet-4-6',
+      system: 'PINNED-SYSTEM',
+    });
+    expect(JSON.stringify(snapshots[0])).not.toContain('RAW-PROVIDER-SECRET');
+    expect(JSON.stringify(snapshots[0])).not.toContain('RAW-IMAGE-BYTES');
+  });
+
+  test('captures and labels the actual fallback attempt separately', async () => {
+    const ring = createContextSnapshots();
+    const sessions = makeSessions();
+    const notes: any[][] = [];
+    await runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []),
+        providerFailoverEnabled: true,
+        providerFallbacks: ['local-webgpu'],
+        postChatNote: (...args: any[]) => { notes.push(args); },
+      },
+      providerEgress: makeFailoverProviderAuthority(),
+      recordModelCall: ring.record,
+    });
+
+    expect(ring.snapshotsFor('session-1').map((snapshot) => ({
+      label: snapshot.label, provider: snapshot.provider,
+    }))).toEqual([
+      { label: 'main', provider: 'anthropic' },
+      { label: 'main:failover', provider: 'local-webgpu' },
+    ]);
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', content: 'fallback reply', streaming: false,
+    });
+    expect(notes).toEqual([[
+      'anthropic unavailable; switching to local-webgpu and continuing…',
+      null,
+      'session-1',
+    ]]);
+  });
+
+  test('ignores an advisory context-recorder exception and still completes inference', async () => {
+    const sessions = makeSessions();
+    await runPrototype({
+      ctx: makeSimpleCtx(sessions, []),
+      recordModelCall: () => { throw new Error('recorder unavailable'); },
+    });
+
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', content: 'done', streaming: false,
+    });
+  });
+
+  test('ignores loss of the advisory context observation without tainting the turn', async () => {
+    const sessions = makeSessions();
+    await runPrototype({
+      ctx: makeSimpleCtx(sessions, []),
+      interceptKernel: async (operation, _payload, next) =>
+        operation === 'turn.model.observe-context'
+          ? { ok: false, code: 'controller-channel-lost', outcomeKnown: false }
+          : next(),
+    });
+
+    expect(sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', content: 'done', streaming: false,
+    });
+  });
+
+  test('a held advisory context recorder cannot delay provider open', async () => {
+    const sessions = makeSessions();
+    let releaseObservation!: () => void;
+    const heldObservation = new Promise<any>((resolve) => {
+      releaseObservation = () => resolve({ ok: true, value: null, outcomeKnown: true });
+    });
+    let markModelStarted!: () => void;
+    const modelStarted = new Promise<void>((resolve) => { markModelStarted = resolve; });
+    let turnSettled = false;
+    const turn = runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []),
+        callModel: async function* () {
+          markModelStarted();
+          yield { type: 'text-delta', text: 'done' };
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        },
+      },
+      interceptKernel: async (operation, _payload, next) =>
+        operation === 'turn.model.observe-context' ? heldObservation : next(),
+    }).finally(() => { turnSettled = true; });
+
+    const opened = await Promise.race([
+      modelStarted.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(opened).toBe(true);
+    expect(turnSettled).toBe(false);
+    releaseObservation();
+    await turn;
+    expect(turnSettled).toBe(true);
+  });
+
+  test('Stop reaches both exact remote and local model cancellation operations', async () => {
+    const operations: string[] = [];
+    const modelEgress = createControllerModelEgress({
+      call: async (operation: string) => {
+        operations.push(operation);
+        if (operation === 'turn.model.open-inference') return {
+          streamId: 'remote-stream', status: 200, headers: {}, hasBody: true,
+        };
+        if (operation === 'turn.model.open-local') return { streamId: 'local-stream' };
+        if (operation === 'turn.model.read-local') return { done: true };
+        return null;
+      },
+    });
+    const remoteStop = new AbortController();
+    remoteStop.abort();
+    await modelEgress.openInference({
+      providerId: 'anthropic', modelId: 'model', nativeBody: {},
+      signal: remoteStop.signal,
+    });
+    const localStop = new AbortController();
+    localStop.abort();
+    const local = modelEgress.generateLocal({
+      providerId: 'local-webgpu', modelId: 'model', messages: [], system: '', tools: [],
+      maxTokens: 1, signal: localStop.signal,
+    });
+    await local.next();
+    for (let attempt = 0; attempt < 10
+      && !operations.includes('turn.model.cancel-inference'); attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(operations).toContain('turn.model.cancel-inference');
+    expect(operations).toContain('turn.model.cancel-local');
+  });
+
+  test('emergency bridge close releases active provider owners', async () => {
+    const released: object[] = [];
+    const bridge = makeControllerTurnBridge({
+      getClient: async () => ({
+        call: () => new Promise(() => {}),
+      }),
+      providerEgress: {
+        closeOwner: async (owner: object) => { released.push(owner); },
+      } as any,
+      newId: () => 'emergency-close-run',
+    });
+    const turn = bridge.runUserTurn({
+      sessionId: 'session-emergency-close', tools: [],
+      allowedOperations: [],
+      signal: new AbortController().signal,
+    });
+    void turn.next();
+    for (let attempt = 0; attempt < 10 && bridge.activeCount() === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(bridge.activeCount()).toBe(1);
+
+    await bridge.close();
+
+    expect(bridge.activeCount()).toBe(0);
+    expect(released).toHaveLength(1);
+  });
+
+  test('emergency bridge close retires runs when provider cleanup never returns', async () => {
+    const bridge = makeControllerTurnBridge({
+      getClient: async () => ({ call: () => new Promise(() => {}) }),
+      providerEgress: {
+        closeOwner: async () => new Promise(() => {}),
+      } as any,
+      cleanupTimeoutMs: 10,
+      newId: () => 'hung-provider-cleanup-run',
+    });
+    const turn = bridge.runUserTurn({
+      sessionId: 'session-hung-provider-cleanup', tools: [],
+      allowedOperations: [],
+      signal: new AbortController().signal,
+    });
+    void turn.next();
+    for (let attempt = 0; attempt < 10 && bridge.activeCount() === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    const completed = await Promise.race([
+      bridge.close().then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    expect(completed).toBe('completed');
+    expect(bridge.activeCount()).toBe(0);
+  });
+
+  test('Stop re-closes provider custody admitted after the first cleanup', async () => {
+    const controller = new AbortController();
+    let releaseOpen!: () => void;
+    let markOpenStarted!: () => void;
+    const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+    const openStarted = new Promise<void>((resolve) => { markOpenStarted = resolve; });
+    let closes = 0;
+    let observed: any = null;
+    let lateOpening: Promise<any> | null = null;
+    let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+    bridge = makeControllerTurnBridge({
+      getClient: async () => ({
+        call: async (capability: string, payload: any, options: any) => {
+          const authority = bridge.authorize(payload);
+          const invoke = (operation: string, value: unknown) => bridge.handleKernelCall(
+            operation, { runId: payload.runId, value }, {
+              capability, authority, signal: options.signal,
+              deadlineAt: Date.now() + 60_000,
+            },
+          );
+          await invoke('turn.model.bind', {
+            candidates: [{ provider: 'local-webgpu', model: 'model-1' }],
+          });
+          lateOpening = invoke('turn.model.open-local', {
+            providerId: 'local-webgpu', modelId: 'model-1',
+            messages: [], system: '', tools: [], maxTokens: 128,
+          });
+          await openStarted;
+          controller.abort();
+          // Match the real controller client: transport rejects immediately
+          // on Stop while the admitted kernel operation may settle later.
+          return { ok: false, code: 'controller-call-aborted', outcomeKnown: true };
+        },
+      }),
+      providerEgress: {
+        openLocalGeneration: async () => {
+          markOpenStarted();
+          await openGate;
+          return { ok: true, value: { streamId: 'late-controller-local' } };
+        },
+        closeOwner: async () => { closes += 1; return new Promise(() => {}); },
+      } as any,
+      cleanupTimeoutMs: 10,
+      newId: () => 'late-provider-open-run',
+    });
+    const run = drain(bridge.runUserTurn({
+      sessionId: 'session-late-provider-open', tools: [],
+      allowedOperations: [],
+      maxOutputTokens: 4096, signal: controller.signal,
+      sessions: {
+        get: async () => ({
+          sessionId: 'session-late-provider-open',
+          provider: 'local-webgpu', model: 'model-1',
+        }),
+      },
+    })).catch(() => []);
+    const completed = await Promise.race([
+      run.then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    expect(completed).toBe('completed');
+    expect(closes).toBe(1);
+    releaseOpen();
+    if (!lateOpening) throw new Error('late-provider-open-not-started');
+    observed = await lateOpening;
+    expect(observed).toMatchObject({ ok: false, code: 'turn-run-aborted' });
+    expect(closes).toBe(2);
+    expect(bridge.activeCount()).toBe(0);
+  });
+
+  test('matches direct transcript semantics while opaque media stays kernel-side', async () => {
+    const directSessions = makeSessions();
+    const controllerSessions = makeSessions();
+    const directCalls: any[] = [];
+    const controllerCalls: any[] = [];
+    const directEvents = await drain(runDirectTurn(
+      makeSimpleCtx(directSessions, directCalls) as any,
+    ));
+    const observedTransport: string[] = [];
+    const authorityMedia: string[] = [];
+    const controllerEvents = await runPrototype({
+      ctx: makeSimpleCtx(controllerSessions, controllerCalls),
+      inspectOuter: (payload) => observedTransport.push(JSON.stringify(payload)),
+      inspectModelRequest: (request, grant) => {
+        const token = request.nativeBody.messages
+          .flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+          .find((block: any) => typeof block?.source?.data === 'string')?.source.data;
+        expect(token).toStartWith('peerd-controller-opaque:');
+        authorityMedia.push(grant.redeemOpaque(token));
+      },
+      interceptKernel: async (_operation, payload, next) => {
+        observedTransport.push(JSON.stringify(payload));
+        return next();
+      },
+    });
+    expect(controllerEvents.find((event) => event.type === 'usage')?.price)
+      .toEqual({ cost: 0.000024, estimated: true });
+    expect(normalize(withoutProjectedPrice(controllerEvents))).toEqual(normalize(directEvents));
+    expect(normalize(controllerSessions.snapshot())).toEqual(normalize(directSessions.snapshot()));
+    expect(controllerCalls).toEqual(directCalls);
+    expect(authorityMedia).toEqual(['RAW-IMAGE-BYTES']);
+    expect(observedTransport.join('\n')).not.toContain('RAW-IMAGE-BYTES');
+  });
+
+  test('pins provider and model before egress opens', async () => {
+    const sessions = makeSessions();
+    let modelCalls = 0;
+    const events = await runPrototype({
+      ctx: {
+        ...makeSimpleCtx(sessions, []), attachments: undefined,
+        callModel: async function* () { modelCalls += 1; },
+      },
+      interceptKernel: async (operation, payload, next) => {
+        if (operation === 'turn.model.open-inference') {
+          payload.value.modelId = 'forged-model';
+        }
+        return next();
+      },
+    });
+    expect(modelCalls).toBe(0);
+    expect(events.some((event) => event.type === 'error'
+      && String(event.error).includes('model-egress-request-invalid'))).toBe(true);
+  });
+
+  test('a pre-dispatch abort performs no model effect', async () => {
+    const sessions = makeSessions();
+    const controller = new AbortController();
+    controller.abort();
+    let modelCalls = 0;
+    let failure: any = null;
+    try {
+      await runPrototype({
+        ctx: {
+          ...makeSimpleCtx(sessions, []),
+          signal: controller.signal,
+          callModel: async function* () { modelCalls += 1; },
+        },
+      });
+    } catch (cause) { failure = cause; }
+    expect(modelCalls).toBe(0);
+    expect(failure).toMatchObject({ code: 'controller-call-aborted', outcomeKnown: true });
+  });
+});

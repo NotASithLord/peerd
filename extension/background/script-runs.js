@@ -19,7 +19,7 @@
 
 /** @param {{ actorOpLimit?: number, codeOpLimit?: number }} [options] */
 export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actorOpLimit } = {}) => {
-  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }>} */
+  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, operations: Set<string>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }>} */
   const runs = new Map();
   let seq = 0;
 
@@ -42,15 +42,18 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
      * param (design 5 — a dead or foreign run buys nothing).
      * @param {string} runId @param {AbortSignalLike} [outerSignal] @param {string} [owner]
      * @param {Record<string, boolean>} [capabilities]
+     * @param {Iterable<string>} [operations] exact host operations projected
+     *   by the sealed semantic owner for this run
      */
-    register: (runId, outerSignal, owner, capabilities = {}) => {
+    register: (runId, outerSignal, owner, capabilities = {}, operations = []) => {
       const controller = new AbortController();
-      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }} */
+      /** @type {{ controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, operations: Set<string>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }} */
       const entry = {
         controller,
         ops: [],
         ...(owner ? { owner } : {}),
         capabilities: Object.fromEntries(Object.entries(capabilities).map(([name, on]) => [name, on === true])),
+        operations: new Set([...operations].filter((operation) => typeof operation === 'string')),
         opCounts: {},
         providerCalls: 0,
         providerOutputTokens: 0,
@@ -107,10 +110,19 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
         && entry?.capabilities[capability] === true;
     },
 
+    /** A code bridge may redeem only an exact operation projected when its
+     * outer semantic call registered the run. @param {string} runId
+     * @param {string} operation */
+    allowsOperation: (runId, operation) => {
+      const entry = runs.get(runId);
+      return entry?.controller.signal.aborted !== true
+        && entry?.operations.has(operation) === true;
+    },
+
     /** Atomically admit one code-client op against a per-capability run ceiling.
      * Counting happens before any await, so Promise.all cannot oversubscribe it.
      * @param {string} runId @param {string} capability @param {number} [limit] */
-    admitOp: (runId, capability, limit = codeOpLimit) => {
+    admitCodeOp: (runId, capability, limit = codeOpLimit) => {
       const entry = runs.get(runId);
       if (!entry || entry.controller.signal.aborted
         || entry.capabilities[capability] !== true
@@ -161,6 +173,16 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
       entry.providerOutputTokens = Math.max(0, entry.providerOutputTokens - reserved + actual);
     },
 
+    /** @param {string} runId @param {number} reservedOutputTokens */
+    cancelProviderCall: (runId, reservedOutputTokens) => {
+      const entry = runs.get(runId);
+      if (!entry) return;
+      const reserved = Number.isFinite(reservedOutputTokens) && reservedOutputTokens > 0
+        ? reservedOutputTokens : 0;
+      entry.providerCalls = Math.max(0, entry.providerCalls - 1);
+      entry.providerOutputTokens = Math.max(0, entry.providerOutputTokens - reserved);
+    },
+
     /** The run's sub-call meter (copy), or null when unregistered. @param {string} runId */
     providerUsageFor: (runId) => {
       const entry = runs.get(runId);
@@ -175,7 +197,7 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
      * pending SW-side is an orphan whose actor turn must die with it (a job
      * timeout / worker crash reaches here without the Stop signal ever firing
      * — without this abort those turns would burn tokens for up to the
-     * per-ask cap after the script already returned). Then detaches the
+     * per-call cap after the script already returned). Then detaches the
      * outer-signal listener so a long-lived turn signal doesn't accumulate
      * dead handlers.
      * @param {string} runId

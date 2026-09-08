@@ -26,14 +26,6 @@ import {
 
 /**
  * @param {Object} deps
- * @param {(model: string|undefined, usage: Partial<TokenUsage>, overrides?: object) => { cost: number }} deps.costOf
- *   Pricing fn (peerd-provider's local table). Injected, never imported —
- *   the runtime takes Layer-1 capabilities via DI.
- * @param {string|undefined} deps.model
- *   The SESSION's model (the one that actually produced the usage), not
- *   the current Settings selection — an old chat keeps its original
- *   model even if the user later switches the default.
- * @param {object|undefined} deps.pricingOverrides   settings.pricingOverrides snapshot
  * @param {number|undefined} deps.limitUsd           settings.spendLimitUsd snapshot (0/absent = no limit)
  * @param {object|null|undefined} deps.initialSessionCost
  *   The session record's persisted tally; normalized + turn-bumped here
@@ -54,9 +46,6 @@ import {
  */
 export const makeTurnCostTracker = (deps) => {
   const {
-    costOf,
-    model,
-    pricingOverrides,
     limitUsd,
     initialSessionCost,
     persistCost,
@@ -78,10 +67,15 @@ export const makeTurnCostTracker = (deps) => {
    * meter. Ordering preserved from the original inline code:
    * fold → persist → push.
    *
-   * @param {{ sessionId?: any, usage: Partial<TokenUsage> }} ev
+   * @param {{ sessionId?: any, usage: Partial<TokenUsage>, price?: {cost?:unknown,estimated?:unknown} }} ev
    */
   const onUsage = async (ev) => {
-    const { cost } = costOf(model, ev.usage, pricingOverrides);
+    const price = ev?.price;
+    if (!price || typeof price.cost !== 'number' || !Number.isFinite(price.cost)
+        || price.cost < 0 || typeof price.estimated !== 'boolean') {
+      throw new TypeError('turn usage price projection invalid');
+    }
+    const { cost } = price;
     turnTally = addUsage(turnTally, ev.usage, cost);
     sessionTally = addUsage(sessionTally, ev.usage, cost);
     try { await persistCost(sessionTally); } catch { /* never break the stream */ }

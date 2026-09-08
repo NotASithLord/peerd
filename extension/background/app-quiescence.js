@@ -8,6 +8,7 @@
  * @param {Object} deps
  * @param {{
  *   getTabId: (appId:string)=>number|null,
+ *   getOwnerClaim?: (appId:string)=>string|null,
  *   quiesceTab?: (appId:string)=>Promise<boolean>,
  *   resumeTab?: (appId:string)=>Promise<boolean>,
  *   closeTab: (appId:string)=>Promise<boolean>,
@@ -49,6 +50,7 @@ export const createAppQuiescence = ({
       throw new Error('App editor disappeared before its pending save completed');
     }
 
+    const ownerSessionId = tracker.getOwnerClaim?.(appId) ?? null;
     let closed = false;
     try {
       if (close) {
@@ -59,7 +61,10 @@ export const createAppQuiescence = ({
       return await operation();
     } finally {
       if (closed) {
-        tracker.ensureTab(appId, { active: false, groupTitle: 'peerd' }).catch(() => {});
+        tracker.ensureTab(appId, {
+          active: false, groupTitle: 'peerd',
+          ...(ownerSessionId ? { ownerSessionId } : {}),
+        }).catch(() => {});
       } else {
         await resumeOrReload(appId);
       }

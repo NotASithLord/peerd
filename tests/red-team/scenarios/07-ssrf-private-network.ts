@@ -16,7 +16,7 @@ import {
   type Scenario, type Probe, blocked, leaked, summarize,
 } from '../harness.ts';
 import { makeWebFetch } from '../../../extension/peerd-egress/fetch/web-fetch.js';
-import { isPrivateOrLocalHost } from '../../../extension/peerd-egress/fetch/private-network.js';
+import { isPrivateOrLocalHost } from '../../../extension/shared/private-network.js';
 import { EgressDeniedError } from '../../../extension/peerd-egress/fetch/errors.js';
 import {
   buildPrivateNetworkBlockRules, buildPrivateNetworkInitiatorBlockRules,
@@ -70,7 +70,7 @@ export const scenario: Scenario = {
   title: 'Private-network / metadata SSRF',
   adversary: 'malicious webpage',
   asset: 'internal network + cloud metadata credentials',
-  claim: 'Open-web and browser entry points refuse private targets, no-tab worker fetch rules require a custodied page domain, and child guards require exact source identity.',
+  claim: 'Open-web and browser entry points refuse private targets, no-tab worker rules are narrowly scoped to a custodied page domain, and child guards require exact source identity; live Chrome acceptance separately classifies the browser worker-WebSocket limitation.',
   threatModelRef: 'INV-7',
   tier: 'unit',
   async run() {
@@ -172,8 +172,8 @@ export const scenario: Scenario = {
         && JSON.stringify(rule.condition?.tabIds) === JSON.stringify([-1])
         && JSON.stringify(rule.condition?.initiatorDomains) === JSON.stringify(['shop.example']));
       probes.push(exactRuleSet && exactScope
-        ? blocked('use a page service worker to bypass tab custody', 'every no-tab private-target rule requires no-tab attribution and the custodied initiator domain')
-        : leaked('use a page service worker to bypass tab custody', 'the worker rule family was missing or overbroad'));
+        ? blocked('broaden the no-tab worker backstop beyond current custody', 'every no-tab private-target rule requires no-tab attribution and the custodied initiator domain; the live Chrome lane separately records worker-WebSocket behavior')
+        : leaked('broaden the no-tab worker backstop beyond current custody', 'the worker rule family was missing or overbroad'));
       probes.push(buildPrivateNetworkInitiatorBlockRules({ initiatorDomains: [] }).length === 0
         ? blocked('install a no-tab private-network rule without page custody', 'no initiator domain produced no rule')
         : leaked('install a no-tab private-network rule without page custody', 'a browser-wide no-tab rule was produced'));
@@ -218,13 +218,15 @@ export const scenario: Scenario = {
         getSessionRules: async () => incompleteRules,
         updateSessionRules: async () => { incompleteUpdates += 1; },
       }, PRIVATE_NETWORK_RULE_IDS);
-      const incompleteAdopted = await incompleteGuard.adopt(sourceTabId, childTabId + 1);
-      probes.push(!incompleteAdopted && incompleteUpdates === 0
+      let incompleteRejected = false;
+      try { await incompleteGuard.adopt(sourceTabId, childTabId + 1); }
+      catch { incompleteRejected = true; }
+      probes.push(incompleteRejected && incompleteUpdates === 0
         ? blocked('claim startup child custody from a partial surviving rule set', 'partial browser evidence changed no rule')
         : leaked('claim startup child custody from a partial surviving rule set', 'partial browser evidence was accepted'));
     }
 
-    // 8) Firefox's synchronous first-request stop is exact-child scoped. It
+    // 8) Firefox's blocking first-request stop is exact-child scoped. It
     // does not infer ownership from an ordinary opener and it does not block a
     // public request from the adopted child.
     {
@@ -243,26 +245,32 @@ export const scenario: Scenario = {
       guard.onNavigationTarget({ tabId: 76, sourceTabId: 74 });
       guard.onNavigationTarget({ tabId: 77, sourceTabId: 73 });
       guard.onNavigationTarget({ tabId: 78, sourceTabId: 73 });
-      const drivenPrivate = guard.onBeforeRequest({ tabId: 75, url: 'http://127.0.0.1/' });
-      const drivenSocket = guard.onBeforeRequest({
+      const drivenPrivate = await Promise.resolve(guard.onBeforeRequest({
+        tabId: 75, url: 'http://127.0.0.1/',
+      }));
+      const drivenSocket = await Promise.resolve(guard.onBeforeRequest({
         tabId: 75, url: 'ws://127.0.0.1/socket', type: 'websocket',
-      });
-      const drivenPublic = guard.onBeforeRequest({ tabId: 75, url: 'https://public.example/' });
-      const ordinaryPrivate = guard.onBeforeRequest({ tabId: 76, url: 'http://127.0.0.1/' });
-      const drivenSensitive = guard.onBeforeRequest({
+      }));
+      const drivenPublic = await Promise.resolve(guard.onBeforeRequest({
+        tabId: 75, url: 'https://public.example/',
+      }));
+      const ordinaryPrivate = await Promise.resolve(guard.onBeforeRequest({
+        tabId: 76, url: 'http://127.0.0.1/',
+      }));
+      const drivenSensitive = await Promise.resolve(guard.onBeforeRequest({
         tabId: 77, url: 'https://vault.example/account', type: 'xmlhttprequest',
-      });
+      }));
       policyReady = false;
-      const drivenCold = guard.onBeforeRequest({
+      const drivenCold = await Promise.resolve(guard.onBeforeRequest({
         tabId: 78, url: 'https://public.example/', type: 'xmlhttprequest',
-      });
-      const ordinaryCold = guard.onBeforeRequest({
+      }));
+      const ordinaryCold = await Promise.resolve(guard.onBeforeRequest({
         tabId: 76, url: 'https://public.example/', type: 'xmlhttprequest',
-      });
+      }));
       policyReady = true;
-      const hydratedPublic = guard.onBeforeRequest({
+      const hydratedPublic = await Promise.resolve(guard.onBeforeRequest({
         tabId: 78, url: 'https://public.example/', type: 'xmlhttprequest',
-      });
+      }));
       probes.push(drivenPrivate.cancel === true
           && drivenSocket.cancel === true
           && drivenSensitive.cancel === true
@@ -273,7 +281,7 @@ export const scenario: Scenario = {
           && ordinaryPrivate.cancel !== true
           && stopped.length === 3
         ? blocked('race a protected request through a newly opened child', 'private HTTP, WebSocket, denylisted, and cold-policy requests were cancelled only for exact children, with source-bound receipts')
-        : leaked('race a protected request through a newly opened child', 'the synchronous child scope was missing or overbroad'));
+        : leaked('race a protected request through a newly opened child', 'the blocking child scope was missing or overbroad'));
     }
 
     return {
@@ -282,11 +290,16 @@ export const scenario: Scenario = {
         'webFetch pre-flight host check',
         'browser automation target classifier',
         'tab-scoped private-network DNR rules',
-        'origin-scoped no-tab worker fetch DNR rules',
-        'exact-child synchronous Firefox request stop',
+        'origin-scoped no-tab worker DNR rule shape (live Chrome classifies worker-WebSocket enforcement)',
+        'exact-child blocking Firefox request stop',
         'exact-source startup child rule copy',
         'redirect fail-closed',
       ]),
+      coverage: 'partial',
+      residuals: [
+        'Chrome service-worker-created WebSockets bypass DNR, including an unscoped diagnostic rule',
+        'Chrome can establish a TCP connection/preconnect for a blocked direct top-level private navigation while sending no HTTP request',
+      ],
       verifiedBy: 'scripts/cdp/states.mjs (browser network floor); scripts/firefox/run-runtime-tests.mjs (Firefox private-network and child navigation probes)',
     };
   },

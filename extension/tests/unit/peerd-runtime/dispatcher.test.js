@@ -7,9 +7,9 @@
 // already populated. These tests pin all of that.
 
 import { describe, it, expect } from '../../framework.js';
-import {
-  registerTool, clearTools, dispatchToolCall, GATES,
-} from '/peerd-runtime/index.js';
+import { GATES } from '/peerd-runtime/index.js';
+import { dispatchToolCall as dispatchExplicitToolCall } from '/peerd-runtime/tools/local-tool-dispatcher.js';
+import { toToolDescriptor } from '/peerd-runtime/tools/metadata/descriptor.js';
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').Tool} Tool */
@@ -58,9 +58,25 @@ const makeTool = (overrides) => /** @type {Tool} */ ({
   ...overrides,
 });
 
+/** @type {Map<string, Tool>} */
+const fixtureTools = new Map();
+/** @param {Tool} tool */
+const setFixtureTool = (tool) => { fixtureTools.set(tool.name, tool); };
+const clearFixtureTool = () => { fixtureTools.clear(); };
+/** @param {import('/shared/tool-types.js').ToolCall} call @param {ToolContext} ctx */
+const dispatchToolCall = (call, ctx) => {
+  const implementation = fixtureTools.get(call.name) ?? null;
+  return dispatchExplicitToolCall(call, ctx, {
+    descriptor: implementation ? toToolDescriptor(implementation) : undefined,
+    execute: (prepared) => implementation
+      ? implementation.execute(prepared.args, prepared.execCtx)
+      : ({ ok: false, error: 'tool implementation unavailable', outcomeKnown: true }),
+  });
+};
+
 describe('dispatcher', () => {
-  it('returns unknown_tool for an unregistered name', async () => {
-    clearTools();
+  it('returns unknown_tool for a name absent from the explicit surface', async () => {
+    clearFixtureTool();
     const { ctx } = recorderCtx();
     const r = await dispatchToolCall({ id: 'x', name: 'no-such', args: {} }, ctx);
     expect(r.ok).toBe(false);
@@ -70,8 +86,8 @@ describe('dispatcher', () => {
   });
 
   it('runs every gate and records each in meta.gates', async () => {
-    clearTools();
-    registerTool(makeTool({}));
+    clearFixtureTool();
+    setFixtureTool(makeTool({}));
     const { ctx } = recorderCtx();
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     expect(r.ok).toBe(true);
@@ -81,9 +97,9 @@ describe('dispatcher', () => {
   });
 
   it('rechecks the live actor landing before any gate or tool effect', async () => {
-    clearTools();
+    clearFixtureTool();
     let executed = false;
-    registerTool(makeTool({ execute: async () => { executed = true; return { ok: true, content: 'bad' }; } }));
+    setFixtureTool(makeTool({ execute: async () => { executed = true; return { ok: true, content: 'bad' }; } }));
     const { ctx } = recorderCtx({
       revalidateActorLanding: async () => ({ action: 'wait', reason: 'signing in' }),
     });
@@ -95,10 +111,10 @@ describe('dispatcher', () => {
   });
 
   it('rechecks the live actor landing again immediately before execution', async () => {
-    clearTools();
+    clearFixtureTool();
     let checks = 0;
     let executed = false;
-    registerTool(makeTool({ execute: async () => { executed = true; return { ok: true, content: 'bad' }; } }));
+    setFixtureTool(makeTool({ execute: async () => { executed = true; return { ok: true, content: 'bad' }; } }));
     const { ctx } = recorderCtx({
       revalidateActorLanding: async () => {
         checks += 1;
@@ -119,8 +135,8 @@ describe('dispatcher', () => {
       'this helper works only on one site, and the tab left it',
       'the sign-in authorization was invalid or expired, so this task was stopped',
     ]) {
-      clearTools();
-      registerTool(makeTool({}));
+      clearFixtureTool();
+      setFixtureTool(makeTool({}));
       const { ctx } = recorderCtx({
         revalidateActorLanding: async () => ({ action: 'end', reason }),
       });
@@ -132,8 +148,8 @@ describe('dispatcher', () => {
   });
 
   it('attaches primitive and durationMs to meta', async () => {
-    clearTools();
-    registerTool(makeTool({ primitive: 'tab' }));
+    clearFixtureTool();
+    setFixtureTool(makeTool({ primitive: 'tab' }));
     const { ctx } = recorderCtx();
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     expect(metaOf(r).primitive).toBe('tab');
@@ -142,9 +158,9 @@ describe('dispatcher', () => {
   });
 
   it('stops at the first gate denial and audits a tool_blocked entry', async () => {
-    clearTools();
+    clearFixtureTool();
     // Tool whose origin gate triggers a denylist hit.
-    registerTool(makeTool({
+    setFixtureTool(makeTool({
       origins: () => ['https://chase.com'],
     }));
     const { ctx, audited } = recorderCtx({ denylist: ['chase.com', '*.chase.com'] });
@@ -162,8 +178,8 @@ describe('dispatcher', () => {
   });
 
   it('audits tool_executed on success', async () => {
-    clearTools();
-    registerTool(makeTool({}));
+    clearFixtureTool();
+    setFixtureTool(makeTool({}));
     const { ctx, audited } = recorderCtx();
     await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     await Promise.resolve();
@@ -177,8 +193,8 @@ describe('dispatcher', () => {
   // tests/unit/options/activity-tool-failed.test.js.
 
   it('catches execute() throw and returns ok:false with meta intact', async () => {
-    clearTools();
-    registerTool(makeTool({
+    clearFixtureTool();
+    setFixtureTool(makeTool({
       execute: async () => { throw new Error('kaboom'); },
     }));
     const { ctx, audited } = recorderCtx();
@@ -194,8 +210,8 @@ describe('dispatcher', () => {
     // We can't inject a custom gate easily; we'll exercise the path
     // via a tool whose origins() throws — that surfaces through the
     // origin gate's `result = fn(...)` wrapper.
-    clearTools();
-    registerTool(makeTool({
+    clearFixtureTool();
+    setFixtureTool(makeTool({
       origins: () => { throw new Error('origins blew up'); },
     }));
     const { ctx } = recorderCtx();
@@ -205,18 +221,12 @@ describe('dispatcher', () => {
   });
 });
 
-// Confirmation is driven by the Plan/Act permission policy (Feature 03)
-// via ctx.permission = { mode, confirmActions }. These tests pin the
-// dispatcher's integration with that policy (post-2026-06-12 tier
-// collapse: one boolean — ON = every non-read confirms, OFF = nothing
-// confirms).
-/** @param {boolean} confirmActions */
-const act = (confirmActions) => ({ permission: { mode: 'act', confirmActions } });
-
-describe('confirmation (Plan/Act permission policy)', () => {
-  it('PLAN mode blocks a non-read tool at the persona gate (before confirm)', async () => {
-    clearTools();
-    registerTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
+// Semantic dispatch enforces Plan/Act admission, but exact service-worker
+// authority owns confirmation after binding final arguments and targets.
+describe('confirmation ownership', () => {
+  it('PLAN mode blocks a non-read tool before exact authority', async () => {
+    clearFixtureTool();
+    setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
     let prompted = false;
     const { ctx } = recorderCtx({
       permission: { mode: 'plan', confirmActions: true },
@@ -225,15 +235,15 @@ describe('confirmation (Plan/Act permission policy)', () => {
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     expect(r.ok).toBe(false);
     expect(errOf(r).startsWith('gate_blocked:persona:')).toBe(true);
-    expect(prompted).toBe(false);  // blocked before the confirm step
+    expect(prompted).toBe(false);
   });
 
-  it('does NOT prompt for read tools even with confirmations on', async () => {
-    clearTools();
-    registerTool(makeTool({ sideEffect: 'read' }));
+  it('read tools require no confirmation', async () => {
+    clearFixtureTool();
+    setFixtureTool(makeTool({ sideEffect: 'read' }));
     let prompted = false;
     const { ctx } = recorderCtx({
-      ...act(true),
+      permission: { mode: 'act', confirmActions: true },
       confirm: async () => { prompted = true; return 'no'; },
     });
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
@@ -241,61 +251,23 @@ describe('confirmation (Plan/Act permission policy)', () => {
     expect(prompted).toBe(false);
   });
 
-  it('confirmations OFF does NOT prompt for a write tool', async () => {
-    clearTools();
-    registerTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    let prompted = false;
-    const { ctx } = recorderCtx({ ...act(false), confirm: async () => { prompted = true; return 'no'; } });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(true);
-    expect(prompted).toBe(false);
-  });
-
-  it('confirmations ON prompts even for a workspace write (the old auto-edit lane is gone)', async () => {
-    clearTools();
-    registerTool(makeTool({ sideEffect: 'write', primitive: 'webvm' }));
-    let prompted = false;
-    const { ctx } = recorderCtx({ ...act(true), confirm: async () => { prompted = true; return 'yes_once'; } });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(true);
-    expect(prompted).toBe(true);
-  });
-
-  it('missing/garbage confirmActions fails safe to prompting', async () => {
-    clearTools();
-    registerTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    let prompted = false;
-    // A legacy-shaped permission (tier string, no boolean) must confirm.
+  it('semantic writes do not prompt or settle before exact authority', async () => {
+    clearFixtureTool();
+    setFixtureTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
+    let semanticAuthorityCalls = 0;
     const { ctx } = recorderCtx({
-      permission: { mode: 'act', tier: 'full-auto' },
-      confirm: async () => { prompted = true; return 'yes_once'; },
+      permission: { mode: 'act', confirmActions: true },
+      confirm: async () => { semanticAuthorityCalls += 1; return 'no'; },
+      lifecycle: {
+        beginTracking: async () => { semanticAuthorityCalls += 1; },
+        settleTracking: async () => { semanticAuthorityCalls += 1; },
+      },
     });
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     expect(r.ok).toBe(true);
-    expect(prompted).toBe(true);
-  });
-
-  it('confirmations ON prompts for a write tool; "no" blocks and audits tool_rejected', async () => {
-    clearTools();
-    registerTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    const { ctx, audited } = recorderCtx({ ...act(true), confirm: async () => 'no' });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(false);
-    expect(errOf(r).startsWith('gate_blocked:confirmation:')).toBe(true);
+    expect(semanticAuthorityCalls).toBe(0);
     const confirmGate = metaOf(r).gates.find((g) => g.name === 'confirmation');
-    expect(confirmGate?.allowed).toBe(false);
-    await Promise.resolve();
-    expect(audited.some((e) => e.type === 'tool_rejected')).toBe(true);
-  });
-
-  it('confirmations ON prompts for a write tool; "yes_once" allows and runs', async () => {
-    clearTools();
-    registerTool(makeTool({ sideEffect: 'write', primitive: 'tab' }));
-    const { ctx } = recorderCtx({ ...act(true), confirm: async () => 'yes_once' });
-    const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
-    expect(r.ok).toBe(true);
-    const confirmGate = metaOf(r).gates.find((g) => g.name === 'confirmation');
-    expect(confirmGate?.allowed).toBe(true);
+    expect(confirmGate?.reason).toBe('exact authority verifies final arguments');
   });
 });
 
@@ -307,10 +279,10 @@ describe('gate composition order', () => {
   });
 
   it('persona gate reflects the Plan/Act mode; exposure passes non-hidden tools', async () => {
-    clearTools();
+    clearFixtureTool();
     // Default ctx has no permission → resolves to Plan; but a read tool
     // is allowed in Plan, so the persona reason names the mode + class.
-    registerTool(makeTool({ sideEffect: 'read' }));
+    setFixtureTool(makeTool({ sideEffect: 'read' }));
     const { ctx } = recorderCtx();
     const r = await dispatchToolCall({ id: 'x', name: 't', args: {} }, ctx);
     const persona = metaOf(r).gates.find((g) => g.name === 'persona');
@@ -321,11 +293,11 @@ describe('gate composition order', () => {
   });
 
   it('exposure gate refuses main-hidden tools when ctx.exposure is "main"', async () => {
-    clearTools();
+    clearFixtureTool();
     // read_page is in the main-hidden set (actor-only — the web actor holds the
     // DOM tools) — dispatching it with exposure:'main' must refuse at the gate,
     // so a prompt-injected model can't reach it by name.
-    registerTool(makeTool({ name: 'read_page', sideEffect: 'read' }));
+    setFixtureTool(makeTool({ name: 'read_page', sideEffect: 'read' }));
     const { ctx } = recorderCtx({ exposure: 'main' });
     const r = await dispatchToolCall({ id: 'x', name: 'read_page', args: {} }, ctx);
     expect(r.ok).toBe(false);
@@ -341,9 +313,9 @@ describe('gate composition order', () => {
   // actor can't escalate into the mutating tier, while message_actor (the
   // non-mutating delegation channel) passes the exposure gate on the main agent.
   it('actor tier: an actor can not escalate into the mutating tier', async () => {
-    clearTools();
-    registerTool(makeTool({ name: 'app_delete', sideEffect: 'destructive' }));
-    registerTool(makeTool({ name: 'message_actor', sideEffect: 'write' }));
+    clearFixtureTool();
+    setFixtureTool(makeTool({ name: 'app_delete', sideEffect: 'destructive' }));
+    setFixtureTool(makeTool({ name: 'message_actor', sideEffect: 'write' }));
     // act + confirm-off so persona/confirmation don't pre-empt the exposure gate.
     const permission = { mode: 'act', confirmActions: false };
 

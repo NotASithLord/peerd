@@ -74,9 +74,27 @@ export const createDiscovery = ({
   // (they already have it). Our OWN announces use exceptVia = null.
   /** @param {any} item @param {string | null} [exceptVia] */
   const forward = async (item, exceptVia = null) => {
-    if (subscribers.size === 0) return;
+    if (subscribers.size === 0) return true;
     const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item });
-    for (const did of subscribers) if (did !== exceptVia) mesh.send(did, env);
+    let propagated = true;
+    for (const did of subscribers) {
+      if (did !== exceptVia && !mesh.send(did, env)) propagated = false;
+    }
+    return propagated;
+  };
+
+  /** @param {string} id @param {any} item @param {string | null} via */
+  const propagateCommitted = async (id, item, via) => {
+    let propagated = true;
+    try { onCard?.({ dwapp_id: id, ...item }); }
+    catch { propagated = false; }
+    try { if (!await forward(item, via)) propagated = false; }
+    catch { propagated = false; }
+    if (!propagated) {
+      try { audit?.('discovery_card_propagation_failed', { dwapp_id: id }); }
+      catch { /* observers cannot change committed discovery custody */ }
+    }
+    return propagated;
   };
 
   // Verify → blocklist → no-downgrade store → (if fresh) relay to our subscribers.
@@ -100,7 +118,7 @@ export const createDiscovery = ({
       return false;
     }
     const fresh = library.put(id, item);
-    if (fresh) { onCard?.({ dwapp_id: id, ...item }); await forward(item, via); } // relay over consented edges
+    if (fresh) await propagateCommitted(id, item, via);
     return fresh;
   };
 
@@ -169,8 +187,10 @@ export const createDiscovery = ({
       })) throw new Error('announce: durable version gate refused card');
       const fresh = library.put(id, item);
       library.markInstalled(id, true); // our own app is installed by definition (we authored + seed it)
-      if (fresh) { onCard?.({ dwapp_id: id, ...item }); await forward(item, null); }
-      return { dwapp_id: id, fresh };
+      // An explicit re-announce is also the retry path after a prior link
+      // refusal. Re-send even when the local no-downgrade store is unchanged.
+      const propagated = await propagateCommitted(id, item, null);
+      return { dwapp_id: id, fresh, propagated };
     },
     // Subscribe to a peer's feed (default happens on connect; this is the manual
     // lever + the reconcile-already-linked path).

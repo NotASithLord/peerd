@@ -46,10 +46,8 @@ import './unit/peerd-runtime/introspection-tools.test.js';
 import './unit/peerd-runtime/query-dom.test.js';
 import './unit/peerd-runtime/dom-walk.test.js';
 import './unit/peerd-runtime/activity-overlay.test.js';
-import './unit/peerd-runtime/page-eval.test.js';
-import './unit/peerd-runtime/page-exec.test.js';
-import './unit/peerd-runtime/page-keys.test.js';
 import './unit/peerd-runtime/default-hooks.test.js';
+import './unit/peerd-runtime/user-hook-csp.test.js';
 import './unit/peerd-runtime/prompt-wrap.test.js';
 import './unit/peerd-runtime/system-prompt.test.js';
 import './unit/peerd-runtime/tool-manifests.test.js';
@@ -60,12 +58,12 @@ import './unit/peerd-runtime/lifecycle-recovery.test.js';
 import './unit/peerd-runtime/trim.test.js';
 import './unit/peerd-runtime/clock/now.test.js';
 import './unit/peerd-runtime/clock/context.test.js';
-import './unit/peerd-runtime/clock/tools.test.js';
 import './unit/peerd-runtime/web/tools.test.js';
 import './unit/peerd-runtime/voice/model-store.test.js';
 import './unit/peerd-runtime/voice/manager.test.js';
 import './unit/peerd-runtime/voice/transcriber.test.js';
 import './unit/peerd-runtime/voice/engine-picker.test.js';
+import './unit/peerd-runtime/voice/host-runtime.test.js';
 import './unit/peerd-runtime/vm-tools.test.js';
 
 // --- peerd-engine ---
@@ -91,7 +89,8 @@ import './unit/peerd-engine/repository.test.js';
 // --- chassis: offscreen (headless JS jobs / script) ---
 import './unit/offscreen/job-runner.test.js';
 import './unit/offscreen/job-runner-workspace.test.js';
-import './unit/offscreen/job-runner-toolbox.test.js';
+import './unit/offscreen/controller-worker.test.js';
+import './unit/offscreen/actor-worker.test.js';
 
 // --- background (SW chassis: tab trackers + RPC clients + live SW routes) ---
 import './unit/background/vm-tab-close.test.js';
@@ -99,7 +98,6 @@ import './unit/background/app-tab-tracker.test.js';
 import './unit/background/notebook-tab-tracker.test.js';
 import './unit/background/pod-client.test.js';
 import './unit/background/state-get.test.js';
-import './unit/background/script-model-call.test.js';
 
 // --- peerd-distributed ---
 // (none yet — dweb surface reserved for V2+)
@@ -121,6 +119,9 @@ import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/composer-readiness.test.js';
 import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/protected-tab-starter.test.js';
+import './unit/sidepanel/vault-shell.test.js';
+import './unit/sidepanel/vault-gate-authority.test.js';
+import './unit/sidepanel/ui-effect-failure.test.js';
 import './unit/sidepanel/failure-chip.test.js';
 import './unit/sidepanel/actor-isolation.test.js';
 import './unit/sidepanel/actor-fabric.test.js';
@@ -134,12 +135,15 @@ import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
 import './unit/options/dweb-section.test.js';
 import './unit/options/runtime-capability-controls.test.js';
+import './unit/options/state-recovery.test.js';
 import './unit/options/provider-races.test.js';
+import './unit/options/git-credentials.test.js';
 import './unit/options/transfer-identity.test.js';
 import './unit/options/contributor-metrics.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
+import './unit/home/discover-section.test.js';
 import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';

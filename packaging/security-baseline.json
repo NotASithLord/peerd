@@ -12,7 +12,7 @@
         }
       },
       "background": {
-        "service_worker": "background/service-worker.js",
+        "service_worker": "background/vault-kernel-chrome.js",
         "type": "module"
       },
       "commands": {
@@ -87,14 +87,14 @@
       },
       "background": {
         "scripts": [
-          "background/service-worker.js"
+          "background/vault-kernel-firefox.js"
         ],
         "type": "module"
       },
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd@peerd.ai",
-          "strict_min_version": "153.0",
+          "strict_min_version": "154.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -145,6 +145,12 @@
         "webRequest",
         "webRequestBlocking"
       ],
+      "sandbox": {
+        "pages": [
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
+        ]
+      },
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
         "default_title": "peerd"
@@ -161,7 +167,7 @@
         }
       },
       "background": {
-        "service_worker": "background/service-worker.js",
+        "service_worker": "background/vault-kernel-preview.js",
         "type": "module"
       },
       "commands": {
@@ -238,14 +244,14 @@
       },
       "background": {
         "scripts": [
-          "background/service-worker.js"
+          "background/vault-kernel-firefox-preview.js"
         ],
         "type": "module"
       },
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-preview@peerd.ai",
-          "strict_min_version": "153.0",
+          "strict_min_version": "154.0",
           "update_url": "https://peerd.ai/updates/firefox-preview.json",
           "data_collection_permissions": {
             "required": [
@@ -297,6 +303,12 @@
         "webRequest",
         "webRequestBlocking"
       ],
+      "sandbox": {
+        "pages": [
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
+        ]
+      },
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
         "default_title": "peerd preview"
@@ -313,7 +325,7 @@
         }
       },
       "background": {
-        "service_worker": "background/service-worker.js",
+        "service_worker": "background/vault-kernel-preview.js",
         "type": "module"
       },
       "commands": {
@@ -399,14 +411,14 @@
       },
       "background": {
         "scripts": [
-          "background/service-worker.js"
+          "background/vault-kernel-firefox-preview.js"
         ],
         "type": "module"
       },
       "browser_specific_settings": {
         "gecko": {
           "id": "peerd-dev@peerd.ai",
-          "strict_min_version": "153.0",
+          "strict_min_version": "154.0",
           "data_collection_permissions": {
             "required": [
               "none"
@@ -457,6 +469,12 @@
         "webRequest",
         "webRequestBlocking"
       ],
+      "sandbox": {
+        "pages": [
+          "engine-tabs/app-tab/runner.html",
+          "engine-tabs/notebook-tab/worker-host.html"
+        ]
+      },
       "sidebar_action": {
         "default_panel": "sidepanel/sidepanel.html",
         "default_title": "peerd (dev)"
@@ -474,21 +492,14 @@
     }
   },
   "dynamicCodeSites": {
-    "peerd-runtime/tools/defs/js-notebook.js": 1,
-    "peerd-runtime/tools/defs/page-eval.js": 1,
-    "peerd-runtime/tools/hooks/compile.js": 1
+    "background/notebook-tool-authority.js": 1
   },
   "messageHostSites": {
-    "background/service-worker.js": 3,
     "engine-tabs/app-tab/app-tab.js": 3,
     "engine-tabs/notebook-tab/notebook-tab.js": 1,
     "engine-tabs/pod-tab/pod-tab.js": 1,
     "engine-tabs/vm-tab/vm-tab.js": 1,
-    "offscreen/doc-extract.js": 1,
-    "offscreen/dweb-base.js": 1,
-    "offscreen/offscreen.js": 4,
-    "offscreen/toolbox-parse.js": 1,
-    "offscreen/web-extract.js": 1,
+    "offscreen/offscreen.js": 5,
     "shared/peer-notifications.js": 1,
     "shared/pull-in-peerd.js": 1
   }

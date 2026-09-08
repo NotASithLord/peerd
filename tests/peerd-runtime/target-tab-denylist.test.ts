@@ -5,7 +5,7 @@
 // since actor_list replaced list_tabs as the enumeration primitive.)
 
 import { describe, test, expect } from 'bun:test';
-import { resolveTargetTab, isDenylistedTab } from '../../extension/peerd-runtime/tools/defs/dom-helpers.js';
+import { resolveTargetTab, isDenylistedTab } from '../../extension/peerd-runtime/browser-authority/dom-helpers.js';
 import { BrowserAutomationPolicyError } from '../../extension/peerd-runtime/tools/browser-automation-policy.js';
 import { browserProbeResult } from '../helpers/browser-scripting.ts';
 

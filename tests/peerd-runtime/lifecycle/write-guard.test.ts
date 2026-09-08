@@ -25,6 +25,8 @@ const makeIdb = () => {
     ops,
     get: async (store: string, key: string) => { ops.push(`get:${store}:${key}`); return undefined; },
     put: async (store: string) => { ops.push(`put:${store}`); },
+    patch: async (store: string) => { ops.push(`patch:${store}`); },
+    mutate: async (store: string) => { ops.push(`mutate:${store}`); },
     del: async (store: string) => { ops.push(`del:${store}`); },
     getAll: async (store: string) => { ops.push(`getAll:${store}`); return []; },
     clear: async (store: string) => { ops.push(`clear:${store}`); },
@@ -81,6 +83,8 @@ describe('idb enforcement', () => {
     const idb = guard.wrapIdb(raw);
     guard.block(['sessions', 'audit']);
     expect(() => idb.put('sessions')).toThrow(StoreReadOnlyError);
+    expect(() => idb.patch('sessions')).toThrow(StoreReadOnlyError);
+    expect(() => idb.mutate('sessions')).toThrow(StoreReadOnlyError);
     expect(() => idb.del('session_messages')).toThrow(StoreReadOnlyError);
     expect(() => idb.clear('audit_log')).toThrow(StoreReadOnlyError);
     await idb.get('sessions', 'x');                    // read passes
@@ -97,6 +101,20 @@ describe('idb enforcement', () => {
     guard.block(['engine-registries']);
     expect(() => vms.set('webvms.v1', {})).toThrow(StoreReadOnlyError);
     expect(sets).toEqual(['webvms.v1']);
+  });
+
+  test('multi-store transactions refuse when either logical store is read-only', () => {
+    const calls: string[][] = [];
+    const guard = makeWriteGuard();
+    const idb = guard.wrapIdb({
+      transact: async (stores: string[], operation: Function) => {
+        calls.push(stores); return operation({}, {});
+      },
+    });
+    guard.block(['profiles']);
+    expect(() => idb.transact(['profiles', 'agents_memory'], () => {}))
+      .toThrow("store 'profiles' is read-only");
+    expect(calls).toEqual([]);
   });
 });
 

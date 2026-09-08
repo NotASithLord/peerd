@@ -17,12 +17,11 @@
 // constrained-output format (§3.3), tuned from real runs. The PARSER itself is
 // pure + Bun-tested here so a format change is a localized edit, not a rewrite.
 //
-// The engine bridge is INJECTED (`setLocalGenerate`) rather than imported, so
-// (a) the SW wires the real offscreen RPC at boot, and (b) this module is fully
-// unit-testable with a mock token stream — no WebGPU needed to test the shim.
+// The engine bridge arrives through the same named model-egress capability as
+// every provider. The adapter never imports the engine host or a generic RPC.
 
 import { MODEL_SPECS, DEFAULT_LOCAL_MODEL_ID } from '../local-model-capability.js';
-import { asWindow } from '../model-window.js';
+import { asWindow, readModelWindow } from '../model-window.js';
 
 // The DEFAULT on-device model id (also the adapter's defaultRunnerModel) - not
 // the only one: the engine runs any model in MODEL_SPECS, and a call carries the
@@ -31,33 +30,8 @@ export const LOCAL_MODEL_ID = DEFAULT_LOCAL_MODEL_ID;
 
 /**
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
- * @typedef {(opts: { messages: readonly object[], system: string, tools?: readonly object[],
- *   model?: string, signal?: AbortSignal }) => AsyncIterable<string>} LocalGenerate
+ * @typedef {import('../model-egress.js').ModelEgress} ModelEgress
  */
-
-/**
- * The offscreen-engine bridge, wired by the SW at boot.
- * @type {LocalGenerate | null}
- */
-let generateLocal = null;
-/** @param {LocalGenerate | null} fn */
-export const setLocalGenerate = (fn) => { generateLocal = fn; };
-
-/**
- * Optional bridge to the resident model's LIVE config — the on-device analog
- * of the cloud Models APIs. When the offscreen engine is loaded it knows the
- * model's real `max_position_embeddings` (and could expose an effective,
- * memory-bounded window), so this lets the on-device runner report its
- * window through the SAME provider seam as Anthropic/OpenRouter/Ollama. Until
- * the SW wires it, fetchLocalContextWindow falls back to the static
- * MODEL_SPECS value — so the unified schema works today and sharpens later.
- *
- * @typedef {(model: string) => (number | null | Promise<number | null>)} LocalModelContextWindow
- * @type {LocalModelContextWindow | null}
- */
-let localModelContextWindow = null;
-/** @param {LocalModelContextWindow | null} fn */
-export const setLocalModelInfo = (fn) => { localModelContextWindow = fn; };
 
 /**
  * Live context window for the on-device model, unified with the API
@@ -67,21 +41,27 @@ export const setLocalModelInfo = (fn) => { localModelContextWindow = fn; };
  * bridge-not-wired fallback only.
  *
  * why a wired-but-failing bridge returns null instead of the static value:
- * the caller (model-catalog's liveContextWindow) caches a returned number for
+ * the caller's controller-side context-window resolver caches a returned number for
  * the SW's lifetime as if it were live. Handing it the static value on a
  * TRANSIENT bridge failure would freeze it in place and stop the retry that
  * would have learned the engine's real answer; null leaves the miss uncached
  * so the next turn asks again, while the trim layer meanwhile uses the same
  * static table on its own (resolveContextWindow's fallback).
  *
- * @param {{ model?: string }} args
+ * @param {{ model?: string, modelEgress?: ModelEgress, signal?: AbortSignal }} args
  * @returns {Promise<number | null>}
  */
-export const fetchLocalContextWindow = async ({ model = LOCAL_MODEL_ID } = {}) => {
-  if (typeof localModelContextWindow === 'function') {
-    try {
-      return asWindow(await localModelContextWindow(model));
-    } catch { return null; }
+export const fetchLocalContextWindow = async ({ model = LOCAL_MODEL_ID, modelEgress, signal } = {}) => {
+  if (modelEgress) {
+    return readModelWindow({
+      readResponse: (requestSignal) => modelEgress.readModelContext({
+        providerId: 'local-webgpu',
+        modelId: model,
+        signal: requestSignal,
+      }),
+      extract: (body) => body?.contextWindow,
+      signal,
+    });
   }
   // MODEL_SPECS has no index signature; the cast lets an arbitrary model id
   // be looked up (?. handles the miss, returning a static-table null).
@@ -176,8 +156,8 @@ function* emitToolCall(json, seq) {
 }
 
 /**
- * Adapter `call` — same signature as the cloud adapters; `getSecret`/`safeFetch`
- * are accepted and ignored (keyless, on-device). Routes to the offscreen engine
+ * Adapter `call` has the same signature as the cloud adapters. It routes through the
+ * exact local-generation authority operation
  * and re-yields its stream as ProviderEvents, closing with a synthetic usage +
  * message-stop.
  *
@@ -185,15 +165,16 @@ function* emitToolCall(json, seq) {
  * @param {readonly object[]} args.messages
  * @param {string} args.system
  * @param {string} [args.model]
+ * @param {number} [args.maxTokens]
  * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [args.tools]
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
  * @returns {AsyncGenerator<ProviderEvent>}
  */
-export async function* callLocalWebgpu({ messages, system, model = LOCAL_MODEL_ID, tools, signal }) {
-  if (typeof generateLocal !== 'function') {
-    yield { type: 'error', error: 'local model is not loaded — download it in Settings → Local model first.' };
-    return;
-  }
+export async function* callLocalWebgpu({
+  messages, system, model = LOCAL_MODEL_ID, maxTokens = 512,
+  tools, modelEgress, signal,
+}) {
   let outTokens = 0;
   try {
     // The local-model transport needs only role + content. Project that exact
@@ -204,7 +185,15 @@ export async function* callLocalWebgpu({ messages, system, model = LOCAL_MODEL_I
       content: message?.content,
     }));
     const tokenStream = (async function* () {
-      for await (const tok of generateLocal({ messages: transportMessages, system, tools, model, signal })) {
+      for await (const tok of modelEgress.generateLocal({
+        providerId: 'local-webgpu',
+        modelId: model,
+        messages: transportMessages,
+        system,
+        tools,
+        maxTokens,
+        signal,
+      })) {
         outTokens += 1; // ~one streamer chunk ≈ one token (good enough for the cost split)
         yield tok;
       }
@@ -235,10 +224,8 @@ export async function* callLocalWebgpu({ messages, system, model = LOCAL_MODEL_I
 export const localWebgpuAdapter = Object.freeze({
   name: 'local-webgpu',
   label: 'Local (WebGPU)',
-  endpoint: null,
   defaultModel: LOCAL_MODEL_ID,
   defaultRunnerModel: LOCAL_MODEL_ID,
-  vaultSecretName: null,
   keyless: true,
   call: callLocalWebgpu,
   // unified context-window seam: on-device window via the engine (when wired)

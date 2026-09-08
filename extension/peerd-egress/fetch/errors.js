@@ -14,6 +14,8 @@ import { TypedError } from '/shared/errors.js';
  * this is thrown — callers should surface the error without re-logging.
  */
 export class EgressDeniedError extends TypedError {
+  static errorName = 'EgressDeniedError';
+
   /**
    * @param {string} origin
    * @param {string} [reason]  machine code, e.g. 'redirect_blocked', so a

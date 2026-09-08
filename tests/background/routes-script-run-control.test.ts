@@ -1,15 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import { makeScriptRunControlRoutes } from '../../extension/background/routes/script-run-control.js';
+import { makeActorsRoutes } from '../../extension/background/routes/actors.js';
 
 describe('script-run/abort — settlement control plane', () => {
   const build = () => {
     const aborted: string[] = [];
-    const route = makeScriptRunControlRoutes({
+    const route = makeActorsRoutes({
       scriptRuns: {
-        ownerFor: (runId) => runId === 'live' ? 'owner-1' : null,
-        abort: (runId) => { aborted.push(runId); },
+        ownerFor: (runId: string) => runId === 'live' ? 'owner-1' : null,
+        abort: (runId: string) => { aborted.push(runId); },
       },
-      isOffscreenSender: (sender) => sender?.offscreen === true,
+      isOffscreenSender: (sender: { offscreen?: boolean } | undefined) => sender?.offscreen === true,
     })['script-run/abort'];
     return { route, aborted };
   };

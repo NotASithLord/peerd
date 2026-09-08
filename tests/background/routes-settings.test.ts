@@ -94,6 +94,24 @@ describe('settings/update', () => {
     expect(await updating).toEqual({ ok: true, settings: { a: 1 } });
     expect(calls.changed).toEqual(['stopped']);
   });
+  test('a storage or lifecycle loss after dispatch is unknown and hides internals', async () => {
+    for (const over of [
+      { settingsStore: {
+        get: () => ({ a: 1 }), stored: () => ({}), reset: async () => {},
+        update: async () => { throw new Error('private-storage-detail'); },
+      } },
+      { onSettingsChanged: async () => { throw new Error('private-host-epoch'); } },
+    ]) {
+      const { deps } = baseDeps(over);
+      const reply = await makeSettingsRoutes(deps)['settings/update']({ patch: { providerModel: 'x' } });
+      expect(reply).toMatchObject({
+        ok: false, code: 'settings-update-outcome-unknown',
+        outcomeKnown: false, outcomeKind: 'unknown', retryable: false,
+        settings: { a: 1 },
+      });
+      expect(reply.error).not.toMatch(/private-storage|private-host/);
+    }
+  });
 });
 
 describe('settings hydration gate', () => {
@@ -168,6 +186,35 @@ describe('settings/reset', () => {
     await makeSettingsRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] });
     expect(events).toEqual(['invalidate', 'reset', 'changed']);
   });
+  test('a lost reset result is unknown and never exposes storage details', async () => {
+    const { deps } = baseDeps({
+      settingsStore: {
+        get: () => ({ providerModel: 'default' }), stored: () => ({}), update: async () => {},
+        reset: async () => { throw new Error('private-reset-transaction'); },
+      },
+    });
+    const reply = await makeSettingsRoutes(deps)['settings/reset']({ keys: ['providerModel'] });
+    expect(reply).toMatchObject({
+      ok: false, code: 'settings-reset-outcome-unknown',
+      outcomeKnown: false, retryable: false,
+      settings: { providerModel: 'default' },
+    });
+    expect(reply.error).not.toContain('private-reset');
+  });
+  test('resetting voice to its OFF default forwards the concrete disable transition', async () => {
+    const { deps, calls } = baseDeps({
+      DEFAULT_SETTINGS: { voiceEnabled: false },
+      settingsStore: {
+        get: () => ({ voiceEnabled: false }),
+        stored: () => ({}),
+        update: async () => {},
+        reset: async (keys: string[]) => { calls.reset.push(keys); },
+      },
+    });
+    await makeSettingsRoutes(deps)['settings/reset']({ keys: ['voiceEnabled'] });
+    expect(calls.reset).toEqual([['voiceEnabled']]);
+    expect(calls.changed).toEqual([{ voiceEnabled: false }]);
+  });
   test('resetting the preview update check re-syncs its live listener', async () => {
     const { deps, calls } = baseDeps({
       DEFAULT_SETTINGS: { autoUpdateEnabled: true },
@@ -208,6 +255,14 @@ describe('transfer/export', () => {
     const { deps } = baseDeps({ vault: { isLocked: () => false, listSecretNames: async () => [], getSecret: async () => null } });
     const res = await makeSettingsRoutes(deps)['transfer/export'](authorized());
     expect(res.ok).toBe(true);
+  });
+
+  test('Store exports remain available when no dweb identity owner exists', async () => {
+    const { deps } = baseDeps({ dwebTransfer: null, CHANNEL: 'store' });
+    const res = await makeSettingsRoutes(deps)['transfer/export'](authorized({
+      passphrase: 'long-enough-for-backup',
+    }));
+    expect(res).toMatchObject({ ok: true, identityIncluded: false, identityDid: null });
   });
 
   test('custody secrets are never decrypted and the portable identity is reported', async () => {

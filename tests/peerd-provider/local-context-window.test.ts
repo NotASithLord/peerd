@@ -1,17 +1,14 @@
 // Local WebGPU context window — unified with the API providers' seam.
-// fetchLocalContextWindow prefers a live engine-reported window (when the
-// bridge is wired via setLocalModelInfo) and falls back to the canonical
+// fetchLocalContextWindow prefers a live authority-reported engine window and
+// falls back to the canonical
 // MODEL_SPECS value. A parity test pins MODEL_SPECS ↔ the cold-start table
 // so the two can't drift.
 
-import { describe, test, expect, afterEach } from 'bun:test';
-import {
-  fetchLocalContextWindow, setLocalModelInfo, LOCAL_MODEL_ID,
-} from '../../extension/peerd-provider/adapters/local-webgpu.js';
+import { describe, test, expect } from 'bun:test';
+import { fetchLocalContextWindow, LOCAL_MODEL_ID } from '../../extension/peerd-provider/adapters/local-webgpu.js';
 import { MODEL_SPECS } from '../../extension/peerd-provider/local-model-capability.js';
 import { DEFAULT_CONTEXT_WINDOWS } from '../../extension/peerd-provider/context-window.js';
-
-afterEach(() => setLocalModelInfo(null)); // never leak a wired bridge across tests
+import { makeModelEgress } from './model-egress-fixture';
 
 describe('fetchLocalContextWindow', () => {
   test('falls back to the static MODEL_SPECS window when no engine bridge is wired', async () => {
@@ -23,14 +20,14 @@ describe('fetchLocalContextWindow', () => {
     expect(await fetchLocalContextWindow()).toBe(MODEL_SPECS[LOCAL_MODEL_ID].contextWindow);
   });
 
-  test('a wired engine value overrides the static spec', async () => {
-    setLocalModelInfo(() => 65_536);
-    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID })).toBe(65_536);
+  test('an authority-reported engine value overrides the static spec', async () => {
+    const modelEgress = makeModelEgress({ readModelContext: async () => new Response(JSON.stringify({ contextWindow: 65_536 })) });
+    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID, modelEgress })).toBe(65_536);
   });
 
   test('an async engine value is awaited', async () => {
-    setLocalModelInfo(async () => 8192);
-    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID })).toBe(8192);
+    const modelEgress = makeModelEgress({ readModelContext: async () => new Response(JSON.stringify({ contextWindow: 8192 })) });
+    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID, modelEgress })).toBe(8192);
   });
 
   test('a WIRED bridge that fails or answers badly yields null - never the static value', async () => {
@@ -39,11 +36,11 @@ describe('fetchLocalContextWindow', () => {
     // would freeze the nominal in place of the engine's enforced window; null
     // leaves the miss uncached so the next turn retries.
     for (const bad of [0, -1, NaN, null, 'x' as any]) {
-      setLocalModelInfo(() => bad as any);
-      expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID })).toBe(null);
+      const modelEgress = makeModelEgress({ readModelContext: async () => new Response(JSON.stringify({ contextWindow: bad })) });
+      expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID, modelEgress })).toBe(null);
     }
-    setLocalModelInfo(() => { throw new Error('engine not ready'); });
-    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID })).toBe(null);
+    const modelEgress = makeModelEgress({ readModelContext: async () => { throw new Error('engine not ready'); } });
+    expect(await fetchLocalContextWindow({ model: LOCAL_MODEL_ID, modelEgress })).toBe(null);
   });
 
   test('the unwired fallback for a capped engine is the ENFORCED window, not the nominal', async () => {

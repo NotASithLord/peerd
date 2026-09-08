@@ -18,9 +18,8 @@ export { detectInterruptedTurn, RESUME_NUDGE } from './loop/resume-detect.js';
 // Per-session turn slots — steer-live aborts stay inside one chat;
 // streams in other conversations survive navigation + new sends.
 export { makeTurnSlots } from './loop/turn-slots.js';
-// The agent turn driver — runAgentTurn + maybeAutoResume, extracted from the
-// SW with all IO injected (background/service-worker.js wires it).
-export { makeTurnDriver } from './loop/turn-driver.js';
+// The agent turn driver: runAgentTurn + maybeAutoResume with injected IO.
+export { makeTurnAuthorityDriver } from './loop/turn-authority-driver.js';
 // Goal mode (the mode-row Goal toggle): auto-continuing agent turns until the
 // agent calls complete_goal (or the cap / Stop). loop/goal-runner.js.
 export { makeGoalRunner, GOAL_MAX_ITERATIONS, goalContinuationPrompt } from './loop/goal-runner.js';
@@ -55,7 +54,6 @@ export { makeTrimEnricher, ENRICHMENT_MAX_OUTPUT_TOKENS } from './loop/summary-e
 // concurrently, everything else stays serial. The loop consumes it; it's
 // exported for tests and for the SW's lineage/debug surfaces.
 export { partitionToolBatch } from './loop/tool-batch.js';
-export { renderSystemPrompt, _setTemplateForTests } from './loop/system-prompt.js';
 // File attachments — pure classify/validate/strip core. The SW validates
 // agent/send payloads through it (fail closed); the side panel uses the
 // same caps/classifier for instant pre-send feedback; the loop strips.
@@ -75,18 +73,16 @@ export { createSessionStore } from './sessions/store.js';
 // --- profiles (default-profile shape; ROADMAP "Profiles" deprioritized) --
 // One 'default' record carrying peerName (the AI peer's display name —
 // chat-transcript label only) + the first-run onboarding latch. The
-// store API is already multi-profile shaped; nothing is namespaced yet.
+// nothing is namespaced yet.
 export {
-  createProfileStore,
   DEFAULT_PROFILE_ID, DEFAULT_PEER_NAME, PEER_NAME_MAX,
   normalizePeerName, defaultProfileRecord,
 } from './profiles/index.js';
 
 // --- contacts: the per-peer overlay (user name/notes/tags) keyed by did,
-// plus the read-time "known peers + activity" aggregation. The store is core
-// (a did is just an identity string); activity is derived from the App catalog
-// + the audit log, so it stays correct whether or not the mesh is up.
-export { createContactsStore, InvalidDidError } from './contacts/store.js';
+// plus the read-time "known peers + activity" aggregation. Storage custody is
+// owned by the background kernel; activity is derived from the App catalog +
+// the audit log, so it stays correct whether or not the mesh is up.
 export { mergeContacts } from './contacts/aggregate.js';
 export {
   isPeerDid, peerDidFromUri, normalizeContactName,
@@ -101,26 +97,6 @@ export {
   normalizeTally, addUsage, limitExceeded,
 } from './cost/accumulator.js';
 
-// Optional, local-only Contributor Metrics. A closed reducer/serializer plus
-// its injected-storage shell; there is deliberately no generic event API and
-// no network client in this issue.
-export {
-  CONTRIBUTOR_SCHEMA_VERSION, CONTRIBUTOR_DISCLOSURE_VERSION,
-  CONTRIBUTOR_LOCAL_VERSION, CONTRIBUTOR_MAX_ROWS, CONTRIBUTOR_MAX_COUNTER,
-  CONTRIBUTOR_MAX_LOCAL_DEDUPE, CONTRIBUTOR_MAX_ACTIONS_PER_SETTLEMENT,
-  CONTRIBUTOR_KNOWN_MODEL_FAMILIES,
-  ContributorSchemaError, emptyContributorLocalState, emptyContributorRow,
-  normalizeContributorProvider, normalizeContributorModelFamily,
-  normalizeContributorCohort, contributorDurationBucket, contributorTokenBucket,
-  contributorCohortKey, contributorActionForTool, contributorTurnResult,
-  recordContributorWebTurn, recordContributorWebAction,
-  adjustContributorFeedback, serializeContributorEnvelope,
-} from './observability/contributor-metrics.js';
-export { CONTRIBUTOR_LOCAL_KEY, ContributorReadOnlyError, makeContributorStore }
-  from './observability/contributor-store.js';
-export {
-  contributorFeedbackContextKey, contributorFeedbackTargets,
-} from './observability/contributor-feedback.js';
 // The per-turn imperative shell over the accumulator: fold usage events,
 // persist the session total, push the live meter, fire the hard-limit
 // halt once. All IO injected; the SW's streaming switch stays two lines.
@@ -129,7 +105,6 @@ export { makeTurnCostTracker } from './cost/turn-tracker.js';
 // --- spawned (orchestration over sessions; see docs/ACTORS.md) ------
 export {
   makeSpawnActor, narrowTools, finalAssistantText, finalActorTurnReply,
-  restrictCtxCapabilities, CAPABILITY_CONSUMERS,
   DEFAULT_MAX_DEPTH, DEFAULT_MAX_STEPS, DEFAULT_MAX_OUTPUT_TOKENS,
 } from './actor/spawn.js';
 // DESIGN-11: async (non-blocking) spawned — spawn returns a handle, the
@@ -158,10 +133,10 @@ export {
 } from './actor/capability-manifest.js';
 export {
   actorsCallToOp, shapeActorsResult, renderTraceLines, traceErrorDetails,
-  askOutcome, ACTORS_ASK_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
+  ACTORS_CALL_DEFAULT_TIMEOUT_MS, ACTORS_BRIDGE_GUARD_MS,
   ACTORS_RUN_MAX_OPS, ACTORS_ADDRESS_MAX_CHARS, ACTORS_GOAL_MAX_CHARS,
   ACTORS_TRACE_TARGET_MAX_CHARS, ACTORS_TRACE_ERROR_MAX_CHARS,
-  ACTORS_API_METHODS, ACTORS_API_ACCEPTED_METHODS,
+  ACTORS_API_METHODS,
 } from './actor/actors-api.js';
 export { makeMeshDispatch } from './actor/a2a-dispatch.js';
 // Design 5 — peerd.provider.call: the pure core (text-only arg validation,
@@ -218,7 +193,7 @@ export {
   runtimeCapabilityForTool, filterByRuntimeCapabilities, runtimeCapabilityRefusal,
   runtimeCapabilityPromptBlock, RuntimeCapabilityUnavailableError, requireRuntimeCapability,
 } from './runtime-capabilities.js';
-export { decideLanding, mayHoldCredentials, EXCURSION_BUDGET, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
+export { decideLanding, mayHoldCredentials, EXCURSION_MS, MAX_EXCURSIONS } from './actor/landing-rule.js';
 export {
   makeJudgeLanding, makeCredentialScope, makeSiteClientOriginGuard,
   makeSiteClientOriginAuthorizer, makeFixedSiteClientOriginGuard, makeSignInOriginAuthorizer,
@@ -250,22 +225,9 @@ export {
   stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
   createSiteClientStore, digestCapture, redactHeaders, shapeSketch,
 } from './site-clients/index.js';
-// design js-superpower/06: the toolbox — durable agent-authored ES modules
-// imported as peerd:toolbox/<name> from the own-compute lanes. Pure core
-// (validation, confirm-gated proposal, write-time parse check, fenced list
-// rendering) + the two-tier store. See toolbox/index.js.
-// Only the SW's wiring needs (store + write-time parse check) cross the module
-// boundary; everything else is consumed intra-module by the toolbox_* tools.
-export {
-  createToolboxStore, makeToolboxParseCheck,
-} from './toolbox/index.js';
 // PR #119: the host-side handler for the web actor's code-REPL arm — turns a
 // page.<method> RPC (made inside the sealed worker) into the SAME gated tool
 // dispatch the tool-call web actor uses, pinned to the actor's owned tab.
-// resolvePageTab is the pure "adopt the first tab on page.goto" decision.
-export { makePageCallHandler, resolvePageTab } from './actor/page-call-handler.js';
-export { makeAppCallHandler } from './actor/app-call-handler.js';
-export { appCallToToolCall, shapeAppResult, APP_API_METHODS } from './actor/app-api.js';
 // Cheap one-shot clean-context calls (auto-memory + trim enrichment):
 // a tools:[] spawn with the spend-limit preflight and the cost fold
 // into the parent session's tally built in.
@@ -273,34 +235,15 @@ export {
   makeCheapCall, CHEAP_CALL_MAX_STEPS, CHEAP_CALL_MAX_OUTPUT_TOKENS,
 } from './actor/cheap-call.js';
 
-// --- edit (SEARCH/REPLACE diff editing + checkpoint/undo) ---------------
+// --- edit (SEARCH/REPLACE diff editing) ----------------------------------
 export {
   parseEditBlocks, applyBlocks, applyEdit,
 } from './edit/search-replace.js';
 export {
   EditParseError, SearchNotFoundError, SearchAmbiguousError,
 } from './edit/errors.js';
-export {
-  createSnapshotStore, createBrowserSnapshotStore, browserSnapshotIO,
-} from './edit/snapshot-store.js';
-export { createCheckpointManager } from './edit/checkpoint.js';
-export {
-  defaultWritePermissions, resolveCanWrite,
-} from './edit/permissions-adapter.js';
-// --- review (clean-context read-only reviewer; see docs/REVIEW.md) ------
-export {
-  makeRequestReview,
-  parseReviewSummary, worstSeverity, SEVERITIES,
-  readOnlyToolNames, isReadOnlyTool, intersectReadOnly,
-  renderDiffForReview, synthesizeDiff, fromCheckpointDiff,
-  buildReviewTask,
-} from './review/index.js';
-
 // --- tools --------------------------------------------------------------
-export { registerTool, getTool, listTools, clearTools } from './tools/registry.js';
-export { dispatchToolCall } from './tools/dispatcher.js';
 export { GATES } from './tools/gates.js';
-export { BUILTIN_TOOLS } from './tools/defs/index.js';
 export {
   mainAgentDescriptors, isHiddenFromMain, MAIN_AGENT_HIDDEN_TOOLS,
   filterByDwebEnabled, isDwebTool,
@@ -308,9 +251,6 @@ export {
   filterByGoalActive, isGoalOnlyTool, GOAL_ONLY_TOOLS,
   // DESIGN-17: the actor capability tier vocabulary.
   EXPOSURE_ACTOR, ACTOR_ONLY_TOOLS, isActorOnlyTool,
-  // #160: the review-exemption marker — the SW injects it into the offscreen
-  // relay so a review child's persisted flag re-stamps ctx.exposure there.
-  EXPOSURE_REVIEW,
   actorAllowedTools, isAllowedForActorType, actorDescriptors, filterActorSurface,
   // DESIGN-18: backing-aware allow-set (an API actor has no DOM tools).
   actorAllowedToolsFor, isAllowedForActor,
@@ -327,8 +267,8 @@ export {
 export { makeToolsCommand, describePresets } from './tools/manifest-command.js';
 export { wrapUntrusted } from './tools/prompt-wrap.js';
 // The script value-spill store (run cache) — the SW instantiates it and
-// injects it into tool contexts (read_run_cache pages it back).
-export { createRunCacheStore } from './tools/run-cache.js';
+// injects it into tool contexts (read_result pages it back).
+export { createResultStore } from './tools/result-store.js';
 // The shared spill-cache entry cap — the SW's web extract cache uses the same
 // number as the run cache, imported from ONE home so the twins never drift.
 export { SPILL_CACHE_MAX_ENTRIES } from './tools/web/spill.js';
@@ -342,10 +282,6 @@ export {
   parseComposer, parseCommandName, parseCommandArgs, parseRefs, activeTrigger,
   score, filterCandidates,
   createCommandStore, isValidCommandName, COMMAND_KEY_PREFIX,
-  localStoreSource, skillRegistrySource, mergeSources,
-  decideTabGate, buildTabPayload, buildFilePayload,
-  resolveTabRef, resolveFileRef, resolveAllRefs,
-  applyComposer,
 } from './composer/index.js';
 // --- memory (V1.5 — file-based AGENTS.md, hierarchical scope) ------------
 // Public store + pure core + /init drafter. Foundational for skills (07)
@@ -361,7 +297,6 @@ export {
   ALWAYS_LOADED_LINE_BUDGET, MAX_DOC_CHARS, INITIALIZER_SUBPATH,
 } from './memory/memory.js';
 export { draftAgentsMd, deriveChecklist, resolveWorkspaceKey } from './memory/initializer.js';
-export { makeInitOrchestrator } from './memory/init-orchestrator.js';
 export { USER_DOC_SCOPE, seedUserDocBody } from './memory/user-doc.js';
 // Auto-memory: wrap-up extraction → pending suggestions → user
 // approval into the user doc. See memory/auto-memory.js.
@@ -413,11 +348,6 @@ export {
   encodeSurface, decodeSurface,
 } from './transfer/self-sync-surfaces.js';
 
-// The "Use my existing Peerd" flow, as a pure reducer + its copy table.
-export {
-  STEP_COPY, initialEnrollmentState, enrollmentStep, describeSurfaces, diagnostics,
-} from './transfer/enrollment-flow.js';
-
 // --- permissions (Plan/Act mode + confirm-actions toggle; Feature 03) ---
 // The foundational write-authorization policy. Other features route every
 // write through decideAction. Pure function — see permissions/policy.js.
@@ -432,20 +362,16 @@ export {
   parseSkillMd, normalizeName, SkillParseError,
   createSkillStore,
   createSkillRegistry, SkillExistsError, SkillNotFoundError,
-  installFromLocal, installFromGit, installFromManifest, resolveGitRawUrl, SkillInstallError,
   loadSkillTool,
 } from './skills/index.js';
 
 // --- clock (temporal grounding) -----------------------------------------
 export {
   buildTemporalBlock,
-  CLOCK_TOOLS,
 } from './clock/index.js';
 
 // --- web (capture wrapper) ----------------------------------------------
-export {
-  WEB_TOOLS, captureTool,
-} from './tools/web/index.js';
+export { captureTool } from './tools/web/screenshot.js';
 
 // --- voice (lightweight control/UI surface) -----------------------------
 // The offscreen-only transcriber factory imports Moonshine and must never be
@@ -456,7 +382,7 @@ export { detectVoiceCapability } from './voice/engine-picker.js';
 export { MicButton } from './voice/mic-button.js';
 export { normalizeVariant, normalizeEngine, VOICE_ENGINES } from './voice/settings.js';
 
-// --- pdf (read_pdf tool: pdf.js text layer + opt-in OCR) ----------------
+// --- PDF engine (used internally by read_doc: pdf.js + opt-in OCR) ------
 export {
   chooseEngine, looksScanned, requireEngine, DEFAULT_ENGINE, PDF_ENGINES,
   formatPdfBody, assemblePages, DEFAULT_MAX_CHARS,
@@ -480,7 +406,6 @@ export {
   // Firefox-parity capture: CDP when the pool is wired, else the
   // chrome.scripting DOM-walk pseudo-snapshot. Same contract either way.
   captureSnapshot,
-  describeSource,
   domWalkInjected,
   activityOverlayInjected,
   clearActivityOverlayInjected,
@@ -494,11 +419,10 @@ export {
 // used by the background-owned activity overlay before it injects UI.
 export {
   browserNetworkGuardUnavailableResult,
-  browserNetworkGuardPostNavigationResult,
   classifyBrowserAutomationTarget,
   isAddressableBrowserTab,
 } from './tools/browser-automation-policy.js';
-export { isDenylistedTab, liveDocumentLocationInjected } from './tools/defs/dom-helpers.js';
+export { isDenylistedTab, liveDocumentLocationInjected } from './browser-authority/dom-helpers.js';
 
 // --- lifecycle (the interruption/recovery contract's functional core) ---
 // Canonical operation states + the retry-class recovery decision, SW/actor
@@ -546,8 +470,6 @@ export {
 // override table, then the sideEffect/primitive taxonomy, failing closed
 // to E. The inventory test asserts totality over the live tool set.
 export { retryClassForTool, RETRY_CLASS_OVERRIDES } from './lifecycle/tool-retry-class.js';
-// §9: passive, bounded reports for engine resources the live boot sweep lost.
-export { groupResourceLossNotices } from './lifecycle/resource-recovery.js';
 // §11.1/§12: independent per-store schema versions + durability tiers.
 export {
   DURABILITY_TIERS, STORE_REGISTRY, VERSION_STAMP_KEY,
@@ -559,7 +481,9 @@ export {
 export { makeWriteGuard, StoreReadOnlyError } from './lifecycle/write-guard.js';
 // §9: the durable engine-liveness ledger the tab trackers feed and the
 // boot sweep reaps orphans from.
-export { makeEngineLiveness, ENGINE_LIVENESS_KEY } from './lifecycle/engine-liveness.js';
+export {
+  makeEngineLiveness, groupResourceLossNotices, ENGINE_LIVENESS_KEY,
+} from './lifecycle/engine-liveness.js';
 // The wiring shells: dispatch tracking (the dispatcher consumes it via
 // ctx.lifecycle) and the SW boot sequence (generation + reconcile +
 // notices).

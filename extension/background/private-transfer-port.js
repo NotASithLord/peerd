@@ -1,9 +1,4 @@
 // @ts-check
-// Dedicated options-page RPC for backup and restore requests. The service
-// worker creates a standard MessageChannel only after an exact options-page
-// request, then transfers it directly to that WindowClient. Firefox has no
-// service-worker WindowClient API, so its exact options sender uses the private
-// background-page Port fallback.
 
 const PRIVATE_TRANSFER_TYPES = new Set([
   'transfer/export', 'transfer/inspectImport', 'transfer/import',
@@ -30,8 +25,6 @@ export const makePrivateTransferPort = ({ handlers, authorization }) => {
   return {
     /** @param {MessagePort | import('webextension-polyfill').Runtime.Port} port */
     attach(port) {
-      // A transferred MessagePort needs a host-owned reference for the whole
-      // options session. Event-handler self-cycles are collectible.
       activePorts.add(port);
       if ('onDisconnect' in port) {
         port.onDisconnect.addListener(() => activePorts.delete(port));
@@ -90,9 +83,6 @@ export const makePrivateTransferOpenRoute = ({
       || typeof message.requestId !== 'string' || message.requestId.length === 0) {
     return { ok: false, error: 'private-transfer-channel-refused' };
   }
-  // WindowClient ids are not documented as MessageSender documentIds. Require
-  // one exact options document instead of turning that coincidence into trust.
-  // Hash routes identify panes within the same page and are intentionally ignored.
   const exact = (await listWindowClients())
     .filter((client) => isOptionsClientUrl(client.url, optionsUrl));
   const target = exact.length === 1 ? exact[0] : null;

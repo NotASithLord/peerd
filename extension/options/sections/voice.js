@@ -18,8 +18,9 @@
 // Live LISTENING stays a panel affair (the mic button lives there).
 
 import m from '/vendor/mithril/mithril.js';
-import browser from '/vendor/browser-polyfill.js';
-import { createVoiceManager, detectVoiceCapability } from '/peerd-runtime/index.js';
+import browser from '/shared/browser-api.js';
+import { createVoiceManager, detectVoiceCapability } from '/peerd-runtime/options.js';
+import { mutationFailureCopy } from '../mutation-custody.js';
 import { resetRow } from './reset-row.js';
 // OCR shares this tab (both are heavy on-device model downloads), but lives in
 // its own section file — one section, one file.
@@ -28,7 +29,7 @@ import { OcrSection } from './ocr.js';
 /** @typedef {import('./reset-row.js').Send} Send */
 
 export const VoiceSection = {
-  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { state: any, send: Send, voiceManager?: any } }} vnode */
   oninit(vnode) {
     vnode.state.voiceConfirmOpen = false;     // Moonshine download confirmation modal
     vnode.state.voiceBusy = false;
@@ -37,7 +38,7 @@ export const VoiceSection = {
     vnode.state.runtimeState = vnode.attrs.state;
     // why the no-op onMessage: SW voice pushes ride the panel port only;
     // this page never listens, so there is nothing to subscribe to.
-    vnode.state.mgr = createVoiceManager({
+    vnode.state.mgr = vnode.attrs.voiceManager ?? createVoiceManager({
       send: vnode.attrs.send,
       onMessage: () => () => {},
       moonshineHostAvailable: () => vnode.state.runtimeState?.capabilities?.moonshineVoiceHost?.status === 'available',
@@ -87,6 +88,7 @@ export const VoiceSection = {
       ui.voiceError = null;
       ui.voiceConfirmOpen = false;
       m.redraw();
+      let managerEnabled = false;
       try {
         if (engine && engine !== voiceEngine) {
           await send({ type: 'settings/update', patch: { voiceEngine: engine } });
@@ -95,13 +97,24 @@ export const VoiceSection = {
         // tear down the live transcriber before the new one inits.
         if (voiceEnabled) await voiceManager?.disable?.();
         await voiceManager?.enable?.({ variant: voiceVariant, engine: engine ?? voiceEngine });
+        managerEnabled = true;
         await send({ type: 'settings/update', patch: { voiceEnabled: true } });
       } catch (e) {
-        ui.voiceError = /** @type {{ message?: string }} */ (e)?.message ?? 'enable-failed';
-        await send({ type: 'settings/update', patch: { voiceEnabled: false } });
+        ui.voiceError = mutationFailureCopy(e, {
+          action: 'enabling voice',
+          fallback: 'Voice could not be enabled. Check the current setting before trying again.',
+        });
+        // The persisted enable may have committed even when its receipt was
+        // lost. Stop only this page's live manager and let the centralized
+        // state read reconcile durable intent; never issue a blind inverse
+        // settings mutation.
+        if (managerEnabled) {
+          try { await voiceManager?.disable?.(); } catch { /* state reconciliation owns the result */ }
+        }
+      } finally {
+        ui.voiceBusy = false;
+        m.redraw();
       }
-      ui.voiceBusy = false;
-      m.redraw();
     };
 
     return m('div', [
@@ -164,10 +177,14 @@ export const VoiceSection = {
                     await voiceManager?.disable?.();
                     await send({ type: 'settings/update', patch: { voiceEnabled: false } });
                   } catch (e) {
-                    ui.voiceError = /** @type {{ message?: string }} */ (e)?.message ?? 'disable-failed';
+                    ui.voiceError = mutationFailureCopy(e, {
+                      action: 'disabling voice',
+                      fallback: 'Voice could not be disabled. Check the current setting before trying again.',
+                    });
+                  } finally {
+                    ui.voiceBusy = false;
+                    m.redraw();
                   }
-                  ui.voiceBusy = false;
-                  m.redraw();
                 },
               }, 'Disable voice')
             : m('button', {
@@ -219,10 +236,28 @@ export const VoiceSection = {
             min: 500, max: 5000, step: 100,
             value: voiceSilenceMs,
             disabled: ui.voiceBusy,
-            oninput: (/** @type {{ target: HTMLInputElement }} */ e) => {
+            onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
+              if (ui.voiceBusy) return;
               const ms = Number(e.target.value);
-              send({ type: 'settings/update', patch: { voiceSilenceMs: ms } });
+              ui.voiceBusy = true;
+              ui.voiceError = null;
               voiceManager?.setSilenceThreshold?.(ms);
+              m.redraw();
+              try {
+                const reply = await send({
+                  type: 'settings/update', patch: { voiceSilenceMs: ms },
+                });
+                if (!reply?.ok) throw reply;
+              } catch (cause) {
+                voiceManager?.setSilenceThreshold?.(voiceSilenceMs);
+                ui.voiceError = mutationFailureCopy(cause, {
+                  action: 'changing the silence threshold',
+                  fallback: 'The silence threshold could not be changed. Try again.',
+                });
+              } finally {
+                ui.voiceBusy = false;
+                m.redraw();
+              }
             },
           }),
         ]) : null,

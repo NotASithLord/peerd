@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // app_read_file — read a single file from an App's OPFS subtree.
 //
 // Fenced like js_read_file: an App's files can embed data its actor pulled
@@ -7,49 +9,18 @@
 // orchestrator's trusted context. Reads stay global; the fence pays for it.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appReadFileTool = {
-  name: 'app_read_file',
-  primitive: 'app',
-  description: [
-    'Read a single file from an App\'s OPFS subtree. Returns UTF-8 text.',
-    'Binary assets are listed but cannot be read as text; replace them with',
-    '`app_write_file({contentBase64})` when needed.',
-    'Use to inspect current content before patching. A large file returns a',
-    'bounded slice plus a paging note — re-call with offset to read on (no',
-    're-truncation). Pass `query` to find exact text and character offsets in',
-    'a large generated file before an anchored edit. Without `appId`, targets',
-    'the chat\'s current app.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      appId: { type: 'string' },
-      path: { type: 'string' },
-      offset: { type: 'number', description: 'Start character offset. Default 0.' },
-      limit: { type: 'number', description: `Max characters to return (capped at ${SPILL_PAGE_CHARS}). Default the cap.` },
-      query: { type: 'string', description: 'Optional exact substring to find; returns bounded snippets and offsets.' },
-    },
-    required: ['path'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const appReadFileTool = composeTool("app_read_file", {
 
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string') return { ok: false, error: 'path_required' };
-    // why: appClient rides the opaque ctx contract (not on ToolContext); narrow
-    // to the one method this tool calls.
-    const appClient = /** @type {{ readFile?: (opts: { appId?: string, path: string, sessionId?: string }) => Promise<string> } | undefined} */ (
-      /** @type {any} */ (ctx).appClient);
-    if (!appClient?.readFile) return { ok: false, error: 'app_not_available' };
+    const authority = /** @type {{ readFile?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.readFile) return { ok: false, error: 'app_not_available' };
     try {
-      const content = await appClient.readFile({
-        appId: args.appId,
-        path: args.path,
-        sessionId: ctx.session?.sessionId,
-      });
+      const content = await authority.readFile(args.appId, args.path);
       if (args.query !== undefined) {
         if (typeof args.query !== 'string' || !args.query || args.query.length > 500) {
           return { ok: false, error: 'query_must_be_1_to_500_characters' };
@@ -120,4 +91,4 @@ export const appReadFileTool = {
       };
     }
   },
-};
+});

@@ -6,6 +6,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { a2aRunTool } from '../../../extension/peerd-runtime/tools/defs/a2a-run.js';
+import { createDwebToolAuthority } from '../../../extension/background/dweb-tool-authority.js';
 
 const RESULT = { value: 'ok', consoleOutput: [], durationMs: 1, error: null };
 const runRegistry = () => ({
@@ -18,6 +19,7 @@ const makeCtx = (over: any = {}) => {
   const seen: { exec?: any; aborts: Array<{ runId: string; owner?: string }> } = { aborts: [] };
   const ctx: any = {
     session: { sessionId: 'dweb-1' },
+    dweb: {},
     jsOffscreenClient: {
       execHeadless: async (_code: string, opts: any) => { seen.exec = opts; return RESULT; },
       abortHeadless: async (runId: string, owner?: string) => { seen.aborts.push({ runId, owner }); },
@@ -28,10 +30,21 @@ const makeCtx = (over: any = {}) => {
   return { ctx, seen };
 };
 
+const executeA2A = (args: any, ctx: any) => a2aRunTool.execute(args, {
+  dwebAuthority: {
+    runMeshProgram: (code: string, timeoutMs: number) => createDwebToolAuthority({
+      binding: {
+        operation: 'turn.dweb.run-mesh-program', args: { code, timeoutMs },
+      },
+      ctx, signal: ctx.abortSignal,
+    }).runMeshProgram(code, timeoutMs),
+  },
+} as any);
+
 describe('a2a_run — Stop plumbing (#153)', () => {
   test('threads a minted runId (+ owner) into the job so the runner can register it', async () => {
     const { ctx, seen } = makeCtx();
-    const r = await a2aRunTool.execute({ code: 'return await mesh.peers();' }, ctx);
+    const r = await executeA2A({ code: 'return await mesh.peers();' }, ctx);
     expect(r.ok).toBe(true);
     expect(seen.exec.a2a).toBe(true);
     expect(seen.exec.ownerSessionId).toBe('dweb-1');
@@ -43,6 +56,7 @@ describe('a2a_run — Stop plumbing (#153)', () => {
     const seen: { exec?: any; aborts: Array<{ runId: string; owner?: string }> } = { aborts: [] };
     const ctx: any = {
       session: { sessionId: 'dweb-1' },
+      dweb: {},
       abortSignal: controller.signal,
       jsOffscreenClient: {
         execHeadless: async (_code: string, opts: any) => {
@@ -55,7 +69,7 @@ describe('a2a_run — Stop plumbing (#153)', () => {
       },
       scriptRuns: runRegistry(),
     };
-    await a2aRunTool.execute({ code: 'return 1;' }, ctx);
+    await executeA2A({ code: 'return 1;' }, ctx);
     expect(seen.aborts).toEqual([{ runId: seen.exec.runId, owner: 'dweb-1' }]);
   });
 
@@ -63,7 +77,7 @@ describe('a2a_run — Stop plumbing (#153)', () => {
     const controller = new AbortController();
     controller.abort();
     const { ctx, seen } = makeCtx({ abortSignal: controller.signal });
-    const r = await a2aRunTool.execute({ code: 'return 1;' }, ctx);
+    const r = await executeA2A({ code: 'return 1;' }, ctx);
     expect(r.ok).toBe(false);
     expect(String((r as { error?: string }).error)).toContain('a2a_aborted');
     expect(seen.exec).toBeUndefined();           // no worker was launched
@@ -72,9 +86,31 @@ describe('a2a_run — Stop plumbing (#153)', () => {
   test('the abort listener detaches after the run — a later Stop cannot abort a finished job', async () => {
     const controller = new AbortController();
     const { ctx, seen } = makeCtx({ abortSignal: controller.signal });
-    await a2aRunTool.execute({ code: 'return 1;' }, ctx);
+    await executeA2A({ code: 'return 1;' }, ctx);
     controller.abort();                          // fires AFTER the run settled
     await new Promise((r) => setTimeout(r, 5));
     expect(seen.aborts).toEqual([]);
+  });
+
+  test('a lost mesh mutation acknowledgement remains unknown and nonretryable', async () => {
+    const { ctx } = makeCtx({
+      jsOffscreenClient: {
+        execHeadless: async () => ({
+          value: undefined, durationMs: 1,
+          error: 'nested host operation outcome unknown',
+          outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+          codeTrace: [{
+            seq: 1, bridge: 'mesh', method: 'cast', outcome: 'error', ms: 1,
+          }],
+        }),
+      },
+    });
+    const result: any = await executeA2A({
+      code: 'await mesh.cast("did:key:zPeer", "mutate");',
+    }, ctx);
+    expect(result).toMatchObject({
+      ok: false, error: 'a2a_nested_host_outcome_unknown',
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    });
   });
 });

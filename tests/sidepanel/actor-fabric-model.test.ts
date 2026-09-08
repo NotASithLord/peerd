@@ -11,7 +11,7 @@ describe('Actor Fabric topology projection', () => {
         'tu-live': {
           sessionId: 'web-actor-1', rootSessionId: 'chat-1', parentSessionId: 'chat-1',
           kind: 'web', instanceId: 'web', task: 'check the current price',
-          grantedTools: ['read_page'], streaming: true,
+          visibleTools: ['read_page'], streaming: true,
           messages: [{ toolUses: [{ id: 'read', name: 'read_page' }] }],
         },
         settled: { sessionId: 'old', kind: 'app', instanceId: 'app-1', streaming: false },
@@ -36,7 +36,7 @@ describe('Actor Fabric topology projection', () => {
       spawned: { sessions: {
         child: {
           sessionId: 'child', parentSessionId: 'chat-1', task: 'research safely',
-          rootSessionId: 'chat-1', running: true, grantedTools: ['message_actor'],
+          rootSessionId: 'chat-1', running: true, visibleTools: ['message_actor'],
           messages: [{ toolUses: [{ id: 'tu-child-web', name: 'message_actor' }] }],
         },
       } },
@@ -44,7 +44,7 @@ describe('Actor Fabric topology projection', () => {
         'tu-child-web': {
           sessionId: 'bound-web', rootSessionId: 'chat-1', parentSessionId: 'child',
           kind: 'web', instanceId: '42', task: 'inspect the target tab',
-          grantedTools: ['read_page'], streaming: true,
+          visibleTools: ['read_page'], streaming: true,
           messages: [],
         },
       },
@@ -68,7 +68,7 @@ describe('Actor Fabric topology projection', () => {
       asyncTasks: {
         'chat-1': [{
           taskId: 'as-1', childSessionId: 'child', task: 'build calculator',
-          status: 'done', grantedTools: ['script', 'message_actor'],
+          status: 'done', visibleTools: ['script', 'message_actor'],
         }],
       },
     });
@@ -106,7 +106,7 @@ describe('Actor Fabric topology projection', () => {
       asyncTasks: {
         'chat-1': [{
           taskId: 'as-1', childSessionId: 'child-late', task: 'hydrate me',
-          status: 'running', grantedTools: ['script'],
+          status: 'running', visibleTools: ['script'],
         }],
       },
     });
@@ -129,7 +129,7 @@ describe('Actor Fabric topology projection', () => {
       asyncTasks: {
         parent: [{
           taskId: 'as-late', childSessionId: 'late-child', task: 'inspect source',
-          status: 'running', grantedTools: ['fetch_url'],
+          status: 'running', visibleTools: ['fetch_url'],
         }],
       },
     });
@@ -167,7 +167,7 @@ describe('Actor Fabric topology projection', () => {
         tu: {
           sessionId: 'actor', rootSessionId: 'chat-1', parentSessionId: 'chat-1',
           kind: 'web', instanceId: 'web', task: 'read safely',
-          grantedTools: ['read_page'], streaming: true,
+          visibleTools: ['read_page'], streaming: true,
           messages: [{ toolUses: [{ id: 'forged', name: 'vault_export_all_secrets' }] }],
         },
       },

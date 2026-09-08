@@ -4,13 +4,13 @@
 // Z.ai publishes GLM (General Language Model) behind an OpenAI-compatible
 // API — same /chat/completions wire shape, same SSE streaming, same
 // tools/tool_choice function-calling schema. The only deltas from a vanilla
-// OpenAI client are the base URL (https://api.z.ai/api/paas/v4, note /v4 not
-// /v1), Bearer auth on a `xxxxx.yyyyy`-shaped key, and bare model ids
+// OpenAI client are the fixed authority destination, its authentication class,
+// and bare model ids
 // (`glm-5.2`, not `vendor/model`). That makes this a thin adapter: it reuses
 // to-openai.js / from-openai.js for the format, exactly like openrouter.js.
 //
-// Same DI contract as the other cloud adapters: `safeFetch` + `getSecret`
-// are injected; this module never imports peerd-egress.
+// Fixed destination, credentials, authentication, and network policy belong to
+// the named model-egress authority; this adapter owns only semantic shaping.
 //
 // Thinking mode (GLM-4.6/4.5/4.5-Air, and 5.2): Z.ai surfaces reasoning as a
 // `delta.reasoning_content` SSE field gated by `extra_body.thinking.type`. The
@@ -22,20 +22,14 @@
 
 import { toOpenAiBody } from '../format/to-openai.js';
 import { fromOpenAiStream } from '../format/from-openai.js';
-import { abortableSleep, fetchInitialResponseWithRetry } from '../connect-timeout.js';
+import { abortableSleep, openInitialResponseWithRetry } from '../connect-timeout.js';
 import {
   ProviderError,
   ProviderHttpError,
-  ProviderKeyMissingError,
   ProviderUsageLimitError,
 } from '../errors.js';
 import { isUsageLimitResponse, apiErrorMessage } from '../error-classify.js';
 
-// The standard Z.ai platform endpoint. A separate `coding/paas/v4` path exists
-// for GLM Coding Plan subscribers; this is the general one every normal API
-// key (`xxxxx.yyyyy`) authenticates against.
-const ENDPOINT = 'https://api.z.ai/api/paas/v4/chat/completions';
-const VAULT_SECRET_NAME = 'glm_api_key';
 // Connect timeout for the response headers; the SSE body streams untimed.
 const CONNECT_TIMEOUT_MS = 45_000;
 
@@ -57,6 +51,7 @@ const MAX_BACKOFF_MS = 60_000;
 /**
  * @typedef {import('../types.js').InternalMessage} InternalMessage
  * @typedef {import('../format/from-anthropic.js').ProviderEvent} ProviderEvent
+ * @typedef {import('../model-egress.js').ModelEgress} ModelEgress
  */
 
 /**
@@ -70,8 +65,7 @@ const MAX_BACKOFF_MS = 60_000;
  * @param {string} [args.model]
  * @param {number} [args.maxTokens]
  * @param {ReadonlyArray<{ name: string, description: string, schema: object }>} [args.tools]
- * @param {(name: string) => Promise<string | null>} args.getSecret
- * @param {(resource: string | URL | Request, init?: RequestInit) => Promise<Response>} args.safeFetch
+ * @param {ModelEgress} args.modelEgress
  * @param {AbortSignal} [args.signal]
  * @param {(ms: number, signal?: AbortSignal) => Promise<void>} [args._sleep]
  * @returns {AsyncGenerator<ProviderEvent>}
@@ -82,36 +76,31 @@ export async function* callGlm(args) {
     model = DEFAULT_MODEL,
     maxTokens,
     tools,
-    getSecret, safeFetch,
+    modelEgress,
     signal,
     _sleep = abortableSleep,
   } = args;
 
-  const apiKey = await getSecret(VAULT_SECRET_NAME);
-  if (!apiKey) throw new ProviderKeyMissingError('glm');
-
   const body = toOpenAiBody({ model, system, messages, tools, maxTokens });
-  const requestInit = {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal,
-  };
 
   // why two retry layers: connection-drop retry (TypeError rejections, up to
   // 3 total attempts) rides inside this HTTP loop — orthogonal failure modes;
   // a network drop never produces a Response for the status logic below.
   // Mirrors openrouter.js / anthropic.js.
   for (let attempt = 1; ; attempt++) {
-    const res = await fetchInitialResponseWithRetry(safeFetch, ENDPOINT, requestInit, {
+    const res = await openInitialResponseWithRetry(
+      (requestSignal) => modelEgress.openInference({
+        providerId: 'glm',
+        modelId: model,
+        nativeBody: body,
+        signal: requestSignal,
+      }), {
       stopSignal: signal,
       timeoutMs: CONNECT_TIMEOUT_MS,
       onTimeout: (ms) => new ProviderError('glm', `the API did not respond within ${ms / 1000}s — it may be unreachable or down. Try again.`),
       sleepFn: _sleep,
-    });
+      },
+    );
     if (res.ok) {
       if (!res.body) {
         throw new ProviderError('glm', 'response has no body (streaming requires it)');
@@ -175,9 +164,7 @@ export const _computeBackoffMsForTests = computeBackoffMs;
 export const glmAdapter = Object.freeze({
   name: 'glm',
   label: 'Z.ai',
-  endpoint: ENDPOINT,
   defaultModel: DEFAULT_MODEL,
   defaultRunnerModel: DEFAULT_RUNNER_MODEL,
-  vaultSecretName: VAULT_SECRET_NAME,
   call: callGlm,
 });

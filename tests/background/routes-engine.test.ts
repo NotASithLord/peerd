@@ -58,12 +58,14 @@ const baseDeps = (over: any = {}) => ({
   opfsHelpers: () => ({ list: async () => [], read: async () => '', readBytes: async () => new Uint8Array(), write: async () => {} }),
   NOTEBOOK_OPFS_ROOT: 'peerd-notebooks',
   IMAGE_PIN_STORAGE_KEY: 'vm.imagePins',
-  buildAppExport: async () => ({ env: 'app' }),
-  buildNotebookExport: async () => ({ env: 'nb' }),
-  buildVmRecipeExport: async () => ({ env: 'vm' }),
-  openEnvelope: async () => ({ kind: 'app', name: 'X', entry: 'i.html', files: {}, meta: { tags: [] } }),
-  inspectEnvelope: async () => ({ ok: true, summary: 'x' }),
-  exportFilename: (name: string, kind: string) => `${name}.${kind}.peerd`,
+  artifactEngine: {
+    buildAppExport: async () => ({ env: 'app' }),
+    buildNotebookExport: async () => ({ env: 'nb' }),
+    buildVmRecipeExport: async () => ({ env: 'vm' }),
+    openEnvelope: async () => ({ kind: 'app', name: 'X', entry: 'i.html', files: {}, meta: { tags: [] } }),
+    inspectEnvelope: async () => ({ ok: true, summary: 'x' }),
+    exportFilename: (name: string, kind: string) => `${name}.${kind}.peerd`,
+  },
   ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
   settingsStore: { get: () => ({ dwebEnabled: false }) },
   DWEB_ENABLED: false,
@@ -169,7 +171,26 @@ describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
     expect(reply.result.exitCode).toBe(0);
     expect(pushedRef.ref).toEqual({ kind: 'pod', id: 'pod-1' });
     expect(pushedRef.opts.ref).toBe('main');
+    expect(pushedRef.opts.expectedRemote).toBe('https://github.com/a/b.git');
     expect(pushedRef.opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('an indeterminate remote result is never presented as a safe retry', async () => {
+    const deps = baseDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.push = async () => {
+      throw Object.assign(new Error('transport closed'), {
+        code: 'repository-outcome-unknown', outcomeKnown: false,
+      });
+    };
+    const reply = await makeEngineRoutes(deps)['pod/git']({
+      podId: 'pod-1', jobId: 'job-unknown', argv: ['push', 'origin', 'main'],
+      remoteGrant: { op: 'push', url: 'https://github.com/a/b.git' },
+    }, sender);
+    expect(reply).toMatchObject({
+      ok: false, code: 'repository-outcome-unknown', outcomeKnown: false,
+      outcomeKind: 'unknown', retryable: false,
+    });
   });
 
   test('validates the granted target and pushes under one repository coordinator', async () => {
@@ -233,7 +254,7 @@ describe('App repository quiescence', () => {
     ['apps/repository/restore', { appId: 'a1', to: 'old' }, 'restoreApp'],
     ['apps/repository/checkout', { appId: 'a1', name: 'feature' }, 'checkout'],
   ] as const) {
-    test(`${routeName} flushes and closes the App before taking its repository lock`, async () => {
+    test(`${routeName} flushes and fences the App before taking its repository lock`, async () => {
       const order: string[] = [];
       const tracker = {
         getTabId: () => 41,
@@ -272,9 +293,12 @@ describe('App repository quiescence', () => {
       deps.repositories.checkout = async () => { order.push('operation'); return { oid: 'new', branch: 'feature' }; };
       const result = await makeEngineRoutes(deps)[routeName](message);
       expect(result.ok).toBe(true);
+      const keepsVisible = repositoryMethod === 'commitApp' || repositoryMethod === 'push';
       const operationOrder = repositoryMethod === 'push'
-        ? ['lifecycle', 'flush', 'close', 'lock', 'checkpoint', 'operation', 'unlock', 'reopen', 'lifecycle-release']
-        : ['lifecycle', 'flush', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release'];
+        ? ['lifecycle', 'flush', 'lock', 'checkpoint', 'operation', 'unlock', 'resume', 'lifecycle-release']
+        : keepsVisible
+          ? ['lifecycle', 'flush', 'lock', 'operation', 'unlock', 'resume', 'lifecycle-release']
+          : ['lifecycle', 'flush', 'close', 'lock', 'operation', 'unlock', 'reopen', 'lifecycle-release'];
       expect(order).toEqual(operationOrder);
     });
   }
@@ -300,9 +324,59 @@ describe('App repository quiescence', () => {
     });
     deps.repositories.commitApp = async () => { mutated = true; return {}; };
     const result = await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' });
-    expect(result).toEqual({ ok: false, error: 'save failed' });
+    expect(result).toEqual({
+      ok: false, code: 'repository-operation-failed', outcomeKnown: true,
+      retryable: true, error: 'Peerd could not save the Git checkpoint. Try again.',
+    });
     expect(closed).toBe(false);
     expect(mutated).toBe(false);
+  });
+
+  test('lock refuses every Git route before repository IO and rechecks inside mutation custody', async () => {
+    let locked = true;
+    let calls = 0;
+    const deps = baseDeps({ vault: { isLocked: () => locked } });
+    for (const name of [
+      'statusApp', 'getAppRemote', 'branches', 'historyApp', 'diffApp', 'commitApp',
+      'restoreApp', 'branch', 'checkout', 'setRemote', 'fetch', 'push',
+    ]) deps.repositories[name] = async () => { calls += 1; return {}; };
+    const routes = makeEngineRoutes(deps);
+    for (const [type, message] of [
+      ['apps/repository/status', { appId: 'a1' }],
+      ['apps/repository/history', { appId: 'a1' }],
+      ['apps/repository/diff', { appId: 'a1' }],
+      ['apps/repository/commit', { appId: 'a1' }],
+      ['apps/repository/restore', { appId: 'a1', to: 'old' }],
+      ['apps/repository/branch', { appId: 'a1', name: 'next' }],
+      ['apps/repository/checkout', { appId: 'a1', name: 'next' }],
+      ['apps/repository/link', { appId: 'a1', url: 'https://example.com/a.git' }],
+      ['apps/repository/fetch', { appId: 'a1' }],
+      ['apps/repository/push', { appId: 'a1' }],
+    ] as const) expect(await routes[type](message)).toEqual({ ok: false, error: 'vault-locked' });
+    expect(calls).toBe(0);
+
+    locked = false;
+    deps.repositories.coordinate = async (_ref: any, operation: () => Promise<any>) => {
+      locked = true;
+      return operation();
+    };
+    const raced = await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' });
+    expect(raced).toMatchObject({ ok: false, outcomeKnown: true, retryable: true });
+    expect(calls).toBe(0);
+  });
+
+  test('post-dispatch unknown Git custody survives the live route for reconcile-only UX', async () => {
+    const unknown = Object.assign(new Error('transport lost'), {
+      code: 'repository-host-timeout', outcomeKnown: false,
+    });
+    const deps = baseDeps();
+    deps.repositories.commitApp = async () => { throw unknown; };
+    expect(await makeEngineRoutes(deps)['apps/repository/commit']({ appId: 'a1' }))
+      .toEqual({
+        ok: false, code: 'repository-host-timeout', outcomeKnown: false,
+        retryable: false,
+        error: 'Peerd could not confirm the result of trying to save the Git checkpoint. Refresh Git history to reconcile before trying again.',
+      });
   });
 });
 
@@ -459,7 +533,7 @@ describe('sw/web-fetch', () => {
       scriptRuns: {
         ownerFor: () => 'owner-1',
         allows: () => true,
-        admitOp: () => { admissions += 1; return true; },
+        admitCodeOp: () => { admissions += 1; return true; },
         signalFor: () => controller.signal,
       },
     }));
@@ -485,7 +559,7 @@ describe('sw/web-fetch', () => {
       scriptRuns: {
         ownerFor: () => 'owner-1',
         allows: (_runId: string, cap: string) => cap === 'egress',
-        admitOp: () => true,
+        admitCodeOp: () => true,
         signalFor: () => controller.signal,
       },
     }));
@@ -514,7 +588,7 @@ describe('sw/web-fetch', () => {
       isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
       scriptRuns: {
         ownerFor: () => 'owner-1', allows: () => true,
-        admitOp: () => { admissions += 1; return true; },
+        admitCodeOp: () => { admissions += 1; return true; },
         signalFor: () => controller.signal,
       },
     }));
@@ -537,7 +611,7 @@ describe('sw/web-fetch', () => {
       vmHttpFetch: async () => { fetched = true; return { ok: true }; },
       isOffscreenSender: (sender: any) => sender?.url === 'offscreen',
       scriptRuns: {
-        ownerFor: () => 'owner-1', allows: () => true, admitOp: () => true,
+        ownerFor: () => 'owner-1', allows: () => true, admitCodeOp: () => true,
         signalFor: () => new AbortController().signal,
       },
     }));
@@ -644,6 +718,26 @@ describe('app/vm meta + apps Library', () => {
       runtime: ['observe', 'act'],
     });
   });
+  test('app/get-meta observes the manifest entry without repairing the registry', async () => {
+    let writes = 0;
+    const r = makeEngineRoutes(baseDeps({
+      appRegistry: {
+        get: async () => ({ id: 'a1', name: 'App', entryFile: 'old.html' }),
+        update: async () => { writes += 1; throw new Error('read wrote'); },
+      },
+      appClient: {
+        readFile: async () => JSON.stringify({
+          schema: 1, kind: 'app', entry: 'main.html', agent: { kind: 'bound-app' },
+          capabilities: [],
+        }),
+        listFiles: async () => [{ path: 'main.html' }, { path: 'peerd.json' }],
+      },
+    }));
+    expect(await r['app/get-meta']({ appId: 'a1' })).toMatchObject({
+      ok: true, entryFile: 'main.html',
+    });
+    expect(writes).toBe(0);
+  });
   test('app/get-meta revokes a stale registry bridge when peerd.json removes dweb', async () => {
     const r = makeEngineRoutes(baseDeps({
       appRegistry: {
@@ -719,6 +813,23 @@ describe('app/vm meta + apps Library', () => {
       appClient: { createFromGit: async () => { throw new Error('git URL required'); } },
     }));
     expect(await r['apps/import-git']({ url: '' })).toEqual({ ok: false, error: 'git URL required' });
+  });
+
+  test('apps/import-git preserves an unknown repository outcome without exposing transport text', async () => {
+    const failure = Object.assign(new Error('raw repository channel text'), {
+      code: 'repository-host-timeout', outcomeKnown: false,
+    });
+    const r = makeEngineRoutes(baseDeps({
+      appClient: { createFromGit: async () => { throw failure; } },
+    }));
+    expect(await r['apps/import-git']({ url: 'https://github.com/example/app' }))
+      .toEqual({
+        ok: false,
+        code: 'repository-host-timeout',
+        outcomeKnown: false,
+        retryable: false,
+        error: 'Peerd could not confirm whether the Git import finished. Refresh and inspect the Library before trying again.',
+      });
   });
   test('App data mutations reuse exact-tab-pinned editor authority', async () => {
     const sender = { tab: { id: 44, url: 'moz-extension://peerd/engine-tabs/app-tab/index.html#app-1' } };
@@ -871,6 +982,7 @@ describe('apps/delete', () => {
           publisher: 'pub', hash: 'main', room_hash: 'room', slug: 'a',
           pending_unserve_hashes: ['older-share'],
           pending_seed_unserve_hashes: ['older-seed'],
+          pending_room_unserve_hashes: ['older-room'],
         },
       }) },
       appClient: { delete: async () => true },
@@ -878,7 +990,7 @@ describe('apps/delete', () => {
       browser: { runtime: { getContexts: async () => [{}], sendMessage: async (message: any) => { msg = message; return { ok: true }; } } },
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({ ok: true });
-    expect(msg.hashes).toEqual(['main', 'room', 'older-share', 'older-seed']);
+    expect(msg.hashes).toEqual(['main', 'room', 'older-share', 'older-seed', 'older-room']);
   });
   test('deleting an installed App does not tombstone the peer discovery card', async () => {
     let msg: any = null;
@@ -921,6 +1033,7 @@ describe('apps/delete', () => {
     }));
     expect(await r['apps/delete']({ appId: 'a1' })).toEqual({
       ok: false,
+      code: 'dweb-unshare-failed',
       error: 'Could not stop sharing, so your local App was kept. Try again when the dweb is available.',
     });
     expect(deleted).toBe(false);
@@ -940,11 +1053,33 @@ describe('export/artifact', () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['export/artifact']({ kind: 'app', id: 'a1' })).toEqual({ ok: true, filename: 'App.app.peerd', envelope: { env: 'app' } });
   });
+  test('app export returns a Firefox-cloneable JSON reply', async () => {
+    const r = makeEngineRoutes(baseDeps({
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        buildAppExport: async () => ({ reference: new URL('https://example.test/app') }),
+      },
+    }));
+    const reply = await r['export/artifact']({ kind: 'app', id: 'a1' });
+    expect(reply.envelope.reference).toBe('https://example.test/app');
+    expect(() => structuredClone(reply)).not.toThrow();
+  });
+  test('artifact export does not mutate audit state', async () => {
+    let writes = 0;
+    const r = makeEngineRoutes(baseDeps({
+      auditLog: { append: async () => { writes += 1; } },
+    }));
+    expect((await r['export/artifact']({ kind: 'app', id: 'a1' })).ok).toBe(true);
+    expect(writes).toBe(0);
+  });
   test('app export preserves every file as bytes, including an unknown suffix', async () => {
     const raw = new Uint8Array([0xff, 0x00, 0xc0]);
     let exported: any = null;
     const r = makeEngineRoutes(baseDeps({
-      buildAppExport: async ({ files }: any) => { exported = files; return { env: 'app' }; },
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        buildAppExport: async ({ files }: any) => { exported = files; return { env: 'app' }; },
+      },
       appClient: {
         snapshotFiles: async () => ({
           record: { name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text', 'model.custom': 'binary' } },
@@ -965,11 +1100,17 @@ describe('export/artifact', () => {
 
 describe('import/apply', () => {
   test('format error mapped to message', async () => {
-    const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new EnvelopeFormatError('bad envelope'); } }));
+    const r = makeEngineRoutes(baseDeps({ artifactEngine: {
+      ...baseDeps().artifactEngine,
+      openEnvelope: async () => { throw new EnvelopeFormatError('bad envelope'); },
+    } }));
     expect(await r['import/apply']({ envelope: {} })).toEqual({ ok: false, error: 'bad envelope' });
   });
   test('integrity error mapped to message', async () => {
-    const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new EnvelopeIntegrityError('hash mismatch'); } }));
+    const r = makeEngineRoutes(baseDeps({ artifactEngine: {
+      ...baseDeps().artifactEngine,
+      openEnvelope: async () => { throw new EnvelopeIntegrityError('hash mismatch'); },
+    } }));
     expect(await r['import/apply']({ envelope: {} })).toEqual({ ok: false, error: 'hash mismatch' });
   });
   test('app import mints a fresh id', async () => {
@@ -981,10 +1122,13 @@ describe('import/apply', () => {
     let received: any = null;
     const r = makeEngineRoutes(baseDeps({
       appClient: { create: async (opts: any) => { received = opts.files; return { id: 'imported' }; } },
-      openEnvelope: async () => ({
-        kind: 'app', name: 'X', entry: 'index.html', meta: { tags: [] },
-        files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
-      }),
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        openEnvelope: async () => ({
+          kind: 'app', name: 'X', entry: 'index.html', meta: { tags: [] },
+          files: { 'index.html': new TextEncoder().encode('<h1>x</h1>'), 'model.custom': raw },
+        }),
+      },
     }));
     expect((await r['import/apply']({ envelope: {} })).ok).toBe(true);
     expect(received['index.html']).toBeInstanceOf(Uint8Array);
@@ -994,10 +1138,13 @@ describe('import/apply', () => {
     let creates = 0;
     let writes = 0;
     const r = makeEngineRoutes(baseDeps({
-      openEnvelope: async () => ({
-        kind: 'notebook', name: 'Imported', entry: 'notebook.js', meta: { tags: [] },
-        files: { 'notebook.js': new TextEncoder().encode('return 1;') },
-      }),
+      artifactEngine: {
+        ...baseDeps().artifactEngine,
+        openEnvelope: async () => ({
+          kind: 'notebook', name: 'Imported', entry: 'notebook.js', meta: { tags: [] },
+          files: { 'notebook.js': new TextEncoder().encode('return 1;') },
+        }),
+      },
       jsRegistry: {
         get: async () => null,
         create: async () => { creates += 1; return { id: 'nNew' }; },
@@ -1014,7 +1161,10 @@ describe('import/apply', () => {
     expect(writes).toBe(0);
   });
   test('unexpected error rethrown (not swallowed)', async () => {
-    const r = makeEngineRoutes(baseDeps({ openEnvelope: async () => { throw new Error('weird'); } }));
+    const r = makeEngineRoutes(baseDeps({ artifactEngine: {
+      ...baseDeps().artifactEngine,
+      openEnvelope: async () => { throw new Error('weird'); },
+    } }));
     await expect(r['import/apply']({ envelope: {} })).rejects.toThrow('weird');
   });
 });
