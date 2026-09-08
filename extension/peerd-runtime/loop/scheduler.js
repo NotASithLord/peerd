@@ -203,6 +203,7 @@ export const makeScheduler = ({
     return existed;
   };
 
+  /** @param {string} id @returns {Promise<boolean>} */
   const removeReady = async (id) => {
     if (kv) await hydrate();
     return remove(id);
@@ -220,6 +221,7 @@ export const makeScheduler = ({
     return true;
   };
 
+  /** @param {string} id @param {boolean} on @returns {Promise<boolean>} */
   const setEnabledReady = async (id, on) => {
     if (kv) await hydrate();
     return setEnabled(id, on);
