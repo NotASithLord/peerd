@@ -101,12 +101,16 @@ describe('pageCallToToolCall — web capability parity', () => {
 });
 
 describe('shapePageResult — tool result -> Playwright-ish return', () => {
-  test('goto returns the landed url + origin', () => {
+  test('goto returns navigate\'s final URL after a redirect', () => {
     const r = shapePageResult('goto', {
       ok: true,
-      content: JSON.stringify({ url: 'https://example.com/', origin: 'https://example.com' }),
+      content: JSON.stringify({
+        requested: 'https://example.com/start',
+        finalUrl: 'https://example.com/landed',
+        tabId: 42,
+      }),
     });
-    expect(r).toEqual({ ok: true, url: 'https://example.com/', origin: 'https://example.com' });
+    expect(r).toEqual({ ok: true, url: 'https://example.com/landed' });
   });
 
   test('click surfaces matchedCount + navigated when present', () => {
