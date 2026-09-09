@@ -18,9 +18,15 @@ const ROWS = [
 ];
 
 /**
- * @param {{ testOk?: boolean, ollamaOk?: boolean, settingsOk?: boolean }} [opts]
+ * `local` models the on-device runner's REAL readiness, which is residency and
+ * not the liveModels flag: 'installed' = weights here, 'empty' = supported host
+ * with nothing downloaded, 'unsupported' = no host to run the engine at all.
+ * @param {{ testOk?: boolean, ollamaOk?: boolean, settingsOk?: boolean,
+ *   local?: 'installed'|'empty'|'unsupported' }} [opts]
  */
-const makeHarness = ({ testOk = true, ollamaOk = false, settingsOk = true } = {}) => {
+const makeHarness = ({
+  testOk = true, ollamaOk = false, settingsOk = true, local = 'empty',
+} = {}) => {
   /** @type {Msg[]} */
   const sends = [];
   let doneCount = 0;
@@ -34,6 +40,10 @@ const makeHarness = ({ testOk = true, ollamaOk = false, settingsOk = true } = {}
     }
     if (msg.type === 'settings/update') {
       return settingsOk ? { ok: true } : { ok: false, error: 'settings-unavailable' };
+    }
+    if (msg.type === 'local-model/catalog') {
+      if (local === 'unsupported') return { ok: false, error: 'runtime_capability_unavailable' };
+      return { ok: true, models: [{ id: 'muse-glimmer-30b', available: local === 'installed' }] };
     }
     return { ok: true };
   };
@@ -64,18 +74,47 @@ const typeKey = (root, value) => {
 };
 
 describe('sidepanel.onboarding provider step (§5h)', () => {
-  it('renders the six-row shape: chips, an unusable on-device row, key input for the keyed lead', async () => {
+  it('renders the row shape, an undownloaded on-device row, key input for the keyed lead', async () => {
     const h = makeHarness();
     try {
-      await tick();
+      await tick(); await tick();
       m.redraw.sync();
       const rowEls = h.root.querySelectorAll('.onb-provider-row');
       expect(rowEls.length).toBe(3);
-      expect(need(h.root, '.onb-provider-row.is-unusable').textContent).toContain('NOT YET USABLE');
+      expect(need(h.root, '.onb-provider-row.is-unusable').textContent).toContain('NOT DOWNLOADED');
       // Anthropic leads selected → the key input renders with its prefix hint.
       const input = /** @type {HTMLInputElement} */ (need(h.root, '#onb-key'));
       expect(input.getAttribute('placeholder')).toBe('sk-ant-...');
       expect(input.type).toBe('password');
+    } finally { h.unmount(); }
+  });
+
+  it('the on-device runner is selectable once its weights are resident', async () => {
+    // The regression this replaces: usability came from liveModels, which the
+    // runner has no way to satisfy, so a shipped engine read NOT YET USABLE
+    // even with a model downloaded.
+    const ready = makeHarness({ local: 'installed' });
+    try {
+      await tick(); await tick();
+      m.redraw.sync();
+      const row = [...ready.root.querySelectorAll('.onb-provider-row')]
+        .find((r) => r.textContent?.includes('On-device runner'));
+      if (!(row instanceof HTMLButtonElement)) throw new Error('missing runner row');
+      expect(row.textContent).toContain('ON DEVICE');
+      expect(row.classList.contains('is-unusable')).toBe(false);
+      expect(row.disabled).toBe(false);
+    } finally { ready.unmount(); }
+  });
+
+  it('a host that cannot run the engine says so, not "not downloaded"', async () => {
+    // Different facts: nothing downloaded yet vs. nowhere to run it.
+    const h = makeHarness({ local: 'unsupported' });
+    try {
+      await tick(); await tick();
+      m.redraw.sync();
+      const row = need(h.root, '.onb-provider-row.is-unusable');
+      expect(row.textContent).toContain('NOT AVAILABLE HERE');
+      expect((row.textContent ?? '').includes('NOT DOWNLOADED')).toBe(false);
     } finally { h.unmount(); }
   });
 
@@ -104,8 +143,14 @@ describe('sidepanel.onboarding provider step (§5h)', () => {
       need(h.root, '.onboarding-actions button').click();
       await tick(); await tick(); await tick(); await tick();
       m.redraw.sync();
-      const order = h.sends.filter((s) => s.type !== 'provider/status').map((s) => s.type);
-      expect(order).toEqual(['provider/test', 'provider/setKey', 'provider/test', 'settings/update']);
+      // Mount-time probes (status, the daemon survey, the residency read) are
+      // not part of the save sequence under test.
+      const MOUNT_PROBES = ['provider/status', 'local-model/catalog'];
+      const order = h.sends
+        .filter((s) => !MOUNT_PROBES.includes(s.type))
+        .filter((s) => !(s.type === 'provider/test' && s.activate === false))
+        .map((s) => s.type);
+      expect(order).toEqual(['provider/setKey', 'provider/test', 'settings/update']);
       expect(h.sends.find((s) => s.type === 'provider/setKey')?.activate).toBe(false);
       expect(h.sends.find((s) => s.type === 'settings/update')?.patch?.providerName).toBe('anthropic');
       // The plaintext left component state with the save.

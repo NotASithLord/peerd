@@ -50,9 +50,24 @@ const DISPLAY_LABEL = Object.freeze({
  * @property {boolean} busy
  * @property {{ ok: boolean, text: string }|null} msg
  * @property {Record<string, 'checking'|'connected'|'down'>} conn
+ * @property {'checking'|'installed'|'empty'|'unsupported'} local
  */
 
 /** @typedef {{ state: ProviderStepState, attrs: { send: Send, onDone: () => void, busy?: boolean } }} ProviderStepVnode */
+
+/**
+ * Collapse a local-model/catalog reply into the three states this row can
+ * honestly show. Exported for test: the route answers with a capability
+ * refusal on hosts without an offscreen document (Firefox today), which is a
+ * different fact from "supported here, nothing downloaded yet".
+ * @param {{ ok?: boolean, models?: Array<{ available?: boolean, downloaded?: boolean }> }|null|undefined} reply
+ * @returns {'installed'|'empty'|'unsupported'}
+ */
+export const localPhase = (reply) => {
+  if (!reply?.ok) return 'unsupported';
+  const models = Array.isArray(reply.models) ? reply.models : [];
+  return models.some((entry) => entry?.available || entry?.downloaded) ? 'installed' : 'empty';
+};
 
 export const ProviderStep = {
   /** @param {ProviderStepVnode} vnode */
@@ -63,6 +78,7 @@ export const ProviderStep = {
     vnode.state.busy = false;
     vnode.state.msg = null;
     vnode.state.conn = {};
+    vnode.state.local = 'checking';
     vnode.attrs.send({ type: 'provider/status' }).then((r) => {
       // A resolved-but-not-ok reply must not strand the step on 'Loading…'
       // forever - the dispatcher turns route throws into { ok:false }, and
@@ -74,11 +90,22 @@ export const ProviderStep = {
       for (const p of vnode.state.rows ?? []) {
         if (p.keyless && p.liveModels) {
           vnode.state.conn[p.name] = 'checking';
-          vnode.attrs.send({ type: 'provider/test', provider: p.name })
+          vnode.attrs.send({ type: 'provider/test', provider: p.name, activate: false })
             .then((t) => { vnode.state.conn[p.name] = t?.ok ? 'connected' : 'down'; m.redraw(); })
             .catch(() => { vnode.state.conn[p.name] = 'down'; m.redraw(); });
         }
       }
+      // The on-device runner has no daemon to ping - its readiness is "are the
+      // weights already here", the same question the Settings card asks. why
+      // not liveModels: that flag means "this adapter can enumerate a remote
+      // inventory", which is an Ollama concept the runner will never satisfy,
+      // so keying usability off it marked a shipped engine permanently
+      // unusable on the first screen a new user sees.
+      if ((vnode.state.rows ?? []).some((p) => p.name === 'local-webgpu')) {
+        vnode.attrs.send({ type: 'local-model/catalog' })
+          .then((c) => { vnode.state.local = localPhase(c); m.redraw(); })
+          .catch(() => { vnode.state.local = 'unsupported'; m.redraw(); });
+      } else vnode.state.local = 'unsupported';
       m.redraw();
     }).catch(() => { vnode.state.rows = []; m.redraw(); });
   },
@@ -89,7 +116,9 @@ export const ProviderStep = {
     const ui = vnode.state;
     const rows = ui.rows;
     /** @param {ProviderRow} p */
-    const usable = (p) => !(p.keyless && !p.liveModels);
+    const usable = (p) => (p.name === 'local-webgpu'
+      ? ui.local === 'installed'
+      : !(p.keyless && !p.liveModels));
     const selectedRow = rows?.find((p) => p.name === ui.selected) ?? null;
     const needsKey = !!selectedRow && !selectedRow.keyless;
 
@@ -158,6 +187,13 @@ export const ProviderStep = {
 
     /** @param {ProviderRow} p */
     const chip = (p) => {
+      if (p.name === 'local-webgpu') {
+        if (ui.local === 'checking') return m('span.onb-provider-chip', 'CHECKING…');
+        if (ui.local === 'unsupported') return m('span.onb-provider-chip', 'NOT AVAILABLE HERE');
+        return ui.local === 'installed'
+          ? m('span.onb-provider-chip.is-reached', [m('span.onb-provider-dot', { 'aria-hidden': 'true' }), 'ON DEVICE'])
+          : m('span.onb-provider-chip', 'NOT DOWNLOADED');
+      }
       if (p.keyless && !p.liveModels) return m('span.onb-provider-chip', 'NOT YET USABLE');
       if (p.keyless) {
         return ui.conn[p.name] === 'connected'

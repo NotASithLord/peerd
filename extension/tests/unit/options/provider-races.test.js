@@ -88,7 +88,7 @@ describe('provider settings request ordering', () => {
       capabilities: { localWebGpuHost: { status: 'unsupported' } },
     };
     const probe = deferred();
-    const send = async (/** @type {{ type: string }} */ msg) => {
+    const send = async (/** @type {{ type: string, activate?: boolean }} */ msg) => {
       if (msg.type === 'provider/status') return {
         ok: true,
         providers: [{
@@ -96,7 +96,7 @@ describe('provider settings request ordering', () => {
           hasKey: true, keyless: true, liveModels: true,
         }],
       };
-      if (msg.type === 'provider/test') return probe.promise;
+      if (msg.type === 'provider/test') { expect(msg.activate).toBe(false); return probe.promise; }
       if (msg.type === 'models/options') return { ok: true, options: [] };
       return { ok: false };
     };

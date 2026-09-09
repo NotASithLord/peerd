@@ -19,7 +19,13 @@ describe('settings hydration before UI state snapshots', () => {
     const snapshot = serviceWorker.slice(start, end);
     const hydration = snapshot.indexOf('await ensureSettingsReady();');
     const sessionRead = snapshot.indexOf("sessionCache.sessionGet('currentSessionId')");
-    const providerRead = snapshot.indexOf('const activeProv = resolveActiveProvider();');
+    // The snapshot must resolve the active provider through the READINESS-aware
+    // resolver. The bare resolveActiveProvider falls back to Anthropic whenever
+    // providerName is empty - the shipped default - which is the other half of
+    // issue #384: hydration alone cannot save a projection that never asks
+    // whether the provider it picked can serve a turn.
+    const providerRead = snapshot.indexOf('const activeProv = await resolveActiveProviderForDisplay();');
+    expect(snapshot).not.toContain('const activeProv = resolveActiveProvider();');
 
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
