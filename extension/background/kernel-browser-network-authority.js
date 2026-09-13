@@ -1155,9 +1155,9 @@ export const createKernelBrowserNetworkAuthority = ({
       }
       await netGuard.sync();
     }
+    // Removal can retire the quarantine while reconcile waits for it.
+    if (quarantineActive && quarantineRemoving) await quarantineRemoving;
     if (quarantineActive) {
-      if (quarantineRemoving) await quarantineRemoving;
-      if (!quarantineActive) return status();
       let changed = false;
       for (const tabId of [...quarantineExcluded]) {
         if (live.has(tabId)) continue;

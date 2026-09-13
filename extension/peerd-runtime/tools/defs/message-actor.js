@@ -43,6 +43,7 @@ export const messageActorTool = composeTool("message_actor", {
       // Flag off / not wired — fail closed (the gate also refuses by name).
       return { ok: false, error: 'message_actor is not enabled' };
     }
+    const { 'await': awaitRequested } = args ?? {};
     const res = await c.messageActor({
       to: args?.to,
       message: args?.message,
@@ -65,7 +66,7 @@ export const messageActorTool = composeTool("message_actor", {
       // substance THIS turn instead of a deferral — its awaited reply races the
       // turn's abort signal (below) so Stop / the turn timeout unwinds it.
       // Either way the reply resolves INTO this tool result, still wrapUntrusted-fenced.
-      awaitReply: c.session?.kind === 'spawned' || args?.await === true,
+      awaitReply: c.session?.kind === 'spawned' || awaitRequested === true,
       // The caller's abort signal: spawn.js threads the child's; the turn-driver
       // threads the orchestrator's turn signal. Lets an awaited reply race the
       // caller's wall-clock timeout / Stop / cancel, so a hung actor turn can't
@@ -77,7 +78,7 @@ export const messageActorTool = composeTool("message_actor", {
       // Stop. Gated to a long-lived sender: an ephemeral child (kind:'spawned')
       // has no later turn to degrade to, so it keeps the abort-only semantics and
       // relies on its own wall-clock awaitSignal.
-      degradeToAsync: args?.await === true && c.session?.kind !== 'spawned',
+      degradeToAsync: awaitRequested === true && c.session?.kind !== 'spawned',
       awaitCapMs: ORCHESTRATOR_AWAIT_CAP_MS,
     });
     // Keep the internal delivery id until the caller's tool-result message is

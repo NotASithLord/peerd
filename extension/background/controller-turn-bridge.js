@@ -493,6 +493,11 @@ export const makeControllerTurnBridge = ({
   const rehydrateMessage = async (/** @type {any} */ run, /** @type {unknown} */ message) => {
     if (!isRecord(message)) return message;
     const toolResults = Array.isArray(message.toolResults) ? message.toolResults : [];
+    // why: assistant records remain patchable while streaming. Host receipts
+    // belong only to the separate tool-result message, never that mutable row.
+    if (toolResults.length > 0 && message.role !== 'user') {
+      throw new Error('session tool results require a user message');
+    }
     const rawCallIds = toolResults.map((result) => isRecord(result)
       && typeof result.tool_use_id === 'string' ? result.tool_use_id : null);
     const callIds = [...new Set(rawCallIds.filter((callId) => callId !== null))];
@@ -1613,6 +1618,12 @@ export const makeControllerTurnBridge = ({
             const session = await run.ctx.sessions.appendMessage(
               run.sessionId, message,
             );
+            // why: the store may acknowledge an existing ID without writing.
+            // Only the exact durable message proves its stamped receipts exist.
+            if (!session?.messages?.some((/** @type {any} */ stored) =>
+              stored?.id === message?.id && jsonWire(stored) === jsonWire(message))) {
+              throw new Error('session message was not persisted');
+            }
             for (const result of message?.toolResults ?? []) {
               run.persistedSemanticCalls.add(result.tool_use_id);
               const issued = run.modelToolCalls.get(result.tool_use_id);
@@ -1638,8 +1649,13 @@ export const makeControllerTurnBridge = ({
           let patch;
           try { patch = jsonUnwire(value.patchJson, 'session patch'); }
           catch (cause) { return failed(cause, true); }
+          // why: a streaming patch cannot alias another row or turn the mutable
+          // assistant into a receipt-bearing message that can later be erased.
+          if (!isRecord(patch) || ['id', 'role', 'toolResults'].some((key) => Object.hasOwn(patch, key))) {
+            return failed('session assistant patch is invalid', true);
+          }
           const resumeFinalize = value.messageId === run.resumeAssistantId
-            && isRecord(patch) && Object.keys(patch).length === 1
+            && Object.keys(patch).length === 1
             && patch.streaming === false;
           if (value.messageId !== run.currentAssistantId && !resumeFinalize) {
             return failed('session authority mismatch', true);
@@ -2844,9 +2860,13 @@ export const makeControllerTurnBridge = ({
           });
           await boundedCleanup(drain);
           const receipts = [...run.effectReceipts.values()];
+          // why: a completed tool round already persisted its exact outcome.
+          // Stopping a later model response must not make that known work
+          // uncertain; only unpersisted performed work still needs recovery.
           const hostOutcomeUnknown = !kernelCallsDrained || !custodyDrained
             || run.activeDispatches.size > 0 || run.nestedUnknown
             || receipts.some((receipt) => (receipt.performed === true
+              && !run.persistedSemanticCalls.has(receipt.callId)
               && !receiptHasTerminalActorCancellation(run, receipt))
               || receipt.outcomeKnown === false);
           // The semantic loop loses its local dispatch race when Stop fires, but

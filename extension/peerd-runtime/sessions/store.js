@@ -293,7 +293,9 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
           id = `${base}:${suffix}`;
         }
         const message = /** @type {any} */ ({ ...pickPortable(source, PORTABLE_MESSAGE_FIELDS), id });
-        await idb.put(MSGS, { id, sessionId, seq: msgIndex.length, message });
+        await turnRecords.writeMessage(sessionId, id, () => ({
+          id, sessionId, seq: msgIndex.length, message,
+        }));
         msgIndex.push(id);
         if (Number.isFinite(message.when)) lastMessageAt = message.when;
         if (turnRecords.isRealUserMessage(message)) latestNonSyntheticUserMessageId = id;

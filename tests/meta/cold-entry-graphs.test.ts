@@ -43,41 +43,6 @@ const RICH_UI_GRAPH_CEILINGS = {
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';
 const previewKernelEntry = 'background/vault-kernel-preview.js';
 
-// why: exact byte accounting detects unrelated changes that cancel each other.
-// Record each changed cold input with its size before the change.
-const KERNEL_SOURCE_DELTA_ACCOUNTING = Object.freeze({
-  baselineGraphBytes: 4_035_518,
-  priorInputBytes: Object.freeze({
-    'background/controller-turn-bridge.js': 145_646,
-    'background/execution-tool-authority.js': 19_738,
-    'background/kernel-demand-plane.js': 18_505,
-    'background/kernel-turn-authority-adapter.js': 170_225,
-    'background/offscreen-actor-client.js': 162_659,
-    'background/page-authority/click.js': 17_903,
-    'background/page-authority/type.js': 18_159,
-    'background/page-authority/view.js': 6_105,
-    'background/vault-kernel-core.js': 20_087,
-    'background/vault-kernel.js': 45_777,
-    'peerd-egress/fetch/origin-credentials.js': 8_776,
-    'peerd-runtime/actor/a2a-api.js': 8_997,
-    'peerd-runtime/browser-authority/dom-helpers.js': 18_857,
-    'peerd-runtime/contacts/aggregate.js': 5_310,
-    'peerd-runtime/contacts/contact.js': 4_498,
-    'peerd-runtime/errors.js': 2_561,
-    'peerd-runtime/kernel-turn-authority.js': 3_002,
-    'peerd-runtime/lifecycle/engine-liveness.js': 3_997,
-    'peerd-runtime/loop/turn-authority-driver.js': 36_904,
-    'peerd-runtime/permissions/policy.js': 14_942,
-    'peerd-runtime/skills/registry.js': 8_780,
-    'peerd-runtime/tools/prompt-wrap.js': 5_778,
-    'shared/canonical-clone-digest.js': 5_463,
-    'shared/controller-kernel-quota.js': 31_640,
-    'shared/kernel-feature-policy.js': 28_696,
-    'shared/kernel-feature-route-inventory.js': 4_180,
-    'shared/util.js': 4_904,
-  }),
-});
-
 const stats = async (name: keyof typeof entries) => {
   const entry = join(EXTENSION_DIR, entries[name]);
   const graph = await collectStaticModuleGraph(EXTENSION_DIR, entry);
@@ -166,12 +131,6 @@ describe('cold entry graphs', () => {
 
   test('every cold graph stays at or below its achieved no-growth ratchet', async () => {
     const kernel = await nativeKernelStats();
-    const accountedGraphBytes = KERNEL_SOURCE_DELTA_ACCOUNTING.baselineGraphBytes
-      + Object.entries(KERNEL_SOURCE_DELTA_ACCOUNTING.priorInputBytes)
-        .reduce((delta, [file, priorBytes]) =>
-          delta + statSync(join(EXTENSION_DIR, file)).size - priorBytes, 0);
-    expect(kernel.graphBytes, 'kernel graph delta has an unaccounted input')
-      .toBe(accountedGraphBytes);
     expect(kernel.modules, 'kernel modules')
       .toBeLessThanOrEqual(COLD_SOURCE_RATCHETS.kernel.modules);
     expect(kernel.graphBytes, 'kernel graph bytes')

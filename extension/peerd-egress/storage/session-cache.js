@@ -164,7 +164,8 @@ export const makeAgentSendCustody = (/** @type {any} */ cache, now = Date.now) =
       return { ...result, operationId: id };
     })();
     active.set(id, { ...binding, task });
-    try { return await task; } finally { if (active.get(id)?.task === task) active.delete(id); }
+    // Concurrent calls reuse this entry until its sole owner settles.
+    try { return await task; } finally { active.delete(id); }
   };
   return Object.freeze({ validOperationId, operationWindowValid, sendFingerprint,
     unknownSend, sendReceiptStatus, withSendReceipt });

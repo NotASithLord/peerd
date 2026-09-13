@@ -137,4 +137,96 @@ describe('fixed provider egress authority', () => {
     });
     expect(JSON.stringify(result)).not.toContain('anthropic_api_key');
   });
+
+  test.each([
+    ['openrouter', { models: ['other-model'] }],
+    ['openrouter', { preset: 'other-model-preset' }],
+    ['openrouter', { fallbacks: [{ model: 'other-model' }] }],
+    ['openrouter', { tools: [{ type: 'openrouter:fusion' }] }],
+    ['openrouter', { tools: [{
+      type: 'openrouter:fusion',
+      parameters: { analysis_models: ['other-model'], model: 'another-model' },
+    }] }],
+    ['openrouter', { tools: [{ type: 'openrouter:advisor' }] }],
+    ['openrouter', { tools: [{ type: 'openrouter:advisor', parameters: { model: 'other-model' } }] }],
+    ['openrouter', { tools: [{ type: 'openrouter:subagent' }] }],
+    ['openrouter', { tools: [{ type: 'openrouter:subagent', parameters: { model: 'other-model' } }] }],
+    ['openrouter', { tools: [{ type: 'openrouter:image_generation' }] }],
+    ['openrouter', { tools: [{ type: 'openrouter:image_generation', parameters: { model: 'other-model' } }] }],
+    ['openrouter', { tools: [{ type: 'future-server-tool' }] }],
+    ['anthropic', { fallbacks: 'default' }],
+    ['anthropic', { fallbacks: [{ model: 'other-model', max_tokens: 4096 }] }],
+    ['anthropic', { tools: [{ type: 'advisor_20260301', name: 'advisor', model: 'other-model' }] }],
+    ['anthropic', { tools: [{ type: 'future-server-tool' }] }],
+    ['openai', { tools: [{ type: 'future-server-tool' }] }],
+    ['glm', { tools: [{ type: 'future-server-tool' }] }],
+    ['ollama', { tools: [{ type: 'future-server-tool' }] }],
+    ['openrouter', { tools: {} }],
+    ['anthropic', { tools: [null] }],
+  ] as const)('refuses %s alternate model routing before credential lookup: %j', async (providerId, routing) => {
+    let secretReads = 0;
+    let fetches = 0;
+    const authority = createProviderEgressAuthority({
+      safeFetch: async () => { fetches += 1; return new Response(); },
+      vault: { getSecret: async () => { secretReads += 1; return 'vault-key'; } },
+      settingsStore: { get: () => ({}) },
+    });
+    expect(await authority.openInference({
+      providerId, modelId: 'granted-model',
+      nativeBody: {
+        model: 'granted-model', stream: true, max_tokens: 128,
+        messages: [{ role: 'user', content: 'hello' }], ...routing,
+      },
+    }, {
+      owner: {}, maxOutputTokens: 256,
+      permits: (provider, model) => provider === providerId && model === 'granted-model',
+    })).toMatchObject({ ok: false, code: 'model-egress-request-invalid', outcomeKnown: true });
+    expect(secretReads).toBe(0);
+    expect(fetches).toBe(0);
+  });
+
+  test.each(['anthropic', 'openrouter', 'openai', 'glm', 'ollama'])(
+    'preserves %s native nonrouting options and the exact granted alias', async (providerId) => {
+      const sent: unknown[] = [];
+      const authority = createProviderEgressAuthority({
+        safeFetch: async (_url, init) => {
+          sent.push(JSON.parse(String(init?.body)));
+          return new Response();
+        },
+        vault: { getSecret: async () => 'vault-key' },
+        settingsStore: { get: () => ({}) },
+      });
+      const tools = providerId === 'anthropic' ? [{
+        name: 'inspect', description: 'Inspect a value',
+        input_schema: { type: 'object', properties: { model: { type: 'string' } } },
+      }, {
+        type: 'custom', name: 'custom_inspect', description: 'Inspect another value',
+        input_schema: { type: 'object', properties: {} },
+        cache_control: { type: 'ephemeral' },
+      }] : [{
+        type: 'function', function: {
+          name: 'inspect', description: 'Inspect a value',
+          parameters: { type: 'object', properties: { model: { type: 'string' } } },
+        },
+      }];
+      const nativeBody = {
+        model: 'granted-latest', stream: true, max_tokens: 128,
+        messages: [{ role: 'user', content: 'hello' }], temperature: 0.5, tools,
+        ...(providerId === 'anthropic' ? {
+          system: [{ type: 'text', text: 'Be helpful.', cache_control: { type: 'ephemeral' } }],
+        } : {}),
+        ...(providerId === 'openrouter' ? {
+          provider: { allow_fallbacks: true }, plugins: [{ id: 'response-healing' }],
+          reasoning: { effort: 'low' }, stream_options: { include_usage: true },
+        } : {}),
+      };
+      const owner = {};
+      expect(await authority.openInference({ providerId, modelId: 'granted-latest', nativeBody }, {
+        owner, maxOutputTokens: 256,
+        permits: (provider, model) => provider === providerId && model === 'granted-latest',
+      })).toMatchObject({ ok: true, outcomeKnown: true });
+      expect(sent).toEqual([nativeBody]);
+      await authority.closeOwner(owner);
+    },
+  );
 });

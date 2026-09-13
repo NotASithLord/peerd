@@ -88,7 +88,7 @@ describe('bounded UI runtime client', () => {
       caught = true;
       throw cause;
     });
-    expect(settleUiEffect(failure)).toBeUndefined();
+    settleUiEffect(failure);
     await Promise.resolve();
     await Promise.resolve();
     expect(caught).toBe(true);

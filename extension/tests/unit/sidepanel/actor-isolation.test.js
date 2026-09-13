@@ -408,7 +408,7 @@ describe('sidepanel actor isolation UX', () => {
       role: 'assistant', id: 'a-awaited-live', content: '',
       toolUses: [{
         id: 't-awaited-live', name: 'message_actor',
-        input: { to: 'web', message: 'submit it', await: true },
+        input: { to: 'web', message: 'submit it', 'await': true },
       }],
     }];
     m.mount(root, { view: () => m(MessageList, { sessionId: 'chat-live', messages }) });

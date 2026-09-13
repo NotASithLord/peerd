@@ -225,7 +225,8 @@ export const assertLifecycleFaultExecutionSeam = ({ tracking, controller, bridge
     [bridge, "case 'turn.session.append':"],
     [bridge, 'run.persistedSemanticCalls.add(result.tool_use_id);'],
     [bridge, "case 'turn.finalize':"],
-    [bridge, '!run.persistedSemanticCalls.has(receipt.callId)'],
+    [bridge, `typeof receipt.callId === 'string'
+              && !run.persistedSemanticCalls.has(receipt.callId)`],
     [authority, "requireOperation('turn.execution.run-script');"],
     [authority, 'const result = await client.execHeadless(code, opts);'],
   ];

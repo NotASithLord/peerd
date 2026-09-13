@@ -119,6 +119,48 @@ describe('session store v2 — per-message records', () => {
     });
   });
 
+  test('portable import cannot overwrite a concurrent message and safely retries partial rows', async () => {
+    const idb = makeIdb();
+    const read = idb.get;
+    let entered!: () => void;
+    let release!: () => void;
+    const candidateRead = new Promise<void>((resolve) => { entered = resolve; });
+    const resumeImport = new Promise<void>((resolve) => { release = resolve; });
+    let blockCandidate = true;
+    idb.get = async (table, key) => {
+      const result = await read(table, key);
+      if (blockCandidate && table === 'session_messages' && key === 'selfsync:remote:1') {
+        blockCandidate = false;
+        entered();
+        await resumeImport;
+      }
+      return result;
+    };
+    const store = makeStore(idb);
+    const local = await store.create();
+    const portable = {
+      sessionId: 'remote', createdAt: 1,
+      messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'second' }],
+    };
+    const importing = store.importPortable(portable);
+    await candidateRead;
+    const original = {
+      id: 'selfsync:remote:1', role: 'assistant' as const, content: 'local receipt', when: 1,
+    };
+    await store.appendMessage(local.sessionId, original);
+    release();
+    await expect(importing).rejects.toThrow('session-message-authority-mismatch');
+    expect(await store.get('remote')).toBeUndefined();
+    expect((await store.get(local.sessionId))!.messages).toEqual([original]);
+    expect(idb._tbl('session_messages').get('selfsync:remote:0').sessionId).toBe('remote');
+    const restored = await store.importPortable(portable);
+    expect(restored.messages.map((message: any) => message.id)).toEqual([
+      'selfsync:remote:0', 'selfsync:remote:1:1',
+    ]);
+    expect(restored.messages.map((message: any) => message.content)).toEqual(['first', 'second']);
+    expect((await store.get(local.sessionId))!.messages).toEqual([original]);
+  });
+
   test('listMetadata never reads or returns message bodies', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);

@@ -1349,4 +1349,4 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
   return true; // async sendResponse
 };
 
-log('host loaded', DWEB_ENABLED ? '(dweb enabled)' : '(dweb disabled and inert)');
+log('host loaded');

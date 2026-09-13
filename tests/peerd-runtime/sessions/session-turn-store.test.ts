@@ -215,5 +215,71 @@ describe('shared turn-session store parity', () => {
       try { await exerciseTurnStore(backend); }
       finally { backend.close(); }
     });
+
+    test(`${name}: a foreign message ID cannot overwrite or patch another session`, async () => {
+      const backend = await makeBackend();
+      const { idb } = backend;
+      const turns = createSessionTurnStore({ idb, notFound: (id) => new Error(id) });
+      try {
+        for (const sessionId of ['owner', 'other']) {
+          await idb.put('sessions', { sessionId, createdAt: 1, messagesV2: true, msgIndex: [] });
+        }
+        const original = { id: 'owned-message', role: 'assistant' as const, content: 'keep', when: 1 };
+        await turns.appendMessage('owner', original);
+        const before = await idb.get('sessions', 'other');
+        await expect(turns.appendMessage('other', { ...original, content: 'replace' }))
+          .rejects.toThrow('session-message-authority-mismatch');
+        await expect(turns.updateAssistantMessage('other', original.id, { content: 'patch' }))
+          .rejects.toThrow('session-message-authority-mismatch');
+        expect(await idb.get('sessions', 'other')).toEqual(before);
+        expect((await turns.get('other'))!.messages).toEqual([]);
+        expect((await turns.get('owner'))!.messages).toEqual([original]);
+        expect((await turns.appendMessage('owner', original)).messages).toEqual([original]);
+        await turns.updateAssistantMessage('owner', original.id, { content: 'complete' });
+        expect((await turns.get('owner'))!.messages).toEqual([{ ...original, content: 'complete' }]);
+      } finally { backend.close(); }
+    });
+
+    test(`${name}: concurrent sessions cannot claim the same new message ID`, async () => {
+      const backend = await makeBackend();
+      const { idb } = backend;
+      const turns = createSessionTurnStore({ idb, notFound: (id) => new Error(id) });
+      try {
+        for (const sessionId of ['first', 'second']) {
+          await idb.put('sessions', { sessionId, createdAt: 1, messagesV2: true, msgIndex: [] });
+        }
+        const outcomes = await Promise.allSettled(['first', 'second'].map((sessionId) =>
+          turns.appendMessage(sessionId, {
+            id: 'shared-message', role: 'assistant', content: sessionId, when: 1,
+          })));
+        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+        expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toMatchObject([
+          { reason: { message: 'session-message-authority-mismatch' } },
+        ]);
+        const row = await idb.get('session_messages', 'shared-message');
+        const loser = row.sessionId === 'first' ? 'second' : 'first';
+        expect((await turns.get(row.sessionId))!.messages).toEqual([row.message]);
+        expect((await turns.get(loser))!.messages).toEqual([]);
+      } finally { backend.close(); }
+    });
+
+    test(`${name}: legacy migration cannot overwrite a foreign message`, async () => {
+      const backend = await makeBackend();
+      const { idb } = backend;
+      const turns = createSessionTurnStore({ idb, notFound: (id) => new Error(id) });
+      try {
+        await idb.put('sessions', { sessionId: 'owner', createdAt: 1, messagesV2: true, msgIndex: [] });
+        const original = { id: 'legacy-collision', role: 'user' as const, content: 'durable receipt', when: 1 };
+        await turns.appendMessage('owner', original);
+        const legacy = {
+          sessionId: 'legacy', createdAt: 1,
+          messages: [{ ...original, content: 'must not overwrite' }],
+        };
+        await idb.put('sessions', legacy);
+        await expect(turns.get('legacy')).rejects.toThrow('session-message-authority-mismatch');
+        expect(await idb.get('sessions', 'legacy')).toEqual(legacy);
+        expect((await turns.get('owner'))!.messages).toEqual([original]);
+      } finally { backend.close(); }
+    });
   }
 });

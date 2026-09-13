@@ -35,6 +35,8 @@ export const createSessionTurnStore = ({
 }) => {
   /** @type {Map<string, Promise<unknown>>} */
   const sessionChains = new Map();
+  /** @type {Map<string, Promise<unknown>>} */
+  const messageChains = new Map();
   const mutateRecord = async (/** @type {string} */ sessionId,
     /** @type {(record:any)=>any} */ transform) => {
     if (typeof idb.mutate === 'function') return idb.mutate(SESSIONS, sessionId, transform);
@@ -46,22 +48,35 @@ export const createSessionTurnStore = ({
   };
 
   /**
-   * Serialize every read-modify-write of one session record, including lazy
-   * migration. Message-body patches need no session-record lock.
+   * Serialize every read-modify-write of one record, including lazy migration.
+   * Message-body patches use their own queue, never the session-record lock.
    * @template T
    * @param {string} sessionId
    * @param {() => Promise<T>} operation
+   * @param {Map<string, Promise<unknown>>} [chains]
    * @returns {Promise<T>}
    */
-  const serialize = (sessionId, operation) => {
-    const previous = sessionChains.get(sessionId) ?? Promise.resolve();
+  const serialize = (sessionId, operation, chains = sessionChains) => {
+    const previous = chains.get(sessionId) ?? Promise.resolve();
     const current = previous.catch(() => {}).then(operation);
-    sessionChains.set(sessionId, current);
+    chains.set(sessionId, current);
     void current.finally(() => {
-      if (sessionChains.get(sessionId) === current) sessionChains.delete(sessionId);
+      if (chains.get(sessionId) === current) chains.delete(sessionId);
     }).catch(() => {});
     return current;
   };
+
+  /** @param {string} sessionId @param {string} id @param {(current:any)=>any} transform */
+  const writeMessage = (sessionId, id, transform) => serialize(id, async () => {
+    // why: message keys are global, but controller-supplied IDs are not proof
+    // of ownership. Serialize the check and write across distinct sessions too.
+    const current = await idb.get(MESSAGES, id);
+    if (current && current.sessionId !== sessionId) {
+      throw new TypeError('session-message-authority-mismatch');
+    }
+    const updated = transform(current);
+    if (updated) await idb.put(MESSAGES, updated);
+  }, messageChains);
 
   /** @param {string[]} ids @returns {Promise<InternalMessage[]>} */
   const readMessages = async (ids) => {
@@ -120,7 +135,9 @@ export const createSessionTurnStore = ({
     for (let seq = 0; seq < inline.length; seq++) {
       const message = inline[seq];
       const id = messageKey(record.sessionId, message, seq);
-      await idb.put(MESSAGES, { id, sessionId: record.sessionId, seq, message });
+      await writeMessage(record.sessionId, id, () => ({
+        id, sessionId: record.sessionId, seq, message,
+      }));
       msgIndex.push(id);
     }
     const migrated = await mutateRecord(record.sessionId, (current) => {
@@ -178,11 +195,12 @@ export const createSessionTurnStore = ({
     if (!record) throw notFound(sessionId);
     const seq = record.msgIndex.length;
     const id = messageKey(sessionId, message, seq);
+    await writeMessage(sessionId, id, () => record.msgIndex.includes(id)
+      ? null : { id, sessionId, seq, message });
     if (record.msgIndex.includes(id)) {
       try { await onMessageAppended(sessionId, message); } catch {}
       return /** @type {Promise<Session>} */ (assemble(record));
     }
-    await idb.put(MESSAGES, { id, sessionId, seq, message });
     const updated = await mutateRecord(sessionId, (current) => {
       if (current.msgIndex.includes(id)) return current;
       const next = {
@@ -205,15 +223,13 @@ export const createSessionTurnStore = ({
   });
 
   /**
-   * @param {string} _sessionId
+   * @param {string} sessionId
    * @param {string} messageId
    * @param {Partial<InternalMessage>} patch
    */
-  const updateAssistantMessage = async (_sessionId, messageId, patch) => {
-    const row = await idb.get(MESSAGES, messageId);
-    if (!row) return;
-    await idb.put(MESSAGES, { ...row, message: { ...row.message, ...patch } });
-  };
+  const updateAssistantMessage = (sessionId, messageId, patch) => writeMessage(
+    sessionId, messageId, (row) => row ? { ...row, message: { ...row.message, ...patch } } : null,
+  );
 
   /** @param {string} sessionId @param {any} state */
   const setTrimSummary = (sessionId, state) => updateRecord(
@@ -231,6 +247,7 @@ export const createSessionTurnStore = ({
     records: Object.freeze({
       serialize,
       update: updateRecord,
+      writeMessage,
       assemble,
       readMessages,
       present,

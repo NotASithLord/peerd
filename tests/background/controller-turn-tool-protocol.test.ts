@@ -17,6 +17,8 @@ import { getToolAuthority } from '../../extension/peerd-runtime/tools/metadata/a
 import { controllerOperationsForTools } from '../../extension/peerd-runtime/controller-tool-ownership.js';
 import { ORCHESTRATOR_OPERATION_GRANT } from '../../extension/shared/controller-kernel-quota.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
+import { createProviderEgressAuthority } from '../../extension/background/provider-egress-authority.js';
+import { createSessionTurnStore } from '../../extension/shared/session-turn-store.js';
 
 const PROTOCOL_FIXTURE_TOOL = 'a2a_run';
 const authorityDescriptor = (name: string) => projectToolAuthority(
@@ -158,6 +160,47 @@ const runHarness = async ({
 };
 
 describe('controller turn finite tool protocol', () => {
+  test.each(['request', 'body'] as const)(
+    'a failed model metadata %s still completes inference with the static window',
+    async (failureStage) => {
+      const ctx = context({
+        tools: [], refreshTools: async () => [], oneShot: false,
+        callModel: async function* () {
+          yield { type: 'text-delta', text: 'Completed normally.' };
+          yield { type: 'message-stop', stopReason: 'end_turn' };
+        },
+      });
+      let metadataReads = 0;
+      const metadataAuthority = createProviderEgressAuthority({
+        safeFetch: async () => {
+          metadataReads += 1;
+          if (failureStage === 'request') throw new TypeError('connection reset');
+          return new Response(new ReadableStream({
+            start(controller) { controller.error(new TypeError('response interrupted')); },
+          }));
+        },
+        vault: { getSecret: async () => 'vault-key' },
+        settingsStore: { get: () => ({}) },
+      });
+      const result = await runHarness({
+        ctx,
+        bridgeHooks: {
+          providerEgress: {
+            ...makeScriptedProviderAuthority(() => ctx.callModel),
+            readModelContext: metadataAuthority.readModelContext,
+          },
+        },
+      });
+      expect(metadataReads).toBe(1);
+      expect(result.error).toBeNull();
+      expect(result.events).not.toContainEqual(expect.objectContaining({ type: 'error' }));
+      expect(ctx.sessions.snapshot().messages.at(-1)).toMatchObject({
+        role: 'assistant', content: 'Completed normally.',
+        streaming: false, stopReason: 'end_turn',
+      });
+    },
+  );
+
   test('executes now entirely in the semantic realm without tool lifecycle RPC', async () => {
     let legacy = 0;
     const audits: any[] = [];
@@ -1418,6 +1461,175 @@ describe('controller turn finite tool protocol', () => {
       streaming: false, errorCode: 'turn_abort_effect_outcome_unknown',
       outcomeKnown: false, retryable: false,
     });
+  });
+
+  test.each([
+    { id: 'receipt-message' },
+    { role: 'user' },
+    { toolResults: [] },
+  ])('assistant patches cannot change receipt custody: %j', async (patch) => {
+    let patched: any;
+    const ctx = context({
+      tools: [], refreshTools: async () => [],
+      callModel: async function* () {
+        yield { type: 'text-delta', text: 'Normal response.' };
+        yield { type: 'message-stop', stopReason: 'end_turn' };
+      },
+    });
+    const result = await runHarness({
+      ctx,
+      interceptKernel: async (operation, payload: any, next, invoke) => {
+        const reply = await next();
+        if (operation === 'turn.session.append') {
+          const message = JSON.parse(payload.value.messageJson);
+          if (message.role === 'assistant') patched = await invoke('turn.session.update-assistant', {
+            runId: payload.runId,
+            value: {
+              sessionId: payload.value.sessionId, messageId: message.id,
+              patchJson: JSON.stringify(patch),
+            },
+          });
+        }
+        return reply;
+      },
+    });
+    expect(patched).toMatchObject({ ok: false, outcomeKnown: true });
+    expect(result.error).toBeNull();
+    expect(ctx.sessions.snapshot().messages.at(-1)).toMatchObject({
+      role: 'assistant', content: 'Normal response.', streaming: false,
+    });
+  });
+
+  test.each([
+    ['turn.finalize', 'duplicate message ID'],
+    ['turn.abort.finalize', 'duplicate message ID'],
+    ['turn.finalize', 'mutable assistant message'],
+    ['turn.abort.finalize', 'mutable assistant message'],
+  ])('%s rejects a performed receipt in a %s', async (finalize, placement) => {
+      const rows = new Map<string, any>();
+      const sessions = createSessionTurnStore({
+        idb: {
+          get: async (store, key) => structuredClone(rows.get(`${store}:${key}`)),
+          put: async (store, value) => {
+            rows.set(`${store}:${value.id ?? value.sessionId}`, structuredClone(value));
+          },
+        },
+        notFound: (sessionId) => new Error(`missing ${sessionId}`),
+      });
+      rows.set('sessions:session-tool-protocol', {
+        sessionId: 'session-tool-protocol', createdAt: 1,
+        messagesV2: true, msgIndex: [],
+      });
+      const scheduleDescriptor = authorityDescriptor('schedule_cancel');
+      const ctx = context({
+        sessions, tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+        scheduleRemove: async () => true,
+      });
+      let bridge!: ReturnType<typeof makeControllerTurnBridge>;
+      let appended: any;
+      let finalized: any;
+      const getClient = async () => ({
+        call: async (capability: string, payload: any, options: any) => {
+          const authority = bridge.authorize(payload);
+          const invoke = (operation: string, value: any) => bridge.handleKernelCall(
+            operation, { runId: payload.runId, value }, {
+              capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
+            },
+          );
+          const assistant = {
+            role: 'assistant', id: 'existing-message', content: '', streaming: true,
+          };
+          const appendAssistant = () => invoke('turn.session.append', {
+            sessionId: payload.sessionId, messageJson: JSON.stringify(assistant),
+          });
+          expect(await appendAssistant()).toMatchObject({ ok: true });
+          // An exact duplicate retains the existing store's retry contract.
+          expect(await appendAssistant()).toMatchObject({ ok: true });
+          await invoke('turn.model.observe-event', {
+            type: 'tool-use-start', id: 'duplicate-result-call', name: 'schedule_cancel',
+          });
+          expect(await invoke('turn.schedule.cancel-routine', {
+            callId: 'duplicate-result-call', effectId: 'duplicate-result-call:1',
+            effectSequence: 1, turnGeneration: payload.turnGeneration, id: 'routine-1',
+          })).toMatchObject({ ok: true, value: { authorityReceipt: {
+            performed: true, outcomeKnown: true,
+          } } });
+          appended = await invoke('turn.session.append', {
+            sessionId: payload.sessionId,
+            messageJson: JSON.stringify({
+              role: placement === 'mutable assistant message' ? 'assistant' : 'user',
+              id: placement === 'mutable assistant message' ? 'mutable-result' : assistant.id,
+              content: '',
+              toolResults: [{ tool_use_id: 'duplicate-result-call', content: 'done', is_error: false }],
+            }),
+          });
+          finalized = await invoke(finalize, finalize === 'turn.abort.finalize' ? {
+            sessionId: payload.sessionId, messageId: assistant.id, content: '', outcomeKnown: true,
+          } : {});
+          return finalized;
+        },
+      });
+      bridge = makeControllerTurnBridge({ getClient, newId: () => 'duplicate-result-run' });
+      try {
+        for await (const _event of bridge.runUserTurn(withOperationSurface(ctx))) { /* drain */ }
+      } catch { /* failed persistence makes normal finalization terminal */ }
+      expect(appended).toMatchObject({ ok: false, outcomeKnown: false });
+      expect(finalized).toMatchObject(finalize === 'turn.abort.finalize'
+        ? { ok: true, value: { outcomeKnown: false } }
+        : { ok: false, outcomeKnown: false });
+      const stored = await sessions.get(ctx.sessionId);
+      expect(stored?.messages).toHaveLength(1);
+      expect(stored?.messages.flatMap((message) =>
+        message.role === 'user' ? message.toolResults ?? [] : [])).toEqual([]);
+      if (finalize === 'turn.abort.finalize') expect(stored?.messages[0]).toMatchObject({
+        outcomeKnown: false, errorCode: 'turn_abort_effect_outcome_unknown', retryable: false,
+      });
+    },
+  );
+
+  test('Stop during the next model response preserves a completed tool round', async () => {
+    const scheduleDescriptor = authorityDescriptor('schedule_cancel');
+    const stop = new AbortController();
+    let round = 0;
+    const ctx = context({
+      signal: stop.signal, oneShot: false,
+      tools: [scheduleDescriptor], refreshTools: async () => [scheduleDescriptor],
+      scheduleRemove: async () => true,
+      callModel: async function* () {
+        round += 1;
+        if (round === 1) {
+          yield { type: 'tool-use-start', id: 'completed-routine-call', name: 'schedule_cancel' };
+          yield {
+            type: 'tool-use-delta', id: 'completed-routine-call',
+            partialJson: '{"id":"routine-1"}',
+          };
+          yield { type: 'tool-use-stop', id: 'completed-routine-call' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+          return;
+        }
+        yield { type: 'text-delta', text: 'The routine was cancelled.' };
+        stop.abort();
+        throw new DOMException('user stopped', 'AbortError');
+      },
+    });
+    const result = await runHarness({ ctx });
+    const messages = ctx.sessions.snapshot().messages;
+    const stored = messages.flatMap((message: any) => message.toolResults ?? [])
+      .find((block: any) => block.tool_use_id === 'completed-routine-call');
+    expect(stored).toMatchObject({
+      is_error: false, outcomeKnown: true, authorityPerformed: true,
+      authorityReceipts: [expect.objectContaining({ outcomeKnown: true, performed: true })],
+    });
+    expect(round).toBe(2);
+    expect(result.error).toBeNull();
+    expect(result.events).not.toContainEqual(expect.objectContaining({ type: 'error' }));
+    expect(result.events).toContainEqual(expect.objectContaining({
+      type: 'stop', stopReason: 'aborted',
+    }));
+    expect(messages.at(-1)).toMatchObject({
+      content: 'The routine was cancelled.', streaming: false, stopReason: 'aborted',
+    });
+    expect(messages.at(-1)).not.toHaveProperty('outcomeKnown', false);
   });
 
   test('Stop settles an abort-ignoring exact host operation unknown', async () => {

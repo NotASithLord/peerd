@@ -8,7 +8,7 @@
 
 import { plugin } from 'bun';
 import { existsSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 
 // The production cold-path adapter intentionally binds only to the browser's
 // native WebExtension object; it must never pull the compatibility polyfill
@@ -57,28 +57,9 @@ plugin({
     // extension/. Genuine filesystem-absolute paths (or typos) return
     // undefined and fall through to Bun's default resolver.
     build.onResolve({ filter: /^\// }, (args) => {
-      // why the extension marker: Bun can cache the resolved absolute form of
-      // a root-relative import from a disposable worktree. Recover only the
-      // extension-local suffix, so a deleted measurement directory cannot
-      // poison later test runs while unrelated absolute paths still fall
-      // through untouched.
-      const marker = `${sep}extension${sep}`;
-      const markerAt = args.path.lastIndexOf(marker);
-      // Store verification evaluates a disposable package root whose files sit
-      // directly below `peerd-verify-*` (there is no `extension/` segment).
-      // Bun can cache that resolved absolute form after the verifier deletes
-      // the directory, so recover its extension-local suffix too.
-      const verifyMarker = `${sep}peerd-verify-`;
-      const verifyAt = args.path.lastIndexOf(verifyMarker);
-      const verifySuffixAt = verifyAt < 0
-        ? -1
-        : args.path.indexOf(sep, verifyAt + verifyMarker.length);
-      const relativePath = markerAt >= 0
-        ? args.path.slice(markerAt + marker.length)
-        : verifySuffixAt >= 0
-          ? args.path.slice(verifySuffixAt + 1)
-          : args.path.slice(1);
-      const candidate = join(extensionRoot, relativePath);
+      // why: live artifact/worktree imports must execute their own bytes.
+      if (existsSync(args.path)) return undefined;
+      const candidate = join(extensionRoot, args.path.slice(1));
       return existsSync(candidate) ? { path: candidate } : undefined;
     });
   },

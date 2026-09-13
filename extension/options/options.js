@@ -178,6 +178,7 @@ for (const id of SECTIONS) routes[`/${id}`] = Root;
 if (CHANNEL === 'preview' || CHANNEL === 'dev') routes['/contributor-metrics'] = Root;
 // Build-time literal: the store artifact has DWEB_ENABLED=false, so this route
 // (like the nav entry) is structurally dead code there.
+// codeql[js/trivial-conditional]
 if (DWEB_ENABLED) routes['/dweb'] = Root;
 
 m.route(root, '/providers', routes);

@@ -45,6 +45,14 @@ const boundedModel = (/** @type {unknown} */ value) => typeof value === 'string'
 /** @param {string} providerId @param {Record<string,any>} body @param {string} modelId */
 const nativeBodyAllowed = (providerId, body, modelId) => {
   if (!boundedModel(modelId) || body.model !== modelId || body.stream !== true) return false;
+  // why: the grant pins every inference model. Provider-side fallbacks, presets,
+  // and model-calling server tools can spend a different model's authority while
+  // leaving the checked top-level model unchanged.
+  if (['models', 'fallbacks', 'preset'].some((key) => Object.hasOwn(body, key))) return false;
+  if (body.tools !== undefined && (!Array.isArray(body.tools) || !body.tools.every((tool) =>
+    record(tool) && (providerId === 'anthropic'
+      ? tool.type === undefined || tool.type === 'custom'
+      : tool.type === 'function')))) return false;
   if (!Array.isArray(body.messages) || body.messages.length > 20_000) return false;
   if (providerId === 'anthropic') {
     return body.system === undefined || typeof body.system === 'string' || Array.isArray(body.system);
@@ -462,7 +470,9 @@ export const createProviderEgressAuthority = ({
     catch {
       const aborted = !ownerOperationLive(operation);
       releaseOwnerOperation(operation);
-      return aborted ? knownFailure('model-egress-aborted') : unknownFailure('model-egress-probe-failed');
+      // why: metadata reads cannot start inference or mutate a target. Their
+      // failure must leave the controller free to use its static model window.
+      return aborted ? knownFailure('model-egress-aborted') : knownFailure('model-egress-probe-failed');
     }
     if (!ownerOperationLive(operation)) {
       cancelBestEffort(response.body, 'model-egress-owner-retired');
@@ -481,7 +491,7 @@ export const createProviderEgressAuthority = ({
       return aborted ? knownFailure('model-egress-aborted')
         : cause instanceof ResponseTooLargeError
           ? knownFailure('model-egress-probe-response-too-large')
-        : unknownFailure('model-egress-probe-read-failed');
+        : knownFailure('model-egress-probe-read-failed');
     }
     releaseOwnerOperation(operation);
     return {

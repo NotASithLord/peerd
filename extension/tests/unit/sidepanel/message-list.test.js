@@ -481,7 +481,7 @@ describe('sidepanel.message-list actor disclosures', () => {
     const { root, unmount } = mount([
       {
         role: 'assistant', id: 'a1', content: '',
-        toolUses: [{ id: 't1', name: 'message_actor', input: { to: 'web', message: 'inspect it', await: true } }],
+        toolUses: [{ id: 't1', name: 'message_actor', input: { to: 'web', message: 'inspect it', 'await': true } }],
       },
       {
         role: 'user', id: 'u1', content: '',
@@ -523,7 +523,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'assistant', id: 'a-host-state', content: '',
         toolUses: [{
           id: 't-host-state', name: 'message_actor',
-          input: { to: 'web', message: 'inspect it', await: true },
+          input: { to: 'web', message: 'inspect it', 'await': true },
         }],
       },
       {
@@ -551,7 +551,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'assistant', id: 'a-unknown-abort', content: '',
         toolUses: [{
           id: 't-unknown-abort', name: 'message_actor',
-          input: { to: 'web', message: 'change it', await: true },
+          input: { to: 'web', message: 'change it', 'await': true },
         }],
       },
       {
@@ -661,7 +661,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'assistant', id: 'a-old-unknown', content: '',
         toolUses: [{
           id: 'reused-unknown', name: 'message_actor',
-          input: { to: 'web', message: 'change it', await: true },
+          input: { to: 'web', message: 'change it', 'await': true },
         }],
       },
       {
@@ -830,7 +830,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'assistant', id: 'a4', content: '',
         toolUses: [{
           id: 't4', name: 'message_actor',
-          input: { to: 'web', message: 'inspect it', await: true },
+          input: { to: 'web', message: 'inspect it', 'await': true },
         }],
       },
       {
@@ -859,7 +859,7 @@ describe('sidepanel.message-list actor disclosures', () => {
         role: 'assistant', id: 'a5', content: '',
         toolUses: [{
           id: 't5', name: 'message_actor',
-          input: { to: 'web', message: 'inspect it', await: true },
+          input: { to: 'web', message: 'inspect it', 'await': true },
         }],
       },
       {

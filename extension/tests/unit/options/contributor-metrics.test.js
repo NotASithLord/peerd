@@ -218,7 +218,7 @@ describe('Contributor Metrics human UI', () => {
     document.body.appendChild(root);
     const messages = [
       { role: 'user', id: 'user-1', content: 'First' },
-      { role: 'assistant', id: 'step-1', content: 'I will check.', toolUses: [{ id: 'tool-1', name: 'message_actor', input: { await: true } }] },
+      { role: 'assistant', id: 'step-1', content: 'I will check.', toolUses: [{ id: 'tool-1', name: 'message_actor', input: { 'await': true } }] },
       { role: 'user', id: 'result-1', content: '', toolResults: [{ tool_use_id: 'tool-1', content: '{}' }] },
       { role: 'assistant', id: 'answer-1', content: 'Done.', stopReason: 'end_turn', toolUses: [] },
       { role: 'user', id: 'user-2', content: 'Second' },

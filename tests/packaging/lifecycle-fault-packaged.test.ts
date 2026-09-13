@@ -58,7 +58,8 @@ describe('packaged Chrome lifecycle fault lane', () => {
     expect(executionSources.controller).toContain("await rpc('turn.finalize', {});");
     expect(executionSources.bridge).toContain("case 'turn.finalize':");
     expect(executionSources.bridge).toContain(
-      '!run.persistedSemanticCalls.has(receipt.callId)',
+      `typeof receipt.callId === 'string'
+              && !run.persistedSemanticCalls.has(receipt.callId)`,
     );
 
     const harness = readFileSync(
@@ -107,7 +108,8 @@ describe('packaged Chrome lifecycle fault lane', () => {
     expect(() => assertLifecycleFaultExecutionSeam({
       ...executionSources,
       bridge: executionSources.bridge.replace(
-        '!run.persistedSemanticCalls.has(receipt.callId)', '',
+        `typeof receipt.callId === 'string'
+              && !run.persistedSemanticCalls.has(receipt.callId)`, '',
       ),
     })).toThrow('source lifecycle exact-effect/finalization seam changed');
     expect(() => injectLifecycleFaultEffect(
