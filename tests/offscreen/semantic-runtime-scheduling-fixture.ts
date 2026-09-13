@@ -5,6 +5,7 @@ import { startActorWorker } from '../../extension/offscreen/actor-worker-runtime
 import { describeActorExecution } from '../../extension/offscreen/actor-runner.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
+import { createSessionTurnStore } from '../../extension/shared/session-turn-store.js';
 
 type ToolCall = { id: string; name: string; args?: Record<string, unknown> };
 const turnRuntime = createControllerTurnRuntime();
@@ -84,25 +85,21 @@ const makeModelCall = (batches: ToolCall[][]) => {
 };
 
 const sessions = (sessionId: string) => {
-  let record: any = {
-    sessionId, provider: 'anthropic', model: 'claude-sonnet-4-6', messages: [],
+  const record = {
+    sessionId, provider: 'anthropic', model: 'claude-sonnet-4-6', messagesV2: true, msgIndex: [],
   };
-  return {
-    get: async () => structuredClone(record),
-    appendMessage: async (_id: string, message: any) => {
-      record = { ...record, messages: [...record.messages, structuredClone(message)] };
-      return structuredClone(record);
+  const tables = new Map<string, Map<string, any>>([
+    ['sessions', new Map([[sessionId, record]])], ['session_messages', new Map()],
+  ]);
+  return createSessionTurnStore({
+    idb: {
+      get: async (table, id) => structuredClone(tables.get(table)?.get(id)),
+      put: async (table, value) => {
+        tables.get(table)!.set(value.id ?? value.sessionId, structuredClone(value));
+      },
     },
-    updateAssistantMessage: async (_id: string, messageId: string, patch: any) => {
-      record = {
-        ...record,
-        messages: record.messages.map((message: any) => message.id === messageId
-          ? { ...message, ...structuredClone(patch) } : message),
-      };
-      return structuredClone(record);
-    },
-    setTrimSummary: async () => structuredClone(record),
-  };
+    notFound: (id) => new Error(`missing:${id}`),
+  });
 };
 
 const projectionFor = (batches: ToolCall[][]) => projectControllerToolSurface({

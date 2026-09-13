@@ -42,6 +42,8 @@ import {
 } from '../../extension/offscreen/repository-host.js';
 import { acceptRepositoryOffer } from '../../extension/offscreen/repository-worker.js';
 import { createRepositoryAppFileService } from '../../extension/offscreen/repository-app-files.js';
+import { makeKernelAppEditorRoutes } from '../../extension/background/kernel-app-file-reader.js';
+import { createAppDataClient } from '../../extension/engine-tabs/app-tab/app-data-client.js';
 
 const ref = { kind: 'app', id: 'app-one' };
 const testLease = {
@@ -720,6 +722,63 @@ describe('operation-lazy offscreen repository split', () => {
     await expect(files.appDelete(ref, { path: 'assets/pixel.bin' }))
       .resolves.toMatchObject({ deleted: true });
     await expect(files.appList(ref, { sizes: false })).resolves.toEqual([]);
+  });
+
+  test('missing App files survive the service, worker, client, editor and data joins', async () => {
+    const root = new MemoryDirectory();
+    const service = createRepositoryAppFileService({ getRootDirectory: async () => root as any });
+    const offscreenUrl = 'chrome-extension://id/offscreen/offscreen.html';
+    const calls: string[] = [];
+    const client = createOffscreenRepositoryClient({
+      withHost: (operation: any) => operation(testLease), offscreenUrl,
+      kernelFetch: async () => { throw new Error('App files must not request credentials'); },
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage(offer: any, ports: MessagePort[]) {
+          if (proveFeatureHost(offer, ports[0])) return;
+          calls.push(offer.method);
+          acceptRepositoryOffer({ data: offer, ports } as any, {
+            ownsLease: () => true, createService: () => service,
+          });
+        },
+      }],
+    });
+    let fileKinds: Record<string, string> = {};
+    const routes = makeKernelAppEditorRoutes({
+      vault: { isLocked: () => false },
+      catalog: {
+        get: async () => ({ id: ref.id, entryFile: 'index.html', fileKinds }),
+        setFileKinds: async (_id: string, value: typeof fileKinds) => { fileKinds = value; return { id: ref.id }; },
+      },
+      files: client.appFiles, repositories: client, isAppSender: () => true,
+    });
+    await expect(client.appFiles.readBytes(ref.id, 'new.js')).rejects.toMatchObject({
+      name: 'NotFoundError', code: 'repository-path-not-found', outcomeKnown: true,
+    });
+    await expect(routes['app/editor-write']({ appId: ref.id, path: 'new.js', content: 'first edit' }, {}))
+      .resolves.toEqual({ ok: true });
+    await expect(client.appFiles.readText(ref.id, 'new.js')).resolves.toBe('first edit');
+    const data = createAppDataClient({
+      appId: ref.id,
+      opfs: {
+        read: (path) => client.appFiles.readText(ref.id, path),
+        list: () => client.appFiles.listAppInfo(ref.id),
+      },
+      send: (message) => routes[message.type as keyof typeof routes](message, {}),
+    });
+    await expect(data.request('set', 'first', '{"saved":true}')).resolves.toEqual({ ok: true, value: true });
+    await expect(data.request('get', 'first')).resolves.toEqual({ ok: true, value: { saved: true } });
+    expect(fileKinds).toEqual({ 'new.js': 'text', 'data/first.json': 'text' });
+
+    const writes = calls.filter((method) => method === 'appWrite').length;
+    await expect(routes['app/editor-delete']({ appId: ref.id, path: 'data/absent.json', runtimeData: true }, {}))
+      .resolves.toEqual({ ok: true });
+    expect(calls.filter((method) => method === 'appWrite')).toHaveLength(writes);
+    expect(calls).not.toContain('appDelete');
+
+    await expect(routes['app/editor-write']({ appId: ref.id, path: '../escape', content: 'forbidden' }, {}))
+      .resolves.toMatchObject({ ok: false, code: 'repository-call-failed', error: 'unsafe App path' });
+    expect(calls.filter((method) => method === 'appWrite')).toHaveLength(writes);
   });
 
   test('the lazy App-file host inspects a complete manifest without crossing catalog authority', async () => {

@@ -36,6 +36,9 @@ const bodyBytes = (/** @type {unknown} */ value) => {
   catch { return Number.POSITIVE_INFINITY; }
 };
 const outputLimit = (/** @type {Record<string,any>} */ body) => {
+  // why: a grant funds one completion, not an arbitrary number of choices.
+  if (body.n !== undefined && body.n !== 1) return null;
+  if (body.max_tokens !== undefined && body.max_completion_tokens !== undefined) return null;
   const value = body.max_tokens ?? body.max_completion_tokens;
   return Number.isSafeInteger(value) && value > 0 ? Number(value) : null;
 };

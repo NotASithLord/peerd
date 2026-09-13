@@ -248,24 +248,26 @@ const replyFailure = (reply, knownMessage) => Object.assign(
     ? 'Peerd could not confirm whether the change finished.' : knownMessage),
   /** @type {object} */ (reply ?? {}),
 );
-/** @param {string} path @param {unknown} error */
-const showSaveFailure = (path, error) => {
+/** @param {string} path @param {unknown} error @param {'save'|'create'|'delete'} [action] */
+const showSaveFailure = (path, error, action = 'save') => {
   if (saveStatus.hidden && document.activeElement instanceof HTMLElement) {
     saveReturnFocus = document.activeElement;
   }
-  saveOutcomeUnknown = /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false;
+  saveOutcomeUnknown ||= /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false;
+  const pastAction = action === 'delete' ? 'deleted' : action === 'create' ? 'created' : 'saved';
   saveMessage.textContent = saveOutcomeUnknown
-    ? `Peerd could not confirm whether ${path} was saved. Your edits are still open. Reload the App to reconcile before saving again.`
-    : `Could not save ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
+    ? `Peerd could not confirm whether ${path} was ${pastAction}. Your edits are still open. Download a copy before reopening the App to check the saved file.`
+    : `Could not ${action} ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
   saveStatus.hidden = false;
   saveRetry.disabled = false;
-  saveRetry.textContent = saveOutcomeUnknown ? 'Reload to reconcile' : 'Retry';
+  saveRetry.textContent = saveOutcomeUnknown ? 'Download edits' : 'Retry';
 };
 const clearSaveFailure = () => {
+  // why: an editor's clean-state callback is not a receipt or reconciliation.
+  if (saveOutcomeUnknown) return;
   const restoreFocus = saveStatus.contains(document.activeElement);
   saveStatus.hidden = true;
   saveRetry.disabled = false;
-  saveOutcomeUnknown = false;
   saveRetry.textContent = 'Retry';
   if (restoreFocus) {
     if (saveReturnFocus?.isConnected) saveReturnFocus.focus({ preventScroll: true });
@@ -274,11 +276,18 @@ const clearSaveFailure = () => {
   saveReturnFocus = null;
 };
 saveRetry.addEventListener('click', async () => {
+  if (!editorApi) return;
   if (saveOutcomeUnknown) {
-    location.reload();
+    // why: a lost save receipt may be the only copy of these edits. Export
+    // the current buffer without replacing it or repeating the uncertain write.
+    const url = URL.createObjectURL(new Blob([editorApi.getActiveContent()], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = editorApi.getActiveFile().split('/').at(-1) || 'app-edits.txt';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
     return;
   }
-  if (!editorApi) return;
   saveRetry.disabled = true;
   try {
     await editorApi.flushSave();
@@ -858,6 +867,9 @@ const editMode = async () => {
         { persistent: true },
       ),
       writeFile: async (path, content) => {
+        // why: autosave, export and suspension all flush through this boundary;
+        // none may replay an uncertain write before the user reconciles it.
+        if (saveOutcomeUnknown) throw replyFailure({ outcomeKnown: false }, 'The previous save needs verification.');
         const reply = /** @type {any} */ (await uiRuntime.send({
           type: 'app/editor-write', appId, path, content,
         }));
@@ -866,6 +878,7 @@ const editMode = async () => {
         if (appMeta) appMeta.fileKinds[path] = 'text';
       },
       deleteFile: async (path) => {
+        if (saveOutcomeUnknown) throw replyFailure({ outcomeKnown: false }, 'The previous save needs verification.');
         const reply = /** @type {any} */ (await uiRuntime.send({
           type: 'app/editor-delete', appId, path,
         }));
@@ -874,6 +887,7 @@ const editMode = async () => {
         if (appMeta) delete appMeta.fileKinds[path];
       },
       onSaveError: showSaveFailure,
+      onMutationError: (action, path, error) => showSaveFailure(path, error, action),
       onDirtyChange: (dirty) => { if (!dirty) clearSaveFailure(); },
       onSaved: () => {
         if (!editorApi?.hasUnsavedChanges()) clearSaveFailure();
@@ -976,6 +990,8 @@ toggleBtn.addEventListener('click', async () => {
     }
   } catch (error) {
     console.warn('[app-tab] mode switch failed:', error);
+    // why: a failed flush must leave the draft and its recovery action visible.
+    if (editorApi?.hasUnsavedChanges()) return;
     fail(
       /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false
         ? 'Peerd could not confirm the App state. Reopen the App to reconcile.'

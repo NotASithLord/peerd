@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { collectStaticModuleGraph } from './static-module-graph.ts';
+import { collectStaticModuleGraph, type StaticImportReader } from './static-module-graph.ts';
 import {
   SEMANTIC_HOST_CORE_BUILD_ENTRIES,
 } from './semantic-host-entries.ts';
@@ -133,13 +133,24 @@ const CONTROLLER_BUILD_STAMP_PATHS = new Set(
   CONTROLLER_BUILD_STAMP_MODULES.map((name) => `shared/${name}`),
 );
 
-export const controllerBuildDigest = async (root: string): Promise<string> => {
+export const stampControllerBuildSource = (source: string, digest: string): string => {
+  const stamp = /(CONTROLLER_BUILD_DIGEST\s*=\s*['"])[a-f0-9]{64}(['"])/;
+  if (!stamp.test(source)) throw new Error('controller build digest stamp is missing');
+  return source.replace(stamp, `$1${digest}$2`);
+};
+
+export const controllerBuildDigest = async (
+  root: string,
+  { readStaticImports }: { readStaticImports?: StaticImportReader } = {},
+): Promise<string> => {
   const absoluteRoot = resolve(root);
   const files = new Set<string>();
   for (const entry of [...CONTROLLER_BUILD_ENTRIES, ...CONTROLLER_OPTIONAL_BUILD_ENTRIES]) {
     const absolute = join(absoluteRoot, entry);
     if (!existsSync(absolute)) continue;
-    for (const file of await collectStaticModuleGraph(absoluteRoot, absolute)) files.add(file);
+    for (const file of await collectStaticModuleGraph(absoluteRoot, absolute, { readStaticImports })) {
+      files.add(file);
+    }
   }
   for (const asset of CONTROLLER_BUILD_ASSETS) {
     const absolute = join(absoluteRoot, asset);
@@ -152,15 +163,7 @@ export const controllerBuildDigest = async (root: string): Promise<string> => {
     const rel = relative(absoluteRoot, file).split('\\').join('/');
     let bytes = readFileSync(file);
     if (CONTROLLER_BUILD_STAMP_PATHS.has(rel)) {
-      const source = bytes.toString('utf8');
-      if (!/CONTROLLER_BUILD_DIGEST\s*=\s*['"][a-f0-9]{64}['"]/.test(source)) {
-        throw new Error('controller build digest stamp is missing');
-      }
-      const normalized = source.replace(
-        /(CONTROLLER_BUILD_DIGEST\s*=\s*['"])[a-f0-9]{64}(['"])/,
-        `$1${'0'.repeat(64)}$2`,
-      );
-      bytes = Buffer.from(normalized);
+      bytes = Buffer.from(stampControllerBuildSource(bytes.toString('utf8'), '0'.repeat(64)));
     }
     hash.update(rel);
     hash.update('\0');
@@ -176,15 +179,7 @@ export const writeControllerBuildIdentity = async (root: string): Promise<string
   const digest = await controllerBuildDigest(root);
   for (const name of CONTROLLER_BUILD_STAMP_MODULES) {
     const path = join(root, 'shared', name);
-    const source = readFileSync(path, 'utf8');
-    const stamped = source.replace(
-      /(CONTROLLER_BUILD_DIGEST\s*=\s*['"])[a-f0-9]{64}(['"])/,
-      `$1${digest}$2`,
-    );
-    if (stamped === source && !source.includes(digest)) {
-      throw new Error(`controller build digest stamp is missing from ${name}`);
-    }
-    writeFileSync(path, stamped);
+    writeFileSync(path, stampControllerBuildSource(readFileSync(path, 'utf8'), digest));
   }
   return digest;
 };

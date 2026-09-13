@@ -56,6 +56,13 @@ const makeSessions = () => {
       session = { ...session, messages: [...session.messages, structuredClone(message)] };
       return structuredClone(session);
     },
+    async appendMessageSince(sessionId: string, message: any, cursor: { length: number }) {
+      const snapshot = await this.appendMessage(sessionId, message);
+      return {
+        offset: cursor.length, persisted: snapshot.messages.find((row: any) => row.id === message.id),
+        session: { ...snapshot, messages: snapshot.messages.slice(cursor.length) },
+      };
+    },
     updateAssistantMessage: async (_sessionId: string, messageId: string, patch: any) => {
       session = {
         ...session,
@@ -3410,22 +3417,29 @@ describe('controller turn finite tool protocol', () => {
     let bridge!: ReturnType<typeof makeControllerTurnBridge>;
     const queued: any[] = [];
     const replies: any[] = [];
+    const sessions = makeSessions();
+    const dropped = { id: 'dropped', role: 'user', content: 'earlier context', when: 1 };
+    await sessions.appendMessage('session-tool-protocol', dropped);
+    const state = { covered: 1, coveredLastId: 'dropped' };
     const getClient = async () => ({
       call: async (capability: string, payload: any, options: any) => {
         const authority = bridge.authorize(payload);
+        await bridge.handleKernelCall('turn.session.get', {
+          runId: payload.runId, value: { sessionId: 'session-tool-protocol' },
+        }, { capability, authority, signal: options.signal, deadlineAt: Date.now() + 60000 });
         const invoke = (value: any) => bridge.handleKernelCall(
           'turn.trim.enrich', { runId: payload.runId, value }, {
             capability, authority, signal: options.signal, deadlineAt: Date.now() + 60_000,
           },
         );
         replies.push(await invoke({ request: {
-          sessionId: 'session-tool-protocol', state: {}, newlyDropped: [],
+          sessionId: 'session-tool-protocol', state, droppedStart: 0,
         } }));
         replies.push(await invoke({ request: {
-          sessionId: 'session-foreign', state: {}, newlyDropped: [],
+          sessionId: 'session-foreign', state, droppedStart: 0,
         } }));
         replies.push(await invoke({ request: {
-          sessionId: 'session-tool-protocol', state: {}, newlyDropped: [], extra: true,
+          sessionId: 'session-tool-protocol', state, droppedStart: 0, extra: true,
         } }));
         return bridge.handleKernelCall('turn.finalize', {
           runId: payload.runId, value: {},
@@ -3436,11 +3450,12 @@ describe('controller turn finite tool protocol', () => {
     });
     bridge = makeControllerTurnBridge({ getClient });
     for await (const _event of bridge.runUserTurn(withOperationSurface(context({
+      sessions,
       enrichTrimSummary: (request: any) => { queued.push(request); },
     })))) { /* drain */ }
     expect(replies.map((reply) => reply.ok)).toEqual([true, false, false]);
     expect(queued).toEqual([{
-      sessionId: 'session-tool-protocol', state: {}, newlyDropped: [],
+      sessionId: 'session-tool-protocol', state, newlyDropped: [dropped],
     }]);
     await bridge.close();
   });

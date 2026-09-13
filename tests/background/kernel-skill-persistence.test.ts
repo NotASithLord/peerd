@@ -38,12 +38,40 @@ const makeLane = async () => {
   });
   const install = (name: string) => registry.install(SKILL_MD(name), { source: 'local' });
   return {
-    kernel, install, kernelAudit, kernelPushes,
+    kernel, install, kernelAudit, kernelPushes, registry,
+    exportRegistry: createSkillRegistry({ store: createSkillStore({ idbFactory: factory }) }),
     readBody: (name: string) => store.getBody(name),
   };
 };
 
 describe('kernel skill persistence', () => {
+  test('hydrated runtime and export readers observe later installs, toggles, replacements and removals', async () => {
+    const { kernel, registry, exportRegistry } = await makeLane();
+    await kernel.commit(SKILL_MD('alpha'));
+    for (const reader of [registry, exportRegistry]) {
+      expect((await reader.list()).map((meta) => meta.name)).toEqual(['alpha']);
+      expect(await reader.describeForPrompt()).toMatch(/alpha\s+\S+\s+/);
+      expect((await reader.loadBody('alpha')).body).toContain('Do the thing carefully.');
+    }
+    await kernel.setEnabled('alpha', false);
+    await kernel.commit(SKILL_MD('beta'));
+    for (const reader of [registry, exportRegistry]) {
+      expect(await reader.list()).toEqual(await kernel.list());
+      expect(await reader.describeForPrompt()).not.toMatch(/alpha\s+\S+\s+/);
+      expect((await reader.listCommands()).map((command) => command.name)).toEqual(['beta']);
+      await expect(reader.loadBody('alpha')).rejects.toThrow("no skill named 'alpha'");
+      expect((await reader.loadBody('beta')).body).toContain('Do the thing carefully.');
+    }
+    await kernel.commit(SKILL_MD('beta').replace('playbook', 'revised playbook').replace('carefully.', 'once.'), { replace: true });
+    await kernel.remove('alpha');
+    for (const reader of [registry, exportRegistry]) {
+      expect(await reader.list()).toEqual(await kernel.list());
+      expect((await reader.loadBody('beta')).meta.description).toContain('revised playbook');
+      expect((await reader.loadBody('beta')).body).toContain('Do the thing once.');
+      await expect(reader.install(SKILL_MD('beta'), { source: 'local' })).rejects.toThrow('already installed');
+    }
+  });
+
   test('list is sorted and metadata only', async () => {
     const lanes = await makeLane();
     await lanes.install('zeta');

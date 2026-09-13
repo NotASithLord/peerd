@@ -5,6 +5,7 @@
 // this service-worker closure.
 
 import { normalizeExactEffectOutcome } from '../shared/exact-effect-outcome.js';
+import { createSessionTranscriptPages } from '../shared/session-transcript.js';
 import {
   actorRecoveryCustody,
   authorityReceiptsForCall,
@@ -478,6 +479,12 @@ export const makeControllerTurnBridge = ({
     finally { run.closingSemanticCallPromises.delete(callId); }
   };
   const rehydrateEvent = async (/** @type {any} */ run, /** @type {unknown} */ event) => {
+    if (isRecord(event) && event.type === 'state') {
+      if (!exactOptionalKeys(event, ['type', 'sessionId'])
+          || event.sessionId !== run.sessionId || !run.sessionSnapshot
+          || run.transcript.pending) throw new TypeError('session state authority mismatch');
+      return { type: 'state', session: run.sessionSnapshot };
+    }
     if (!isRecord(event) || event.type !== 'tool-result' || !isRecord(event.result)) return event;
     if (typeof event.toolUseId === 'string') {
       await closeSemanticCall(run, event.toolUseId);
@@ -542,8 +549,6 @@ export const makeControllerTurnBridge = ({
       }),
     };
   };
-  const externalizeSessionWire = (/** @type {any} */ run, /** @type {unknown} */ session) =>
-    jsonWire(externalizeSession(run, session));
   const setTools = (/** @type {any} */ run, /** @type {unknown} */ tools) => {
     run.tools = Array.isArray(tools) ? tools : [];
   };
@@ -1596,6 +1601,8 @@ export const makeControllerTurnBridge = ({
         switch (operation) {
         case 'turn.session.get':
           if (!sameSession()) return failed('session authority mismatch', true);
+          if (run.transcript.pending || run.transcriptBusy) return failed('session transcript read in progress', true);
+          run.transcriptBusy = true;
           try {
             const session = await run.ctx.sessions.get(run.sessionId);
             if (run.ctx.resume === true && run.currentAssistantId === null) {
@@ -1604,26 +1611,43 @@ export const makeControllerTurnBridge = ({
                 && trailing?.streaming === true && typeof trailing.id === 'string'
                 ? trailing.id : null;
             }
-            return known(externalizeSessionWire(
-              run, session,
-            ));
+            run.sessionSnapshot = externalizeSession(run, session);
+            return known(run.transcript.start(run.sessionSnapshot, 0));
           }
+          catch (cause) { return failed(cause, true); }
+          finally { run.transcriptBusy = false; }
+        case 'turn.session.read':
+          if (!sameSession() || !exactOptionalKeys(value, ['sessionId', 'cursor', 'page'])) {
+            return failed('session authority mismatch', true);
+          }
+          try { return known(run.transcript.read(value.cursor, value.page)); }
           catch (cause) { return failed(cause, true); }
         case 'turn.session.append':
           if (!sameSession()) return failed('session authority mismatch', true);
+          if (run.transcript.pending || run.transcriptBusy) return failed('session transcript read in progress', true);
+          run.transcriptBusy = true;
           try {
             const message = /** @type {any} */ (await rehydrateMessage(
               run, jsonUnwire(value.messageJson, 'session message'),
             ));
-            const session = await run.ctx.sessions.appendMessage(
-              run.sessionId, message,
+            const prior = run.sessionSnapshot?.messages ?? [];
+            const appended = await run.ctx.sessions.appendMessageSince(
+              run.sessionId, message, {
+                length: prior.length, lastMessageId: prior.at(-1)?.id ?? null,
+              },
             );
             // why: the store may acknowledge an existing ID without writing.
             // Only the exact durable message proves its stamped receipts exist.
-            if (!session?.messages?.some((/** @type {any} */ stored) =>
-              stored?.id === message?.id && jsonWire(stored) === jsonWire(message))) {
+            if (jsonWire(appended.persisted) !== jsonWire(message)) {
               throw new Error('session message was not persisted');
             }
+            const session = externalizeSession(run, appended.session);
+            if (!isRecord(session) || !Array.isArray(session.messages)) {
+              throw new TypeError('session append projection invalid');
+            }
+            run.sessionSnapshot = {
+              ...session, messages: [...prior, ...session.messages],
+            };
             for (const result of message?.toolResults ?? []) {
               run.persistedSemanticCalls.add(result.tool_use_id);
               const issued = run.modelToolCalls.get(result.tool_use_id);
@@ -1639,8 +1663,9 @@ export const makeControllerTurnBridge = ({
               run.currentAssistantId = message.id;
             }
             if (run.auditUnavailable) return auditUnavailableForRun(run);
-            return known(externalizeSessionWire(run, session));
+            return known(run.transcript.start(session, appended.offset));
           } catch (cause) { return unknown(run, cause); }
+          finally { run.transcriptBusy = false; }
         case 'turn.session.update-assistant':
           {
           if (!sameSession() || typeof value.messageId !== 'string') {
@@ -1706,13 +1731,23 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.trim.enrich': {
           const request = isRecord(value.request)
-            && exactOptionalKeys(value.request, ['sessionId', 'state', 'newlyDropped'])
+            && exactOptionalKeys(value.request, ['sessionId', 'state', 'droppedStart'])
             && value.request.sessionId === run.sessionId
             && isRecord(value.request.state)
-            && Array.isArray(value.request.newlyDropped)
+            && Number.isSafeInteger(value.request.droppedStart)
+            && value.request.droppedStart >= 0
+            && Number.isSafeInteger(value.request.state.covered)
+            && value.request.state.covered > value.request.droppedStart
+            && value.request.state.covered <= (run.sessionSnapshot?.messages?.length ?? 0)
+            && typeof value.request.state.coveredLastId === 'string'
+            && run.sessionSnapshot?.messages?.[value.request.state.covered - 1]?.id
+              === value.request.state.coveredLastId
             ? value.request : null;
           if (!request) return failed('trim enrichment authority mismatch', true);
-          try { return known(run.ctx.enrichTrimSummary?.(request)); }
+          try { return known(run.ctx.enrichTrimSummary?.({
+            sessionId: run.sessionId, state: request.state,
+            newlyDropped: run.sessionSnapshot.messages.slice(request.droppedStart, request.state.covered),
+          })); }
           catch (cause) { return failed(cause, true); }
           }
         case 'turn.model.bind': {
@@ -3002,7 +3037,8 @@ export const makeControllerTurnBridge = ({
           return { ok: false, code: 'turn-kernel-operation-denied', outcomeKnown: true };
         }
       } catch (cause) {
-        return operation.startsWith('turn.session.') && operation !== 'turn.session.get'
+        return operation.startsWith('turn.session.')
+            && operation !== 'turn.session.get' && operation !== 'turn.session.read'
           ? unknown(run, cause) : failed(cause, true);
       }
     } finally {
@@ -3044,6 +3080,7 @@ export const makeControllerTurnBridge = ({
       authorityScopes: new Map(),
       authorityBridge: null,
       opaque: new Map(), modelToolCalls: new Map(),
+      transcript: createSessionTranscriptPages(), transcriptBusy: false, sessionSnapshot: null,
       providerOwner: Object.freeze({ runId }), modelCandidates: [],
       maxOutputTokens: Number.isSafeInteger(ctx.maxOutputTokens)
         ? Math.max(1, Math.min(64_000, Number(ctx.maxOutputTokens))) : 64_000,
@@ -3131,6 +3168,8 @@ export const makeControllerTurnBridge = ({
       }
       finally {
         runs.delete(runId);
+        run.transcript.close();
+        run.sessionSnapshot = null;
         run.opaque.clear();
       }
     }
@@ -3145,6 +3184,8 @@ export const makeControllerTurnBridge = ({
       for (const run of runs.values()) {
         run.abort.abort();
         run.events.close();
+        run.transcript.close();
+        run.sessionSnapshot = null;
         providerCleanup.push(closeProviderOwner(run));
       }
       runs.clear();

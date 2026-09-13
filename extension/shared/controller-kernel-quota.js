@@ -5,6 +5,7 @@
 // so drift retires the channel instead of widening it.
 
 import { controllerPayloadBytes } from './structured-clone-size.js';
+import { TRANSCRIPT_PAGE_LIMIT } from './session-transcript.js';
 import {
   createSemanticDemandQuota,
   SEMANTIC_DEMAND_MAX_BYTES,
@@ -436,6 +437,7 @@ export const createControllerKernelQuota = (
 
   const limits = Object.freeze({
     'turn.session.get': steps + 4,
+    'turn.session.read': TRANSCRIPT_PAGE_LIMIT,
     'turn.session.append': 2 * steps + 8,
     'turn.session.update-assistant': steps * MODEL_STREAM_EVENTS + 10 * steps + 8,
     'turn.session.set-trim': steps,
@@ -560,7 +562,7 @@ export const createControllerKernelQuota = (
       const streamId = value?.streamId;
       if (typeof streamId === 'string') models.delete(streamId);
     }
-    const replayable = operation === 'turn.session.get'
+    const replayable = operation === 'turn.session.get' || operation === 'turn.session.read'
       || operation === 'turn.prompt.get' || operation === 'turn.tools.refresh'
       || operation === 'turn.model.observe-context'
       || controllerOperationReplayableAfterSettlement(operation);

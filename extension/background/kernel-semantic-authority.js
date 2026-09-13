@@ -3,6 +3,7 @@
 import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
 import { PROVIDER_EGRESS_MANIFEST } from './provider-egress-manifest.js';
+import { parseAppManifest } from '../peerd-engine/app-manifest.js';
 
 const MUTATIONS = new Set([
   'semantic.memory.delete-all', 'semantic.memory.write', 'semantic.memory.delete',
@@ -107,6 +108,28 @@ export const createKernelSemanticAuthority = ({
       }
       if (vault.isLocked() && route !== 'app/get-meta') {
         return { ok: false, error: 'vault-locked', outcomeKnown: true };
+      }
+      if (operation.startsWith('semantic.apps.')) {
+        // why: route admission is not target admission. Only the host-retained
+        // request, never the sealed worker's reverse-call arguments, selects an App.
+        const requested = context?.outerPayload?.message;
+        const appId = route === 'app/get-meta' ? requested?.app?.id : requested?.appId;
+        if (typeof appId !== 'string' || payload?.appId !== appId
+            || context.authority.instanceId !== appId) {
+          return { ok: false, code: 'semantic-app-target-denied', outcomeKnown: true };
+        }
+        if (operation === 'semantic.apps.set-entry') {
+          try {
+            const { entry } = parseAppManifest(requested.manifestText);
+            if (payload.entryFile !== entry || !Array.isArray(requested.paths)
+                || !requested.paths.some((/** @type {unknown} */ path) =>
+                  typeof path === 'string' && path.replace(/^\/+/, '') === entry)) {
+              return { ok: false, code: 'semantic-app-entry-denied', outcomeKnown: true };
+            }
+          } catch {
+            return { ok: false, code: 'semantic-app-entry-denied', outcomeKnown: true };
+          }
+        }
       }
       try {
         return { ok: true, value: await /** @type {any} */ (calls)[operation](payload),

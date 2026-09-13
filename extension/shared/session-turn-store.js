@@ -186,20 +186,24 @@ export const createSessionTurnStore = ({
   );
 
   /**
+   * @template T
    * @param {string} sessionId
    * @param {InternalMessage} message
-   * @returns {Promise<Session>}
+   * @param {(record:any)=>Promise<T>} project
+   * @param {(record:any)=>Promise<void>} [validate]
+   * @returns {Promise<T>}
    */
-  const appendMessage = (sessionId, message) => serialize(sessionId, async () => {
+  const appendMessageWith = (sessionId, message, project, validate = async () => {}) => serialize(sessionId, async () => {
     const record = await getRecord(sessionId);
     if (!record) throw notFound(sessionId);
+    await validate(record);
     const seq = record.msgIndex.length;
     const id = messageKey(sessionId, message, seq);
     await writeMessage(sessionId, id, () => record.msgIndex.includes(id)
       ? null : { id, sessionId, seq, message });
     if (record.msgIndex.includes(id)) {
       try { await onMessageAppended(sessionId, message); } catch {}
-      return /** @type {Promise<Session>} */ (assemble(record));
+      return project(record);
     }
     const updated = await mutateRecord(sessionId, (current) => {
       if (current.msgIndex.includes(id)) return current;
@@ -219,8 +223,45 @@ export const createSessionTurnStore = ({
     });
     if (!updated) throw notFound(sessionId);
     try { await onMessageAppended(sessionId, message); } catch {}
-    return /** @type {Promise<Session>} */ (assemble(updated));
+    return project(updated);
   });
+
+  /** @param {string} sessionId @param {InternalMessage} message @returns {Promise<Session>} */
+  const appendMessage = (sessionId, message) => appendMessageWith(
+    sessionId, message, (record) => /** @type {Promise<Session>} */ (assemble(record)),
+  );
+
+  /**
+   * A turn already owns the preceding snapshot. Read only the appended suffix,
+   * including intervening appends, under the same queue as the durable write.
+   * @param {string} sessionId
+   * @param {InternalMessage} message
+   * @param {{length:number,lastMessageId:string|null}} cursor
+   */
+  const appendMessageSince = (sessionId, message, cursor) => appendMessageWith(
+    sessionId, message, async (record) => {
+      const offset = cursor.length;
+      const persisted = await idb.get(MESSAGES, messageKey(sessionId, message, record.msgIndex.length - 1));
+      return {
+        offset,
+        session: present(record, await readMessages(record.msgIndex.slice(offset))),
+        persisted: persisted?.sessionId === sessionId ? persisted.message : undefined,
+      };
+    },
+    async (record) => {
+      const offset = cursor.length;
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > record.msgIndex.length) {
+        throw new TypeError('session-transcript-cursor-invalid');
+      }
+      if (offset > 0) {
+        const anchor = await idb.get(MESSAGES, record.msgIndex[offset - 1]);
+        if (anchor?.sessionId !== sessionId
+            || (anchor.message?.id ?? null) !== cursor.lastMessageId) {
+          throw new TypeError('session-transcript-changed');
+        }
+      }
+    },
+  );
 
   /**
    * @param {string} sessionId
@@ -240,6 +281,7 @@ export const createSessionTurnStore = ({
   return Object.freeze({
     get,
     appendMessage,
+    appendMessageSince,
     updateAssistantMessage,
     setTrimSummary,
     // The legacy facade uses these record mechanics too, so all metadata

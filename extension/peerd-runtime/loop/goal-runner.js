@@ -98,6 +98,14 @@ export const makeGoalRunner = ({
 }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
+  // why: only outstanding recovery reads need cancellation memory; completed
+  // chats must not accumulate a permanent generation registry.
+  /** @type {Set<Set<string>>} */
+  const recovering = new Set();
+  /** @param {string} sid */
+  const invalidateRecovery = (sid) => {
+    for (const cancelled of recovering) cancelled.add(sid);
+  };
   let persistenceQueued = 0;
   let persistenceLane = Promise.resolve();
 
@@ -199,11 +207,13 @@ export const makeGoalRunner = ({
   // PAUSED run (vault-lock) is no longer in — so it can't remove a paused run's
   // record, and a live run's persist() is fire-and-forget. forget() is keyed by
   // sid and reaches the record either way. Best-effort, like persist(). No kv → no-op.
-  /** @param {string} sid */
-  const forget = async (sid) => {
+  /** @param {string} sid @param {GoalRun} [expectedRun] */
+  const forget = async (sid, expectedRun) => {
     if (!kv) return;
     await enqueuePersistence(async () => {
+      if (expectedRun && runs.get(sid) !== expectedRun) return;
       const stored = await kv.get(GOAL_RUNS_KEY);
+      if (expectedRun && runs.get(sid) !== expectedRun) return;
       if (stored && typeof stored === 'object' && Object.hasOwn(stored, sid)) {
         const next = { ...stored };
         delete next[sid];
@@ -222,6 +232,7 @@ export const makeGoalRunner = ({
    * @param {string} sid
    */
   const stop = async (sid) => {
+    invalidateRecovery(sid);
     const r = runs.get(sid);
     if (r) r.halted = true;  // its drive() loop sees !alive() and exits to the terminal finally
     await forget(sid);
@@ -238,10 +249,9 @@ export const makeGoalRunner = ({
     });
   };
 
-  /** Run turns until complete / halted / capped, then clean up. @param {string} sid */
-  const driveRun = async (sid) => {
-    const run = runs.get(sid);
-    if (!run) return;
+  /** Run turns until complete / halted / capped, then clean up.
+   * @param {string} sid @param {GoalRun} run */
+  const driveRun = async (sid, run) => {
     // why identity check (not just isActive): a fresh start() for the SAME
     // session replaces the map entry and halts THIS one — the old drive must
     // see it's been superseded and exit WITHOUT deleting the new run.
@@ -255,6 +265,7 @@ export const makeGoalRunner = ({
         if (!first && typeof hasUnresolvedSideEffects === 'function') {
           let unresolved = true;
           try { unresolved = await hasUnresolvedSideEffects(sid); } catch { /* fail closed */ }
+          if (!alive()) break;
           if (unresolved) {
             run.halted = true;
             run.lastError = 'an earlier action needs verification before autonomous work can continue';
@@ -273,6 +284,7 @@ export const makeGoalRunner = ({
         if (!first && typeof getTodoBlock === 'function') {
           try { todoBlock = await getTodoBlock(sid); } catch { todoBlock = ''; }
         }
+        if (!alive()) break;
         try {
           outcome = await runTurn({
             sessionId: sid,
@@ -312,32 +324,36 @@ export const makeGoalRunner = ({
         } else {
           const phase = run.completed ? 'done' : run.halted ? 'halted'
             : run.iteration >= maxIterations ? 'capped' : 'done';
-          await forget(sid);
+          await forget(sid, run);
+          // why: storage cleanup may overlap a replacement in the same chat.
+          if (runs.get(sid) !== run) return;
+          runs.delete(sid);
           emit(sid, phase, run);
           try { onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null }); }
           catch (e) { console.error('[goal] onRunEnd threw', e); }
-          runs.delete(sid);
         }
       }
     }
   };
   /** @param {string} sid */
   const drive = async (sid) => {
+    // why: acquiring the controller can outlive this run's ownership.
+    const run = runs.get(sid);
+    if (!run) return;
     let entered = false;
     try {
       await withRun(() => {
         entered = true;
-        return driveRun(sid);
+        return driveRun(sid, run);
       });
     } catch (e) {
-      if (entered) throw e;
+      if (runs.get(sid) !== run) return;
+      if (entered) { halt(sid); throw e; }
       // why re-enter only the local lifecycle: acquisition failed before the
       // drive could reach its terminal finally, so close the run without work.
-      const run = runs.get(sid);
-      if (!run) return;
       run.halted = true;
       run.lastError = /** @type {any} */ (e)?.message ?? String(e);
-      await driveRun(sid);
+      await driveRun(sid, run);
     }
   };
 
@@ -350,6 +366,7 @@ export const makeGoalRunner = ({
     if (!sessionId || typeof goal !== 'string' || !goal.trim()) {
       return { ok: false, error: 'goal-required' };
     }
+    invalidateRecovery(sessionId);
     if (runs.has(sessionId)) halt(sessionId);  // supersede any prior run
     runs.set(sessionId, {
       goal: goal.trim(), iteration: 0, completed: false, halted: false,
@@ -359,7 +376,6 @@ export const makeGoalRunner = ({
     emit(sessionId, 'running');
     drive(sessionId).catch((e) => {
       console.error('[goal] drive threw', e);
-      halt(sessionId);
     });
     return { ok: true };
   };
@@ -374,12 +390,19 @@ export const makeGoalRunner = ({
    */
   const resume = async () => {
     if (!kv) return { resumed: 0 };
+    const cancelled = new Set();
+    recovering.add(cancelled);
     let stored;
-    try { stored = await kv.get(GOAL_RUNS_KEY); } catch { return { resumed: 0 }; }
+    try {
+      // why: recovery begun during a Stop must wait for its durable removal.
+      await persistenceLane;
+      stored = await kv.get(GOAL_RUNS_KEY);
+    } catch { return { resumed: 0 }; }
+    finally { recovering.delete(cancelled); }
     if (!stored || typeof stored !== 'object') return { resumed: 0 };
     let resumed = 0;
     for (const [sid, raw] of Object.entries(stored)) {
-      if (!sid || runs.has(sid)) continue;
+      if (!sid || runs.has(sid) || cancelled.has(sid)) continue;
       const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
       if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
       // why clamp at the cap: persist() records the iteration ABOUT to run, so a
@@ -389,6 +412,7 @@ export const makeGoalRunner = ({
       // actually ran. Rewind one so that interrupted final turn re-runs once.
       const storedIteration = Number(rec.iteration) || 0;
       const iteration = storedIteration >= maxIterations ? Math.max(0, maxIterations - 1) : storedIteration;
+      invalidateRecovery(sid);
       runs.set(sid, {
         goal: rec.goal,
         iteration,
@@ -396,7 +420,7 @@ export const makeGoalRunner = ({
         startedAt: Number(rec.startedAt) || now(),
       });
       emit(sid, 'running');
-      drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
+      drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); });
       resumed += 1;
     }
     return { resumed };

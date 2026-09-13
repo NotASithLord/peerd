@@ -525,6 +525,7 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     findActorSession,
     archive,
     appendMessage: turnSessions.appendMessage,
+    appendMessageSince: turnSessions.appendMessageSince,
     updateAssistantMessage: turnSessions.updateAssistantMessage,
     update,
     setCustomSystemPrompt,

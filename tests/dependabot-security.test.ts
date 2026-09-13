@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,12 +15,18 @@ import {
   minimumSecurityAgeDays,
   nextPatchVersion,
   parseDependencyNames,
+  securityStaticImportSpecifiers,
   validateActionsDiff,
   validatePackageJsonChange,
   validatePrepared,
   verifyNoGitHubNpmMalware,
   verifyNpmSeasoning,
 } from '../packaging/dependabot-security.ts';
+import { writeDevBuildConfig } from '../packaging/gen-build-config.ts';
+import {
+  controllerBuildDigest, stampControllerBuildSource, writeControllerBuildIdentity,
+} from '../packaging/controller-build-identity.ts';
+import { collectStaticModuleGraph } from '../packaging/static-module-graph.ts';
 
 const sha256 = (value: string): string =>
   createHash('sha256').update(value).digest('hex');
@@ -312,9 +318,27 @@ describe('Dependabot security automation policy', () => {
       .toThrow('only 24 continuous clean observation hours');
   });
 
-  test('accepts only the exact generated patch on a fresh privileged runner', () => {
+  test('trusted built-in scanner follows re-exports and excludes dynamic imports', async () => {
+    expect(securityStaticImportSpecifiers(`
+      import './static.js';
+      export { value } from './reexport.js';
+      export * from './star.js';
+      void import('./lazy.js');
+    `)).toEqual(['./static.js', './reexport.js', './star.js']);
+    const extension = join(import.meta.dir, '../extension');
+    // why: tiny fixtures cannot detect a scanner disagreement in the actual
+    // runtime/vendor syntax that the privileged validator must hash identically.
+    expect(await controllerBuildDigest(extension, { readStaticImports: securityStaticImportSpecifiers }))
+      .toBe(await controllerBuildDigest(extension));
+    const entry = join(extension, 'offscreen/offscreen.js');
+    expect(await collectStaticModuleGraph(extension, entry, { readStaticImports: securityStaticImportSpecifiers }))
+      .toEqual(await collectStaticModuleGraph(extension, entry));
+  }, 20_000);
+
+  test.each(['bun', 'github_actions'])('accepts only the exact generated %s patch on a fresh privileged runner', async (ecosystem) => {
     const root = mkdtempSync(join(tmpdir(), 'peerd-dependabot-policy-'));
     const today = new Date().toISOString().slice(0, 10);
+    const dependency = ecosystem === 'bun' ? 'eslint' : 'actions/checkout';
     const source = 'CodeMirror source\n';
     const bundle = 'export const cm = true;\n';
     const lock = {
@@ -336,10 +360,28 @@ describe('Dependabot security automation policy', () => {
         manifest_version: 3,
         version: '0.5.0',
         name: 'peerd',
+        background: { service_worker: 'background/vault-kernel-preview.js' },
       }, null, 2)}\n`);
+      const buildConfigPath = 'extension/shared/build-config.js';
+      const controllerBuildPath = 'extension/shared/controller-build.js';
+      write(root, controllerBuildPath, readFileSync(join(import.meta.dir, '..', controllerBuildPath), 'utf8'));
+      write(root, 'extension/offscreen/offscreen.js', [
+        "import '../shared/build-config.js';",
+        "export { CONTROLLER_BUILD_DIGEST } from '../shared/controller-build.js';",
+        "void import('./must-not-load.js');",
+        // This also ensures validation never evaluates the modules it scans.
+        "throw new Error('candidate module executed');",
+      ].join('\n'));
+      const regenerate = () => writeDevBuildConfig({
+        manifestFile: join(root, 'extension/manifest.json'), out: join(root, buildConfigPath),
+      });
+      await regenerate();
       write(root, 'extension/vendor/codemirror/SOURCE.txt', source);
       write(root, 'extension/vendor/codemirror/cm.js', bundle);
       write(root, 'extension/vendor/vendor.lock.json', `${JSON.stringify(lock, null, 2)}\n`);
+      if (ecosystem === 'github_actions') {
+        write(root, '.github/workflows/ci.yml', `steps:\n  - uses: actions/checkout@${'1'.repeat(40)} # v7.0.0\n`);
+      }
       git(root, 'init', '-q');
       git(root, 'config', 'user.name', 'test');
       git(root, 'config', 'user.email', 'test@example.invalid');
@@ -347,12 +389,16 @@ describe('Dependabot security automation policy', () => {
       git(root, 'commit', '-qm', 'base');
       const baseSha = git(root, 'rev-parse', 'HEAD');
 
-      write(root, 'package.json', `${JSON.stringify({
-        name: 'peerd',
-        version: '0.5.0',
-        devDependencies: { eslint: '1.0.1' },
-      }, null, 2)}\n`);
-      write(root, 'bun.lock', 'lock-v2\n');
+      if (ecosystem === 'bun') {
+        write(root, 'package.json', `${JSON.stringify({
+          name: 'peerd',
+          version: '0.5.0',
+          devDependencies: { eslint: '1.0.1' },
+        }, null, 2)}\n`);
+        write(root, 'bun.lock', 'lock-v2\n');
+      } else {
+        write(root, '.github/workflows/ci.yml', `steps:\n  - uses: actions/checkout@${'2'.repeat(40)} # v7.0.1\n`);
+      }
       git(root, 'add', '--all');
       git(root, 'commit', '-qm', 'dependabot patch');
       const headSha = git(root, 'rev-parse', 'HEAD');
@@ -360,35 +406,82 @@ describe('Dependabot security automation policy', () => {
       write(root, 'package.json', `${JSON.stringify({
         name: 'peerd',
         version: '0.5.1',
-        devDependencies: { eslint: '1.0.1' },
+        devDependencies: { eslint: ecosystem === 'bun' ? '1.0.1' : '1.0.0' },
       }, null, 2)}\n`);
       write(root, 'CHANGELOG.md', addSecurityChangelog(
         '# Changelog\n\n## [Unreleased]\n',
         '0.5.1',
         today,
-        ['eslint'],
+        [dependency],
         42,
       ));
       write(root, 'extension/manifest.json', `${JSON.stringify({
         manifest_version: 3,
         version: '0.5.1',
         name: 'peerd',
+        background: { service_worker: 'background/vault-kernel-preview.js' },
       }, null, 2)}\n`);
 
       const values = {
         repo: root,
         'base-sha': baseSha,
         'head-sha': headSha,
-        ecosystem: 'bun',
-        dependencies: 'eslint',
+        ecosystem,
+        dependencies: dependency,
         pr: '42',
         date: today,
       };
-      expect(() => validatePrepared(values)).not.toThrow();
+      await expect(validatePrepared(values)).rejects.toThrow('did not update extension/shared/');
+      await regenerate();
+      await expect(validatePrepared(values)).resolves.toBeUndefined();
+
+      // A second real generation must leave the prepared release unchanged.
+      git(root, 'add', '--all');
+      await regenerate();
+      expect(git(root, 'diff', '--name-only')).toBe('');
+
+      // why: reproduce the publish runner's dependency-free trusted checkout.
+      // A poisoned package would throw if the lazy lexer import were reached.
+      const trusted = join(root, 'trusted');
+      cpSync(join(import.meta.dir, '../packaging'), join(trusted, 'packaging'), { recursive: true });
+      write(root, 'trusted/node_modules/es-module-lexer/package.json', JSON.stringify({
+        name: 'es-module-lexer', type: 'module', main: 'index.js',
+      }));
+      write(root, 'trusted/node_modules/es-module-lexer/index.js', "throw new Error('dependency package executed');\n");
+      const command = [join(trusted, 'packaging/dependabot-security.ts'), 'validate-prepared',
+        ...Object.entries(values).map(([key, value]) => `--${key}=${value}`)];
+      expect(execFileSync(process.execPath, ['--no-install', ...command], {
+        cwd: trusted, encoding: 'utf8',
+      })).toContain('"version": "0.5.1"');
+      rmSync(join(trusted, 'node_modules'), { recursive: true });
+      expect(execFileSync(process.execPath, ['--no-install', ...command], {
+        cwd: trusted, encoding: 'utf8',
+      })).toContain('"version": "0.5.1"');
+
+      const generatedConfig = readFileSync(join(root, buildConfigPath), 'utf8');
+      const generatedController = readFileSync(join(root, controllerBuildPath), 'utf8');
+      const restoreIdentities = () => {
+        write(root, buildConfigPath, generatedConfig);
+        write(root, controllerBuildPath, generatedController);
+      };
+      for (const path of [buildConfigPath, controllerBuildPath]) {
+        const current = readFileSync(join(root, path), 'utf8');
+        write(root, path, stampControllerBuildSource(current, '1'.repeat(64)));
+        await expect(validatePrepared(values)).rejects.toThrow('not the exact current build identity');
+        write(root, path, `${current}\nthrow new Error('injected identity code');\n`);
+        await writeControllerBuildIdentity(join(root, 'extension'));
+        await expect(validatePrepared(values)).rejects.toThrow('not the exact current build identity');
+        restoreIdentities();
+      }
+      write(root, buildConfigPath, generatedConfig.replace('"0.5.1"', '"0.4.9"'));
+      await writeControllerBuildIdentity(join(root, 'extension'));
+      await expect(validatePrepared(values)).rejects.toThrow('not the exact current build identity');
+      restoreIdentities();
 
       lock.files['codemirror/cm.js'] = '0'.repeat(64);
       write(root, 'extension/vendor/vendor.lock.json', `${JSON.stringify(lock, null, 2)}\n`);
-      expect(() => validatePrepared(values)).toThrow('vendor lock changed beyond');
+      await expect(validatePrepared(values)).rejects.toThrow(ecosystem === 'bun'
+        ? 'vendor lock changed beyond' : 'untrusted generation changed disallowed path');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

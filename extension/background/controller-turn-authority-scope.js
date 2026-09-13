@@ -63,7 +63,7 @@ const CLASS_KEYS = Object.freeze({
     'siteClients',
   ]),
   execution: Object.freeze([
-    'session', 'inbound', 'confirm',
+    'session', 'inbound', 'permission', 'readAuthorityPermission', 'confirm',
     'appClient', 'dweb', 'jsOffscreenClient', 'jsRegistry', 'jsTabTracker',
     'messageActor', 'podRegistry', 'podTabTracker', 'repositories', 'resultStore',
     'scriptRuns', 'toolUseId', 'vmRegistry', 'vmTabTracker',

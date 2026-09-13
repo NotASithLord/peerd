@@ -1,6 +1,22 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelSemanticAuthority } from '../../extension/background/kernel-semantic-authority.js';
+import { createKernelSemanticControl } from '../../extension/background/kernel-semantic-control.js';
 import { dispatchAppSemanticRoute } from '../../extension/offscreen/semantic-routes/apps.js';
+
+const semanticCaller = (authority: ReturnType<typeof createKernelSemanticAuthority>) => {
+  const control = createKernelSemanticControl({
+    authority, isHomeSender: () => true, vault: { isLocked: () => false },
+    callSemantic: (outerPayload: any) => {
+      const grant = control.authorize(outerPayload);
+      return dispatchAppSemanticRoute(outerPayload.route, outerPayload.message, {
+        kernelCall: (operation, payload) => control.handleKernelCall(operation, payload, {
+          authority: grant, outerPayload,
+        }),
+      });
+    },
+  });
+  return (route: string, message: any) => control.dispatchProjected(route, message, 'first-party');
+};
 
 const makeState = () => {
   const apps: Record<string, any> = {
@@ -34,11 +50,7 @@ const makeState = () => {
     appTabUrl: 'chrome-extension://id/engine-tabs/app-tab/index.html',
     sessionCache: { sessionGet: async () => 'chat' },
   });
-  const run = (route: string, message: any) => dispatchAppSemanticRoute(route, message, {
-    kernelCall: (operation, payload) => authority.handle(operation, payload, {
-      authority: { target: `semantic:${route}:first-party` },
-    }),
-  });
+  const run = semanticCaller(authority);
   return { apps, tabs, reloads, authority, run };
 };
 
@@ -106,11 +118,8 @@ describe('sealed App semantic routes', () => {
       reloadApp: () => new Promise<void>((resolve) => { finish = resolve; }),
     });
     let settled = false;
-    const pending = dispatchAppSemanticRoute('apps/rename', { appId: 'a', name: 'Next' }, {
-      kernelCall: (operation, payload) => authority.handle(operation, payload, {
-        authority: { target: 'semantic:apps/rename:first-party' },
-      }),
-    }).then((value) => { settled = true; return value; });
+    const pending = semanticCaller(authority)('apps/rename', { appId: 'a', name: 'Next' })
+      .then((value: any) => { settled = true; return value; });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
     finish();

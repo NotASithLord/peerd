@@ -9,7 +9,8 @@
 
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { init, parse } from 'es-module-lexer';
+
+export type StaticImportReader = (source: string, filename: string) => string[] | Promise<string[]>;
 
 export const pathIsInside = (root: string, candidate: string): boolean => {
   const rel = relative(resolve(root), resolve(candidate));
@@ -35,6 +36,9 @@ export const staticImportSpecifiers = async (
   source: string,
   filename = '<module>',
 ): Promise<string[]> => {
+  // why: the privileged security-release validator supplies Bun's built-in
+  // scanner and must never resolve or execute dependency packages.
+  const { init, parse } = await import('es-module-lexer');
   await init;
   return parse(source, filename)[0]
     .filter((imported) => imported.d === -1 && typeof imported.n === 'string')
@@ -45,6 +49,7 @@ export const moduleImportSpecifiers = async (
   source: string,
   filename = '<module>',
 ): Promise<Array<Readonly<{ kind: 'static' | 'dynamic'; specifier: string }>>> => {
+  const { init, parse } = await import('es-module-lexer');
   await init;
   return parse(source, filename)[0]
     .filter((imported) => typeof imported.n === 'string')
@@ -58,6 +63,7 @@ export const exportedNames = async (
   source: string,
   filename = '<module>',
 ): Promise<string[]> => {
+  const { init, parse } = await import('es-module-lexer');
   await init;
   return parse(source, filename)[1].map((exported) => exported.n);
 };
@@ -70,7 +76,10 @@ export const exportedNames = async (
 export const collectStaticModuleGraph = async (
   root: string,
   entry: string,
-  { allowExternalSpecifiers = false }: { allowExternalSpecifiers?: boolean } = {},
+  {
+    allowExternalSpecifiers = false,
+    readStaticImports = staticImportSpecifiers,
+  }: { allowExternalSpecifiers?: boolean; readStaticImports?: StaticImportReader } = {},
 ): Promise<Set<string>> => {
   const absoluteRoot = resolve(root);
   const realRoot = realpathSync(absoluteRoot);
@@ -108,7 +117,7 @@ export const collectStaticModuleGraph = async (
 
     if (!['.js', '.mjs'].includes(extname(file))) continue;
     const source = readFileSync(file, 'utf8');
-    for (const specifier of await staticImportSpecifiers(source, relative(absoluteRoot, file))) {
+    for (const specifier of await readStaticImports(source, relative(absoluteRoot, file))) {
       let target: string;
       try {
         target = resolveStaticSpecifier(specifier, file, absoluteRoot);

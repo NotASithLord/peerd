@@ -37,6 +37,53 @@ const deferred = <T>() => {
 const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('dedicated sealed-controller Worker loss', () => {
+  test('close retires pending startup and fences its late readiness and failure from a successor', async () => {
+    const channels: MessageChannel[] = [];
+    const workers: { terminated: boolean, error: () => void, port?: MessagePort }[] = [];
+    const loader = makeSealedControllerLoader({
+      workerUrl: '/offscreen/controller-worker.js',
+      createChannel: () => {
+        const channel = new MessageChannel();
+        channels.push(channel);
+        return channel;
+      },
+      createWorker: () => {
+        const entry = { terminated: false, error: () => {}, port: undefined as MessagePort|undefined };
+        workers.push(entry);
+        return {
+          postMessage: (_message: unknown, transfer: Transferable[]) => {
+            entry.port = transfer[0] as MessagePort;
+            entry.port.start();
+          },
+          addEventListener: (type: string, listener: () => void) => {
+            if (type === 'error') entry.error = listener;
+          },
+          terminate: () => { entry.terminated = true; entry.port?.close(); },
+        } as unknown as Worker;
+      },
+    });
+    const retired = loader();
+    const retirement = retired.catch((cause) => cause);
+    const oldMessage = channels[0].port1.onmessage!;
+    loader.close();
+    expect(workers[0].terminated).toBe(true);
+    const replacement = loader();
+    expect(await retirement).toMatchObject({
+      message: 'sealed controller worker retired before readiness',
+    });
+    expect(loader()).toBe(replacement);
+    workers[1].port!.postMessage({ type: 'controller-worker/ready', realm: SEALED_REALM });
+    await replacement;
+    oldMessage.call(channels[0].port1, new MessageEvent('message', {
+      data: { type: 'controller-worker/ready', realm: SEALED_REALM },
+    }));
+    workers[0].error();
+    expect(loader()).toBe(replacement);
+    expect(workers).toHaveLength(2);
+    loader.close();
+    expect(workers.map((worker) => worker.terminated)).toEqual([true, true]);
+  });
+
   test('a late reverse-RPC result is fenced to the dead Worker generation', async () => {
     const oldReverse = deferred<any>();
     const firstReverseEntered = deferred<void>();

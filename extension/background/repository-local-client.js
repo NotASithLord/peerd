@@ -23,7 +23,7 @@ import { makeBoundedModuleLoader } from '../shared/bounded-module-load.js';
  *   setTimeoutFn?: typeof setTimeout,
  *   clearTimeoutFn?: typeof clearTimeout,
  * }} deps
- * @returns {ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>}
+ * @returns {ReturnType<typeof makeRepositoryFacade>}
  */
 export const createLazyLocalRepositoryClient = ({
   loadService,

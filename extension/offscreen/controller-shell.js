@@ -94,26 +94,27 @@ export const makeSealedControllerLoader = ({
         if (closed) return;
         closed = true;
         clearTimeout(timer);
+        if (!ready) reject(new Error('sealed controller worker retired before readiness'));
         finishUnknown();
         try { port1.close(); } catch { /* already closed */ }
         try { worker.terminate(); } catch { /* already gone */ }
-        if (active?.close === closeWorker) active = null;
         // A live generation can fail after its startup promise resolved. Do
         // not leave that settled promise cached: the next committed request
         // must create a fresh sealed Worker instead of calling a dead facade.
-        loading = null;
+        if (active?.close === closeWorker) { active = null; loading = null; }
       };
       const fail = (/** @type {string} */ message) => {
-        const wasReady = ready;
+        if (!ready) reject(new Error(message));
         closeWorker();
-        if (!wasReady) reject(new Error(message));
       };
       const timer = setTimeout(() => {
         fail('sealed controller worker did not become ready');
       }, readyTimeoutMs);
       port1.onmessage = (event) => {
+        if (closed || active?.close !== closeWorker) return;
         const message = /** @type {any} */ (event.data);
         if (message?.type === 'controller-worker/ready') {
+          if (ready) return;
           if (!isSealedControllerRealm(message.realm)) {
             fail('controller worker realm seal was not proven');
             return;
@@ -154,7 +155,6 @@ export const makeSealedControllerLoader = ({
             },
             close: closeWorker,
           };
-          active = controller;
           resolve(controller);
           return;
         }
@@ -208,15 +208,20 @@ export const makeSealedControllerLoader = ({
       }, { once: true });
       worker.addEventListener?.('error', () => fail('sealed controller worker crashed'), { once: true });
       worker.addEventListener?.('messageerror', () => fail('sealed controller worker message failed'), { once: true });
-      port1.start();
-      worker.postMessage({ type: 'controller-worker/bootstrap' }, [port2]);
+      // why: close owns the candidate even while its readiness is pending.
+      active = { close: closeWorker };
+      try {
+        port1.start();
+        worker.postMessage({ type: 'controller-worker/bootstrap' }, [port2]);
+      } catch { fail('sealed controller worker bootstrap failed'); }
     });
-    loading = attempt.catch((error) => {
+    const pending = attempt.catch((error) => {
       // A failed startup is not a permanent poison. A later committed request
       // receives a fresh sealed Worker generation.
-      loading = null;
+      if (loading === pending) loading = null;
       throw error;
     });
+    loading = pending;
     return loading;
   };
   load.close = () => {

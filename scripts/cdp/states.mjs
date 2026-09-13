@@ -21,6 +21,9 @@
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   GIT_FIXTURE_HOST, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_TLS_KEY,
 } from '../acceptance/git-smart-http-fixture.mjs';
@@ -2978,6 +2981,123 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'goal-receipt-chat-switch', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('Receipt fixture ready.') }),
+    async run(ctx, rec) {
+      const sessions = [];
+      for (const label of ['Goal receipt chat A', 'Goal receipt chat B']) {
+        if (sessions.length) await rpc(ctx.page, { type: 'session/reset' });
+        await rpc(ctx.page, { type: 'agent/send', text: label });
+        const ready = await waitFor(async () => {
+          const view = await probe(ctx);
+          if (!view.userText?.includes(label) || !view.assistantText || view.busy) return null;
+          return (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId;
+        }, { budgetMs: 20_000, pollMs: 50 });
+        if (!ready) throw new Error(`Could not create ${label}`);
+        sessions.push({ id: ready, label });
+      }
+      rec.check('the receipt fixture uses two real chats', sessions[0].id !== sessions[1].id);
+      const switchTo = async (session) => {
+        const reply = await rpc(ctx.page, { type: 'session/switch', sessionId: session.id });
+        const mounted = await waitFor(async () => (await probe(ctx)).userText?.includes(session.label),
+          { budgetMs: 8_000, pollMs: 50 });
+        if (!reply?.ok || !mounted) throw new Error(`Could not switch to ${session.label}`);
+      };
+      const inspect = (session) => evalIn(ctx.page, `(() => ({
+        draft: document.querySelector('form.input-bar textarea')?.value,
+        savedDraft: localStorage.getItem('peerd.draft.' + ${JSON.stringify(session.id)}),
+        pending: JSON.parse(localStorage.getItem('peerd.unconfirmed-send.' + ${JSON.stringify(session.id)}) || 'null'),
+        canCheck: [...document.querySelectorAll('form.input-bar button')]
+          .some((button) => button.textContent === 'Check delivery' && !button.disabled),
+        sendDisabled: document.querySelector('form.input-bar .send-btn')?.disabled,
+      }))()`);
+      const modelCalls = ctx.modelCallCount();
+      for (const outcome of ['unknown-reply', 'transport-failure']) {
+        const goal = `Keep the goal draft in A after ${outcome}`;
+        const draftB = `Keep this separate B draft after ${outcome}`;
+        const pendingB = {
+          operationId: `e2e.pending-b.${outcome}`, sessionId: sessions[1].id,
+          text: 'Earlier B message awaiting delivery', goal: false,
+          hadAttachments: false, source: 'composer',
+        };
+        try {
+          await switchTo(sessions[0]);
+          await evalIn(ctx.page, `(async () => {
+            localStorage.setItem('peerd.draft.' + ${JSON.stringify(sessions[1].id)}, ${JSON.stringify(draftB)});
+            localStorage.setItem('peerd.unconfirmed-send.' + ${JSON.stringify(sessions[1].id)}, ${JSON.stringify(JSON.stringify(pendingB))});
+            const browser = (await import('/shared/browser-api.js')).default;
+            const runtime = browser.runtime;
+            const original = runtime.sendMessage;
+            const fixture = globalThis.__peerdGoalReceipt = {
+              calls: [], finish: () => {}, restore: () => { runtime.sendMessage = original; },
+            };
+            // Hold only the first send; every session/read route stays real.
+            runtime.sendMessage = (message, ...args) => {
+              if (message?.type === 'agent/send') {
+                fixture.calls.push(message);
+                if (fixture.calls.length === 1) return new Promise((resolve, reject) => {
+                  fixture.finish = () => ${JSON.stringify(outcome)} === 'transport-failure'
+                    ? reject(new Error('Goal receipt transport lost'))
+                    : resolve({ ok: false, outcomeKnown: false });
+                });
+              }
+              return original.call(runtime, message, ...args);
+            };
+          })()`, true);
+          rec.check(`${outcome}: the visible Goal control arms the send`,
+            await clickAndSyncRedraw(ctx.page, '.goal-toggle[aria-pressed="false"]'));
+          await evalIn(ctx.page, `(async () => {
+            const { default: m } = await import('/vendor/mithril/mithril.js');
+            const input = document.querySelector('form.input-bar textarea');
+            input.value = ${JSON.stringify(goal)};
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            m.redraw.sync();
+            document.querySelector('form.input-bar').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            m.redraw.sync();
+          })()`, true);
+          const sent = await waitFor(() => evalIn(ctx.page, 'globalThis.__peerdGoalReceipt.calls[0] ?? null'),
+            { budgetMs: 5_000, pollMs: 50 });
+          if (!sent?.operationId) throw new Error('The mounted composer did not send a goal');
+          rec.check(`${outcome}: the pending goal names its original chat`,
+            sent.goal === true && sent.sessionId === sessions[0].id && sent.text === goal, JSON.stringify(sent));
+          await switchTo(sessions[1]);
+          rec.check(`${outcome}: B displays its own draft while A waits`, (await inspect(sessions[1])).draft === draftB);
+          await evalIn(ctx.page, 'globalThis.__peerdGoalReceipt.finish()');
+          const other = await waitFor(async () => {
+            const view = await inspect(sessions[1]);
+            return view.canCheck ? view : null;
+          }, { budgetMs: 8_000, pollMs: 50 });
+          rec.check(`${outcome}: A cannot replace B's draft or delivery receipt`,
+            other?.draft === draftB && other.savedDraft === draftB && other.sendDisabled === true
+              && other.pending?.operationId === pendingB.operationId, JSON.stringify(other));
+          await switchTo(sessions[0]);
+          const origin = await inspect(sessions[0]);
+          rec.check(`${outcome}: returning to A restores its goal and delivery action`,
+            origin.draft === goal && origin.savedDraft === goal && origin.canCheck && origin.sendDisabled === true
+              && origin.pending?.operationId === sent.operationId && origin.pending?.sessionId === sessions[0].id,
+            JSON.stringify(origin));
+          rec.check(`${outcome}: switching and recovery never replay the send`,
+            await evalIn(ctx.page, 'globalThis.__peerdGoalReceipt.calls.length === 1')
+              && ctx.modelCallCount() === modelCalls);
+          await rec.shot(outcome);
+        } finally {
+          await evalIn(ctx.page, `(async () => {
+            globalThis.__peerdGoalReceipt?.finish();
+            globalThis.__peerdGoalReceipt?.restore();
+            delete globalThis.__peerdGoalReceipt;
+            for (const id of ${JSON.stringify(sessions.map((session) => session.id))}) {
+              localStorage.removeItem('peerd.unconfirmed-send.' + id);
+              localStorage.removeItem('peerd.draft.' + id);
+            }
+            const { default: m } = await import('/vendor/mithril/mithril.js');
+            m.redraw.sync();
+          })()`, true).catch(() => {});
+        }
+      }
+    },
+  },
+
   // --- functional: the Plan/Act mode toggle ----------------------------------
   {
     name: 'mode-toggle', kind: 'functional', phase: 'post-unlock',
@@ -4918,6 +5038,125 @@ export const STATES = [
       const page = await openWidePage(ctx, 'engine-tabs/app-tab/index.html', { ready: '#boot.is-failed' });
       try { await rec.visualPage('app-tab-failed', page); }
       finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'app-editor-save-recovery', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => ({ sse: callIndex === 0
+      ? sseToolCall('sandbox_create', {
+        kind: 'app', name: 'Editor recovery', files: {
+          'index.html': '<!doctype html><title>Editor recovery</title><h1>Draft recovery</h1><script>peerd.data.set("first", {saved:true})</script>',
+        },
+      }) : sseText('EDITOR-RECOVERY-READY') }),
+    async run(ctx, rec) {
+      const directory = await mkdtemp(join(tmpdir(), 'peerd-editor-recovery-'));
+      let page;
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create an App named Editor recovery.' });
+        rec.check('App creation accepted', sent?.ok === true, JSON.stringify(sent));
+        const target = await waitFor(async () => {
+          const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((reply) => reply.json());
+          return targets.find((candidate) => candidate.type === 'page'
+            && candidate.title === 'peerd · Editor recovery') ?? null;
+        }, { budgetMs: 30_000, pollMs: 100 });
+        if (!target) throw new Error('The created App did not render');
+        page = await attach(target.webSocketDebuggerUrl);
+        await page.send('Page.enable');
+        await page.send('Page.bringToFront');
+        await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: directory });
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+        const appId = new URL(target.url).hash.slice(1).split('?')[0];
+        const firstData = await waitFor(() => evalIn(page, `(async () => {
+          const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+          return opfsHelpers(['peerd-apps', ${JSON.stringify(appId)}]).read('data/first.json').catch(() => null);
+        })()`, true), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('the first peerd.data.set creates a real absent OPFS path', firstData === '{"saved":true}', firstData);
+        await evalIn(page, `document.getElementById('mode-toggle').click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('#editor-panel:not([hidden]) .cm-content')`),
+          { budgetMs: 10_000, pollMs: 100 });
+        await evalIn(page, `(() => {
+          const original = window.prompt;
+          window.prompt = () => 'notes.txt';
+          document.querySelector('.pe-new').click();
+          window.prompt = original;
+        })()`);
+        const created = await waitFor(() => evalIn(page,
+          `document.querySelector('.pe-node.is-active')?.dataset.path === 'notes.txt'`),
+        { budgetMs: 10_000, pollMs: 100 });
+        rec.check('the real editor creates and opens a new file', !!created);
+        const draft = 'These edits exist only in the open draft.\nKeep every character: café ✓';
+        await evalIn(page, `(async () => {
+          const browser = (await import('/shared/browser-api.js')).default;
+          const original = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__editorWriteAttempts = 0;
+          globalThis.__editorDeleteAttempts = 0;
+          browser.runtime.sendMessage = (message, ...args) => {
+            if (message?.type === 'app/editor-delete') globalThis.__editorDeleteAttempts += 1;
+            if (message?.type === 'app/editor-write') {
+              globalThis.__editorWriteAttempts += 1;
+              return Promise.resolve({ ok: false, outcomeKnown: false, error: 'save receipt lost' });
+            }
+            return original(message, ...args);
+          };
+          document.querySelector('.cm-content').focus();
+        })()`, true);
+        await page.send('Input.insertText', { text: draft });
+        const notice = await waitFor(() => evalIn(page, `(() => {
+          const status = document.getElementById('app-save-status');
+          return status && !status.hidden ? status.textContent : null;
+        })()`), { budgetMs: 5_000, pollMs: 100 });
+        rec.check('unknown save offers a draft download before reopening',
+          notice?.includes('Download edits') && notice.includes('Download a copy before reopening'), notice);
+        await evalIn(page, `(async () => {
+          document.getElementById('mode-toggle').click();
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const original = window.confirm;
+          window.confirm = () => true;
+          document.querySelector('.pe-node.is-active').focus();
+          document.querySelector('.pe-delete').click();
+          window.confirm = original;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        })()`, true);
+        rec.check('View and Delete cannot hide recovery or replay an uncertain save',
+          await evalIn(page, `document.getElementById('app-save-retry').textContent === 'Download edits'
+            && document.getElementById('boot').classList.contains('is-hidden')
+            && globalThis.__editorDeleteAttempts === 0 && globalThis.__editorWriteAttempts === 1`));
+        await rec.shotPage('unknown-save', page);
+        await evalIn(page, `document.getElementById('app-save-retry').click()`);
+        const downloaded = await waitFor(() => readFile(join(directory, 'notes.txt'), 'utf8').catch(() => null),
+          { budgetMs: 10_000, pollMs: 100 });
+        rec.check('the recovery button downloads the exact unsaved draft', downloaded === draft, downloaded);
+        await ctx.page.send('Page.bringToFront');
+        await evalIn(page, `(async () => {
+          window.dispatchEvent(new PageTransitionEvent('pagehide'));
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        })()`, true);
+        const after = await evalIn(page, `(async () => {
+          const { EditorView } = await import('/vendor/codemirror/cm.js');
+          const view = EditorView.findFromDOM(document.querySelector('.cm-editor'));
+          const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+          const event = new Event('beforeunload', { cancelable: true });
+          window.dispatchEvent(event);
+          return {
+            draft: view.state.doc.toString(),
+            saved: await opfsHelpers(['peerd-apps', ${JSON.stringify(appId)}]).read('notes.txt'),
+            attempts: globalThis.__editorWriteAttempts,
+            guard: event.defaultPrevented,
+            url: location.href,
+            noticeVisible: !document.getElementById('app-save-status').hidden,
+          };
+        })()`, true);
+        rec.check('download and subsequent suspension preserve the dirty buffer without retry or reload',
+          after?.draft === draft && after.saved === '' && after.attempts === 1
+            && after.guard === true && after.url === target.url && after.noticeVisible === true,
+          JSON.stringify(after));
+        await page.send('Page.bringToFront');
+        await rec.shotPage('draft-preserved', page);
+      } finally {
+        try { await page?.send('Page.setDownloadBehavior', { behavior: 'default' }); } catch {}
+        try { page?.close(); } catch {}
+        await rm(directory, { recursive: true, force: true });
+      }
     },
   },
   {

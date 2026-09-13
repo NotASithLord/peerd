@@ -557,19 +557,25 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       deps.keyedOriginAuthority?.has(origin) ?? keyedOrigins.has(origin),
     getLearned: () => learnedOrigins.snapshot(),
   });
+  /** @type {(sessions:any)=>void} */
+  let bindLifecycleSessions;
+  const lifecycleSessions = new Promise((resolve) => { bindLifecycleSessions = resolve; });
+  const resolveLifecycleSession = async (/** @type {string} */ sessionId) => {
+    // why: recovery may run before the controller projects its tool surface.
+    const sessions = await lifecycleSessions;
+    let current = sessionId;
+    for (let hops = 0; hops < 8; hops += 1) {
+      const record = await sessions.get(current).catch(() => null);
+      if (!record?.parentSessionId) break;
+      current = record.parentSessionId;
+    }
+    return current;
+  };
   const lifecycleBoot = makeLifecycleBoot({
     storage: deps.kv,
     appendAudit: (entry) => deps.auditLog.append({ type: entry.event, details: entry }),
     notify: (sessionId, text) => deps.postChatNote(text, null, sessionId),
-    resolveNoticeSession: async (sessionId) => {
-      let current = sessionId;
-      for (let hops = 0; hops < 8; hops += 1) {
-        const record = await live?.shared.sessions.get(current).catch(() => null);
-        if (!record?.parentSessionId) break;
-        current = record.parentSessionId;
-      }
-      return current;
-    },
+    resolveNoticeSession: resolveLifecycleSession,
     nonce: () => crypto.randomUUID(),
   });
   /** @type {ReturnType<typeof makeDispatchTracker> | ReturnType<typeof makeFailClosedTracker> | null} */
@@ -580,15 +586,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       generationId: () => generation.id,
       retryClassFor: retryClassForTool,
       classifyFailure,
-      resolveOwnerSessionId: async (sessionId) => {
-        let current = sessionId;
-        for (let hops = 0; hops < 8; hops += 1) {
-          const record = await live?.shared.sessions.get(current).catch(() => null);
-          if (!record?.parentSessionId) break;
-          current = record.parentSessionId;
-        }
-        return current;
-      },
+      resolveOwnerSessionId: resolveLifecycleSession,
     });
   }).catch((cause) => {
     lifecycleTracker = makeFailClosedTracker({
@@ -2208,6 +2206,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   };
 
   const makeActorRuntime = async (/** @type {Record<string,any>} */ shared) => {
+    bindLifecycleSessions(shared.sessions);
     const allToolDescriptors = await projectToolDescriptors({ surface: 'all' });
     const toolDescriptorsByName = new Map(allToolDescriptors.map((tool) => [tool.name, tool]));
     const baseActorIsolation = actorIsolationCapability({

@@ -65,6 +65,7 @@ import {
   shapeModelCall,
 } from '/shared/model-context-snapshot.js';
 import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
+import { TRANSCRIPT_CHUNK_CHARS, TRANSCRIPT_PAGE_LIMIT } from '/shared/session-transcript.js';
 
 const isRecord = (/** @type {unknown} */ value) => value !== null
   && typeof value === 'object' && !Array.isArray(value);
@@ -334,14 +335,42 @@ const runControllerTurnWith = async (payload, options) => {
     }
     throw lastError;
   };
+  /** @type {any} */
+  let sessionSnapshot = null;
+  const readSession = async (/** @type {any} */ head, /** @type {string} */ sessionId) => {
+    const chunks = [];
+    let next = head;
+    for (let page = 0; page < TRANSCRIPT_PAGE_LIMIT; page += 1) {
+      if (!isRecord(next) || next.cursor !== head.cursor || next.page !== page
+          || typeof next.chunk !== 'string' || next.chunk.length > TRANSCRIPT_CHUNK_CHARS
+          || typeof next.done !== 'boolean') throw new TypeError('session transcript page invalid');
+      chunks.push(next.chunk);
+      if (next.done) {
+        const snapshot = parseJson(chunks.join(''), 'session transcript');
+        if (!isRecord(snapshot?.session) || snapshot.session.sessionId !== sessionId
+            || !Array.isArray(snapshot.session.messages)
+            || (snapshot.offset !== 0 && snapshot.offset !== sessionSnapshot?.messages.length)) {
+          throw new TypeError('session transcript snapshot invalid');
+        }
+        sessionSnapshot = {
+          ...snapshot.session,
+          messages: snapshot.offset === 0 ? snapshot.session.messages
+            : [...sessionSnapshot.messages, ...snapshot.session.messages],
+        };
+        return sessionSnapshot;
+      }
+      next = await rpc('turn.session.read', { sessionId, cursor: head.cursor, page: page + 1 });
+    }
+    throw new RangeError('session transcript budget exhausted');
+  };
   const sessions = {
-    get: async (/** @type {string} */ sessionId) => parseJson(
-      await rpc('turn.session.get', { sessionId }), 'session',
+    get: async (/** @type {string} */ sessionId) => readSession(
+      await rpc('turn.session.get', { sessionId }), sessionId,
     ),
     appendMessage: async (/** @type {string} */ sessionId, /** @type {unknown} */ message) =>
-      parseJson(await rpc('turn.session.append', {
+      readSession(await rpc('turn.session.append', {
         sessionId, messageJson: JSON.stringify(message),
-      }), 'session'),
+      }), sessionId),
     updateAssistantMessage: (
       /** @type {string} */ sessionId,
       /** @type {string} */ messageId,
@@ -911,11 +940,18 @@ const runControllerTurnWith = async (payload, options) => {
         abortFinalized = true;
         return result;
       },
-      enrichTrimSummary: (/** @type {unknown} */ request) => {
-        trackAdvisory(rpc('turn.trim.enrich', { request })).catch(() => {});
+      enrichTrimSummary: (/** @type {any} */ request) => {
+        trackAdvisory(rpc('turn.trim.enrich', { request: {
+          sessionId: request.sessionId, state: request.state,
+          droppedStart: request.state.covered - request.newlyDropped.length,
+        } })).catch(() => {});
       },
     })) {
-      try { await rpc('turn.event', { eventJson: JSON.stringify(event) }); }
+      // why: state already came from host-owned persistence. Echoing the full
+      // archive back would exceed the same frame quota even after paged reads.
+      const wireEvent = event.type === 'state'
+        ? { type: 'state', sessionId: input.sessionId } : event;
+      try { await rpc('turn.event', { eventJson: JSON.stringify(wireEvent) }); }
       catch (cause) {
         if (!options.signal.aborted) throw cause;
       }

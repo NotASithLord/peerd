@@ -44,6 +44,7 @@ const repositoryError = (/** @type {string} */ message, /** @type {string} */ co
   /** @type {boolean} */ outcomeKnown, /** @type {boolean|undefined} */ dispatched) => {
   const error = /** @type {RepositoryError} */ (new Error(message));
   Object.assign(error, { code, outcomeKnown });
+  if (code === 'repository-path-not-found') error.name = 'NotFoundError';
   if (dispatched !== undefined) error.repositoryHostDispatched = dispatched;
   return error;
 };
@@ -200,12 +201,13 @@ export const makeRepositoryFacade = (invoke, coordinate) => {
     service[name] = (/** @type {string} */ id, /** @type {any[]} */ ...args) =>
       invoke(method, [appRef(id), ...args]);
   }
-  return /** @type {ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>} */ (
+  return (/** @type {ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>
+    & {readonly appFiles:ReturnType<typeof makeAppFilesFacade>}} */ (
     /** @type {unknown} */ (Object.freeze({
       ...service,
       appFiles: makeAppFilesFacade(service),
     }))
-  );
+  ));
 };
 
 /** @param {()=>Promise<ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>>} loader
@@ -233,7 +235,7 @@ export const createDeferredRepositoryClient = (loader, { loadTimeoutMs = 1e4 } =
 };
 
 /** @param {any} deps
- * @returns {ReturnType<typeof import('../peerd-engine/repository.js').createRepositoryService>} */
+ * @returns {ReturnType<typeof makeRepositoryFacade>} */
 export const createOffscreenRepositoryClient = ({
   withHost,
   retireHost = async () => {},

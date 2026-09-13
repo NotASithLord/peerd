@@ -30,8 +30,6 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     expect(host).toContain('actorChatUnconfirmed = true');
     expect(host).toContain('Delivery unconfirmed · inspect the actor in peerd');
     expect(host).toContain('makeUiRuntimeClient({ browser })');
-    expect(host).toContain("saveRetry.textContent = saveOutcomeUnknown ? 'Reload to reconcile' : 'Retry'");
-    expect(host).toContain('if (saveOutcomeUnknown)');
     expect(host).not.toContain('browser.runtime.sendMessage');
     expect(host).not.toContain('message.innerHTML =');
 

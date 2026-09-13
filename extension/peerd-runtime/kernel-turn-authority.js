@@ -57,7 +57,7 @@ export { makePrewalkController } from './loop/prewalk-controller.js';
 export { makeTurnAuthorityDriver } from './loop/turn-authority-driver.js';
 export { assembleDebugBundle, childSessionIdsOf } from './observability/debug-bundle.js';
 export { classifyFailure } from './observability/failure-classify.js';
-export { resolveRuntimeCapabilities } from './runtime-capabilities.js';
+export { resolveRuntimeCapabilities } from '/shared/runtime-capability-hosts.js';
 export { createSiteClientStore } from './site-clients/store.js';
 export {
   buildClientWriteProposal,

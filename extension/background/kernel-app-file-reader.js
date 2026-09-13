@@ -82,7 +82,7 @@ export const makeKernelAppEditorRoutes = ({
         try { prior = await files.readBytes(checked.id, path); }
         catch (cause) {
           const missing = /** @type {any} */ (cause)?.name === 'NotFoundError';
-          if (!(remove && runtimeData && missing) && !missing) throw cause;
+          if (!missing) throw cause;
         }
         if (remove && prior === undefined) return;
         if (remove) await files.deleteFile(checked.id, path);

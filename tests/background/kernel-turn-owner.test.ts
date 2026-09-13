@@ -6,6 +6,7 @@ import { createKernelTurnOwner } from '../../extension/background/kernel-turn-ow
 import { createControllerTurnRuntime } from '../../extension/offscreen/controller-turn-runtime.js';
 import { makeAgentSendCustody } from '../../extension/peerd-egress/background.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
+import { createSessionTurnStore } from '../../extension/shared/session-turn-store.js';
 
 const until = async (predicate: () => boolean) => {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -27,31 +28,31 @@ const makeCache = () => {
 };
 
 const makeSessions = () => {
-  let record: any = {
+  const record: any = {
     sessionId: 'root', provider: 'anthropic', model: 'claude-sonnet-4-6',
-    depth: 0, messages: [],
+    depth: 0, messagesV2: true, msgIndex: [],
   };
-  const clone = () => structuredClone(record);
+  const tables = new Map<string, Map<string, any>>([
+    ['sessions', new Map([['root', record]])], ['session_messages', new Map()],
+  ]);
+  const store = createSessionTurnStore({
+    idb: {
+      get: async (table, id) => structuredClone(tables.get(table)?.get(id)),
+      put: async (table, value) => {
+        tables.get(table)!.set(value.id ?? value.sessionId, structuredClone(value));
+      },
+    },
+    notFound: (id) => new Error(`missing:${id}`),
+  });
+  const snapshot = () => {
+    const current = tables.get('sessions')!.get('root');
+    return structuredClone(store.records.present(current,
+      current.msgIndex.map((id: string) => tables.get('session_messages')!.get(id).message)));
+  };
   return {
-    get: async (id: string) => id === 'root' ? clone() : null,
-    list: async () => [clone()],
-    appendMessage: async (_id: string, message: any) => {
-      record = { ...record, messages: [...record.messages, structuredClone(message)] };
-      return clone();
-    },
-    updateAssistantMessage: async (_id: string, messageId: string, patch: any) => {
-      record = {
-        ...record,
-        messages: record.messages.map((message: any) => message.id === messageId
-          ? { ...message, ...structuredClone(patch) } : message),
-      };
-      return clone();
-    },
-    setTrimSummary: async (_id: string, state: any) => {
-      record = { ...record, trimSummary: structuredClone(state) };
-      return clone();
-    },
-    archive: async () => {}, update: async () => {}, snapshot: clone,
+    ...store,
+    list: async () => [snapshot()],
+    archive: async () => {}, update: async () => {}, snapshot,
   };
 };
 

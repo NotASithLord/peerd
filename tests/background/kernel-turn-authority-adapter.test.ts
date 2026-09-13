@@ -17,7 +17,8 @@ import { composeTurn } from '../../extension/offscreen/controller-compose-runtim
 import { browserProbeResult, TEST_DOCUMENT_ID } from '../helpers/browser-scripting.ts';
 import { ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
 import { ENGINE_LIVENESS_KEY } from '../../extension/peerd-runtime/lifecycle/engine-liveness.js';
-import { PENDING_NOTICES_KEY } from '../../extension/peerd-runtime/lifecycle/boot.js';
+import { makeLifecycleBoot, PENDING_NOTICES_KEY } from '../../extension/peerd-runtime/lifecycle/boot.js';
+import { OPERATION_STATES } from '../../extension/peerd-runtime/lifecycle/operation-state.js';
 
 const event = () => {
   const listeners = new Set<(...args: any[]) => void>();
@@ -852,6 +853,63 @@ describe('kernel turn authority adapter', () => {
     expect(() => createKernelTurnAuthorityAdapter({})).toThrow(
       'kernel-turn-live-config-invalid',
     );
+  });
+
+  test('startup recovery reaches the root chat while controller tool projection is still pending', async () => {
+    const values = new Map<string, any>();
+    const kv = {
+      get: async (key: string) => structuredClone(values.get(key)),
+      set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
+    };
+    const prior = makeLifecycleBoot({ storage: kv, nonce: () => 'prior-generation' });
+    const { generation } = await prior.init();
+    await prior.operationLog.begin({
+      operationId: 'click-in-flight', sessionId: 'actor-child', ownerSessionId: 'root-chat',
+      toolName: 'turn.page.click', retryClass: 'E', generationId: generation.id,
+    });
+    await prior.operationLog.transition('click-in-flight', OPERATION_STATES.RUNNING);
+    await prior.operationLog.markDispatched('click-in-flight');
+    const readSessions: string[] = [];
+    const sessions = {
+      get: async (id: string) => {
+        readSessions.push(id);
+        return { sessionId: id, ...(id === 'actor-child' ? { parentSessionId: 'root-chat' } : {}) };
+      },
+    };
+    let rejectProjection!: (reason: Error) => void;
+    let projectionStarted = false;
+    const projection = new Promise<never>((_resolve, reject) => { rejectProjection = reject; });
+    const notifications: { text: string, sessionId: string }[] = [];
+    const adapter = createKernelTurnAuthorityAdapter({
+      engine: {}, browser: { runtime: { getURL: (path: string) => `chrome-extension://test/${path}` }, scripting: {} },
+      vault: {}, settingsStore: { get: () => ({}) },
+      seams: { projectTurnTools: () => { projectionStarted = true; return projection; } },
+      confirmation: {}, denylist: {}, scriptRuns: {}, contextSnapshots: {},
+      providerEgress: {}, resolveProviderSelection: async () => ({}), closePanel: async () => {},
+      kv, sessionCache: { sessionGet: async () => null, sessionSet: async () => {} },
+      auditLog: { append: async () => {} }, siteCapture: {},
+      featureHost: { ensureOffscreen: async () => {}, runtime: {} }, idb: {},
+      postChatNote: (text: string, _unused: unknown, sessionId: string) => notifications.push({ text, sessionId }),
+    });
+    // Recovery must also wait if actor setup itself has not received sessions yet.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(notifications).toEqual([]);
+    const runtime = adapter.makeActorRuntime({ sessions });
+    const failedRuntime = runtime.catch((cause) => cause);
+    try {
+      for (let i = 0; i < 100 && !notifications.length; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(projectionStarted).toBe(true);
+      expect(readSessions).toEqual(['actor-child', 'root-chat']);
+      expect(notifications.map((note) => note.sessionId)).toEqual(['root-chat']);
+      expect(Object.keys(await kv.get(PENDING_NOTICES_KEY))).toEqual(['root-chat']);
+      expect((await kv.get(PENDING_NOTICES_KEY))['root-chat'][0].recoveryRecord)
+        .toMatchObject({ verificationRequired: true, recoveryState: 'outcome_unknown' });
+    } finally {
+      rejectProjection(new Error('projection stopped'));
+      expect(await failedRuntime).toMatchObject({ message: 'projection stopped' });
+    }
   });
 
   test('routes Firefox heartbeat loss into the direct actor host and durable isolation state', async () => {

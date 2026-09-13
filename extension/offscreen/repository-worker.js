@@ -67,7 +67,11 @@ const runRepositoryOperation = async (message, service, signal) => {
   } catch (cause) {
     return {
       ok: false,
-      code: signal.aborted ? 'repository-call-aborted' : 'repository-call-failed',
+      // why: a missing App path permits creation or idempotent deletion; the
+      // private port must retain that finite identity without forwarding errors.
+      code: signal.aborted ? 'repository-call-aborted'
+        : /** @type {{name?:unknown}} */ (cause)?.name === 'NotFoundError'
+          ? 'repository-path-not-found' : 'repository-call-failed',
       error: cause instanceof Error ? cause.message : String(cause),
       outcomeKnown: !repositoryMethodIsMutating(method),
     };

@@ -12,6 +12,35 @@ const makeGrant = (owner: object, signal?: AbortSignal) => ({
 });
 
 describe('fixed provider egress authority', () => {
+  test('a one-completion grant cannot fund multiple choices or ambiguous output limits', async () => {
+    let fetches = 0;
+    let secrets = 0;
+    const authority = createProviderEgressAuthority({
+      safeFetch: async () => { fetches += 1; return new Response('done'); },
+      vault: { getSecret: async () => { secrets += 1; return 'fixture-key'; } },
+      settingsStore: { get: () => ({}) },
+    });
+    const grant = { ...makeGrant({}), permits: () => true };
+    for (const providerId of ['openai', 'openrouter', 'glm', 'ollama', 'anthropic']) {
+      const nativeBody = { model: 'test', stream: true, messages: [], max_completion_tokens: 256 };
+      for (const extra of [{ n: 8 }, { n: 0 }, { n: '1' }, { n: null }, { max_tokens: 1 }]) {
+        expect(await authority.openInference({
+          providerId, modelId: 'test', nativeBody: { ...nativeBody, ...extra },
+        }, grant)).toMatchObject({ ok: false, code: 'model-egress-output-limit-denied' });
+      }
+    }
+    expect(fetches).toBe(0);
+    expect(secrets).toBe(0);
+    for (const extra of [{}, { n: 1 }]) {
+      expect(await authority.openInference({
+        providerId: 'openai', modelId: 'test',
+        nativeBody: { model: 'test', stream: true, messages: [], max_completion_tokens: 256, ...extra },
+      }, grant)).toMatchObject({ ok: true });
+    }
+    expect(fetches).toBe(2);
+    await authority.closeOwner(grant.owner);
+  });
+
   test('pins destination, credential and transport while redeeming only provider media fields', async () => {
     const calls: Array<{ resource: string; init?: RequestInit }> = [];
     const authority = createProviderEgressAuthority({

@@ -1,8 +1,59 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelSemanticControl } from '../../extension/background/kernel-semantic-control.js';
 import { SEMANTIC_DISPATCH_PROTOCOL } from '../../extension/shared/semantic-dispatch-contract.js';
+import { createKernelSemanticAuthority } from '../../extension/background/kernel-semantic-authority.js';
+import { createControllerKernelQuota } from '../../extension/shared/controller-kernel-quota.js';
 
 describe('kernel semantic control', () => {
+  test('binds reverse App entry updates to the host request and its manifest', async () => {
+    const writes: Array<{ appId: string; entryFile: string }> = [];
+    const vault = { isLocked: () => true };
+    const authority = createKernelSemanticAuthority({
+      vault, ready: Promise.resolve(), memory: { routes: {} }, contacts: {},
+      appCatalog: { setEntryFile: async (appId: string, entryFile: string) => {
+        writes.push({ appId, entryFile });
+        return { id: appId, entryFile };
+      } },
+    });
+    const manifest = (entry: string) => JSON.stringify({
+      schema: 1, kind: 'app', entry, agent: { kind: 'bound-app' }, capabilities: [],
+    });
+    const attempt = async (appId: string, entryFile: string, manifestText: string,
+      paths = ['index.html', 'next.html']) => {
+      const control = createKernelSemanticControl({
+        vault, authority, isHomeSender: () => true,
+        callSemantic: async (outerPayload: any) => {
+          const grant = control.authorize(outerPayload);
+          const quota = createControllerKernelQuota('semantic.dispatch', outerPayload);
+          const payload = { appId, entryFile };
+          expect(quota.admit('semantic.apps.set-entry', payload).ok).toBe(true);
+          return control.handleKernelCall('semantic.apps.set-entry', payload, {
+            capability: 'semantic.dispatch', outerPayload, authority: grant,
+          });
+        },
+      });
+      return control.dispatchProjected('app/get-meta', {
+        app: { id: 'app-a', entryFile: 'index.html' }, manifestText, paths,
+      }, 'app');
+    };
+    expect(await attempt('app-b', 'next.html', manifest('next.html')))
+      .toMatchObject({ ok: false, code: 'semantic-app-target-denied', outcomeKnown: true });
+    for (const [entry, declared, paths] of [
+      ['index.html', 'next.html', ['index.html', 'next.html']],
+      ['../foreign.html', '../foreign.html', ['../foreign.html']],
+      ['next.html', 'next.html', ['index.html']],
+    ] as const) {
+      expect(await attempt('app-a', entry, manifest(declared), [...paths]))
+        .toMatchObject({ ok: false, code: 'semantic-app-entry-denied', outcomeKnown: true });
+    }
+    expect(await attempt('app-a', 'next.html', 'invalid json'))
+      .toMatchObject({ ok: false, code: 'semantic-app-entry-denied' });
+    expect(writes).toHaveLength(0);
+    expect(await attempt('app-a', 'next.html', manifest('next.html')))
+      .toMatchObject({ ok: true, value: { id: 'app-a', entryFile: 'next.html' } });
+    expect(writes).toEqual([{ appId: 'app-a', entryFile: 'next.html' }]);
+  });
+
   test('binds one route grant to the exact dispatched object', async () => {
     let sent: any;
     const control = createKernelSemanticControl({

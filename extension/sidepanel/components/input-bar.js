@@ -454,14 +454,12 @@ export const InputBar = {
             } else {
               saveDraft(sid, text);
             }
-            if (unresolved) saveUnconfirmed(ui._sid ?? sid, unresolved);
           }
         } catch {
           if (ui._sid === sid) ui.value = text;
           else saveDraft(sid, text);
           ui.sendError = 'Peerd could not confirm whether the goal started. Check this chat before sending it again; your goal remains in the composer.';
           if (ui._sid === sid) ui.unconfirmedSend = pending;
-          saveUnconfirmed(ui._sid ?? sid, pending);
         } finally {
           ui.busy = false;
           m.redraw();

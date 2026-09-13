@@ -21,6 +21,13 @@ const makeSessions = () => {
       record = { ...record, messages: [...record.messages, clone(message)] };
       return clone(record);
     },
+    async appendMessageSince(sessionId: string, message: any, cursor: { length: number }) {
+      const session = await this.appendMessage(sessionId, message);
+      return {
+        offset: cursor.length, persisted: session.messages.find((row: any) => row.id === message.id),
+        session: { ...session, messages: session.messages.slice(cursor.length) },
+      };
+    },
     updateAssistantMessage: async (sessionId: string, messageId: string, patch: any) => {
       if (sessionId !== record.sessionId) throw new Error('session not found');
       const index = record.messages.findIndex((message: any) => message.id === messageId);

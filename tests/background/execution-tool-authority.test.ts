@@ -1,11 +1,68 @@
 import { describe, expect, test } from 'bun:test';
 import { createExecutionToolAuthority } from '../../extension/background/execution-tool-authority.js';
+import {
+  snapshotControllerTurnAuthorityBinding, projectControllerTurnAuthorityClass,
+  createReadOnlyOperationGrant,
+} from '../../extension/background/controller-turn-authority-scope.js';
 
 const planFor = (kind: 'notebook'|'pod') => ({
   kind, name: 'Work', gitUrl: 'https://github.com/example/work.git',
 });
 
 describe('exact execution creation rollback', () => {
+  test.each(['notebook', 'pod', 'app'] as const)(
+    '%s Git creation retains live Act authority through the exact projection',
+    async (kind) => {
+      for (const permissionSource of ['snapshot', 'live', 'revoked'] as const) {
+        let mode = 'act';
+        let clones = 0;
+        let confirmations = 0;
+        const deleted: string[] = [];
+        const record = { id: `${kind}-1`, name: 'Work' };
+        const registry = {
+          create: async () => record,
+          delete: async (id: string) => { deleted.push(id); return true; },
+          setDefaultForSession: async () => {},
+        };
+        const tracker = { ensureTab: async () => {} };
+        const operation = `turn.execution.create-${kind}`;
+        const ctx = projectControllerTurnAuthorityClass(snapshotControllerTurnAuthorityBinding({
+          session: { sessionId: 'chat-1' }, permission: { mode },
+          ...(permissionSource !== 'snapshot'
+            ? { readAuthorityPermission: async () => ({ mode }) } : {}),
+          confirm: async () => {
+            confirmations += 1;
+            if (permissionSource === 'revoked') mode = 'plan';
+            return 'yes_once';
+          },
+          repositories: {
+            clone: async () => { clones += 1; return {}; },
+            destroy: async () => {},
+          },
+          jsRegistry: registry, podRegistry: registry,
+          jsTabTracker: tracker, podTabTracker: tracker,
+          appClient: {
+            createFromGit: async () => { clones += 1; return { record }; },
+          },
+        }, {
+          sessionId: 'chat-1',
+          operationGrant: createReadOnlyOperationGrant(new Set([operation])),
+          abortSignal: new AbortController().signal,
+        }), 'execution');
+        const plan = { kind, gitUrl: 'https://github.com/example/work.git' };
+        const authority = createExecutionToolAuthority({ binding: { operation, args: { plan } }, ctx });
+        const result = kind === 'app' ? await authority.createApp(plan)
+          : kind === 'pod' ? await authority.createPod(plan) : await authority.createNotebook(plan);
+        const revoked = permissionSource === 'revoked';
+        expect(result).toMatchObject(revoked
+          ? { ok: false, error: 'plan_mode_refused' } : { ok: true, record });
+        expect(confirmations).toBe(1);
+        expect(clones).toBe(revoked ? 0 : 1);
+        expect(deleted).toEqual(revoked && kind !== 'app' ? [record.id] : []);
+      }
+    },
+  );
+
   test.each(['notebook', 'pod'] as const)(
     'a rejected %s clone confirmation removes the provisional engine and repository',
     async (kind) => {

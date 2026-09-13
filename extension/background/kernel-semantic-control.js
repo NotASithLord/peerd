@@ -51,7 +51,9 @@ export const createKernelSemanticControl = ({
       message: { ...message, type: route, ...(kernelContext ? { kernelContext } : {}) },
     };
     grants.set(payload, Object.freeze({
-      ownerId: 'peerd-authority-kernel', sessionId: null, instanceId: null,
+      ownerId: 'peerd-authority-kernel', sessionId: null,
+      instanceId: route === 'app/get-meta' ? message.app?.id ?? null
+        : route.startsWith('apps/') ? message.appId ?? null : null,
       origin: null, target: `semantic:${route}:${senderClass}`,
       replayClass: READS.has(route) ? 'A' : 'E',
     }));

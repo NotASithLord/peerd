@@ -191,6 +191,7 @@ describe('cold entry graphs', () => {
       'peerd-runtime/controller-tool-projection.js',
       'peerd-runtime/controller-actor-tools.js',
       'peerd-runtime/controller-schedule-tools.js',
+      'peerd-runtime/runtime-capabilities.js',
       'peerd-provider/adapters/anthropic.js',
     ]) {
       expect(measured.modulesSet.has(forbidden), `native kernel imports ${forbidden}`).toBe(false);

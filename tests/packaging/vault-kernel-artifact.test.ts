@@ -3,13 +3,14 @@ import {
   cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { REPO_ROOT } from '../../packaging/lib.ts';
 import { packageArtifact } from '../../packaging/package.ts';
 import { FIREFOX_BACKGROUND_ENTRY } from '../../packaging/gen-manifest.ts';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import {
   assertVaultKernelArtifactShape,
+  assertVaultKernelGraph,
   vaultKernelManifest,
 } from '../../scripts/cdp/vault-kernel-artifact.mjs';
 
@@ -63,10 +64,6 @@ describe('test-only vault kernel package target', () => {
       join(REPO_ROOT, 'scripts/cdp/vault-kernel-artifact.mjs'), 'utf8',
     );
     expect(source).toContain("`vault-kernel-${channel}-${browser}`");
-    expect(source).toContain("path.startsWith('offscreen/')");
-    expect(source).toContain("path.includes('controller-turn')");
-    expect(source).toContain("path.includes('agent-loop')");
-    expect(source).toContain("path.includes('semantic-route-host')");
     expect(source).toContain("`peerd-vault-kernel-${channel}-${browser}.${extension}`");
     expect(source).toContain("verify: channel === 'store', minify: false");
     expect(source).toContain('minifyColdArtifactModules(staging, browser, channel)');
@@ -74,6 +71,22 @@ describe('test-only vault kernel package target', () => {
     expect(source).toContain('dwebEnabled: dwebEnabledForTarget(channel, browser), channel, browser');
     expect(source).toContain('writeControllerBuildIdentity(staging)');
     expect(source).not.toContain('generateManifest(');
+  });
+
+  test('diagnostic guard accepts actual native graphs but rejects semantic implementations', async () => {
+    const root = join(REPO_ROOT, 'extension');
+    for (const entry of ['background/vault-kernel-chrome.js', FIREFOX_BACKGROUND_ENTRY]) {
+      const graph = await collectStaticModuleGraph(root, join(root, entry));
+      const paths = [...graph].map((path) => relative(root, path).split('\\').join('/'));
+      expect(() => assertVaultKernelGraph(paths)).not.toThrow();
+      for (const semantic of [
+        'offscreen/controller-turn-runtime.js', 'offscreen/semantic-route-host.js',
+        'offscreen/actor-worker.js', 'peerd-runtime/loop/agent-loop.js',
+      ]) {
+        expect(() => assertVaultKernelGraph([...paths, semantic]))
+          .toThrow('crossed semantic host boundary');
+      }
+    }
   });
 
   test('kernel timing keeps the worker-origin reply marker', () => {

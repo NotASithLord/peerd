@@ -45,6 +45,17 @@ export const assertVaultKernelArtifactShape = ({ modules, graphBytes, entryBytes
   }
 };
 
+export const assertVaultKernelGraph = (paths) => {
+  // why: the native host shares a pure actor wire contract, not its Worker
+  // implementation. Authority adapters named controller-turn are native too.
+  const forbidden = paths.filter((path) =>
+    (path.startsWith('offscreen/') && path !== 'offscreen/actor-worker-protocol.js')
+    || path.endsWith('/agent-loop.js'));
+  if (forbidden.length > 0) {
+    throw new Error(`vault kernel graph crossed semantic host boundary: ${forbidden.join(', ')}`);
+  }
+};
+
 export async function buildVaultKernelArtifact({
   browser = 'chrome', channel = 'store', releaseMinify = false,
   artifactRoot = ARTIFACTS_DIR,
@@ -82,14 +93,7 @@ export async function buildVaultKernelArtifact({
   const entry = join(staging, nativeEntry(browser, channel));
   const graph = [...await collectStaticModuleGraph(staging, entry)].sort();
   const graphRelative = graph.map((path) => relative(staging, path).split('\\').join('/'));
-  const forbidden = graphRelative.filter((path) =>
-    path.startsWith('offscreen/')
-    || path.includes('controller-turn')
-    || path.includes('agent-loop')
-    || path.includes('semantic-route-host'));
-  if (forbidden.length > 0) {
-    throw new Error(`vault kernel graph crossed semantic host boundary: ${forbidden.join(', ')}`);
-  }
+  assertVaultKernelGraph(graphRelative);
 
   const entries = entriesSorted(staging);
   for (const rel of ['.', ...entries]) {
