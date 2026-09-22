@@ -40,7 +40,7 @@ describe('runtime Port receiver exclusivity', () => {
     const offenders = filesUnder(EXTENSION_DIR)
       .filter((path) => path.endsWith('.js') || path.endsWith('.mjs'))
       .filter((path) => /\bonConnect\b/.test(stripComments(readFileSync(path, 'utf8'))));
-    expect(offenders.map((path) => relative(EXTENSION_DIR, path))).toEqual([
+    expect(offenders.map((path) => relative(EXTENSION_DIR, path)).sort()).toEqual([
       'background/cold-kernel-inventory.js',
       'background/vault-kernel.js',
     ]);

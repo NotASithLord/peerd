@@ -54,10 +54,10 @@ const makeStorage = () => {
 };
 
 describe('sealed vault authority channel', () => {
-  test('offscreen offer carries the exact host lease', async () => {
+  test.each(['boot', 'setAutoLockMs'] as const)('%s policy survives closed and successor workers', async (configure) => {
     const storage = makeStorage();
-    const offers: any[] = [];
     let currentLease: any = vaultLease;
+    const offers: any[] = [];
     const client = makeVaultAuthorityClient({
       offscreen: true,
       offscreenUrl,
@@ -70,54 +70,50 @@ describe('sealed vault authority channel', () => {
         url: offscreenUrl,
         postMessage: (offer: any, ports: MessagePort[]) => {
           offers.push(offer);
+          expect(offer).toMatchObject({
+            type: 'peerd/vault-authority-channel', protocol: 1, lease: currentLease,
+          });
           void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
         },
       }],
     });
 
+    await client[configure](500);
+    expect(offers).toHaveLength(configure === 'boot' ? 1 : 0);
+    await expect(client.boot(-1)).rejects.toMatchObject({ code: 'vault-authority-arguments-invalid' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
     await expect(client.status()).resolves.toMatchObject({ initialized: false, locked: true });
     expect(offers).toHaveLength(1);
-    expect(offers[0]).toMatchObject({
-      type: 'peerd/vault-authority-channel', protocol: 1, lease: vaultLease,
-    });
-    currentLease = { ...vaultLease, leaseId: 'vault-lease-two', generation: 2 };
-    await client.status();
-    expect(offers).toHaveLength(2);
-    expect(offers[1].lease).toEqual(currentLease);
     client.close();
-  });
-
-  test('an unlocked vault resumes before the first call on a successor lease', async () => {
-    const storage = makeStorage();
-    let currentLease: any = vaultLease;
-    const client = makeVaultAuthorityClient({
-      offscreen: true,
-      offscreenUrl,
-      workerUrl,
-      kv: storage.kv,
-      idb: storage.idb,
-      sessionCache: storage.sessionCache,
-      withHost: async (operation) => operation(currentLease),
-      listWindowClients: async () => [{
-        url: offscreenUrl,
-        postMessage: (offer: any, ports: MessagePort[]) => {
-          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
-        },
-      }],
-    });
-
+    const locked = new Promise<void>((resolve) => client.subscribe((event) => {
+      if (event.type === 'locked') resolve();
+    }));
+    const prfOutput = new Uint8Array(32).fill(5);
     await client.initializeWithPrfOnly({
-      prfOutput: new Uint8Array(32).fill(5),
+      prfOutput,
       credentialId: new Uint8Array([1, 2, 3]),
       prfSalt: new Uint8Array(32).fill(6),
     });
     await client.setSecret('provider:test', 'survives-host-replacement');
     expect(client.isLocked()).toBe(false);
     expect(storage.session.has('vault.unlocked.v1')).toBe(true);
+    expect(storage.session.get('vault.unlocked.v1').autoLockMs).toBe(500);
 
     currentLease = { ...vaultLease, leaseId: 'vault-lease-successor', generation: 2 };
     await expect(client.getSecret('provider:test')).resolves.toBe('survives-host-replacement');
+    expect(offers).toHaveLength(3);
     await expect(client.status()).resolves.toMatchObject({ initialized: true, locked: false });
+    await locked;
+    expect(client.isLocked()).toBe(true);
+    await client.setAutoLockMs(0);
+    client.close();
+    await client.unlockWithPrf(prfOutput);
+    expect(storage.session.get('vault.unlocked.v1').autoLockMs).toBe(0);
+    currentLease = { ...vaultLease, leaseId: 'vault-lease-third', generation: 3 };
+    await expect(client.getSecret('provider:test')).resolves.toBe('survives-host-replacement');
+    await client.lock();
+    await client.unlockWithPrf(prfOutput);
+    expect(storage.session.get('vault.unlocked.v1').autoLockMs).toBe(0);
     client.close();
   });
 
@@ -159,13 +155,17 @@ describe('sealed vault authority channel', () => {
     holdSuccessor = true;
     const read = client.getSecret('provider:test');
     await Promise.resolve();
+    const policy = client.setAutoLockMs(120_000);
     const locking = client.lock('manual');
     releaseSuccessor();
 
     await expect(read).resolves.toBe('secret');
+    await policy;
     await expect(locking).resolves.toBeUndefined();
     await expect(client.status()).resolves.toMatchObject({ locked: true });
     expect(storage.session.has('vault.unlocked.v1')).toBe(false);
+    await client.unlockWithPrf(new Uint8Array(32).fill(5));
+    expect(storage.session.get('vault.unlocked.v1').autoLockMs).toBe(120_000);
     client.close();
   });
 
@@ -353,9 +353,7 @@ describe('sealed vault authority channel', () => {
       credentialId: new Uint8Array([1, 2, 3]),
       prfSalt: new Uint8Array(32).fill(6),
     });
-    // Bun's in-process MessageChannel needs one task turn after resolving a
-    // result handler before the same port can deliver a nested reverse call.
-    // A real second user action naturally has this separation.
+    // why: Bun needs a task turn before this port can deliver a nested call.
     await new Promise((resolve) => setTimeout(resolve, 0));
     storage.sessionCache.sessionDelete = async () => {
       throw new Error('session delete unavailable');
@@ -423,9 +421,7 @@ describe('sealed vault authority channel', () => {
       }
     });
     await client.lock('manual');
-    // The route that issued an explicit lock owns host retirement after the
-    // result settles. A premature subscriber callback would close this call's
-    // channel and make the promise reject instead.
+    // why: Only the route can retire this host after the lock reply settles.
     expect(explicitLockEvents).toEqual([]);
     expect(client.isLocked()).toBe(true);
     expect(storage.session.has('vault.unlocked.v1')).toBe(false);

@@ -305,7 +305,10 @@ const vaultReady = prepareVaultKernel({
     block: (blocked) => writeGuard.block(blocked),
   }),
   readSettings: () => settingsStore.load(),
-  setAutoLockMs: (/** @type {number} */ value) => { autoLockMs = value; },
+  setAutoLockMs: (/** @type {number} */ value) => {
+    autoLockMs = value;
+    return vault.setAutoLockMs(value);
+  },
   attemptResume: async () => {
     const indexed = await vaultPosture.loadForBoot();
     if (indexed?.initialized === false) return false;
@@ -547,7 +550,7 @@ const onKernelSettingsChanged = async (/** @type {Record<string,any>} */ patch) 
   }
   if (Object.hasOwn(patch, 'vaultAutoLockMs')) {
     autoLockMs = settingsStore.get().vaultAutoLockMs ?? DEFAULT_AUTO_LOCK_MS;
-    if (vault.isInitialized()) await vault.setAutoLockMs(autoLockMs);
+    await vault.setAutoLockMs(autoLockMs);
   }
   if (patch.voiceEnabled === false) await voiceCustody.teardown();
   if (Object.hasOwn(patch, 'autoUpdateEnabled')) {

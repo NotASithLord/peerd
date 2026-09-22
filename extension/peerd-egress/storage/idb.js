@@ -1,31 +1,9 @@
 // @ts-check
 
 const DB_NAME = 'peerd';
-const DB_VERSION = 14;
+const DB_VERSION = 13;
 const OPEN_TIMEOUT_MS = 8_000;
 const TX_TIMEOUT_MS = 15_000;
-const RETIRED_DATABASE_NAMES = Object.freeze([
-  'peerd-toolbox', 'peerd-run-cache', 'peerd-checkpoints',
-]);
-
-/**
- * Remove exact databases owned only by retired product surfaces. Failure is
- * intentionally non-fatal: an old extension page may still hold a connection
- * during update; the next service-worker boot retries.
- * @param {IDBFactory | undefined} [idbFactory]
- * @returns {Promise<void>}
- */
-export const cleanupRetiredDatabases = async (idbFactory = globalThis.indexedDB) => {
-  if (!idbFactory || typeof idbFactory.deleteDatabase !== 'function') return;
-  await Promise.all(RETIRED_DATABASE_NAMES.map((name) =>
-    new Promise((resolve) => {
-      const settle = () => resolve(undefined);
-      try {
-        const request = idbFactory.deleteDatabase(name);
-        request.onsuccess = request.onerror = request.onblocked = settle;
-      } catch { settle(); }
-    })));
-};
 
 /** @param {IDBTransaction} tx @param {Function} resolve @param {Function} reject */
 const guardTransaction = (tx, resolve, reject) => {
@@ -46,18 +24,13 @@ const guardTransaction = (tx, resolve, reject) => {
   };
 };
 
-/** @returns {Promise<IDBDatabase>} */
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null;
-let retiredDatabaseCleanupStarted = false;
+/** @returns {Promise<IDBDatabase>} */
 export const openDB = () => {
-  if (!retiredDatabaseCleanupStarted) {
-    retiredDatabaseCleanupStarted = true;
-    void cleanupRetiredDatabases().catch(() => {});
-  }
   if (dbPromise) return dbPromise;
   const opening = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let req = indexedDB.open(DB_NAME, DB_VERSION);
     let settled = false;
     const fail = (/** @type {unknown} */ cause) => {
       if (settled) return;
@@ -87,11 +60,8 @@ export const openDB = () => {
       if (!db.objectStoreNames.contains('audit_meta')) {
         db.createObjectStore('audit_meta', { keyPath: 'key' });
       }
-      // why: oversized web, document, page, and script values now share the
-      // session-owned opaque result store. The legacy web cache is disposable
-      // spill data and must not survive as a second readable storage path.
-      if (db.objectStoreNames.contains('web_extract_cache')) {
-        db.deleteObjectStore('web_extract_cache');
+      if (!db.objectStoreNames.contains('web_extract_cache')) {
+        db.createObjectStore('web_extract_cache', { keyPath: 'key' });
       }
       if (!db.objectStoreNames.contains('vault')) {
         db.createObjectStore('vault', { keyPath: 'key' });
@@ -136,7 +106,16 @@ export const openDB = () => {
       db.onversionchange = () => { db.close(); dbPromise = null; };
       resolve(db);
     };
-    req.onerror = () => fail(req.error ?? new Error('idb-open-failed'));
+    req.onerror = () => {
+      if (settled || req.error?.name !== 'VersionError') return fail(req.error ?? new Error('idb-open-failed'));
+      // why: some preview profiles use 14. Do not upgrade or accept newer schemas.
+      const previous = req;
+      req = indexedDB.open(DB_NAME, 14);
+      req.onupgradeneeded = () => req.transaction?.abort();
+      req.onsuccess = previous.onsuccess;
+      req.onblocked = previous.onblocked;
+      req.onerror = () => fail(req.error ?? new Error('idb-open-failed'));
+    };
     req.onblocked = () => fail(new Error('idb-open-blocked'));
   });
   dbPromise = /** @type {Promise<IDBDatabase>} */ (opening);

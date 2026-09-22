@@ -86,6 +86,8 @@ export const makeVaultAuthorityClient = ({
   /** @type {any} */
   let connectingLease = null;
   let sequence = 0;
+  /** @type {number|null} */
+  let autoLockMs = null;
   let cached = {
     initialized: false,
     prfEnrolled: false,
@@ -180,14 +182,10 @@ export const makeVaultAuthorityClient = ({
     if (active && offscreen && !sameLease(active.lease, lease)) {
       retire('vault authority lease changed', active);
     }
-    // A connection is not callable until its successor-resume decision has
-    // settled. `active` is published early so reverse storage calls can be
-    // admitted during bootstrap, but ordinary callers must join `connecting`.
+    // why: Calls must wait for successor policy and resume checks.
     if (connecting) {
       if (!offscreen || sameLease(connectingLease, lease)) return connecting;
-      // The older attempt may still settle, but it no longer owns admission
-      // for this generation. Its identity-guarded finalizer cannot clear the
-      // successor recorded below.
+      // why: An old finalizer must not clear its successor.
       connecting = null;
       connectingLease = null;
     }
@@ -196,11 +194,7 @@ export const makeVaultAuthorityClient = ({
       return active;
     }
     const attempt = (async () => {
-      // A successor host starts with a fresh sealed vault heap. If this client
-      // was unlocked before its lease/channel changed, restore the DK from the
-      // bounded session mirror before allowing the first caller onto the new
-      // connection. Otherwise a routine feature-host replacement silently
-      // turns a live unlocked session into a locked one.
+      // why: A new heap needs the saved policy before it restores the key.
       const resumeSuccessor = cached.locked === false;
       const channelId = `vault-${newId()}`;
       const offer = {
@@ -340,6 +334,7 @@ export const makeVaultAuthorityClient = ({
         if (bootstrapTimer !== null) clearTimeout(bootstrapTimer);
       }
       try {
+        if (autoLockMs !== null) await dispatch(connection, 'setAutoLockMs', autoLockMs);
         if (resumeSuccessor) await dispatch(connection, 'attemptResume', null);
         return connection;
       } catch (cause) {
@@ -402,12 +397,8 @@ export const makeVaultAuthorityClient = ({
       const value = await call(method, args);
       return value?.authorityStatus ? value.result : value;
     } catch (cause) {
-      // A rejected mutating call can still have committed before its mirror or
-      // reply failed. Refresh the nonsecret status so first-run UI does not
-      // remain pinned to an obsolete "Create vault" state.
-      // Outcome-unknown transport loss is different: the channel has already
-      // been retired and the UI explicitly requires a manual reconciliation;
-      // silently opening a second timed call would only delay that response.
+      // why: A failed reply can follow a committed mutation. Refresh known
+      // outcomes; channel loss needs manual reconciliation.
       if ((/** @type {{outcomeKnown?:unknown}} */ (cause))?.outcomeKnown !== false) {
         await refreshStatus().catch(() => {});
       }
@@ -418,8 +409,12 @@ export const makeVaultAuthorityClient = ({
     const value = await call('attemptResume');
     return value?.authorityStatus ? value.result === true : value === true;
   };
-  const boot = async (/** @type {number} */ autoLockMs) => {
-    const value = await call('boot', autoLockMs);
+  const boot = async (/** @type {number} */ interval) => {
+    if (!Number.isFinite(interval) || interval < 0) {
+      throw mappedError('vault-authority-arguments-invalid', 'vault-authority-arguments-invalid');
+    }
+    autoLockMs = interval;
+    const value = await call('boot', interval);
     return value?.authorityStatus
       ? { ...value.result, status: Object.freeze({ ...cached }) }
       : value;
@@ -446,7 +441,13 @@ export const makeVaultAuthorityClient = ({
     deleteSecret: (/** @type {string} */ name) => call('deleteSecret', name),
     listSecretNames: () => call('listSecretNames'),
     attemptResume,
-    setAutoLockMs: (/** @type {number} */ value) => invokeAndRefresh('setAutoLockMs', value),
+    setAutoLockMs: async (/** @type {number} */ value) => {
+      if (!Number.isFinite(value) || value < 0) {
+        throw mappedError('vault-authority-arguments-invalid', 'vault-authority-arguments-invalid');
+      }
+      autoLockMs = value;
+      if (active || connecting) await invokeAndRefresh('setAutoLockMs', value);
+    },
     isLocked: () => cached.locked,
     isInitialized: () => cached.initialized,
     unlockedAt: () => cached.unlockedAt,

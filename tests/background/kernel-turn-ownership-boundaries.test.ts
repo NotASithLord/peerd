@@ -181,12 +181,8 @@ describe('kernel turn ownership boundaries', () => {
     for (const retired of legacyManifestNames) {
       expect(manifestMigration.match(new RegExp(retired, 'g')), retired).toHaveLength(1);
     }
-    expect(source.match(/toolbox/g)).toHaveLength(1);
-    const retiredDatabases = readFileSync(
-      join(EXTENSION_ROOT, 'peerd-egress/storage/idb.js'), 'utf8',
-    );
-    for (const name of ['peerd-toolbox', 'peerd-run-cache', 'peerd-checkpoints']) {
-      expect(retiredDatabases.match(new RegExp(name, 'g')), name).toHaveLength(1);
+    for (const name of ['toolbox', 'peerd-run-cache', 'peerd-checkpoints']) {
+      expect(source, name).not.toContain(name);
     }
   });
 
