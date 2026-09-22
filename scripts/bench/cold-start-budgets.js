@@ -127,8 +127,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 403, graphBytes: 4_053_738 }),
-  target: Object.freeze({ modules: 406, graphBytes: 4_145_123 }),
+  shared: Object.freeze({ modules: 403, graphBytes: 4_044_479 }),
+  target: Object.freeze({ modules: 406, graphBytes: 4_135_864 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_585 }),
@@ -162,16 +162,9 @@ export const OFFSCREEN_SUPERVISOR_SOURCE_CONTRACT = Object.freeze({
 });
 
 export const COLD_SOURCE_RATCHETS = Object.freeze({
-  // Exact achieved authority graph: controller/tool semantics, completed
-  // migration ledgers remain outside it; pass-through composition aliases are
-  // deleted. The only construction-time deferrals are restored-tab liveness
-  // transitions and the goal-runner bind; every other exact relay fails unbound.
-  // Browser-child generations, runtime-capability-hosts and the semantic hook
-  // manifest are fixed custody/policy inputs, not feature ownership.
-  // Reviewed target/budget checks, transcript transport and Stop recovery add
-  // fixed custody code; semantic capability guidance is no longer an input.
-  // Re-pin the measured closure, with no allowance for future feature growth.
-  kernel: Object.freeze({ modules: 403, graphBytes: 4_053_738, entryBytes: 200, directImports: 2 }),
+  // why: Stop, schedule persistence, and actor delivery need fixed authority
+  // checks. Shorter comments reduce the exact source graph. Module limits stay.
+  kernel: Object.freeze({ modules: 403, graphBytes: 4_044_479, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -197,16 +190,10 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // Chrome's complete executable MV3 closure is static: runtime import() is
     // not a supported demand boundary. This is the exact achieved minified
     // authored graph in the disposable, module-preserving release staging tree.
-    // Exact lifecycle settlement, stale-generation fencing, isolation
-    // admission and controller recovery remain fixed authority work. Tool
-    // semantics and feature owners remain outside this closure. This is the
-    // exact achieved graph with no reserved headroom. The source-action child
-    // generation and bounded hostile-response reads are fixed browser custody
-    // and do not grow with tool count. Credential-bearing repository egress
-    // rejects private and metadata hosts at this authority edge. Finite relay
-    // validation is fixed owner assembly, not a feature-selected dispatcher.
+    // why: Durable Stop, ordered schedule writes, and acknowledged actor replies
+    // add fixed authority checks. Pin their exact measured bytes with no reserve.
     serviceWorker: Object.freeze({
-      modules: 400, graphBytes: 2_042_064, entryBytes: 173,
+      modules: 400, graphBytes: 2_044_482, entryBytes: 173,
       inputSha256: 'ae5f604ad2659c09325cd85a161943163fb49534540d163f06c4a363c6280c52',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -238,7 +225,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
-        modules: 406, graphBytes: 2_156_968, entryBytes: 207,
+        modules: 406, graphBytes: 2_159_386, entryBytes: 207,
         inputSha256: '917de7e3b050c244f780742edde21dc38627b8f161ae6db277449e6d90c4c5f7',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 135_725, entryBytes: 396 }),

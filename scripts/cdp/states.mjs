@@ -3121,10 +3121,17 @@ export const STATES = [
     name: 'vault-lock', kind: 'functional', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
-      await rpc(ctx.page, { type: 'vault/lock' });
+      const lock = await rpc(ctx.page, { type: 'vault/lock' });
       const locked = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.vault-brand') && !document.querySelector('form.input-bar')`), { budgetMs: 8_000 });
-      rec.check('locking flips the panel to the vault gate', !!locked);
-      // Unlock again so later states start from a ready, unlocked panel.
+      rec.check('locking flips the panel to the vault gate', !!locked && lock?.ok === true, JSON.stringify(lock));
+      if (!locked || lock?.ok !== true) {
+        await rec.shot('lock-failed');
+        rec.observe('lock failure', {
+          state: await rpc(ctx.page, { type: 'state/get' }),
+          pageEvents: ctx.page.events.slice(-12),
+          targetEvents: ctx.extensionTargetEvents().map(({ targetId, events }) => ({ targetId, events: events.slice(-12) })),
+        });
+      }
       await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE });
       const ready = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar')`), { budgetMs: 10_000 });
       rec.check('unlocking restores the ready composer', !!ready);
@@ -6928,12 +6935,11 @@ Promise.resolve().then(async () => {
   },
 
   // --- visual + functional: authority row at Firefox sidebar width ---------
-  // Last because the keyed Anthropic fixture intentionally changes the
-  // ephemeral E2E vault/provider inventory.
   {
     name: 'narrow-sidebar', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('narrow layout ready') }),
     async run(ctx, rec) {
+      const { providerName, providerModel, reasoningEnabled } = (await rpc(ctx.page, { type: 'state/get' })).state.settings;
       await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
       try {
         await sleep(80);
@@ -7106,21 +7112,15 @@ Promise.resolve().then(async () => {
                 return rect.width >= 24 && rect.height >= 24;
               }),
               wraps: getComputedStyle(row).flexWrap === 'wrap',
-              // why: the pill-squeeze bug - a control narrower than its own
-              // label overflows internally (scrollWidth > clientWidth) or
-              // grows a second text line. Fitting means neither happens.
+              // why: narrow controls must not clip or wrap their labels.
               unsqueezed: controls.every((el) => el.scrollWidth <= el.clientWidth
                 && el.getBoundingClientRect().height <= 30),
-              // 7 actions since the §5g top-bar Lock joined the rail.
               actionsFit: actions.length === 7 && actions.every(inside),
               actionNames: actions.map((el) => el.getAttribute('aria-label')),
             };
           })()`));
         }
-        // why wraps at EVERY width: the row is flex-wrap:wrap unconditionally
-        // now - overflow becomes a second row of intact pills. The old
-        // nowrap-above-370 rule squeezed the pills at 371–460px and their
-        // labels broke onto two lines inside the pill.
+        // why: the row must wrap before controls become too narrow.
         rec.check('the authority row fits across both sides of every responsive boundary',
           widthResults.every((result) => result.pageFits && result.rowFits && result.targets
             && result.wraps && result.unsqueezed),
@@ -7138,6 +7138,7 @@ Promise.resolve().then(async () => {
           /^Anthropic/.test(settledModel), settledModel);
         await rec.visual('narrow-sidebar');
       } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { providerName, providerModel, reasoningEnabled } });
         await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
       }
     },

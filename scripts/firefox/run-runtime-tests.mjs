@@ -2952,6 +2952,11 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
     const installedId = await driver.installAddon(resolve(artifact));
     assert(installedId === ADDON_ID, 'the recovery diagnostic XPI keeps the Store add-on id', String(installedId));
     await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
+    const ready = await waitFor(() => driver.executeAsync(`
+      const done = arguments[arguments.length - 1];
+      browser.runtime.sendMessage({ type: 'state/get' }).then((reply) => done(reply?.ok === true), () => done(false));
+    `), { budgetMs: 30_000, pollMs: 100 });
+    assert(ready === true, 'the recovery background is ready before vault initialization');
 
     const prepared = await driver.executeAsync(`
       const [passphrase, providerKey, seedKey] = arguments;
@@ -2960,9 +2965,7 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       (async () => {
         const vault = await send({ type: 'vault/initialize', passphrase });
         const provider = await send({ type: 'provider/setKey', provider: 'anthropic', plaintext: providerKey });
-        // why: /system deliberately refuses to create a chat now. /init is the
-        // production no-model path that creates one exact fresh session, so the
-        // recovery fixture remains free of provider work before its checkpoint.
+        // why: /init creates a session without a model call.
         const command = await send({ type: 'agent/send', text: '/init' });
         let sessionId = null;
         for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -3051,12 +3054,8 @@ const runActorRecoverySmoke = async ({ providerServer }) => {
       LIFECYCLE_OPERATIONS_KEY, LIFECYCLE_NOTICES_KEY]);
 
     const idleRestartAndRecover = async (previousBoot) => {
-      // Exercise Firefox's real event-page lifecycle. runtime.reload tears down
-      // the temporary add-on's moz-extension document and Gecko may reject
-      // navigation back to that origin for the whole WebDriver command budget,
-      // which tests add-on reinstallation rather than product recovery. Closing
-      // the real sidebar releases its port; after Firefox's idle window the
-      // event page is discarded and the blank tab can wake a fresh generation.
+      // why: close the sidebar so Firefox can discard the event page.
+      // Reload would remove the temporary add-on page.
       await driver.navigate('about:blank');
       const extensionUiClosed = await driver.execute('return location.href === "about:blank";');
       assert(extensionUiClosed === true,

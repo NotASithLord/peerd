@@ -1,9 +1,3 @@
-// The background Routine runner (loop/scheduler.js). Pins the control loop with
-// fakes (no real model / Chrome): add/remove/setEnabled, the durable kv mirror,
-// alarm arming, and — the heart of the feature — tick() as a catch-up pass that
-// fires due routines, defers while the vault is locked, collapses missed slots,
-// caps concurrency, skips still-running routines, and enforces the count cap.
-
 import { describe, it, expect } from 'bun:test';
 import {
   makeScheduler, SCHEDULE_ROUTINES_KEY, MAX_ROUTINES, MAX_FIRINGS_PER_TICK, LOCKED_BACKOFF_MS,
@@ -12,14 +6,12 @@ import {
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
-/** Yield to the event loop until `pred` holds (fire-and-forget firings settle). */
-const settle = async (pred: () => boolean, tries = 200) => {
-  for (let i = 0; i < tries && !pred(); i++) await new Promise((r) => setTimeout(r, 0));
-};
-
 function makeHarness(opts: {
   locked?: boolean,
   fireRoutine?: (routine: any) => Promise<any>,
+  beforeRead?: () => void,
+  beforeWrite?: (value: any) => void | Promise<void>,
+  onEvent?: (event: any) => void,
 } = {}) {
   let clock = 1_000_000;
   let locked = opts.locked ?? false;
@@ -27,7 +19,7 @@ function makeHarness(opts: {
   const fired: any[] = [];
   const alarms: (number | null)[] = [];
   const events: any[] = [];
-  const running = new Set<string>();          // routineIds whose prior run is "still going"
+  const running = new Set<string>();
   let idSeq = 0;
   let failWrites = false;
 
@@ -36,8 +28,9 @@ function makeHarness(opts: {
       fired.push(routine); return { sessionId: `sess-${routine.id}` };
     }),
     kv: {
-      get: async (k: string) => structuredClone(store.get(k)),
+      get: async (k: string) => { opts.beforeRead?.(); return structuredClone(store.get(k)); },
       set: async (k: string, v: any) => {
+        await opts.beforeWrite?.(v);
         if (failWrites) throw new Error('storage unavailable');
         store.set(k, structuredClone(v));
       },
@@ -45,7 +38,7 @@ function makeHarness(opts: {
     isLocked: () => locked,
     isRunning: (routine: any) => running.has(routine.id),
     setAlarm: (when: number | null) => { alarms.push(when); },
-    onEvent: (event: any) => { events.push(event); },
+    onEvent: (event: any) => { events.push(event); opts.onEvent?.(event); },
     now: () => clock,
     makeId: () => `r${++idSeq}`,
   });
@@ -61,7 +54,7 @@ function makeHarness(opts: {
   };
 }
 
-describe('makeScheduler — registration', () => {
+describe('makeScheduler - registration', () => {
   it('adds a routine, computes its next run, persists it, and arms the alarm', async () => {
     const h = makeHarness();
     const res = await h.scheduler.add({ prompt: 'do a thing', every: '1h' });
@@ -80,22 +73,27 @@ describe('makeScheduler — registration', () => {
     expect((await h.scheduler.add({ prompt: 'x', every: 'whenever' })).ok).toBe(false);
   });
 
-  it('enforces the routine count cap', async () => {
+  it('loads stored routines before enforcing the count cap', async () => {
     const h = makeHarness();
     for (let i = 0; i < MAX_ROUTINES; i++) expect((await h.scheduler.add({ prompt: `r${i}`, every: '1h' })).ok).toBe(true);
-    const over = await h.scheduler.add({ prompt: 'one too many', every: '1h' });
+    const reboot = makeHarness();
+    reboot.store.set(SCHEDULE_ROUTINES_KEY, h.stored());
+    const over = await reboot.scheduler.add({ prompt: 'one too many', every: '1h' });
     expect(over.ok).toBe(false);
     expect((over as any).error).toBe('too-many-routines');
-    expect(h.scheduler.list()).toHaveLength(MAX_ROUTINES);
+    expect(reboot.scheduler.list()).toHaveLength(MAX_ROUTINES);
+    expect(reboot.stored()).toEqual(h.stored());
   });
 
   it('removes a routine and clears the alarm when none remain', async () => {
     const h = makeHarness();
     const r = (await h.scheduler.add({ prompt: 'x', every: '1h' }) as any).routine;
-    expect(await h.scheduler.remove(r.id)).toBe(true);
-    expect(h.scheduler.list()).toHaveLength(0);
-    expect(h.alarms.at(-1)).toBeNull();
-    expect(await h.scheduler.remove('nope')).toBe(false);
+    const reboot = makeHarness();
+    reboot.store.set(SCHEDULE_ROUTINES_KEY, h.stored());
+    expect(await reboot.scheduler.remove(r.id)).toBe(true);
+    expect(reboot.scheduler.list()).toHaveLength(0);
+    expect(reboot.alarms.at(-1)).toBeNull();
+    expect(await reboot.scheduler.remove('nope')).toBe(false);
   });
 
   it('does not publish a routine until its durable write succeeds', async () => {
@@ -107,6 +105,27 @@ describe('makeScheduler — registration', () => {
     expect(h.stored()).toEqual({});
     expect(h.alarms).toEqual([]);
     expect(h.events).toEqual([]);
+  });
+
+  it('serializes writes and excludes a failed add from the next snapshot', async () => {
+    const firstWrite = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    const opts: NonNullable<Parameters<typeof makeHarness>[0]> = { beforeWrite: async (snapshot) => {
+      opts.beforeWrite = undefined;
+      entered.resolve();
+      await firstWrite.promise;
+      expect(Object.keys(snapshot)).toEqual(['r1']);
+      throw new Error('first write failed');
+    } };
+    const h = makeHarness(opts);
+    const first = h.scheduler.add({ prompt: 'first', every: '1h' }).catch((cause) => cause);
+    await entered.promise;
+    const second = h.scheduler.add({ prompt: 'second', every: '1h' });
+    firstWrite.resolve();
+    expect(await first).toMatchObject({ message: 'first write failed' });
+    await second;
+    expect(Object.keys(h.stored())).toEqual(['r2']);
+    expect(h.scheduler.list().map((r) => r.id)).toEqual(['r2']);
   });
 
   it('restores a routine when durable removal fails', async () => {
@@ -125,93 +144,53 @@ describe('makeScheduler — registration', () => {
   });
 });
 
-describe('makeScheduler — tick fires due routines', () => {
-  it('fires a due routine, advances it, and records the session', async () => {
-    const h = makeHarness();
+describe('makeScheduler - tick fires due routines', () => {
+  it('waits until due, collapses missed slots, and dispatches before its event', async () => {
+    let firedBeforeEvent = false;
+    const h = makeHarness({ onEvent: (event) => {
+      if (event.type === 'schedule/firing') firedBeforeEvent = h.fired.length === 1;
+    } });
     const r = (await h.scheduler.add({ prompt: 'x', every: '1h' }) as any).routine;
-    h.advance(HOUR + MIN);
-    const out = await h.scheduler.tick();
-    expect(out.fired).toBe(1);
-    expect(h.fired.map((f) => f.id)).toEqual([r.id]);
-    const live = h.scheduler.list()[0];
-    expect(live.nextRunAt).toBeGreaterThan(h.now());
-    expect(live.runCount).toBe(1);
-    await settle(() => h.scheduler.list()[0].lastSessionId != null);
-    expect(h.scheduler.list()[0].lastSessionId).toBe(`sess-${r.id}`);
-  });
-
-  it('does not fire a routine that is not yet due', async () => {
-    const h = makeHarness();
-    await h.scheduler.add({ prompt: 'x', every: '1h' });
     h.advance(30 * MIN);
     expect((await h.scheduler.tick()).fired).toBe(0);
-    expect(h.fired).toHaveLength(0);
-  });
-
-  it('collapses many missed slots into ONE catch-up fire', async () => {
-    const h = makeHarness();
-    const r = (await h.scheduler.add({ prompt: 'x', every: '1h' }) as any).routine;
-    h.advance(5 * HOUR + 20 * MIN);
-    const out = await h.scheduler.tick();
-    expect(out.fired).toBe(1);
-    expect(h.scheduler.list()[0].nextRunAt).toBe(r.createdAt + 6 * HOUR);
-  });
-
-  it('caps firings per tick — a catch-up storm does not launch everything at once', async () => {
-    const h = makeHarness();
-    for (let i = 0; i < MAX_FIRINGS_PER_TICK + 2; i++) await h.scheduler.add({ prompt: `r${i}`, every: '1h' });
-    h.advance(2 * HOUR);          // all due
-    const out = await h.scheduler.tick();
-    expect(out.fired).toBe(MAX_FIRINGS_PER_TICK);   // throttled, not all N
-    expect(h.fired).toHaveLength(MAX_FIRINGS_PER_TICK);
-  });
-
-  it('caps firings across the WHOLE tick() call even when a re-tick lands mid-persist', async () => {
-    // Regression: the firing cap must bind the whole tick() call, not each
-    // re-tick pass. Simulate a concurrent wake (alarm/unlock) arriving during a
-    // persist await by re-entering tick() once from kv.set — it should set the
-    // re-tick flag (run another pass), NOT reset a per-pass counter and stampede.
-    let clock = 1_000_000;
-    const store = new Map<string, any>();
-    const fired: any[] = [];
-    let idSeq = 0;
-    let reentered = false;
-    /** @type {any} */
-    let sched: ReturnType<typeof makeScheduler>;
-    sched = makeScheduler({
-      fireRoutine: async (r: any) => { fired.push(r); return { sessionId: `s-${r.id}` }; },
-      kv: {
-        get: async (k: string) => store.get(k),
-        set: async (k: string, v: any) => {
-          store.set(k, v);
-          if (!reentered) { reentered = true; await sched.tick(); } // concurrent wake mid-persist
-        },
-      },
-      now: () => clock,
-      makeId: () => `r${++idSeq}`,
+    expect(h.fired).toEqual([]);
+    h.advance(5 * HOUR - 10 * MIN);
+    expect((await h.scheduler.tick()).fired).toBe(1);
+    expect(h.fired.map((f) => f.id)).toEqual([r.id]);
+    expect(firedBeforeEvent).toBe(true);
+    expect(h.scheduler.list()[0]).toMatchObject({
+      nextRunAt: r.createdAt + 6 * HOUR, runCount: 1, lastSessionId: `sess-${r.id}`,
     });
-    for (let i = 0; i < MAX_FIRINGS_PER_TICK + 3; i++) await sched.add({ prompt: `p${i}`, every: '1h' });
-    clock += 2 * HOUR;                       // all due
-    await sched.tick();
-    expect(reentered).toBe(true);            // the re-entrant wake actually happened
-    expect(fired.length).toBe(MAX_FIRINGS_PER_TICK);  // still capped for the whole call
+  });
+
+  it.each([false, true])('caps firings across the full tick with a concurrent wake: %s', async (reenter) => {
+    const opts: NonNullable<Parameters<typeof makeHarness>[0]> = {};
+    const h = makeHarness(opts);
+    for (let i = 0; i < MAX_FIRINGS_PER_TICK + 3; i++) await h.scheduler.add({ prompt: `p${i}`, every: '1h' });
+    let reentered = false;
+    opts.beforeWrite = async () => {
+      if (reenter && !reentered) { reentered = true; await h.scheduler.tick(); }
+    };
+    h.advance(2 * HOUR);
+    expect((await h.scheduler.tick()).fired).toBe(MAX_FIRINGS_PER_TICK);
+    expect(reentered).toBe(reenter);
+    expect(h.fired).toHaveLength(MAX_FIRINGS_PER_TICK);
   });
 
   it('skips a routine whose previous run is still going (no pile-up)', async () => {
     const h = makeHarness();
     const r = (await h.scheduler.add({ prompt: 'x', every: '1m' }) as any).routine;
-    h.running.add(r.id);          // its prior goal run is still active
+    h.running.add(r.id);
     h.advance(5 * MIN);
     const out = await h.scheduler.tick();
     expect(out.fired).toBe(0);
     expect(out.skipped).toBe(1);
     expect(h.fired).toHaveLength(0);
-    // advanced a slot so it retries next cadence instead of busy-looping
     expect(h.scheduler.list()[0].nextRunAt).toBeGreaterThan(h.now());
   });
 });
 
-describe('makeScheduler — vault-locked deferral', () => {
+describe('makeScheduler - vault-locked deferral', () => {
   it('defers firing while locked and arms a BACKOFF alarm (no past-time wake storm)', async () => {
     const h = makeHarness({ locked: true });
     const r = (await h.scheduler.add({ prompt: 'x', every: '1h' }) as any).routine;
@@ -219,17 +198,15 @@ describe('makeScheduler — vault-locked deferral', () => {
     const deferred = await h.scheduler.tick();
     expect(deferred).toEqual({ fired: 0, deferred: 1, skipped: 0 });
     expect(h.fired).toHaveLength(0);
-    expect(h.scheduler.list()[0].nextRunAt).toBe(r.nextRunAt);   // untouched, still due
-    // the alarm was armed for a backoff, NOT the past due time (which would storm)
+    expect(h.scheduler.list()[0].nextRunAt).toBe(r.nextRunAt);
     expect(h.alarms.at(-1)).toBe(h.now() + LOCKED_BACKOFF_MS);
-    // unlock + re-tick → fires
     h.unlock();
     expect((await h.scheduler.tick()).fired).toBe(1);
     expect(h.fired.map((f) => f.id)).toEqual([r.id]);
   });
 });
 
-describe('makeScheduler — enable/disable', () => {
+describe('makeScheduler - enable/disable', () => {
   it('a disabled routine never fires; re-enabling re-anchors it forward', async () => {
     const h = makeHarness();
     const r = (await h.scheduler.add({ prompt: 'x', every: '1h' }) as any).routine;
@@ -242,7 +219,7 @@ describe('makeScheduler — enable/disable', () => {
   });
 });
 
-describe('makeScheduler — durability (load on boot)', () => {
+describe('makeScheduler - durability (load on boot)', () => {
   it('rehydrates routines from the kv mirror and re-arms', async () => {
     const h1 = makeHarness();
     const r = (await h1.scheduler.add({ prompt: 'survive me', every: '2h' }) as any).routine;
@@ -255,6 +232,19 @@ describe('makeScheduler — durability (load on boot)', () => {
     expect(live.id).toBe(r.id);
     expect(live.prompt).toBe('survive me');
     expect(h2.alarms.at(-1)).toBe(live.nextRunAt);
+  });
+
+  it('retries a failed cold read before an add can overwrite stored routines', async () => {
+    const source = makeHarness();
+    const routine = (await source.scheduler.add({ prompt: 'stored', every: '1h' }) as any).routine;
+    const opts = { beforeRead: () => { throw new Error('read failed'); } } as NonNullable<Parameters<typeof makeHarness>[0]>;
+    const h = makeHarness(opts);
+    h.store.set(SCHEDULE_ROUTINES_KEY, { old: { ...routine, id: 'old' } });
+    await expect(h.scheduler.add({ prompt: 'new', every: '1h' })).rejects.toThrow('read failed');
+    expect(Object.keys(h.stored())).toEqual(['old']);
+    opts.beforeRead = undefined;
+    await h.scheduler.add({ prompt: 'new', every: '1h' });
+    expect(Object.keys(h.stored())).toEqual(['old', 'r1']);
   });
 
   it('load is idempotent and skips ids already live', async () => {
@@ -313,6 +303,34 @@ describe('makeScheduler execution custody', () => {
     });
   });
 
+  it.each(['remove', 'disable', 'enable-again', 'lock', 'running'])('cancels before dispatch after %s during the pending write', async (action) => {
+    const opts: NonNullable<Parameters<typeof makeHarness>[0]> = {};
+    const h = makeHarness(opts);
+    const routine = (await h.scheduler.add({ prompt: 'x', every: '1h' }) as any).routine;
+    const dueAt = routine.nextRunAt;
+    let removal: Promise<boolean> | undefined;
+    opts.beforeWrite = async (snapshot) => {
+      opts.beforeWrite = undefined;
+      if (action === 'remove') removal = h.scheduler.remove(routine.id);
+      if (action === 'disable' || action === 'enable-again') h.scheduler.setEnabled(routine.id, false);
+      if (action === 'enable-again') h.scheduler.setEnabled(routine.id, true);
+      if (action === 'lock') h.lock();
+      if (action === 'running') h.running.add(routine.id);
+      expect(snapshot.r1).toMatchObject({ enabled: true, pendingRunAt: h.now() });
+    };
+    h.advance(HOUR + MIN);
+    expect((await h.scheduler.tick()).fired).toBe(0);
+    await removal;
+    expect(h.fired).toEqual([]);
+    if (action === 'remove') expect(h.stored()).toEqual({});
+    else expect(h.stored().r1).toMatchObject({ pendingRunAt: null, runCount: 0, lastRunAt: null });
+    if (action === 'lock') {
+      expect(h.stored().r1.nextRunAt).toBe(dueAt);
+      h.unlock();
+      expect((await h.scheduler.tick()).fired).toBe(1);
+    } else expect((await h.scheduler.tick()).fired).toBe(0);
+  });
+
   it('keeps tick pending until bounded execution admission settles', async () => {
     let release = (_value: any) => {};
     const admitted = new Promise((resolve) => { release = resolve; });
@@ -331,84 +349,50 @@ describe('makeScheduler execution custody', () => {
     });
   });
 
-  it('retries only a known pre-commit refusal without consuming the cadence slot', async () => {
-    const refusal = Object.assign(new Error('host did not accept custody'), {
-      code: 'controller-host-missing', outcomeKnown: true,
-    });
-    const h = makeHarness({ fireRoutine: async () => { throw refusal; } });
-    await h.scheduler.add({ prompt: 'x', every: '1h' });
-    h.advance(HOUR + MIN);
-    await h.scheduler.tick();
-    expect(h.scheduler.list()[0]).toMatchObject({
-      runCount: 0,
-      lastRunAt: null,
-      pendingRunAt: null,
-      lastOutcomeUnknownAt: null,
-      nextRunAt: h.now() + LOCKED_BACKOFF_MS,
-    });
-    expect(h.events).toContainEqual({
-      type: 'schedule/retry', id: 'r1', code: 'controller-host-missing',
-    });
-  });
-
-  it('never replays a post-commit loss and makes the unknown outcome durable', async () => {
-    const loss = Object.assign(new Error('channel lost after commit'), {
-      code: 'controller-channel-lost', outcomeKnown: false,
-    });
-    const h = makeHarness({ fireRoutine: async () => { throw loss; } });
+  it.each([true, false])('retries a refusal only when its outcome is known: %s', async (outcomeKnown) => {
+    const code = outcomeKnown ? 'controller-host-missing' : 'controller-channel-lost';
+    const h = makeHarness({ fireRoutine: async () => { throw Object.assign(new Error(code), { code, outcomeKnown }); } });
     await h.scheduler.add({ prompt: 'x', every: '1h' });
     h.advance(HOUR + MIN);
     await h.scheduler.tick();
     const routine = h.scheduler.list()[0];
     expect(routine).toMatchObject({
-      runCount: 1,
-      pendingRunAt: null,
-      lastOutcomeUnknownAt: h.now(),
+      runCount: outcomeKnown ? 0 : 1, pendingRunAt: null,
+      lastRunAt: outcomeKnown ? null : h.now(),
+      lastOutcomeUnknownAt: outcomeKnown ? null : h.now(),
     });
     expect(routine.nextRunAt).toBeGreaterThan(h.now());
-    expect(h.events).toContainEqual({ type: 'schedule/outcome-unknown', id: 'r1' });
-    expect(h.stored()[routine.id].lastOutcomeUnknownAt).toBe(h.now());
+    if (outcomeKnown) expect(routine.nextRunAt).toBe(h.now() + LOCKED_BACKOFF_MS);
+    expect(h.events).toContainEqual(outcomeKnown
+      ? { type: 'schedule/retry', id: 'r1', code }
+      : { type: 'schedule/outcome-unknown', id: 'r1' });
+    expect(h.stored().r1).toEqual(routine);
   });
 
-  it('retains the pending marker when result persistence fails after host custody', async () => {
-    let h: ReturnType<typeof makeHarness>;
-    h = makeHarness({ fireRoutine: async () => {
-      h.failWrites();
-      return { sessionId: 'committed-session' };
+  it.each([1, 2])('keeps %i pending markers after a result-write failure and releases every firing', async (count) => {
+    const fired: string[] = [];
+    const h = makeHarness({ fireRoutine: async (routine) => {
+      fired.push(routine.id);
+      if (fired.length === count) h.failWrites();
+      return { sessionId: `session-${routine.id}` };
     } });
-    await h.scheduler.add({ prompt: 'x', every: '1h' });
+    for (let i = 0; i < count; i++) await h.scheduler.add({ prompt: `routine ${i}`, every: '1h' });
     h.advance(HOUR + MIN);
     await expect(h.scheduler.tick()).rejects.toThrow('storage unavailable');
-    const stored = h.stored().r1;
-    expect(stored.pendingRunAt).toBe(h.now());
-    expect(stored.lastSessionId).toBeNull();
-
+    for (const record of Object.values(h.stored()) as any[]) {
+      expect(record).toMatchObject({ pendingRunAt: h.now(), lastSessionId: null });
+    }
     const recovered = makeHarness();
     recovered.store.set(SCHEDULE_ROUTINES_KEY, structuredClone(h.stored()));
     await recovered.scheduler.load();
     expect(recovered.fired).toEqual([]);
-    expect(recovered.scheduler.list()[0]).toMatchObject({
-      pendingRunAt: null,
-      lastOutcomeUnknownAt: h.now(),
-    });
-  });
-
-  it('releases every concurrent firing when result persistence fails', async () => {
-    let h: ReturnType<typeof makeHarness>;
-    const fired: string[] = [];
-    h = makeHarness({ fireRoutine: async (routine) => {
-      fired.push(routine.id);
-      if (fired.length <= 2) h.failWrites();
-      return { sessionId: `session-${routine.id}` };
-    } });
-    await h.scheduler.add({ prompt: 'one', every: '1h' });
-    await h.scheduler.add({ prompt: 'two', every: '1h' });
-    h.advance(HOUR + MIN);
-    await expect(h.scheduler.tick()).rejects.toThrow('storage unavailable');
-
+    for (const record of recovered.scheduler.list()) {
+      expect(record).toMatchObject({ pendingRunAt: null, lastOutcomeUnknownAt: h.now() });
+    }
     h.failWrites(false);
     h.advance(HOUR);
     await h.scheduler.tick();
-    expect(fired).toEqual(['r1', 'r2', 'r1', 'r2']);
+    const ids = recovered.scheduler.list().map((r) => r.id);
+    expect(fired).toEqual([...ids, ...ids]);
   });
 });

@@ -3447,11 +3447,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     };
     return Object.freeze({
       actorCount, actorOverview, relays,
-      onSessionMessageAppended: async (/** @type {string} */ _sessionId,
+      onSessionMessageAppended: async (/** @type {string} */ sessionId,
         /** @type {any} */ message) => {
-        await Promise.all(actorDeliveryIdsFromMessage(message).map((id) => actorMailbox.remove(id)));
+        await Promise.all(actorDeliveryIdsFromMessage(message).map((id) => {
+          asyncActors.acknowledgeDelivery(sessionId, id);
+          return actorMailbox.remove(id);
+        }));
       },
       close: async () => {
+        asyncActors.close();
         stopVaultSubscription?.();
         await directHandle?.stop?.();
       },
@@ -3557,6 +3561,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           () => live.maybeAutoResume(sessionId),
         ),
       turnSlots: shared.turnSlots, actorMessaging: live.actorMessaging,
+      actorLifecycle: live.actorLifecycle,
       nukeSessionWorkspace: (/** @type {string} */ sessionId) =>
         engine.opfsHelpers(['peerd-workspace', sessionId]).nuke(),
       purgeLifecycleSession: (/** @type {string} */ sessionId) =>

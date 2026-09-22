@@ -1,10 +1,3 @@
-// Goal mode (the mode-row Goal toggle): makeGoalRunner keeps re-entering the
-// agent turn until the agent calls complete_goal, the user halts, or a cap is
-// hit. These tests pin the control loop with a fake runTurn (no real model):
-// the visible-goal-then-synthetic-continuation shape, the three exits
-// (complete / halt / cap), the terminal events, and the exposure filter that
-// reveals complete_goal only during a run.
-
 import { describe, it, expect } from 'bun:test';
 import {
   makeGoalRunner, goalContinuationPrompt, GOAL_MAX_ITERATIONS, GOAL_RUNS_KEY,
@@ -326,8 +319,10 @@ const makeDeferredKv = () => {
 };
 
 describe('makeGoalRunner — persistence + resume (survives SW restart / other chats)', () => {
-  it('serializes delayed completion writes and clears before terminal publication', async () => {
+  it.each([false, true])('finishes delayed completion after a terminal read failure: %s', async (failRead) => {
     const kv = makeDeferredKv();
+    const read = kv.get;
+    kv.get = async (key) => { if (failRead) { failRead = false; throw new Error('read failed'); } return read(key); };
     const ends: any[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;
     runner = makeGoalRunner({
@@ -345,6 +340,7 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     await kv.releaseNext();
     await settle(() => ends.length === 1);
 
+    expect(runner.get('s')).toBeNull();
     expect(kv.maxPending()).toBe(1);
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
     expect(ends).toEqual([{
@@ -386,19 +382,27 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     await expect(recycled.resume()).resolves.toEqual({ resumed: 0 });
   });
 
-  it('mirrors a live run to kv while running and clears it on a terminal phase', async () => {
+  it.each([false, true])('finishes a halted run and blocks stale recovery after a write failure: %s', async (failWrite) => {
     const kv = makeKv();
+    const write = kv.set, ends: any[] = [];
     let seenWhileLive: any = null;
     let runner: ReturnType<typeof makeGoalRunner>;
     runner = makeGoalRunner({
-      runTurn: async () => { seenWhileLive = kv.store.get(GOAL_RUNS_KEY); runner.halt('s1'); },
-      kv,
+      runTurn: async () => {
+        seenWhileLive = kv.store.get(GOAL_RUNS_KEY);
+        if (failWrite) kv.set = async () => { throw new Error('write failed'); };
+        runner.halt('s1');
+      },
+      kv, onRunEnd: (_sid, info) => ends.push(info),
     });
     await runner.start({ sessionId: 's1', goal: 'do it' });
     await settle(() => runner.get('s1') === null);
-    // Was mirrored to storage while the run was live (so an SW restart finds it).
     expect(seenWhileLive?.s1).toMatchObject({ goal: 'do it' });
-    // Cleared once the run ends — a terminal run must not resume.
+    expect(runner.get('s1')).toBeNull();
+    expect(ends).toEqual([{ phase: 'halted', summary: null, reason: null }]);
+    expect(await runner.resume()).toEqual({ resumed: 0 });
+    kv.set = write;
+    await runner.stop('s1');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
@@ -562,7 +566,7 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
-  it('stop() on a vault-lock-PAUSED run drops its kv record so it does NOT resurrect on resume()', async () => {
+  it.each([false, true])('Stop preserves paused recovery rules when storage fails: %s', async (failWrite) => {
     const kv = makeKv();
     let throwOnce = true;
     const calls: TurnArgs[] = [];
@@ -576,16 +580,18 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     });
     await runner.start({ sessionId: 's', goal: 'keep going' });
     await settle(() => !runner.isActive('s'));
-    // Paused: evicted from the in-memory map, but the record survives in kv.
     expect(runner.get('s')).toBe(null);
     expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
-
-    // The user clicks Stop on the (still-visible) paused run. halt() alone would
-    // be a no-op (not in the map); stop() durably forgets the record.
+    if (failWrite) {
+      const set = kv.set;
+      kv.set = async () => { throw new Error('storage unavailable'); };
+      await expect(runner.stop('s')).rejects.toThrow('storage unavailable');
+      expect(await runner.resume()).toEqual({ resumed: 0 });
+      expect(calls).toHaveLength(1);
+      kv.set = set;
+    }
     await runner.stop('s');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
-
-    // resume() must NOT re-drive a stopped run.
     const before = calls.length;
     await runner.resume();
     await settle(() => true, 5);

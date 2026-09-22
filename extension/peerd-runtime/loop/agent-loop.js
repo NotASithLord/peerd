@@ -221,14 +221,9 @@ export const stripCrossModelThinking = (messages, model) => messages.map((msg) =
  *   absent (window unknown), planTrim falls back to its message-count
  *   backstop alone.
  * @param {boolean} [ctx.synthetic]
- *   Mark the appended user message `synthetic` (API-sanctioned but hidden
- *   from the chat UI, like the truncation-continue path). Used by the
- *   async-actor reintegration wake (DESIGN-11): the child's result
- *   re-enters its parent as a synthetic user turn rather than a real one.
+ *   Hide internal user messages from the chat UI.
  * @param {{ kind: string, instanceId: string, name?: string, failed?: boolean, outcomeKnown?: boolean, performed?: boolean, aborted?: boolean, actorDeliveryId?: string, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }} [ctx.actorReply]
- *   Set on an ACTOR's reply-wake: stamps who replied onto the appended
- *   message so the chat surfaces it as its own attributed bubble (the one
- *   synthetic turn the UI shows).
+ *   Show the actor's reply as an attributed chat message.
  * @param {boolean} [ctx.resume]
  *   Auto-resume mode (loop/resume-detect.js): continue a turn the SW
  *   reclaimed mid-flight. No NEW user message is appended — the persisted
@@ -289,17 +284,9 @@ export async function* runUserTurn(ctx) {
   // initial set (spawned / runners use a fixed narrowed toolset).
   let activeTools = tools;
 
-  // 1. Persist the user's message and emit state.
-  //
-  // Send-once-then-strip (redact.js precedent, inverted in time): the
-  // PERSISTED user message carries metadata-only attachment records
-  // (stripped:true, no base64) so the bytes never re-ship on later
-  // turns — one 5MB image is ~1.7M tokens of base64 if it rides the
-  // history. The LIVE payload stays in this turn-local variable and is
-  // spliced back into the history (by message id) for every model call
-  // of THIS turn only. An SW restart mid-turn degrades to the stripped
-  // shape — a valid prompt, just without the bytes. Validation happened
-  // upstream (SW agent/send via loop/attachments.js).
+  // why: persist attachment metadata only. Send the validated bytes during
+  // this turn so later turns do not repeat large payloads. A worker restart
+  // keeps the prompt, but loses the attachment bytes.
   const liveAttachments = !resume && Array.isArray(ctx.attachments) && ctx.attachments.length > 0
     ? ctx.attachments
     : null;
@@ -359,16 +346,12 @@ export async function* runUserTurn(ctx) {
       role: 'user',
       content: userText,
       ...(liveAttachments ? { attachments: stripAttachments(liveAttachments) } : {}),
-      // why: an async-actor reintegration wake (DESIGN-11) rides a
-      // synthetic user turn — API-sanctioned, hidden from the chat UI like
-      // the truncation-continue path below. The wake framing is trusted; the
-      // child's result text inside it is wrapUntrusted by the caller.
+      // why: internal turns stay hidden. The caller fences actor output.
       ...(synthetic ? { synthetic: true } : {}),
-      // why: an ACTOR-REPLY wake additionally carries who replied, so the
-      // chat renders it as its own attributed bubble instead of hiding it
-      // with the other synthetic plumbing turns (resume/truncation nudges).
+      // why: actor replies need visible attribution despite being synthetic.
       ...(actorReply ? { actorReply } : {}),
-      id: uuidv7(now),
+      // why: retry an uncertain append with the same storage key.
+      id: synthetic && actorReply?.actorDeliveryId ? actorReply.actorDeliveryId : uuidv7(now),
       when: now(),
     };
     session = await sessions.appendMessage(sessionId, userMsg);

@@ -37,9 +37,7 @@ export const LOCKED_BACKOFF_MS = 5 * 60_000;
  * }|void>} deps.fireRoutine
  * @param {{ get(k:string):Promise<any>, set(k:string,v:any):Promise<void>, delete?(k:string):Promise<void> }} [deps.kv]
  * @param {() => boolean} [deps.isLocked]
- * @param {(routine: Routine) => boolean} [deps.isRunning]  true when this routine's
- *   PREVIOUS firing is still going (its goal run is active) — such a routine is
- *   SKIPPED this slot so a long-running routine can't pile up concurrent runs.
+ * @param {(routine: Routine) => boolean} [deps.isRunning] Whether the previous run is active.
  * @param {(whenMs: number|null) => void} [deps.setAlarm]
  * @param {(ev: object) => void} [deps.onEvent]
  * @param {() => number} [deps.now]
@@ -61,18 +59,24 @@ export const makeScheduler = ({
   const routines = new Map();
   /** @type {Set<string>} */
   const firing = new Set();
+  /** @type {WeakMap<Routine, number>} */
+  const revisions = new WeakMap();
 
   let ticking = false;
   let retickRequested = false;
+  let persistenceTail = Promise.resolve();
+  /** @type {Promise<{ loaded: number }> | null} */
+  let loading = null;
 
   const snapshot = () => [...routines.values()];
 
-  const persist = async () => {
-    if (!kv) return;
-    /** @type {Record<string, Routine>} */
-    const out = {};
-    for (const [id, r] of routines) out[id] = r;
-    await kv.set(SCHEDULE_ROUTINES_KEY, out);
+  const persist = () => {
+    if (!kv) return Promise.resolve();
+    // why: Older writes must finish first. Each write owns its snapshot.
+    const write = persistenceTail.then(() => kv.set(SCHEDULE_ROUTINES_KEY,
+      Object.fromEntries([...routines].map(([id, routine]) => [id, { ...routine }]))));
+    persistenceTail = write.catch(() => {});
+    return write;
   };
 
   const reschedule = () => {
@@ -90,16 +94,16 @@ export const makeScheduler = ({
   const list = () => snapshot().map((r) => ({ ...r }));
 
   /**
-   * Register a new routine. Normalizes the spec through parseSchedule and
-   * enforces the count cap. Returns the created routine or an error object.
+   * Register a routine after loading the stored records.
    * @param {{ prompt: string, every?: string, dailyAt?: string, mode?: string }} req
    * @returns {Promise<{ ok: true, routine: Routine } | { ok: false, error: string }>}
    */
   const add = async ({ prompt, every, dailyAt, mode } = /** @type {any} */ ({})) => {
     if (typeof prompt !== 'string' || !prompt.trim()) return { ok: false, error: 'prompt-required' };
-    if (routines.size >= MAX_ROUTINES) return { ok: false, error: 'too-many-routines' };
     const schedule = parseSchedule({ every, dailyAt });
     if (!schedule) return { ok: false, error: 'invalid-schedule' };
+    await load();
+    if (routines.size >= MAX_ROUTINES) return { ok: false, error: 'too-many-routines' };
     const at = now();
     /** @type {Routine} */
     const routine = {
@@ -131,6 +135,7 @@ export const makeScheduler = ({
 
   /** @param {string} id @returns {Promise<boolean>} existed */
   const remove = async (id) => {
+    await load();
     const prior = routines.get(id);
     if (!prior) return false;
     routines.delete(id);
@@ -150,6 +155,7 @@ export const makeScheduler = ({
   const setEnabled = (id, on) => {
     const r = routines.get(id);
     if (!r) return false;
+    revisions.set(r, (revisions.get(r) ?? 0) + 1);
     r.enabled = !!on;
     if (r.enabled) r.nextRunAt = computeNextRun(r.schedule, now(), r.createdAt);
     void persist().catch(() => {});
@@ -158,11 +164,7 @@ export const makeScheduler = ({
     return true;
   };
 
-  /**
-   * The wake pass: fire due routines (capped, skipping still-running ones),
-   * advance each to its next FUTURE slot, then re-arm. Deferred while the vault
-   * is locked. Serialized; a concurrent request re-runs once rather than being
-   * dropped.
+  /** Fire due routines after their pending state is saved.
    * @returns {Promise<{ fired: number, deferred: number, skipped: number }>}
    */
   const tick = async () => {
@@ -172,6 +174,7 @@ export const makeScheduler = ({
     const totals = { fired: 0, deferred: 0, skipped: 0 };
     let firedThisTick = 0;
     try {
+      await load();
       do {
         const at = now();
         const due = dueRoutines(snapshot(), at);
@@ -185,18 +188,20 @@ export const makeScheduler = ({
         /** @type {Array<{routine:Routine, priorLastRunAt:number|null, priorRunCount:number,
          * result:Promise<{ok:boolean,value?:any,cause?:unknown}>}>} */
         const dispatches = [];
+        let needsPersist = false;
         for (const routine of due) {
-          if (firedThisTick >= MAX_FIRINGS_PER_TICK) break;  // throttle the herd
-          if (firing.has(routine.id)) continue;
-          // Skip a routine whose previous firing is still running — advance it a
-          // slot so it retries next cadence instead of piling up concurrent runs.
+          if (firedThisTick >= MAX_FIRINGS_PER_TICK) break;
+          if (firing.has(routine.id) || routines.get(routine.id) !== routine || !routine.enabled || routine.nextRunAt > at) continue;
+          // why: A long run must not start a second copy.
           if (isRunning(routine)) {
             routine.nextRunAt = computeNextRun(routine.schedule, at, routine.createdAt);
+            needsPersist = true;
             totals.skipped += 1;
             continue;
           }
-          // Advance + AWAIT the durable write BEFORE firing → no double-fire on a
-          // crash after commit (at-most-once; see the file header).
+          // why: A restart must see the pending action before host dispatch.
+          const revision = revisions.get(routine);
+          const priorNextRunAt = routine.nextRunAt;
           routine.nextRunAt = computeNextRun(routine.schedule, at, routine.createdAt);
           const priorLastRunAt = routine.lastRunAt;
           const priorRunCount = routine.runCount;
@@ -212,12 +217,22 @@ export const makeScheduler = ({
             emit('schedule/retry', { id: routine.id, code: 'schedule-storage-unavailable' });
             continue;
           }
+          needsPersist = true;
+          if (routines.get(routine.id) !== routine || revisions.get(routine) !== revision || !routine.enabled || isLocked() || isRunning(routine)) {
+            routine.lastRunAt = priorLastRunAt;
+            routine.runCount = priorRunCount;
+            routine.pendingRunAt = null;
+            if (isLocked() && revisions.get(routine) === revision) {
+              routine.nextRunAt = priorNextRunAt;
+              totals.deferred += 1;
+            }
+            continue;
+          }
           firing.add(routine.id);
-          emit('schedule/firing', { id: routine.id, prompt: routine.prompt });
-          const result = Promise.resolve()
-            .then(() => fireRoutine(routine))
+          const result = (async () => fireRoutine(routine))()
             .then((value) => ({ ok: value?.ok !== false, value }))
             .catch((cause) => ({ ok: false, cause }));
+          emit('schedule/firing', { id: routine.id, prompt: routine.prompt });
           dispatches.push({ routine, priorLastRunAt, priorRunCount, result });
           firedThisTick += 1;
           totals.fired += 1;
@@ -248,9 +263,8 @@ export const makeScheduler = ({
             console.error('[schedule] fireRoutine threw', detail);
           }
         }
-        if (dispatches.length > 0) await persist();
-        // More due than we fired (throttle or skips) → re-arm; the past-due
-        // nextWakeAt makes the alarm fire again to drain the rest.
+        if (needsPersist) await persist();
+        // why: Due routines above the firing limit need another alarm.
         reschedule();
       } while (consumeRetick());
       return totals;
@@ -259,15 +273,17 @@ export const makeScheduler = ({
     }
   };
 
-  /**
-   * Rehydrate routines from the durable mirror on SW boot. A no-op without kv or
-   * with nothing stored. Does NOT fire — the caller ticks() after. Idempotent.
+  /** Load stored routines before a mutation can overwrite them.
    * @returns {Promise<{ loaded: number }>}
    */
   const load = async () => {
+    if (loading) { await loading; return { loaded: 0 }; }
+    loading = readStored().catch((cause) => { loading = null; throw cause; });
+    return loading;
+  };
+  const readStored = async () => {
     if (!kv) return { loaded: 0 };
-    let stored;
-    try { stored = await kv.get(SCHEDULE_ROUTINES_KEY); } catch { return { loaded: 0 }; }
+    const stored = await kv.get(SCHEDULE_ROUTINES_KEY);
     if (!stored || typeof stored !== 'object') return { loaded: 0 };
     let loaded = 0;
     let recoveredPending = false;

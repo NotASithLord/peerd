@@ -29,6 +29,7 @@ const baseDeps = (over: any = {}) => {
     // Defaults = "nothing in flight" so the other reset tests are unaffected.
     turnSlots: { stop: () => false },
     actorMessaging: { stopActorsFor: () => [] },
+    actorLifecycle: { stopSubtree: () => [] },
     resolvePermission: async (s: any) => ({ mode: s ? 'act' : 'plan', confirmActions: false }),
     normalizeMode: (m: string) => (m === 'plan' ? 'plan' : 'act'),
     normalizeConfirmActions: (c: any) => c === true,
@@ -99,17 +100,21 @@ describe('session/reset + switch + archive auto-memory seams', () => {
       currentSessionId: 'fresh', currentPermissionMode: 'act', currentConfirmActions: false,
     });
   });
-  test('reset STOPS the abandoned session\'s turn AND cascades to its in-flight actors', async () => {
-    // The current chat is 'cur' with two actors in flight. "New chat" must abort
-    // the orchestrator turn AND both actor slots — else they run on as zombies
-    // (the OM2W harness wedge). Mirrors agent/stop's cascade.
+  test.each(['session/reset', 'session/archive'])('%s stops all work before a failed goal write', async (route) => {
     const stopped: string[] = [];
     const { deps } = baseDeps({
+      haltGoalRun: async () => { throw new Error('storage unavailable'); },
       turnSlots: { stop: (sid: string) => { stopped.push(sid); return true; } },
       actorMessaging: { stopActorsFor: (sid: string) => (sid === 'cur' ? ['res-1', 'res-2'] : []) },
+      actorLifecycle: { stopSubtree: (sid: string) => { stopped.push(`children:${sid}`); return ['child']; } },
     });
-    await makeSessionMutationRoutes(deps)['session/reset']();
-    expect(stopped).toEqual(['cur', 'res-1', 'res-2']);   // orchestrator first, then its actors
+    let archived = false;
+    deps.sessions.get = async () => { throw new Error('session read unavailable'); };
+    deps.sessions.archive = async () => { archived = true; };
+    await expect(makeSessionMutationRoutes(deps)[route]({ sessionId: 'cur' }))
+      .rejects.toThrow('storage unavailable');
+    expect(stopped).toEqual(['cur', 'res-1', 'res-2', 'children:cur']);
+    expect([archived, await deps.sessionCache.sessionGet('currentSessionId')]).toEqual([false, 'cur']);
   });
   test('reset with nothing in flight does not over-stop', async () => {
     const stopped: string[] = [];
@@ -151,6 +156,7 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     const { deps } = baseDeps({
       turnSlots: { stop: (sid: string) => { events.push(`stop:${sid}`); return true; } },
       actorMessaging: { stopActorsFor: () => ['actor-1', 'actor-2'] },
+      actorLifecycle: { stopSubtree: (sid: string) => { events.push(`children:${sid}`); return ['child']; } },
       purgeLifecycleSession: async (sid: string) => {
         events.push(`purge:${sid}`);
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -160,7 +166,7 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 's2' });
     expect(events).toEqual([
       'stop:s2', 'stop:actor-1', 'stop:actor-2',
-      'purge:s2', 'purge:actor-1', 'purge:actor-2',
+      'children:s2', 'purge:s2', 'purge:actor-1', 'purge:actor-2', 'purge:child',
     ]);
     expect(settled).toBe(true);
   });

@@ -1,24 +1,8 @@
 // @ts-check
-// peerd-runtime/loop/goal-runner — "Goal mode": keep running normal agent
-// turns in the MAIN session until the agent declares the goal met (the
-// complete_goal tool), or a safety cap / the user's Stop ends it.
-//
-// This is the loop the mode-row Goal toggle drives — just the ordinary agent
-// turn, re-entered:
-//   - turn 1 is the user's goal text (a REAL, visible message);
-//   - every later turn is a hidden `synthetic` continuation nudge, so the
-//     chat reads like a normal session that simply doesn't stop to wait for
-//     you — reasoning + tool calls stream inline exactly as always.
-// The agent ends the run by calling complete_goal (revealed only while a run
-// is active — see tools/exposure.js). A hard iteration cap and the Stop
-// button are the backstops behind "until it's done".
-//
-// Run state is keyed by session id and MIRRORED to storage (the injected kv),
-// so a run survives an SW restart and keeps going while the user is in another
-// chat: resume() (called on vault unlock) re-drives any persisted active run.
-// Each chat owns at most one run. Functional-core / imperative-shell: `runTurn`
-// (runAgentTurn), `onEvent`, and `kv` are injected, so the control logic is
-// otherwise pure and unit-testable with fakes (kv optional → pure in-memory).
+// Goal mode continues a chat until completion, Stop, or the turn limit.
+// The first turn shows the user's goal. Later turns use hidden continuations.
+// why: Stored state permits recovery after worker loss. Stop must remove it.
+// Each chat owns one run. IO enters through runTurn, onEvent, and kv.
 
 // Hard backstop on autonomous turns — generous for real multi-step work,
 // still a wall against a run that never calls complete_goal. The Stop button
@@ -98,6 +82,8 @@ export const makeGoalRunner = ({
 }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
+  /** @type {Set<string>} */
+  const stopping = new Set();
   // why: only outstanding recovery reads need cancellation memory; completed
   // chats must not accumulate a permanent generation registry.
   /** @type {Set<Set<string>>} */
@@ -127,10 +113,7 @@ export const makeGoalRunner = ({
     return running;
   };
 
-  // Mirror the live (non-terminal) runs to storage. Fire-and-forget: the
-  // in-memory map is authoritative within an SW lifetime; this is the seam that
-  // lets resume() pick up after a restart. Best-effort — a write failure just
-  // means that run won't resume, not that the live run breaks.
+  // why: Live snapshots permit recovery. A failed snapshot does not stop work.
   const persist = () => {
     if (!kv) return Promise.resolve();
     /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
@@ -202,11 +185,7 @@ export const makeGoalRunner = ({
   /** Stop / steer-takeover: end the run without declaring success. @param {string} sid */
   const halt = (sid) => { const r = runs.get(sid); if (r) { r.halted = true; persist(); } };
 
-  // Durably drop ONE session's record from the mirror (read-modify-write).
-  // why not persist(): persist() writes a snapshot of the in-memory MAP, which a
-  // PAUSED run (vault-lock) is no longer in — so it can't remove a paused run's
-  // record, and a live run's persist() is fire-and-forget. forget() is keyed by
-  // sid and reaches the record either way. Best-effort, like persist(). No kv → no-op.
+  // why: Stop must remove paused records too and report storage failure.
   /** @param {string} sid @param {GoalRun} [expectedRun] */
   const forget = async (sid, expectedRun) => {
     if (!kv) return;
@@ -219,23 +198,18 @@ export const makeGoalRunner = ({
         delete next[sid];
         await kv.set(GOAL_RUNS_KEY, next);
       }
-    }).catch(() => {});
+    });
   };
 
-  /**
-   * Durable user-initiated Stop (Stop button, steer-takeover, new-chat, archive).
-   * Halts any live run AND awaits removal of the persisted record, so a Stop can't
-   * be silently undone by resume() on the next vault unlock. Unlike halt() (the
-   * internal supersede/error mark, in-memory only), this is keyed by sid and works
-   * even when the run was PAUSED and evicted from the map, or when a live run's
-   * fire-and-forget persist() hasn't committed yet.
-   * @param {string} sid
-   */
+  /** Stop a live or paused run. @param {string} sid */
   const stop = async (sid) => {
+    // why: A failed removal must block recovery until Stop succeeds.
+    stopping.add(sid);
     invalidateRecovery(sid);
     const r = runs.get(sid);
     if (r) r.halted = true;  // its drive() loop sees !alive() and exits to the terminal finally
     await forget(sid);
+    stopping.delete(sid);
   };
 
   /** @param {string} sid @param {'running'|'done'|'halted'|'capped'} phase */
@@ -324,7 +298,9 @@ export const makeGoalRunner = ({
         } else {
           const phase = run.completed ? 'done' : run.halted ? 'halted'
             : run.iteration >= maxIterations ? 'capped' : 'done';
-          await forget(sid, run);
+          // why: Failed cleanup must finish the UI state and block recovery.
+          try { await forget(sid, run); }
+          catch { if (runs.get(sid) === run) stopping.add(sid); }
           // why: storage cleanup may overlap a replacement in the same chat.
           if (runs.get(sid) !== run) return;
           runs.delete(sid);
@@ -367,6 +343,7 @@ export const makeGoalRunner = ({
       return { ok: false, error: 'goal-required' };
     }
     invalidateRecovery(sessionId);
+    stopping.delete(sessionId);
     if (runs.has(sessionId)) halt(sessionId);  // supersede any prior run
     runs.set(sessionId, {
       goal: goal.trim(), iteration: 0, completed: false, halted: false,
@@ -380,12 +357,7 @@ export const makeGoalRunner = ({
     return { ok: true };
   };
 
-  /**
-   * Re-drive any persisted active runs after an SW restart (called once the
-   * vault is unlocked — a turn needs the key). Each rehydrated run continues
-   * from its persisted iteration (so it sends a synthetic continuation, not a
-   * fresh goal). A no-op without kv or with nothing stored. Idempotent: skips a
-   * session that already has a live run.
+  /** Resume saved runs after unlock. Skip live runs and cancelled recovery.
    * @returns {Promise<{ resumed: number }>}
    */
   const resume = async () => {
@@ -402,7 +374,7 @@ export const makeGoalRunner = ({
     if (!stored || typeof stored !== 'object') return { resumed: 0 };
     let resumed = 0;
     for (const [sid, raw] of Object.entries(stored)) {
-      if (!sid || runs.has(sid) || cancelled.has(sid)) continue;
+      if (!sid || runs.has(sid) || cancelled.has(sid) || stopping.has(sid)) continue;
       const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
       if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
       // why clamp at the cap: persist() records the iteration ABOUT to run, so a

@@ -10,7 +10,7 @@ export const makeSessionMutationRoutes = (deps) => {
     vault, auditLog, pushState, sessions, sessionCache, autoMemory,
     SessionNotFoundError,
     maybeAutoResumeAfterRecovery, haltGoalRun, turnSlots, actorMessaging, nukeSessionWorkspace,
-    purgeLifecycleSession,
+    actorLifecycle, purgeLifecycleSession,
   } = deps;
 
   return {
@@ -18,24 +18,7 @@ export const makeSessionMutationRoutes = (deps) => {
       // why read BEFORE delete: "new chat" is a switch-away from the
       // current session — one of auto-memory's two lifecycle seams.
       const previousId = await sessionCache.sessionGet('currentSessionId');
-      // why: a "new chat" abandons the current one — end its goal run (if any)
-      // so it doesn't keep driving the orphaned session in the background.
-      // (A plain session/switch does NOT halt — that's the "keep running while
-      // I'm in another chat" case.) Awaited: stop() durably forgets the run's
-      // persisted record, so a "new chat" can't be undone by a resume() on the
-      // next unlock even if the SW is torn down right after this handler (#60).
-      if (previousId) await haltGoalRun?.(previousId);
-      // A "new chat" abandons the current session, so its BACKGROUND WORK must
-      // stop — not keep running invisibly. haltGoalRun (above) ends any goal
-      // loop; this ends the live TURN and CASCADES to its in-flight ACTORS (each
-      // runs on its OWN turn slot, so stopping the orchestrator alone leaves
-      // delegated web/VM/App/Notebook work running to completion). why: without
-      // it, New-chat mid-web-task — and the OM2W eval harness, which
-      // session/resets between EVERY task — leaks a live web-actor loop; they
-      // pile up until the SW saturates and every later turn stalls (the harness
-      // "2 tasks then a wall of timeouts"). Mirrors agent/stop's cascade
-      // (routes/sessions.js). Guarded so callers that don't wire the slots (unit
-      // tests) are a no-op.
+      // why: Stop live work before storage IO can delay or fail the reset.
       if (previousId && turnSlots?.stop?.(previousId)) {
         auditLog.append({ type: 'session_ended', sessionId: previousId, details: { reason: 'session_reset' } }).catch(() => {});
       }
@@ -45,6 +28,10 @@ export const makeSessionMutationRoutes = (deps) => {
             auditLog.append({ type: 'actor_stopped', sessionId: previousId, details: { actorSessionId, reason: 'session_reset_cascade' } }).catch(() => {});
           }
         }
+      }
+      if (previousId) {
+        actorLifecycle?.stopSubtree?.(previousId);
+        await haltGoalRun?.(previousId);
       }
       await bindCurrentChat(sessionCache, null);
       // The caller may send the first message of the new chat immediately
@@ -94,14 +81,7 @@ export const makeSessionMutationRoutes = (deps) => {
     'session/archive': async ({ sessionId }) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       try {
-        await sessions.archive(sessionId);
-        // Archiving wraps the chat up — end its goal run (if any) so it can't
-        // keep running on a put-away session. Awaited: durably forget the run so
-        // it can't resurrect on the next unlock (#60).
-        await haltGoalRun?.(sessionId);
-        // Archive is also Stop. End the root turn and every delegated actor
-        // before cleaning up durable state so no hidden work can continue on
-        // a put-away chat.
+        // why: Archive must stop live work before it changes durable state.
         if (turnSlots?.stop?.(sessionId)) {
           auditLog.append({ type: 'session_ended', sessionId, details: { reason: 'session_archive' } }).catch(() => {});
         }
@@ -115,13 +95,10 @@ export const makeSessionMutationRoutes = (deps) => {
             }
           }
         }
-        // Settle lifecycle records before returning. For dispatched Class D/E
-        // actions this preserves uncertainty and a verification notice instead
-        // of falsely reporting cancellation.
-        // Tool operations are keyed to the execution session, not only the
-        // owning root chat. Settle every stopped actor too, before archive
-        // returns, so a crash cannot strand its dispatched D/E action until a
-        // later boot or hide its verification notice in an archived chat.
+        actorSessionIds.push(...(actorLifecycle?.stopSubtree?.(sessionId) ?? []));
+        await haltGoalRun?.(sessionId);
+        await sessions.archive(sessionId);
+        // why: Keep uncertain effects for each stopped execution session.
         for (const lifecycleSessionId of new Set([sessionId, ...actorSessionIds])) {
           await purgeLifecycleSession?.(lifecycleSessionId);
         }
