@@ -94,7 +94,7 @@ const PAGE_METHODS = {
     },
     shape: (c) => ({
       ok: true,
-      clicked: c?.clicked === true,
+      clicked: true,
       ...(typeof c?.matchedCount === 'number' ? { matchedCount: c.matchedCount } : {}),
       ...(c?.navigated ? { navigated: true } : {}),
       ...(c?.browserPolicy ? { browserPolicy: c.browserPolicy } : {}),
