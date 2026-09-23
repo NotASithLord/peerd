@@ -185,6 +185,39 @@ describe('composeApp', () => {
     expect(out).toContain('\\u003c/script>');
   });
 
+  test('runtime data cannot become an entry, script, style, or worker source', () => {
+    const payload = JSON.stringify('</script><script>globalThis.pwned=1</script>');
+    for (const html of [
+      '<script src="data/state.json"></script>',
+      '<link rel="stylesheet" href="data/state.json">',
+      '<script>new Worker("data/state.json")</script>',
+    ]) {
+      expect(() => composeApp({ 'index.html': html, 'data/state.json': payload }))
+        .toThrow('app runtime data cannot be a composed source');
+    }
+    expect(() => composeApp({ 'data/state.json': payload }, 'data/state.json'))
+      .toThrow('app runtime data cannot be a composed source');
+  });
+
+  test('runtime-data source refusal uses the resolved case-insensitive path', () => {
+    for (const html of [
+      '<script src="../DATA/State.JSON"></script>',
+      '<link rel="stylesheet" href="../DATA/State.JSON">',
+      '<script>new Worker("../DATA/State.JSON")</script>',
+    ]) {
+      expect(() => composeApp({
+        'pages/index.html': html, 'DATA/State.JSON': '{}',
+      }, 'pages/index.html')).toThrow('app runtime data cannot be a composed source');
+    }
+  });
+
+  test('unreferenced runtime data does not prevent composing ordinary App code', () => {
+    const html = '<h1>App</h1><script src="main.js"></script>';
+    const files = { 'index.html': html, 'main.js': 'globalThis.ready=true;' };
+    expect(composeApp({ ...files, 'data/state.json': '{"count":1}' }))
+      .toBe(composeApp(files));
+  });
+
   // Execute the injected shim against mocked Worker/Blob/URL to prove the
   // runtime rewrite — a known spec becomes a blob: worker, anything else passes
   // straight through. Guards against a regression in the shim source string.

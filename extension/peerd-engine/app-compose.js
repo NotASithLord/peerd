@@ -24,6 +24,12 @@
 
 import { escapeAttr } from '/shared/util.js';
 
+const APP_DATA_PATH_RE = /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i;
+/** why: Mutable App data must never become executable without consent rotation. @param {string} path */
+const assertStaticSource = (path) => {
+  if (APP_DATA_PATH_RE.test(path)) throw new Error(`app runtime data cannot be a composed source: ${path}`);
+};
+
 /**
  * Inline tag-relative <link rel="stylesheet"> and <script src> references
  * by reading from `files` and substituting the file's content.
@@ -36,6 +42,7 @@ export const composeApp = (files, entry = 'index.html') => {
   if (!(entry in files)) {
     throw new Error(`app entry not found: ${entry}`);
   }
+  assertStaticSource(entry);
   const visited = new Set();
 
   // Inline <link rel="stylesheet" href="./...">  → <style>…</style>
@@ -47,6 +54,7 @@ export const composeApp = (files, entry = 'index.html') => {
     const href = hrefMatch[2];
     if (!isRelativeAndKnown(href, files, entry)) return full;
     const path = resolveRel(entry, href);
+    assertStaticSource(path);
     visited.add(path);
     return `<style data-from="${escapeAttr(path)}">${files[path]}</style>`;
   });
@@ -57,6 +65,7 @@ export const composeApp = (files, entry = 'index.html') => {
   composed = composed.replace(SCRIPT_RE, (full, beforeSrc, _q, src, afterSrc, inner) => {
     if (!isRelativeAndKnown(src, files, entry)) return full;
     const path = resolveRel(entry, src);
+    assertStaticSource(path);
     visited.add(path);
     // Preserve type="module" etc. if present.
     const attrs = (`${beforeSrc} ${afterSrc}`).replace(/\bsrc\s*=\s*['"][^'"]*['"]/i, '').trim();
@@ -164,7 +173,10 @@ const inlineWorkerFiles = (composed, files, entry) => {
     const spec = m[2];
     if (srcBySpec[spec] != null) continue;
     const path = workerFilePath(spec, entry, files);
-    if (path) srcBySpec[spec] = files[path];
+    if (path) {
+      assertStaticSource(path);
+      srcBySpec[spec] = files[path];
+    }
   }
   if (Object.keys(srcBySpec).length === 0) return composed;
 
