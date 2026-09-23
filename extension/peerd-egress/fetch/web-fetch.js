@@ -386,11 +386,13 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     }
     // u.hostname (not u.host): the denylist matches bare hostnames; u.host
     // carries :port. (The matcher also normalizes defensively — see denylist.js.)
-    const denylisted = matchDenylist(u.hostname, getDenylist());
-    if (denylisted) {
-      _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'denylist', method } }).catch(() => {});
-      throw new EgressDeniedError(u.origin);
-    }
+    const assertDenylist = () => {
+      if (matchDenylist(u.hostname, getDenylist())) {
+        _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'denylist', method } }).catch(() => {});
+        throw new EgressDeniedError(u.origin);
+      }
+    };
+    assertDenylist();
     // Redirects fail closed. A 3xx to a different host would re-open every
     // gate above (scheme / SSRF private-network / denylist) against an
     // UN-checked target — e.g. a public host that 302s to 169.254.169.254
@@ -421,6 +423,9 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
         _audit({ type: 'egress_denied', details: { origin: u.origin, reason, method } }).catch(() => {});
         throw new EgressDeniedError(u.origin, reason);
       }
+      // why: pacing can wait after the first policy read. A newly blocked
+      // target or unavailable policy must still prevent the physical request.
+      assertDenylist();
     }
     signal?.throwIfAborted();
     const res = await _fetch(resource, { ...init, redirect: 'manual' });
