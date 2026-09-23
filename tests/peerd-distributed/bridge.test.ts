@@ -41,17 +41,20 @@ const memoryStorage = () => {
 // The bridge now talks to the offscreen base host over swCall('dweb/base/room')
 // and receives pushed room events via onHostEvent — no in-page room host, no
 // identity minting, no signaler. The fakes below stand in for that host.
-const makeBridge = ({ confirm = true, joinHost, roomCall, storage }: {
+const makeBridge = ({ confirm = true, joinHost, roomCall, storage, appDweb = { seed: 'commons' }, metadata }: {
   confirm?: boolean | ((request: any) => boolean | Promise<boolean>),
   joinHost?: (payload: any) => Promise<any>,
   roomCall?: (payload: any) => Promise<any>,
   storage?: { get: (key: string) => Promise<any>, set: (value: any) => Promise<void> },
+  appDweb?: any,
+  metadata?: any,
 } = {}) => {
   const mt = mockTransport();
   const calls: any[] = [];
   const confirmations: any[] = [];
   let pushEvent: ((m: any) => void) | null = null;
   const swCall = async (type: string, payload: any = {}) => {
+    if (type === 'app/get-meta') return metadata ?? { ok: true, dweb: appDweb };
     if (type !== 'dweb/base/room') return { ok: true };
     calls.push(payload);
     if (roomCall) return roomCall(payload);
@@ -78,7 +81,7 @@ const makeBridge = ({ confirm = true, joinHost, roomCall, storage }: {
     }
   };
   const bridge = createDwebBridge({
-    appId: 'commons', appName: 'commons', appDweb: { seed: 'commons' }, entryFile: 'index.html',
+    appId: 'commons', appName: 'commons', appDweb, entryFile: 'index.html',
     transport: mt.transport,
     swCall,
     storage: storage ?? { get: async () => ({}), set: async () => {} },
@@ -93,6 +96,61 @@ const makeBridge = ({ confirm = true, joinHost, roomCall, storage }: {
 };
 
 describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
+  test('a remembered release grant cannot authorize a local fork', async () => {
+    const storage = memoryStorage();
+    await storage.set({ 'dweb.grants.v1': { releaseHash: { rooms: { r: true } } } });
+    const { mt, confirmations, calls, bridge } = makeBridge({
+      storage, appDweb: { hash: 'releaseHash', generation: 2, forked: false },
+      metadata: { ok: true, dweb: { hash: 'releaseHash', generation: 2, forked: true } },
+    });
+    mt.drive(rpc('request-fork', 'join', { roomId: 'r' }));
+    await tick();
+    expect(confirmations).toHaveLength(1);
+    expect(storage.values['dweb.grants.v1']['fork:commons:releaseHash'].rooms.r).toBe(true);
+    expect(calls.find((call) => call.op === 'join')).toMatchObject({
+      bridgeAppId: 'commons', bridgeAppHash: 'releaseHash', bridgeAppForked: true,
+      bridgeAppGeneration: 2,
+    });
+    await bridge.dispose();
+  });
+
+  test.each([
+    { hash: 'otherHash', generation: 2, forked: true },
+    { hash: 'releaseHash', generation: 3, forked: true },
+    { hash: 'releaseHash', generation: 2, forked: false },
+  ])('stale or downgraded App identity cannot spend a remembered grant: %j', async (dweb) => {
+    const storage = memoryStorage();
+    await storage.set({ 'dweb.grants.v1': { 'fork:commons:releaseHash': { rooms: { r: true } } } });
+    const { mt, confirmations, calls, bridge } = makeBridge({
+      storage, appDweb: { hash: 'releaseHash', generation: 2, forked: true },
+      metadata: { ok: true, dweb },
+    });
+    mt.drive(rpc('request-stale', 'join', { roomId: 'r' }));
+    await tick();
+    expect(mt.results()[0]).toMatchObject({ ok: false, error: 'App identity changed. Reload the App.' });
+    expect(confirmations).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    await bridge.dispose();
+  });
+
+  test('generation invalidation retires a delayed join without waiting for the authority lane', async () => {
+    const joining = deferred<any>();
+    const { mt, bridge, calls, push } = makeBridge({ joinHost: () => joining.promise });
+    mt.drive(rpc('request-pending', 'join', { roomId: 'r' }));
+    await tick();
+    expect(calls.map((call) => call.op)).toEqual(['join']);
+    await bridge.invalidate();
+    expect(mt.hasHandler()).toBe(false);
+    push({ type: 'dweb/base-room/event', roomId: 'r', event: 'direct', data: 'retired' });
+    expect(mt.events()).toHaveLength(0);
+    joining.resolve({ ok: true, did: 'did:key:zME', joined: 'r', hostEpoch: 'host-epoch-0001' });
+    await tick();
+    expect(calls.some((call) => call.op === 'join-ack')).toBe(false);
+    expect(calls.filter((call) => call.op === 'leave')).toHaveLength(1);
+    expect(calls.find((call) => call.op === 'leave').roomAdmissionToken)
+      .toBe(calls[0].roomAdmissionToken);
+  });
+
   test('hello replies over the injected transport', async () => {
     const { mt } = makeBridge();
     mt.drive(rpc('request-0001', 'hello'));

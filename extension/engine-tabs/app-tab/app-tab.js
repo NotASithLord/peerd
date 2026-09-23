@@ -983,6 +983,13 @@ toggleBtn.addEventListener('click', async () => {
     } else {
       // When leaving edit mode, flush save + force a fresh render.
       if (editorApi) await editorApi.flushSave?.();
+      if (dwebBridgeLifecycle.isInvalidated()) {
+        // why: code edits retire this trusted document's bridge permanently.
+        // A fresh host rehydrates consent/actor custody through normal gates;
+        // rearming the old host could grant its retired iframe new authority.
+        location.reload();
+        return;
+      }
       const attachment = await actorAttachment.retry();
       if (!attachment?.ok) {
         showActorAttachFailure(attachment);

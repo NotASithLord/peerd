@@ -94,6 +94,7 @@ describe('kernel production runtime', () => {
     const runtime = await createKernelProductionRuntime(base(async ({ engine, turn }) => {
       engine.onVmTabAdopt('vm-1', 17);
       const tracker = createAppTabTracker({
+        storage: { get: async () => ({}), set: async () => {} } as any,
         tabs: {
           query: async () => [], sendMessage: async () => ({ ok: true }),
         } as any,
@@ -102,6 +103,10 @@ describe('kernel production runtime', () => {
       });
       tracker.onTabPending('app-1', 23);
       expect(tracker.onTabFailed('app-1', new Error('network-floor-failed'))).toBe(23);
+      // Failed attachment retains the physical tab in the liveness ledger so
+      // its later removal still retires App consent after a worker restart.
+      expect(tracker.getAppIdByTab(23)).toBe('app-1');
+      expect(tracker.onTabRemoved(23)).toBe('app-1');
       turn.goal.bind(goalRunner);
       expect(events).toEqual([]);
       return {
@@ -116,6 +121,8 @@ describe('kernel production runtime', () => {
     expect(runtime).toBeDefined();
     expect(events).toEqual([
       ['adopt', 'vm', 'vm-1', 17],
+      ['adopt', 'app', 'app-1', 23],
+      ['drop', 'app', 'app-1'],
       ['adopt', 'app', 'app-1', 23],
       ['drop', 'app', 'app-1'],
       ['bind', goalRunner],

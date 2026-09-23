@@ -357,6 +357,7 @@ describe('App tab tracker quiescence', () => {
     const tracker = createAppTabTracker({
       tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
     });
+    tracker.onTabPending('app-1', 41, 'chat-a', 'root-a');
     tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
     expect(await tracker.reconcileTabClaim('app-1', 42)).toBe(41);
     expect(tracker.getTabId('app-1')).toBe(41);
@@ -375,6 +376,7 @@ describe('App tab tracker quiescence', () => {
     const tracker = createAppTabTracker({
       tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
     });
+    tracker.onTabPending('app-1', 41, 'chat-a', 'root-a');
     tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
     expect(await tracker.closeTab('app-1')).toBe(false);
     expect(removed).toEqual([]);
@@ -395,10 +397,13 @@ describe('App tab tracker quiescence', () => {
     const tracker = createAppTabTracker({
       tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
     });
+    tracker.onTabPending('app-1', 41, 'chat-a', 'root-a');
     tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
     snapshotFails = true;
     await expect(() => tracker.closeTab('app-1'))
       .toThrow((error) => error?.message === 'app-tab-state-unavailable');
+    expect(removed).toEqual([]);
+    expect(tracker.getTabId('app-1')).toBe(41);
     snapshotFails = false;
     expect(await tracker.closeTab('app-1')).toBe(true);
     expect(removed).toEqual([41]);

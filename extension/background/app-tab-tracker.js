@@ -188,7 +188,10 @@ export const createAppTabTracker = ({
 
   /** Find every exact App page, including tabs not adopted after a worker restart. @param {string} appId */
   const exactTabIds = async (appId) => {
-    const tabIds = new Set((await tabs.query({ url: `${tabUrlPrefix}*` }))
+    let liveTabs;
+    try { liveTabs = await tabs.query({ url: `${tabUrlPrefix}*` }); }
+    catch (cause) { throw new Error('app-tab-state-unavailable', { cause }); }
+    const tabIds = new Set(liveTabs
       .filter((tab) => tab.id != null && tracker.parseIdFromUrl(tab.url ?? '') === appId)
       .map((tab) => /** @type {number} */ (tab.id)));
     // why: a stale numeric tab id must never authorize closing a different page.

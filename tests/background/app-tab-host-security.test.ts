@@ -2,6 +2,30 @@ import { describe, expect, test } from 'bun:test';
 import { createDwebBridgeLifecycle } from '../../extension/engine-tabs/app-tab/dweb-bridge-lifecycle.js';
 
 describe('App tab required-actor and runtime lifecycle contracts', () => {
+  test('a saved code edit reopens the trusted host instead of rearming its retired bridge', async () => {
+    const lifecycle = createDwebBridgeLifecycle();
+    expect(lifecycle.isInvalidated()).toBe(false);
+    lifecycle.allow();
+    await lifecycle.dispose();
+    expect(lifecycle.isInvalidated()).toBe(false);
+    await lifecycle.invalidate();
+    lifecycle.allow();
+    expect(lifecycle.isInvalidated()).toBe(true);
+    let recreated = false;
+    await lifecycle.attach(async () => { recreated = true; return null; });
+    expect(recreated).toBe(false);
+
+    const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
+    const view = host.slice(host.indexOf('// When leaving edit mode,'));
+    const flushAt = view.indexOf('await editorApi.flushSave?.()');
+    const retiredAt = view.indexOf('dwebBridgeLifecycle.isInvalidated()');
+    const reloadAt = view.indexOf('location.reload()');
+    expect(flushAt).toBeGreaterThanOrEqual(0);
+    expect(retiredAt).toBeGreaterThan(flushAt);
+    expect(reloadAt).toBeGreaterThan(retiredAt);
+    expect(view.indexOf('await actorAttachment.retry()')).toBeGreaterThan(reloadAt);
+  });
+
   test('concurrent bridge attach and detach share one lifecycle', async () => {
     let releaseCreate!: () => void;
     let releaseLeave!: () => void;
