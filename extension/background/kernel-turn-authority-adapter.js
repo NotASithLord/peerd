@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import {
   actorIsolationAvailable,
   actorIsolationCapability,
@@ -335,6 +336,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     (await projectToolSurface(input)).tools;
   const engine = deps.engine;
   const scriptRuns = deps.scriptRuns;
+  const authorityScheduler = deps.authorityScheduler ?? createAuthorityEffectScheduler();
   const poisonedAppRuntimeTabs = new Set();
   const projection = createActorLiveProjection();
   const contextSnapshots = deps.contextSnapshots;
@@ -2353,7 +2355,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         return over(root)
           ? `actor refused: the session spend limit ($${spendLimit}) is reached` : null;
       },
-      authorityScheduler: deps.authorityScheduler,
+      authorityScheduler,
     }) : null;
     directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
     live.actorIsolationReady = actorIsolationAvailable(baseActorIsolation) && isolationState
@@ -2631,6 +2633,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       if (signal?.aborted) {
         await deps.browser.tabs.remove(tab.id).catch(() => {});
         throw new Error('adopt_web_tab: aborted');
+      }
+      try {
+        // why: a numeric-tab actor can replace this owner while navigation is
+        // still pending. Attach its tab lane before publishing the binding so
+        // replacement cannot escape the first-adoption queue or poison state.
+        authorityScheduler.linkAliases([`page:actor:${sessionId}`, `page:tab:${tab.id}`]);
+      } catch (cause) {
+        await deps.browser.tabs.remove(tab.id).catch(() => {});
+        throw cause;
       }
       webActorTabBindings.bind(tab.id, sessionId);
       await persistWebBindings();

@@ -93,7 +93,25 @@ export const createAuthorityEffectScheduler = ({
     }
     return entry;
   };
+  const releaseIdleAliases = (/** @type {TargetLane} */ resource) => {
+    // Healthy aliases live only while an effect owns the resource; retired
+    // actors/tabs cannot accumulate historical identity mappings. Unknown
+    // outcome tombstones deliberately survive until host restart.
+    if (resource.users !== 0 || resource.poisoned) return;
+    for (const alias of resource.aliases) {
+      if (targetLanes.get(alias) === resource) targetLanes.delete(alias);
+    }
+  };
   return Object.freeze({
+    // Host custody calls this before publishing a newly adopted resource.
+    linkAliases: (/** @type {string[]} */ names) => {
+      if (names.length < 2 || names.some((name) => typeof name !== 'string' || !name)) {
+        throw new TypeError('authority resource aliases are invalid');
+      }
+      const resource = bindAliases(names);
+      if (resource.poisoned) throw poisonedTarget();
+      releaseIdleAliases(resource);
+    },
     run: async (
       /** @type {{read:boolean,target?:string|null,aliases?:string[],parentLease?:object|null,scopeOnly?:boolean,signal?:AbortSignal}} */ options,
       /** @type {(lease:object)=>Promise<any>|any} */ execute,
@@ -196,10 +214,7 @@ export const createAuthorityEffectScheduler = ({
         releaseTarget?.();
         releaseParent?.();
         if (targetEntry) targetEntry.users -= 1;
-        if (resource.users === 0 && !resource.poisoned && resource.aliases.size === 1
-            && targetLanes.get(target) === resource) {
-          targetLanes.delete(target);
-        }
+        releaseIdleAliases(resource);
       }
     },
   });

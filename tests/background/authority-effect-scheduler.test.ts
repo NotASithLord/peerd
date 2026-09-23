@@ -240,6 +240,24 @@ describe('authority effect scheduler', () => {
     }
   });
 
+  test('releases healthy settled aliases when an actor later moves to another tab', async () => {
+    const scheduler = createAuthorityEffectScheduler();
+    await scheduler.run({
+      read: false, target: 'page:actor:reused', aliases: ['page:tab:7'],
+    }, () => {});
+    const gate = deferred();
+    const started = deferred();
+    const next = scheduler.run({
+      read: false, target: 'page:actor:reused', aliases: ['page:tab:8'],
+    }, async () => { started.resolve(); await gate.promise; });
+    await started.promise;
+    let oldTabFree = false;
+    await scheduler.run({ read: false, target: 'page:tab:7' }, () => { oldTabFree = true; });
+    expect(oldTabFree).toBe(true);
+    gate.resolve();
+    await next;
+  });
+
   test('recognizes a nested target alias without self-deadlocking', async () => {
     const scheduler = createAuthorityEffectScheduler();
     let nested = false;

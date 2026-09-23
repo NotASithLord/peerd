@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnAuthorityAdapter } from '../../extension/background/kernel-turn-authority-adapter.js';
 import { createOriginPacingStore } from '../../extension/peerd-runtime/pacing/origin-pacing-store.js';
+import { createAuthorityEffectScheduler } from '../../extension/background/authority-effect-scheduler.js';
 import {
   actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
 } from '../../extension/background/kernel-turn-authority-adapter.js';
@@ -125,6 +126,7 @@ const harness = async (
     },
     sessionReadsUnavailable?: () => boolean,
     engineRecovery?: boolean,
+    authorityScheduler?: ReturnType<typeof createAuthorityEffectScheduler>,
   } = {},
 ) => {
   const toolProjections: any[] = [];
@@ -321,6 +323,7 @@ const harness = async (
   };
   const scriptRuns = createScriptRunRegistry();
   const dependencies: any = {
+    authorityScheduler: options.authorityScheduler,
     engine, browser, idb,
     vault: {
       isLocked: () => false, getSecret: async () => 'secret',
@@ -1026,6 +1029,45 @@ describe('kernel turn authority adapter', () => {
     );
     expect(attached).toMatchObject({ ok: false });
     expect(h.engine.appTabTracker.getTabId('app-1')).toBeNull();
+  });
+
+  test('publishes an adopted tab on the first owner lane before a replacement actor can dispatch', async () => {
+    const scheduler = createAuthorityEffectScheduler({ abortDrainMs: 1 });
+    const h = await harness(undefined, { firefox: true, authorityScheduler: scheduler });
+    const ctx: any = await h.factories.buildToolContext({
+      sessionId: h.root.sessionId,
+      actorType: 'web', actorBacking: 'tab', exposure: 'actor',
+    });
+    const controller = new AbortController();
+    let adopted!: { tabId: number };
+    let firstEntered!: () => void;
+    let releaseHost!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstEntered = resolve; });
+    const hostGate = new Promise<void>((resolve) => { releaseHost = resolve; });
+    const first = scheduler.run({
+      read: false, target: `page:actor:${h.root.sessionId}`, signal: controller.signal,
+    }, async () => {
+      adopted = await ctx.adoptWebTab();
+      firstEntered();
+      await hostGate;
+    });
+    try {
+      await firstStarted;
+      let replacementDispatched = false;
+      const replacement = scheduler.run({
+        read: false, target: `page:tab:${adopted.tabId}`,
+        aliases: ['page:actor:replacement'],
+      }, () => { replacementDispatched = true; });
+      const replacementResult = replacement.then(() => null, (cause) => cause);
+      await scheduler.run({ read: false, target: 'page:tab:unrelated' }, () => {});
+      expect(replacementDispatched).toBe(false);
+      controller.abort();
+      await expect(first).rejects.toMatchObject({ outcomeKnown: false });
+      expect(await replacementResult).toMatchObject({
+        code: 'authority-target-poisoned', outcomeKnown: false,
+      });
+      expect(replacementDispatched).toBe(false);
+    } finally { releaseHost(); }
   });
 
   test('persists a fingerprinted web source projection and refreshes it on navigation', async () => {
