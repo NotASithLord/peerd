@@ -291,7 +291,7 @@ describe('session/reset + switch + archive auto-memory seams', () => {
 });
 
 // #60 (related): new-chat and archive must AWAIT the durable goal Stop, so the
-// run's persisted record is forgotten before the handler returns — otherwise an
+// run's persisted record is forgotten before the handler returns; otherwise an
 // SW teardown right after could let resume() resurrect the stopped run. A
 // late-resolving haltGoalRun reverts-proves the await (un-awaited → not done yet).
 describe('durable goal Stop is awaited on new-chat / archive (#60)', () => {

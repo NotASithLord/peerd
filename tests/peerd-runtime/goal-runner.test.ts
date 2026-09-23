@@ -488,7 +488,7 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     });
     await runner.resume();
     await settle(() => runner.get('s') === null);
-    // The interrupted final turn re-ran exactly once, THEN the run caps — without
+    // The interrupted final turn re-ran exactly once, THEN the run caps; without
     // the clamp the loop would exit immediately (0 turns) and still report capped.
     expect(calls.length).toBe(1);
     expect(events[events.length - 1].phase).toBe('capped');

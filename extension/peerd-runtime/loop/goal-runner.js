@@ -138,7 +138,7 @@ export const makeGoalRunner = ({
   };
 
   /**
-   * Is a run for this session recorded in the DURABLE mirror — i.e. live OR
+   * Is a run for this session recorded in the DURABLE mirror: live OR
    * merely not-yet-resumed after an SW restart OR vault-lock-paused (evicted
    * from the map but kept in the mirror for resume)? Prewalk's reconcile
    * consults this so a mid-restart/paused run is never mistaken for a dead one
@@ -341,7 +341,7 @@ export const makeGoalRunner = ({
   };
 
   /**
-   * Start (or supersede) a goal run for a session. Fire-and-forget — returns
+   * Start (or supersede) a goal run for a session. Fire-and-forget: returns
    * immediately; the turns stream over the port like any chat.
    * @param {{ sessionId: string, goal: string }} req
    */
@@ -387,7 +387,7 @@ export const makeGoalRunner = ({
       // why clamp at the cap: persist() records the iteration ABOUT to run, so a
       // crash resumes there. But if the SW died DURING the final allowed turn, the
       // stored iteration === maxIterations and drive()'s `iteration < maxIterations`
-      // would be false immediately — declaring 'capped' for a turn that never
+      // would be false immediately, declaring 'capped' for a turn that never
       // actually ran. Rewind one so that interrupted final turn re-runs once.
       const storedIteration = Number(rec.iteration) || 0;
       const iteration = storedIteration >= maxIterations ? Math.max(0, maxIterations - 1) : storedIteration;
