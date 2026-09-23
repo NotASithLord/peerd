@@ -33,11 +33,11 @@ const richUiEntries = {
   home: 'home/home.js',
 } as const;
 
-// Exact pre-Options-boundary graphs. The shared ui.js surfaces are first-paint
-// contracts; Settings-only features must never widen either rich document.
+// Exact reviewed graphs including the shared pacing status bar. The shared
+// ui.js surfaces are first-paint contracts; Settings-only features stay outside.
 const RICH_UI_GRAPH_CEILINGS = {
-  sidepanel: { modules: 61, graphBytes: 670_963 },
-  home: { modules: 68, graphBytes: 847_827 },
+  sidepanel: { modules: 62, graphBytes: 677_350 },
+  home: { modules: 69, graphBytes: 854_254 },
 } as const;
 
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';
