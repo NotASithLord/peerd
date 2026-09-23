@@ -347,6 +347,7 @@ export const createOriginPacingStore = ({
    */
   const reserve = async (origin, { isWrite, signal, onWait, maxInlineWaitMs }) => {
     await hydrate();
+    signal?.throwIfAborted();
     if (!ready || loadFailed) {
       return isWrite
         ? { outcome: 'unavailable', waitedMs: 0 }
@@ -356,6 +357,9 @@ export const createOriginPacingStore = ({
     return lanes.enqueue(origin, async () => {
       let waitedMs = 0;
       for (;;) {
+        // why: cancellation and persistence failure can happen while queued.
+        signal?.throwIfAborted();
+        if (loadFailed && isWrite) return { outcome: 'unavailable', waitedMs, origin };
         const at = now();
         const verdict = planRequest(currentRule(origin, at), { now: at, isWrite, maxInlineWaitMs }, K);
         if (!verdict) return { outcome: 'unavailable', waitedMs, origin };

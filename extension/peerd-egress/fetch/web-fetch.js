@@ -362,6 +362,8 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
       : resource;
     // why: pacing and audit must use the method that fetch sends.
     const method = (typeof init?.method === 'string' ? init.method : resource instanceof Request ? resource.method : 'GET').toUpperCase();
+    // why: a Request carries cancellation even when init does not repeat it.
+    const signal = init?.signal ?? (resource instanceof Request ? resource.signal : undefined);
     let u;
     try { u = new URL(urlString); }
     catch {
@@ -411,7 +413,7 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     if (pace && paceKey) {
       const clearance = await pace.reserve(paceKey, {
         isWrite: pace.isWriteMethod(method),
-        signal: init?.signal ?? undefined,
+        signal,
         maxInlineWaitMs: NETWORK_INLINE_WAIT_MS,
       });
       if (clearance.outcome === 'handoff' || clearance.outcome === 'unavailable') {
@@ -420,6 +422,7 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
         throw new EgressDeniedError(u.origin, reason);
       }
     }
+    signal?.throwIfAborted();
     const res = await _fetch(resource, { ...init, redirect: 'manual' });
     if (pace && paceKey) {
       // Await the trusted observation before a response leaves this boundary.

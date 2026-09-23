@@ -186,9 +186,9 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // point are the only enforcement points, and a pacing decision may never be
     // answerable from an actor heap.
     expect(graph.size).toBeLessThanOrEqual(462);
-    // The merged readiness projection grows existing modules only; the
-    // measured combined graph is 4,774,517 bytes with the same four additions.
-    expect(bytes).toBeLessThanOrEqual(4_774_600);
+    // Readiness and the cancellation/dequeue rechecks grow existing modules;
+    // the combined graph measures 4,774,924 bytes with the same four additions.
+    expect(bytes).toBeLessThanOrEqual(4_775_000);
     // 460_000 -> 464_000: the pacing subsystem's wiring (the store, its
     // tool-context closures, the wait notice, the dev seam, and the settings
     // routes). Wiring is what belongs in this file; the policy and the control
