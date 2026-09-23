@@ -113,10 +113,10 @@ describe('shapePageResult — tool result -> Playwright-ish return', () => {
     expect(r).toEqual({ ok: true, url: 'https://example.com/landed' });
   });
 
-  test('click surfaces matchedCount + navigated when present', () => {
+  test('click reports selector success and surfaces matchedCount + navigated', () => {
     const r = shapePageResult('click', {
       ok: true,
-      content: JSON.stringify({ clicked: true, matchedCount: 1, navigated: true }),
+      content: JSON.stringify({ clicked: '#submit', matchedCount: 1, navigated: true }),
     });
     expect(r).toEqual({ ok: true, clicked: true, matchedCount: 1, navigated: true });
   });
