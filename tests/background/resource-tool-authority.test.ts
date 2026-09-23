@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createResourceToolAuthority } from '../../extension/background/resource-tool-authority.js';
 import { makeWebFetch, withSessionScopedCredentials } from '../../extension/peerd-egress/fetch/web-fetch.js';
+import { snapshotControllerTurnAuthorityBinding, projectControllerTurnAuthorityClass } from '../../extension/background/controller-turn-authority-scope.js';
 
 const response = (
   url: string, text = 'ok',
@@ -51,6 +52,45 @@ const tabAuthorityFor = (args: any, webFetch: (url: string) => Promise<any>) =>
   });
 
 describe('exact API actor web-resource scope', () => {
+  test.each(['unchanged', 'revoked'])('controller resource projection retains %s final-send authority', async (change) => {
+    let version = 0;
+    let permissionReads = 0;
+    let calls = 0;
+    const args = { url: 'https://api.example.com/change', method: 'POST', headers: {} };
+    const raw = makeWebFetch({ getDenylist: () => [], matchDenylist: () => false,
+      fetchFn: (async () => { calls += 1; return new Response('sent'); }) as unknown as typeof fetch });
+    const controller = new AbortController();
+    const host = {
+      session: { sessionId: 'controller-owner' }, permission: { mode: 'act' },
+      readAuthorityPermission: async () => {
+        permissionReads += 1;
+        if (change === 'revoked' && permissionReads === 2) version += 1;
+        return { mode: 'act' };
+      },
+      captureRequestAuthority: () => { const captured = version; return () => version === captured; },
+      webFetch: raw,
+    };
+    const binding = snapshotControllerTurnAuthorityBinding(host, {
+      sessionId: host.session.sessionId, operationGrant: new Set(['turn.resource.request-web-text']),
+      abortSignal: controller.signal,
+    });
+    const ctx = projectControllerTurnAuthorityClass(binding, 'resource');
+    expect(ctx?.captureRequestAuthority).toBe(host.captureRequestAuthority);
+    const authority = createResourceToolAuthority({
+      binding: { operation: 'turn.resource.request-web-text', args }, ctx,
+      shared: { webWriteApproval: { ...args } },
+    });
+    if (change === 'revoked') {
+      await expect(authority.requestWebText(args)).rejects.toMatchObject({
+        performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+      });
+      expect(calls).toBe(0);
+    } else {
+      expect(await authority.requestWebText(args)).toMatchObject({ ok: true, status: 200 });
+      expect(calls).toBe(1);
+    }
+  });
+
   test.each(['plan', 'unavailable'])('refuses a confirmed write if live permission becomes %s during pacing', async (change) => {
     let waited = false;
     let calls = 0;

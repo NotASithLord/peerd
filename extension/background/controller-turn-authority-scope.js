@@ -8,7 +8,7 @@ const BRIDGE_KEYS = Object.freeze([
   'lifecycleOwnerSessionId', 'lifecycleTurnId', 'lifecycleUserInitiated',
 ]);
 const BROWSER_TARGET_KEYS = Object.freeze([
-  'tabs', 'scripting', 'denylist', 'judgeLanding', 'noteTab',
+  'tabs', 'scripting', 'denylist', 'readAuthorityDenylist', 'judgeLanding', 'noteTab',
   'noteLearnedOrigin', 'ensureBrowserNetworkGuard',
 ]);
 /** @type {Readonly<Record<string, readonly string[]>>} */
@@ -52,6 +52,7 @@ const CLASS_KEYS = Object.freeze({
   ]),
   resource: Object.freeze([
     'session', 'activeTab', 'actorType', 'actorInstanceId', 'backing', 'confirm',
+    'permission', 'readAuthorityPermission', 'captureRequestAuthority',
     ...BROWSER_TARGET_KEYS,
     'docOffscreenClient', 'resultStore', 'webFetch', 'webOffscreenClient',
   ]),
