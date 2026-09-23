@@ -180,12 +180,18 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // App-native semantic APIs are document-side adapters over the existing
     // authority verbs; they must not grow this graph. Privileged Git import is
     // one small repository bootstrap verb, not a worker-side UI controller.
-    // Reviewed for the untrusted-content escaping fixes: module count and the
-    // entry file are both UNCHANGED - no dependency added, no worker growth.
-    // The 352 bytes are an escaper plus its rationale in two leaf modules.
+    //
+    // Reviewed for the #384 readiness-aware provider projection: the MODULE
+    // COUNT is unchanged, so no dependency was added - provider-readiness.js
+    // was already on the graph and absorbed the policy, which is why the entry
+    // grew by far less than the two byte budgets moved. Source-size growth in
+    // modules already present is what these two numbers track.
+    // The untrusted-content escaping repair adds only leaf-module source and
+    // rationale, with no dependency or entry growth. The integrated source
+    // graph measures 4,712,048 bytes; allow only the measured rounding margin.
     expect(graph.size).toBeLessThanOrEqual(458);
-    expect(bytes).toBeLessThanOrEqual(4_706_000);
-    expect(statSync(entry).size).toBeLessThanOrEqual(460_000);
+    expect(bytes).toBeLessThanOrEqual(4_712_100);
+    expect(statSync(entry).size).toBeLessThanOrEqual(462_000);
   });
 
   test('the offscreen host uses its exact runtime and engine surfaces', async () => {
