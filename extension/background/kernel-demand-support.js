@@ -111,6 +111,7 @@ export const createKernelDemandSupport = (deps) => {
       vault: deps.vault,
       settingsStore: deps.settingsStore,
       auditLog: deps.auditLog,
+      testProvider: deps.testProvider,
       pushState: async () => {
         deps.providerProjection.bumpRevision();
         await deps.pushState();

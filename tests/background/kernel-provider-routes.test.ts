@@ -112,6 +112,118 @@ describe('provider key custody', () => {
     expect(preserved.updated).toEqual([]);
   });
 
+  test.each([
+    { name: 'empty', result: { ok: false, reachable: true, error: 'no-models', models: 0 } },
+    { name: 'unreachable', result: { ok: false, error: 'unreachable' } },
+  ])('replaces an active $name Ollama selection when a key becomes available', async ({ result }) => {
+    const updates: unknown[] = [];
+    const probes: unknown[] = [];
+    const h = harness({
+      settingsStore: {
+        get: () => ({ providerName: 'ollama', providerModel: 'missing' }),
+        update: async (patch: unknown) => { updates.push(patch); },
+      },
+      testProvider: async (request: unknown) => { probes.push(request); return result; },
+    });
+    expect(await h.route({ provider: 'anthropic', plaintext: 'new-valid-key' }))
+      .toEqual({ ok: true });
+    expect(probes).toEqual([{ provider: 'ollama', activate: false }]);
+    expect(updates).toEqual([{ providerName: 'anthropic', providerModel: '' }]);
+  });
+
+  test('a failed live probe permits fallback but a healthy daemon remains selected', async () => {
+    for (const usable of [false, true]) {
+      const updates: unknown[] = [];
+      const h = harness({
+        settingsStore: {
+          get: () => ({ providerName: 'ollama', providerModel: 'installed' }),
+          update: async (patch: unknown) => { updates.push(patch); },
+        },
+        testProvider: async () => {
+          if (!usable) throw new Error('daemon offline');
+          return { ok: true, reachable: true, models: 1 };
+        },
+      });
+      await h.route({ provider: 'anthropic', plaintext: 'new-valid-key' });
+      expect(updates).toEqual(usable ? [] : [{ providerName: 'anthropic', providerModel: '' }]);
+    }
+  });
+
+  test('preserves a resident WebGPU selection without a daemon probe', async () => {
+    const updates: unknown[] = [];
+    let probes = 0;
+    const h = harness({
+      settingsStore: {
+        get: () => ({ providerName: 'local-webgpu', providerModel: 'downloaded-model' }),
+        update: async (patch: unknown) => { updates.push(patch); },
+      },
+      testProvider: async () => { probes += 1; return { ok: false }; },
+    });
+    await h.route({ provider: 'anthropic', plaintext: 'new-valid-key' });
+    expect(probes).toBe(0);
+    expect(updates).toEqual([]);
+  });
+
+  test('an onboarding key save never probes or replaces its explicit selection', async () => {
+    const updates: unknown[] = [];
+    let probes = 0;
+    const h = harness({
+      settingsStore: {
+        get: () => ({ providerName: 'ollama' }),
+        update: async (patch: unknown) => { updates.push(patch); },
+      },
+      testProvider: async () => { probes += 1; return { ok: false }; },
+    });
+    await h.route({ provider: 'anthropic', plaintext: 'new-valid-key', activate: false });
+    expect(probes).toBe(0);
+    expect(updates).toEqual([]);
+  });
+
+  test('a slow readiness check never overwrites a newer explicit provider selection', async () => {
+    let settings = { providerName: 'ollama', providerModel: '' };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const updates: unknown[] = [];
+    const h = harness({
+      settingsStore: {
+        get: () => settings,
+        update: async (patch: unknown) => { updates.push(patch); },
+      },
+      testProvider: async () => { entered.resolve(); await release.promise; return { ok: false }; },
+    });
+    const save = h.route({ provider: 'anthropic', plaintext: 'new-valid-key' });
+    await entered.promise;
+    settings = { providerName: 'local-webgpu', providerModel: 'chosen-model' };
+    release.resolve();
+    await save;
+    expect(updates).toEqual([]);
+  });
+
+  test.each(['retired', 'aborted', 'locked'] as const)(
+    'a %s readiness check does not activate a fallback', async (state) => {
+      const updates: unknown[] = [];
+      let locked = false;
+      const h = harness({
+        vault: {
+          isLocked: () => locked,
+          getSecret: async () => null,
+          setSecret: async () => {},
+        },
+        settingsStore: {
+          get: () => ({ providerName: 'ollama' }),
+          update: async (patch: unknown) => { updates.push(patch); },
+        },
+        testProvider: async () => {
+          if (state === 'aborted') throw new DOMException('stopped', 'AbortError');
+          if (state === 'locked') { locked = true; return { ok: false, error: 'unreachable' }; }
+          return { ok: false, code: 'controller-retired', outcomeKnown: false };
+        },
+      });
+      await h.route({ provider: 'anthropic', plaintext: 'new-valid-key' });
+      expect(updates).toEqual([]);
+    },
+  );
+
   test('an exact replay does not rewrite or re-audit an existing key', async () => {
     const stored: any[] = [];
     const audited: any[] = [];

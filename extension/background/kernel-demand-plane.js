@@ -121,6 +121,7 @@ export const createKernelDemandPlane = (deps) => {
   };
   const support = createKernelDemandSupport({
     ...deps,
+    testProvider: (/** @type {any} */ message) => semanticRoutes['provider/test'](message),
     denylist: deps.denylist,
     createFirefoxRepositoryClient: deps.firefoxAddon?.createFirefoxRepositoryClient,
     withFirefoxLifetime: (/** @type {()=>Promise<any>} */ operation,
