@@ -1,7 +1,11 @@
 {
   "schemaVersion": 1,
   "label": "In-Browser (Gecko)",
+<<<<<<< HEAD
   "message": "972/972 passing",
+=======
+  "message": "944/944 passing",
+>>>>>>> origin/main
   "color": "brightgreen",
   "namedLogo": "firefoxbrowser",
   "logoColor": "white"
