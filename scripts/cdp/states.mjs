@@ -1481,7 +1481,7 @@ export const STATES = [
         if (body.includes('tools: page_code')) {
           harvestActorUsedCode = true;
           if (t === 0) return { sse: sseToolCall('page_code', {
-            code: `await page.goto(${JSON.stringify(harvestFixtureUrl)}); return await page.content();`,
+            code: `await Promise.all([page.goto(${JSON.stringify(`${harvestFixtureUrl}first`)}), page.goto(${JSON.stringify(harvestFixtureUrl)})]); return await page.content();`,
           }) };
           return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
         }
@@ -1512,7 +1512,17 @@ export const STATES = [
       // The web actor opens and reads the locally served fixture through the
       // real actor-model path. The harness maps the reserved .test host to this
       // server, so product localhost blocking remains active.
-      const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
+      let firstResponseAt = 0;
+      let rootRequestAt = 0;
+      const server = createServer((req, res) => {
+        const respond = () => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); };
+        if (req.url === '/first') {
+          setTimeout(() => { firstResponseAt = Date.now(); respond(); }, 150);
+          return;
+        }
+        if (req.url === '/') rootRequestAt = Date.now();
+        respond();
+      });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const fxPort = /** @type {{ port: number }} */ (server.address()).port;
       harvestFixtureUrl = `http://orders.peerd.test:${fxPort}/`;
@@ -1542,6 +1552,10 @@ export const STATES = [
         rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
         rec.check('the web-actor sub-loop ran (page code + report, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
         rec.check('the preview web actor used the code-first page surface', harvestActorUsedCode === true);
+        const actorTabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => tab.url?.startsWith(${JSON.stringify(harvestFixtureUrl)})).map(({ id, url }) => ({ id, url })))`, true);
+        rec.check('concurrent first page calls share one actor tab in FIFO order',
+          actorTabs.length === 1 && actorTabs[0]?.url === harvestFixtureUrl && firstResponseAt > 0 && rootRequestAt >= firstResponseAt,
+          JSON.stringify({ actorTabs, firstResponseAt, rootRequestAt }));
         // load-bearing proof: the web actor REALLY read the live page — the page's
         // own order text rode back into the actor's model request via read_page.
         rec.check('the web actor REALLY read the live page (real order data in its read result)',
