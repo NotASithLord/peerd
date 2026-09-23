@@ -1864,7 +1864,9 @@ describe('kernel turn authority adapter', () => {
         ownerSessionId: owner.sessionId, siteOrigin: origin,
         pathOrUrl: '/endless', method: 'GET', headers: {}, runId,
       }, {});
-      await readStarted;
+      await Promise.race([readStarted, pending.then((result: any) => {
+        throw new Error(`site fetch settled before entering its response body: ${result?.error ?? 'unknown'}`);
+      })]);
       outer.abort();
       await expect(pending).resolves.toMatchObject({ ok: false, outcomeKnown: true });
       expect(cancelled).toBe(true);
