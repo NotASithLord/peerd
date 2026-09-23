@@ -180,20 +180,17 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // App-native semantic APIs are document-side adapters over the existing
     // authority verbs; they must not grow this graph. Privileged Git import is
     // one small repository bootstrap verb, not a worker-side UI controller.
-    // 458 -> 462: per-origin action pacing adds a pure policy core, its fixed
+    // 458 -> 464: per-origin action pacing adds a pure policy core, its fixed
     // refusal prose, the control-plane store, and the settings routes. All four
     // are worker-side by construction - the dispatcher and the egress choke
     // point are the only enforcement points, and a pacing decision may never be
-    // answerable from an actor heap.
-    expect(graph.size).toBeLessThanOrEqual(462);
-    // Readiness and the cancellation/dequeue rechecks grow existing modules;
-    // the combined graph measures 4,774,924 bytes with the same four additions.
-    expect(bytes).toBeLessThanOrEqual(4_775_000);
-    // 460_000 -> 464_000: the pacing subsystem's wiring (the store, its
-    // tool-context closures, the wait notice, the dev seam, and the settings
-    // routes). Wiring is what belongs in this file; the policy and the control
-    // plane both live in modules.
-    expect(statSync(entry).size).toBeLessThanOrEqual(465_000);
+    // answerable from an actor heap. Two finite host-only leaves add the
+    // final-send binder and synchronous permission-revocation epoch.
+    expect(graph.size).toBeLessThanOrEqual(464);
+    // Exact measured combined source and entry, including reviewed browser
+    // simplifications and consent retirement, with no reserved headroom.
+    expect(bytes).toBeLessThanOrEqual(4_781_985);
+    expect(statSync(entry).size).toBeLessThanOrEqual(467_378);
   });
 
   test('the offscreen host uses its exact runtime and engine surfaces', async () => {

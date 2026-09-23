@@ -1,41 +1,22 @@
 // @ts-check
-// peerd-engine/app-compose.js — turn a per-app file map into a single
-// HTML document the sandboxed runner can document.write.
-//
-// Apps are multi-file (index.html + style.css + script.js + data.json
-// + …) but the runner only takes a single HTML body. We inline the
-// tag-relative referenced files at compose time:
-//
-//   <link rel="stylesheet" href="style.css">     →  <style>…</style>
-//   <script src="script.js">…</script>           →  <script>…</script>
-//   new Worker('worker.js')                      →  blob: worker (shim, see below)
-//   <img src="./logo.png">                       →  runner resolves bundled binary asset
-//   <a href="./other.html">                      →  (left as-is — nav)
-//
-// "tag-relative" is liberal on purpose: a bundle file resolves whether the
-// agent writes it bare ('style.css'), dot-relative ('./style.css'),
-// parent-relative ('../style.css'), or root-relative ('/style.css') — same
-// latitude the Worker resolver already gives `new Worker('worker.js')`.
-// Absolute URLs (scheme:), protocol-relative (//host), data: URIs, and
-// pure #fragment / ?query refs pass through unchanged. The App sandbox refuses
-// remote loads; data:/blob: resources are the only non-bundle asset paths.
-//
-// Pure function, browser-free. Tested in Bun against a file map.
+// Compose an App file map into one sandbox document.
+// Relative references use bundle files. Absolute references stay unchanged.
+// why: The opaque runner can load only bundled, data, and blob resources.
 
 import { escapeAttr } from '/shared/util.js';
 
-/**
- * Inline tag-relative <link rel="stylesheet"> and <script src> references
- * by reading from `files` and substituting the file's content.
- *
- * @param {Record<string, string>} files - path → content
- * @param {string} [entry='index.html']
- * @returns {string} composed HTML
- */
+const APP_DATA_PATH_RE = /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i;
+/** why: Mutable App data must never become executable without consent rotation. @param {string} path */
+const assertStaticSource = (path) => {
+  if (APP_DATA_PATH_RE.test(path)) throw new Error(`app runtime data cannot be a composed source: ${path}`);
+};
+
+/** @param {Record<string,string>} files @param {string} [entry] @returns {string} */
 export const composeApp = (files, entry = 'index.html') => {
   if (!(entry in files)) {
     throw new Error(`app entry not found: ${entry}`);
   }
+  assertStaticSource(entry);
   const visited = new Set();
 
   // Inline <link rel="stylesheet" href="./...">  → <style>…</style>
@@ -47,6 +28,7 @@ export const composeApp = (files, entry = 'index.html') => {
     const href = hrefMatch[2];
     if (!isRelativeAndKnown(href, files, entry)) return full;
     const path = resolveRel(entry, href);
+    assertStaticSource(path);
     visited.add(path);
     return `<style data-from="${escapeAttr(path)}">${files[path]}</style>`;
   });
@@ -57,6 +39,7 @@ export const composeApp = (files, entry = 'index.html') => {
   composed = composed.replace(SCRIPT_RE, (full, beforeSrc, _q, src, afterSrc, inner) => {
     if (!isRelativeAndKnown(src, files, entry)) return full;
     const path = resolveRel(entry, src);
+    assertStaticSource(path);
     visited.add(path);
     // Preserve type="module" etc. if present.
     const attrs = (`${beforeSrc} ${afterSrc}`).replace(/\bsrc\s*=\s*['"][^'"]*['"]/i, '').trim();
@@ -64,42 +47,18 @@ export const composeApp = (files, entry = 'index.html') => {
     return `<script${attrStr} data-from="${escapeAttr(path)}">${files[path]}</script>`;
   });
 
-  // Make `new Worker('worker.js')` Just Work. A Worker URL inside the opaque-
-  // origin sandbox can't load by path (a chrome-extension:// or null-origin
-  // worker script is blocked — "cannot be accessed from origin 'null'"); the
-  // ONLY thing that loads is a same-origin blob: URL (the manifest sandbox CSP
-  // allows worker-src blob:). So embed the referenced worker file's source and
-  // shim Worker to build a blob URL from it at runtime (blob URLs only exist at
-  // runtime). Precise: only files actually named in a `new Worker('literal')`
-  // are embedded, so data/libs aren't bloated in. why a shim over telling the
-  // agent to hand-roll a blob — it reaches for `new Worker('worker.js')`.
+  // why: The opaque runner needs an inlined blob for each literal worker path.
   composed = inlineWorkerFiles(composed, files, entry);
 
   return composed;
 };
 
-// ---------------------------------------------------------------------------
-
-// A href/src is inlinable when it's a same-bundle relative reference AND it
-// resolves to a file we actually hold. why two gates: `isBundleRelative`
-// rejects things that are categorically NOT bundle files (CDN URLs, data:
-// URIs, #fragments) so we don't misread them; the "resolves to a known file"
-// guard is what makes accepting BARE paths ('style.css') safe — a CDN URL
-// can't collide with a bundle key, so there's no need to demand a './' prefix.
-// Resolution is anchored at the real `entry` (not a hardcoded 'index.html'),
-// so a nested entry (pages/about.html) resolves its siblings correctly and the
-// check agrees with the resolveRel() the caller uses to read the file.
-/**
- * @param {string} ref
- * @param {Record<string, string>} files
- * @param {string} [entry]
- */
+// why: Accept only known bundle paths and resolve them from the actual entry.
+/** @param {string} ref @param {Record<string,string>} files @param {string} [entry] */
 const isRelativeAndKnown = (ref, files, entry = 'index.html') =>
   isBundleRelative(ref) && resolveRel(entry, ref) in files;
 
-// True unless `ref` is something that can't name a bundled file: an absolute
-// URL with a scheme (https:, data:, mailto:, blob:…), a protocol-relative
-// //host reference, or a pure in-document #fragment / ?query.
+// Reject absolute and in-document references.
 /** @param {string} ref */
 const isBundleRelative = (ref) =>
   !/^[a-z][a-z0-9+.-]*:/i.test(ref)
@@ -164,7 +123,10 @@ const inlineWorkerFiles = (composed, files, entry) => {
     const spec = m[2];
     if (srcBySpec[spec] != null) continue;
     const path = workerFilePath(spec, entry, files);
-    if (path) srcBySpec[spec] = files[path];
+    if (path) {
+      assertStaticSource(path);
+      srcBySpec[spec] = files[path];
+    }
   }
   if (Object.keys(srcBySpec).length === 0) return composed;
 

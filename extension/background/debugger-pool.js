@@ -114,7 +114,7 @@ export const createDebuggerPool = () => {
     const set = pendingEvals.get(tabId);
     if (!set) return;
     pendingEvals.delete(tabId);
-    for (const reject of set) reject(new Error(`page_exec: ${why}`));
+    for (const reject of set) reject(hostLostError(`page_exec: ${why}`));
   };
 
   // why: `chrome.debugger` may not exist in this build at all. It's a
@@ -332,7 +332,7 @@ export const createDebuggerPool = () => {
         const set = pendingEvals.get(tabId) ?? new Set();
         pendingEvals.set(tabId, set);
         const timer = setTimeout(() => {
-          fail(new Error(`page_exec: the page script did not settle within ${Math.round(timeoutMs / 1000)}s — hung promise or unresponsive page`));
+          fail(hostLostError(`page_exec: the page script did not settle within ${Math.round(timeoutMs / 1000)}s - hung promise or unresponsive page`));
         }, timeoutMs);
         /** @param {Error} e */
         const fail = (e) => { cleanup(); reject(e); };

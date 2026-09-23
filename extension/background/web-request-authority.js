@@ -2,6 +2,14 @@
 
 // Host-only closure binding, deliberately not a ToolContext callback or a
 // request option. Actor capability projection preserves only the wrapped fetch.
+/**
+ * why: the cookie getter and its last asynchronously proven tab origin must
+ * belong to one physical request, never to a reusable actor ToolContext.
+ * @param {()=>((resource:any,init?:any)=>Promise<Response>)} createFetch
+ */
+export const withRequestLocalWebFetch = (createFetch) =>
+  (/** @type {any} */ resource, /** @type {any} */ init = {}) => createFetch()(resource, init);
+
 /** @typedef {{
  * webFetch:(resource:any,init?:any)=>Promise<Response>,
  * captureRequestAuthority:()=>()=>boolean,

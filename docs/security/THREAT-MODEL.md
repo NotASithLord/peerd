@@ -400,7 +400,12 @@ for an autonomous child if the browser lost its session rules while peerd's
 later registry restore still identifies the source as driven. A page-initiated
 cross-origin redirect can also begin before the browser reports the new committed
 URL and adds its no-tab domain scope. DNS resolution and rebinding remain
-outside this client-side lexical boundary. With native local-network checks
+outside this client-side lexical boundary. An isolated live Chrome probe also
+shows that a blocked direct top-level private navigation sends no HTTP bytes but
+can still open a TCP connection/preconnect to the target. The browser floor is
+therefore not an absolute zero-transport or port-oracle defense. The live lane
+requires proof of probe execution and reports this accepted platform residual;
+all other transport-blocking assertions remain unchanged. With native local-network checks
 disabled, Chrome can also start an inherited about:blank child's immediate
 private request before the extension receives enough child identity to close it.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,

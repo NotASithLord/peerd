@@ -71,6 +71,10 @@ export const makeEngineLiveness = ({ storage, now = Date.now }) => {
     await storage.set(ENGINE_LIVENESS_KEY, map).catch(() => {});
   }).catch(() => {});
 
+  /** @param {string} kind @param {number} tabId @returns {Promise<LivenessEntry|null>} */
+  const findByTab = (kind, tabId) => enqueue(async () =>
+    Object.values(await load()).find((entry) => entry?.kind === kind && entry.tabId === tabId) ?? null);
+
   /**
    * The boot sweep: entries whose instance is NOT in the survivor set lost
    * their process to the interruption. The ledger is rewritten to exactly
@@ -95,5 +99,5 @@ export const makeEngineLiveness = ({ storage, now = Date.now }) => {
     return lost;
   });
 
-  return { adopt, drop, sweep };
+  return { adopt, drop, findByTab, sweep };
 };

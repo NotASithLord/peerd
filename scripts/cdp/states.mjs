@@ -24,6 +24,7 @@ import {
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT,
 } from './e2e-harness.mjs';
+import { recordNetworkFloorVector } from './network-floor-oracle.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -562,30 +563,35 @@ export const STATES = [
         }
         if (requestUrl.pathname === '/cross-frame-popup') {
           const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-popup`;
-          res.end(`<!doctype html><script>
-            navigator.sendBeacon('/attempt?vector=cross-frame-popup');
+          res.end(`<!doctype html><body><script>
+            'use strict';
             const link = document.createElement('a');
             link.href = ${JSON.stringify(target)};
             link.target = '_blank';
             document.body.append(link);
             link.click();
+            navigator.sendBeacon('/attempt?vector=cross-frame-popup');
           <\/script>`);
           return;
         }
         if (requestUrl.pathname === '/cross-frame-blank') {
           const target = `http://127.0.0.1:${probePort}/probe?vector=cross-frame-blank`;
-          res.end(`<!doctype html><script>
-            const name = 'private-child-' + Math.random();
-            const link = document.createElement('a');
-            link.href = 'about:blank';
-            link.target = name;
-            document.body.append(link);
-            link.click();
-            const child = window.open('', name);
-            if (child) {
-              navigator.sendBeacon('/attempt?vector=cross-frame-blank');
-              child.fetch(${JSON.stringify(target)}, { mode: 'no-cors' }).catch(() => {});
-            }
+          // why: parser-blocking head scripts have no body yet. A receipt must
+          // follow the child fetch call, not merely this action page loading.
+          res.end(`<!doctype html><body style="margin:0">
+            <button style="width:100vw;height:100vh">Open child</button><script>
+            'use strict';
+            document.querySelector('button').addEventListener('click', (event) => {
+              navigator.sendBeacon('/attempt?vector=cross-frame-blank:' + (event.isTrusted ? 'trusted-click' : 'untrusted-click'));
+              const name = 'private-child-' + Math.random();
+              const child = window.open('about:blank', name);
+              navigator.sendBeacon('/attempt?vector=cross-frame-blank:' + (child ? 'opened' : 'open-refused'));
+              if (child) {
+                child.fetch(${JSON.stringify(target)}, { mode: 'no-cors' }).catch(() => {});
+                navigator.sendBeacon('/attempt?vector=cross-frame-blank');
+              }
+            });
+            navigator.sendBeacon('/attempt?vector=cross-frame-blank:ready');
           <\/script>`);
           return;
         }
@@ -747,71 +753,125 @@ export const STATES = [
 
         const runVector = async (vector) => {
           await resetProbe();
-          const target = `${vector === 'websocket' ? 'ws' : 'http'}://127.0.0.1:${probePort}/probe?vector=${vector}`;
-          await evalIn(ctx.page, `(async () => chrome.scripting.executeScript({
-            target: { tabId: ${drivenTab.id} },
-            world: 'MAIN',
-            func: (kind, privateTarget, publicBase) => {
-              const frame = (url, name = '') => {
-                const node = document.createElement('iframe');
-                if (name) node.name = name;
-                node.hidden = true;
-                node.src = url;
-                document.body.append(node);
-                return node;
-              };
-              if (kind === 'fetch') fetch(privateTarget).catch(() => {});
-              if (kind === 'websocket') new WebSocket(privateTarget);
-              if (kind === 'image') {
-                const image = new Image();
-                image.src = privateTarget;
-                document.body.append(image);
+          // why: only this vector permits Chrome's preconnect residual. Give it
+          // an exact listener so late sockets from prior probes cannot taint it.
+          let locationConnections = 0;
+          const locationRequests = [];
+          const locationServer = vector === 'location' ? createServer((req, res) => {
+            locationRequests.push(req.url ?? '/');
+            res.writeHead(204, { connection: 'close' });
+            res.end();
+          }) : null;
+          locationServer?.on('connection', () => { locationConnections += 1; });
+          locationServer?.on('upgrade', (req, socket) => {
+            locationRequests.push(req.url ?? '/');
+            socket.destroy();
+          });
+          if (locationServer) await new Promise((resolve) => locationServer.listen(0, '127.0.0.1', resolve));
+          const privatePort = locationServer
+            ? /** @type {{port:number}} */ (locationServer.address()).port : probePort;
+          const target = `${vector === 'websocket' ? 'ws' : 'http'}://127.0.0.1:${privatePort}/probe?vector=${vector}`;
+          try {
+            await evalIn(ctx.page, `(async () => chrome.scripting.executeScript({
+              target: { tabId: ${drivenTab.id} },
+              world: 'MAIN',
+              func: (kind, privateTarget, publicBase) => {
+                // Cross-frame vectors keep their own action-page receipt below;
+                // a parent frame merely creating an iframe is not that proof.
+                if (!['cross-frame-popup', 'cross-frame-blank'].includes(kind)) {
+                  navigator.sendBeacon('/attempt?vector=' + encodeURIComponent(kind));
+                }
+                const frame = (url, name = '') => {
+                  const node = document.createElement('iframe');
+                  if (name) node.name = name;
+                  node.hidden = true;
+                  node.src = url;
+                  document.body.append(node);
+                  return node;
+                };
+                if (kind === 'fetch') fetch(privateTarget).catch(() => {});
+                if (kind === 'websocket') new WebSocket(privateTarget);
+                if (kind === 'image') {
+                  const image = new Image();
+                  image.src = privateTarget;
+                  document.body.append(image);
+                }
+                if (kind === 'form') {
+                  const name = 'private-probe-frame';
+                  frame('about:blank', name);
+                  const form = document.createElement('form');
+                  form.method = 'post';
+                  form.action = privateTarget;
+                  form.target = name;
+                  document.body.append(form);
+                  form.submit();
+                }
+                if (['redirect', 'meta', 'script'].includes(kind)) {
+                  frame(publicBase + kind);
+                }
+                if (kind === 'popup') {
+                  const link = document.createElement('a');
+                  link.href = privateTarget;
+                  link.target = '_blank';
+                  document.body.append(link);
+                  link.click();
+                }
+                if (kind === 'cross-frame-popup') {
+                  const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
+                  frame(crossOrigin + 'cross-frame-popup');
+                }
+                if (kind === 'cross-frame-blank') {
+                  const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
+                  const node = frame(crossOrigin + 'cross-frame-blank');
+                  node.hidden = false;
+                  node.dataset.peerdCrossFrameBlank = '';
+                  node.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:100px;z-index:2147483647;border:0';
+                }
+                if (kind === 'location') location.href = privateTarget;
+              },
+              args: [${JSON.stringify(vector)}, ${JSON.stringify(target)}, ${JSON.stringify(networkGuardFixtureUrl)}],
+            }))()`, true);
+            if (vector === 'cross-frame-blank') {
+              // why: popup admission is separate from the network floor. Use a
+              // real click so a refused automatic popup cannot fake coverage.
+              const ready = await waitFor(() => controllerAttempts.has(vector + ':ready'), {
+                budgetMs: 2_000, pollMs: 25,
+              });
+              if (!ready) throw new Error('cross-frame blank action did not become ready');
+              const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((response) => response.json());
+              const target = targets.find((item) => item.type === 'page' && item.url === networkGuardFixtureUrl);
+              if (!target) throw new Error('cross-frame blank source target not found');
+              const source = await attach(target.webSocketDebuggerUrl);
+              try {
+                const point = await evalIn(source, `(() => {
+                  const rect = document.querySelector('[data-peerd-cross-frame-blank]').getBoundingClientRect();
+                  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                })()`);
+                await source.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+                await source.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+              } finally { source.close(); }
+            }
+            await waitFor(() => controllerAttempts.has(vector), { budgetMs: 2_000, pollMs: 25 });
+            await sleep(800);
+            const observed = {
+              connections: locationServer ? locationConnections : probeConnections,
+              requests: locationServer ? [...locationRequests] : [...probeRequests],
+              attempted: controllerAttempts.has(vector),
+              stages: [...controllerAttempts].filter((entry) => entry.startsWith(vector + ':')),
+            };
+            if (['popup', 'cross-frame-popup', 'cross-frame-blank'].includes(vector)) {
+              const children = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.filter((tab) => tab.openerTabId === ${drivenTab.id}).map((tab) => tab.id))`, true);
+              for (const childId of children) {
+                await evalIn(ctx.page, `chrome.tabs.remove(${childId})`, true).catch(() => {});
               }
-              if (kind === 'form') {
-                const name = 'private-probe-frame';
-                frame('about:blank', name);
-                const form = document.createElement('form');
-                form.method = 'post';
-                form.action = privateTarget;
-                form.target = name;
-                document.body.append(form);
-                form.submit();
-              }
-              if (['redirect', 'meta', 'script'].includes(kind)) {
-                frame(publicBase + kind);
-              }
-              if (kind === 'popup') {
-                const link = document.createElement('a');
-                link.href = privateTarget;
-                link.target = '_blank';
-                document.body.append(link);
-                link.click();
-              }
-              if (kind === 'cross-frame-popup') {
-                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
-                frame(crossOrigin + 'cross-frame-popup');
-              }
-              if (kind === 'cross-frame-blank') {
-                const crossOrigin = publicBase.replace('orders.peerd.test', 'acct.peerd.test');
-                frame(crossOrigin + 'cross-frame-blank');
-              }
-              if (kind === 'location') location.href = privateTarget;
-            },
-            args: [${JSON.stringify(vector)}, ${JSON.stringify(target)}, ${JSON.stringify(networkGuardFixtureUrl)}],
-          }))()`, true);
-          await sleep(800);
-          const observed = {
-            connections: probeConnections,
-            requests: [...probeRequests],
-            attempted: controllerAttempts.has(vector),
-          };
-          if (['popup', 'cross-frame-popup', 'cross-frame-blank'].includes(vector)) {
-            const children = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.filter((tab) => tab.openerTabId === ${drivenTab.id}).map((tab) => tab.id))`, true);
-            for (const childId of children) {
-              await evalIn(ctx.page, `chrome.tabs.remove(${childId})`, true).catch(() => {});
+            }
+            return observed;
+          } finally {
+            if (locationServer) {
+              locationServer.closeAllConnections?.();
+              await new Promise((resolve) => locationServer.close(resolve));
             }
           }
-          return observed;
         };
 
         for (const vector of [
@@ -823,9 +883,7 @@ export const STATES = [
             rec.check(`${vector} reaches its cross-origin action`, observed.attempted === true,
               JSON.stringify(observed));
           }
-          rec.check(`${vector} causes no private TCP or HTTP side effect`,
-            observed.connections === 0 && observed.requests.length === 0,
-            JSON.stringify(observed));
+          recordNetworkFloorVector(rec, vector, observed);
         }
 
         // A blocked top-level navigation can leave Chrome displaying its
@@ -1481,7 +1539,7 @@ export const STATES = [
         if (body.includes('tools: page_code')) {
           harvestActorUsedCode = true;
           if (t === 0) return { sse: sseToolCall('page_code', {
-            code: `await page.goto(${JSON.stringify(harvestFixtureUrl)}); return await page.content();`,
+            code: `await Promise.all([page.goto(${JSON.stringify(`${harvestFixtureUrl}first`)}), page.goto(${JSON.stringify(harvestFixtureUrl)})]); return await page.content();`,
           }) };
           return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
         }
@@ -1512,7 +1570,17 @@ export const STATES = [
       // The web actor opens and reads the locally served fixture through the
       // real actor-model path. The harness maps the reserved .test host to this
       // server, so product localhost blocking remains active.
-      const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
+      let firstResponseAt = 0;
+      let rootRequestAt = 0;
+      const server = createServer((req, res) => {
+        const respond = () => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); };
+        if (req.url === '/first') {
+          setTimeout(() => { firstResponseAt = Date.now(); respond(); }, 150);
+          return;
+        }
+        if (req.url === '/') rootRequestAt = Date.now();
+        respond();
+      });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const fxPort = /** @type {{ port: number }} */ (server.address()).port;
       harvestFixtureUrl = `http://orders.peerd.test:${fxPort}/`;
@@ -1542,6 +1610,10 @@ export const STATES = [
         rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
         rec.check('the web-actor sub-loop ran (page code + report, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
         rec.check('the preview web actor used the code-first page surface', harvestActorUsedCode === true);
+        const actorTabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => tab.url?.startsWith(${JSON.stringify(harvestFixtureUrl)})).map(({ id, url }) => ({ id, url })))`, true);
+        rec.check('concurrent first page calls share one actor tab in FIFO order',
+          actorTabs.length === 1 && actorTabs[0]?.url === harvestFixtureUrl && firstResponseAt > 0 && rootRequestAt >= firstResponseAt,
+          JSON.stringify({ actorTabs, firstResponseAt, rootRequestAt }));
         // load-bearing proof: the web actor REALLY read the live page — the page's
         // own order text rode back into the actor's model request via read_page.
         rec.check('the web actor REALLY read the live page (real order data in its read result)',
@@ -3625,6 +3697,73 @@ export const STATES = [
     },
   },
   {
+    // The dweb page's HAPPY path had no state at all - the only coverage was
+    // the stop-failure fixture, so the shape a user actually meets was
+    // unphotographed. Preview builds default dwebEnabled on, which is what the
+    // harness runs, so the nested agent row renders too.
+    name: 'options-dweb', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/dweb');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 2`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        const shape = await evalIn(page, `(() => {
+          const rows = [...document.querySelectorAll('.set-row')].map((row) => ({
+            label: row.querySelector('.set-row-label')?.textContent ?? '',
+            pill: row.querySelector('.set-pill')?.textContent ?? '',
+            named: row.querySelector('button[role="switch"]')?.getAttribute('aria-label') ?? '',
+          }));
+          return { rows, headings: document.querySelectorAll('.options-page h3').length };
+        })()`);
+        rec.check('the network and agent settings both read as rows',
+          shape?.rows?.length === 2
+            && shape.rows[0].label === 'Participate in the dweb'
+            && shape.rows[1].label === 'dweb agent',
+          JSON.stringify(shape?.rows));
+        rec.check('each switch is named for its STATE, not its inverse action',
+          // The bug the row pattern exists to kill: a control labelled
+          // "Disable the dweb agent" makes the reader infer state from an
+          // action verb. Every switch must announce where you stand.
+          (shape?.rows ?? []).every((row) => / - (on|off)$/.test(row.named))
+            && !(shape?.rows ?? []).some((row) => /^(Enable|Disable) /.test(row.named)),
+          JSON.stringify((shape?.rows ?? []).map((row) => row.named)));
+        await rec.visualPage('options-dweb', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    // Memory had no visual state at all, so the auto-memory switch - the one
+    // control on the page - was never photographed. It is also the row whose
+    // old hand-rolled busy dance had no `finally`, which is precisely the kind
+    // of state a still frame catches and an assertion does not.
+    name: 'options-memory', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/memory');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 1`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        const row = await evalIn(page, `(() => {
+          const el = document.querySelector('.set-row');
+          const toggle = el?.querySelector('button[role="switch"]');
+          return {
+            label: el?.querySelector('.set-row-label')?.textContent ?? '',
+            pill: el?.querySelector('.set-pill')?.textContent ?? '',
+            named: toggle?.getAttribute('aria-label') ?? '',
+            headings: document.querySelectorAll('.memory-pane h3').length,
+          };
+        })()`);
+        rec.check('auto-memory reads as a row that states where you stand',
+          row?.label === 'Auto-memory'
+            && row?.pill === 'ON'
+            && / - (on|off)$/.test(row?.named ?? ''),
+          JSON.stringify(row));
+        await rec.visualPage('options-memory', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
     name: 'options-denylist', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
@@ -3687,7 +3826,7 @@ export const STATES = [
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         await rpc(ctx.page, { type: 'paced/clear' }).catch(() => {});
-        try { page?.close(); } catch { /* */ }
+        if (page) await retirePrivateTransferPage(page);
       }
     },
   },
@@ -3794,14 +3933,25 @@ export const STATES = [
         ready: '[role="alert"]',
       });
       try {
-        const status = await evalIn(page, `({
-          warning: document.querySelector('[role="alert"]')?.textContent ?? '',
-          retry: [...document.querySelectorAll('button')]
-            .some((button) => button.textContent === 'Retry stopping dweb'),
-        })`);
+        const status = await evalIn(page, `(() => {
+          const row = document.querySelector('.set-row');
+          const toggle = document.querySelector('button[role="switch"]');
+          return {
+            warning: document.querySelector('[role="alert"]')?.textContent ?? '',
+            // The retry affordance is now the switch itself, named for what it
+            // will do. The BADGE is what makes the disagreement legible without
+            // reading the alert - a clean OFF pill would have lied.
+            retry: (toggle?.getAttribute('aria-label') ?? '').includes('retry stopping'),
+            badge: row?.querySelector('.set-badge')?.textContent ?? '',
+            enabled: toggle instanceof HTMLButtonElement && !toggle.disabled,
+          };
+        })()`);
         rec.check('failed live stop stays visible',
           status?.warning.includes('live network could not be stopped'), status?.warning);
-        rec.check('failed live stop remains retryable', status?.retry === true);
+        rec.check('failed live stop remains retryable',
+          status?.retry === true && status?.enabled === true, JSON.stringify(status));
+        rec.check('the row says the network is still running',
+          status?.badge === 'STILL RUNNING', status?.badge);
         await rec.visualPage('options-dweb-stop-failed', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
