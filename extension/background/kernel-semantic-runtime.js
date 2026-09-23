@@ -12,6 +12,7 @@ import { KERNEL_SESSION_TURN_ROUTE_NAMES } from './kernel-session-turn-routes.js
 import { createKernelRuntimeControl } from './kernel-runtime-control.js';
 import { createKernelRepositoryControl } from './kernel-repository-control.js';
 import { createKernelLocalControl } from './kernel-local-control.js';
+import { appReleaseDescriptorMatches } from '../shared/app-dweb-identity.js';
 
 export const KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES = Object.freeze([
   'apps/list', 'contacts/list', 'memory/export',
@@ -79,6 +80,7 @@ export const createKernelSemanticRuntime = (deps) => {
   /** @type {ReturnType<typeof createKernelTurnOwner>|null} */
   let turnOwner = null;
   const repository = deps.repositories ? createKernelRepositoryControl({
+    withAppDwebAuthority: deps.withAppDwebAuthority,
     callFeature: (/** @type {unknown} */ payload, /** @type {any} */ options) =>
       ensureRepositoryBinding().callFeature(payload, options),
     repositories: deps.repositories,
@@ -173,6 +175,7 @@ export const createKernelSemanticRuntime = (deps) => {
     if (!deps.isAppSender(sender, appId)) {
       return { ok: false, error: 'app-meta-unauthorized' };
     }
+    const read = async () => {
     const app = await deps.appCatalog.get(appId);
     if (!app) return { ok: false, error: 'app-not-found' };
     let manifestText = null;
@@ -187,7 +190,12 @@ export const createKernelSemanticRuntime = (deps) => {
         }
       }
     }
-    return control.dispatchProjected('app/get-meta', {
+    const installedBytesMatch = !app.dweb?.hash || (appReleaseDescriptorMatches(app)
+      && typeof app.dweb.git_oid === 'string'
+      && await deps.repositories?.matches({ kind: 'app', id: appId }, {
+        at: app.dweb.git_oid, excludeAppData: true,
+      }).catch(() => false));
+    const result = await control.dispatchProjected('app/get-meta', {
       app: {
         id: app.id, name: app.name, entryFile: app.entryFile,
         fileKinds: app.fileKinds ?? {}, dweb: app.dweb ?? null,
@@ -196,6 +204,22 @@ export const createKernelSemanticRuntime = (deps) => {
       paths,
       dwebEnabled: deps.dwebEnabled === true,
     }, 'app');
+    return result?.ok && result.dweb ? { ...result, dweb: {
+      ...result.dweb,
+      ...(installedBytesMatch ? {} : { forked: true }),
+      generation: deps.appDwebGeneration?.(appId) ?? 0,
+    } } : result;
+    };
+    // why: hash verification and the projection share the same kernel App
+    // lane as cold editor writes, actor writes, and repository replacement.
+    const inspect = () => deps.repositories?.coordinate
+      ? deps.repositories.coordinate({ kind: 'app', id: appId }, read) : read();
+    try {
+      return await (deps.withAppDwebAuthority
+        ? deps.withAppDwebAuthority(appId, inspect) : inspect());
+    } catch (cause) {
+      return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+    }
   };
   const ensureTurnOwner = () => {
     if (turnOwner) return turnOwner;

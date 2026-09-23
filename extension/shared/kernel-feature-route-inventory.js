@@ -66,7 +66,7 @@ export const KERNEL_TRANSFER_ROUTE_NAMES = Object.freeze(
 );
 
 export const KERNEL_DWEB_ROUTE_NAMES = Object.freeze(
-  'dweb/app-install dweb/app-record-served dweb/app-snapshot dweb/app-update dweb/audit dweb/base/announce dweb/base/find dweb/base/heard dweb/base/install dweb/base/room dweb/base/share-app dweb/base/start dweb/base/status dweb/base/stop dweb/base/update-app dweb/base/updates dweb/distributed/info dweb/ensure-seed-app dweb/meta-admit dweb/open-commons dweb/self-apply-surface dweb/self-prepare-offer dweb/self-read-surface dweb/self-restore dweb/self-status'.split(' '),
+  'dweb/app-authority-generations dweb/app-install dweb/app-record-served dweb/app-snapshot dweb/app-update dweb/audit dweb/base/announce dweb/base/find dweb/base/heard dweb/base/install dweb/base/room dweb/base/share-app dweb/base/start dweb/base/status dweb/base/stop dweb/base/update-app dweb/base/updates dweb/distributed/info dweb/ensure-seed-app dweb/meta-admit dweb/open-commons dweb/self-apply-surface dweb/self-prepare-offer dweb/self-read-surface dweb/self-restore dweb/self-status'.split(' '),
 );
 
 export const KERNEL_REPOSITORY_ROUTE_NAMES = Object.freeze(

@@ -32,7 +32,7 @@ const gateway = (makeController: (deps: any) => any) => createKernelControllerGa
   controller: {}, loadController: async () => makeController,
 });
 
-const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
+const makeRuntime = (locked = false, docs: any[] = [], withTurn = false, overrides: Record<string, any> = {}) => {
   let controllerCalls = 0;
   let controllerCreates = 0;
   let io = 0;
@@ -81,6 +81,7 @@ const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
         actorOverview: async () => ({ roots: [] }),
       }),
     } : {}),
+    ...overrides,
   });
   return {
     runtime, controllerGateway, controllerCalls: () => controllerCalls,
@@ -89,6 +90,34 @@ const makeRuntime = (locked = false, docs: any[] = [], withTurn = false) => {
 };
 
 describe('kernel semantic runtime', () => {
+  test('App consent metadata verifies installed bytes in the shared mutation lane', async () => {
+    const calls: string[] = [];
+    let matches = true;
+    const dweb = { hash: 'verified-hash', git_oid: 'release', release_entry_file: 'index.html', release_file_kinds: { 'index.html': 'text' } };
+    const state = makeRuntime(false, [], false, {
+      controllerGateway: gateway(() => controller({
+        callSemantic: async () => { calls.push('project'); return Object.freeze({ ok: true, dweb }); },
+      })),
+      appCatalog: { get: async () => ({ id: 'app-1', name: 'App', entryFile: 'index.html', fileKinds: { 'index.html': 'text' }, dweb }) },
+      repositories: {
+        coordinate: async (_ref: any, operation: any) => { calls.push('repository'); return operation(); },
+        matches: async (_ref: any, options: any) => {
+          expect(options).toEqual({ at: 'release', excludeAppData: true });
+          calls.push('verify'); return matches;
+        },
+      },
+      browser: { tabs: {} }, appTabUrl: 'chrome-extension://id/engine-tabs/app-tab/index.html',
+      withAppDwebAuthority: async (_id: string, operation: any) => { calls.push('authority'); return operation(); },
+      appDwebGeneration: () => 5,
+    });
+    await expect(state.runtime.routes['app/get-meta']({ appId: 'app-1' }, {}))
+      .resolves.toEqual({ ok: true, dweb: { ...dweb, generation: 5 } });
+    expect(calls).toEqual(['authority', 'repository', 'verify', 'project']);
+    matches = false;
+    await expect(state.runtime.routes['app/get-meta']({ appId: 'app-1' }, {}))
+      .resolves.toEqual({ ok: true, dweb: { ...dweb, forked: true, generation: 5 } });
+  });
+
   test('direct and host ownership have no overlap', () => {
     const host = new Set(SEMANTIC_HOST_ROUTE_MANIFEST.map((row) => row.route));
     expect(KERNEL_SEMANTIC_DIRECT_ROUTE_NAMES.filter((route) => host.has(route))).toEqual([]);

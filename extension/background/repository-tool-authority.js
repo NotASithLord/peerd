@@ -51,7 +51,9 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
     });
     if (options.quiesce !== true) return coordinated();
     if (kind === 'app') {
-      const result = await ctx?.appQuiescence?.run?.(id, coordinated, { close: true });
+      const result = await ctx?.appQuiescence?.run?.(id, coordinated, {
+        close: true, invalidateDweb: options.replacesTree === true,
+      });
       if (result === undefined) throw new Error('App editor quiesce unavailable');
       return result;
     }

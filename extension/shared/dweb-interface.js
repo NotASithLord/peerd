@@ -15,6 +15,8 @@
 // directory: this file ships in the store artifact, and the verifier
 // greps it like everything else.)
 
+export const APP_DWEB_GENERATION_PREFIX = 'app.dweb-generation.';
+
 /**
  * @typedef {Object} DwebStatus
  * @property {boolean} available  false in the store package / stub

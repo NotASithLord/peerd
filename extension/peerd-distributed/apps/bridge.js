@@ -104,7 +104,8 @@ export const createDwebBridge = ({
 }) => {
   // Grants key on the app's content identity when it has one (stable
   // across reinstalls of the same bundle), else the seed key / local id.
-  const appKey = appDweb?.hash || (appDweb?.seed ? `seed:${appDweb.seed}` : appId);
+  let appKey = appDweb?.forked ? `fork:${appId}:${appDweb.hash}`
+    : appDweb?.hash || (appDweb?.seed ? `seed:${appDweb.seed}` : appId);
 
   /** @type {string | null} */
   let roomId = null;        // the room we're in (one per app, v0)
@@ -199,6 +200,10 @@ export const createDwebBridge = ({
         roomClientId: exactClientId,
         ...(exactHostEpoch ? { expectedHostEpoch: exactHostEpoch } : {}),
         ...args,
+        bridgeAppId: appId,
+        bridgeAppHash: appDweb?.hash,
+        bridgeAppForked: appKey.startsWith('fork:'),
+        bridgeAppGeneration: appDweb?.generation ?? 0,
         ...(exactAdmissionToken ? { roomAdmissionToken: exactAdmissionToken } : {}),
       });
     } catch (cause) { throw roomFailure(cause, op); }
@@ -413,6 +418,15 @@ export const createDwebBridge = ({
   /** @param {string} rid @param {{clientId:string,cancelled:boolean}} request */
   const consent = async (rid, request) => {
     if (isCancelled(request)) throw new Error('cancelled');
+    if (appDweb?.hash) {
+      const current = await swCall('app/get-meta', { appId });
+      if (!current?.ok || current.dweb?.hash !== appDweb.hash
+          || current.dweb?.generation !== (appDweb?.generation ?? 0)
+          || (appKey.startsWith('fork:') && !current.dweb?.forked)) {
+        throw new Error('App identity changed. Reload the App.');
+      }
+      appKey = current.dweb.forked ? `fork:${appId}:${current.dweb.hash}` : current.dweb.hash;
+    }
     if (await grantStore.has(rid)) return true;
     if (isCancelled(request)) throw new Error('cancelled');
     const okd = await confirmAction({
@@ -746,18 +760,20 @@ export const createDwebBridge = ({
 
   const offTransport = transport.onMessage(handleOp);
 
-  return {
-    dispose() {
+  const dispose = async (waitForPending = true) => {
       disposed = true;
       if (activeClientId) cancelClient(activeClientId);
       offTransport();
       for (const off of disposers.splice(0)) off();
       for (const timer of recoveryTimers) clearTimeout(timer);
       recoveryTimers.clear();
-      void serializeTransition(async () => {
+      const leave = serializeTransition(async () => {
         if (!roomId) return;
         const was = roomId;
-        await room('leave', {}, was).catch(() => {});
+        await compensateJoin({
+          schema: 1, appId, roomId: was, clientId: stableRoomClientId,
+          admissionToken: roomAdmissionToken, hostEpoch,
+        });
         roomId = null;
         roomClientId = null;
         roomAdmissionToken = null;
@@ -765,6 +781,14 @@ export const createDwebBridge = ({
         subbedTopics.clear();
         retainedTopics.clear();
       });
-    },
+      if (waitForPending) await leave;
+      else void leave.catch(() => {});
+  };
+  return {
+    dispose: () => dispose(),
+    // why: mutation already owns the kernel's App lane. Retire the bridge
+    // synchronously; the host generation purge drains old room work without
+    // deadlocking on a leave request queued behind that same mutation.
+    invalidate: () => dispose(false),
   };
 };

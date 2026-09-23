@@ -84,6 +84,7 @@ export const createKernelDemandSupport = (deps) => {
       catalog: appCatalog,
       files: appFiles,
       repositories,
+      withAppDwebAuthority: deps.withAppDwebAuthority,
       isAppSender: deps.isAppSender,
       reloadApp: deps.reloadApp,
     }),

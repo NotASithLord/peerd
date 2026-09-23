@@ -36,6 +36,7 @@ const POD_ROUTES = new Set(KERNEL_POD_ROUTE_NAMES);
 const RELAY_ROUTES = new Set(KERNEL_RELAY_ROUTE_NAMES);
 const ENGINE_ATTACH_ROUTES = new Set(KERNEL_ENGINE_ATTACH_ROUTE_NAMES);
 const DWEB_OFFSCREEN_ROUTES = new Set([
+  'dweb/app-authority-generations',
   'dweb/app-install', 'dweb/app-record-served', 'dweb/app-snapshot', 'dweb/app-update',
   'dweb/meta-admit', 'dweb/self-apply-surface', 'dweb/self-prepare-offer',
   'dweb/self-read-surface',

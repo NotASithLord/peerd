@@ -69,6 +69,7 @@ export const createKernelProductionRuntime = async (deps) => {
     settingsStore: deps.settingsStore,
     sessionCache: deps.sessionCache,
     repositories: deps.repositories,
+    appDwebAuthority: deps.appDwebAuthority,
     denylist: deps.denylist,
     originPacing: deps.originPacing,
     dwebEnabled: deps.dwebEnabled,

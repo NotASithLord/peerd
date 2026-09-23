@@ -2763,16 +2763,54 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     const networkCustodyState = () => networkCustody?.state?.()
       ?? networkCustody?.status?.()
       ?? { supported: false, lastError: 'network-custody-unavailable' };
-    const refuseAppNetwork = (/** @type {string} */ appId, /** @type {number} */ tabId) => {
-      engine.appTabTracker.onTabFailed(appId, new Error('App network isolation is unavailable.'));
+    /** @type {Map<number,Promise<any>>} */
+    const appRetirements = new Map();
+    const retireAppDweb = (/** @type {string} */ appId, /** @type {number} */ tabId) =>
+      Promise.resolve(engine.appTabTracker.retireDwebTab?.(appId, tabId));
+    const trackAppRetirement = (/** @type {number} */ tabId,
+      /** @type {()=>Promise<any>} */ operation) => {
+      const retirement = operation();
+      appRetirements.set(tabId, retirement);
+      retirement.then(() => {
+        if (appRetirements.get(tabId) === retirement) appRetirements.delete(tabId);
+      }, () => {});
+      return retirement;
+    };
+    const retireAppDocument = async (/** @type {number} */ tabId,
+      /** @type {string|undefined} */ url, /** @type {string|null} */ trackedAppId) => {
+      const entry = trackedAppId ? null : await engineLiveness.findByTab('app', tabId);
+      const appId = trackedAppId ?? entry?.id;
+      if (!appId) return;
+      if (typeof url === 'string' && engine.appTabTracker.parseIdFromUrl(url) !== appId) {
+        if (trackedAppId) engine.appTabTracker.onTabRemoved(tabId);
+        else engineLiveness.drop('app', appId);
+      }
+      await retireAppDweb(appId, tabId);
+    };
+    const failAppTab = async (/** @type {string} */ appId, /** @type {Error} */ error,
+      /** @type {number} */ tabId) => {
+      const failedTabId = engine.appTabTracker.onTabFailed(appId, error, tabId);
+      if (failedTabId != null) {
+        await trackAppRetirement(tabId, () => retireAppDweb(appId, tabId)).catch(() => {});
+      }
+    };
+    const refuseAppNetwork = async (/** @type {string} */ appId, /** @type {number} */ tabId) => {
+      await failAppTab(appId, new Error('App network isolation is unavailable.'), tabId);
       setTimeout(() => deps.browser.tabs.remove(tabId).catch(() => {}), 250);
       return {
         ok: false,
         error: 'Apps are unavailable because this browser cannot enforce their network isolation.',
       };
     };
-    const attachAppTabActor = async (/** @type {any} */ message,
-      /** @type {any} */ sender) => {
+    const attachAppTabActorUnlocked = async (/** @type {any} */ message,
+      /** @type {any} */ sender, /** @type {number|null} */ attachEpoch = null) => {
+      const attachCurrent = () => attachEpoch == null
+        || engine.appTabTracker.isAttachCurrent(sender?.tab?.id, attachEpoch);
+      try {
+        if (sender?.tab?.id != null) await appRetirements.get(sender.tab.id);
+        await engine.appTabTracker.dwebGenerationsReady?.();
+      } catch { return { ok: false, error: 'App authority state is unavailable.' }; }
+      if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
       const liveTabId = typeof message?.appId === 'string'
         ? typeof engine.appTabTracker.reconcileTabClaim === 'function'
           ? await engine.appTabTracker.reconcileTabClaim(message.appId, sender?.tab?.id)
@@ -2795,10 +2833,14 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       });
       if (!ownerClaim.ok) return ownerClaim;
       const ownerSessionId = ownerClaim.ownerSessionId;
+      if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
       if (message.type === 'app/actor-retry') engine.appTabTracker.markReloading(appId);
-      engine.appTabTracker.onTabPending(appId, tabId, ownerSessionId);
+      if (engine.appTabTracker.onTabPending(appId, tabId, ownerSessionId) === false) {
+        return { ok: false, error: 'app-already-open' };
+      }
       const admission = await networkCustody?.admitAppTab?.(tabId, sender.tab.url);
       const network = networkCustodyState();
+      if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
       if (admission?.ok !== true || !network.supported || network.lastError
           || !network.tabs?.includes(tabId)) return refuseAppNetwork(appId, tabId);
       try {
@@ -2806,19 +2848,28 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         if (!actorSessionId) throw new Error('manifest-defined App actor could not be attached');
         const actor = await shared.sessions.get(actorSessionId);
         if (!actor?.parentSessionId) throw new Error('manifest-defined App actor has no owner root');
-        engine.appTabTracker.onTabReady(
+        if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+        if (engine.appTabTracker.onTabReady(
           appId, tabId, ownerSessionId, actor.parentSessionId,
-        );
+        ) === false) return { ok: false, error: 'app-already-open' };
         poisonedAppRuntimeTabs.delete(tabId);
         return { ok: true, actorSessionId };
       } catch (cause) {
         const error = cause instanceof Error ? cause : new Error(String(cause));
-        engine.appTabTracker.onTabFailed(appId, error);
+        if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+        await failAppTab(appId, error, tabId);
         await syncNetworkCustody();
         return {
           ok: false, error: error.message, actorRequired: true, retryable: true,
         };
       }
+    };
+    const attachAppTabActor = (/** @type {any} */ message, /** @type {any} */ sender) => {
+      const tabId = sender?.tab?.id;
+      return tabId == null || !engine.appTabTracker.coordinateAttach
+        ? attachAppTabActorUnlocked(message, sender)
+        : engine.appTabTracker.coordinateAttach(tabId, (/** @type {number} */ epoch) =>
+          attachAppTabActorUnlocked(message, sender, epoch));
     };
     const trustedEngineMessage = (/** @type {any} */ sender) =>
       deps.isTrustedSender(sender) && typeof sender?.tab?.id === 'number';
@@ -3112,6 +3163,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       },
       onUpdated: (/** @type {number} */ tabId, /** @type {any} */ change,
         /** @type {any} */ tab) => {
+        if (change?.status === 'loading' || change?.discarded === true || typeof change?.url === 'string') {
+          engine.appTabTracker.markAttachLoading?.(tabId);
+          const trackedAppId = engine.appTabTracker.getAppIdByTab?.(tabId) ?? null;
+          void trackAppRetirement(tabId,
+            () => retireAppDocument(tabId, change.url, trackedAppId)).catch(() => {});
+        }
         if (debuggerApiAvailable()) debuggerPool.onTabUpdated(tabId, change);
         if (change?.status === 'loading' || change?.url) domRefs.clear?.(tabId);
         if (siteCapture.has(tabId)
@@ -3124,12 +3181,23 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         return sourceWrite;
       },
       onRemoved: async (/** @type {number} */ tabId) => {
+        appRetirements.delete(tabId);
         poisonedAppRuntimeTabs.delete(tabId);
         if (debuggerApiAvailable()) debuggerPool.onTabRemoved(tabId);
         siteCapture.release(tabId);
         for (const [kind, , , tracker] of registryEntries()) {
           const instanceId = tracker.onTabRemoved(tabId);
           if (kind === 'vm' && instanceId) engine.vmClient.onTabClosed(instanceId);
+          if (kind === 'app') {
+            if (instanceId) await retireAppDweb(instanceId, tabId).catch(() => {});
+            else {
+              const entry = await engineLiveness.findByTab('app', tabId);
+              if (entry) {
+                engineLiveness.drop('app', entry.id);
+                await retireAppDweb(entry.id, tabId).catch(() => {});
+              }
+            }
+          }
         }
         if (webActorTabBindings.drop(tabId)) await persistWebBindings();
         domRefs.clear?.(tabId);

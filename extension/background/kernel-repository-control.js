@@ -121,7 +121,9 @@ export const createKernelRepositoryControl = (deps) => {
   const coordinate = (/** @type {string} */ appId, /** @type {()=>Promise<any>} */ operation) =>
     deps.repositories.coordinate({ kind: 'app', id: appId }, operation);
   const quiesce = (/** @type {string} */ appId, /** @type {()=>Promise<any>} */ operation,
-    close = true) => withQuiescedApp(appId, () => coordinate(appId, operation), close);
+    close = true) => withQuiescedApp(appId, () => deps.withAppDwebAuthority
+      ? deps.withAppDwebAuthority(appId, () => coordinate(appId, operation), { invalidate: close })
+      : coordinate(appId, operation), close);
   const run = async (/** @type {string} */ operation, /** @type {any} */ payload,
     /** @type {any} */ context) => {
     const message = context?.message;

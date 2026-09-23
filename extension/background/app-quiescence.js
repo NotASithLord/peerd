@@ -1,8 +1,6 @@
 // @ts-check
-// Drain a live App editor before any repository snapshot or mutation. The
-// lifecycle lane is deliberately outside the editor flush: flushSave writes
-// through the repository coordinator itself, so taking that lock first would
-// deadlock on the pending save we are trying to preserve.
+// Drain the App editor before repository work.
+// why: Taking the repository lock before flushSave would deadlock.
 
 /**
  * @param {Object} deps
@@ -13,6 +11,7 @@
  *   resumeTab?: (appId:string)=>Promise<boolean>,
  *   closeTab: (appId:string)=>Promise<boolean>,
  *   ensureTab: (appId:string, opts?:any)=>Promise<number>,
+ *   withDwebAuthority?: <T>(id:string, op:()=>Promise<T>, options?:{invalidate?:boolean,expectedGeneration?:number})=>Promise<T>,
  *   reloadTab?: (appId:string)=>Promise<boolean>,
  * }} deps.tracker
  * @param {<T>(appId:string, operation:()=>Promise<T>)=>Promise<T>} deps.withLifecycle
@@ -30,35 +29,31 @@ export const createAppQuiescence = ({
     await tracker.reloadTab?.(appId).catch(() => {});
   };
 
-  /**
-   * Run while a live editor is frozen and its pending save has completed.
-   * Call this form only when the caller already owns the App lifecycle lane.
-   *
-   * @template T
-   * @param {string} appId
-   * @param {()=>Promise<T>} operation
-   * @param {{close?:boolean}} [options]
-   * @returns {Promise<T>}
-   */
-  const runUnlocked = async (appId, operation, { close = false } = {}) => {
-    const live = tracker.getTabId(appId) != null;
-    if (!live) return operation();
-    if (typeof tracker.quiesceTab !== 'function') {
-      throw new Error('App editor quiesce is unavailable');
+  /** Caller owns the lifecycle lane. @template T @param {string} appId @param {()=>Promise<T>} operation
+   * @param {{close?:boolean,invalidateDweb?:boolean,expectedDwebGeneration?:number}} [options] @returns {Promise<T>} */
+  const runUnlocked = async (appId, operation, { close = false, invalidateDweb = false, expectedDwebGeneration } = {}) => {
+    const trackedLive = tracker.getTabId(appId) != null;
+    let live = trackedLive;
+    if (typeof tracker.quiesceTab === 'function') {
+      live = await tracker.quiesceTab(appId);
+      if (trackedLive && !live) throw new Error('App editor disappeared before its pending save completed');
     }
-    if (await tracker.quiesceTab(appId) !== true) {
-      throw new Error('App editor disappeared before its pending save completed');
-    }
+    else if (live) throw new Error('App editor quiesce is unavailable');
 
     const ownerSessionId = tracker.getOwnerClaim?.(appId) ?? null;
     let closed = false;
     try {
-      if (close) {
-        closed = await tracker.closeTab(appId);
-        if (!closed) throw new Error('App tab could not close after its editor was flushed');
-        await afterClose();
-      }
-      return await operation();
+      const execute = async () => {
+        if (close && live) {
+          closed = await tracker.closeTab(appId);
+          if (!closed) throw new Error('App tab could not close after its editor was flushed');
+          await afterClose();
+        }
+        return operation();
+      };
+      return await (invalidateDweb && tracker.withDwebAuthority
+        ? tracker.withDwebAuthority(appId, execute, { invalidate: true, expectedGeneration: expectedDwebGeneration })
+        : execute());
     } finally {
       if (closed) {
         tracker.ensureTab(appId, {
@@ -71,17 +66,8 @@ export const createAppQuiescence = ({
     }
   };
 
-  /**
-   * Serialize quiesce/freeze, the protected operation, and release/reopen as one
-   * App lifecycle transaction. Repository coordination belongs inside
-   * `operation`, after the editor flush.
-   *
-   * @template T
-   * @param {string} appId
-   * @param {()=>Promise<T>} operation
-   * @param {{close?:boolean}} [options]
-   * @returns {Promise<T>}
-   */
+  /** @template T @param {string} appId @param {()=>Promise<T>} operation
+   * @param {{close?:boolean,invalidateDweb?:boolean,expectedDwebGeneration?:number}} [options] @returns {Promise<T>} */
   const run = (appId, operation, options) => withLifecycle(
     appId,
     () => runUnlocked(appId, operation, options),

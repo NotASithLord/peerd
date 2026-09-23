@@ -26,6 +26,7 @@ import { createProviderEgressAuthority } from './provider-egress-authority.js';
 import { HARDCODED_ALLOWLIST, makeSafeFetch } from '/peerd-egress/background.js';
 import { costOf, hasPricing } from '/peerd-provider/background.js';
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
+import { createAppDwebAuthority } from './app-dweb-authority.js';
 
 const OPTIONAL_CONTROLLER_ROUTES = new Set([
   'provider/test', 'models/options', 'openrouter/models',
@@ -35,6 +36,42 @@ const OPTIONAL_CONTROLLER_ROUTES = new Set([
 /** @param {Record<string,any>} deps */
 export const createKernelDemandPlane = (deps) => {
   const authorityScheduler = createAuthorityEffectScheduler();
+  /** @type {ReturnType<typeof createAppDwebAuthority>|null} */
+  let appDwebAuthority = null;
+  const getAppDwebAuthority = () => appDwebAuthority ??= createAppDwebAuthority({
+    storage: deps.browser.storage.session,
+    tabIds: async (appId) => (await deps.browser.tabs.query({ url: `${deps.appTabUrl}*` }))
+      .filter((/** @type {any} */ tab) => {
+        try {
+          const actual = new URL(tab.url);
+          const expected = new URL(deps.appTabUrl);
+          return Number.isInteger(tab.id) && actual.origin === expected.origin
+            && actual.pathname === expected.pathname
+            && actual.hash.slice(1).split('?', 1)[0] === appId;
+        } catch { return false; }
+      }).map((/** @type {any} */ tab) => tab.id),
+    stopTab: async (appId, tabId) => {
+      const reply = await deps.browser.tabs.sendMessage(tabId, {
+        type: 'app/quiesce', action: 'invalidate-dweb', appId,
+      });
+      if (!reply?.ok) throw new Error(reply?.error ?? 'App bridge did not stop');
+    },
+    closeTab: (tabId) => deps.browser.tabs.remove(tabId),
+    purgeOwners: async (appId, appGeneration) => {
+      if (!deps.dwebEnabled) return;
+      // Do not start the network to revoke it. A successor host hydrates the
+      // persisted floor before accepting any App room operation.
+      const contexts = await deps.browser.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+      if (!contexts.some((/** @type {any} */ context) => context.documentUrl === deps.offscreenUrl)) return;
+      const reply = await deps.browser.runtime.sendMessage({
+        type: 'dweb/base-host/rotate-app-authority', appId, appGeneration,
+      });
+      if (!reply?.ok) throw new Error(reply?.error ?? 'App room authority could not be retired');
+    },
+  });
+  const withAppDwebAuthority = (/** @type {string} */ appId,
+    /** @type {()=>Promise<any>} */ operation, /** @type {any} */ options = {}) =>
+    deps.dwebEnabled ? getAppDwebAuthority().run(appId, operation, options) : operation();
   if (typeof deps.createProductionRuntime !== 'function'
       || !deps.controllerGateway || typeof deps.controllerGateway.withRun !== 'function') {
     throw new TypeError('kernel-demand-plane-config-invalid');
@@ -122,6 +159,7 @@ export const createKernelDemandPlane = (deps) => {
   const support = createKernelDemandSupport({
     ...deps,
     testProvider: (/** @type {any} */ message) => semanticRoutes['provider/test'](message),
+    withAppDwebAuthority,
     denylist: deps.denylist,
     createFirefoxRepositoryClient: deps.firefoxAddon?.createFirefoxRepositoryClient,
     withFirefoxLifetime: (/** @type {()=>Promise<any>} */ operation,
@@ -177,6 +215,7 @@ export const createKernelDemandPlane = (deps) => {
     let sourceProjectionRevision = 0;
     const runtime = await deps.controllerGateway.withRun(() => deps.createProductionRuntime({
       ...deps,
+      appDwebAuthority: getAppDwebAuthority(),
       authorityScheduler,
       seams,
       turnCustody,
@@ -223,6 +262,8 @@ export const createKernelDemandPlane = (deps) => {
     if (controllerOwner) return controllerOwner;
     controllerOwner = createKernelSemanticRuntime({
       ...deps,
+      withAppDwebAuthority,
+      appDwebGeneration: (/** @type {string} */ appId) => getAppDwebAuthority().generation(appId),
       skillPersistence,
       authorityScheduler,
       ready: deps.vaultReady,

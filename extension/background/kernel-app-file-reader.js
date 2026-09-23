@@ -32,6 +32,7 @@ export const createKernelAppFileReader = ({ idb, sessionCache, appFiles }) => {
 /** @param {any} deps */
 export const makeKernelAppEditorRoutes = ({
   vault, catalog, files, repositories, isAppSender, reloadApp = () => {},
+  withAppDwebAuthority = (/** @type {string} */ _appId, /** @type {()=>Promise<any>} */ operation) => operation(),
 }) => {
   const fail = (/** @type {any} */ cause) => ({
     ok: false,
@@ -77,7 +78,7 @@ export const makeKernelAppEditorRoutes = ({
       return { ok: false, error: `refusing to delete entry file: ${path}` };
     }
     try {
-      await repositories.coordinate({ kind: 'app', id: checked.id }, async () => {
+      await withAppDwebAuthority(checked.id, () => repositories.coordinate({ kind: 'app', id: checked.id }, async () => {
         let prior;
         try { prior = await files.readBytes(checked.id, path); }
         catch (cause) {
@@ -96,7 +97,7 @@ export const makeKernelAppEditorRoutes = ({
           else await files.deleteFile(checked.id, path).catch(() => {});
           throw cause;
         }
-      });
+      }), { invalidate: !runtimeData });
       if (reload) Promise.resolve(reloadApp(checked.id)).catch(() => {});
       return { ok: true };
     } catch (cause) { return fail(cause); }

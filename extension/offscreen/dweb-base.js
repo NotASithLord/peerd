@@ -36,6 +36,7 @@ import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js'
 import { publishFailureError, runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
+import { createAppRoomAuthority } from '/offscreen/app-room-authority.js';
 import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
 import { runDwebReseedPublication } from '/offscreen/dweb-reseed-publication.js';
 
@@ -707,9 +708,37 @@ const roomLiveness = createAppRoomLiveness({
   },
 });
 
-// One relayed op from the dwapp bridge (app-tab -> SW -> here). Returns the reply.
+// why: hydrate lazily so importing this feature cannot start a host lease or
+// create a reverse kernel request before its own admission has completed.
+/** @type {ReturnType<typeof createAppRoomAuthority>|null} */
+let appRoomAuthority = null;
+const roomAuthority = () => appRoomAuthority ??= createAppRoomAuthority({ get: async () => {
+  const response = await swCall('dweb/app-authority-generations');
+  if (!response?.ok) throw new Error(response?.error ?? 'App room authority unavailable');
+  return response.generations ?? {};
+} });
+const purgeAppRoomOwners = (/** @type {string} */ appId) => {
+  let left = 0;
+  for (const [roomId, entry] of rooms) {
+    for (const [clientId, owner] of entry.clients) {
+      if (owner.appId === appId && closeRoom(entry, roomId, clientId, owner.token, appId)) left += 1;
+    }
+  }
+  return { ok: true, left };
+};
+
 /** @param {any} msg */
 const handleRoomOp = async (msg) => {
+  if (!msg.appId || msg.op === 'leave') return handleRoomOpUnlocked(msg);
+  return roomAuthority().run(msg.appId, msg.appGeneration, async (current, advanced) => {
+    if (advanced) purgeAppRoomOwners(msg.appId);
+    return handleRoomOpUnlocked(msg, current);
+  });
+};
+
+// One relayed op from the dwapp bridge (app-tab -> SW -> here). Returns the reply.
+/** @param {any} msg @param {()=>boolean} [current] */
+const handleRoomOpUnlocked = async (msg, current = () => true) => {
   const { op, roomId } = msg;
   if (typeof msg.expectedHostEpoch === 'string'
       && msg.expectedHostEpoch !== activeFeatureHostEpoch) {
@@ -720,6 +749,10 @@ const handleRoomOp = async (msg) => {
   const admissionToken = appRoomAdmissionToken(msg.roomAdmissionToken);
   if (op === 'join') {
     const entry = await ensureRoom(roomId, msg.name, clientId, msg);
+    if (!current()) {
+      closeRoom(entry, roomId, clientId, admissionToken, msg.appId);
+      return { ok: false, error: 'app-identity-changed' };
+    }
     return {
       ok: true, did: entry.room.did, joined: roomId,
       hostEpoch: activeFeatureHostEpoch,
@@ -1177,6 +1210,12 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         }
         // A dwapp room op (join/leave/publish/subscribe/dm/presence/…) — the
         // bridge's room surface, served over the shared base mesh.
+        case 'dweb/base-host/rotate-app-authority': {
+          if (typeof msg.appId !== 'string' || !msg.appId) throw new Error('appId-required');
+          sendResponse(await roomAuthority().rotate(msg.appId, msg.appGeneration,
+            () => purgeAppRoomOwners(msg.appId)));
+          return;
+        }
         case 'dweb/base-host/room': { sendResponse(await handleRoomOp(msg)); return; }
         // Install: fetch the signed bundle over the base mesh, verify, install +
         // persist as an engine App (via the SW). Returns the new app record.

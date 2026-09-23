@@ -74,6 +74,7 @@ export const createKernelEngineLive = async (deps) => {
     onDrop: deps.onPodTabDrop,
   });
   const appTabTracker = createAppTabTracker({
+    dwebAuthority: deps.appDwebAuthority,
     tabs: deps.browser.tabs,
     sendTabMessage: deps.browser.tabs.sendMessage.bind(deps.browser.tabs),
     announce: deps.noteAppTab,
