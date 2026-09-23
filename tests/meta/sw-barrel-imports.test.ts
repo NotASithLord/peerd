@@ -186,11 +186,12 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // was already on the graph and absorbed the policy, which is why the entry
     // grew by far less than the two byte budgets moved. Source-size growth in
     // modules already present is what these two numbers track.
+    // Fresh combined measurement includes the reviewed browser simplifications,
+    // native App guidance and consent retirement. No static dependency is added;
+    // pin the achieved closure and entry exactly, without reserved headroom.
     expect(graph.size).toBeLessThanOrEqual(458);
-    expect(bytes).toBeLessThanOrEqual(4_712_000);
-    // Consent retirement plus the readiness projection adds wiring, not a
-    // new static dependency. The combined entry measures 462,161 bytes.
-    expect(statSync(entry).size).toBeLessThanOrEqual(462_200);
+    expect(bytes).toBeLessThanOrEqual(4_706_470);
+    expect(statSync(entry).size).toBeLessThanOrEqual(460_989);
   });
 
   test('the offscreen host uses its exact runtime and engine surfaces', async () => {

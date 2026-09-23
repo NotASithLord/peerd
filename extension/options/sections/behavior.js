@@ -19,7 +19,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { listProviders } from '/peerd-provider/index.js';
 import { resetRow } from './reset-row.js';
-import { settingsRow, settingsBand, toggleSwitch } from '../components/settings-row.js';
+import { settingsRow, settingsBand, toggleSwitch, rowController } from '../components/settings-row.js';
 
 /** @typedef {import('./reset-row.js').Send} Send */
 
@@ -27,48 +27,7 @@ export const BehaviorSection = {
   /** @param {{ attrs: { state: any, send: Send }, state: any }} vnode */
   view: ({ attrs: { state, send }, state: ui }) => {
     const s = state.settings ?? {};
-    // Which rationales are open. Per-row, remembered while the page is mounted
-    // and never persisted — a disclosure is a reading aid, not a preference.
-    if (!ui.why) ui.why = new Set();
-    const whyOpen = (/** @type {string} */ id) => ui.why.has(id);
-    const toggleWhy = (/** @type {string} */ id) => () => {
-      if (ui.why.has(id)) ui.why.delete(id); else ui.why.add(id);
-      m.redraw();
-    };
-
-    /**
-     * A row whose control is a switch. Holds the busy-flag dance in ONE place:
-     * it was copy-pasted eight times, and a missed `finally` in any copy is a
-     * control stuck spinning forever.
-     * @param {{ id: string, label: string, on: boolean, busyKey: string,
-     *   summary: string, why: string, apply: () => Promise<any>,
-     *   badge?: string | null, children?: any }} p
-     */
-    const toggleRow = ({ id, label, on, busyKey, summary, why, apply, badge = null, children = null }) => {
-      const busy = !!ui[busyKey];
-      return settingsRow({
-        id,
-        label,
-        pill: busy ? '…' : on ? 'ON' : 'OFF',
-        badge,
-        summary: busy ? 'Saving…' : summary,
-        why,
-        open: whyOpen(id),
-        onToggleWhy: toggleWhy(id),
-        control: toggleSwitch({
-          on,
-          busy,
-          label: `${label} — ${on ? 'on' : 'off'}`,
-          onclick: async () => {
-            if (ui[busyKey]) return;
-            ui[busyKey] = true; m.redraw();
-            try { await apply(); } catch (e) { console.warn(`[options] ${id} toggle failed`, e); }
-            finally { ui[busyKey] = false; m.redraw(); }
-          },
-        }),
-        children,
-      });
-    };
+    const { whyOpen, toggleWhy, toggleRow } = rowController(ui);
 
     // ── Safety — changes what peerd MAY DO ───────────────────────────────────
     const confirmsOn = state.session?.permission?.confirmActions === true;
