@@ -103,20 +103,11 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {Map<string|undefined, Set<string>>} [seenRecoveryIdsBySession]
  */
 
-// Auto-scroll heuristic: if the user is reading near the bottom, keep
-// them pinned at the bottom across all updates (new messages, growing
-// tool calls, streaming text deltas). If they've scrolled away to read
-// older content, respect their scroll position.
-//
-// "Near the bottom" = within 150px. Generous enough that the
-// expand-result affordance doesn't fight scroll, tight enough that an
-// intentional scroll-up keeps the user where they want.
+// Keep following only while the user stays near the live edge. Record this on
+// scroll because a large redraw can move the edge before onupdate measures it.
 const NEAR_BOTTOM_PX = 150;
 /** @param {HTMLElement} el */
-const scrollIfNearBottom = (el) => {
-  const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-  if (distance < NEAR_BOTTOM_PX) el.scrollTop = el.scrollHeight;
-};
+const nearBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
 
 // How many levels of nested actor transcript to render inline before
 // stopping. Deeper runs still exist and are inspectable, but rendering
@@ -274,6 +265,7 @@ export const MessageList = {
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
   oninit(vnode) {
     vnode.state.sessionId = vnode.attrs.sessionId;
+    vnode.state.followBottom = true;
     // Existing history on the initial mount is a visual receipt, not a new
     // alert. Keep the baseline per session after that: a receipt first
     // encountered when the user switches chats is new to this surface and must
@@ -299,6 +291,7 @@ export const MessageList = {
   onbeforeupdate(vnode) {
     if (vnode.state.sessionId !== vnode.attrs.sessionId) {
       vnode.state.sessionId = vnode.attrs.sessionId;
+      vnode.state.followBottom = true;
       const receipts = recoveryReceipts(vnode.attrs.messages);
       const existing = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId);
       const fresh = existing
@@ -338,7 +331,7 @@ export const MessageList = {
   },
   /** @param {{ dom: HTMLElement, state: any }} vnode */
   onupdate(vnode) {
-    scrollIfNearBottom(vnode.dom);
+    if (vnode.state.followBottom) vnode.dom.scrollTop = vnode.dom.scrollHeight;
     scheduleRecoveryAnnouncementClear(vnode.state);
   },
   /** @param {{ state: any }} vnode */
@@ -348,7 +341,12 @@ export const MessageList = {
 
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
   view: ({ attrs: { messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName, tabEvents, confirmEvents, uiActions, send, sessionId, busy }, state }) =>
-    m('.message-list', [
+    m('.message-list', {
+      onscroll: (/** @type {Event & { redraw?: boolean }} */ event) => {
+        state.followBottom = nearBottom(/** @type {HTMLElement} */ (event.currentTarget));
+        event.redraw = false;
+      },
+    }, [
       renderTranscript({
         messages, vmStreams, spawned, actors, scriptOps, loadActor, peerName,
         depth: 0, tabEvents, confirmEvents, uiActions, send, sessionId, busy,
