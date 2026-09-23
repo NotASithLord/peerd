@@ -61,6 +61,46 @@ describe('the first-contact signing gate', () => {
 });
 
 describe('ask / reply correlation', () => {
+  test('an authenticated fast reply settles before the send acknowledgment returns', async () => {
+    let envelope: any;
+    const d = harness({ sendDm: (_to: string, env: any) => {
+      envelope = env; return new Promise(() => {});
+    } });
+    const ask = d.dispatch('ask', { did: DID, message: 'ping', timeoutMs: 5000 }, { signs: true, allowed: () => true });
+    await tick();
+    d.handleInbound(DID, { __a2a: 1, kind: 'reply', reqId: envelope.reqId, message: 'pong' });
+    expect(await Promise.race([ask, tick().then(() => ({ pending: true }))]))
+      .toEqual({ ok: true, from: DID, reply: 'pong' });
+    expect(d._pendingCount()).toBe(0);
+  });
+
+  test('Stop during an unacknowledged send settles as unknown and never retryable', async () => {
+    const d = harness({ sendDm: () => new Promise(() => {}) });
+    const controller = new AbortController();
+    const ask = d.dispatch('ask', { did: DID, message: 'ping', timeoutMs: 5000 },
+      { signs: true, allowed: () => true, signal: controller.signal });
+    await tick();
+    controller.abort();
+    expect(await Promise.race([ask, tick().then(() => ({ pending: true }))]))
+      .toMatchObject({ ok: false, performed: true, outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false });
+    expect(d._pendingCount()).toBe(0);
+  });
+
+  test('timeout also bounds an unacknowledged send and retains its uncertainty', async () => {
+    const d = harness({ sendDm: () => new Promise(() => {}) });
+    const ask = d.dispatch('ask', { did: DID, message: 'ping', timeoutMs: 0 }, { signs: true, allowed: () => true });
+    expect(await Promise.race([ask, tick().then(() => ({ pending: true }))]))
+      .toMatchObject({ timedOut: true, outcomeKnown: false, retryable: false });
+    expect(d._pendingCount()).toBe(0);
+  });
+
+  test('a synchronous transport failure retires correlation without losing the rejection', async () => {
+    const d = harness({ sendDm: () => { throw new Error('transport down'); } });
+    await expect(d.dispatch('ask', { did: DID, message: 'ping' }, { signs: true, allowed: () => true }))
+      .rejects.toThrow('transport down');
+    expect(d._pendingCount()).toBe(0);
+  });
+
   test('ask sends a tagged request and resolves when the matching reply lands', async () => {
     const d = harness();
     const p = d.dispatch('ask', { did: DID, message: 'free Tuesday?', timeoutMs: 5000 }, { signs: true, allowed: () => true });

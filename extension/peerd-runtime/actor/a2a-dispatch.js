@@ -81,30 +81,66 @@ export const makeMeshDispatch = (deps) => {
     const reqId = mkReqId();
     const env = /** @type {A2AEnvelope} */ ({ __a2a: 1, kind: 'ask', reqId, message });
     if (convId) env.convId = convId;
-    const sent = await sendDm(did, env);
-    if (!sent?.ok) return { ...sent, ok: false, error: sent?.error ?? 'mesh.call: could not reach the peer' };
     const sentReceipt = {
       performed: true, outcomeKnown: true,
       outcomeKind: 'effect-completed', retryable: false,
     };
-    if (signal?.aborted) return { ok: false, error: 'a2a: aborted after peer request', ...sentReceipt };
+    const unacknowledgedReceipt = {
+      performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    };
+    let sendAcknowledged = false;
+    let sendStarted = false;
+    /** @type {(afterSend?:boolean)=>void} */
+    let settleAbort = () => {};
     const ms = typeof timeoutMs === 'number' ? timeoutMs : defaultTimeoutMs;
-    return await new Promise((resolve) => {
+    // why: a peer can answer before the transport acknowledges send. Correlate
+    // first, and bound that pending acknowledgment with the same Stop/deadline.
+    const reply = new Promise((resolve) => {
+      /** @type {ReturnType<typeof setTimeout>|undefined} */
+      let abortTimer;
       /** @param {any} value */
       const finish = (value) => {
         clearTimeout(timer);
+        clearTimeout(abortTimer);
         pendingAsks.delete(reqId);
         signal?.removeEventListener('abort', onAbort);
         resolve(value);
       };
-      const onAbort = () => finish({
-        ok: false, error: 'a2a: aborted while awaiting reply', ...sentReceipt,
+      settleAbort = (afterSend = false) => finish({
+        ok: false, error: afterSend ? 'a2a: aborted after peer request' : 'a2a: aborted while awaiting reply',
+        ...(sendAcknowledged ? sentReceipt : sendStarted ? unacknowledgedReceipt
+          : { performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false }),
       });
-      const timer = setTimeout(() => finish({ ok: true, from: null, reply: null, timedOut: true }), ms);
+      const onAbort = () => {
+        pendingAsks.delete(reqId);
+        signal?.removeEventListener('abort', onAbort);
+        clearTimeout(timer);
+        // why: retain a send acknowledgment already settling in this tick,
+        // without making Stop depend on an unbounded transport promise.
+        if (sendStarted && !sendAcknowledged) abortTimer = setTimeout(() => settleAbort(), 0);
+        else settleAbort();
+      };
+      const timer = setTimeout(() => finish({ ok: true, from: null, reply: null, timedOut: true,
+        ...(!sendAcknowledged ? unacknowledgedReceipt : {}),
+      }), ms);
       pendingAsks.set(reqId, { resolve: finish, timer, did, convId });
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) onAbort();
     });
+    Promise.resolve().then(() => {
+      if (!pendingAsks.has(reqId)) return null;
+      sendStarted = true;
+      return sendDm(did, env);
+    }).then((sent) => {
+      if (!sent) return;
+      if (sent.ok) {
+        sendAcknowledged = true;
+        if (signal?.aborted) settleAbort(true);
+      }
+      else pendingAsks.get(reqId)?.resolve({ ...sent, ok: false, error: sent?.error ?? 'mesh.call: could not reach the peer' });
+    }, (error) => pendingAsks.get(reqId)?.resolve(Promise.reject(error)));
+    return await reply;
   };
 
   /**
@@ -194,8 +230,6 @@ export const makeMeshDispatch = (deps) => {
       // orphan reply is dropped, never resolved — but still CONSUMED, so a forged
       // reply can't wake the actor either.
       if (pending && pending.did === from) {
-        clearTimeout(pending.timer);
-        pendingAsks.delete(env.reqId);
         pending.resolve({ ok: true, from, reply: String(env.message ?? ''), ...(pending.convId ? { convId: pending.convId } : {}) });
       }
       return { consumed: true };   // a reply is plumbing, never a wake
