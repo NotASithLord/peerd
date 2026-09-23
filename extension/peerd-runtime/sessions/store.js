@@ -33,6 +33,7 @@
 // other browser-extension storage.
 
 import { uuidv7 } from '/shared/util.js';
+import { beginSessionAuthorityChange, changesSessionAuthority } from '/shared/session-authority-epoch.js';
 import { SessionNotFoundError } from '../errors.js';
 // why: the store persists ONE canonical manifest shape so every consumer
 // (descriptor filter, exposure gate, actor inheritance, UI chips)
@@ -491,13 +492,18 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     return isRealUserMessage(message) ? message : undefined;
   };
 
-  const archive = (/** @type {string} */ sessionId) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
-    const updated = { ...record, archivedAt: now() };
-    await idb.put(STORE, updated);
-    return assemble(updated);
-  });
+  const archive = async (/** @type {string} */ sessionId) => {
+    const finish = beginSessionAuthorityChange(idb);
+    try {
+      return await enqueueSessionOperation(sessionId, async () => {
+        const record = await getRecord(sessionId);
+        if (!record) throw new SessionNotFoundError(sessionId);
+        const updated = { ...record, archivedAt: now() };
+        await idb.put(STORE, updated);
+        return assemble(updated);
+      });
+    } finally { finish(); }
+  };
 
   /**
    * Metadata-only lookup of a live actor session by its self-description — used to
@@ -591,13 +597,18 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    * @param {string} sessionId
    * @param {Record<string, unknown>} patch
    */
-  const update = (sessionId, patch) => enqueueSessionOperation(sessionId, async () => {
-    const record = await getRecord(sessionId);
-    if (!record) throw new SessionNotFoundError(sessionId);
-    const updated = { ...record, ...patch };
-    await idb.put(STORE, updated);
-    return assemble(updated);
-  });
+  const update = async (sessionId, patch) => {
+    const finish = changesSessionAuthority(patch) ? beginSessionAuthorityChange(idb) : () => {};
+    try {
+      return await enqueueSessionOperation(sessionId, async () => {
+        const record = await getRecord(sessionId);
+        if (!record) throw new SessionNotFoundError(sessionId);
+        const updated = { ...record, ...patch };
+        await idb.put(STORE, updated);
+        return assemble(updated);
+      });
+    } finally { finish(); }
+  };
 
   /**
    * Set or CLEAR the session's user-authored system-prompt augmentation

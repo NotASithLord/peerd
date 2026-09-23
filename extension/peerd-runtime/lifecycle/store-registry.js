@@ -198,6 +198,15 @@ export const STORE_REGISTRY = Object.freeze([
     store: 'dweb-release-history', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
     physical: Object.freeze({ kvKeys: ['dweb.metaHighWater.v1'] }),
   }),
+  // What a site asked THIS device to slow down to. Exporting one leaks which
+  // origins were visited; importing one lets another device decide what this
+  // device refuses, and an imported low floor is a widening nobody consented to.
+  // Same shape as a permission grant: profile-scoped, never portable, never
+  // personPortable (issue invariant 13).
+  Object.freeze({
+    store: 'origin-pacing', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    physical: Object.freeze({ kvKeys: ['pacing.origins.v1'] }),
+  }),
   // The did:key keypair is a vault secret — physically under the vault's
   // secret: prefix, encrypted under the DK.
   Object.freeze({

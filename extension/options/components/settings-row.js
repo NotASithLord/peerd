@@ -117,3 +117,65 @@ export const settingsBand = ({ name, subtitle = null, safety = false, rows }) =>
   ]),
   m('.set-band-rows', rows),
 ]);
+
+/**
+ * The per-page controller for a set of rows: disclosure state plus the
+ * switch-row helper. Bind it once per view against the component's own state.
+ *
+ * why this is shared rather than re-typed per page: the helper below holds the
+ * busy-flag dance, and it was already copy-pasted eight times inside one page.
+ * The second page to want rows is exactly when that copy starts to drift - and
+ * the drift is not cosmetic. `memory.js` hand-rolled the same dance without a
+ * `finally`, so a rejected save left its switch spinning until remount.
+ *
+ * @param {Record<string, any>} ui  the calling component's vnode.state
+ */
+export const rowController = (ui) => {
+  // Which rationales are open. Per-row, remembered while the page is mounted
+  // and never persisted - a disclosure is a reading aid, not a preference.
+  if (!ui.why) ui.why = new Set();
+  /** @param {string} id */
+  const whyOpen = (id) => ui.why.has(id);
+  /** @param {string} id */
+  const toggleWhy = (id) => () => {
+    if (ui.why.has(id)) ui.why.delete(id); else ui.why.add(id);
+    m.redraw();
+  };
+
+  /**
+   * A row whose control is a switch.
+   * @param {{ id: string, label: string, on: boolean, busyKey: string,
+   *   summary: string, why?: string | null, apply: () => Promise<any>,
+   *   badge?: string | null, pill?: string | null, children?: any }} p
+   */
+  const toggleRow = ({
+    id, label, on, busyKey, summary, why = null, apply,
+    badge = null, pill = null, children = null,
+  }) => {
+    const busy = !!ui[busyKey];
+    return settingsRow({
+      id,
+      label,
+      pill: busy ? '\u2026' : pill ?? (on ? 'ON' : 'OFF'),
+      badge,
+      summary: busy ? 'Saving\u2026' : summary,
+      why,
+      open: whyOpen(id),
+      onToggleWhy: toggleWhy(id),
+      control: toggleSwitch({
+        on,
+        busy,
+        label: `${label} - ${on ? 'on' : 'off'}`,
+        onclick: async () => {
+          if (ui[busyKey]) return;
+          ui[busyKey] = true; m.redraw();
+          try { await apply(); } catch (e) { console.warn(`[options] ${id} toggle failed`, e); }
+          finally { ui[busyKey] = false; m.redraw(); }
+        },
+      }),
+      children,
+    });
+  };
+
+  return { whyOpen, toggleWhy, toggleRow };
+};

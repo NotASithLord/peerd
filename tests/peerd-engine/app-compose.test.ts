@@ -185,6 +185,20 @@ describe('composeApp', () => {
     expect(out).toContain('\\u003c/script>');
   });
 
+  test('runtime data cannot become an entry, script, style, or worker source', () => {
+    const payload = '"</script><script>globalThis.pwned=1</script>"';
+    for (const html of [
+      '<script src="data/state.json"></script>',
+      '<link rel="stylesheet" href="data/state.json">',
+      '<script>new Worker("data/state.json")</script>',
+    ]) {
+      expect(() => composeApp({ 'index.html': html, 'data/state.json': payload }))
+        .toThrow('app runtime data cannot be a composed source');
+    }
+    expect(() => composeApp({ 'data/state.json': payload }, 'data/state.json'))
+      .toThrow('app runtime data cannot be a composed source');
+  });
+
   // Execute the injected shim against mocked Worker/Blob/URL to prove the
   // runtime rewrite — a known spec becomes a blob: worker, anything else passes
   // straight through. Guards against a regression in the shim source string.

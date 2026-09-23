@@ -46,6 +46,17 @@ describe('adopt / drop / sweep', () => {
     expect(typeof storage.map.get(ENGINE_LIVENESS_KEY)).toBe('object');
   });
 
+  test('a cold worker resolves an App from its durable tab id', async () => {
+    const storage = makeStorage();
+    await makeEngineLiveness({ storage, now: () => 1 }).adopt('app', 'app-1', 41);
+    const restarted = makeEngineLiveness({ storage, now: () => 2 });
+    expect(await restarted.findByTab('app', 41)).toEqual({
+      kind: 'app', id: 'app-1', tabId: 41, at: 1,
+    });
+    await restarted.drop('app', 'app-1');
+    expect(await restarted.findByTab('app', 41)).toBe(null);
+  });
+
   test('a failing storage layer never throws into the tracker hooks', async () => {
     const liveness = makeEngineLiveness({
       storage: {

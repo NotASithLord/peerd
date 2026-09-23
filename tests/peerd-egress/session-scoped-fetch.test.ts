@@ -6,7 +6,7 @@
 // (the wrapper overwrites whatever credentials the caller passed).
 
 import { describe, test, expect } from 'bun:test';
-import { sessionScopedCredentials, withSessionScopedCredentials } from '../../extension/peerd-egress/fetch/web-fetch.js';
+import { makeWebFetch, sessionScopedCredentials, withSessionScopedCredentials } from '../../extension/peerd-egress/fetch/web-fetch.js';
 
 describe('sessionScopedCredentials — same-origin gets the session, else sessionless', () => {
   const ORIGIN = 'https://app.example.com';
@@ -29,6 +29,34 @@ describe('sessionScopedCredentials — same-origin gets the session, else sessio
 });
 
 describe('withSessionScopedCredentials — the boundary owns the decision', () => {
+  test.each(['moved', 'unavailable'])('revalidates %s session authority after pacing at physical dispatch', async (change) => {
+    let waited = false;
+    const calls: any[] = [];
+    const raw = makeWebFetch({
+      getDenylist: () => [], matchDenylist: () => false,
+      pace: {
+        canonicalOrigin: (origin) => origin, isWriteMethod: () => true,
+        reserve: async () => { waited = true; return { outcome: 'waited', waitedMs: 1 }; },
+        observe: async () => {},
+      },
+      fetchFn: (async (_url: any, init: any) => {
+        calls.push(init); return new Response('ok');
+      }) as typeof fetch,
+    });
+    const scoped = withSessionScopedCredentials(raw, () => {
+      if (waited && change === 'unavailable') throw new Error('session authority unavailable');
+      return waited ? 'https://other.example.com' : 'https://app.example.com';
+    });
+    if (change === 'unavailable') {
+      await expect(scoped('https://app.example.com/change', { method: 'POST' })).rejects.toThrow();
+      expect(calls).toHaveLength(0);
+    } else {
+      await scoped('https://app.example.com/change', { method: 'POST' });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].credentials).toBe('omit');
+    }
+  });
+
   const seenInit = () => {
     const calls: any[] = [];
     const inner = async (_res: any, init: any) => { calls.push(init); return {} as any; };
