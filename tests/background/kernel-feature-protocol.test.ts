@@ -89,6 +89,8 @@ describe('sealed kernel feature protocol', () => {
 
   test('classifies observational local-model effects as replayable reads', () => {
     const cases = [
+      ['models/state-projection', 'local.models.ollama', {}],
+      ['models/state-projection', 'local.models.observe-ollama', { known: true, reachable: false, count: null, models: null }],
       ['models/options', 'local.models.snapshot', { sessionId: null }],
       ['models/options', 'local.models.ollama', {}],
       ['openrouter/models', 'local.openrouter.models', {}],
@@ -125,6 +127,16 @@ describe('sealed kernel feature protocol', () => {
     expect(init.pendingLoss('local.model.init')).toEqual({
       outcomeKnown: false, retryable: false,
     });
+  });
+
+  test('provider display projection cannot widen its bounded inventory read', () => {
+    const quota = createKernelFeatureEffectQuota(KERNEL_FEATURE_DISPATCH_CAPABILITY,
+      request({ cluster: 'local', route: 'models/state-projection', message: {} }));
+    expect(quota.admit('local.models.ollama', { url: 'https://other.example' })).toMatchObject({ ok: false });
+    expect(quota.admit('local.provider.test', { provider: 'openai', model: 'm', nativeBody: {} })).toMatchObject({ ok: false });
+    expect(quota.admit('local.model.init', { model: null })).toMatchObject({ ok: false });
+    expect(quota.admit('local.models.ollama', {})).toMatchObject({ ok: true });
+    expect(quota.admit('local.models.ollama', {})).toMatchObject({ ok: false, code: 'feature-effect-budget-exhausted' });
   });
 
   test('uses one-use client grants and refuses forged reverse effects', async () => {

@@ -794,30 +794,35 @@ export const STATES = [
         }
         if (requestUrl.pathname === '/cross-frame-popup') {
           const target = `http://127.0.0.1:${targetProbePort}/probe?vector=cross-frame-popup`;
-          res.end(`<!doctype html><script>
-            navigator.sendBeacon('/attempt?vector=cross-frame-popup');
+          res.end(`<!doctype html><body><script>
+            'use strict';
             const link = document.createElement('a');
             link.href = ${JSON.stringify(target)};
             link.target = '_blank';
             document.body.append(link);
             link.click();
+            navigator.sendBeacon('/attempt?vector=cross-frame-popup');
           <\/script>`);
           return;
         }
         if (requestUrl.pathname === '/cross-frame-blank') {
           const target = `http://127.0.0.1:${targetProbePort}/probe?vector=cross-frame-blank`;
-          res.end(`<!doctype html><script>
-            const name = 'private-child-' + Math.random();
-            const link = document.createElement('a');
-            link.href = 'about:blank';
-            link.target = name;
-            document.body.append(link);
-            link.click();
-            const child = window.open('', name);
-            if (child) {
-              navigator.sendBeacon('/attempt?vector=cross-frame-blank');
-              child.fetch(${JSON.stringify(target)}, { mode: 'no-cors' }).catch(() => {});
-            }
+          // why: parser-blocking head scripts have no body yet. A receipt must
+          // follow the child fetch call, not merely this action page loading.
+          res.end(`<!doctype html><body style="margin:0">
+            <button style="width:100vw;height:100vh">Open child</button><script>
+            'use strict';
+            document.querySelector('button').addEventListener('click', (event) => {
+              navigator.sendBeacon('/attempt?vector=cross-frame-blank:' + (event.isTrusted ? 'trusted-click' : 'untrusted-click'));
+              const name = 'private-child-' + Math.random();
+              const child = window.open('about:blank', name);
+              navigator.sendBeacon('/attempt?vector=cross-frame-blank:' + (child ? 'opened' : 'open-refused'));
+              if (child) {
+                child.fetch(${JSON.stringify(target)}, { mode: 'no-cors' }).catch(() => {});
+                navigator.sendBeacon('/attempt?vector=cross-frame-blank');
+              }
+            });
+            navigator.sendBeacon('/attempt?vector=cross-frame-blank:ready');
           <\/script>`);
           return;
         }
@@ -1164,12 +1169,13 @@ export const STATES = [
                   link.click();
                 }
                 if (kind === 'cross-frame-popup') {
-                  recordAttempt();
                   frame(publicRoute(kind, true));
                 }
                 if (kind === 'cross-frame-blank') {
-                  recordAttempt();
-                  frame(publicRoute(kind, true));
+                  const node = frame(publicRoute(kind, true));
+                  node.hidden = false;
+                  node.dataset.peerdCrossFrameBlank = '';
+                  node.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:100px;z-index:2147483647;border:0';
                 }
                 if (kind === 'location') {
                   recordAttempt();
@@ -1179,6 +1185,26 @@ export const STATES = [
               args: [${JSON.stringify(vector)}, ${JSON.stringify(target)},
                 ${JSON.stringify(networkGuardFixtureUrl)}, ${privatePort}, ${JSON.stringify(marker)}],
             }))()`, true);
+            if (vector === 'cross-frame-blank') {
+              // why: popup admission is separate from the network floor. Use a
+              // real click so a refused automatic popup cannot fake coverage.
+              const ready = await waitFor(() => controllerAttempts.has(vector + ':ready'), {
+                budgetMs: 2_000, pollMs: 25,
+              });
+              if (!ready) throw new Error('cross-frame blank action did not become ready');
+              const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((response) => response.json());
+              const target = targets.find((item) => item.type === 'page' && item.url === networkGuardFixtureUrl);
+              if (!target) throw new Error('cross-frame blank source target not found');
+              const source = await attach(target.webSocketDebuggerUrl);
+              try {
+                const point = await evalIn(source, `(() => {
+                  const rect = document.querySelector('[data-peerd-cross-frame-blank]').getBoundingClientRect();
+                  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                })()`);
+                await source.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+                await source.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+              } finally { source.close(); }
+            }
             await waitFor(() => controllerAttempts.has(vector), {
               budgetMs: 2_000, pollMs: 25,
             });
@@ -1187,6 +1213,7 @@ export const STATES = [
               connections,
               requests: [...requests],
               attempted: controllerAttempts.has(vector),
+              stages: [...controllerAttempts].filter((entry) => entry.startsWith(vector + ':')),
               port: privatePort,
             };
           } finally {
@@ -4032,7 +4059,11 @@ export const STATES = [
             ? { ok: true, providers }
             : message.type === 'provider/test' && message.provider === 'ollama'
               ? { ok: true, reachable: true, models: 2 }
-              : { ok: true };
+              : message.type === 'local-model/catalog'
+                // A resident on-device model: the runner shipped, so the front
+                // door must be able to show it as selectable.
+                ? { ok: true, models: [{ id: 'muse-glimmer-30b', available: true }] }
+                : { ok: true };
           m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card', [
             m(ProviderStep, { send, onDone: () => {} }),
             m('.onb-dots', { 'aria-label': 'Step 1 of 4' }, [0, 1, 2, 3].map((i) =>
@@ -4062,6 +4093,69 @@ export const STATES = [
       } finally {
         await evalIn(ctx.page, `(async () => {
           const host = document.querySelector('#e2e-onboarding-provider');
+          if (!host) return;
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          m.mount(host, null);
+          host.remove();
+        })()`, true);
+      }
+    },
+  },
+
+  // --- visual: the runner row when the weights are NOT here yet --------------
+  // The common first run: the engine is supported, nothing is downloaded. The
+  // row has to separate that from "this browser cannot run it at all", which
+  // is why it is a state and not just a unit assertion on the phase helper.
+  {
+    name: 'onboarding-provider-local-empty', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ProviderStep } = await import('/sidepanel/components/onboarding-provider-step.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-onboarding-local-empty';
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const providers = [
+            { name: 'ollama', label: 'Ollama', keyless: true, liveModels: true },
+            { name: 'local-webgpu', label: 'Local WebGPU', keyless: true, liveModels: false },
+          ];
+          const send = async (message) => message.type === 'provider/status'
+            ? { ok: true, providers }
+            : message.type === 'provider/test'
+              ? { ok: false, error: 'unreachable' }
+              : message.type === 'local-model/catalog'
+                ? { ok: true, models: [{ id: 'muse-glimmer-30b', available: false, downloaded: false }] }
+                : { ok: true };
+          m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card',
+            m(ProviderStep, { send, onDone: () => {} }))) });
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const rows = [...document.querySelectorAll('#e2e-onboarding-local-empty .onb-provider-row')];
+          if (rows.length === 0) return null;
+          const runner = rows.find((r) => r.textContent.includes('On-device runner'));
+          if (!runner || runner.querySelector('.onb-provider-chip')?.textContent === 'CHECKING\u2026') return null;
+          return {
+            rows: rows.length,
+            runnerChip: runner.querySelector('.onb-provider-chip')?.textContent,
+            runnerDisabled: runner.disabled,
+            daemonChip: rows.find((r) => r.textContent.includes('Ollama'))
+              ?.querySelector('.onb-provider-chip')?.textContent,
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('an undownloaded runner says so, and stays unselectable',
+          rendered?.rows === 2
+            && rendered?.runnerChip === 'NOT DOWNLOADED'
+            && rendered?.runnerDisabled === true
+            // The unreachable daemon must NOT borrow the runner's wording.
+            && rendered?.daemonChip === 'NO KEY NEEDED',
+          JSON.stringify(rendered));
+        await rec.visual('onboarding-provider-local-empty');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.querySelector('#e2e-onboarding-local-empty');
           if (!host) return;
           const m = (await import('/vendor/mithril/mithril.js')).default;
           m.mount(host, null);

@@ -55,6 +55,28 @@ function makeHarness(opts: {
 }
 
 describe('makeScheduler - registration', () => {
+  it('a cold cancel waits for hydration and durably removes the stored routine', async () => {
+    const original = makeHarness();
+    await original.scheduler.add({ prompt: 'existing routine', every: '1h' });
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let stored = original.stored();
+    const scheduler = makeScheduler({
+      fireRoutine: async () => {},
+      kv: {
+        get: async () => { entered.resolve(); await release.promise; return structuredClone(stored); },
+        set: async (_key, value) => { stored = structuredClone(value); },
+      },
+    });
+    let settled = false;
+    const cancelling = scheduler.remove('r1').then((result) => { settled = true; return result; });
+    await entered.promise;
+    expect(settled).toBe(false);
+    release.resolve();
+    expect(await cancelling).toBe(true);
+    expect(scheduler.list()).toEqual([]);
+    expect(stored).toEqual({});
+  });
   it('a cold list waits for the durable routines before returning', async () => {
     const original = makeHarness();
     await original.scheduler.add({ prompt: 'existing routine', every: '1h' });

@@ -350,8 +350,8 @@ export async function* runUserTurn(ctx) {
       ...(synthetic ? { synthetic: true } : {}),
       // why: actor replies need visible attribution despite being synthetic.
       ...(actorReply ? { actorReply } : {}),
-      // why: retry an uncertain append with the same storage key.
-      id: synthetic && actorReply?.actorDeliveryId ? actorReply.actorDeliveryId : uuidv7(now),
+      // why: retry an uncertain append with the same validated storage key.
+      id: synthetic && typeof actorReply?.actorDeliveryId === 'string' ? actorReply.actorDeliveryId : uuidv7(now),
       when: now(),
     };
     session = await sessions.appendMessage(sessionId, userMsg);

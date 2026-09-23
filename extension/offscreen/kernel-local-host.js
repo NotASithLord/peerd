@@ -42,13 +42,37 @@ const observeOllama = async (/** @type {any} */ context,
     && Number(projection.status) < 300;
   const body = reachable ? projectionJson(projection) : null;
   const models = reachable ? cleanModels(body?.models).map((row) => row.model) : null;
-  await effect(context, 'local.models.observe-ollama', {
+  const status = {
     known: true,
     reachable,
     count: models?.length ?? null,
     models,
-  });
-  return { body, models: models ?? [] };
+  };
+  await effect(context, 'local.models.observe-ollama', status);
+  return { body, models: models ?? [], status };
+};
+
+// why: display and first-turn binding must pick the same usable provider/model.
+// An explicit model is never replaced; a keyless default needs resident/live
+// evidence, not just a registered adapter or a model catalog entry.
+const defaultSelection = (/** @type {any} */ snapshot) => {
+  const settings = snapshot.settings ?? {};
+  const configured = providerMetadata(settings.providerName);
+  const local = snapshot.localModels === true && Array.isArray(snapshot.downloaded)
+    ? snapshot.downloaded.filter((/** @type {any} */ id) => Object.hasOwn(LOCAL_MODEL_LABELS, id)) : [];
+  const ollama = snapshot.ollamaStatus?.known && snapshot.ollamaStatus.reachable
+    && Array.isArray(snapshot.ollamaStatus.models) ? snapshot.ollamaStatus.models : [];
+  const provider = configured ?? PROVIDER_METADATA.find((candidate) =>
+    snapshot.usable?.includes(candidate.name)
+      && (candidate.name !== 'local-webgpu' || local.length > 0)
+      && (candidate.name !== 'ollama' || ollama.length > 0));
+  if (!provider) return null;
+  const configuredModel = configured && typeof settings.providerModel === 'string'
+    ? settings.providerModel.trim() : '';
+  const installed = provider.name === 'local-webgpu' ? local : provider.name === 'ollama' ? ollama : [];
+  const model = configuredModel || (installed.length && !installed.includes(provider.defaultModel)
+    ? installed[0] : provider.defaultModel);
+  return { name: provider.name, model };
 };
 
 const modelOptions = async (/** @type {any} */ message, /** @type {any} */ context) => {
@@ -56,6 +80,7 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
     sessionId: typeof message?.sessionId === 'string' ? message.sessionId : null,
   });
   const settings = snapshot.settings;
+  let ollamaStatus = snapshot.ollamaStatus;
   const lockedProvider = snapshot.session?.provider ?? null;
   /** @type {Array<any>} */ const options = [];
   for (const provider of PROVIDER_METADATA) {
@@ -76,6 +101,7 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
     } else if (provider.name === 'ollama') {
       const reply = await effect(context, 'local.models.ollama', {});
       const observed = await observeOllama(context, reply);
+      ollamaStatus = observed.status;
       catalog = cleanModels(observed.body?.models);
       if (!catalog.length && !lockedProvider) continue;
       if (!catalog.length) catalog = [{ model: provider.defaultModel, label: provider.defaultModel }];
@@ -93,15 +119,7 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
   }
   const active = lockedProvider
     ? { name: lockedProvider, model: snapshot.session?.model }
-    : (() => {
-        const configured = providerMetadata(settings.providerName);
-        if (configured) return {
-          name: configured.name,
-          model: settings.providerModel || configured.defaultModel,
-        };
-        const first = options[0];
-        return first ? { name: first.provider, model: first.model } : { name: '', model: '' };
-      })();
+    : defaultSelection({ ...snapshot, ollamaStatus }) ?? { name: '', model: '' };
   if (!active.name || !active.model) {
     return { ok: false, error: 'no-provider', options: [], selected: '',
       sessionProvider: lockedProvider };
@@ -119,12 +137,21 @@ const modelOptions = async (/** @type {any} */ message, /** @type {any} */ conte
   };
 };
 
-const providerStateProjection = (/** @type {any} */ snapshot) => {
+const providerStateProjection = async (/** @type {any} */ snapshot, /** @type {any} */ context) => {
   const settings = snapshot?.settings ?? {};
   const session = snapshot?.session ?? null;
-  const defaults = providerMetadata(settings.providerName) ?? PROVIDER_METADATA[0];
-  const defaultModel = typeof settings.providerModel === 'string' && settings.providerModel.trim()
-    ? settings.providerModel.trim() : defaults.defaultModel;
+  // why: an unchosen Ollama-only install cannot wait for Send to discover the
+  // provider that enables Send. Hydrate once through the finite kernel read;
+  // known failures are snapshot facts too, so state pushes never spin a probe.
+  if (!providerMetadata(settings.providerName) && snapshot.locked !== true
+      && !snapshot.ollamaStatus?.known
+      && PROVIDER_METADATA.find((provider) => snapshot.usable?.includes(provider.name))?.name === 'ollama') {
+    const observed = await observeOllama(context, await effect(context, 'local.models.ollama', {}));
+    snapshot = { ...snapshot, ollamaStatus: observed.status };
+  }
+  const selection = defaultSelection(snapshot);
+  const defaults = providerMetadata(selection?.name) ?? PROVIDER_METADATA[0];
+  const defaultModel = selection?.model ?? defaults.defaultModel;
   const selected = providerMetadata(session?.provider ?? defaults.name);
   const composerModel = typeof session?.model === 'string' && session.model.trim()
     ? session.model : selected?.name === defaults.name
@@ -223,7 +250,8 @@ const listOpenRouterModels = async (/** @type {any} */ context) => {
 export const routes = Object.freeze({
   'provider/test': testProvider,
   'models/options': modelOptions,
-  'models/state-projection': (/** @type {any} */ message) => providerStateProjection(message),
+  'models/state-projection': (/** @type {any} */ message, /** @type {any} */ context = undefined) =>
+    providerStateProjection(message, context),
   'openrouter/models': (/** @type {any} */ _message, /** @type {any} */ context) =>
     listOpenRouterModels(context),
   'local-model/status': modelRoute('status', ({ model, includeSupport }) => ({

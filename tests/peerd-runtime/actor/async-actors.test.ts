@@ -32,6 +32,122 @@ const makeCommittedActors = (over: any = {}) => {
 };
 
 describe('makeAsyncActors', () => {
+  test('a failed uncommitted wake retries the same batch before a later child', async () => {
+    const reenters: any[] = [];
+    const scheduled: Array<() => void> = [];
+    let as: ReturnType<typeof makeAsyncActors>;
+    as = makeAsyncActors(baseDeps({
+      schedule: (fn: () => void) => { scheduled.push(fn); },
+      reenter: async (opts: any) => {
+        reenters.push(opts);
+        if (reenters.length > 1) as.acknowledgeDelivery(opts.sessionId, opts.actorReply.actorDeliveryId);
+        return { ok: false };
+      },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(scheduled).toHaveLength(1);
+
+    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(scheduled).toHaveLength(1);
+
+    scheduled.shift()?.();
+    await flush();
+    expect(reenters).toHaveLength(3);
+    expect(reenters[1].userText).toBe(reenters[0].userText);
+    expect(reenters[1].actorReply).toEqual(reenters[0].actorReply);
+    expect(reenters[2].userText).toContain('R:B');
+    expect(reenters[2].userText).not.toContain('R:A');
+    expect(reenters[2].actorReply.actorDeliveryId)
+      .not.toBe(reenters[0].actorReply.actorDeliveryId);
+  });
+
+
+  test('a committed batch stays delivered when reentry throws later', async () => {
+    const scheduled: Array<() => void> = [];
+    let as: ReturnType<typeof makeAsyncActors>;
+    as = makeAsyncActors(baseDeps({
+      schedule: (fn: () => void) => { scheduled.push(fn); },
+      reenter: async (opts: any) => {
+        as.acknowledgeDelivery(opts.sessionId, opts.actorReply.actorDeliveryId);
+        throw new Error('post-commit failure');
+      },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await flush();
+    expect(scheduled).toHaveLength(0);
+    expect(as.actorTasks('parent')[0].status).toBe('delivered');
+  });
+
+
+  test('a committed coalesced batch excludes a child that finishes later', async () => {
+    const slots = makeTurnSlots();
+    const live = slots.claim('parent');
+    const reenters: any[] = [];
+    const finishes: Array<() => void> = [];
+    let as: ReturnType<typeof makeAsyncActors>;
+    as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      reenter: (opts: any) => {
+        reenters.push(opts);
+        return new Promise<void>((resolve) => { finishes.push(resolve); });
+      },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await as.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
+    await flush();
+    live.release();
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(reenters[0].userText).toContain('R:A');
+    expect(reenters[0].userText).toContain('R:B');
+
+    await as.spawnActorAsync({ task: 'C', parentSessionId: 'parent' });
+    await flush();
+    as.acknowledgeDelivery('parent', reenters[0].actorReply.actorDeliveryId);
+    finishes.shift()?.();
+    await flush();
+    expect(reenters).toHaveLength(2);
+    expect(reenters[1].userText).toContain('R:C');
+    expect(reenters[1].userText).not.toContain('R:A');
+    expect(reenters[1].actorReply.actorDeliveryId)
+      .not.toBe(reenters[0].actorReply.actorDeliveryId);
+
+    as.acknowledgeDelivery('parent', reenters[1].actorReply.actorDeliveryId);
+    finishes.shift()?.();
+    await flush();
+  });
+
+
+  test('Stop cancels a frozen batch before its delayed retry', async () => {
+    const slots = makeTurnSlots();
+    const reenters: any[] = [];
+    const scheduled: Array<() => void> = [];
+    const as = makeAsyncActors(baseDeps({
+      turnSlots: slots,
+      schedule: (fn: () => void) => { scheduled.push(fn); },
+      reenter: async (opts: any) => { reenters.push(opts); return { ok: false }; },
+    }));
+
+    await as.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(scheduled).toHaveLength(1);
+
+    slots.stop('parent');
+    scheduled.shift()?.();
+    await flush();
+    expect(reenters).toHaveLength(1);
+    expect(as.actorTasks('parent')[0].status).toBe('cancelled');
+  });
+
+
   test.each(['setup', 'body', 'index', 'projection', 'effect', 'hook'])('delivery survives a %s failure without duplicate work', async (failure) => {
     const idb = makeMockIdb();
     const pending: (() => void)[] = [], attempts: any[] = [];

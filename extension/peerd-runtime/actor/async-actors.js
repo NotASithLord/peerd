@@ -182,6 +182,7 @@ export const makeAsyncActors = (deps) => {
       } };
       for (const child of finished) child.status = 'delivering';
       deliveries.set(parentSessionId, batch);
+      onTasksChanged(parentSessionId);
     }
     batch.busy = true;
     try { await reenter({ ...batch.envelope, ...(turnLease ? { turnLease } : {}) }); }

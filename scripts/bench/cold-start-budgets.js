@@ -127,8 +127,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 413, graphBytes: 4_147_343 }),
-  target: Object.freeze({ modules: 416, graphBytes: 4_238_728 }),
+  shared: Object.freeze({ modules: 413, graphBytes: 4_148_754 }),
+  target: Object.freeze({ modules: 416, graphBytes: 4_240_139 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_585 }),
@@ -163,7 +163,10 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Reviewed pacing, App consent generations and final-send revocation add ten
   // finite authority leaves. Pin their measured complete closure with no reserve;
   // forbidden-owner imports and physical readiness targets remain independent gates.
-  kernel: Object.freeze({ modules: 413, graphBytes: 4_147_343, entryBytes: 200, directImports: 2 }),
+  // Provider inventory observations now retain exact host and vault custody.
+  // Their finite read policy grows existing leaves only; no import or timing
+  // gate changes. These are the remeasured combined bytes, with no reserve.
+  kernel: Object.freeze({ modules: 413, graphBytes: 4_148_754, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -193,7 +196,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
     serviceWorker: Object.freeze({
-      modules: 410, graphBytes: 2_091_524, entryBytes: 173,
+      modules: 410, graphBytes: 2_092_991, entryBytes: 173,
       inputSha256: '6bee21da2c36e5f9cea49a207b4728d07a49318a507295eb167c5021277c5aab',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -225,7 +228,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_209_622, entryBytes: 207,
+        modules: 416, graphBytes: 2_211_089, entryBytes: 207,
         inputSha256: 'd48f59bf3c02c2e1c798a789127209f8ca58eecef79f63233515f554e141ab66',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 136_090, entryBytes: 396 }),

@@ -30,7 +30,10 @@ export const makeSessionMutationRoutes = (deps) => {
         }
       }
       if (previousId) {
-        actorLifecycle?.stopSubtree?.(previousId);
+        for (const childSessionId of actorLifecycle?.stopSubtree?.(previousId) ?? []) {
+          auditLog.append({ type: 'actor_stopped', sessionId: previousId,
+            details: { childSessionId, reason: 'session_reset_cascade' } }).catch(() => {});
+        }
         await haltGoalRun?.(previousId);
       }
       await bindCurrentChat(sessionCache, null);
@@ -95,31 +98,31 @@ export const makeSessionMutationRoutes = (deps) => {
             }
           }
         }
-        actorSessionIds.push(...(actorLifecycle?.stopSubtree?.(sessionId) ?? []));
+        for (const childSessionId of actorLifecycle?.stopSubtree?.(sessionId) ?? []) {
+          actorSessionIds.push(childSessionId);
+          auditLog.append({ type: 'actor_stopped', sessionId,
+            details: { childSessionId, reason: 'session_archive_cascade' } }).catch(() => {});
+        }
         await haltGoalRun?.(sessionId);
+        // why: Stop wins even when storage is unavailable, but a missing
+        // record must never reach archive or its durable cleanup side effects.
+        if (!await sessions.get(sessionId)) return { ok: false, error: 'session-not-found' };
         await sessions.archive(sessionId);
         // why: Keep uncertain effects for each stopped execution session.
         for (const lifecycleSessionId of new Set([sessionId, ...actorSessionIds])) {
           await purgeLifecycleSession?.(lifecycleSessionId);
         }
-        // If the archived session was the active one, drop the cache so
-        // the next agent/send creates a fresh session.
+        // Clear the active cache when it points to the archived session.
         const currentId = await sessionCache.sessionGet('currentSessionId');
         if (currentId === sessionId) {
           await bindCurrentChat(sessionCache, null);
         }
         pushState();
-        // Auto-memory lifecycle seam: archiving IS the session wrapping
-        // up. Fire-and-forget so archive stays instant.
+        // Archive starts a best-effort memory extraction.
         autoMemory.maybeExtract(sessionId, 'archive')
           .catch((/** @type {unknown} */ e) => console.warn('[sw] auto-memory extract failed', e));
-        // Tear down the session's durable script workspace
-        // (['peerd-workspace', sid] in OPFS). why HERE: archive is the terminal
-        // session-lifecycle event today — no session-delete route exists (the
-        // sessions view's "×" archives) — so this is where "the session is torn
-        // down" lives; if a true delete route ever lands, it must nuke too.
-        // Fire-and-forget + guarded: workspace bytes are agent scratch,
-        // best-effort cleanup must never fail the archive.
+        // why: Archive is the terminal session event. Remove its script files.
+        // Cleanup is best-effort and must not fail archive.
         Promise.resolve(nukeSessionWorkspace?.(sessionId)).catch(() => {});
         return { ok: true };
       } catch (e) {

@@ -38,6 +38,106 @@ const flush = async () => {
 };
 
 describe('cold kernel provider/composer projection', () => {
+  test('unchosen projection hydrates real Ollama inventory and selects its installed model', async () => {
+    const calls: string[] = [];
+    const snapshot = {
+      settings: { providerName: '', providerModel: '' }, session: null, locked: false,
+      usable: ['ollama', 'local-webgpu'], localModels: true, downloaded: [],
+      ollamaStatus: null,
+    };
+    const context = { effects: { call: async (operation: string) => {
+      calls.push(operation);
+      return { ok: true, outcomeKnown: true, value: operation === 'local.models.ollama'
+        ? { status: 200, body: new TextEncoder().encode(JSON.stringify({ models: [{ name: 'installed:latest' }] })) }
+        : null };
+    } } };
+    expect(await controllerLocalRoutes['models/state-projection'](snapshot, context)).toMatchObject({
+      providers: { current: 'ollama', model: 'installed:latest' },
+      composer: { provider: 'ollama', model: 'installed:latest', canSend: true },
+    });
+    expect(calls).toEqual(['local.models.ollama', 'local.models.observe-ollama']);
+  });
+
+  test('resident non-default local model is selected consistently with the binder', async () => {
+    const snapshot = {
+      settings: { providerName: '', providerModel: '' }, session: null, locked: false,
+      usable: ['ollama', 'local-webgpu'], localModels: true, downloaded: ['muse-glimmer-30b'],
+      ollamaStatus: { known: true, reachable: false, count: null, models: null },
+    };
+    const projected = await controllerLocalRoutes['models/state-projection'](snapshot);
+    expect(projected).toMatchObject({
+      providers: { current: 'local-webgpu', model: 'muse-glimmer-30b' },
+      composer: { provider: 'local-webgpu', model: 'muse-glimmer-30b', canSend: true },
+    });
+    expect(await controllerLocalRoutes['models/options']({}, { effects: { call: async (operation: string) => ({
+      ok: true, outcomeKnown: true, value: operation === 'local.models.snapshot' ? snapshot
+        : operation === 'local.models.ollama' ? { status: 503 } : null,
+    }) } })).toMatchObject({ selected: 'local-webgpu::muse-glimmer-30b' });
+    expect(await controllerLocalRoutes['models/state-projection']({
+      ...snapshot, settings: { providerName: 'local-webgpu', providerModel: '' },
+    })).toMatchObject({ composer: { model: 'muse-glimmer-30b', canSend: true } });
+  });
+
+  test.each([
+    { settings: { providerName: 'openai', providerModel: 'my-model' }, usable: ['ollama'], expected: 'openai', model: 'my-model', locked: false },
+    { settings: { providerName: '', providerModel: '' }, usable: ['openai', 'ollama'], expected: 'openai', model: 'gpt-5.1', locked: false },
+    { settings: { providerName: '', providerModel: '' }, usable: ['ollama'], expected: 'anthropic', model: 'claude-sonnet-4-6', locked: true },
+  ])('display preserves explicit/ready/locked selection without probing $expected', async ({ settings, usable, expected, model, locked }) => {
+    const calls: string[] = [];
+    const value = await controllerLocalRoutes['models/state-projection']({
+      settings, usable, locked, downloaded: [], localModels: false, ollamaStatus: null,
+    }, { effects: { call: (operation: string) => { calls.push(operation); throw new Error('unexpected probe'); } } });
+    expect(value.providers).toMatchObject({ current: expected, model });
+    expect(calls).toEqual([]);
+    if (locked) expect(value.composer.reason).toBe('vault-locked');
+  });
+
+  test.each([false, true])('known reachable=%s empty inventory is not repeatedly probed', async (reachable) => {
+    const snapshot = {
+      settings: { providerName: '', providerModel: '' }, usable: ['ollama', 'local-webgpu'],
+      locked: false, downloaded: [], localModels: true,
+      ollamaStatus: { known: true, reachable, count: reachable ? 0 : null, models: reachable ? [] : null },
+    };
+    for (let read = 0; read < 2; read += 1) {
+      const value = await controllerLocalRoutes['models/state-projection'](snapshot, {
+        effects: { call: () => { throw new Error('known inventory must not be re-probed'); } },
+      });
+      expect(value.composer.canSend).toBe(false);
+      expect(value.providers.current).toBe('anthropic');
+    }
+  });
+
+  test('unknown stored provider is repicked, but a bound session keeps its explicit model', async () => {
+    const value = await controllerLocalRoutes['models/state-projection']({
+      settings: { providerName: 'removed-provider', providerModel: 'stale-model' },
+      session: { provider: 'openai', model: 'bound-model' },
+      usable: ['ollama'], locked: false, localModels: false, downloaded: [],
+      ollamaStatus: { known: true, reachable: true, count: 1, models: ['installed:latest'] },
+    });
+    expect(value.providers).toMatchObject({ current: 'ollama', model: 'installed:latest' });
+    expect(value.composer).toMatchObject({ provider: 'openai', model: 'bound-model', reason: 'missing-key' });
+  });
+
+  test('an explicit missing local model is not silently replaced by a resident alternate', async () => {
+    expect(await controllerLocalRoutes['models/state-projection']({
+      settings: { providerName: 'local-webgpu', providerModel: 'gemma-4-e2b' },
+      usable: ['local-webgpu'], locked: false, localModels: true, downloaded: ['muse-glimmer-30b'],
+    })).toMatchObject({ composer: { model: 'gemma-4-e2b', canSend: false, reason: 'local-model-not-installed' } });
+  });
+
+  test('unchosen cloud display and binder share the provider default, not catalog order', async () => {
+    const snapshot = {
+      settings: { providerName: '', providerModel: '' }, usable: ['anthropic'],
+      locked: false, localModels: false, downloaded: [], session: null,
+    };
+    const view = await controllerLocalRoutes['models/state-projection'](snapshot);
+    const options = await controllerLocalRoutes['models/options']({}, {
+      effects: { call: async () => ({ ok: true, outcomeKnown: true, value: snapshot }) },
+    });
+    expect(options.selected).toBe(`${view.composer.provider}::${view.composer.model}`);
+    expect(options.selected).toBe('anthropic::claude-sonnet-4-6');
+  });
+
   test('cloud readiness is bound to the selected provider credential', async () => {
     const missing = makeProjection();
     expect(await missing.projection.view()).toMatchObject({

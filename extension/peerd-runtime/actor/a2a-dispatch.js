@@ -52,12 +52,9 @@ export const makeMeshDispatch = (deps) => {
     conversations = null,
   } = deps;
 
-  // reqId → { resolve, timer, did } for asks awaiting a reply. Lives across the
-  // single a2a_run worker call (the worker relays each op to the SW; the pending
-  // map is SW-side so a reply that lands after the op returns still resolves it).
-  // why `did`: a reply is bound to the peer the ask was SENT to — an inbound
-  // 'reply' is only honored when its authenticated mesh sender equals that did,
-  // so a third peer who guesses/observes a reqId can't forge the answer.
+  // Register before send so a fast reply cannot race the pending map.
+  // why `did`: only the authenticated target peer can resolve the ask.
+  // A third peer cannot use an observed reqId.
   /** @type {Map<string, { resolve: (v: any) => void, timer: any, did: string, convId?: string }>} */
   const pendingAsks = new Map();
   // Inbound a2a messages (ask/tell) received during a run, drained by inbox().

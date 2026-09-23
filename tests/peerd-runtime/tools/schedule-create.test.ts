@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createScheduleToolAuthority } from '../../../extension/background/schedule-tool-authority.js';
 import { makeScheduler } from '../../../extension/peerd-runtime/loop/scheduler.js';
+import { scheduleCreateTool } from '../../../extension/peerd-runtime/tools/defs/schedule-create.js';
 
 describe('schedule_create cancellation', () => {
   test('Stop during cold hydration cannot arm a confirmed routine', async () => {
@@ -70,5 +71,49 @@ describe('schedule_create cancellation', () => {
 
     expect(await pending).toMatchObject({ ok: false, error: 'schedule_aborted' });
     expect(additions).toBe(0);
+  });
+
+  test('Stop after durable admission preserves the armed receipt', async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let seenSignal: AbortSignal | undefined;
+    let stored: unknown;
+    const scheduler = makeScheduler({
+      fireRoutine: async () => {},
+      kv: {
+        get: async () => ({}),
+        set: async (_key, value) => {
+          started.resolve();
+          await release.promise;
+          stored = structuredClone(value);
+        },
+      },
+    });
+    const args = { prompt: 'check releases', every: '1h' };
+    const authority = createScheduleToolAuthority({
+      operation: 'turn.schedule.arm-confirmed-routine', args,
+      signal: controller.signal,
+      ctx: {
+        permission: { mode: 'act' },
+        confirm: async () => true,
+        scheduleAdd: (request: any) => {
+          seenSignal = request.signal;
+          return scheduler.add(request);
+        },
+      },
+    });
+    const pending = scheduleCreateTool.execute(args, {
+      abortSignal: controller.signal,
+      scheduleAuthority: authority,
+    } as any);
+    await started.promise;
+    controller.abort();
+    release.resolve();
+
+    expect(seenSignal).toBe(controller.signal);
+    expect(await pending).toMatchObject({ ok: true });
+    expect(scheduler.list()).toHaveLength(1);
+    expect(Object.values(stored as Record<string, unknown>)).toHaveLength(1);
   });
 });

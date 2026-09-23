@@ -124,6 +124,7 @@ export const makeScheduler = ({
       pendingRunAt: null,
       lastOutcomeUnknownAt: null,
     };
+    if (signal?.aborted) return { ok: false, error: 'schedule-aborted' };
     routines.set(routine.id, routine);
     try { await persist(); }
     catch (cause) {

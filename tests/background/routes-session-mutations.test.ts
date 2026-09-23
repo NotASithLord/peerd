@@ -229,7 +229,10 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     expect(calls.extract).toEqual([['cur', 'archive']]);
   });
   test('archive maps SessionNotFoundError', async () => {
-    const { deps } = baseDeps({ sessions: { archive: async () => { throw new SessionNotFoundError(); } } });
+    const { deps } = baseDeps({ sessions: {
+      get: async (sessionId: string) => ({ sessionId }),
+      archive: async () => { throw new SessionNotFoundError(); },
+    } });
     expect(await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'x' })).toEqual({ ok: false, error: 'session-not-found' });
   });
   // Archive is the terminal session-lifecycle event (there is no delete route),
@@ -251,11 +254,39 @@ describe('session/reset + switch + archive auto-memory seams', () => {
   test('a FAILED archive (unknown session) does not nuke the workspace', async () => {
     const nuked: string[] = [];
     const { deps } = baseDeps({
-      sessions: { archive: async () => { throw new SessionNotFoundError(); } },
+      sessions: { get: async () => null, archive: async () => { throw new SessionNotFoundError(); } },
       nukeSessionWorkspace: (sid: string) => { nuked.push(sid); return Promise.resolve(); },
     });
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'ghost' });
     expect(nuked).toEqual([]);
+  });
+  test('unknown archive stops live work but cannot archive, purge, or clean a workspace', async () => {
+    const events: string[] = [];
+    const { deps } = baseDeps({
+      turnSlots: { stop: () => { events.push('stop'); return true; } },
+      haltGoalRun: async () => { events.push('goal-stop'); },
+      sessions: {
+        get: async () => { events.push('read'); return null; },
+        archive: async () => { events.push('archive'); },
+      },
+      purgeLifecycleSession: async () => { events.push('purge'); },
+      nukeSessionWorkspace: async () => { events.push('cleanup'); },
+    });
+    expect(await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'ghost' }))
+      .toEqual({ ok: false, error: 'session-not-found' });
+    expect(events).toEqual(['stop', 'goal-stop', 'read']);
+  });
+  test.each(['session/reset', 'session/archive'])('%s audits stopped descendants', async (route) => {
+    const events: any[] = [];
+    const { deps } = baseDeps({
+      auditLog: { append: async (event: any) => { events.push(event); } },
+      actorLifecycle: { stopSubtree: () => ['child'] },
+    });
+    await makeSessionMutationRoutes(deps)[route]({ sessionId: 'cur' });
+    expect(events).toContainEqual({
+      type: 'actor_stopped', sessionId: 'cur',
+      details: { childSessionId: 'child', reason: route.replace('/', '_') + '_cascade' },
+    });
   });
 });
 

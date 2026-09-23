@@ -27,6 +27,12 @@ import { describeSchedule } from '../../loop/schedule.js';
 export const scheduleCreateTool = composeTool("schedule_create", {
 
   execute: async (args, ctx) => {
+    // why: Stop remains local to this semantic call; only the trusted host
+    // supplies a cancellation signal to the scheduler across the authority boundary.
+    const aborted = () => ctx.abortSignal?.aborted === true;
+    if (aborted()) {
+      return { ok: false, error: 'schedule_aborted', content: 'The routine was not armed because the run was stopped.' };
+    }
     const authority = /** @type {{ armConfirmedRoutine?:(req:any)=>Promise<any> }|undefined} */ (
       /** @type {{ scheduleAuthority?: unknown }} */ (ctx).scheduleAuthority);
     if (typeof authority?.armConfirmedRoutine !== 'function') {
@@ -44,6 +50,11 @@ export const scheduleCreateTool = composeTool("schedule_create", {
       dailyAt: args.dailyAt,
       mode: args.mode,
     });
+    // why: Stop after a durable commit cannot turn an armed receipt into a
+    // false claim that nothing happened. Only the host can prove non-admission.
+    if (res?.error === 'schedule_aborted' && res?.ok !== true) {
+      return { ok: false, error: 'schedule_aborted', content: 'The routine was not armed because the run was stopped.' };
+    }
     if (!res?.ok) {
       const why = res?.error === 'invalid-schedule'
         ? 'Could not parse the cadence. Use `every` like "30m"/"6h"/"1d", or `dailyAt` like "08:00".'

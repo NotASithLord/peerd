@@ -19,6 +19,12 @@ and storage formats may move until the surface stabilizes.
   aliases. Generated code uses the single `actors.call` and `mesh.call`/`cast`
   vocabulary.
 
+### Fixed
+
+- A site helper stopped for leaving its approved site no longer keeps a stale
+  handle, so retrying it starts a fresh helper instead of reopening an
+  abandoned tab.
+
 ## [0.7.3] - 2026-08-18
 
 ### Added

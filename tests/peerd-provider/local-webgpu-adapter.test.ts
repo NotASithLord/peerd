@@ -89,6 +89,20 @@ describe('callLocalWebgpu', () => {
     expect(out.at(-1)).toMatchObject({ type: 'message-stop' });
   });
 
+  test('a cancelled host rejection ends with an aborted stop reason', async () => {
+    const controller = new AbortController();
+    const modelEgress = makeModelEgress({ generateLocal: () => (async function* () {
+      controller.abort();
+      throw new DOMException('Stopped', 'AbortError');
+    })() });
+    const out = await collect(callLocalWebgpu({
+      messages: [], system: 'sys', modelEgress, signal: controller.signal,
+    }));
+    expect(out.at(-1)).toEqual({ type: 'message-stop', stopReason: 'aborted' });
+    expect(out.some((event) => event.type === 'usage')).toBe(false);
+    expect(out.some((event) => event.type === 'error')).toBe(false);
+  });
+
   test('projects messages before the local provider transport', async () => {
     let received: any = null;
     const modelEgress = makeModelEgress({ generateLocal: (request: any) => {

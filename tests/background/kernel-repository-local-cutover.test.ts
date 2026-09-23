@@ -292,6 +292,35 @@ describe('local controller cutover', () => {
     });
   });
 
+  test('unchosen display hydrates Ollama through the actual finite host protocol without writing settings', async () => {
+    const requests: unknown[] = [];
+    const observations: unknown[] = [];
+    const updates: unknown[] = [];
+    const control = lane({ deps: {
+      settingsStore: {
+        get: () => ({ providerName: '', providerModel: '', ollamaHost: 'http://localhost:11434' }),
+        update: async (patch: unknown) => { updates.push(patch); },
+      },
+      providerProjection: { observeOllamaStatus: (status: unknown) => { observations.push(status); } },
+      providerEgress: { readModelInventory: async (request: unknown) => {
+        requests.push(request);
+        return { ok: true, outcomeKnown: true, value: {
+          status: 200, body: new TextEncoder().encode(JSON.stringify({ models: [{ name: 'installed:latest' }] })),
+        } };
+      } },
+    } });
+    expect(await control.routes['models/state-projection']({
+      settings: { providerName: '', providerModel: '' }, usable: ['ollama'], locked: false,
+      localModels: false, downloaded: [], ollamaStatus: null,
+    })).toMatchObject({
+      providers: { current: 'ollama', model: 'installed:latest' },
+      composer: { canSend: true },
+    });
+    expect(requests).toEqual([{ providerId: 'ollama' }]);
+    expect(observations).toEqual([{ known: true, reachable: true, count: 1, models: ['installed:latest'] }]);
+    expect(updates).toEqual([]);
+  });
+
   test('keeps an unconfirmed provider probe unknown', async () => {
     const control = lane({ deps: {
       providerEgress: {
@@ -311,18 +340,26 @@ describe('local controller cutover', () => {
   const daemonLane = (overrides: Record<string, any> = {}) => {
     let settings = { providerName: '', providerModel: '', ollamaHost: 'http://localhost:11434' };
     let locked = false;
+    let credentialEpoch = 0;
+    const observations: unknown[] = [];
     const updates: unknown[] = [];
     const audits: unknown[] = [];
     let pushed = 0;
     let revisions = 0;
-    const control = lane({ deps: {
-      vault: { isLocked: () => locked, getSecret: overrides.getSecret ?? (async () => null) },
+    const control = lane({ loader: overrides.loader, deps: {
+      vault: {
+        isLocked: () => locked, getSecret: overrides.getSecret ?? (async () => null),
+        captureRequestAuthority: () => {
+          const epoch = credentialEpoch;
+          return () => !locked && epoch === credentialEpoch;
+        },
+      },
       settingsStore: {
-        get: () => settings,
+        get: () => ({ ...settings }),
         update: async (patch: any) => { updates.push(patch); settings = { ...settings, ...patch }; },
       },
       providerProjection: {
-        observeOllamaStatus: () => {},
+        observeOllamaStatus: (status: unknown) => { observations.push(status); },
         bumpRevision: () => { revisions += 1; },
       },
       providerEgress: { readModelInventory: async (_request: any, context: any) => {
@@ -338,13 +375,67 @@ describe('local controller cutover', () => {
       pushState: async () => { pushed += 1; },
     } });
     return {
-      control, updates, audits,
+      control, updates, audits, observations,
       setSettings: (patch: Partial<typeof settings>) => { settings = { ...settings, ...patch }; },
-      lock: () => { locked = true; },
+      lock: () => { locked = true; credentialEpoch += 1; },
+      unlock: () => { locked = false; },
+      replaceKey: () => { credentialEpoch += 1; },
       pushed: () => pushed,
       revisions: () => revisions,
     };
   };
+
+  test.each(['host', 'lock-unlock', 'key'] as const)(
+    'an inventory reply cannot populate readiness after a %s authority change', async (change) => {
+      const entered = Promise.withResolvers<void>();
+      const reply = Promise.withResolvers<void>();
+      const h = daemonLane({ beforeReply: async () => { entered.resolve(); await reply.promise; } });
+      const result = h.control.routes['provider/test']({ provider: 'ollama', activate: false });
+      await entered.promise;
+      if (change === 'host') h.setSettings({ ollamaHost: 'http://localhost:11435' });
+      if (change === 'lock-unlock') { h.lock(); h.unlock(); }
+      if (change === 'key') h.replaceKey();
+      reply.resolve();
+      expect(await result).toMatchObject({ ok: false, code: 'local-ollama-authority-changed', outcomeKnown: true });
+      expect(h.observations).toEqual([]);
+      expect(h.updates).toEqual([]);
+    },
+  );
+
+  test.each(['host', 'lock-unlock', 'key'] as const)('inventory %s authority is rechecked at the later observation boundary', async (change) => {
+    const entered = Promise.withResolvers<void>();
+    const observe = Promise.withResolvers<void>();
+    const h = daemonLane({ loader: async () => ({ routes: {
+      'provider/test': async (_message: unknown, context: any) => {
+        await context.effects.call('local.models.ollama', {});
+        entered.resolve();
+        await observe.promise;
+        return context.effects.call('local.models.observe-ollama', {
+          known: true, reachable: true, count: 1, models: ['old-host:latest'],
+        });
+      },
+    } }) });
+    const result = h.control.routes['provider/test']({ provider: 'ollama', activate: false });
+    await entered.promise;
+    if (change === 'host') h.setSettings({ ollamaHost: 'http://localhost:11435' });
+    if (change === 'lock-unlock') { h.lock(); h.unlock(); }
+    if (change === 'key') h.replaceKey();
+    observe.resolve();
+    expect(await result).toMatchObject({ ok: false, code: 'local-ollama-authority-changed' });
+    expect(h.observations).toEqual([]);
+  });
+
+  test('a controller cannot publish an inventory observation without its matching host read', async () => {
+    const h = daemonLane({ loader: async () => ({ routes: {
+      'provider/test': async (_message: unknown, context: any) =>
+        context.effects.call('local.models.observe-ollama', {
+          known: true, reachable: true, count: 1, models: ['forged:latest'],
+        }),
+    } }) });
+    expect(await h.control.routes['provider/test']({ provider: 'ollama', activate: false }))
+      .toMatchObject({ ok: false, code: 'local-ollama-authority-changed' });
+    expect(h.observations).toEqual([]);
+  });
 
   test.each(['', 'anthropic'])('a tested usable daemon activates over an unusable %s selection', async (providerName) => {
     const h = daemonLane();

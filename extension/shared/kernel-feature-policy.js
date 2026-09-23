@@ -220,7 +220,15 @@ const REPOSITORY_EFFECTS = Object.freeze({
   }),
 });
 const LOCAL_EFFECTS = Object.freeze({
-  'models/state-projection': Object.freeze({}),
+  'models/state-projection': Object.freeze({
+    'local.models.ollama': readEffectPolicy([], 1, 16 * KIB, MIB),
+    'local.models.observe-ollama': readEffectPolicy(
+      ['known', 'reachable', 'count', 'models'], 1, 256 * KIB, 4 * KIB,
+      (input) => typeof input.known === 'boolean' && typeof input.reachable === 'boolean'
+        && (input.count === null || Number.isSafeInteger(input.count))
+        && (input.models === null || Array.isArray(input.models)),
+    ),
+  }),
   'provider/test': Object.freeze({
     'local.provider.test': effectPolicy(
       ['provider', 'model', 'nativeBody'], 1, 32 * MIB, MIB,

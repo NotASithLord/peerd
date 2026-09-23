@@ -12,6 +12,48 @@ const settle = async (pred: () => boolean, tries = 500) => {
 type TurnArgs = { sessionId: string; userText: string; synthetic: boolean; trusted?: boolean };
 
 describe('makeGoalRunner — the goal loop', () => {
+  it('stop() reports a failed durable removal', async () => {
+    const kv = makeKv();
+    kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });
+    kv.set = async () => { throw new Error('storage unavailable'); };
+    let calls = 0;
+    const runner = makeGoalRunner({ runTurn: async () => { calls += 1; }, kv });
+
+    await expect(runner.stop('s')).rejects.toThrow('storage unavailable');
+    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
+    expect(await runner.resume()).toEqual({ resumed: 0 });
+    expect(calls).toBe(0);
+  });
+
+
+  it('stop() wins a race with resume()', async () => {
+    const kv = makeKv();
+    kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });
+    const get = kv.get;
+    let releaseRead!: () => void;
+    let signalRead!: () => void;
+    const readBlocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    kv.get = async (key) => {
+      const value = await get(key);
+      kv.get = get;
+      signalRead();
+      await readBlocked;
+      return value;
+    };
+    let calls = 0;
+    const runner = makeGoalRunner({ runTurn: async () => { calls += 1; }, kv });
+
+    const resuming = runner.resume();
+    await readStarted;
+    const stopping = runner.stop('s');
+    releaseRead();
+    expect(await resuming).toEqual({ resumed: 0 });
+    await stopping;
+    expect([runner.isActive('s'), calls, kv.store.get(GOAL_RUNS_KEY)]).toEqual([false, 0, {}]);
+  });
+
+
   it('announces a run before controller acquisition settles', async () => {
     const events: any[] = [];
     let release = () => {};

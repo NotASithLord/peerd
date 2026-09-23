@@ -30,6 +30,7 @@ export const createKernelLocalControl = (deps) => {
   }
   let catalogSignature = '';
   /** @type {Set<AbortController>} */ const providerTests = new Set();
+  /** @type {WeakMap<object,()=>boolean>} */ const inventoryAuthority = new WeakMap();
   const localModel = async (/** @type {string} */ method, /** @type {any} */ args,
     /** @type {AbortSignal} */ signal) => {
     if (deps.localModels !== true) return {
@@ -164,17 +165,30 @@ export const createKernelLocalControl = (deps) => {
       return success(await deps.providerProjection.authoritySnapshot(session, false));
     }
     if (operation === 'local.models.ollama') {
+      // why: inventory belongs to the host and vault lifetime that sent it,
+      // not whichever host is configured when its delayed reply arrives.
+      const host = String(deps.settingsStore.get().ollamaHost ?? '');
+      const credentialCurrent = deps.vault.captureRequestAuthority?.()
+        ?? (() => !deps.vault.isLocked());
+      const current = () => !context.signal?.aborted && credentialCurrent()
+        && String(deps.settingsStore.get().ollamaHost ?? '') === host;
+      if (!current()) return failure('local-ollama-authority-changed', true);
       const result = await deps.providerEgress.readModelInventory({ providerId: 'ollama' }, {
         owner: context.authority,
         signal: context.signal,
         permitsProvider: (/** @type {string} */ providerId) => providerId === 'ollama',
       });
+      if (!current()) return failure('local-ollama-authority-changed', true);
+      inventoryAuthority.set(context.authority, current);
       return result?.ok === true ? result : success({
         status: null,
         error: result?.code ?? result?.error ?? 'ollama-unreachable',
       });
     }
     if (operation === 'local.models.observe-ollama') {
+      const current = inventoryAuthority.get(context.authority);
+      inventoryAuthority.delete(context.authority);
+      if (!current?.()) return failure('local-ollama-authority-changed', true);
       const models = payload.models === null ? null : Array.isArray(payload.models)
         ? payload.models.slice(0, 200).filter((/** @type {unknown} */ model) =>
           typeof model === 'string' && model.length <= 200) : null;
