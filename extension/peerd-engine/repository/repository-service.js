@@ -15,10 +15,7 @@ const MAX_LIGHTWEIGHT_BYTES = 128_000_000;
 /** @typedef {{ git:any, fs:any, dir:string, gitdir:string }} RepositoryContext */
 /** @typedef {[string, number, number, number]} StatusRow */
 
-// Extension pages may load the heavy vendor on first repository use. Chrome's
-// MV3 service worker injects a static loader instead because its global rejects
-// runtime import(); keeping that host choice out of this core also keeps engine
-// consumers that only need a small helper from loading Git.
+// why: Extension pages load Git lazily. The service worker injects a static loader.
 const loadVendoredGit = async () => (await import('/vendor/isomorphic-git/index.js')).default;
 
 /** @param {unknown} message @param {string} [fallback] */

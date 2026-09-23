@@ -13,6 +13,8 @@ export const makeSessionMutationRoutes = (deps) => {
     actorLifecycle, purgeLifecycleSession,
   } = deps;
 
+  // why: permission/set is owned by kernel-session-authority, which revokes
+  // both session stores before readiness or persistence can yield.
   return {
     'session/reset': async () => {
       // why read BEFORE delete: "new chat" is a switch-away from the

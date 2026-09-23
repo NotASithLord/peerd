@@ -408,7 +408,9 @@ URL and adds its no-tab domain scope. DNS resolution and rebinding remain
 outside this client-side lexical boundary. An isolated live Chrome probe also
 shows that a blocked direct top-level private navigation sends no HTTP bytes but
 can still open a TCP connection/preconnect to the target. The browser floor is
-therefore not an absolute zero-transport or port-oracle defense. With native local-network checks
+therefore not an absolute zero-transport or port-oracle defense. The live lane
+requires proof of probe execution and reports this accepted platform residual;
+all other transport-blocking assertions remain unchanged. With native local-network checks
 disabled, Chrome can also start an inherited about:blank child's immediate
 private request before the extension receives enough child identity to close it.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
@@ -759,6 +761,27 @@ user confirmation. A different root chat or external target remains independent.
 Code: `peerd-egress/confirm/protocol.js`, `background/routes/vault.js`,
 `peerd-runtime/lifecycle/dispatch-tracking.js`,
 and `peerd-runtime/tools/dispatcher.js`. Red-team: scenario 14.
+
+### INV-21. A site's stated pause is a control-plane fact the model cannot move
+When a site answers that peerd is asking too often, the pause it asked for is
+recorded against that exact canonical origin and honored before the next
+request. Only the egress choke point, holding a real `Response`, may create or
+raise a rule: page text, a tool result, and a model instruction cannot. Nothing
+reachable from a tool context can lower one either. The trusted kernel owns the
+reservation and observation, and the only descent paths are automatic time decay and an
+explicit human forget on the settings page.
+
+The recorded deadline is absolute and anchored to the response that named it, so
+it survives a service-worker restart and cannot be shortened by a later, smaller
+answer. No adjustment may move an action earlier than that deadline. Past the
+inline ceiling peerd stops rather than sleeping: the refusal ends the turn, and
+because the deadline is durable state keyed by origin rather than by session,
+retrying it or delegating to a fresh actor reaches the same refusal. Pacing state
+that cannot be read refuses browser writes rather than reading as "no limits".
+
+Code: `peerd-runtime/pacing/`, `peerd-egress/fetch/web-fetch.js`,
+`background/kernel-turn-authority-adapter.js`, `background/routes/paced-origins.js`.
+Red-team: scenario 15.
 
 ### Additional invariants (not scenario-gated, enforced in code)
 

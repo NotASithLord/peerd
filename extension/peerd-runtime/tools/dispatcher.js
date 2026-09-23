@@ -284,6 +284,10 @@ export const prepareToolCall = async (call, ctx, descriptor = undefined) => {
       }),
     };
   };
+  // why: page-tool-authority meters exact browser operations and webFetch
+  // meters physical network sends. Their host-only stores cannot be cleared
+  // or replaced by semantic code; metering here would duplicate reservations.
+
   /** @returns {Promise<ToolResult | null>} */
   const refuseInvalidLanding = async () => {
     if (!ctx.revalidateActorLanding) return null;

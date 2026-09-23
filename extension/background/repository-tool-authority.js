@@ -39,7 +39,7 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
 
   const coordinateMutation = async (
     /** @type {()=>Promise<any>} */ operation,
-    /** @type {{quiesce?:boolean,replacesTree?:boolean}} */ options = {},
+    /** @type {{quiesce?:boolean,replacesTree?:boolean,invalidateDweb?:boolean}} */ options = {},
   ) => {
     const ref = requireRepository();
     const coordinated = () => repositories.coordinate(ref, async () => {
@@ -52,7 +52,7 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
     if (options.quiesce !== true) return coordinated();
     if (kind === 'app') {
       const result = await ctx?.appQuiescence?.run?.(id, coordinated, {
-        close: true, invalidateDweb: options.replacesTree === true,
+        close: true, invalidateDweb: options.invalidateDweb === true || options.replacesTree === true,
       });
       if (result === undefined) throw new Error('App editor quiesce unavailable');
       return result;
@@ -170,9 +170,11 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
       if (binding.operation !== 'turn.repository.branch' || name !== args.name) {
         throw mismatch();
       }
+      // why: an App branch retires its consent identity even without a live
+      // editor; the unchanged Notebook worktree still only needs a resume.
       return coordinateMutation(() => repositories.branch(requireRepository(), {
         name, checkout: true,
-      }), { quiesce: true });
+      }), { quiesce: true, invalidateDweb: true });
     },
     checkout: (/** @type {string} */ name) => {
       if (binding.operation !== 'turn.repository.checkout' || name !== args.name) {

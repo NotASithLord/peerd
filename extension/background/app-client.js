@@ -1,16 +1,5 @@
 // @ts-check
-// SW-side App client.
-//
-// Apps are multi-file artifacts stored in OPFS at
-// `peerd-apps/<appId>/`. The registry tracks metadata (name, tags,
-// entryFile, timestamps). When an app tab opens, the parent page
-// reads OPFS directly + composes a single HTML body for the
-// sandboxed runner (see peerd-engine/app-compose.js).
-//
-// Note on IDB: the old `peerd-app-bodies` store from the single-blob
-// era stays put -- it's reserved for the future snapshot tier
-// (immutable, addressable "save this version" records). New apps
-// don't touch it.
+// Store multi-file Apps in OPFS and their metadata in the registry.
 
 import {
   inferAppFileKind,
@@ -23,12 +12,11 @@ import {
 } from '/peerd-engine/background.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { APP_DATA_PATH_RE } from '/shared/app-dweb-identity.js';
+export { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
-// These are storage-layer rails. Tool schemas keep smaller model-facing writes
-// useful, but every caller, including imports and dweb installs, meets these
-// limits again beside the OPFS write.
+// why: Enforce storage limits at the OPFS boundary for every caller.
 export const MAX_APP_TOTAL_BYTES = 50_000_000;
 export const MAX_APP_FILES = 256;
 const MAX_APP_PATH_CHARS = 512;
@@ -143,16 +131,17 @@ const validateAppPath = (path) => {
   return path;
 };
 
-/**
- * Normalize one text, byte, or JSON-safe base64 value before any storage write.
- * The encoded-length rail runs before atob so a hostile transport string cannot
- * allocate beyond the App ceiling merely to be rejected afterward.
- *
- * @param {string} path
- * @param {unknown} value
- * @param {unknown} [declaredKind]
- * @returns {{ stored: string | Uint8Array<ArrayBuffer>, size: number, kind: 'text' | 'binary' }}
- */
+/** @param {string} path @param {string|Uint8Array<ArrayBuffer>} stored @param {'text'|'binary'} kind */
+const validateRuntimeData = (path, stored, kind) => {
+  if (!APP_DATA_PATH_RE.test(path)) return;
+  if (kind !== 'text') throw new AppFileContentError(`App runtime data must be text: ${path}`);
+  try { JSON.parse(typeof stored === 'string' ? stored : new TextDecoder().decode(stored)); }
+  catch { throw new AppFileContentError(`App runtime data must be valid JSON: ${path}`); }
+};
+
+/** why: Check encoded size before base64 decoding can allocate excess bytes.
+ * @param {string} path @param {unknown} value @param {unknown} [declaredKind]
+ * @returns {{stored:string|Uint8Array<ArrayBuffer>,size:number,kind:'text'|'binary'}} */
 const normalizeFileContent = (path, value, declaredKind) => {
   if (typeof value === 'string') {
     if (isBinaryAssetPath(path) || declaredKind === 'binary') {
@@ -197,14 +186,6 @@ const normalizeFileContent = (path, value, declaredKind) => {
   }
   validateRuntimeData(path, stored, kind);
   return { stored, size: stored.byteLength, kind };
-};
-
-/** @param {string} path @param {string|Uint8Array<ArrayBuffer>} stored @param {'text'|'binary'} kind */
-const validateRuntimeData = (path, stored, kind) => {
-  if (!APP_DATA_PATH_RE.test(path)) return;
-  if (kind !== 'text') throw new AppFileContentError(`App runtime data must be text: ${path}`);
-  try { JSON.parse(typeof stored === 'string' ? stored : new TextDecoder().decode(stored)); }
-  catch { throw new AppFileContentError(`App runtime data must be valid JSON: ${path}`); }
 };
 
 /**
@@ -629,7 +610,7 @@ export const createAppClient = ({
     if (!updated) return null;
     if (sessionId) await registry.setDefaultForSession(sessionId, id);
     if (path === 'peerd.json') await onManifestMutation(id);
-    tracker.reloadTab(id).catch(() => {});
+    await tracker.reloadTab(id).catch(() => {});
     return updated;
   };
 
@@ -784,16 +765,11 @@ export const createAppClient = ({
       }
     });
     await onManifestMutation(id);
-    tracker.reloadTab(id).catch(() => {});
+    await tracker.reloadTab(id).catch(() => {});
     return updated;
   };
 
-  /**
-   * Replace a complete App release and record its Git/catalog lineage while the
-   * caller already holds `withWriteLock(appId, ...)`. This deliberately has no
-   * public locking of its own: dweb update needs divergence checks, an optional
-   * fork, byte replacement, commit, and metadata persistence in one outer lane.
-   *
+  /** Caller holds the App lane so version checks, bytes, Git, and metadata stay atomic.
    * @param {{ appId: string, files: Record<string, unknown>, entryFile: string,
    *   fileKinds?: Record<string, unknown>, message?: string,
    *   metadataForOid?: (oid: string | null, oldRecord: import('/peerd-engine/app-registry.js').AppRecord, fileKinds: Record<string, 'text'|'binary'>) => Partial<import('/peerd-engine/app-registry.js').AppRecord>,
@@ -896,11 +872,7 @@ export const createAppClient = ({
     return guardedOpfsForApp(id).list();
   };
 
-  /**
-   * Capture bytes and their catalog kind under the same per-App lane as every
-   * mutation. Export and sharing therefore see one complete version.
-   * @param {{ appId: string }} args
-   */
+  /** Capture one complete App version. @param {{appId:string}} args */
   const snapshotFiles = async ({ appId }) => {
     const id = await resolveId({ appId });
     return withWriteLock(id, async () => {
@@ -964,7 +936,7 @@ export const createAppClient = ({
       }
     }, invalidateDweb);
     if (path === 'peerd.json') await onManifestMutation(id);
-    if (reload) tracker.reloadTab(id).catch(() => {});
+    if (reload) await tracker.reloadTab(id).catch(() => {});
   };
 
   /** @param {{ appId?: string, sessionId?: string, focus?: boolean }} [opts] */
@@ -1007,8 +979,8 @@ export const createAppClient = ({
     // damage and prevents a caught nuke refusal from falling through to the
     // metadata delete.
     await beforeOpfsMutation();
-    await tracker.closeTab(appId);
     await withMutation(appId, async () => {
+      await tracker.closeTab(appId);
       await new Promise((r) => setTimeout(r, 100));
       // Every App now owns a separate peerd-git/app/<id> DAG and remote
       // configuration. Deletion is one fail-closed transaction: preserve the
@@ -1027,7 +999,7 @@ export const createAppClient = ({
     const id = await resolveId({ appId, sessionId });
     const result = await withMutation(id, () => repositories.restoreApp(id, { to }));
     await onManifestMutation(id);
-    tracker.reloadTab(id).catch(() => {});
+    await tracker.reloadTab(id).catch(() => {});
     return result;
   };
 
@@ -1037,7 +1009,7 @@ export const createAppClient = ({
     const id = await resolveId({ appId, sessionId });
     const result = await withMutation(id, () => repositories.checkout({ kind: 'app', id }, { name }));
     await onManifestMutation(id);
-    tracker.reloadTab(id).catch(() => {});
+    await tracker.reloadTab(id).catch(() => {});
     return result;
   };
 

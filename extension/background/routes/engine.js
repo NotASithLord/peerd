@@ -1,10 +1,5 @@
 // @ts-check
-// background/routes/engine.js — engine-instance metadata, the Library (apps)
-// surface, .peerd artifact export/import, and VM-originated HTTP egress.
-//
-// apps/delete stays inline in the SW (it reads the reassigned settings to
-// decide whether to un-share over the dweb). Everything here closes over only
-// stable collaborators. Bodies verbatim, deps injected, imports none.
+// Inject privileged collaborators and share pure App identity validation.
 
 import { APP_DATA_PATH_RE, appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
 
@@ -161,13 +156,8 @@ export const makeEngineRoutes = (deps) => {
     catch { return null; }
   };
 
-  /**
-   * Pod Git stays behind an exact instance/tab pin. Agent jobs receive one
-   * structured, target-bound grant; direct terminal jobs carry the explicit
-   * `true` grant minted by their visible first-party host.
-   * @param {any} msg
-   * @param {any} sender
-   */
+  /** why: Remote Pod Git requires an exact tab and target grant.
+   * @param {any} msg @param {any} sender */
   const runPodGit = async ({ podId, jobId, argv = [], remoteGrant = null }, sender) => {
     if (typeof podId !== 'string' || !Array.isArray(argv)) {
       return { ok: false, error: 'podId-and-argv-required' };
@@ -175,9 +165,7 @@ export const makeEngineRoutes = (deps) => {
     const senderError = await podSenderError(podId, sender);
     if (senderError) return { ok: false, error: senderError };
     const ref = { kind: 'pod', id: podId };
-    // Grant validation and the resulting Git operation are one repository
-    // transaction. Otherwise a concurrent remote set-url can land after the
-    // user approves target A but before push reads origin, sending to target B.
+    // why: One transaction prevents a remote change after target approval.
     return repositories.coordinate(ref, async () => {
     const [command = '', ...args] = argv.map(String);
     const remoteOp = podGitRemoteOperation(argv);
@@ -378,9 +366,7 @@ export const makeEngineRoutes = (deps) => {
         record: { id: record.id, name: record.name, persistent: record.persistent !== false },
       };
     },
-    // Notebook tabs and the offscreen job host own the actual OPFS handles.
-    // They ask here immediately before mutation so the service worker's live
-    // schema posture remains authoritative in Chrome and Firefox alike.
+    // why: The worker stays authoritative for OPFS write posture.
     'lifecycle/assert-opfs-writable': async (_msg, sender = undefined) => {
       const notebookHost = browser.runtime.getURL('engine-tabs/notebook-tab/index.html');
       const senderUrl = sender?.url ?? sender?.tab?.url;
@@ -399,16 +385,7 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // VM-originated HTTP egress. The VM tab's HTTP-marker dispatcher
-    // calls this when it sees a wrapper script's request marker. webFetch
-    // applies the denylist + audit; response body is base64-encoded back
-    // so runtime.sendMessage's JSON serialization preserves the bytes.
-    // Max ~50MB body (matches vm_import's cap) so we don't allow a
-    // runaway curl to OOM the SW.
-    // why vmHttpFetch (not webFetch directly): #53 moved the VM egress glue into
-    // an IO-injected factory (vm-net/vm-http-fetch.js) so it's bun-testable — it
-    // layers the revalidating IDB GET cache + host-bound git-auth + body cap +
-    // chunked base64 on top of webFetch's denylist/SSRF/audit chokepoint.
+    // why: vmHttpFetch adds cache, credentials, size, and byte transport to the egress gate.
     'sw/web-fetch': async ({ url, method, headers, body, gitAuth, noCache, extract, runId, ownerSessionId, deadlineAt, abortToken, notebookId }, sender = undefined) => {
       if (typeof url !== 'string' || url.length === 0) {
         return { ok: false, error: 'url-required' };
@@ -453,17 +430,8 @@ export const makeEngineRoutes = (deps) => {
           else deadlineTimer = setTimeout(() => runController?.abort(), remaining);
         }
       }
-      // GET callers (the VM HTTP marker fast path) pass only { url } and behave
-      // exactly as before; the rich VM path + the Notebook code-mode bridge pass
-      // method/headers/body. webFetch applies denylist + SSRF + audit on EVERY
-      // method (parity with fetch_url), so a POST here is not a new egress surface.
-      // vmHttpFetch layers the IDB GET cache + optional git-auth on top; noCache
-      // (module-source fetches) bypasses that cache so every run is re-audited.
       try {
-        // why: hydration is part of the egress operation, not a preflight outside
-        // it. Admit the run and arm Stop/deadline first, then await policy through
-        // that signal. A stopped or expired run cannot reach vmHttpFetch even if
-        // the shared hydration later succeeds.
+        // why: Stop and deadline also cancel policy hydration before egress.
         await awaitWithinSignal(
           awaitDenylistPolicy,
           runController?.signal ?? null,
@@ -473,9 +441,6 @@ export const makeEngineRoutes = (deps) => {
           url, method, headers, body, gitAuth, noCache: noCache === true,
           ...(runController ? { signal: runController.signal } : {}),
         });
-        // Design 2a extract post-step (Notebook tab relay) — why + security
-        // posture: shared/fetch-extract.js. Absent `extract` (every VM caller)
-        // it is a passthrough, byte-for-byte as before.
         return await applyWebExtract(resp, extract, url);
       } catch (e) {
         const ev = /** @type {{ name?: string, message?: string }} */ (e);
@@ -550,8 +515,6 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // The App editor reads OPFS directly but sends every mutation through the
-    // SW client so byte caps, kind metadata, and rollback stay one contract.
     'app/editor-write': async ({ appId, path, content, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
@@ -578,34 +541,20 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // vm-tab/index.html fetches its full record here at boot. why a route
-    // (not a direct chrome.storage.local read like before): the VM catalog
-    // moved to IndexedDB (idbKV('vms')), which the tab page reaches through
-    // the registry the SW owns — mirroring app/get-meta.
+    // why: The worker owns the IndexedDB VM registry.
     'vm/get-meta': async ({ vmId }) => {
       if (typeof vmId !== 'string') return { ok: false, error: 'vmId-required' };
       try {
         const record = await vmRegistry.get(vmId);
         if (!record) return { ok: false, error: 'vm-not-found' };
-        // why devMode rides along: vm-tab has no settings of its own; it reads
-        // it here (once, at boot) to honour the "verbose VM diagnostics" toggle
-        // (Settings → Behavior) — surfaces the install/verify output in the
-        // terminal at boot (the persistent shell is never traced with `set -x`).
+        // why: The VM tab has no settings store.
         return { ok: true, record, devMode: !!settingsStore.get().devMode };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
 
-    // --- Library (the full-tab apps surface in the options page) ----------
-    // Metadata only — the catalog records, never OPFS file bodies (the grid
-    // stays light under default persistence). Open goes through the appClient
-    // so tab lifecycle + OPFS teardown match the agent's tools.
-    // why vault-gated: matches the memory/* + session/* convention — the
-    // lock is a privacy curtain over plaintext-IDB user content (the app
-    // catalog reveals what the user has been building), and export is
-    // exfiltrating. The options page already hides the Library when locked;
-    // this is the message-level backstop.
+    // why: The vault lock hides plaintext App metadata at the message boundary.
     'apps/list': async () => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       try {
@@ -675,8 +624,7 @@ export const makeEngineRoutes = (deps) => {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
-    // App-tab editor IO goes through the same mutation coordinator as Git.
-    // This keeps a multi-surface browser App from writing around restore/share.
+    // why: Editor and Git writes use one mutation coordinator.
     'app/editor/read': async ({ appId, path }) => {
       if (typeof appId !== 'string' || typeof path !== 'string') return { ok: false, error: 'appId-and-path-required' };
       try { return { ok: true, content: await appClient.readFile({ appId, path }) }; }
@@ -798,15 +746,12 @@ export const makeEngineRoutes = (deps) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       try {
         const result = await withDwebPublication(() => withAppLifecycle(appId, async () => {
-          // Revoke the live network copy before removing the only durable record
-          // that names it. A transient host failure leaves the local App intact so
-          // the user can retry without losing the hashes needed for revocation.
+          // why: Keep the record until all live network copies are revoked.
           const record = await appRegistry.get(appId);
           if (!record) return { ok: false, error: 'app-not-found' };
           if (DWEB_ENABLED && (record.dweb || record.shared)) {
             try {
-              // Never create a host just to revoke. No offscreen context means
-              // no in-memory content store can still be serving these bytes.
+              // why: An absent host cannot still serve in-memory bytes.
               const contexts = await listOffscreenContexts(browser);
               if (contexts.length) {
                 const reply = await browser.runtime.sendMessage({
@@ -849,14 +794,7 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // --- artifacts: .peerd export/import (DESIGN-10) ---
-    //
-    // One bundle format under manual shares, web publishing, and (later)
-    // dwapps. The engine module owns the format (build/verify/unpack);
-    // these routes inject the IO: registry records, OPFS trees, the
-    // stored TOFU image pin. Same inspect-then-apply shape as the
-    // settings transfer — and like every import here, apply mints
-    // a FRESH id, never overwriting an existing artifact.
+    // why: Imports mint fresh IDs and never replace existing artifacts.
     'export/artifact': async ({ kind, id }) => {
       if (typeof id !== 'string' || !id) return { ok: false, error: 'id-required' };
       /** @param {string[]} rootPath @param {'text' | 'bytes'} mode */
@@ -875,8 +813,7 @@ export const makeEngineRoutes = (deps) => {
         if (kind === 'app') {
           const snapshot = await appClient.snapshotFiles({ appId: id });
           record = snapshot.record;
-          // why every App file is read as bytes: artifact transfer is lossless;
-          // the persisted kind map decides which bytes are editable text.
+          // why: App artifact transfer must preserve every byte.
           envelope = await buildAppExport({ record, files: snapshot.files });
         } else if (kind === 'notebook') {
           record = await jsRegistry.get(id);
@@ -885,10 +822,7 @@ export const makeEngineRoutes = (deps) => {
         } else if (kind === 'vm') {
           record = await vmRegistry.get(id);
           if (!record) return { ok: false, error: 'vm-not-found' };
-          // The recipe's whole point is carrying the base-image pin
-          // (receiver pins BEFORE first boot). v1 streams ONE stock
-          // image, so the sole pin entry is the image; without it
-          // (never booted) there is nothing trustworthy to export.
+          // why: A VM recipe needs a trusted base-image pin.
           const stored = await browser.storage.local.get(IMAGE_PIN_STORAGE_KEY);
           const pins = stored?.[IMAGE_PIN_STORAGE_KEY] ?? {};
           const [imageUrl, pin] = Object.entries(pins)[0] ?? [];
@@ -910,9 +844,7 @@ export const makeEngineRoutes = (deps) => {
       }
     },
 
-    // Pre-flight: parse + verify hashes + summarize BEFORE any write
-    // (the envelope is self-verifying; nothing is trusted until the
-    // chunk hashes match the manifest).
+    // why: Verify the envelope before any write.
     'import/inspect': async ({ envelope }) => inspectEnvelope(envelope),
 
     'import/apply': async ({ envelope }) => {
@@ -930,8 +862,7 @@ export const makeEngineRoutes = (deps) => {
         throw e;
       }
       const { kind, name, entry, files, fileKinds, meta } = opened;
-      // Notebook source files use the existing text contract. Apps receive the
-      // raw file map so import preserves every byte, including unknown suffixes.
+      // why: Apps keep raw bytes, but Notebooks use text files.
       const textFiles = () => {
         /** @type {Record<string, string>} */
         const out = {};
@@ -941,8 +872,6 @@ export const makeEngineRoutes = (deps) => {
       };
       let result;
       if (kind === 'app') {
-        // appClient.create is the same path the agent's sandbox_create app arm takes:
-        // fresh id, registry record, OPFS writes.
         let record;
         try {
           record = await appClient.create({
@@ -957,9 +886,7 @@ export const makeEngineRoutes = (deps) => {
         }
         result = { ok: true, kind, id: record.id };
       } else if (kind === 'notebook') {
-        // Refuse before minting metadata. The guarded OPFS helper checks again
-        // at each file write, but a preflight avoids an empty registry record
-        // when the workspace schema is read-only.
+        // why: Refuse before a read-only workspace gets an empty record.
         try { await assertOpfsWritable(); }
         catch (error) {
           return {
@@ -975,10 +902,7 @@ export const makeEngineRoutes = (deps) => {
         result = { ok: true, kind, id: record.id };
       } else {
         const record = await vmRegistry.create({ name });
-        // Seed the TOFU pin BEFORE first boot — the recipe's payoff. A
-        // pin we already hold for the same URL is NEVER overwritten:
-        // TOFU means local evidence wins, and the boot path fails
-        // closed on any mismatch either way.
+        // why: Existing local TOFU evidence wins over imported evidence.
         const image = meta.image;
         if (typeof image?.url === 'string' && typeof image?.pin?.headSha256 === 'string') {
           const stored = await browser.storage.local.get(IMAGE_PIN_STORAGE_KEY);

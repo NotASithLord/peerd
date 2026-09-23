@@ -35,6 +35,7 @@ import {
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
 } from './e2e-harness.mjs';
 import { startWebFixtureServer } from './fixtures/web-suite.mjs';
+import { recordNetworkFloorVector } from './network-floor-oracle.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -1245,19 +1246,12 @@ export const STATES = [
           'popup', 'cross-frame-popup', 'cross-frame-blank', 'location',
         ]) {
           const observed = await runVector(vector);
-          rec.check(`${vector} probe executed`, observed.attempted === true,
-            JSON.stringify(observed));
+          recordNetworkFloorVector(rec, vector, observed);
           if (vector === 'location') {
-            rec.check('location sends no private HTTP request', observed.requests.length === 0,
-              JSON.stringify(observed));
             rec.observe('blocked top-level private navigation transport', {
               mode: observed.connections === 0 ? 'blocked-before-connect' : 'connected-without-request',
               ...observed,
             });
-          } else {
-            rec.check(`${vector} causes no private TCP or HTTP side effect`,
-              observed.connections === 0 && observed.requests.length === 0,
-              JSON.stringify(observed));
           }
         }
 
@@ -3081,6 +3075,7 @@ export const STATES = [
         `after stop: ${callsAfterStop}; after quiet window: ${ctx.modelCallCount()}`);
     },
   },
+
 
   // --- functional: a provider error surfaces + idles --------------------------
   {
@@ -4984,6 +4979,59 @@ export const STATES = [
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await rec.visualPage('options-denylist', page);
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    // #234 Settings -> Paced sites. Seeded through the dev-mode observation
+    // seam, which feeds the same trusted status + Retry-After the egress choke
+    // point feeds, so the rendered rows are ones a real refusal would produce.
+    name: 'options-paced-sites', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let page = await openWidePage(ctx, 'options/options.html#!/paced-sites');
+      try {
+        await rpc(page, { type: 'paced/clear' });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        // Two different shapes, so the row copy is exercised both ways: a site
+        // that stated a wait and was refused twice (a compounded interval), and
+        // one that only answered "unavailable" (peerd's own backoff).
+        await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://api.acme.test', status: 429, retryAfter: '1',
+        });
+        await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://api.acme.test', status: 429, retryAfter: '1',
+        });
+        // why the gap: the list is ordered by most recent refusal, and two seeds
+        // landing in the same millisecond fall back to the alphabetical tiebreak
+        // - so without it the two rows swap places between runs and the capture
+        // flaps.
+        await sleep(50);
+        await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://portal.globex.test', status: 503,
+        });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+        // why the page reopens after the stated pause has run out: a row
+        // renders "paused for another Ns" off the wall clock, and capturing one
+        // mid-countdown would make this state flap by a second on every run. The
+        // learned interval, which is what this capture is actually about, is
+        // stable. The countdown copy is covered by the in-browser test.
+        await sleep(6_000);
+
+        await retirePrivateTransferPage(page);
+        page = await openWidePage(ctx, 'options/options.html#!/paced-sites');
+        await waitFor(() => evalIn(page, `(() => {
+          const text = document.body.innerText;
+          return text.includes('api.acme.test')
+            && text.includes('portal.globex.test')
+            && text.includes('never tries to disguise itself')
+            && !text.includes('paused for another');
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        await rec.visualPage('options-paced-sites', page);
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        await rpc(page, { type: 'paced/clear' }).catch(() => {});
+        if (page) await retirePrivateTransferPage(page);
+      }
     },
   },
   {

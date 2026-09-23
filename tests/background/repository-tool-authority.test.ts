@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createRepositoryToolAuthority } from '../../extension/background/repository-tool-authority.js';
 import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
+import { createAppDwebAuthority } from '../../extension/background/app-dweb-authority.js';
 
 const signal = new AbortController().signal;
 
@@ -9,6 +10,106 @@ const repositoryContext = (repositories: any, extra: any = {}) => ({
 });
 
 describe('repository tool authority', () => {
+  test.each([false, true])('App branch rotates consent without a live editor (persistence fails: %s)', async (fails) => {
+    const order: string[] = [];
+    const dwebAuthority = createAppDwebAuthority({
+      storage: {
+        get: async () => ({}),
+        set: async () => {
+          order.push('persist');
+          if (fails) throw new Error('consent persistence unavailable');
+        },
+      },
+      tabIds: async () => [],
+      stopTab: async () => { throw new Error('no live editor'); },
+      closeTab: async () => { throw new Error('no live editor'); },
+      purgeOwners: async () => { order.push('purge'); },
+    });
+    const appQuiescence = createAppQuiescence({
+      tracker: {
+        getTabId: () => null,
+        quiesceTab: async () => false,
+        closeTab: async () => { throw new Error('no live editor'); },
+        ensureTab: async () => { throw new Error('must not open a new editor'); },
+        withDwebAuthority: dwebAuthority.run,
+      },
+      withLifecycle: async (_id, operation) => operation(),
+    });
+    const authority = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.branch', args: { name: 'new-branch' } },
+      ctx: repositoryContext({
+        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
+          order.push('lock');
+          return operation();
+        },
+        branch: async () => { order.push('branch'); return { name: 'new-branch' }; },
+      }, { appQuiescence }),
+      signal,
+    });
+    if (fails) {
+      await expect(authority.branch('new-branch')).rejects.toThrow('consent persistence unavailable');
+      expect(order).toEqual(['persist']);
+    } else {
+      await authority.branch('new-branch');
+      expect(order).toEqual(['persist', 'purge', 'lock', 'branch']);
+      expect(dwebAuthority.generation('app-1')).toBe(1);
+    }
+  });
+
+  test('a live Pod holds its workspace lock around the repository branch', async () => {
+    const order: string[] = [];
+    const authority = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.branch', args: { name: 'pod-branch' } },
+      ctx: repositoryContext({
+        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
+          order.push('repository-lock');
+          try { return await operation(); } finally { order.push('repository-unlock'); }
+        },
+        branch: async () => { order.push('branch'); return {}; },
+      }, {
+        actorType: 'pod', actorInstanceId: 'pod-1',
+        podTabTracker: { getTabId: () => 17 },
+        podClient: { withWorkspaceLock: async (_id: string, operation: () => Promise<unknown>) => {
+          order.push('workspace-lock');
+          try { return await operation(); } finally { order.push('workspace-unlock'); }
+        } },
+      }),
+      signal,
+    });
+    await authority.branch('pod-branch');
+    expect(order).toEqual(['workspace-lock', 'repository-lock', 'branch', 'repository-unlock', 'workspace-unlock']);
+  });
+
+  test.each([false, true])('a Notebook branch flushes and resumes without reloading (mutation fails: %s)', async (fails) => {
+    const order: string[] = [];
+    const authority = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.branch', args: { name: 'notebook-branch' } },
+      ctx: repositoryContext({
+        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
+          order.push('lock');
+          return operation();
+        },
+        branch: async () => {
+          order.push('branch');
+          if (fails) throw new Error('branch failed');
+          return {};
+        },
+      }, {
+        actorType: 'notebook', actorInstanceId: 'notebook-1',
+        jsTabTracker: {
+          getTabId: () => 17,
+          quiesceTab: async () => { order.push('flush'); return true; },
+          resumeTab: async () => { order.push('resume'); return true; },
+          reloadTab: async () => { order.push('reload'); return true; },
+        },
+      }),
+      signal,
+    });
+    if (fails) await expect(authority.branch('notebook-branch')).rejects.toThrow('branch failed');
+    else await authority.branch('notebook-branch');
+    expect(order).toEqual(['flush', 'lock', 'branch', 'resume']);
+  });
+
   test('flushes and closes a live App before a version mutation takes the lock', async () => {
     const order: string[] = [];
     const repositories = {

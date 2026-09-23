@@ -1,66 +1,11 @@
 // @ts-check
-// peerd-distributed/apps/bridge.js — the dwapp API (bridge v0).
-//
-// THE new privilege boundary (NORTH-STAR §4, MIGRATION §3): a sandboxed,
-// opaque-origin dwapp talks to the dweb ONLY through this postMessage RPC,
-// hosted by the trusted app-tab parent page. The surface is deliberately
-// small and FROZEN for Phase 1 — growing it is a security event, not a
-// convenience.
-//
-// CONNECTIVITY = THE ALWAYS-ON BASE NETWORK. A dwapp is a SUB-PROTOCOL, not a
-// thing tied to a signaler: "join a room" opens a NAMESPACED overlay on the one
-// shared base mesh in the offscreen document (base-network.js openRoom), so the
-// app rides connections that already exist — no per-app rendezvous, no per-app
-// mesh, no rendezvous prompt. The bridge relays each op to that offscreen host
-// over the SW (swCall 'dweb/base/room'); the host pushes feed/dm/presence events
-// back as 'dweb/base-room/event' runtime messages (onHostEvent), filtered to the
-// room we joined. The identity is the user's vault did, held by the offscreen
-// base node — the bridge never mints or sees key material.
-//
-// v0 surface (one room per app):
-//   hello                          → { available, app, launch, did, joined }
-//   join { roomId, name? }         → CONSENT-GATED (confirm + remembered
-//                                    per-app grant; every outcome audited)
-//   leave · status · presence · history { topic } · retain { topic }
-//   publish { topic, data, retain? } · subscribe { topic } · mute { did }
-//   dm-send { to, data }           → a DIRECT 1:1 message (ch=3, PROTOCOL
-//                                    §6.1): point-to-point over one mesh
-//                                    link, never flooded or relayed. This is
-//                                    a NARROWER send than publish (one peer,
-//                                    not the whole room), so it adds no reach
-//                                    a flooding app didn't already have.
-//   announce { meta }
-//   install-app { uri, name? }     → CONSENT-GATED EVERY TIME (never
-//                                    remembered): fetch from base peers,
-//                                    verify, install as an engine App
-// Events pushed to the app: message · direct · presence-join · presence-leave ·
-//   peer · peer-gone · status
-//
-// What v0 deliberately does NOT expose:
-//   - raw sign(): nothing in the demo needs it — post/doc attribution is
-//     the platform envelope's `from`. When an app-visible sign() lands it
-//     MUST be domain-separated per D-8; until then the capability simply
-//     doesn't exist, which is safer than scoping it.
-//   - content put/get: attachments are a Phase 2 surface.
-//   - cross-room/multi-room: one room per app keeps consent legible.
-//   - a custom signaler: the base network IS the connectivity (above).
-//
-// Trust notes:
-//   - Replies go ONLY to the app frame (e.source identity check in the
-//     transport), and the identity key never crosses the boundary — the app
-//     sees its did string, never material.
-//   - Inbound host events are filtered to OUR room id before reaching the
-//     app, so a second dwapp's traffic can't leak across the shared push.
-//   - Payloads stay opaque end-to-end (D-7): `data` passes through
-//     structured-clone untouched.
+// Expose one consent-bound room to one opaque App frame.
+// why: The App can use its did, but it never receives identity key material.
 
 const GRANTS_KEY = 'dweb.grants.v1';
 const ROOM_COMPENSATION_PREFIX = 'dweb.room-compensation.v1';
 
-// The default transport for the app-tab host: post events into the dwapp's
-// iframe and receive its ops (identity-checked by e.source). createDwebBridge
-// is otherwise transport-agnostic — the SAME bridge logic runs in the app-tab
-// page today and, with an SW-relay transport, in the offscreen document.
+// The parent accepts iframe requests only from the exact App frame.
 /** @param {HTMLIFrameElement} frame */
 export const iframeTransport = (frame) => ({
   /** @param {any} msg */
@@ -128,11 +73,7 @@ export const createDwebBridge = ({
   let roomAdmissionToken = null;
   /** @type {string | null} */
   let activeClientId = null;
-  // Once an iframe epoch has been replaced or disposed it can never become
-  // active again. Otherwise a late ordinary RPC from A can replace B, reclaim
-  // roomClientId, and make A's later dispose tear down B's adopted room.
-  // Refuse new epochs after a generous per-tab ceiling instead of evicting
-  // tombstones and making very old epochs replayable again.
+  // why: Keep bounded tombstones so retired iframe epochs cannot regain authority.
   const MAX_CLIENT_EPOCHS = 128;
   /** @type {Set<string>} */
   const retiredClientIds = new Set();
@@ -298,9 +239,7 @@ export const createDwebBridge = ({
     if (activeClientId === clientId) activeClientId = null;
   };
 
-  // Grants are keyed by ROOM id, not just per-app: the consent dialog names a
-  // specific room, so a remembered grant must authorize only THAT room — else
-  // one approval would let the app silently join any room name it likes later.
+  // why: A grant authorizes one room for the current verified App identity.
   const grantStore = {
     /** @param {string} rid */
     async has(rid) {
@@ -413,8 +352,6 @@ export const createDwebBridge = ({
   }) ?? (() => {});
   disposers.push(offHostEvent);
 
-  // The consent gate every join runs. A remembered grant skips the dialog,
-  // never the audit. No rendezvous in the copy: connectivity is the base network.
   /** @param {string} rid @param {{clientId:string,cancelled:boolean}} request */
   const consent = async (rid, request) => {
     if (isCancelled(request)) throw new Error('cancelled');
@@ -524,8 +461,8 @@ export const createDwebBridge = ({
     },
 
     leave: async () => {
-      if (!roomId) return { left: false };
       const was = roomId;
+      if (!was) return { left: false };
       await room('leave', {}, was);
       roomId = null;
       roomClientId = null;
@@ -665,14 +602,15 @@ export const createDwebBridge = ({
         void serializeTransition(async () => {
           if (!roomId || roomClientId !== m.clientId) return;
           const was = roomId;
-          await room('leave', {}, was).catch(() => {});
+          // Keep the exact membership on failure so a successor can retry.
+          await room('leave', {}, was);
           roomId = null;
           roomClientId = null;
           roomAdmissionToken = null;
           did = null;
           subbedTopics.clear();
           audit('room_left', { roomId: was, reason: 'client-disposed' });
-        });
+        }).catch(() => {});
       }
       return;
     }
@@ -699,13 +637,12 @@ export const createDwebBridge = ({
     if (activeClientId && activeClientId !== m.clientId) {
       const priorClientId = activeClientId;
       retireClient(priorClientId);
-      // A completed membership belongs to the bridge/App tab, not a dead
-      // iframe epoch. The replacement adopts it; late dispose from the old
-      // epoch can no longer tear down the replacement's room.
+      // why: A replacement iframe adopts the bridge's completed membership.
       if (roomId && roomClientId === priorClientId) roomClientId = m.clientId;
     }
     if (activeClientId !== m.clientId) {
       activeClientId = m.clientId;
+      if (roomClientId && retiredClientIds.has(roomClientId)) roomClientId = m.clientId;
       admittedClientEpochs += 1;
     }
     const op = /** @type {Record<string, (args?: any) => Promise<any>>} */ (/** @type {unknown} */ (ops))[m.op];
@@ -754,9 +691,7 @@ export const createDwebBridge = ({
         else reply(false, 'cancelled');
       }
     } catch (err) {
-      // A stale epoch receives no late result into a replacement client. Same-
-      // epoch cancellation gets a terminal rejection so its pending promise can
-      // settle if the frame is still alive.
+      // why: Never send a late result to a replacement iframe.
       if (activeClientId === request.clientId) reply(false, err);
     } finally {
       pending.delete(pendingKey);
@@ -774,6 +709,9 @@ export const createDwebBridge = ({
       for (const timer of recoveryTimers) clearTimeout(timer);
       recoveryTimers.clear();
       const leave = serializeTransition(async () => {
+        // A failed join may never publish roomId but still own a durable,
+        // nonce-bound cleanup record. Closing must retry that exact record.
+        await reconcileCompensation();
         if (!roomId) return;
         const was = roomId;
         await compensateJoin({

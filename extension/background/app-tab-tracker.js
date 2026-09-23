@@ -232,6 +232,7 @@ export const createAppTabTracker = ({
   const invalidateDweb = dwebAuthority.invalidate;
   const retireDwebTab = dwebAuthority.retire;
 
+
   /** Re-enable a quiesced tab if closing it failed. */
   const resumeTab = async (/** @type {string} */ appId) => {
     const tabIds = await exactTabIds(appId);

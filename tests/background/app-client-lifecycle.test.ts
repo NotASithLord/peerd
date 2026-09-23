@@ -150,6 +150,41 @@ describe('App OPFS lifecycle posture', () => {
     expect(deletedMetadata).toBe(false);
   });
 
+  test('queued deletion leaves the live App open until its repository lane is admitted', async () => {
+    const events: string[] = [];
+    let enterLane!: () => void;
+    let releaseLane!: () => void;
+    const entered = new Promise<void>((resolve) => { enterLane = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseLane = resolve; });
+    const client = createAppClient({
+      registry: {
+        get: async () => ({ id: 'app-1' }),
+        delete: async () => { events.push('catalog'); },
+      } as any,
+      tracker: { closeTab: async () => { events.push('close'); return true; } } as any,
+      repositories: testRepositories({
+        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
+          events.push('queued');
+          enterLane();
+          await gate;
+          events.push('admitted');
+          return operation();
+        },
+        destroyApp: async () => { events.push('git'); },
+      }) as any,
+      opfsForApp: () => ({ nuke: async () => { events.push('bytes'); } }) as any,
+    });
+    const deleting = client.delete('app-1');
+    await entered;
+    try {
+      expect(events).toEqual(['queued']);
+    } finally {
+      releaseLane();
+      await deleting;
+    }
+    expect(events).toEqual(['queued', 'admitted', 'close', 'git', 'bytes', 'catalog']);
+  });
+
   test('deletion source removes Git before worktree and catalog metadata', async () => {
     const source = await Bun.file('./extension/background/app-client.js').text();
     const body = source.slice(source.indexOf('const deleteApp = async'));

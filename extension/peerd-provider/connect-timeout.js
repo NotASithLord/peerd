@@ -102,16 +102,8 @@ export const MAX_CONNECT_ATTEMPTS = 3;
 // after attempt 2.
 export const CONNECT_RETRY_BACKOFF_MS = Object.freeze([500, 1500]);
 
-/**
- * Promise sleep that respects an AbortSignal. Rejects with AbortError when
- * the signal fires, so a user Stop during a retry backoff unwinds immediately
- * — the agent loop already treats AbortError as a clean stop. Shared by the
- * retry helper here and by the adapters' rate-limit backoff loops.
- *
- * @param {number} ms
- * @param {AbortSignal} [signal]
- * @returns {Promise<void>}
- */
+// Re-exported so the provider module keeps one public spelling of the helper
+// while there is exactly one implementation (shared/util.js).
 export { abortableSleep };
 
 /**

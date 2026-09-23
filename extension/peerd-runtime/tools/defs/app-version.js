@@ -23,6 +23,8 @@ export const repositoryVersionTool = composeTool("repo_version", {
         const answer = await authority.confirmRestore(args.to);
         if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== true) return { ok: false, error: 'restore_declined' };
       }
+      // why: the host authority owns editor quiescence, workspace locks and
+      // consent invalidation; semantic code must not acquire a second lane.
       const result = args.op === 'checkpoint'
         ? await authority.checkpoint(typeof args.message === 'string' ? args.message : 'checkpoint')
         : args.op === 'branch'

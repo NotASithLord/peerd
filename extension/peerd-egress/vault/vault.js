@@ -342,6 +342,22 @@ export const createVault = (deps) => {
   // backend settles. Explicit key adoption is the only operation that clears
   // this in-memory half of the restart fence.
   let resumeBlocked = false;
+  let credentialEpoch = 0;
+  let pendingCredentialChanges = 0;
+  // why: a paced request may already hold decrypted headers. Revoke that
+  // preparation synchronously, before storage or a delayed locked event.
+  const captureRequestAuthority = () => {
+    const locked = lockEpoch;
+    const credentials = credentialEpoch;
+    const usable = !isLocked() && pendingCredentialChanges === 0;
+    return () => usable && !isLocked() && pendingCredentialChanges === 0
+      && locked === lockEpoch && credentials === credentialEpoch;
+  };
+  const beginCredentialChange = () => {
+    credentialEpoch += 1;
+    pendingCredentialChanges += 1;
+    return () => { pendingCredentialChanges -= 1; credentialEpoch += 1; };
+  };
   // WHY the vault locked, for the unlock screen's one added sentence (§5g):
   // 'idle' (the auto-lock timer, or a mirror expired past the idle policy),
   // 'manual' (an explicit lock()), or null - a fresh SW that never locked
@@ -1208,10 +1224,13 @@ export const createVault = (deps) => {
   /** @param {string} name @param {string} plaintext */
   const setSecret = async (name, plaintext) => {
     if (isLocked()) throw new VaultLockedError();
-    // dk is non-null here: isLocked() threw above otherwise.
-    const blob = await encryptString(/** @type {CryptoKey} */ (dk), plaintext);
-    await kv.set(SECRET_PREFIX + name, bytesToBase64(blob));
-    touch();
+    const finish = beginCredentialChange();
+    try {
+      // dk is non-null here: isLocked() threw above otherwise.
+      const blob = await encryptString(/** @type {CryptoKey} */ (dk), plaintext);
+      await kv.set(SECRET_PREFIX + name, bytesToBase64(blob));
+      touch();
+    } finally { finish(); }
   };
 
   /** @param {string} name */
@@ -1231,8 +1250,11 @@ export const createVault = (deps) => {
    */
   const deleteSecret = async (name) => {
     if (isLocked()) throw new VaultLockedError();
-    await kv.delete(SECRET_PREFIX + name);
-    touch();
+    const finish = beginCredentialChange();
+    try {
+      await kv.delete(SECRET_PREFIX + name);
+      touch();
+    } finally { finish(); }
   };
 
   /**
@@ -1260,6 +1282,7 @@ export const createVault = (deps) => {
     touch,
     setAutoLockMs,
     isLocked,
+    captureRequestAuthority,
     isInitialized,
     setSecret,
     getSecret,
