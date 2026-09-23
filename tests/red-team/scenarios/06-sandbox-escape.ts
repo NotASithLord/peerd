@@ -26,6 +26,11 @@ import { resolveRelativePath } from '../../../extension/peerd-engine/module-reso
 import { opfsHelpers } from '../../../extension/peerd-engine/opfs.js';
 import { composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
+import {
+  buildAppEgressBlockRule,
+  APP_EGRESS_REGEX,
+  CHROME_DNR_RESOURCE_TYPES,
+} from '../../../extension/peerd-egress/denylist/dnr-rules.js';
 import { makeOffscreenActorChannelClient } from '../../../extension/background/offscreen-actor-channel-client.js';
 import { buildWorkerSource } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
 import { formatEvalResult } from '../../../extension/peerd-runtime/tools/defs/js-notebook.js';
@@ -233,6 +238,24 @@ export const scenario: Scenario = {
         ? blocked('meta-refresh the App frame to an attacker URL', 'meta http-equiv=refresh stripped from the app HTML')
         : leaked('meta-refresh the App frame to an attacker URL', 'meta refresh survived'));
 
+      const appNetworkRule: any = buildAppEgressBlockRule({
+        tabIds: [73], resourceTypes: CHROME_DNR_RESOURCE_TYPES,
+      });
+      const requiredResourceTypes = [
+        'main_frame', 'sub_frame', 'xmlhttprequest', 'ping',
+        'websocket', 'webtransport', 'other',
+      ];
+      const hasNetworkFloor = appNetworkRule?.action?.type === 'block'
+        && appNetworkRule?.condition?.regexFilter === APP_EGRESS_REGEX
+        && JSON.stringify(appNetworkRule?.condition?.tabIds) === '[73]'
+        && requiredResourceTypes.every((type) =>
+          appNetworkRule?.condition?.resourceTypes?.includes(type));
+      probes.push(hasNetworkFloor
+        ? blocked('open raw HTTP(S), WebSocket, beacon, or WebTransport egress from an App tab',
+          'the exact tab-scoped browser network rule covers every Chrome request type')
+        : leaked('open raw HTTP(S), WebSocket, beacon, or WebTransport egress from an App tab',
+          'the tab-scoped browser network rule was incomplete'));
+
       let publicOffer: any = null;
       let privateJob: any = null;
       const client = makeOffscreenActorChannelClient({
@@ -306,6 +329,7 @@ export const scenario: Scenario = {
       'opfsHelpers (host-side mutation posture before root access)',
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
+      'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',
     ]);
@@ -320,6 +344,7 @@ export const scenario: Scenario = {
       'tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence)',
       'tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
+      'scripts/cdp/states.mjs actor-builds-app (live App raw-network capture)',
       'scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity)',
       'scripts/cdp/states.mjs actor-channel-targeting (live sibling-observer probe)',
       'scripts/cdp/states.mjs notebook-remote-restricted (live visible-Notebook host wall)',
