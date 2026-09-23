@@ -21,12 +21,12 @@ export const scheduleListTool = {
   origins: () => [],
 
   execute: async (_args, ctx) => {
-    const scheduleList = /** @type {(() => any[]) | undefined} */ (
+    const scheduleList = /** @type {(() => Promise<any[]>) | undefined} */ (
       /** @type {{ scheduleList?: unknown }} */ (ctx).scheduleList);
     if (typeof scheduleList !== 'function') {
       return { ok: false, error: 'schedule_unavailable', content: 'Background scheduling is not available in this context.' };
     }
-    const routines = scheduleList() ?? [];
+    const routines = await scheduleList() ?? [];
     if (routines.length === 0) {
       return { ok: true, content: 'No background routines registered.' };
     }
