@@ -23,9 +23,24 @@ import {
 import { makeKernelProviderSetKeyRoute } from './kernel-provider-key-route.js';
 import { makeKernelSettingsRoutes, normalizeSettingsPatch } from './settings-patch.js';
 import { KERNEL_DEMAND_SUPPORT_ROUTE_NAMES } from '../shared/kernel-feature-route-inventory.js';
+import { createOriginPacingStore } from '/peerd-runtime/pacing-authority.js';
+import { normalizeApiOrigin } from '../shared/api-origin.js';
+import { makePacedOriginRoutes } from './routes/paced-origins.js';
 
 /** @param {Record<string,any>} deps */
 export const createKernelDemandSupport = (deps) => {
+  // why: one kernel-generation owner serves both browser actions and network
+  // requests. Controller/actor recreation must never create a fresh empty lane.
+  const originPacing = createOriginPacingStore({
+    kv: deps.kv,
+    onAudit: (event) => { void deps.auditLog.append(event).catch(() => {}); },
+    onWait: (info) => {
+      void deps.sessionCache.sessionGet('currentSessionId').then((/** @type {string|null} */ sessionId) => {
+        if (sessionId) deps.uiPorts.broadcast({ type: 'turn/pacing-wait', sessionId, ...info });
+      }).catch(() => {});
+    },
+  });
+  void originPacing.hydrate();
   const appCatalog = createKernelAppCatalog({ idb: deps.idb });
   const keyedOriginAuthority = createKernelKeyedOriginAuthority(deps.vault);
   const repositoryKernelFetch = makeRepositoryKernelFetch({
@@ -55,6 +70,15 @@ export const createKernelDemandSupport = (deps) => {
     appFiles: /** @type {any} */ (repositories.appFiles),
   });
   const directRoutes = Object.freeze({
+    ...makePacedOriginRoutes({ originPacing, normalizeApiOrigin }),
+    'debug/pacing': async (/** @type {any} */ message = {}) => {
+      const origin = normalizeApiOrigin(message.origin);
+      if (deps.settingsStore.get().devMode === true && origin && typeof message.status === 'number') {
+        await originPacing.observe({ origin, responseAtMs: Date.now(),
+          status: message.status, retryAfter: message.retryAfter });
+      }
+      return { ok: true, origins: await originPacing.list() };
+    },
     ...makeKernelAppEditorRoutes({
       vault: deps.vault,
       catalog: appCatalog,
@@ -142,5 +166,6 @@ export const createKernelDemandSupport = (deps) => {
     repositories,
     keyedOriginAuthority,
     normalizeSettingsPatch,
+    originPacing,
   });
 };

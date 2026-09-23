@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnAuthorityAdapter } from '../../extension/background/kernel-turn-authority-adapter.js';
+import { createOriginPacingStore } from '../../extension/peerd-runtime/pacing/origin-pacing-store.js';
 import {
   actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
 } from '../../extension/background/kernel-turn-authority-adapter.js';
@@ -426,6 +427,7 @@ const harness = async (
       };
     },
   };
+  dependencies.originPacing = createOriginPacingStore({ kv: dependencies.kv });
   const factories = createKernelTurnAuthorityAdapter(dependencies);
   const shared: any = {
     sessions,

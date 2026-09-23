@@ -18,6 +18,8 @@ import {
 import { makeWebFetch, matchesDenylist } from '/peerd-egress/background.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
 import { bytesToBase64 } from '/shared/cold-util.js';
+import { normalizeApiOrigin } from '/shared/api-origin.js';
+import { needsWebWriteConfirm } from '/peerd-engine/authority.js';
 import { createAppClient } from './app-client.js';
 import { createAppQuiescence } from './app-quiescence.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
@@ -110,6 +112,12 @@ export const createKernelEngineLive = async (deps) => {
     matchDenylist: matchesDenylist,
     audit: deps.auditLog.append,
     fetchFn: deps.fetchFn,
+    pace: {
+      reserve: (origin, options) => deps.originPacing.reserve(origin, options),
+      observe: (observation) => deps.originPacing.observe(observation),
+      isWriteMethod: needsWebWriteConfirm,
+      canonicalOrigin: normalizeApiOrigin,
+    },
   });
   const vmHttpFetch = makeVmHttpFetch({
     webFetch,

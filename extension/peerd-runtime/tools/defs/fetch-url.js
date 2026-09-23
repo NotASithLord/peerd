@@ -107,6 +107,7 @@ export const fetchUrlTool = composeTool("fetch_url", {
         url: args.url, method, headers, body: /** @type {string | undefined} */ (body),
       });
       if (res?.ok === false) {
+        if (/** @type {any} */ (res).endTurn === true) return /** @type {any} */ (res);
         throw Object.assign(new Error(res.error ?? 'fetch_failed'), { reason: res.reason });
       }
       const ct = res.headers['content-type'] ?? '';

@@ -12,6 +12,7 @@ import { finalWebRequestConfirmation } from '/shared/web-request-confirmation.js
 import { normalizeApiOrigin } from '/shared/api-origin.js';
 import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
 import { readBoundedResponseText } from '/shared/abort.js';
+import { pacingAuthorityRefusal } from './page-pacing-authority.js';
 
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_WEB_TEXT_CHARS = 2_000_000;
@@ -149,6 +150,7 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
       const controller = new AbortController();
       const abort = () => controller.abort();
       const timer = setTimeout(abort, FETCH_TIMEOUT_MS);
+      if (signal?.aborted) controller.abort();
       signal?.addEventListener('abort', abort, { once: true });
       try {
         if (ctx?.actorType === 'web' && ctx?.backing === 'tab') {
@@ -176,6 +178,10 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
           });
         } catch (cause) {
           const failure = /** @type {{reason?:string,message?:string}} */ (cause);
+          if (failure.reason === 'pacing_ceiling' || failure.reason === 'pacing_unavailable') {
+            return { ...pacingAuthorityRefusal(parsed.origin,
+              failure.reason === 'pacing_unavailable' ? 'unavailable' : 'ceiling') };
+          }
           if (failure?.reason === 'redirect_blocked'
               || failure?.reason === 'private_network') {
             return {

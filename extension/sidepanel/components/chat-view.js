@@ -17,6 +17,7 @@ import { MessageList } from './message-list.js';
 import { hasUnconfirmedAgentSend, InputBar, sendAgentWithCustody } from './input-bar.js';
 import { ModeSelector, EffortDial, GoalToggle } from './mode-badge.js';
 import { GoalBar } from './goal-bar.js';
+import { PacingBar } from './pacing-bar.js';
 import { TodoCard } from './todo-card.js';
 import { ActorFabric } from './actor-fabric.js';
 import { ContextInspector } from './context-inspector.js';
@@ -154,6 +155,9 @@ export const ChatView = {
           + 'Hang tight; sending another message cancels the retry. If this keeps up, '
           + 'your provider account may be over its usage or credit limit.'),
       ]) : null,
+
+      // why: a deliberate site pause must remain visible and stoppable.
+      m(PacingBar, { pacing: state.pacing, send }),
 
       // Goal mode (the mode-row Goal toggle) — a persistent "running · turn N ·
       // Stop" bar while THIS chat's autonomous goal run is live (each chat owns

@@ -22,6 +22,7 @@ import {
   resolveTargetTab,
 } from '/peerd-runtime/browser-authority.js';
 import { controllerOperationAllowedInPermissionMode } from '/shared/controller-kernel-quota.js';
+import { createPagePacingAuthority } from './page-pacing-authority.js';
 
 const PAGE_PROGRAM_CAPS = Object.freeze({
   page: true, egress: false, subagent: false, opfs: false,
@@ -202,6 +203,7 @@ export const createPageToolAuthority = ({
   };
   const run = async (/** @type {string} */ operation, /** @type {Function} */ execute) => {
     if (binding.operation !== operation || typeof execute !== 'function') throw mismatch();
+    const pacing = createPagePacingAuthority({ operation, args, ctx, signal: abortSignal });
     // why: credential ceremonies are forbidden for inbound turns before even
     // a browser target probe. The lower login handler repeats the rule, but
     // this outer authority edge ensures the defense is operational rather
@@ -210,6 +212,8 @@ export const createPageToolAuthority = ({
       ok: false, error: 'login_refused_inbound', performed: false,
       outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
     };
+    const ceiling = await pacing.peek();
+    if (ceiling) return ceiling;
     const preflight = await preflightAction(operation);
     if (preflight.refuse) return typeof preflight.ugcRuleId === 'string'
       ? {
@@ -217,6 +221,9 @@ export const createPageToolAuthority = ({
           authorityPolicy: Object.freeze({ ugcZone: preflight.ugcRuleId }),
         }
       : preflight.refuse;
+    if (stopped()) return stoppedResult();
+    const paced = await pacing.reserve();
+    if (paced) return paced;
     if (stopped()) return stoppedResult();
     /** @type {symbol|null} */ let childActionToken = null;
     /** @type {number|null} */ let childActionTabId = null;

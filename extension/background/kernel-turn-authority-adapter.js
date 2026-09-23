@@ -168,6 +168,7 @@ import {
   createComposerReferenceAuthority,
 } from './composer-reference-authority.js';
 import { normalizeComposerCommands } from './composer-command-authority.js';
+import { pacingAuthorityRefusal } from './page-pacing-authority.js';
 import { parseComposerCommandName } from '../shared/composer-parser.js';
 import {
   composerReferenceRequestKey,
@@ -428,6 +429,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     getDenylist: () => deps.denylist.patterns(),
     matchDenylist: matchesDenylist,
     audit: deps.auditLog.append,
+    pace: {
+      reserve: (origin, options) => deps.originPacing.reserve(origin, options),
+      observe: (observation) => deps.originPacing.observe(observation),
+      isWriteMethod: needsWebWriteConfirm,
+      canonicalOrigin: normalizeApiOrigin,
+    },
   });
   const runtimeCapabilities = resolveRuntimeCapabilities({
     offscreenDocument: !deps.firefox,
@@ -919,6 +926,22 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         } : {}),
       noteLearnedOrigin: (/** @type {string} */ origin, /** @type {any} */ reason) =>
         learnedOrigins.note(origin, reason),
+      // why: only host policy gets these read-shaped closures. Clearing and
+      // learning are absent from all actor and controller authority surfaces.
+      pacing: {
+        engaged: () => deps.originPacing.engaged(),
+        peek: async (/** @type {string|null} */ origin, /** @type {any} */ pacingOptions) => {
+          await deps.originPacing.hydrate();
+          return deps.originPacing.peek(origin, pacingOptions);
+        },
+        reserve: (/** @type {string} */ origin, /** @type {any} */ pacingOptions) =>
+          deps.originPacing.reserve(origin, pacingOptions),
+      },
+      onPacingWait: (/** @type {any} */ info) => {
+        void rootSessionIdFor(sessionId).then((/** @type {string|null} */ rootSessionId) => {
+          if (rootSessionId) post({ type: 'turn/pacing-wait', sessionId: rootSessionId, ...info });
+        }).catch(() => {});
+      },
       listApiIntegrations: () => live.listApiIntegrations(sessionId),
       safeFetch,
       webFetch,
@@ -3261,6 +3284,10 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           } };
         } catch (cause) {
           const error = /** @type {{reason?:string,message?:string}} */ (cause);
+          if (error.reason === 'pacing_ceiling' || error.reason === 'pacing_unavailable') {
+            return pacingAuthorityRefusal(pin,
+              error.reason === 'pacing_unavailable' ? 'unavailable' : 'ceiling');
+          }
           if (error.reason === 'redirect_blocked') {
             return {
               ok: false,

@@ -308,7 +308,7 @@ export const makeKernelRouteProvenance = ({
     'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
   ], sidepanelUi);
   add(['agent/send'], (sender) => sidepanelUi(sender) || evalUi(sender));
-  add(['debug/originLock'], (sender) => sidepanelUi(sender) || evalUi(sender));
+  add(['debug/originLock', 'debug/pacing'], (sender) => sidepanelUi(sender) || evalUi(sender));
   add(['agent/stop'], (sender, message) => sidepanelUi(sender) || evalUi(sender)
     || activityStopUi(sender, message));
   add(['actor/spawn'], actorSpawnUi);
@@ -321,6 +321,7 @@ export const makeKernelRouteProvenance = ({
     'origin-cred/list', 'origin-cred/set', 'origin-cred/delete',
     'local-model/status', 'local-model/catalog', 'local-model/probe', 'local-model/init',
     'site-client/list', 'site-client/delete',
+    'paced/list', 'paced/forget', 'paced/clear',
     'memory/init',
     'memory/export', 'memory/deleteAll', 'memory/write', 'memory/delete',
     'memory/suggestions', 'memory/suggestions/approve', 'memory/suggestions/dismiss',

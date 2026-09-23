@@ -84,6 +84,11 @@ export const STORE_REGISTRY = Object.freeze([
     physical: Object.freeze({ kvKeys: ['dweb.metaHighWater.v1'] }),
   }),
   Object.freeze({
+    store: 'origin-pacing', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
+    // why: another device must not import a lower floor or visited-origin list.
+    physical: Object.freeze({ kvKeys: ['pacing.origins.v1'] }),
+  }),
+  Object.freeze({
     store: 'dweb-identity', version: 1, tier: DURABILITY_TIERS.PROFILE, portable: false,
     physical: Object.freeze({ kvKeys: ['secret:distributed/identity/v1', 'dweb.seededApps'] }),
   }),

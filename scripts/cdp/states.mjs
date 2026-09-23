@@ -468,7 +468,72 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
   }
 };
 
+let pacingDelegated = false;
+let pacingActorCalled = false;
+
 export const STATES = [
+  {
+    name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
+    responder: (_index, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('<actor_agent>')) {
+        if (pacingActorCalled) return { sse: sseText('The paced action has stopped.') };
+        pacingActorCalled = true;
+        return body.includes('tools: page_code')
+          ? { sse: sseToolCall('page_code', { code: 'return await page.goto("https://paced.example/");' }) }
+          : { sse: sseToolCall('navigate', { url: 'https://paced.example/' }) };
+      }
+      if (!pacingDelegated) {
+        pacingDelegated = true;
+        return { sse: sseToolCall('message_actor', { to: 'web', message: 'Open https://paced.example/.' }) };
+      }
+      return { sse: sseText('Delegated the paced browser action.') };
+    },
+    async run(ctx, rec) {
+      pacingDelegated = false;
+      pacingActorCalled = false;
+      let settings = await openWidePage(ctx, 'options/options.html#!/paced-sites');
+      try {
+        await rpc(settings, { type: 'paced/clear' });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+        const seeded = await rpc(ctx.page, {
+          type: 'debug/pacing', origin: 'https://paced.example', status: 429, retryAfter: '20',
+        });
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+        rec.check('a trusted refusal becomes a durable rule', seeded?.origins?.length === 1, JSON.stringify(seeded));
+        settings.close();
+        settings = await openWidePage(ctx, 'options/options.html#!/paced-sites');
+        await waitFor(() => evalIn(settings, `document.body.innerText.includes('paced.example')`), { budgetMs: 10_000 });
+        await rec.visualPage('options-paced-sites', settings);
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Open the paced site.' });
+        rec.check('agent/send accepted', sent?.ok === true, JSON.stringify(sent));
+        const bar = await waitFor(() => evalIn(ctx.page, `(() => {
+          const row = document.querySelector('.pacing-bar');
+          return row ? { text: row.textContent, role: row.getAttribute('role'),
+            stop: !!row.querySelector('button') } : null;
+        })()`), { budgetMs: 20_000, pollMs: 100 });
+        rec.check('a real actor reached the pacing boundary', pacingActorCalled);
+        rec.check('the wait names the site and exposes Stop', bar?.text?.includes('paced.example') && bar?.stop === true, JSON.stringify(bar));
+        rec.check('the wait is announced accessibly', bar?.role === 'status');
+        await rec.shot('waiting');
+        const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+        rec.check('Stop is accepted', stopped?.ok === true);
+        let out = {};
+        await waitFor(async () => { out = await probe(ctx); return !out.busy; }, { budgetMs: 20_000 });
+        rec.check('Stop returns the turn to idle', out.busy === false);
+        const opened = await evalIn(ctx.page, `(async () => (await chrome.tabs.query({}))
+          .filter((tab) => (tab.url || tab.pendingUrl || '').includes('paced.example')))()`, true);
+        rec.check('the delayed action never created a tab', Array.isArray(opened) && opened.length === 0, JSON.stringify(opened));
+        const gone = await waitFor(() => evalIn(ctx.page, `!document.querySelector('.pacing-bar')`), { budgetMs: 10_000 });
+        rec.check('the wait notice clears', !!gone);
+        await rec.shot('final');
+      } finally {
+        await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
+        await rpc(settings, { type: 'paced/clear' }).catch(() => {});
+        try { settings.close(); } catch {}
+      }
+    },
+  },
   // --- visual: the pre-unlock setup screen (must capture BEFORE unlock) -------
   {
     name: 'initial-screen', kind: 'visual', phase: 'pre-unlock',

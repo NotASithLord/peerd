@@ -70,6 +70,7 @@ export const createKernelProductionRuntime = async (deps) => {
     sessionCache: deps.sessionCache,
     repositories: deps.repositories,
     denylist: deps.denylist,
+    originPacing: deps.originPacing,
     dwebEnabled: deps.dwebEnabled,
     firefox: deps.firefox,
     offscreenUrl: deps.offscreenUrl,

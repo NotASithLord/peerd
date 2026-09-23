@@ -18,6 +18,8 @@
 // is unit-testable without knowing whether authority is a native fetch or a
 // named controller-to-kernel operation.
 
+import { abortableSleep } from '/shared/util.js';
+
 // No-op disposer for the paths that register no listeners (the AbortSignal.any
 // branch and the 0/1-signal branches). Shared so every return shape is uniform.
 const NO_DISPOSE = () => {};
@@ -110,21 +112,7 @@ export const CONNECT_RETRY_BACKOFF_MS = Object.freeze([500, 1500]);
  * @param {AbortSignal} [signal]
  * @returns {Promise<void>}
  */
-export const abortableSleep = (ms, signal) => new Promise((resolve, reject) => {
-  if (signal?.aborted) {
-    reject(new DOMException('Aborted', 'AbortError'));
-    return;
-  }
-  const t = setTimeout(() => {
-    signal?.removeEventListener('abort', onAbort);
-    resolve();
-  }, ms);
-  const onAbort = () => {
-    clearTimeout(t);
-    reject(new DOMException('Aborted', 'AbortError'));
-  };
-  signal?.addEventListener('abort', onAbort, { once: true });
-});
+export { abortableSleep };
 
 /**
  * Decide whether a failed initial fetch should be retried, and how long to

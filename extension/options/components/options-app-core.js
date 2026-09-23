@@ -22,6 +22,7 @@ import { SkillsView } from '/sidepanel/components/skills-view.js';
 import { HooksView } from '/sidepanel/components/hooks-view.js';
 import { DenylistView } from '/sidepanel/components/denylist-view.js';
 import { LearnedOriginsView } from '/sidepanel/components/learned-origins-view.js';
+import { PacedOriginsView } from '/sidepanel/components/paced-origins-view.js';
 import { ActorIsolationBanner } from '/sidepanel/components/actor-isolation-banner.js';
 import { ProvidersSection } from '../sections/providers.js';
 import { BehaviorSection } from '../sections/behavior.js';
@@ -74,6 +75,7 @@ const NAV = [
       // seed patterns tall, so anything appended to it sits below the fold -
       // and an un-learn control nobody can find is the problem this fixes.
       ['learned-sites', 'Learned sites'],
+      ['paced-sites', 'Paced sites'],
       ['activity', 'Activity'],
     ],
   },
@@ -291,6 +293,7 @@ const OptionsApp = {
       case 'denylist':  return m(DenylistView, { send });
       // The inverse of the denylist: sites peerd itself decided are the user's.
       case 'learned-sites': return m(LearnedOriginsView, { send });
+      case 'paced-sites': return m(PacedOriginsView, { send });
       case 'activity':  return m(ActivityView, { send });
       case 'dweb':      return DWEB_ENABLED ? m(DwebSection, { state, send }) : null;
       default:          return m('p.muted', 'Unknown section.');

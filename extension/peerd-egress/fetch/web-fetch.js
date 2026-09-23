@@ -54,6 +54,10 @@ export const authOriginForRequestUrl = (url, ownedOrigin) => {
 
 import { makeNonceCache, readDpopNonce, replayableRequest, shouldRetryWithNonce } from '../dpop/nonce.js';
 
+// why: network waits share a caller-owned fetch deadline; longer site pauses
+// must become a visible refusal instead of consuming that entire deadline.
+const NETWORK_INLINE_WAIT_MS = 5_000;
+
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
 // turns any 3xx into an opaqueredirect (type set, status 0). We also match
 // the real redirect statuses defensively — but NOT 300/304/305/306, which
@@ -342,8 +346,12 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
  *   pure matcher (passed in to avoid a cross-module import here)
  * @param {(partial: { type: string, details?: Record<string, any> }) => Promise<void>} [deps.audit]
  * @param {typeof fetch} [deps.fetchFn]
+ * @param {{reserve:(origin:string,opts:{isWrite:boolean,signal?:AbortSignal,maxInlineWaitMs?:number})
+ * => Promise<{outcome:string,waitedMs:number}>,
+ * observe:(signal:{origin:string,responseAtMs:number,status?:number,retryAfter?:unknown})=>Promise<void>,
+ * isWriteMethod:(method:string)=>boolean,canonicalOrigin:(input:string)=>string|null}} [deps.pace]
  */
-export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => {
+export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace }) => {
   const _fetch = fetchFn ?? fetch;
   const _audit = audit ?? (async () => {});
   /**
@@ -355,9 +363,10 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
     const urlString = resource instanceof Request ? resource.url
       : resource instanceof URL ? resource.toString()
       : resource;
-    // why on the audit: the code-mode bridge now sends full HTTP, so the log
-    // must distinguish a GET read from a POST write (a wider surface to see).
-    const method = (init && typeof init.method === 'string' ? init.method : 'GET').toUpperCase();
+    // why: pacing and audit must use the method and cancellation fetch sends.
+    const method = (typeof init?.method === 'string' ? init.method
+      : resource instanceof Request ? resource.method : 'GET').toUpperCase();
+    const signal = init?.signal ?? (resource instanceof Request ? resource.signal : undefined);
     let u;
     try { u = new URL(urlString); }
     catch {
@@ -393,7 +402,26 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
     // header-less response), so we cannot re-validate and follow per hop;
     // we refuse the redirect instead. Forced regardless of the caller's
     // redirect mode (primitives.js used to ask for 'follow').
+    // Only the kernel's real Response may teach a rule. Gate after the other
+    // refusals so invalid requests never consume a pacing reservation.
+    const paceKey = pace ? pace.canonicalOrigin(u.origin) : null;
+    if (pace && paceKey) {
+      const clearance = await pace.reserve(paceKey, {
+        isWrite: pace.isWriteMethod(method), signal: signal ?? undefined,
+        maxInlineWaitMs: NETWORK_INLINE_WAIT_MS,
+      });
+      if (clearance.outcome === 'handoff' || clearance.outcome === 'unavailable') {
+        const reason = clearance.outcome === 'handoff' ? 'pacing_ceiling' : 'pacing_unavailable';
+        _audit({ type: 'egress_denied', details: { origin: u.origin, reason, method } }).catch(() => {});
+        throw new EgressDeniedError(u.origin, reason);
+      }
+    }
+    signal?.throwIfAborted();
     const res = await _fetch(resource, { ...init, redirect: 'manual' });
+    if (pace && paceKey) await pace.observe({
+      origin: paceKey, responseAtMs: Date.now(), status: res.status,
+      retryAfter: res.headers?.get?.('retry-after') ?? null,
+    });
     if (isRedirect(res)) {
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'redirect_blocked', status: res.status } }).catch(() => {});
       throw new EgressDeniedError(u.origin, 'redirect_blocked');

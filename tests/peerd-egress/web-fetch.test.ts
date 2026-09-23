@@ -15,7 +15,7 @@ const setup = (over: any = {}) => {
   return { webFetch, audits, fetched: () => fetched };
 };
 
-describe('webFetch — private-network SSRF block', () => {
+describe('webFetch - request policy', () => {
   test('a denylist provider failure stops the request before fetch', async () => {
     let fetchCalls = 0;
     const policyError = new Error('policy unavailable');
@@ -49,11 +49,16 @@ describe('webFetch — private-network SSRF block', () => {
     expect(audits.at(-1).details.reason).toBe('private_network');
   });
 
-  test('allows a public host (and still audits + denylists)', async () => {
-    const { webFetch, audits, fetched } = setup();
-    const res = await webFetch('https://huggingface.co/model.onnx');
+  test('allows a public Request POST and paces its method', async () => {
+    const writes: boolean[] = [];
+    const { webFetch, audits } = setup({ pace: {
+      reserve: async (_origin: string, opts: { isWrite: boolean }) => { writes.push(opts.isWrite); return { outcome: 'go', waitedMs: 0 }; },
+      observe: async () => {}, isWriteMethod: (method: string) => method === 'POST',
+      canonicalOrigin: (origin: string) => origin,
+    } });
+    const res = await webFetch(new Request('https://huggingface.co/model.onnx', { method: 'POST' }));
     expect(res.ok).toBe(true);
-    expect(fetched()).toBe('https://huggingface.co/model.onnx');
+    expect(writes).toEqual([true]);
     expect(audits.at(-1).type).toBe('web_fetch');
     // denylist still works on public hosts
     await expect(webFetch('https://bank.example.com/')).rejects.toBeInstanceOf(EgressDeniedError);
@@ -70,7 +75,7 @@ describe('webFetch — private-network SSRF block', () => {
   });
 });
 
-describe('webFetch — redirects fail closed', () => {
+describe('webFetch - response policy', () => {
   test('refuses a 3xx, audits redirect_blocked, returns no response', async () => {
     const audits: any[] = [];
     const webFetch = makeWebFetch({
@@ -95,15 +100,13 @@ describe('webFetch — redirects fail closed', () => {
     await expect(webFetch('https://example.com/r')).rejects.toBeInstanceOf(EgressDeniedError);
   });
 
-  test('a normal 200 passes straight through', async () => {
-    const webFetch = makeWebFetch({
-      getDenylist: () => [],
-      matchDenylist: () => false,
-      audit: async () => {},
-      fetchFn: (async () => new Response('ok', { status: 200 })) as any,
-    });
-    const res = await webFetch('https://example.com/ok');
-    expect(res.status).toBe(200);
+  test('a pacing observation must finish before the fetch returns', async () => {
+    const { webFetch } = setup({ pace: {
+      reserve: async () => ({ outcome: 'go', waitedMs: 0 }),
+      observe: async () => { throw new Error('save failed'); },
+      isWriteMethod: () => false, canonicalOrigin: (origin: string) => origin,
+    } });
+    await expect(webFetch('https://example.com/ok')).rejects.toThrow('save failed');
   });
 
   test('304 Not Modified is NOT treated as a redirect', async () => {
