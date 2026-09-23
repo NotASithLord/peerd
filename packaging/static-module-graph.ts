@@ -7,7 +7,7 @@
 // host-specific dynamic edges; Chrome MV3 service-worker packaging does not
 // treat import() as a cold-graph boundary.
 
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 export type StaticImportReader = (source: string, filename: string) => string[] | Promise<string[]>;
@@ -93,30 +93,43 @@ export const collectStaticModuleGraph = async (
     if (!pathIsInside(absoluteRoot, file)) {
       throw new Error(`static module graph escapes artifact root: ${relative(absoluteRoot, file)}`);
     }
-    if (!existsSync(file)) {
-      throw new Error(`static module missing from artifact: ${relative(absoluteRoot, file)}`);
-    }
     const relativeInput = relative(absoluteRoot, file);
-    const inputStat = lstatSync(file);
-    if (inputStat.isSymbolicLink()) {
-      throw new Error(`static module graph input is symlinked: ${relativeInput}`);
+    let descriptor: number;
+    try {
+      descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') throw new Error(`static module missing from artifact: ${relativeInput}`);
+      if (code === 'ELOOP') throw new Error(`static module graph input is symlinked: ${relativeInput}`);
+      throw error;
     }
-    if (!inputStat.isFile()) {
-      throw new Error(`static module graph input is not a regular file: ${relativeInput}`);
-    }
-    const realFile = realpathSync(file);
-    if (!pathIsInside(realRoot, realFile)) {
-      throw new Error(`static module graph input escapes real artifact root: ${relativeInput}`);
-    }
-    // why: a symlinked parent can redirect reads and writes even when the final
-    // directory entry is a regular file and its lexical path stays in staging.
-    if (realFile !== resolve(realRoot, relativeInput)) {
-      throw new Error(`static module graph input traverses a symlink: ${relativeInput}`);
+    let source: string | undefined;
+    try {
+      const openedStat = fstatSync(descriptor);
+      if (!openedStat.isFile()) {
+        throw new Error(`static module graph input is not a regular file: ${relativeInput}`);
+      }
+      const realFile = realpathSync(file);
+      if (!pathIsInside(realRoot, realFile)) {
+        throw new Error(`static module graph input escapes real artifact root: ${relativeInput}`);
+      }
+      // why: parent symlinks are forbidden too. Verify that the opened inode is
+      // still the checked path, then read that descriptor so later replacement
+      // cannot redirect the graph reader outside the artifact.
+      const inputStat = lstatSync(file);
+      if (inputStat.isSymbolicLink() || realFile !== resolve(realRoot, relativeInput)) {
+        throw new Error(`static module graph input traverses a symlink: ${relativeInput}`);
+      }
+      if (openedStat.dev !== inputStat.dev || openedStat.ino !== inputStat.ino) {
+        throw new Error(`static module graph input changed during validation: ${relativeInput}`);
+      }
+      if (['.js', '.mjs'].includes(extname(file))) source = readFileSync(descriptor, 'utf8');
+    } finally {
+      closeSync(descriptor);
     }
     graph.add(file);
 
-    if (!['.js', '.mjs'].includes(extname(file))) continue;
-    const source = readFileSync(file, 'utf8');
+    if (source === undefined) continue;
     for (const specifier of await readStaticImports(source, relative(absoluteRoot, file))) {
       let target: string;
       try {

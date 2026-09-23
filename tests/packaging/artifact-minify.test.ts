@@ -157,6 +157,35 @@ describe('release artifact JavaScript minification', () => {
       .rejects.toThrow('static module graph input is not a regular file: support');
   });
 
+  test('reads the validated descriptor when a module path is replaced before reading', async () => {
+    const root = makeRoot();
+    const outside = makeRoot();
+    write(root, 'entry.js', 'export const safe = true;\n');
+    write(outside, 'outside.js', 'import "https://outside.invalid/escaped.js";\n');
+    // why: isolate the fs interception from the rest of the test process while
+    // deterministically replacing the checked directory entry at the read seam.
+    const probe = Bun.spawnSync([process.execPath, '--eval', `
+      import { mock } from 'bun:test';
+      import * as fs from 'node:fs';
+      const realRead = fs.readFileSync;
+      const entry = ${JSON.stringify(join(root, 'entry.js'))};
+      let replaced = false;
+      mock.module('node:fs', () => ({ ...fs, readFileSync: (input, ...args) => {
+        if (!replaced && (typeof input === 'number' || input === entry)) {
+          replaced = true;
+          fs.renameSync(entry, entry + '.original');
+          fs.symlinkSync(${JSON.stringify(join(outside, 'outside.js'))}, entry);
+        }
+        return realRead(input, ...args);
+      }}));
+      const { collectStaticModuleGraph } = await import(${JSON.stringify(pathToFileURL(join(import.meta.dir, '../../packaging/static-module-graph.ts')).href)});
+      const graph = await collectStaticModuleGraph(${JSON.stringify(root)}, entry);
+      if (!replaced || graph.size !== 1) throw new Error('read-race probe was not exercised');
+    `], { stdout: 'pipe', stderr: 'pipe' });
+    expect(new TextDecoder().decode(probe.stderr)).toBe('');
+    expect(probe.exitCode).toBe(0);
+  });
+
   test('detects an equal-count, equal-byte dependency substitution', async () => {
     const build = async (suffix: 'a' | 'b') => {
       const root = makeRoot();
