@@ -59,16 +59,6 @@ id = "GHSA-v2hh-gcrm-f6hx"
 ignoreUntil = 2026-11-01
 reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
 
-[[IgnoredVulns]]
-id = "GHSA-5p2g-fcmc-qvqq"
-ignoreUntil = 2026-09-15
-reason = "image-size 2.0.2, exact-pinned by the latest addons-linter and with no patched upstream release. Our Bun patch disables the vulnerable HEIF/JXL parsers before calculation; regression tested. Build-time only; never shipped."
-
-[[IgnoredVulns]]
-id = "GHSA-w3rx-r6r6-pgpr"
-ignoreUntil = 2026-09-15
-reason = "image-size 2.0.2, exact-pinned by the latest addons-linter and with no patched upstream release. Our Bun patch disables the vulnerable ICNS parser before calculation; regression tested. Build-time only; never shipped."
-
 # undici — web-ext's HTTP client for the AMO upload/poll. The closest thing
 # here to a path that matters (it talks to a network service during signing),
 # but it talks only to addons.mozilla.org over TLS, in a release job that is
