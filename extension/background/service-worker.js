@@ -2344,9 +2344,9 @@ const buildToolContext = async (/** @type {any} */ {
     // Routines (loop/scheduler.js). Resolved lazily — `scheduler` is built after
     // this fn (same late-dep dance as goalRunner). Routines are GLOBAL (not
     // per-session), so these are present regardless of sessionId.
-    scheduleAdd: (/** @type {any} */ req) => scheduler?.add(req) ?? { ok: false, error: 'schedule_unavailable' },
-    scheduleList: () => scheduler?.list() ?? [],
-    scheduleRemove: (/** @type {string} */ id) => scheduler?.remove(id) ?? false,
+    scheduleAdd: async (/** @type {any} */ req) => scheduler?.add(req) ?? { ok: false, error: 'schedule_unavailable' },
+    scheduleList: async () => scheduler?.listReady() ?? [],
+    scheduleRemove: async (/** @type {string} */ id) => scheduler?.removeReady(id) ?? false,
     // why: the todo_* tools mutate the session's plan-of-record through this
     // serialized read-modify-write (todoChains, module scope) — two todo ops
     // in one concurrent tool wave would otherwise race the record and lose an
