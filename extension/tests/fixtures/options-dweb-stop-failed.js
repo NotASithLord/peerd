@@ -5,10 +5,12 @@ import m from '/vendor/mithril/mithril.js';
 import { DwebSection } from '/options/sections/dweb.js';
 
 const state = { settings: { dwebEnabled: true, dwebAgentEnabled: false } };
+const unknownOutcome = new URLSearchParams(location.search).has('unknown');
 
 /** @param {{ type: string } & Record<string, unknown>} message */
 const send = async (message) => {
   if (message.type !== 'settings/update') return { ok: true };
+  if (unknownOutcome) return { ok: false, outcomeKnown: false };
   const settings = { ...state.settings, dwebEnabled: false };
   state.settings = settings;
   return { ok: false, error: 'dweb-stop-failed', settings };

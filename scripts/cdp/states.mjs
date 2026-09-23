@@ -5016,6 +5016,32 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  {
+    name: 'options-dweb-outcome-unknown', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'tests/fixtures/options-dweb-stop-failed.html?unknown=1', {
+        ready: '[role="alert"]',
+      });
+      try {
+        const status = await evalIn(page, `(() => ({
+          warning: document.querySelector('[role="alert"]')?.textContent ?? '',
+          badge: document.querySelector('.set-badge')?.textContent ?? '',
+          reload: [...document.querySelectorAll('button')].some((button) =>
+            button.textContent === 'Reload dweb status' && !button.disabled),
+          mutationsDisabled: [...document.querySelectorAll('button[role="switch"]')]
+            .every((button) => button.disabled),
+          reset: [...document.querySelectorAll('button')].some((button) =>
+            button.textContent === 'Reset section to defaults'),
+        }))()`);
+        rec.check('unknown network custody is explicit and offers only reconciliation',
+          status?.badge === 'STATUS UNKNOWN' && status?.reload === true
+            && status?.mutationsDisabled === true && status?.reset === false
+            && status?.warning.includes('could not confirm whether'), JSON.stringify(status));
+        await rec.visualPage('options-dweb-outcome-unknown', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
   // --- visual: the STANDALONE TAB PAGES ---------------------------------------
   //
   // Coverage audit finding: every visual baseline photographed the side panel,

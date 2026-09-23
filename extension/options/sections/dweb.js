@@ -152,6 +152,7 @@ export const DwebSection = {
         label: 'dweb agent',
         on: agentOn,
         busyKey: 'dwebAgentBusy',
+        disabled: ui.dwebOutcomeUnknown,
         summary: agentOn
           ? 'Addressable as "dweb" in chat (message_actor); joins the agent inbox on unlock.'
           : 'The mesh tools are unavailable - they live on this agent, not the chat agent.',
@@ -178,7 +179,7 @@ export const DwebSection = {
         m('button.secondary', { type: 'button', onclick: () => openHome('library') }, 'Open Library'),
       ]) : null,
 
-      resetRow(send, ['dwebEnabled', 'dwebAgentEnabled']),
+      ui.dwebOutcomeUnknown ? null : resetRow(send, ['dwebEnabled', 'dwebAgentEnabled']),
     ]);
   },
 };

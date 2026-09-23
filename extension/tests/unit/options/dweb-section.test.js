@@ -86,12 +86,18 @@ describe('options.dweb live-stop status', () => {
     };
     m.mount(root, { view: () => m(DwebSection, { state, send, loadStatus: async () => null }) });
     try {
-      button(root, 'Disable dweb').click();
+      networkSwitch(root).click();
       await settle();
       expect(root.textContent).toContain('could not confirm whether the dweb change finished');
       expect(root.textContent.includes('raw host transport failure')).toBe(false);
-      expect(button(root, 'Reload dweb status') instanceof HTMLButtonElement).toBe(true);
-      expect(button(root, 'Retry stopping dweb') === undefined).toBe(true);
+      expect([...root.querySelectorAll('button')].some((button) =>
+        button.textContent === 'Reload dweb status')).toBe(true);
+      expect(rowState(root).badge).toBe('STATUS UNKNOWN');
+      expect(rowState(root).name.includes('retry stopping')).toBe(false);
+      expect([...root.querySelectorAll('button')].some((button) =>
+        button.textContent === 'Reset section to defaults')).toBe(false);
+      expect([...root.querySelectorAll('button[role="switch"]')].every((button) =>
+        button.hasAttribute('disabled'))).toBe(true);
       expect(calls).toBe(1);
     } finally {
       m.mount(root, null);

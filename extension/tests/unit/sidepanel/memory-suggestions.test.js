@@ -143,6 +143,41 @@ describe('options.memory-suggestions', () => {
   });
 
   describe('interactions', () => {
+    it('an unknown auto-memory save keeps the row and reset disabled without retrying', async () => {
+      const send = makeSend({ 'settings/update': () => ({ ok: false, outcomeKnown: false }) });
+      const { root, unmount } = await mountView(send);
+      try {
+        const toggle = need(root, 'button[role="switch"][aria-label="Auto-memory - on"]');
+        toggle.click();
+        await flush();
+        expect(toggle.hasAttribute('disabled')).toBe(true);
+        expect(root.textContent).toContain('could not confirm whether changing auto-memory finished');
+        const reset = [...root.querySelectorAll('button')].find((button) =>
+          button.textContent === 'Reset section to defaults');
+        expect(reset?.disabled).toBe(true);
+        toggle.click();
+        reset?.click();
+        await flush();
+        expect(send.calls.filter((call) => call.type === 'settings/update').length).toBe(1);
+        expect(send.calls.some((call) => call.type === 'settings/reset')).toBe(false);
+      } finally { unmount(); }
+    });
+
+    it('a known failed auto-memory save clears busy and keeps the row retryable', async () => {
+      const send = makeSend({ 'settings/update': () => ({ ok: false, outcomeKnown: true }) });
+      const { root, unmount } = await mountView(send);
+      try {
+        const toggle = need(root, 'button[role="switch"][aria-label="Auto-memory - on"]');
+        toggle.click();
+        await flush();
+        expect(toggle.hasAttribute('disabled')).toBe(false);
+        expect(root.textContent).toContain('Auto-memory could not be changed.');
+        toggle.click();
+        await flush();
+        expect(send.calls.filter((call) => call.type === 'settings/update').length).toBe(2);
+      } finally { unmount(); }
+    });
+
     it('Approve dispatches memory/suggestions/approve and re-fetches list + docs', async () => {
       const send = makeSend();
       const { root, unmount } = await mountView(send);
