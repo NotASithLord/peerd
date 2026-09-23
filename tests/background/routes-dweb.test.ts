@@ -1196,11 +1196,11 @@ describe('App consent update and room custody cutover', () => {
     const { deps, sent } = baseDeps({ appTabTracker: tracked });
     expect(await makeDwebRoutes(deps)['dweb/base/room']({
       ...claim, op: 'join', appGeneration: 500, roomSnapshot: { malicious: true },
-      releaseSnapshot: { malicious: true }, release: { malicious: true }, expectedHash: 'forged',
+      releaseSnapshot: { malicious: true }, release: { malicious: true }, expectedHash: 'forged', created: 1,
     }, sender)).toMatchObject({ ok: true });
     expect(sent[0]).toMatchObject({ appGeneration: 0, publicationGeneration: 1,
       appTabId: 41, appDocumentId: 'document-one' });
-    for (const field of ['bridgeAppGeneration', 'roomSnapshot', 'releaseSnapshot', 'release', 'expectedHash']) {
+    for (const field of ['bridgeAppGeneration', 'roomSnapshot', 'releaseSnapshot', 'release', 'expectedHash', 'created']) {
       expect(Object.hasOwn(sent[0], field)).toBe(false);
     }
   });

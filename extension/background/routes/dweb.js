@@ -708,6 +708,7 @@ export const makeDwebRoutes = (deps) => {
         releaseSnapshot: _claimedReleaseSnapshot,
         release: _claimedRelease,
         expectedHash: _claimedExpectedHash,
+        created: _claimedCreated,
         bridgeAppId, bridgeAppHash, bridgeAppForked, bridgeAppGeneration,
         ...args
       } = msg;
