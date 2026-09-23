@@ -188,9 +188,10 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // modules already present is what these two numbers track.
     // The untrusted-content escaping repair adds only leaf-module source and
     // rationale, with no dependency or entry growth. The integrated source
-    // graph measures 4,712,048 bytes; allow only the measured rounding margin.
+    // graph plus the binding-cleanup helper measures 4,712,360 bytes. The
+    // helper grows an existing module only; retain the same import-count cap.
     expect(graph.size).toBeLessThanOrEqual(458);
-    expect(bytes).toBeLessThanOrEqual(4_712_100);
+    expect(bytes).toBeLessThanOrEqual(4_712_400);
     expect(statSync(entry).size).toBeLessThanOrEqual(462_000);
   });
 
