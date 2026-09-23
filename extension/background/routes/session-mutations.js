@@ -17,7 +17,7 @@ export const makeSessionMutationRoutes = (deps) => {
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResumeAfterRecovery, haltGoalRun, turnSlots, actorMessaging, nukeSessionWorkspace,
-    purgeLifecycleSession,
+    actorLifecycle, purgeLifecycleSession,
   } = deps;
 
   return {
@@ -44,24 +44,7 @@ export const makeSessionMutationRoutes = (deps) => {
       // why read BEFORE delete: "new chat" is a switch-away from the
       // current session — one of auto-memory's two lifecycle seams.
       const previousId = await sessionCache.sessionGet('currentSessionId');
-      // why: a "new chat" abandons the current one — end its goal run (if any)
-      // so it doesn't keep driving the orphaned session in the background.
-      // (A plain session/switch does NOT halt — that's the "keep running while
-      // I'm in another chat" case.) Awaited: stop() durably forgets the run's
-      // persisted record, so a "new chat" can't be undone by a resume() on the
-      // next unlock even if the SW is torn down right after this handler (#60).
-      if (previousId) await haltGoalRun?.(previousId);
-      // A "new chat" abandons the current session, so its BACKGROUND WORK must
-      // stop — not keep running invisibly. haltGoalRun (above) ends any goal
-      // loop; this ends the live TURN and CASCADES to its in-flight ACTORS (each
-      // runs on its OWN turn slot, so stopping the orchestrator alone leaves
-      // delegated web/VM/App/Notebook work running to completion). why: without
-      // it, New-chat mid-web-task — and the OM2W eval harness, which
-      // session/resets between EVERY task — leaks a live web-actor loop; they
-      // pile up until the SW saturates and every later turn stalls (the harness
-      // "2 tasks then a wall of timeouts"). Mirrors agent/stop's cascade
-      // (routes/sessions.js). Guarded so callers that don't wire the slots (unit
-      // tests) are a no-op.
+      // New chat must stop all work that belongs to the current session.
       if (previousId && turnSlots?.stop?.(previousId)) {
         auditLog.append({ type: 'session_ended', sessionId: previousId, details: { reason: 'session_reset' } }).catch(() => {});
       }
@@ -72,12 +55,16 @@ export const makeSessionMutationRoutes = (deps) => {
           }
         }
       }
+      if (previousId && actorLifecycle?.stopSubtree) {
+        for (const childSessionId of actorLifecycle.stopSubtree(previousId)) {
+          auditLog.append({ type: 'actor_stopped', sessionId: previousId, details: { childSessionId, reason: 'session_reset_cascade' } }).catch(() => {});
+        }
+      }
+      // A failed durable goal removal blocks reset and a later resume.
+      if (previousId) await haltGoalRun?.(previousId);
       await sessionCache.sessionDelete('currentSessionId');
       sessionState.clear();
-      // The caller may send the first message of the new chat immediately
-      // after this route resolves. Finish projecting the empty chat first so
-      // this reset snapshot cannot arrive after that turn's live events and
-      // wipe the new transcript back to the welcome screen.
+      // Finish the empty state first. A late reset must not erase a new turn.
       await pushState();
       if (previousId) {
         autoMemory.maybeExtract(previousId, 'switch')
@@ -119,14 +106,8 @@ export const makeSessionMutationRoutes = (deps) => {
     'session/archive': async ({ sessionId }) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       try {
-        await sessions.archive(sessionId);
-        // Archiving wraps the chat up — end its goal run (if any) so it can't
-        // keep running on a put-away session. Awaited: durably forget the run so
-        // it can't resurrect on the next unlock (#60).
-        await haltGoalRun?.(sessionId);
-        // Archive is also Stop. End the root turn and every delegated actor
-        // before cleaning up durable state so no hidden work can continue on
-        // a put-away chat.
+        if (!await sessions.get(sessionId)) return { ok: false, error: 'session-not-found' };
+        // Archive must stop all work before it changes durable state.
         if (turnSlots?.stop?.(sessionId)) {
           auditLog.append({ type: 'session_ended', sessionId, details: { reason: 'session_archive' } }).catch(() => {});
         }
@@ -140,35 +121,31 @@ export const makeSessionMutationRoutes = (deps) => {
             }
           }
         }
-        // Settle lifecycle records before returning. For dispatched Class D/E
-        // actions this preserves uncertainty and a verification notice instead
-        // of falsely reporting cancellation.
-        // Tool operations are keyed to the execution session, not only the
-        // owning root chat. Settle every stopped actor too, before archive
-        // returns, so a crash cannot strand its dispatched D/E action until a
-        // later boot or hide its verification notice in an archived chat.
+        if (actorLifecycle?.stopSubtree) {
+          for (const childSessionId of actorLifecycle.stopSubtree(sessionId)) {
+            actorSessionIds.push(childSessionId);
+            auditLog.append({ type: 'actor_stopped', sessionId, details: { childSessionId, reason: 'session_archive_cascade' } }).catch(() => {});
+          }
+        }
+        // A failed durable goal Stop leaves the session available for a retry.
+        await haltGoalRun?.(sessionId);
+        await sessions.archive(sessionId);
+        // Settle each execution session. Keep uncertain side effects visible.
         for (const lifecycleSessionId of new Set([sessionId, ...actorSessionIds])) {
           await purgeLifecycleSession?.(lifecycleSessionId);
         }
-        // If the archived session was the active one, drop the cache so
-        // the next agent/send creates a fresh session.
+        // Clear the active cache when it points to the archived session.
         const currentId = await sessionCache.sessionGet('currentSessionId');
         if (currentId === sessionId) {
           await sessionCache.sessionDelete('currentSessionId');
           sessionState.clear();
         }
         pushState();
-        // Auto-memory lifecycle seam: archiving IS the session wrapping
-        // up. Fire-and-forget so archive stays instant.
+        // Archive starts a best-effort memory extraction.
         autoMemory.maybeExtract(sessionId, 'archive')
           .catch((/** @type {unknown} */ e) => console.warn('[sw] auto-memory extract failed', e));
-        // Tear down the session's durable script workspace
-        // (['peerd-workspace', sid] in OPFS). why HERE: archive is the terminal
-        // session-lifecycle event today — no session-delete route exists (the
-        // sessions view's "×" archives) — so this is where "the session is torn
-        // down" lives; if a true delete route ever lands, it must nuke too.
-        // Fire-and-forget + guarded: workspace bytes are agent scratch,
-        // best-effort cleanup must never fail the archive.
+        // why: Archive is the terminal session event. Remove its script files.
+        // Cleanup is best-effort and must not fail archive.
         Promise.resolve(nukeSessionWorkspace?.(sessionId)).catch(() => {});
         return { ok: true };
       } catch (e) {
