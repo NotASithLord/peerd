@@ -37,6 +37,7 @@ import { publishFailureError, runPublishTransaction } from '/shared/publish-tran
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
 import { createAppRoomAuthority } from '/offscreen/app-room-authority.js';
+import { requireAppRoomSnapshot } from '/offscreen/app-room-snapshot.js';
 import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
 import { runDwebReseedPublication } from '/offscreen/dweb-reseed-publication.js';
 
@@ -128,6 +129,11 @@ const publishLocalApp = async (h, msg, ownerId) => {
   if (supplied && (!snapshot.record || !snapshot.files || typeof snapshot.files !== 'object')) {
     throw new Error('release snapshot malformed');
   }
+  return publishAppSnapshot(h, msg, ownerId, snapshot);
+};
+
+/** @param {any} h @param {{release?:any,created?:number,expectedHash?:string}} identity @param {string} ownerId @param {any} snapshot */
+const publishAppSnapshot = async (h, identity, ownerId, snapshot) => {
   if (!snapshot?.ok) throw new Error(snapshot?.error ?? 'App snapshot failed');
   const entries = Object.entries(snapshot.files ?? {});
   if (!entries.length || entries.length > 256) throw new Error('App snapshot file count invalid');
@@ -150,9 +156,9 @@ const publishLocalApp = async (h, msg, ownerId) => {
     entry: record.entryFile,
     files,
     fileKinds: record.fileKinds ?? {},
-    release: msg.release,
-    created: msg.created,
-    expectedHash: msg.expectedHash,
+    release: identity.release,
+    created: identity.created,
+    expectedHash: identity.expectedHash,
   });
   const ownershipAdded = trackServedHash(ownerId, published.hash);
   return { ...published, size: published.packedBytes, storedBytes: snapshot.totalBytes, ownershipAdded };
@@ -874,10 +880,15 @@ const handleRoomOpUnlocked = async (msg, current = () => true) => {
     }
     case 'mute': room.gossip.mute(msg.did); return { ok: true };
     case 'publish-app': {
+      requireAppRoomSnapshot(msg, roomLiveness.snapshot(), current);
       const h = await start();
       const ownerId = appContentOwner(msg.appId, 'room');
       const { published, announced: recorded } = await runPublishTransaction({
-        publish: () => publishLocalApp(h, msg, ownerId),
+        // why: recheck after asynchronous startup. Room publication cannot
+        // borrow the release path or flush an editor under the authority lock.
+        publish: () => publishAppSnapshot(
+          h, {}, ownerId, requireAppRoomSnapshot(msg, roomLiveness.snapshot(), current),
+        ),
         announce: async ({ uri, hash }) => {
           const result = await swEffectCall('dweb/app-record-served', {
             appId: msg.appId, uri, hash,

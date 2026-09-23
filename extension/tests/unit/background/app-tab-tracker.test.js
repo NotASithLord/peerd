@@ -354,7 +354,9 @@ describe('App tab tracker quiescence', () => {
       },
       create: async () => ({ id: 42 }), reload: async () => {}, remove: async () => {},
     });
-    const tracker = createAppTabTracker({ tabs });
+    const tracker = createAppTabTracker({
+      tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
+    });
     tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
     expect(await tracker.reconcileTabClaim('app-1', 42)).toBe(41);
     expect(tracker.getTabId('app-1')).toBe(41);
@@ -370,7 +372,9 @@ describe('App tab tracker quiescence', () => {
       query: async () => [{ id: 41, url: 'moz-extension://test/home/home.html' }],
       remove: async (/** @type {number} */ tabId) => { removed.push(tabId); },
     });
-    const tracker = createAppTabTracker({ tabs });
+    const tracker = createAppTabTracker({
+      tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
+    });
     tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
     expect(await tracker.closeTab('app-1')).toBe(false);
     expect(removed).toEqual([]);
@@ -388,7 +392,9 @@ describe('App tab tracker quiescence', () => {
       },
       remove: async (/** @type {number} */ tabId) => { removed.push(tabId); },
     });
-    const tracker = createAppTabTracker({ tabs });
+    const tracker = createAppTabTracker({
+      tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
+    });
     tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
     snapshotFails = true;
     await expect(() => tracker.closeTab('app-1'))
