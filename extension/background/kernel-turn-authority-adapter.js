@@ -1004,6 +1004,9 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         },
       } : {}),
       denylist: Object.freeze([...deps.denylist.patterns()]),
+      // why: exact browser gates may run after consent or pacing waits. The
+      // semantic snapshot is not authority to keep using a newly blocked site.
+      readAuthorityDenylist: () => Object.freeze([...deps.denylist.patterns()]),
       allowlist: Object.freeze([...HARDCODED_ALLOWLIST, ...userEndpoints]),
       provider: {
         name: providerName,

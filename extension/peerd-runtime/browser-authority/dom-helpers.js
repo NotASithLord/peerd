@@ -230,7 +230,7 @@ const enforceCommittedBrowserTarget = (target) => {
  * yields null, which every caller already surfaces as a refusal.
  *
  * @param {{ tabId?: number }} args
- * @param {{ tabs: any, denylist?: readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, authorityDocumentIdentity?: {origin:string,href:string,documentId:string,timeOrigin:number}, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null>, scripting?: any, noteLearnedOrigin?: (origin: string, reason: string) => void, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<{ ok?: boolean, structured?: { reason?: string } }> }} ctx
+ * @param {{ tabs: any, denylist?: readonly string[], readAuthorityDenylist?: () => readonly string[], activeTab?: { id: number, url: string, origin: string }, actorType?: string, authorityDocumentIdentity?: {origin:string,href:string,documentId:string,timeOrigin:number}, noteTab?: (tabId: number, url?: string, opts?: { opened?: boolean }) => void, judgeLanding?: (url: string) => Promise<{ action: string } | null>, scripting?: any, noteLearnedOrigin?: (origin: string, reason: string) => void, ensureBrowserNetworkGuard?: (tabId: number, targetUrl?: string) => Promise<{ ok?: boolean, structured?: { reason?: string } }> }} ctx
  * @param {{ allowRestrictedSource?: boolean }} [options]
  *
  * `judgeLanding` (issue 251) is the origin lock, injected by the SW so this
@@ -239,6 +239,15 @@ const enforceCommittedBrowserTarget = (target) => {
  * actor kind with no tab: means no lock, which is the pre-251 behaviour.
  */
 export const resolveTargetTab = async (args, ctx, options = {}) => {
+  const denied = (/** @type {string|undefined} */ url) => {
+    // why: a context snapshot predates queued operations, consent and pacing.
+    // The host-only reader keeps live policy authoritative; an unavailable
+    // reader cannot silently fall back to the earlier permissive snapshot.
+    try {
+      return isDenylistedTab(url, typeof ctx.readAuthorityDenylist === 'function'
+        ? ctx.readAuthorityDenylist() : ctx.denylist);
+    } catch { return true; }
+  };
   let tab = null;
   if (args?.tabId) {
     try { tab = await ctx.tabs.get(args.tabId); } catch { return null; }
@@ -285,7 +294,7 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
     if (internallyAdoptedBlank) return tab;
     throw new BrowserAutomationPolicyError(sourceVerdict, { effectCompleted: false });
   }
-  if (isDenylistedTab(tab.url, ctx.denylist)) return null;
+  if (denied(tab.url)) return null;
   // issue 251: THE ORIGIN LOCK, enforced here and only here.
   //
   // why this chokepoint and not the gate stack: gates are pure and synchronous
@@ -332,7 +341,7 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
   if (liveOrigin && liveOrigin !== originOfUrl(tab.url)) {
     const liveUrl = live?.href ?? liveOrigin;
     // It moved. Judge where it IS, on the same two rules, and refuse on either.
-    if (isDenylistedTab(liveUrl, ctx.denylist)) return null;
+    if (denied(liveUrl)) return null;
     if (ctx.judgeLanding) {
       const verdict = await ctx.judgeLanding(liveUrl);
       if (verdict?.action === 'wait') {
@@ -367,6 +376,7 @@ export const resolveTargetTab = async (args, ctx, options = {}) => {
       });
     }
   }
+  if (denied(tab.url)) return null;
   // The loop just targeted THIS tab by id (navigate/click/type/read/… on a tab
   // the agent opened): update the "current agent tab" card so it tracks where
   // the agent is working. Only when explicitly addressed (args.tabId): operating

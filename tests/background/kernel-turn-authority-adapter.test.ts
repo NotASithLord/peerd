@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { createKernelTurnAuthorityAdapter } from '../../extension/background/kernel-turn-authority-adapter.js';
 import { createOriginPacingStore } from '../../extension/peerd-runtime/pacing/origin-pacing-store.js';
 import { createAuthorityEffectScheduler } from '../../extension/background/authority-effect-scheduler.js';
+import { createPageToolAuthority } from '../../extension/background/page-tool-authority.js';
 import {
   actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
 } from '../../extension/background/kernel-turn-authority-adapter.js';
@@ -127,6 +128,7 @@ const harness = async (
     sessionReadsUnavailable?: () => boolean,
     engineRecovery?: boolean,
     authorityScheduler?: ReturnType<typeof createAuthorityEffectScheduler>,
+    denylistPatterns?: () => string[],
   } = {},
 ) => {
   const toolProjections: any[] = [];
@@ -349,7 +351,7 @@ const harness = async (
         : Promise.reject(new Error('compose-unavailable-in-test')),
     },
     confirmation: { confirm: options.confirm ?? (async () => 'yes_once') },
-    denylist: { ready: async () => ({ ok: true }), patterns: () => [] },
+    denylist: { ready: async () => ({ ok: true }), patterns: options.denylistPatterns ?? (() => []) },
     featureHost: {
       ensureOffscreen: async () => {},
       runtime: {
@@ -1118,6 +1120,35 @@ describe('kernel turn authority adapter', () => {
     expect(await ctx.readAuthorityPermission()).toEqual({
       mode: 'plan', confirmActions: true,
     });
+  });
+
+  test.each(['blocked', 'unavailable'])('a paced page mutation refuses newly %s denylist custody', async (change) => {
+    let blocked = false;
+    let actions = 0;
+    const h = await harness(undefined, {
+      firefox: true,
+      denylistPatterns: () => {
+        if (blocked && change === 'unavailable') throw new Error('denylist unavailable');
+        return blocked ? ['example.com'] : [];
+      },
+      executeScript: async (request) => {
+        const probe = browserProbeResult(request, { url: 'https://example.com/work' });
+        if (probe) return probe;
+        actions += 1;
+        return [{ documentId: TEST_DOCUMENT_ID, result: { ok: true, clicked: true } }];
+      },
+    });
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    ctx.pacing = {
+      engaged: () => true,
+      peek: async () => ({ outcome: 'allowed' }),
+      reserve: async () => { blocked = true; return { outcome: 'waited', waitedMs: 1 }; },
+    };
+    const result = await createPageToolAuthority({
+      binding: { operation: 'turn.page.click', args: { tabId: 9, selector: '#next' } }, ctx,
+    }).clickOwnedTarget();
+    expect(result.ok).toBe(false);
+    expect(actions).toBe(0);
   });
 
   test('an exact actor relay reuses its latched surface without reacquiring semantics', async () => {
