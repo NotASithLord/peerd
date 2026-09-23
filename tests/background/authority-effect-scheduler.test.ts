@@ -169,6 +169,87 @@ describe('authority effect scheduler', () => {
     expect(entered).toEqual(['navigate', 'click']);
   });
 
+  test('joins a newly adopted tab to the active actor lane before a successor dispatches', async () => {
+    const scheduler = createAuthorityEffectScheduler();
+    const firstGate = deferred();
+    const firstEntered = deferred();
+    const entered: string[] = [];
+    const first = scheduler.run({ read: false, target: 'page:actor:zero' }, async () => {
+      entered.push('first');
+      firstEntered.resolve();
+      await firstGate.promise;
+    });
+    await firstEntered.promise;
+    const second = scheduler.run({
+      read: false, target: 'page:tab:7', aliases: ['page:actor:zero'],
+    }, () => { entered.push('second'); });
+    const sibling = scheduler.run({ read: false, target: 'page:tab:7' }, () => {
+      entered.push('sibling');
+    });
+    await scheduler.run({ read: false, target: 'page:tab:8' }, () => {
+      entered.push('unrelated');
+    });
+    expect(entered).toEqual(['first', 'unrelated']);
+    firstGate.resolve();
+    await Promise.all([first, second, sibling]);
+    expect(entered).toEqual(['first', 'unrelated', 'second', 'sibling']);
+  });
+
+  test('keeps poison attached to every resource alias after an abort-ignoring host settles', async () => {
+    const scheduler = createAuthorityEffectScheduler({ abortDrainMs: 1 });
+    const controller = new AbortController();
+    const firstGate = deferred();
+    const firstEntered = deferred();
+    const first = scheduler.run({
+      read: false, target: 'page:actor:zero', signal: controller.signal,
+    }, async () => { firstEntered.resolve(); await firstGate.promise; });
+    await firstEntered.promise;
+    controller.abort();
+    await expect(first).rejects.toMatchObject({ outcomeKnown: false });
+    await expect(scheduler.run({
+      read: false, target: 'page:tab:7', aliases: ['page:actor:zero'],
+    }, () => { throw new Error('must not dispatch'); })).rejects.toMatchObject({
+      code: 'authority-target-poisoned', outcomeKnown: false, retryable: false,
+    });
+    firstGate.resolve();
+    await Promise.resolve();
+    await expect(scheduler.run({ read: true, target: 'page:tab:7' }, () => {}))
+      .rejects.toMatchObject({ code: 'authority-target-poisoned' });
+  });
+
+  test('fails closed if resource aliases reveal two already-active lanes', async () => {
+    const scheduler = createAuthorityEffectScheduler();
+    const firstGate = deferred();
+    const enteredA = deferred();
+    const enteredB = deferred();
+    const first = scheduler.run({ read: false, target: 'page:actor:zero' }, async () => {
+      enteredA.resolve(); await firstGate.promise;
+    });
+    const second = scheduler.run({ read: false, target: 'page:tab:7' }, async () => {
+      enteredB.resolve(); await firstGate.promise;
+    });
+    await Promise.all([enteredA.promise, enteredB.promise]);
+    await expect(scheduler.run({
+      read: false, target: 'page:tab:7', aliases: ['page:actor:zero'],
+    }, () => {})).rejects.toMatchObject({ code: 'authority-target-poisoned' });
+    firstGate.resolve();
+    await Promise.all([first, second]);
+    for (const target of ['page:actor:zero', 'page:tab:7']) {
+      await expect(scheduler.run({ read: false, target }, () => {}))
+        .rejects.toMatchObject({ code: 'authority-target-poisoned' });
+    }
+  });
+
+  test('recognizes a nested target alias without self-deadlocking', async () => {
+    const scheduler = createAuthorityEffectScheduler();
+    let nested = false;
+    await scheduler.run({ read: false, target: 'page:actor:zero' }, (lease) =>
+      scheduler.run({
+        read: false, target: 'page:tab:7', aliases: ['page:actor:zero'], parentLease: lease,
+      }, () => { nested = true; }));
+    expect(nested).toBe(true);
+  });
+
   test('allows a nested same-target lease without self-deadlock', async () => {
     const scheduler = createAuthorityEffectScheduler();
     const entered: string[] = [];

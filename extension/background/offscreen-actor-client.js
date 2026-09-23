@@ -1149,9 +1149,18 @@ export const makeOffscreenActorClient = ({
     }
     try {
       const parentLease = entry.effect.parentEffect?.lease ?? null;
+      const pageAliases = [];
+      if (entry.grant.authorityPageResourceKey
+          && schedulerTarget === entry.grant.authorityPageResourceKey) {
+        // why: a successor run sees the adopted tab, not its predecessor's
+        // zero-tab key. Both names must retain the same queue and poison state.
+        pageAliases.push(`page:actor:${entry.grant.actorSessionId}`);
+        const ownedTabId = ownedTabFor?.(entry.grant.actorSessionId);
+        if (Number.isInteger(ownedTabId)) pageAliases.push(`page:tab:${ownedTabId}`);
+      }
       const value = await authorityScheduler.run({
         read: policy?.riskClass === 'read',
-        target: schedulerTarget ?? entry.operation, parentLease,
+        target: schedulerTarget ?? entry.operation, aliases: pageAliases, parentLease,
         // why: the outer page program is a semantic host/drain scope, not the
         // page mutation itself. Each nested exact op acquires its own SW-derived
         // resource lane, preventing A→B/B→A lock cycles while still serializing

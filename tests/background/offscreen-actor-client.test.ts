@@ -311,6 +311,104 @@ describe('isolated actor run custody', () => {
     ]).size).toBe(3);
   });
 
+  test('keeps a poisoned first-adoption lane closed to successor runs on the adopted tab', async () => {
+    const controller = new AbortController();
+    const listeners = new Set<(tabId: number, change: any) => void>();
+    let ownedTabId: number | undefined;
+    let currentUrl = 'about:blank';
+    let updates = 0;
+    let firstEntered!: () => void;
+    let releaseFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstEntered = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const effects: any[] = [];
+    const actorRecord = {
+      kind: 'actor', sessionId: 'web-adoption', actorType: 'web',
+      instanceId: 'web', backing: 'tab',
+    };
+    const tabs = {
+      get: async () => ({ id: 7, windowId: 1, url: currentUrl }),
+      update: async (tabId: number, update: { url: string }) => {
+        updates += 1;
+        if (updates === 1) {
+          firstEntered();
+          await firstGate;
+        }
+        currentUrl = update.url;
+        queueMicrotask(() => {
+          for (const listener of listeners) listener(tabId, { url: update.url });
+          for (const listener of listeners) listener(tabId, { status: 'complete' });
+        });
+        return { id: tabId, url: update.url };
+      },
+      onUpdated: {
+        addListener: (listener: any) => listeners.add(listener),
+        removeListener: (listener: any) => listeners.delete(listener),
+      },
+    };
+    const client = makeOffscreenActorClient(baseDeps({
+      sessions: { get: async () => structuredClone(actorRecord) },
+      ownedTabFor: () => ownedTabId,
+      buildToolContext: async () => ({
+        session: { sessionId: actorRecord.sessionId, kind: 'actor' },
+        actorType: 'web', actorBacking: 'tab', backing: 'tab', actorInstanceId: 'web',
+        activeTab: ownedTabId === undefined ? null : {
+          id: ownedTabId, windowId: 1, url: currentUrl,
+          origin: currentUrl === 'about:blank' ? '' : new URL(currentUrl).origin,
+        },
+        adoptWebTab: async () => {
+          ownedTabId = 7;
+          return { tabId: 7, windowId: 1 };
+        },
+        permission: { mode: 'act', confirmActions: false },
+        readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+        tabs, denylist: [], navigationTimeoutMs: 2_000,
+        scripting: {
+          executeScript: async () => [{ documentId: 'document:7', result: {
+            origin: currentUrl === 'about:blank' ? '' : new URL(currentUrl).origin,
+            href: currentUrl, timeOrigin: 1,
+          } }],
+        },
+        ensureBrowserNetworkGuard: async () => ({ ok: true }),
+        armBrowserChildQuarantine: async () => ({ ok: true }),
+        updateBrowserNetworkGuardOrigin: async () => ({ ok: true }),
+        judgeLanding: async () => ({ action: 'continue' }),
+        lifecycle: {
+          requiresIntentConfirmation: async () => false,
+          beginTracking: async () => ({ handle: {} }),
+          settleTracking: async () => {},
+        },
+        appendAudit: async () => {},
+      }),
+      runOnChannel: async (job: any, { relay }: any) => {
+        const callId = `navigate-${job.runId}`;
+        const effect = await relay('page/navigate', {
+          operation: 'turn.page.navigate', callId,
+          effectId: `${callId}:1`, effectSequence: 1,
+          turnGeneration: job.turnGeneration,
+          args: { url: 'https://www.wikipedia.org/wiki/Test' },
+        });
+        effects.push(effect);
+        return { ok: false, effect };
+      },
+    }));
+    const job = {
+      actorSessionId: actorRecord.sessionId, actorType: 'web', backing: 'tab',
+      message: 'm', systemPrompt: 's', provider: 'anthropic', model: 'model-1',
+      tools: [{ name: 'navigate' }], allowedOperations: ['turn.page.navigate'],
+    };
+    try {
+      const first = client.run(job as any, { signal: controller.signal });
+      await firstStarted;
+      controller.abort();
+      await first;
+      expect(effects[0]).toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
+      await client.run(job as any);
+      expect(updates).toBe(1);
+      expect(effects[1]).toMatchObject({ ok: false, outcomeKnown: false, retryable: false });
+    } finally { releaseFirst(); }
+  });
+
   test('stamps an empty stopped turn as a known pre-effect cancellation', async () => {
     const controller = new AbortController();
     const client = makeOffscreenActorClient(baseDeps({

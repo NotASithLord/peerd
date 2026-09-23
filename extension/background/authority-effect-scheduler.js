@@ -8,7 +8,7 @@
 
 /** @typedef {{barrier:Promise<unknown>,reads:Set<Promise<unknown>>}} AuthorityLane */
 /** @typedef {{lane:AuthorityLane,open:boolean,target:string|null}} AuthorityLease */
-/** @typedef {{lane:AuthorityLane,users:number,poisoned:boolean}} TargetLane */
+/** @typedef {{lane:AuthorityLane,users:number,poisoned:boolean,aliases:Set<string>}} TargetLane */
 
 /** @returns {AuthorityLane} */
 const makeLane = () => ({
@@ -69,9 +69,33 @@ export const createAuthorityEffectScheduler = ({
   const targetLanes = new Map();
   /** @type {WeakSet<object>} */
   const activeLeases = new WeakSet();
+  const poisonedTarget = () => Object.assign(
+    new Error('authority target is poisoned until host restart'),
+    { code: 'authority-target-poisoned', outcomeKnown: false, retryable: false },
+  );
+  const bindAliases = (/** @type {string[]} */ names) => {
+    const entries = [...new Set(names.map((name) => targetLanes.get(name))
+      .filter((entry) => entry !== undefined))];
+    const occupied = entries.filter((entry) => entry.users > 0);
+    const entry = occupied[0] ?? entries[0] ?? {
+      lane: makeLane(), users: 0, poisoned: false, aliases: new Set(),
+    };
+    // why: a first-adoption actor key and its later tab key identify the same
+    // resource, including its poison tombstone. Never join two running queues:
+    // an ambiguous late identity collision closes both lanes until restart.
+    if (occupied.length > 1 || entries.some((item) => item.poisoned)) {
+      for (const item of entries) item.poisoned = true;
+      entry.poisoned = true;
+    }
+    for (const name of [...names, ...entries.flatMap((item) => [...item.aliases])]) {
+      entry.aliases.add(name);
+      targetLanes.set(name, entry);
+    }
+    return entry;
+  };
   return Object.freeze({
     run: async (
-      /** @type {{read:boolean,target?:string|null,parentLease?:object|null,scopeOnly?:boolean,signal?:AbortSignal}} */ options,
+      /** @type {{read:boolean,target?:string|null,aliases?:string[],parentLease?:object|null,scopeOnly?:boolean,signal?:AbortSignal}} */ options,
       /** @type {(lease:object)=>Promise<any>|any} */ execute,
     ) => {
       const parent = options.parentLease;
@@ -81,19 +105,15 @@ export const createAuthorityEffectScheduler = ({
       }
       const target = typeof options.target === 'string' && options.target
         ? options.target : 'authority:unscoped';
-      const poisoned = targetLanes.get(target);
-      if (poisoned?.poisoned === true) {
-        throw Object.assign(new Error('authority target is poisoned until host restart'), {
-          code: 'authority-target-poisoned', outcomeKnown: false, retryable: false,
-        });
-      }
+      const resource = bindAliases([target, ...(options.aliases ?? [])]);
+      if (resource.poisoned) throw poisonedTarget();
       let targetEntry = null;
       const parentTarget = /** @type {{target?:string}} */ (parent)?.target;
-      const needsTargetLane = options.scopeOnly !== true && (!parent || parentTarget !== target);
+      const needsTargetLane = options.scopeOnly !== true
+        && (!parent || !parentTarget || targetLanes.get(parentTarget) !== resource);
       if (needsTargetLane) {
-        targetEntry = targetLanes.get(target) ?? { lane: makeLane(), users: 0, poisoned: false };
+        targetEntry = resource;
         targetEntry.users += 1;
-        targetLanes.set(target, targetEntry);
       }
       const parentLane = parent
         ? /** @type {{lane:{barrier:Promise<unknown>,reads:Set<Promise<unknown>>}}} */ (parent).lane
@@ -109,11 +129,7 @@ export const createAuthorityEffectScheduler = ({
           ? await enterLane(parentLane, options.read === true, options.signal) : null;
         releaseTarget = targetEntry
           ? await enterLane(targetEntry.lane, options.read === true, options.signal) : null;
-        if (targetEntry?.poisoned === true) {
-          throw Object.assign(new Error('authority target is poisoned until host restart'), {
-            code: 'authority-target-poisoned', outcomeKnown: false, retryable: false,
-          });
-        }
+        if (resource.poisoned) throw poisonedTarget();
         lease = /** @type {AuthorityLease} */ (parent && activeLeases.has(parent)
           ? parent : { lane: makeLane(), open: true, target: options.scopeOnly ? null : target });
         activeLeases.add(lease);
@@ -179,12 +195,10 @@ export const createAuthorityEffectScheduler = ({
         // instead of remaining parked behind an abort-ignoring host forever.
         releaseTarget?.();
         releaseParent?.();
-        if (targetEntry) {
-          targetEntry.users -= 1;
-          if (targetEntry.users === 0 && !targetEntry.poisoned
-              && targetLanes.get(target) === targetEntry) {
-            targetLanes.delete(target);
-          }
+        if (targetEntry) targetEntry.users -= 1;
+        if (resource.users === 0 && !resource.poisoned && resource.aliases.size === 1
+            && targetLanes.get(target) === resource) {
+          targetLanes.delete(target);
         }
       }
     },
