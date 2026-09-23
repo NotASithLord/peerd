@@ -538,6 +538,28 @@ const securityUpdateGroups = (): string[] => {
 };
 
 describe('Dependabot workflow eligibility gates', () => {
+  test('nested-checkout jobs select Bun from trusted policy instead of latest or the candidate', () => {
+    for (const [workflow, job] of [
+      ['dependabot-security-release.yml', 'verify'],
+      ['dependabot-security-release.yml', 'publish'],
+      ['dependabot-malware-observation.yml', 'observe'],
+    ]) {
+      const lines = readRepoFile(join('.github/workflows', workflow));
+      const start = lines.indexOf(`  ${job}:`);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const next = lines.findIndex((line, index) => index > start && /^  \S/.test(line));
+      const block = lines.slice(start, next < 0 ? undefined : next);
+      const setup = block.findIndex((line) => /^      - uses: oven-sh\/setup-bun@/.test(line));
+      expect(setup).toBeGreaterThanOrEqual(0);
+      const nextStep = block.findIndex((line, index) => index > setup && /^      - /.test(line));
+      const inputs = block.slice(setup + 1, nextStep < 0 ? undefined : nextStep)
+        .filter((line) => !/^\s*#/.test(line));
+      expect(inputs).toContain('        with:');
+      expect(inputs).toContain('          bun-version-file: trusted/package.json');
+      expect(inputs.some((line) => /^\s+bun-version:/.test(line))).toBe(false);
+    }
+  });
+
   test('the malware observation matrix job requires a non-empty candidate set', () => {
     // why: a matrix expanding to zero entries fails the run instead of skipping
     // the job, which reported every candidate-free scheduled sweep as red.
