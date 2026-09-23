@@ -145,7 +145,7 @@ const publishAppSnapshot = async (h, identity, ownerId, snapshot) => {
   const ownershipAdded = trackServedHash(ownerId, published.hash);
   return { ...published, size: published.packedBytes, storedBytes: snapshot.totalBytes, ownershipAdded };
 };
-// dwapp ROOMS hosted here — each is base.openRoom(id) ONCE, ref-counted across
+// dwapp ROOMS hosted here: each is base.openRoom(id) ONCE, ref-counted across
 // the app-tabs that join it. The room's connectivity IS the base mesh (no second
 // rendezvous): a dwapp is a sub-protocol, not tied to a signaler.
 /** @typedef {{ token: string|null, appId: string }} RoomClient */
@@ -605,7 +605,7 @@ export const stopDwebFeatureLease = async () => {
 // Events (feed message / direct / presence / status) are PUSHED to the dwapp's
 // app-tab as a `dweb/base-room/event` runtime message it filters by roomId. Every
 // extension context receives a runtime.sendMessage, so the app-tab gets it
-// directly — no SW forwarding bus. (The SW + offscreen ignore it: wrong prefix.)
+// directly, with no SW forwarding bus. (The SW + offscreen ignore it: wrong prefix.)
 /** @param {string} roomId @param {string} event @param {any} data */
 const pushRoomEvent = (roomId, event, data) =>
   browser.runtime.sendMessage({ type: 'dweb/base-room/event', roomId, event, data }).catch(() => {});
@@ -985,7 +985,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           // The UI passes an edited namespace on FIRST share (and the stored slug on
           // reshare); fall back to the name. A RESHARE reuses the same slug → same
           // dwapp_id → publishMeta amends the existing card (higher seq) instead of
-          // forking a new app — that's the whole versioning story.
+          // forking a new app. That preserves the version identity.
           const slug = slugify(msg.slug || msg.name);
           const previousHash = typeof msg.previousHash === 'string' ? msg.previousHash : null;
           const previousCard = h.base.heardDwapps().find((/** @type {any} */ row) => (
@@ -1182,7 +1182,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           });
           return;
         }
-        // A dwapp room op (join/leave/publish/subscribe/dm/presence/…) — the
+        // A dwapp room op (join/leave/publish/subscribe/dm/presence/…) uses the
         // bridge's room surface, served over the shared base mesh.
         case 'dweb/base-host/rotate-app-authority': {
           if (typeof msg.appId !== 'string' || !msg.appId) throw new Error('appId-required');
@@ -1339,7 +1339,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         default: sendResponse({ ok: false, error: `unknown:${msg.type}` }); return;
       }
     } catch (e) {
-      warn('handler threw', msg.type, '—', /** @type {{ message?: string }} */ (e)?.message ?? e);
+      warn('handler threw', msg.type, '-', /** @type {{ message?: string }} */ (e)?.message ?? e);
       const failure = /** @type {any} */ (e);
       sendResponse({
         ok: false,

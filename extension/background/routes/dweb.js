@@ -239,7 +239,7 @@ export const makeDwebRoutes = (deps) => {
     // Overwrite an INSTALLED app's files in place with a newer verified version
     // (the storage arm of dweb/base/update-app; verification happened offscreen).
     // why replace-not-merge: a new version may DROP files, so we clear the app's
-    // OPFS dir first, then write the new set — otherwise stale files linger and can
+    // OPFS dir first, then write the new set; otherwise stale files linger and can
     // shadow the new entry. The dweb slot is MERGED so version_id/uri/seq advance
     // while publisher/slug/dwapp_id stay put. The open tab reloads to show the update.
     'dweb/app-update': async ({ appId, files, entryFile, fileKinds, dweb, strategy, conflictToken, publicationGeneration }, sender) => {
@@ -494,12 +494,12 @@ export const makeDwebRoutes = (deps) => {
     // re-catch the forward.
     'dweb/base/start': async () => withReadyPublication(async () =>
       browser.runtime.sendMessage({ type: 'dweb/base-host/start' })),
-    // The master OFF — the user-facing kill switch, symmetric to start
+    // The master OFF is the user-facing kill switch, symmetric to start
     // (docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2). Persist the preference
     // FIRST so it won't auto-restart on the next unlock (maybeStartBaseNetwork
     // gates on dwebEnabled), then tear down a live host. NOT gated on dwebOn():
     // we must be able to stop precisely as we flip the setting off. Gated only on
-    // DWEB_ENABLED — the store package prunes this module entirely.
+    // DWEB_ENABLED; the store package prunes this module entirely.
     'dweb/base/stop': async () => {
       if (!DWEB_ENABLED) return { ok: false, error: 'dweb-disabled' };
       return disableDweb();
@@ -643,7 +643,7 @@ export const makeDwebRoutes = (deps) => {
         return reply;
       }));
     },
-    // A dwapp room op (join/leave/publish/subscribe/dm/presence/history/…) — one
+    // A dwapp room op (join/leave/publish/subscribe/dm/presence/history/…) uses one
     // thin relay to the offscreen base host. Events flow back to the app-tab
     // directly as `dweb/base-room/event` runtime messages, so the SW only
     // carries the request/response.

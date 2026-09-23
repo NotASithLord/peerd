@@ -5,6 +5,7 @@ import {
   buildIdpAllowRule,
   denylistSessionRuleUpdate,
   DENYLIST_RULE_ID,
+  APP_EGRESS_REGEX,
   APP_EGRESS_RULE_ID,
   buildAppEgressBlockRule,
   DENYLIST_ALLOW_RULE_ID,
@@ -343,6 +344,7 @@ describe('buildAppEgressBlockRule: App tabs have no remote network edge', () => 
     expect(rule.id).toBe(APP_EGRESS_RULE_ID);
     expect(rule.action).toEqual({ type: 'block' });
     expect(rule.condition.regexFilter).toBe('^(?:https?|wss?)://');
+    expect(rule.condition.regexFilter).toBe(APP_EGRESS_REGEX);
     expect(rule.condition.tabIds).toEqual([11, 12]);
     expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
   });
@@ -367,6 +369,7 @@ describe('buildAppEgressBlockRule — App tabs have no remote network edge', () 
     expect(rule.id).toBe(APP_EGRESS_RULE_ID);
     expect(rule.action).toEqual({ type: 'block' });
     expect(rule.condition.regexFilter).toBe('^(?:https?|wss?)://');
+    expect(rule.condition.regexFilter).toBe(APP_EGRESS_REGEX);
     expect(rule.condition.tabIds).toEqual([11, 12]);
     expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
   });

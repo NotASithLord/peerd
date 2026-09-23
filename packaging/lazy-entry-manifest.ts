@@ -151,8 +151,8 @@ export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
   // initializes the optional Tailscale implementation behind the auto entry.
   'vendor/cheerpx/tun/direct.js',
   'vendor/cheerpx/tun/tailscale_tun_auto.js',
-  // Apps inline this packaged global build only when authored markup asks for it.
-  'vendor/mithril/mithril.global.js',
+  // Apps fetch this canonical body as text and project its footer to a classic script.
+  'vendor/mithril/mithril.js',
   // Rollup resolves its WASM binding relative to the lazily imported module.
   'vendor/rollup/bindings_wasm_bg.wasm',
   // The local-model host points the embedded ORT loader at this directory.

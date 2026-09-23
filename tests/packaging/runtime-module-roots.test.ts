@@ -113,7 +113,7 @@ describe('fixed runtime module roots', () => {
       },
       {
         selector: 'engine-tabs/app-tab/app-tab.js',
-        assets: ['vendor/mithril/mithril.global.js'],
+        assets: ['vendor/mithril/mithril.js'],
       },
       {
         selector: 'vendor/rollup/rollup.browser.js',
@@ -163,7 +163,7 @@ describe('fixed runtime module roots', () => {
       'vendor/cheerpx/workerclock.js',
       'vendor/cheerpx/tun/direct.js',
       'vendor/cheerpx/tun/tailscale_tun_auto.js',
-      'vendor/mithril/mithril.global.js',
+      'vendor/mithril/mithril.js',
       'vendor/rollup/bindings_wasm_bg.wasm',
       'engine-tabs/pod-tab/pod-realm-seal.js',
     ]) {

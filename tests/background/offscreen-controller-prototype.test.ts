@@ -618,13 +618,16 @@ describe('Chrome lazy controller private channel prototype', () => {
       runId: 'pending-turn-effect', sessionId: 'session:test',
       ctx: { maxSteps: 1 }, tools: [], classifications: {},
     });
-    await dispatched;
-    await started;
-    await expect(result).resolves.toMatchObject({
-      ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
-    });
-    expect(observed.signal?.aborted).toBe(true);
-    controller.close();
+    try {
+      await dispatched;
+      await started;
+      // Native await lets host microtasks progress; Bun's .resolves matcher
+      // pumps native MessagePort events without draining that continuation.
+      expect(await result).toMatchObject({
+        ok: false, code: 'controller-pending-kernel-effect', outcomeKnown: false,
+      });
+      expect(observed.signal?.aborted).toBe(true);
+    } finally { controller.close(); }
   });
 
   test('an unawaited replay-safe effect remains known and retryable', async () => {
@@ -656,12 +659,13 @@ describe('Chrome lazy controller private channel prototype', () => {
       }),
     });
     const result = controller.call('turn.run', { maxSteps: 1 });
-    await started;
-    await expect(result).resolves.toMatchObject({
-      ok: false, code: 'controller-pending-kernel-effect',
-      outcomeKnown: true, retryable: true,
-    });
-    controller.close();
+    try {
+      await started;
+      expect(await result).toMatchObject({
+        ok: false, code: 'controller-pending-kernel-effect',
+        outcomeKnown: true, retryable: true,
+      });
+    } finally { controller.close(); }
   });
 
   test('a replay-safe pending effect stays known across timeout and channel loss', async () => {

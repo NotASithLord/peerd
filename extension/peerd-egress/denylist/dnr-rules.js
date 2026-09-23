@@ -17,6 +17,10 @@ export const DENYLIST_RULE_ID = 1;
 export const DENYLIST_ALLOW_RULE_ID = 2;
 export const APP_EGRESS_RULE_ID = 3;
 export const APP_EGRESS_REGEX = '^(?:https?|wss?)://';
+// Private-network navigation is a separate policy from the user's sensitive-
+// site denylist. These rules are always present for driven tabs, even when the
+// denylist is empty, because a public page can initiate a form submit, redirect,
+// iframe load, or popup without naming that destination in a tool call.
 export const PRIVATE_NETWORK_HOST_RULE_ID = 4;
 
 export const PRIVATE_NETWORK_HOSTS = Object.freeze([
@@ -163,7 +167,11 @@ export const buildIdpAllowRule = ({
   };
 };
 
-/** @param {Object} input
+/**
+ * Block every HTTP(S) or WebSocket request made in a live App tab. App code
+ * has no ambient network capability; its only external edge is the trusted
+ * parent bridge.
+ * @param {Object} input
  * @param {readonly number[]} input.tabIds
  * @param {number} [input.ruleId]
  * @param {readonly string[]} [input.resourceTypes]

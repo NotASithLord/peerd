@@ -679,13 +679,16 @@ describe('private runtime controller channel', () => {
       }),
     });
     const result = controller.call('runtime.dispatch', BOOTSTRAP, { timeoutMs: 1_000 });
-    await started;
-    await expect(result).resolves.toMatchObject({
-      ok: false, code: 'controller-pending-kernel-effect',
-      outcomeKnown: true, retryable: true,
-    });
-    expect(observed.signal?.aborted).toBe(true);
-    controller.close();
+    try {
+      await started;
+      // Native await lets host microtasks progress before Bun's assertion
+      // matcher runs; .resolves can stall the MessagePort continuation.
+      expect(await result).toMatchObject({
+        ok: false, code: 'controller-pending-kernel-effect',
+        outcomeKnown: true, retryable: true,
+      });
+      expect(observed.signal?.aborted).toBe(true);
+    } finally { controller.close(); }
   });
 
   test('dispatch cancellation retires a settled reverse-effect lifetime', async () => {

@@ -838,7 +838,7 @@ export const makeEngineRoutes = (deps) => {
         }));
       } catch (e) {
         // why cast: the error class arrives via the `any` deps bag, so
-        // instanceof can't narrow `e` for tsc — read .message off a view.
+        // instanceof can't narrow `e` for tsc, so read .message off a view.
         if (isArtifactError(e, ArtifactTooLargeError)) return { ok: false, error: /** @type {{ message?: string }} */ (e).message };
         throw e;
       }
@@ -856,7 +856,7 @@ export const makeEngineRoutes = (deps) => {
             || isArtifactError(e, EnvelopeIntegrityError)
             || isArtifactError(e, ArtifactTooLargeError)) {
           // why cast: the error classes arrive via the `any` deps bag, so
-          // instanceof can't narrow `e` for tsc — read .message off a view.
+          // instanceof can't narrow `e` for tsc, so read .message off a view.
           return { ok: false, error: /** @type {{ message?: string }} */ (e).message };
         }
         throw e;

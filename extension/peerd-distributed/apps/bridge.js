@@ -337,7 +337,7 @@ export const createDwebBridge = ({
 
   // Events pushed from the offscreen base host. Filter to OUR room (the shared
   // runtime push reaches every app-tab) and, for feed messages, to topics this
-  // app actually subscribed — so another dwapp in the same room can't bleed in.
+  // app actually subscribed, so another dwapp in the same room can't bleed in.
   const offHostEvent = onHostEvent?.((/** @type {any} */ m) => {
     if (m?.type === 'dweb/base-host/generation') {
       if (typeof m.hostEpoch !== 'string' || m.hostEpoch.length < 8) return;

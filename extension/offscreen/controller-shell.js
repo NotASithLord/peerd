@@ -38,6 +38,9 @@ import {
 const STOP_LANE_MAX_PENDING = 64;
 const STOP_LANE_MAX_PENDING_BYTES = 256 * 1024;
 const STOP_LANE_MAX_CONCURRENT = 64;
+const MAX_RETIRED_KERNEL_REQUESTS = 64;
+const MAX_RETIRED_KERNEL_REPLIES = 1024;
+const MAX_RETIRED_KERNEL_IDENTITY_BYTES = 256 * 1024;
 
 /**
  * Create the lazy loader used by bindControllerChannel. The offscreen document
@@ -300,6 +303,43 @@ export const bindControllerChannel = ({
  *   stopLane: boolean,
  * }>} */
   const operations = new Map();
+  /** @type {Map<string,{grantId:string,rpcIds:Set<string>}>} */
+  const retiredKernelReplies = new Map();
+  let retiredKernelReplyCount = 0;
+  let retiredKernelIdentityBytes = 0;
+  // why: opposite MessagePort directions are independently ordered. A reply
+  // already in flight can cross our terminal message. Retain only the exact
+  // pending identities, never their payload, authority, result, or quota.
+  const rememberRetiredKernelReplies = (
+    /** @type {string} */ requestId, /** @type {any} */ operation,
+  ) => {
+    if (operation.kernelCalls.size === 0) return true;
+    const rpcIds = new Set(/** @type {Iterable<string>} */ (operation.kernelCalls.keys()));
+    const identityBytes = 2 * (requestId.length + operation.grantId.length
+      + [...rpcIds].reduce((total, rpcId) => total + rpcId.length, 0));
+    if (retiredKernelReplies.has(requestId)
+        || retiredKernelReplies.size >= MAX_RETIRED_KERNEL_REQUESTS
+        || retiredKernelReplyCount + rpcIds.size > MAX_RETIRED_KERNEL_REPLIES
+        || retiredKernelIdentityBytes + identityBytes > MAX_RETIRED_KERNEL_IDENTITY_BYTES) {
+      return false;
+    }
+    retiredKernelReplies.set(requestId, { grantId: operation.grantId, rpcIds });
+    retiredKernelReplyCount += rpcIds.size;
+    retiredKernelIdentityBytes += identityBytes;
+    return true;
+  };
+  const consumeRetiredKernelReply = (/** @type {any} */ message) => {
+    const retired = retiredKernelReplies.get(message.requestId);
+    if (!retired || message.grantId !== retired.grantId
+        || !retired.rpcIds.delete(message.rpcId)) return false;
+    retiredKernelReplyCount -= 1;
+    retiredKernelIdentityBytes -= 2 * message.rpcId.length;
+    if (retired.rpcIds.size === 0) {
+      retiredKernelReplies.delete(message.requestId);
+      retiredKernelIdentityBytes -= 2 * (message.requestId.length + retired.grantId.length);
+    }
+    return true;
+  };
   let concurrent = 0;
   let stopConcurrent = 0;
   let pendingBytes = 0;
@@ -341,6 +381,9 @@ export const bindControllerChannel = ({
         || operation.effectEntered ? pendingCustody(operation) : null;
     if (pendingEffect) operation.abort?.abort();
     if (operation.deadlineTimer) clearTimeout(operation.deadlineTimer);
+    // Abort observers may synchronously post allowed cleanup RPCs. Capture
+    // after that edge, immediately before retiring the pending reverse calls.
+    const retainedPendingReplies = rememberRetiredKernelReplies(requestId, operation);
     for (const pending of operation.kernelCalls.values()) {
       const loss = typeof operation.quota.pendingLoss === 'function'
         ? operation.quota.pendingLoss(pending.operation, pending.payload)
@@ -368,6 +411,9 @@ export const bindControllerChannel = ({
       type: 'controller/settled', requestId, grantId: operation.grantId, result: settlement,
     }); }
     catch { /* retired kernel epoch */ }
+    // Never evict identities and reinterpret a late reply. Exhaustion retains
+    // the original conservative settlement, then fails the whole channel closed.
+    if (!retainedPendingReplies) close();
   };
   const reject = (
     /** @type {string} */ requestId,
@@ -499,6 +545,9 @@ export const bindControllerChannel = ({
       operation.kernelCalls.clear();
     }
     operations.clear();
+    retiredKernelReplies.clear();
+    retiredKernelReplyCount = 0;
+    retiredKernelIdentityBytes = 0;
     pendingBytes = 0;
     stopPending = 0;
     stopPendingBytes = 0;
@@ -518,6 +567,9 @@ export const bindControllerChannel = ({
       if (typeof message.requestId !== 'string' || typeof message.rpcId !== 'string') {
         close(); return;
       }
+      // This is a once-only discard, not a replay or a successful operation.
+      // Binding and sequence checks above still authenticate the wire message.
+      if (consumeRetiredKernelReply(message)) return;
       const operation = operations.get(message.requestId);
       const pending = operation?.kernelCalls.get(message.rpcId);
       if (!operation || !pending || message.grantId !== operation.grantId) {
@@ -538,6 +590,7 @@ export const bindControllerChannel = ({
     }
     if (message.type === 'kernel/open') {
       if (typeof message.requestId !== 'string' || operations.has(message.requestId)) return;
+      if (retiredKernelReplies.has(message.requestId)) { close(); return; }
       const grantId = typeof message.grantId === 'string' ? message.grantId : '';
       const authority = parseControllerAuthority(message.authority);
       if (!grantId || grantId.length > 512 || !authority

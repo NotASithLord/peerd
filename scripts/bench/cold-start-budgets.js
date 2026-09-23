@@ -127,8 +127,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 413, graphBytes: 4_148_754 }),
-  target: Object.freeze({ modules: 416, graphBytes: 4_240_139 }),
+  shared: Object.freeze({ modules: 413, graphBytes: 4_142_320 }),
+  target: Object.freeze({ modules: 416, graphBytes: 4_233_705 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_585 }),
@@ -137,10 +137,10 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 88, graphBytes: 658_917, entryBytes: 239, directImports: 3,
+  modules: 88, graphBytes: 659_404, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 90, graphBytes: 666_548, entryBytes: 250, directImports: 2,
+  modules: 90, graphBytes: 667_035, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -166,7 +166,9 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Provider inventory observations now retain exact host and vault custody.
   // Their finite read policy grows existing leaves only; no import or timing
   // gate changes. These are the remeasured combined bytes, with no reserve.
-  kernel: Object.freeze({ modules: 413, graphBytes: 4_148_754, entryBytes: 200, directImports: 2 }),
+  // The final main integration preserves those authority fixes and removes
+  // duplicated legacy implementations. Remeasure without adding graph reserve.
+  kernel: Object.freeze({ modules: 413, graphBytes: 4_142_320, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -177,8 +179,10 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // only vault shell graph. Exact shared-shell values, no reserved headroom.
   // The shared utility now supports abortable pacing sleeps; neither shell gains
   // a module or execution owner. These are the exact measured source bytes.
-  sidepanel: Object.freeze({ modules: 11, graphBytes: 144_753, entryBytes: 396, directImports: 1 }),
-  home: Object.freeze({ modules: 11, graphBytes: 144_921, entryBytes: 564, directImports: 1 }),
+  // Mithril's unused network API is removed from the single canonical asset;
+  // ratchet both shells down to their measured closure rather than retain slack.
+  sidepanel: Object.freeze({ modules: 11, graphBytes: 137_969, entryBytes: 396, directImports: 1 }),
+  home: Object.freeze({ modules: 11, graphBytes: 138_137, entryBytes: 564, directImports: 1 }),
 });
 
 // Cold-start is an observed user-visible outcome, not a bundle-size contest.
@@ -196,13 +200,13 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
     serviceWorker: Object.freeze({
-      modules: 410, graphBytes: 2_092_991, entryBytes: 173,
+      modules: 410, graphBytes: 2_093_905, entryBytes: 173,
       inputSha256: '6bee21da2c36e5f9cea49a207b4728d07a49318a507295eb167c5021277c5aab',
     }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
-    sidepanel: Object.freeze({ modules: 11, graphBytes: 136_090, entryBytes: 396 }),
-    home: Object.freeze({ modules: 11, graphBytes: 136_258, entryBytes: 564 }),
+    sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
+    home: Object.freeze({ modules: 11, graphBytes: 129_474, entryBytes: 564 }),
     // The feature-lease supervisor owns only broker/lifecycle code; controller,
     // repository, model, job and dweb owners remain fixed lazy entries. The
     // stamped build identity replaces runtime.getManifest, which Chrome does
@@ -213,8 +217,8 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
   }),
   firefox: Object.freeze({
     serviceWorker: Object.freeze({ modules: 88, graphBytes: 418_408, entryBytes: 210 }),
-    sidepanel: Object.freeze({ modules: 11, graphBytes: 140_578, entryBytes: 396 }),
-    home: Object.freeze({ modules: 11, graphBytes: 140_746, entryBytes: 564 }),
+    sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
+    home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
 });
 
@@ -228,19 +232,19 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_211_089, entryBytes: 207,
+        modules: 416, graphBytes: 2_212_199, entryBytes: 207,
         inputSha256: 'd48f59bf3c02c2e1c798a789127209f8ca58eecef79f63233515f554e141ab66',
       }),
-      sidepanel: Object.freeze({ modules: 11, graphBytes: 136_090, entryBytes: 396 }),
-      home: Object.freeze({ modules: 11, graphBytes: 136_258, entryBytes: 564 }),
+      sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
+      home: Object.freeze({ modules: 11, graphBytes: 129_474, entryBytes: 564 }),
       offscreen: Object.freeze({ modules: 7, graphBytes: 22_080, entryBytes: 13_318 }),
     }),
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
       serviceWorker: Object.freeze({ modules: 90, graphBytes: 423_807, entryBytes: 81 }),
-      sidepanel: Object.freeze({ modules: 11, graphBytes: 140_578, entryBytes: 396 }),
-      home: Object.freeze({ modules: 11, graphBytes: 140_746, entryBytes: 564 }),
+      sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
+      home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),
   }),
 });
