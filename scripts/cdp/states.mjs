@@ -506,7 +506,9 @@ export const STATES = [
         });
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
         rec.check('a trusted refusal becomes a durable rule', seeded?.origins?.length === 1, JSON.stringify(seeded));
-        settings.close();
+        // CDP close only disconnects. Retire this Options document so later
+        // private-transfer tests still have one exact recipient.
+        await retirePrivateTransferPage(settings);
         settings = await openWidePage(ctx, 'options/options.html#!/paced-sites');
         await waitFor(() => evalIn(settings, `document.body.innerText.includes('paced.example')`), { budgetMs: 10_000 });
         await rec.visualPage('options-paced-sites', settings);
@@ -535,7 +537,7 @@ export const STATES = [
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         await rpc(settings, { type: 'paced/clear' }).catch(() => {});
-        try { settings.close(); } catch {}
+        await retirePrivateTransferPage(settings);
       }
     },
   },
