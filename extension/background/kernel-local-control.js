@@ -29,6 +29,7 @@ export const createKernelLocalControl = (deps) => {
     throw new TypeError('kernel-local-control-config-invalid');
   }
   let catalogSignature = '';
+  /** @type {Set<AbortController>} */ const providerTests = new Set();
   const localModel = async (/** @type {string} */ method, /** @type {any} */ args,
     /** @type {AbortSignal} */ signal) => {
     if (deps.localModels !== true) return {
@@ -235,12 +236,49 @@ export const createKernelLocalControl = (deps) => {
   const routes = Object.freeze(Object.fromEntries(KERNEL_LOCAL_ROUTE_NAMES.map((route) => [
     route,
     async (/** @type {any} */ message = {}) => {
-      const result = await feature.dispatch('local', route, message);
-      return result?.ok === true && Object.hasOwn(result, 'value') ? result.value : result;
+      const probe = route === 'provider/test' ? new AbortController() : null;
+      if (probe) providerTests.add(probe);
+      try {
+        if (probe) await deps.ready;
+        if (probe?.signal.aborted) return failure('provider-test-aborted', true);
+        const settings = probe ? deps.settingsStore.get() : null;
+        const result = await feature.dispatch('local', route, message,
+          probe ? { signal: probe.signal } : undefined);
+        if (probe?.signal.aborted) return failure('provider-test-aborted', true);
+        const value = result?.ok === true && Object.hasOwn(result, 'value') ? result.value : result;
+        if (probe && message.provider === 'ollama' && value?.ok === true
+            && value.reachable === true && Number(value.models) > 0) {
+          // why: only a completed live probe may adopt an unused active slot.
+          // The controller interprets inventory; fixed kernel policy alone
+          // checks credentials and writes settings, without a settings relay.
+          const active = providerEgressPolicy(settings.providerName);
+          let usable = active?.credential === null;
+          if (message.activate !== false && !usable && active?.credential) {
+            try { usable = !!(await deps.vault.getSecret(active.credential)); }
+            catch { usable = false; }
+          }
+          if (probe.signal.aborted) return failure('provider-test-aborted', true);
+          const current = deps.settingsStore.get();
+          const unchanged = current.providerName === settings.providerName
+            && current.providerModel === settings.providerModel
+            && current.ollamaHost === settings.ollamaHost;
+          if (message.activate !== false && !usable && unchanged && !deps.vault.isLocked()) {
+            await deps.settingsStore.update({ providerName: 'ollama', providerModel: '' });
+            deps.providerProjection.bumpRevision?.();
+          }
+          deps.auditLog.append({
+            type: 'provider_validated', details: { provider: 'ollama' },
+          }).catch(() => {});
+          await Promise.resolve(deps.pushState());
+        }
+        return value;
+      } finally {
+        if (probe) providerTests.delete(probe);
+      }
     },
   ])));
   return Object.freeze({
     routes, authorize: feature.authorize, handleKernelCall: feature.handleKernelCall,
-    abort: () => {},
+    abort: () => { for (const probe of providerTests) probe.abort(); },
   });
 };

@@ -221,9 +221,9 @@ describe('local controller cutover', () => {
     });
     let control: ReturnType<typeof createKernelLocalControl>;
     control = createKernelLocalControl({
-      callFeature: async (payload: any) => {
+      callFeature: async (payload: any, options: any = {}) => {
         const authority = control.authorize(payload);
-        const signal = new AbortController().signal;
+        const signal = options.signal ?? new AbortController().signal;
         const deadlineAt = Date.now() + 60_000;
         return host.dispatch(payload, {
           signal, deadlineAt, authority,
@@ -306,6 +306,109 @@ describe('local controller cutover', () => {
     } });
     expect(await control.routes['provider/test']({ provider: 'anthropic' }))
       .toMatchObject({ ok: false, outcomeKnown: false });
+  });
+
+  const daemonLane = (overrides: Record<string, any> = {}) => {
+    let settings = { providerName: '', providerModel: '', ollamaHost: 'http://localhost:11434' };
+    let locked = false;
+    const updates: unknown[] = [];
+    const audits: unknown[] = [];
+    let pushed = 0;
+    let revisions = 0;
+    const control = lane({ deps: {
+      vault: { isLocked: () => locked, getSecret: overrides.getSecret ?? (async () => null) },
+      settingsStore: {
+        get: () => settings,
+        update: async (patch: any) => { updates.push(patch); settings = { ...settings, ...patch }; },
+      },
+      providerProjection: {
+        observeOllamaStatus: () => {},
+        bumpRevision: () => { revisions += 1; },
+      },
+      providerEgress: { readModelInventory: async (_request: any, context: any) => {
+        await overrides.beforeReply?.(context);
+        return { ok: true, outcomeKnown: true, value: {
+          status: overrides.status ?? 200,
+          body: new TextEncoder().encode(JSON.stringify({
+            models: overrides.models ?? [{ name: 'gemma:latest' }],
+          })),
+        } };
+      } },
+      auditLog: { append: async (entry: unknown) => { audits.push(entry); } },
+      pushState: async () => { pushed += 1; },
+    } });
+    return {
+      control, updates, audits,
+      setSettings: (patch: Partial<typeof settings>) => { settings = { ...settings, ...patch }; },
+      lock: () => { locked = true; },
+      pushed: () => pushed,
+      revisions: () => revisions,
+    };
+  };
+
+  test.each(['', 'anthropic'])('a tested usable daemon activates over an unusable %s selection', async (providerName) => {
+    const h = daemonLane();
+    h.setSettings({ providerName, providerModel: 'old-model' });
+    expect(await h.control.routes['provider/test']({ provider: 'ollama' }))
+      .toEqual({ ok: true, reachable: true, models: 1 });
+    expect(h.updates).toEqual([{ providerName: 'ollama', providerModel: '' }]);
+    expect(h.audits).toEqual([{ type: 'provider_validated', details: { provider: 'ollama' } }]);
+    expect(h.pushed()).toBe(1);
+    expect(h.revisions()).toBe(1);
+  });
+
+  test.each([
+    { providerName: 'anthropic', key: 'existing-key', activate: true },
+    { providerName: 'local-webgpu', key: null, activate: true },
+    { providerName: 'ollama', key: null, activate: true },
+    { providerName: '', key: null, activate: false },
+  ])('daemon activation preserves $providerName with activate=$activate', async ({ providerName, key, activate }) => {
+    const h = daemonLane({ getSecret: async () => key });
+    h.setSettings({ providerName, providerModel: 'explicit-model' });
+    expect(await h.control.routes['provider/test']({ provider: 'ollama', activate }))
+      .toMatchObject({ ok: true, models: 1 });
+    expect(h.updates).toEqual([]);
+  });
+
+  test.each([
+    { models: [], status: 200, error: 'no-models' },
+    { models: [{ name: 'gemma:latest' }], status: 503, error: 'unreachable' },
+  ])('daemon activation refuses $error inventory', async ({ models, status, error }) => {
+    const h = daemonLane({ models, status });
+    expect(await h.control.routes['provider/test']({ provider: 'ollama' }))
+      .toMatchObject({ ok: false, error });
+    expect(h.updates).toEqual([]);
+  });
+
+  test.each(['selection', 'host', 'locked', 'aborted'] as const)(
+    'daemon activation ignores a %s change during the live probe', async (change) => {
+      const entered = Promise.withResolvers<void>();
+      const reply = Promise.withResolvers<void>();
+      const h = daemonLane({ beforeReply: async () => { entered.resolve(); await reply.promise; } });
+      const result = h.control.routes['provider/test']({ provider: 'ollama' });
+      await entered.promise;
+      if (change === 'selection') h.setSettings({ providerName: 'local-webgpu' });
+      if (change === 'host') h.setSettings({ ollamaHost: 'http://localhost:11435' });
+      if (change === 'locked') h.lock();
+      if (change === 'aborted') h.control.abort();
+      reply.resolve();
+      const value = await result;
+      if (change === 'aborted') expect(value).toMatchObject({ ok: false, code: 'provider-test-aborted' });
+      expect(h.updates).toEqual([]);
+    },
+  );
+
+  test('abort after the daemon reply but during credential lookup still refuses activation', async () => {
+    const entered = Promise.withResolvers<void>();
+    const reply = Promise.withResolvers<null>();
+    const h = daemonLane({ getSecret: () => { entered.resolve(); return reply.promise; } });
+    h.setSettings({ providerName: 'anthropic' });
+    const result = h.control.routes['provider/test']({ provider: 'ollama' });
+    await entered.promise;
+    h.control.abort();
+    reply.resolve(null);
+    expect(await result).toMatchObject({ ok: false, code: 'provider-test-aborted' });
+    expect(h.updates).toEqual([]);
   });
 
   test('bounds a local module hang before custody starts', async () => {
