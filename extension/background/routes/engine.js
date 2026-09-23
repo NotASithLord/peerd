@@ -6,6 +6,8 @@
 // decide whether to un-share over the dweb). Everything here closes over only
 // stable collaborators. Bodies verbatim, deps injected, imports none.
 
+import { APP_DATA_PATH_RE, appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
+
 /**
  * Await work through the same cancellation boundary as the operation it gates.
  * The underlying one-time hydration may still finish for other callers, but a
@@ -91,6 +93,10 @@ export const makeEngineRoutes = (deps) => {
     () => coordinateApp(appId, operation),
     { close },
   );
+  /** @param {string} appId @param {() => Promise<any>} operation */
+  const mutateApp = (appId, operation) => appQuiescence.run(
+    appId, () => coordinateApp(appId, operation), { close: true, invalidateDweb: true },
+  );
   /** @param {unknown} cause @param {string} action */
   const repositoryFailure = (cause, action) => {
     const detail = /** @type {{code?:string,outcomeKnown?:boolean,message?:string}} */ (cause);
@@ -105,10 +111,8 @@ export const makeEngineRoutes = (deps) => {
         : `Peerd could not confirm the result of trying to ${action}. Refresh Git history to reconcile before trying again.`,
     };
   };
-  /** @param {unknown} appId @param {unknown} path @param {any} sender */
-  const ownsAppDataMutation = (appId, path, sender) => typeof appId === 'string'
-    && typeof path === 'string'
-    && /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path)
+  /** @param {unknown} appId @param {any} sender */
+  const ownsAppTab = (appId, sender) => typeof appId === 'string'
     && sender?.tab?.id != null
     && appTabTracker.getTabId(appId) === sender.tab.id
     && appTabTracker.parseIdFromUrl?.(sender.tab.url) === appId;
@@ -500,9 +504,11 @@ export const makeEngineRoutes = (deps) => {
     // app-tab/index.html requests its name + entry filename here at load
     // time. The parent then reads files from OPFS directly + composes the
     // body before posting to the sandboxed runner.
-    'app/get-meta': async ({ appId }) => {
+    'app/get-meta': async ({ appId }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      if (!ownsAppTab(appId, sender)) return { ok: false, error: 'app-data-unauthorized' };
       try {
+        return await appTabTracker.withDwebAuthority(appId, () => appClient.withWriteLock(appId, async () => {
         const meta = await appRegistry.get(appId);
         if (!meta) return { ok: false, error: 'app-not-found' };
         let runtimeEntryFile = meta.entryFile;
@@ -524,6 +530,12 @@ export const makeEngineRoutes = (deps) => {
         }
         // dweb meta unlocks the app-tab bridge for dwapps (preview builds);
         // harmless null elsewhere.
+        const installedBytesMatch = !runtimeDweb?.hash || (appReleaseDescriptorMatches(meta)
+          && typeof runtimeDweb.git_oid === 'string'
+          && await repositories.matches({ kind: 'app', id: appId },
+            { at: runtimeDweb.git_oid, excludeAppData: true }).catch(() => false));
+        if (!installedBytesMatch) runtimeDweb = { ...runtimeDweb, forked: true };
+        if (runtimeDweb) runtimeDweb = { ...runtimeDweb, generation: appTabTracker.getDwebGeneration(appId) };
         return {
           ok: true,
           name: meta.name,
@@ -532,6 +544,7 @@ export const makeEngineRoutes = (deps) => {
           dweb: runtimeDweb,
           agent: runtimeAgent,
         };
+        }));
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
@@ -543,9 +556,9 @@ export const makeEngineRoutes = (deps) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
       if (typeof content !== 'string') return { ok: false, error: 'content-required' };
-      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
+      if (!ownsAppTab(appId, sender) || (runtimeData && !APP_DATA_PATH_RE.test(path))) return { ok: false, error: 'app-data-unauthorized' };
       try {
-        const result = await appClient.writeFile({ appId, path, content, reload: false });
+        const result = await appClient.writeFile({ appId, path, content, reload: false, invalidateDweb: !runtimeData });
         return { ok: true, ...result };
       } catch (e) {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
@@ -555,9 +568,9 @@ export const makeEngineRoutes = (deps) => {
     'app/editor-delete': async ({ appId, path, runtimeData = false }, sender) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       if (typeof path !== 'string') return { ok: false, error: 'path-required' };
-      if (runtimeData && !ownsAppDataMutation(appId, path, sender)) return { ok: false, error: 'app-data-unauthorized' };
+      if (!ownsAppTab(appId, sender) || (runtimeData && !APP_DATA_PATH_RE.test(path))) return { ok: false, error: 'app-data-unauthorized' };
       try {
-        await appClient.deleteFile({ appId, path, reload: false });
+        await appClient.deleteFile({ appId, path, reload: false, invalidateDweb: !runtimeData });
         return { ok: true };
       } catch (e) {
         if (runtimeData && (/** @type {{name?:string}} */ (e))?.name === 'NotFoundError') return { ok: true };
@@ -721,7 +734,7 @@ export const makeEngineRoutes = (deps) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof to !== 'string') return { ok: false, error: 'appId-and-to-required' };
       try {
-        const result = await quiesceApp(appId, () => repositories.restoreApp(appId, { to }));
+        const result = await mutateApp(appId, () => repositories.restoreApp(appId, { to }));
         appTabTracker.reloadTab(appId).catch(() => {});
         await auditLog.append({ type: 'git_version_restored', details: { kind: 'app', appId, to, oid: result.oid } });
         return { ok: true, result };
@@ -730,14 +743,14 @@ export const makeEngineRoutes = (deps) => {
     'apps/repository/branch': async ({ appId, name, checkout = true }) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
-      try { return { ok: true, result: await (checkout === false ? coordinateApp : quiesceApp)(appId, () => repositories.branch({ kind: 'app', id: appId }, { name, checkout: checkout !== false })) }; }
+      try { return { ok: true, result: await (checkout === false ? coordinateApp : mutateApp)(appId, () => repositories.branch({ kind: 'app', id: appId }, { name, checkout: checkout !== false })) }; }
       catch (e) { return repositoryFailure(e, 'create this Git branch'); }
     },
     'apps/repository/checkout': async ({ appId, name }) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof name !== 'string') return { ok: false, error: 'appId-and-name-required' };
       try {
-        const result = await quiesceApp(appId, () => repositories.checkout({ kind: 'app', id: appId }, { name }));
+        const result = await mutateApp(appId, () => repositories.checkout({ kind: 'app', id: appId }, { name }));
         appTabTracker.reloadTab(appId).catch(() => {});
         return { ok: true, result };
       } catch (e) { return repositoryFailure(e, 'switch this Git branch'); }

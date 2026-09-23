@@ -12,6 +12,8 @@ const blockedAppGuard = (reason: string) => {
 };
 
 const testRepositories = (overrides: Record<string, unknown> = {}) => ({
+  statusApp: async () => ({ oid: 'a'.repeat(40) }),
+  rollbackWorkingTree: async () => ({ oid: 'a'.repeat(40) }),
   coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => operation(),
   ...overrides,
 });
@@ -187,9 +189,9 @@ describe('App OPFS lifecycle posture', () => {
       } as any,
       tracker: { reloadTab: async () => true } as any,
       repositories: testRepositories({
-        replaceWorkingTree: async (_ref: any, args: any) => {
-          events.push(args.message === 'rollback failed App release update'
-            ? 'files:rollback' : 'files:new');
+        rollbackWorkingTree: async () => { events.push('files:rollback'); return { oid: 'a'.repeat(40) }; },
+        replaceWorkingTree: async () => {
+          events.push('files:new');
           return { oid: 'a'.repeat(40), created: true };
         },
       }) as any,
@@ -212,10 +214,10 @@ describe('App OPFS lifecycle posture', () => {
     ]);
   });
 
-  test('failed version replacement records the rollback HEAD so a retry starts clean', async () => {
+  test('failed version replacement resets its prior HEAD so a retry starts clean', async () => {
     const originalOid = 'a'.repeat(40);
     const failedOid = 'b'.repeat(40);
-    const rollbackOid = 'c'.repeat(40);
+    const rollbackOid = originalOid;
     const retryOid = 'd'.repeat(40);
     let record: any = {
       id: 'app-1', name: 'Old', tags: [], entryFile: 'index.html',
@@ -223,7 +225,7 @@ describe('App OPFS lifecycle posture', () => {
       dweb: { git_oid: originalOid, source_git_oid: originalOid, version_id: 'v1' },
     };
     const seenBaselines: string[] = [];
-    const repositoryOids = [failedOid, rollbackOid, retryOid];
+    const repositoryOids = [failedOid, retryOid];
     const client = createAppClient({
       registry: {
         get: async () => record,
@@ -283,5 +285,87 @@ describe('App OPFS lifecycle posture', () => {
     expect(failure).toBeInstanceOf(TypeError);
     expect(failure.message).toBe('afterCommit is required');
     expect(storageTouched).toBe(false);
+  });
+});
+
+describe('App executable identity mutations', () => {
+  const fixture = () => {
+    const events: string[] = [];
+    let record: any = { id: 'app-1', entryFile: 'index.html', fileKinds: {
+      'index.html': 'text', 'data/state.json': 'text',
+    } };
+    const files = new Map<string, Uint8Array>([
+      ['index.html', new TextEncoder().encode('old')],
+      ['data/state.json', new TextEncoder().encode('{"local":true}')],
+    ]);
+    const client = createAppClient({
+      registry: { get: async () => record, update: async (_id: string, patch: any) => {
+        record = { ...record, ...patch }; return record;
+      } } as any,
+      tracker: { withDwebAuthority: async (_id: string, op: () => Promise<any>, opts: any) => {
+        events.push(opts.invalidate ? 'rotate' : 'hold'); return op();
+      }, reloadTab: async () => true } as any,
+      repositories: testRepositories({
+        coordinate: async (_ref: any, op: () => Promise<any>) => { events.push('repository'); return op(); },
+        replaceWorkingTree: async (_ref: any, opts: any) => {
+          expect(opts.includeIgnored).toBe(true);
+          files.clear();
+          for (const [path, bytes] of Object.entries(opts.files)) {
+            files.set(path, typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes as Uint8Array);
+          }
+          return { oid: 'b'.repeat(40), created: true };
+        },
+      }) as any,
+      opfsForApp: () => ({
+        list: async () => [...files].map(([path, value]) => ({ path, size: value.byteLength })),
+        readBytes: async (path: string) => {
+          if (!files.has(path)) throw new DOMException('missing', 'NotFoundError');
+          return files.get(path);
+        },
+        write: async (path: string, value: string | Uint8Array) => {
+          files.set(path, typeof value === 'string' ? new TextEncoder().encode(value) : value);
+        },
+        delete: async (path: string) => { files.delete(path); },
+      }) as any,
+    });
+    return { client, events, files };
+  };
+
+  test('executable writes rotate before acquiring the repository lane', async () => {
+    const { client, events } = fixture();
+    await client.writeFile({ appId: 'app-1', path: 'index.html', content: 'new', reload: false });
+    expect(events).toEqual(['rotate', 'repository']);
+  });
+
+  test('only exact valid runtime JSON may retain consent, never executable bytes', async () => {
+    const { client, events } = fixture();
+    await client.writeFile({ appId: 'app-1', path: 'data/state.json', content: '{"saved":true}',
+      invalidateDweb: false, reload: false });
+    expect(events).toEqual(['repository']);
+    await expect(client.writeFile({ appId: 'app-1', path: 'index.html', content: 'evil',
+      invalidateDweb: false })).rejects.toThrow('Only runtime data');
+    await expect(client.writeFile({ appId: 'app-1', path: 'data/state.json', content: 'not json',
+      invalidateDweb: false })).rejects.toThrow('valid JSON');
+    await expect(client.deleteFile({ appId: 'app-1', path: 'index.html',
+      invalidateDweb: false })).rejects.toThrow('Only runtime data');
+    expect(events).toEqual(['repository']);
+  });
+
+  test('snapshots use the repository lane without rotating consent', async () => {
+    const { client, events } = fixture();
+    await client.snapshotFiles({ appId: 'app-1' });
+    expect(events).toEqual(['repository']);
+  });
+
+  test('verified replacement preserves local runtime data and commit custody', async () => {
+    const { client, files } = fixture();
+    let committed = false;
+    await client.replaceVersionedFilesUnlocked({ appId: 'app-1', entryFile: 'index.html',
+      files: { 'index.html': 'release', 'data/state.json': '{"publisher":true}' },
+      afterCommit: async () => { committed = true; },
+    });
+    expect(committed).toBe(true);
+    expect(new TextDecoder().decode(files.get('index.html'))).toBe('release');
+    expect(new TextDecoder().decode(files.get('data/state.json'))).toBe('{"local":true}');
   });
 });

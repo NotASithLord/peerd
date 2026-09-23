@@ -10,7 +10,8 @@ class ArtifactTooLargeError extends Error {}
 class EnvelopeFormatError extends Error {}
 class EnvelopeIntegrityError extends Error {}
 
-const baseDeps = (over: any = {}) => ({
+const baseDeps = (over: any = {}) => {
+ const defaults = {
   vault: { isLocked: () => false },
   auditLog: { append: async () => {} },
   pushState: () => {},
@@ -103,8 +104,16 @@ const baseDeps = (over: any = {}) => ({
     coordinate: async (_ref: any, operation: any) => operation(),
     destroy: async () => {},
   },
-  ...over,
-});
+ };
+ return { ...defaults, ...over,
+   appClient: { ...defaults.appClient, withWriteLock: async (_id: string, op: () => Promise<any>) => op(), ...over.appClient },
+   appTabTracker: { ...defaults.appTabTracker, getTabId: () => 44,
+     parseIdFromUrl: (url: string) => url?.split('#')[1] ?? null,
+     withDwebAuthority: async (_id: string, op: () => Promise<any>) => op(),
+     getDwebGeneration: () => 0, ...over.appTabTracker },
+ };
+};
+const appSender = (id: string) => ({ tab: { id: 44, url: `moz-extension://peerd/engine-tabs/app-tab/index.html#${id}` } });
 
 describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
   const sender = { tab: { id: 99 } };
@@ -675,11 +684,11 @@ describe('sw/web-fetch', () => {
 describe('app/vm meta + apps Library', () => {
   test('app/get-meta unknown → app-not-found', async () => {
     const r = makeEngineRoutes(baseDeps());
-    expect(await r['app/get-meta']({ appId: 'zzz' })).toEqual({ ok: false, error: 'app-not-found' });
+    expect(await r['app/get-meta']({ appId: 'zzz' }, appSender('zzz'))).toEqual({ ok: false, error: 'app-not-found' });
   });
   test('app/get-meta returns name, entry, file kinds, and dweb metadata', async () => {
     const r = makeEngineRoutes(baseDeps());
-    expect(await r['app/get-meta']({ appId: 'a1' })).toEqual({
+    expect(await r['app/get-meta']({ appId: 'a1' }, appSender('a1'))).toEqual({
       ok: true,
       name: 'App',
       entryFile: 'index.html',
@@ -709,7 +718,7 @@ describe('app/vm meta + apps Library', () => {
         listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
       },
     }));
-    expect((await r['app/get-meta']({ appId: 'a1' })).agent).toEqual({
+    expect((await r['app/get-meta']({ appId: 'a1' }, appSender('a1'))).agent).toEqual({
       kind: 'bound-app',
       profile: 'developer',
       surface: 'code',
@@ -733,7 +742,7 @@ describe('app/vm meta + apps Library', () => {
         listFiles: async () => [{ path: 'main.html' }, { path: 'peerd.json' }],
       },
     }));
-    expect(await r['app/get-meta']({ appId: 'a1' })).toMatchObject({
+    expect(await r['app/get-meta']({ appId: 'a1' }, appSender('a1'))).toMatchObject({
       ok: true, entryFile: 'main.html',
     });
     expect(writes).toBe(0);
@@ -745,7 +754,7 @@ describe('app/vm meta + apps Library', () => {
         update: async (_id: string, patch: any) => ({ id: 'a1', name: 'App', dweb: { publisher: 'did:key:zOld' }, ...patch }),
       },
     }));
-    expect((await r['app/get-meta']({ appId: 'a1' })).dweb).toBeNull();
+    expect((await r['app/get-meta']({ appId: 'a1' }, appSender('a1'))).dweb).toBeNull();
   });
   test('app/get-meta grants the bridge from peerd.json without mutating provenance', async () => {
     const r = makeEngineRoutes(baseDeps({
@@ -755,7 +764,7 @@ describe('app/vm meta + apps Library', () => {
         listFiles: async () => [{ path: '/index.html' }, { path: '/peerd.json' }],
       },
     }));
-    expect((await r['app/get-meta']({ appId: 'a1' })).dweb).toMatchObject({ local: true });
+    expect((await r['app/get-meta']({ appId: 'a1' }, appSender('a1'))).dweb).toMatchObject({ local: true });
   });
   test('vm/get-meta requires a string id', async () => {
     const r = makeEngineRoutes(baseDeps());

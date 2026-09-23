@@ -288,7 +288,8 @@ export const makeKernelRouteProvenance = ({
   ], anyHumanUi);
   add(['audit/voice-fetch'], voiceUi);
   add(['voice/init', 'voice/listen', 'voice/stop', 'voice/silence', 'voice/teardown'], voiceUi);
-  add(['voice/chunk', 'voice/auto-stop', 'voice/error', 'dweb/base-host/generation'], offscreenUi);
+  add(['voice/chunk', 'voice/auto-stop', 'voice/error', 'dweb/base-host/generation',
+    'dweb/app-authority-generations'], offscreenUi);
   add(['voice/permission-result'], micUi);
   add(['contacts/list', 'contacts/set', 'contacts/forget'], homeUi);
   add([

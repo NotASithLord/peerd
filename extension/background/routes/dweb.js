@@ -14,6 +14,8 @@
 // literal string in every shipped file.)
 // Every privileged collaborator is injected.
 
+import { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
+
 /**
  * @param {Record<string, any>} deps
  * @returns {Record<string, (msg?: any, sender?: import('webextension-polyfill').Runtime.MessageSender) => Promise<any>>}
@@ -33,6 +35,11 @@ export const makeDwebRoutes = (deps) => {
   }
   const ensureFeature = ensureDwebFeature;
   const rollbackGuard = createDwebRollbackGuard({ kv });
+  /** @param {string} appId */
+  const updateConflict = (appId) => ({
+    ok: false, error: 'local-changes', requiresAction: true,
+    conflictToken: appTabTracker.getDwebGeneration(appId),
+  });
 
   /**
    * Public discovery installs carry a complete stream tuple. Cold URI/private
@@ -150,6 +157,11 @@ export const makeDwebRoutes = (deps) => {
   };
 
   return {
+    'dweb/app-authority-generations': async (_msg, sender) => {
+      if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
+      try { return { ok: true, generations: await appTabTracker.dwebGenerationSnapshot() }; }
+      catch (error) { return failureResult(error); }
+    },
     // The offscreen discovery host calls this only after signature + shape +
     // derived-id verification. Persist BEFORE its in-memory Library accepts the
     // card, so tearing that host down cannot erase the anti-rollback decision.
@@ -217,7 +229,11 @@ export const makeDwebRoutes = (deps) => {
         const repository = await repositories.statusApp(record.id);
         // Local history and signed publisher provenance are different lineages:
         // git_oid is our safe-update baseline; source_git_oid came from the peer.
-        record = await appRegistry.update(record.id, { dweb: { git_oid: repository.oid } });
+        record = await appRegistry.update(record.id, { dweb: {
+          git_oid: repository.oid,
+          release_entry_file: record.entryFile,
+          release_file_kinds: { ...(record.fileKinds ?? {}) },
+        } });
         if (!record) throw new Error('app disappeared while recording install lineage');
         if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
           throw new Error('dweb-custody-changed');
@@ -246,11 +262,15 @@ export const makeDwebRoutes = (deps) => {
     // OPFS dir first, then write the new set — otherwise stale files linger and can
     // shadow the new entry. The dweb slot is MERGED so version_id/uri/seq advance
     // while publisher/slug/dwapp_id stay put. The open tab reloads to show the update.
-    'dweb/app-update': async ({ appId, files, entryFile, fileKinds, dweb, strategy, publicationGeneration }, sender) => {
+    'dweb/app-update': async ({ appId, files, entryFile, fileKinds, dweb, strategy, conflictToken, publicationGeneration }, sender) => {
       if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
       const storageRefusal = await dwebStorageRefusal(publicationGeneration);
       if (storageRefusal) return storageRefusal;
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      const resolvesConflict = strategy === 'replace' || strategy === 'fork';
+      if (resolvesConflict && (!Number.isSafeInteger(conflictToken) || conflictToken < 0)) {
+        return { ok: false, error: 'update-conflict-token-required' };
+      }
       try {
         // The App editor writes OPFS directly from its tab. Quiesce that host,
         // then serialize every SW-side writer through the same per-App lock so
@@ -277,19 +297,17 @@ export const makeDwebRoutes = (deps) => {
             return { ok: false, error: 'dweb-custody-changed' };
           }
 
-          const repository = await repositories.statusApp(appId);
+          const cleanupHashes = [...new Set([
+            ...(Array.isArray(rec.dweb?.pending_seed_unserve_hashes) ? rec.dweb.pending_seed_unserve_hashes : []),
+            ...(typeof rec.dweb?.hash === 'string' ? [rec.dweb.hash] : []),
+          ].filter((hash) => typeof hash === 'string' && hash !== dweb?.hash))];
+          const nextDweb = { ...(dweb ?? {}) };
+          if (cleanupHashes.length) nextDweb.pending_seed_unserve_hashes = cleanupHashes;
+          else delete nextDweb.pending_seed_unserve_hashes;
           const diverged = !rec.dweb?.git_oid
-            || repository.oid !== rec.dweb.git_oid
-            || !await repositories.matches({ kind: 'app', id: appId }, { at: rec.dweb.git_oid });
-          if (diverged && strategy !== 'replace' && strategy !== 'fork') {
-            return {
-              ok: false,
-              error: 'local-changes',
-              requiresAction: true,
-              currentOid: repository.oid,
-              baseOid: rec.dweb?.git_oid ?? null,
-            };
-          }
+            || (typeof rec.dweb?.hash === 'string' && !appReleaseDescriptorMatches(rec))
+            || !await repositories.matches({ kind: 'app', id: appId }, { at: rec.dweb.git_oid, excludeAppData: true });
+          if (diverged && !resolvesConflict) return updateConflict(appId);
           if (!publicationCurrent(publicationGeneration) || !dwebOn()) {
             return { ok: false, error: 'dweb-custody-changed' };
           }
@@ -343,11 +361,13 @@ export const makeDwebRoutes = (deps) => {
               entryFile,
               fileKinds,
               message: `update from dweb ${dweb?.version_id?.slice?.(0, 10) ?? ''}`,
-              metadataForOid: (/** @type {string | null} */ oid, /** @type {any} */ oldRecord) => ({
+              metadataForOid: (/** @type {string | null} */ oid, /** @type {any} */ oldRecord, /** @type {Record<string, 'text'|'binary'>} */ releaseFileKinds = {}) => ({
                 ...(dweb && typeof dweb === 'object' ? {
                   dweb: {
-                    ...dweb,
+                    ...nextDweb,
                     git_oid: oid,
+                    release_entry_file: entryFile,
+                    release_file_kinds: { ...releaseFileKinds },
                     published_hashes: [...new Set([
                       ...(oldRecord.dweb?.published_hashes ?? []),
                       ...(typeof dweb.hash === 'string' ? [dweb.hash] : []),
@@ -372,11 +392,16 @@ export const makeDwebRoutes = (deps) => {
           return {
             ok: true,
             app: committed.record,
+            cleanupHashes,
             ...(fork ? { fork: { id: fork.id, name: fork.name } } : {}),
             ...(auditWarning ? { warning: auditWarning } : {}),
           };
-        }), { close: true });
+        }), {
+          close: true, invalidateDweb: true,
+          ...(resolvesConflict ? { expectedDwebGeneration: conflictToken } : {}),
+        });
       } catch (e) {
+        if (/** @type {{name?:string}} */ (e)?.name === 'AppDwebAuthorityChangedError') return updateConflict(appId);
         return failureResult(e);
       }
     },
@@ -594,7 +619,7 @@ export const makeDwebRoutes = (deps) => {
     // Update an installed app in place to a newer announced version: the offscreen
     // refetches + verifies the new bundle and the SW overwrites the existing app's
     // files. The user keeps ONE copy that just updates.
-    'dweb/base/update-app': async ({ appId, uri, name, strategy } = {}) => {
+    'dweb/base/update-app': async ({ appId, uri, name, strategy, conflictToken } = {}) => {
       if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string' || typeof uri !== 'string') return { ok: false, error: 'appId-and-uri-required' };
@@ -619,7 +644,7 @@ export const makeDwebRoutes = (deps) => {
           pendingHashes: Array.isArray(record.dweb?.pending_seed_unserve_hashes)
             ? record.dweb.pending_seed_unserve_hashes
             : [],
-          ...(strategy === 'replace' || strategy === 'fork' ? { strategy } : {}),
+          ...(strategy === 'replace' || strategy === 'fork' ? { strategy, conflictToken } : {}),
         });
         if (!isCurrent() || !dwebOn()) {
           return { ok: false, error: 'dweb-custody-changed', outcomeKnown: false };
@@ -678,10 +703,24 @@ export const makeDwebRoutes = (deps) => {
         type: _t,
         appDocumentId: _claimedDocumentId,
         appTabId: _claimedTabId,
+        appGeneration: _claimedGeneration,
+        roomSnapshot: _claimedRoomSnapshot,
+        releaseSnapshot: _claimedReleaseSnapshot,
+        release: _claimedRelease,
+        expectedHash: _claimedExpectedHash,
+        bridgeAppId, bridgeAppHash, bridgeAppForked, bridgeAppGeneration,
         ...args
       } = msg;
+      if (bridgeAppId !== appId || !Number.isSafeInteger(bridgeAppGeneration)
+          || bridgeAppGeneration < 0) return { ok: false, error: 'app-identity-changed' };
+      if (args.op !== 'leave') {
+        try { await appTabTracker.dwebGenerationsReady(); }
+        catch { return { ok: false, error: 'app-authority-unavailable' }; }
+      }
+      const identityCurrent = () => appTabTracker.getTabId(appId) === senderTabId
+        && appTabTracker.getDwebGeneration(appId) === bridgeAppGeneration;
       return withReadyPublication(async (/** @type {() => boolean} */ isCurrent) => {
-        const relay = async () => {
+        const relay = async (extra = {}) => {
           const generation = publicationClaim(isCurrent);
           if (generation == null) return {
             ok: false, error: 'dweb-custody-changed',
@@ -690,7 +729,9 @@ export const makeDwebRoutes = (deps) => {
             type: 'dweb/base-host/room', ...args,
             appDocumentId: senderDocumentId,
             appTabId: senderTabId,
+            appGeneration: bridgeAppGeneration,
             publicationGeneration: generation,
+            ...extra,
           });
           if (args.op !== 'publish-app' || reply?.ok !== true
               || !Array.isArray(reply.pendingRoomUnserveHashes)) return reply;
@@ -715,10 +756,45 @@ export const makeDwebRoutes = (deps) => {
           }
           return reply;
         };
-        if (args.op === 'publish-app' && typeof args.appId === 'string') {
-          return withAppLifecycle(args.appId, relay);
+        // why: token-bound leave compensation must finish even after rotation.
+        if (args.op === 'leave') return relay();
+        const authorized = () => isCurrent() && dwebOn() && identityCurrent();
+        const holdIdentity = (/** @type {()=>Promise<any>} */ operation) =>
+          appTabTracker.withDwebAuthority(appId, operation, { expectedGeneration: bridgeAppGeneration });
+        try {
+          if (args.op === 'publish-app') {
+            // why: flush pending editor writes before acquiring consent. The
+            // offscreen publication must use this trusted snapshot, not call
+            // back into a save that needs the same authority lock.
+            return await withAppLifecycle(appId, () => appQuiescence.runUnlocked(appId, async () => {
+              const roomSnapshot = { ok: true, ...(await appClient.snapshotFilesBase64({ appId })) };
+              return holdIdentity(() => appClient.withWriteLock(appId, async () =>
+                authorized() ? relay({ roomSnapshot }) : { ok: false, error: 'app-identity-changed' }));
+            }));
+          }
+          return await holdIdentity(() => appClient.withWriteLock(appId, async () => {
+            if (!authorized()) return { ok: false, error: 'app-identity-changed' };
+            if (args.op === 'join') {
+              const record = await appRegistry.get(appId);
+              const hash = record?.dweb?.hash;
+              const exact = typeof hash === 'string' && typeof record.dweb.git_oid === 'string'
+                && appReleaseDescriptorMatches(record)
+                && await repositories.matches({ kind: 'app', id: appId },
+                  { at: record.dweb.git_oid, excludeAppData: true }).catch(() => false);
+              if (!record || !authorized()
+                  || (hash != null && (typeof hash !== 'string' || bridgeAppHash !== hash
+                    || typeof bridgeAppForked !== 'boolean' || exact === bridgeAppForked))) {
+                return { ok: false, error: 'app-identity-changed' };
+              }
+            }
+            return relay();
+          }));
+        } catch (error) {
+          if (/** @type {{name?:string}} */ (error)?.name === 'AppDwebAuthorityChangedError') {
+            return { ok: false, error: 'app-identity-changed' };
+          }
+          return failureResult(error);
         }
-        return relay();
       });
     },
     // The READ surface behind peerd.distributed.{whoami,status,peers,presence} in

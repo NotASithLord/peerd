@@ -7,6 +7,7 @@ const offscreenSender = { url: 'moz-extension://peerd/offscreen/offscreen.html' 
 
 const baseDeps = (over: any = {}) => {
   const sent: any[] = [];
+  let appGeneration = 0;
   const audits: any[] = [];
   const deps = {
     vault: { isLocked: () => false, getSecret: async () => 'id-secret', setSecret: async () => {} },
@@ -28,6 +29,16 @@ const baseDeps = (over: any = {}) => {
       },
     },
     appTabTracker: {
+      dwebGenerationsReady: async () => {},
+      dwebGenerationSnapshot: async () => ({ a1: appGeneration }),
+      getDwebGeneration: () => appGeneration,
+      withDwebAuthority: async (_id: string, op: () => Promise<any>, opts: any = {}) => {
+        if (opts.expectedGeneration != null && opts.expectedGeneration !== appGeneration) {
+          throw Object.assign(new Error('stale generation'), { name: 'AppDwebAuthorityChangedError' });
+        }
+        if (opts.invalidate) appGeneration += 1;
+        return op();
+      },
       getTabId: () => null,
       quiesceTab: async () => true,
       resumeTab: async () => true,
@@ -437,7 +448,7 @@ describe('dweb app store', () => {
       files: { 'index.html': { base64: 'PGgxPng8L2gxPg==' } },
     });
     expect(replacement.metadataForOid('new-base', { dweb: { git_oid: 'base' } })).toEqual({
-      dweb: { version_id: 'v2', git_oid: 'new-base', published_hashes: [] },
+      dweb: { version_id: 'v2', git_oid: 'new-base', published_hashes: [], release_entry_file: 'index.html', release_file_kinds: {} },
     });
     expect(directMetadataWrites).toBe(0);
   });
@@ -856,10 +867,11 @@ describe('dweb app store', () => {
       },
       repositories: {
         statusApp: async () => ({ oid: 'local', branch: 'main', dirty: true }),
+        matches: async () => false,
         fork: async () => { order.push('fork-copy'); return { oid: 'local' }; },
       },
     });
-    const result = await makeDwebRoutes(deps)['dweb/app-update']({ appId: 'a1', strategy: 'fork', files: { 'i.html': 'upstream' }, entryFile: 'i.html', dweb: { version_id: 'v2' }, publicationGeneration: 1 }, offscreenSender);
+    const result = await makeDwebRoutes(deps)['dweb/app-update']({ appId: 'a1', strategy: 'fork', conflictToken: 0, files: { 'i.html': 'upstream' }, entryFile: 'i.html', dweb: { version_id: 'v2' }, publicationGeneration: 1 }, offscreenSender);
     expect(result).toMatchObject({ ok: true, fork: { id: 'fork-1' } });
     expect(new TextDecoder().decode(forked.files['i.html'])).toBe('local');
     expect(replacement.files).toEqual({ 'i.html': 'upstream' });
@@ -887,7 +899,7 @@ describe('dweb app store', () => {
       },
     });
     expect(await makeDwebRoutes(deps)['dweb/app-update']({
-      appId: 'a1', strategy: 'fork', files: { 'i.html': 'upstream' },
+      appId: 'a1', strategy: 'fork', conflictToken: 0, files: { 'i.html': 'upstream' },
       entryFile: 'i.html', dweb: { version_id: 'v2' }, publicationGeneration: 1,
     }, offscreenSender)).toEqual({ ok: false, error: 'replacement failed' });
     expect(deleted).toEqual(['fork-1']);
@@ -910,7 +922,7 @@ describe('dweb app store', () => {
       },
     });
     expect(await makeDwebRoutes(deps)['dweb/app-update']({
-      appId: 'a1', strategy: 'fork', files: { 'i.html': 'upstream' },
+      appId: 'a1', strategy: 'fork', conflictToken: 0, files: { 'i.html': 'upstream' },
       entryFile: 'i.html', dweb: { version_id: 'v2' }, publicationGeneration: 1,
     }, offscreenSender)).toMatchObject({
       ok: false, code: 'dweb-update-fork-rollback-incomplete',
@@ -939,7 +951,7 @@ describe('dweb app store', () => {
       },
     });
     expect(await makeDwebRoutes(deps)['dweb/app-update']({
-      appId: 'a1', strategy: 'fork', files: { 'i.html': 'upstream' },
+      appId: 'a1', strategy: 'fork', conflictToken: 0, files: { 'i.html': 'upstream' },
       entryFile: 'i.html', dweb: { version_id: 'v2' }, publicationGeneration: 1,
     }, offscreenSender)).toEqual({ ok: false, error: 'dweb-custody-changed' });
     expect(created).toBe(false);
@@ -981,12 +993,12 @@ describe('dweb app store', () => {
     };
     await makeDwebRoutes(deps)['dweb/base/room']({
       type: 'dweb/base/room', op: 'join', roomId: 'r1', appId: 'app-one',
-      roomAdmissionToken: 'room-admission-token-one',
+      roomAdmissionToken: 'room-admission-token-one', bridgeAppId: 'app-one', bridgeAppGeneration: 0,
     }, sender as any);
     expect(sent[0]).toEqual({
       type: 'dweb/base-host/room', op: 'join', roomId: 'r1', appId: 'app-one',
       roomAdmissionToken: 'room-admission-token-one',
-      publicationGeneration: 1,
+      publicationGeneration: 1, appGeneration: 0,
       appDocumentId: 'document-one', appTabId: 41,
     });
   });
@@ -1005,7 +1017,7 @@ describe('dweb app store', () => {
       appTabTracker: { parseIdFromUrl: () => 'app-one', getTabId: () => 41 },
     });
     const result = await makeDwebRoutes(deps)['dweb/base/room']({
-      op: 'publish-app', appId: 'app-one', roomId: 'room-one',
+      op: 'publish-app', appId: 'app-one', roomId: 'room-one', bridgeAppId: 'app-one', bridgeAppGeneration: 0,
     }, {
       url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
       documentId: 'document-one', tab: { id: 41 },
@@ -1023,7 +1035,7 @@ describe('dweb app store', () => {
       appTabTracker: { parseIdFromUrl: () => 'app-one', getTabId: () => 41 },
     });
     expect(await makeDwebRoutes(deps)['dweb/base/room']({
-      op: 'publish-app', appId: 'app-one', roomId: 'room-one',
+      op: 'publish-app', appId: 'app-one', roomId: 'room-one', bridgeAppId: 'app-one', bridgeAppGeneration: 0,
     }, {
       url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
       documentId: 'document-one', tab: { id: 41 },
@@ -1052,7 +1064,7 @@ describe('dweb app store', () => {
     };
     const pending = makeDwebRoutes(deps)['dweb/base/room']({
       type: 'dweb/base/room', op: 'join', roomId: 'r1', appId: 'app-one',
-      roomAdmissionToken: 'room-admission-token-one',
+      roomAdmissionToken: 'room-admission-token-one', bridgeAppId: 'app-one', bridgeAppGeneration: 0,
     }, sender as any);
     await started;
     current = false;
@@ -1075,7 +1087,7 @@ describe('dweb app store', () => {
     });
     const pending = makeDwebRoutes(deps)['dweb/base/room']({
       op: 'join', roomId: 'r1', appId: 'app-one',
-      roomAdmissionToken: 'room-admission-token-one',
+      roomAdmissionToken: 'room-admission-token-one', bridgeAppId: 'app-one', bridgeAppGeneration: 0,
     }, {
       url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
       documentId: 'document-one', tab: { id: 41 },
@@ -1113,5 +1125,107 @@ describe('dweb app store', () => {
       url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one', tab: { id: 41 },
     } as any)).toEqual({ ok: false, error: 'app-room-owner-mismatch' });
     expect(sent).toEqual([]);
+  });
+});
+
+describe('App consent update and room custody cutover', () => {
+  const sender: any = { url: 'chrome-extension://peerd/engine-tabs/app-tab/index.html#app-one',
+    documentId: 'document-one', tab: { id: 41 } };
+  const claim = { appId: 'app-one', bridgeAppId: 'app-one', bridgeAppGeneration: 0,
+    roomClientId: 'client-one', roomAdmissionToken: 'admission-one', expectedHostEpoch: 'host-one' };
+  const tracked = { parseIdFromUrl: () => 'app-one', getTabId: () => 41 };
+
+  test('generation hydration is accepted only from the exact offscreen owner', async () => {
+    const { deps } = baseDeps();
+    const route = makeDwebRoutes(deps)['dweb/app-authority-generations'];
+    expect(await route({}, sender)).toMatchObject({ ok: false, error: 'offscreen-sender-required' });
+    expect(await route({}, offscreenSender)).toEqual({ ok: true, generations: { a1: 0 } });
+  });
+
+  test('a destructive update requires the exact conflict generation', async () => {
+    let replacements = 0;
+    const { deps } = baseDeps({ appClient: { replaceVersionedFilesUnlocked: async () => { replacements += 1; return { record: {} }; } } });
+    const route = makeDwebRoutes(deps)['dweb/app-update'];
+    const request = { appId: 'a1', entryFile: 'i.html', files: { 'i.html': 'new' },
+      publicationGeneration: 1, strategy: 'replace' };
+    expect(await route(request, offscreenSender)).toMatchObject({ error: 'update-conflict-token-required' });
+    await deps.appTabTracker.withDwebAuthority('a1', async () => {}, { invalidate: true });
+    expect(await route({ ...request, conflictToken: 0 }, offscreenSender))
+      .toMatchObject({ error: 'local-changes', conflictToken: 1 });
+    expect(replacements).toBe(0);
+    expect(await route({ ...request, conflictToken: 1 }, offscreenSender)).toMatchObject({ ok: true });
+    expect(replacements).toBe(1);
+  });
+
+  test('an equal release tree is safe despite another Git HEAD and excludes only runtime data', async () => {
+    let options: any;
+    const { deps } = baseDeps({ repositories: {
+      statusApp: async () => ({ oid: 'another-commit' }),
+      matches: async (_ref: any, opts: any) => { options = opts; return true; },
+    } });
+    expect(await makeDwebRoutes(deps)['dweb/app-update']({
+      appId: 'a1', entryFile: 'i.html', files: { 'i.html': 'new' }, publicationGeneration: 1,
+    }, offscreenSender)).toMatchObject({ ok: true });
+    expect(options).toEqual({ at: 'base', excludeAppData: true });
+  });
+
+  test('a matching hash cannot admit changed executable interpretation as the installed release', async () => {
+    const { deps, sent } = baseDeps({
+      appTabTracker: tracked,
+      appRegistry: { get: async () => ({ id: 'app-one', entryFile: 'changed.html', fileKinds: {},
+        dweb: { hash: 'release-hash', git_oid: 'base', release_entry_file: 'index.html', release_file_kinds: {} } }) },
+    });
+    expect(await makeDwebRoutes(deps)['dweb/base/room']({
+      ...claim, op: 'join', bridgeAppHash: 'release-hash', bridgeAppForked: false,
+    }, sender)).toMatchObject({ ok: false, error: 'app-identity-changed' });
+    expect(sent).toEqual([]);
+  });
+
+  test('a queued room operation cannot spend a retired generation but token-bound leave can finish', async () => {
+    const { deps, sent } = baseDeps({ appTabTracker: tracked });
+    await deps.appTabTracker.withDwebAuthority('app-one', async () => {}, { invalidate: true });
+    const route = makeDwebRoutes(deps)['dweb/base/room'];
+    expect(await route({ ...claim, op: 'join' }, sender)).toMatchObject({ error: 'app-identity-changed' });
+    expect(await route({ ...claim, op: 'leave' }, sender)).toMatchObject({ ok: true });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ op: 'leave', appGeneration: 0,
+      roomClientId: claim.roomClientId, roomAdmissionToken: claim.roomAdmissionToken, expectedHostEpoch: claim.expectedHostEpoch });
+  });
+
+  test('room relay strips forged snapshots and stamps only the held host generation', async () => {
+    const { deps, sent } = baseDeps({ appTabTracker: tracked });
+    expect(await makeDwebRoutes(deps)['dweb/base/room']({
+      ...claim, op: 'join', appGeneration: 500, roomSnapshot: { malicious: true },
+      releaseSnapshot: { malicious: true }, release: { malicious: true }, expectedHash: 'forged',
+    }, sender)).toMatchObject({ ok: true });
+    expect(sent[0]).toMatchObject({ appGeneration: 0, publicationGeneration: 1,
+      appTabId: 41, appDocumentId: 'document-one' });
+    for (const field of ['bridgeAppGeneration', 'roomSnapshot', 'releaseSnapshot', 'release', 'expectedHash']) {
+      expect(Object.hasOwn(sent[0], field)).toBe(false);
+    }
+  });
+
+  test('publish flushes and snapshots before taking consent and repository locks', async () => {
+    const order: string[] = [];
+    let authorityHeld = false;
+    const snapshot = { record: { id: 'app-one' }, files: { 'index.html': 'eA==' } };
+    const { deps, sent } = baseDeps({
+      appTabTracker: { ...tracked, withDwebAuthority: async (_id: string, operation: () => Promise<any>) => {
+        order.push('authority'); authorityHeld = true;
+        try { return await operation(); } finally { authorityHeld = false; }
+      } },
+      appQuiescence: { runUnlocked: async (_id: string, op: () => Promise<any>) => {
+        expect(authorityHeld).toBe(false); order.push('flush'); return op();
+      } },
+      appClient: {
+        snapshotFilesBase64: async () => { expect(authorityHeld).toBe(false); order.push('snapshot'); return snapshot; },
+        withWriteLock: async (_id: string, op: () => Promise<any>) => {
+          expect(authorityHeld).toBe(true); order.push('repository'); return op();
+        },
+      },
+    });
+    expect(await makeDwebRoutes(deps)['dweb/base/room']({ ...claim, op: 'publish-app' }, sender)).toMatchObject({ ok: true });
+    expect(order).toEqual(['flush', 'snapshot', 'authority', 'repository']);
+    expect(sent[0].roomSnapshot).toEqual({ ok: true, ...snapshot });
   });
 });

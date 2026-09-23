@@ -22,6 +22,7 @@ import {
   parseAppManifest,
 } from '/peerd-engine/background.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
+import { APP_DATA_PATH_RE } from '/shared/app-dweb-identity.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
@@ -157,6 +158,7 @@ const normalizeFileContent = (path, value, declaredKind) => {
     if (isBinaryAssetPath(path) || declaredKind === 'binary') {
       throw new AppFileContentError(`binary App asset requires bytes or { base64 }: ${path}`);
     }
+    validateRuntimeData(path, value, 'text');
     return { stored: value, size: new TextEncoder().encode(value).byteLength, kind: 'text' };
   }
   /** @type {Uint8Array<ArrayBuffer> | null} */
@@ -193,7 +195,16 @@ const normalizeFileContent = (path, value, declaredKind) => {
   if (kind === 'text' && (isBinaryAssetPath(path) || !isLosslessUtf8Text(stored))) {
     throw new AppFileContentError(`App text file is not lossless UTF-8: ${path}`);
   }
+  validateRuntimeData(path, stored, kind);
   return { stored, size: stored.byteLength, kind };
+};
+
+/** @param {string} path @param {string|Uint8Array<ArrayBuffer>} stored @param {'text'|'binary'} kind */
+const validateRuntimeData = (path, stored, kind) => {
+  if (!APP_DATA_PATH_RE.test(path)) return;
+  if (kind !== 'text') throw new AppFileContentError(`App runtime data must be text: ${path}`);
+  try { JSON.parse(typeof stored === 'string' ? stored : new TextDecoder().decode(stored)); }
+  catch { throw new AppFileContentError(`App runtime data must be valid JSON: ${path}`); }
 };
 
 /**
@@ -269,11 +280,19 @@ export const createAppClient = ({
    * @param {() => Promise<T>} operation
    * @returns {Promise<T>}
    */
-  const withMutation = (appId, operation) =>
-    repositories.coordinate({ kind: 'app', id: appId }, operation);
+  const withMutation = async (appId, operation, invalidateDweb = true) => {
+    const mutate = () => repositories.coordinate({ kind: 'app', id: appId }, operation);
+    if (!invalidateDweb) return mutate();
+    // why: rotate consent before the repository lock, matching room admission's
+    // authority→repository order. A generic lock must never rotate reads.
+    if (tracker.withDwebAuthority) return tracker.withDwebAuthority(appId, mutate, { invalidate: true });
+    await tracker.invalidateDweb?.(appId);
+    return mutate();
+  };
 
   // The public write lock is the same repository lane used by every mutation.
-  const withWriteLock = withMutation;
+  const withWriteLock = (/** @type {string} */ appId, /** @type {()=>Promise<any>} */ operation) =>
+    repositories.coordinate({ kind: 'app', id: appId }, operation);
 
   /** @param {ReturnType<typeof opfsForApp>} opfs */
   const currentFileSizes = async (opfs) => {
@@ -464,7 +483,10 @@ export const createAppClient = ({
       const opfs = guardedOpfsForApp(record.id);
       for (const { path, stored } of normalized.files) await opfs.write(path, stored);
       if (repositories?.initApp) {
-        await repositories.initApp(record.id, { message: `create ${record.name}` });
+        await repositories.initApp(record.id, {
+          message: `create ${record.name}`,
+          includeIgnored: source === 'dweb' && typeof dweb?.hash === 'string' && dweb.hash.length > 0,
+        });
       }
       if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
     } catch (error) {
@@ -634,10 +656,13 @@ export const createAppClient = ({
 
   /** Write a single file in the app's OPFS subdir.
    * @param {{ appId?: string, path: string, content: unknown, sessionId?: string,
-   *   reload?: boolean, signal?: AbortSignal }} args */
-  const writeFile = async ({ appId, path, content, sessionId, reload = true, signal }) => {
+   *   reload?: boolean, signal?: AbortSignal, invalidateDweb?: boolean }} args */
+  const writeFile = async ({ appId, path, content, sessionId, reload = true, signal, invalidateDweb = true }) => {
+    validateAppPath(path);
+    normalizeFileContent(path, content);
+    if (!invalidateDweb && !APP_DATA_PATH_RE.test(path)) throw new AppFileContentError('Only runtime data can retain App consent');
     const id = await resolveId({ sessionId, appId });
-    const result = await withMutation(id, () => writeFileUnlocked(id, path, content, signal));
+    const result = await withMutation(id, () => writeFileUnlocked(id, path, content, signal), invalidateDweb);
     if (path === 'peerd.json') await onManifestMutation(id);
     if (reload) tracker.reloadTab(id).catch(() => {});
     return result;
@@ -771,7 +796,7 @@ export const createAppClient = ({
    *
    * @param {{ appId: string, files: Record<string, unknown>, entryFile: string,
    *   fileKinds?: Record<string, unknown>, message?: string,
-   *   metadataForOid?: (oid: string | null, oldRecord: import('/peerd-engine/app-registry.js').AppRecord) => Partial<import('/peerd-engine/app-registry.js').AppRecord>,
+   *   metadataForOid?: (oid: string | null, oldRecord: import('/peerd-engine/app-registry.js').AppRecord, fileKinds: Record<string, 'text'|'binary'>) => Partial<import('/peerd-engine/app-registry.js').AppRecord>,
    *   isCurrent?: () => boolean,
    *   afterCommit: (record: import('/peerd-engine/app-registry.js').AppRecord) => Promise<void>|void }} args
    */
@@ -780,13 +805,17 @@ export const createAppClient = ({
     isCurrent = () => true, afterCommit,
   }) => {
     if (typeof afterCommit !== 'function') throw new TypeError('afterCommit is required');
-    if (!repositories?.replaceWorkingTree) throw new Error('browser Git is unavailable');
+    if (!repositories?.replaceWorkingTree || !repositories?.rollbackWorkingTree || !repositories?.statusApp) {
+      throw new Error('browser Git is unavailable');
+    }
     await beforeOpfsMutation();
     const id = await resolveId({ appId });
     const normalized = normalizeFileMap(files, entryFile, fileKinds);
     const opfs = guardedOpfsForApp(id);
     const oldRecord = await registry.get(id);
     if (!oldRecord) throw new Error(`app not found: ${id}`);
+    const previousOid = (await repositories.statusApp(id)).oid;
+    if (typeof previousOid !== 'string') throw new Error('versioned App has no repository head');
 
     /** @type {Record<string, Uint8Array<ArrayBuffer>>} */
     const oldFiles = Object.create(null);
@@ -806,18 +835,28 @@ export const createAppClient = ({
     /** @type {Record<string, string | Uint8Array<ArrayBuffer>>} */
     const nextFiles = Object.create(null);
     for (const file of normalized.files) nextFiles[file.path] = file.stored;
+    for (const [path, bytes] of Object.entries(oldFiles)) {
+      if (APP_DATA_PATH_RE.test(path)) nextFiles[path] = bytes;
+    }
+    const nextEntries = Object.values(nextFiles);
+    if (nextEntries.length > MAX_APP_FILES) throw new AppFileLimitError('App has too many files including runtime data');
+    let nextTotalBytes = 0;
+    for (const value of nextEntries) {
+      nextTotalBytes += typeof value === 'string' ? new TextEncoder().encode(value).byteLength : value.byteLength;
+      if (nextTotalBytes > MAX_APP_TOTAL_BYTES) throw new AppFileLimitError('App is too large including runtime data');
+    }
 
     try {
       if (!isCurrent()) throw new Error('dweb-custody-changed');
       const committed = await repositories.replaceWorkingTree(
         { kind: 'app', id },
-        { files: nextFiles, message },
+        { files: nextFiles, message, includeIgnored: true },
       );
       if (!isCurrent()) throw new Error('dweb-custody-changed');
       const patch = {
         entryFile,
         fileKinds: normalized.fileKinds,
-        ...metadataForOid(committed.oid ?? null, oldRecord),
+        ...metadataForOid(committed.oid ?? null, oldRecord, normalized.fileKinds),
       };
       const updated = await registry.update(id, /** @type {any} */ (patch));
       if (!updated) throw new Error(`app not found after versioned replacement: ${id}`);
@@ -830,30 +869,16 @@ export const createAppClient = ({
     } catch (cause) {
       /** @type {unknown[]} */
       const rollbackFailures = [];
-      /** @type {string | null | undefined} */
-      let rollbackOid;
-      // replaceWorkingTree can fail after changing bytes, so every failed
-      // attempt must restore the exact snapshot captured above.
+      // why: restore the old HEAD/index before ignored local bytes, so a
+      // failed release cannot turn those bytes into a committed local fork.
       try {
-        const rollback = await repositories.replaceWorkingTree(
+        await repositories.rollbackWorkingTree(
           { kind: 'app', id },
-          { files: oldFiles, message: 'rollback failed App release update' },
+          { to: previousOid, files: oldFiles },
         );
-        rollbackOid = rollback.oid;
       } catch (error) { rollbackFailures.push(error); }
       try {
-        // why: restoring old bytes creates a new rollback commit. The catalog's
-        // safe-update baseline must name that physical HEAD, not the old
-        // ancestor, or the next retry falsely reports the clean rollback as a
-        // local divergence. source_git_oid remains the peer-authored lineage.
-        let rollbackRecord = oldRecord;
-        if (oldRecord.dweb && rollbackFailures.length === 0) {
-          const dweb = { ...oldRecord.dweb };
-          if (typeof rollbackOid === 'string' && rollbackOid) dweb.git_oid = rollbackOid;
-          else delete dweb.git_oid;
-          rollbackRecord = { ...oldRecord, dweb };
-        }
-        await restoreRecord(id, rollbackRecord);
+        await restoreRecord(id, oldRecord);
       }
       catch (error) { rollbackFailures.push(error); }
       if (rollbackFailures.length) {
@@ -878,7 +903,7 @@ export const createAppClient = ({
    */
   const snapshotFiles = async ({ appId }) => {
     const id = await resolveId({ appId });
-    return withMutation(id, async () => {
+    return withWriteLock(id, async () => {
       const record = await registry.get(id);
       if (!record) throw new Error(`app not found: ${id}`);
       const opfs = guardedOpfsForApp(id);
@@ -916,9 +941,10 @@ export const createAppClient = ({
   };
 
   /** @param {{ appId?: string, path: string, sessionId?: string, reload?: boolean,
-   *   signal?: AbortSignal }} args */
-  const deleteFile = async ({ appId, path, sessionId, reload = true, signal }) => {
+   *   signal?: AbortSignal, invalidateDweb?: boolean }} args */
+  const deleteFile = async ({ appId, path, sessionId, reload = true, signal, invalidateDweb = true }) => {
     validateAppPath(path);
+    if (!invalidateDweb && !APP_DATA_PATH_RE.test(path)) throw new AppFileContentError('Only runtime data can retain App consent');
     const id = await resolveId({ sessionId, appId });
     await withMutation(id, async () => {
       const rec = await registry.get(id);
@@ -936,7 +962,7 @@ export const createAppClient = ({
       } catch (error) {
         return rollbackMutation(error, () => opfs.write(path, backup), id, rec);
       }
-    });
+    }, invalidateDweb);
     if (path === 'peerd.json') await onManifestMutation(id);
     if (reload) tracker.reloadTab(id).catch(() => {});
   };
