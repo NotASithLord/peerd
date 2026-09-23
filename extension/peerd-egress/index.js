@@ -55,7 +55,7 @@ export {
 } from './fetch/safe-fetch.js';
 export {
   makeWebFetch, sessionScopedCredentials, withSessionScopedCredentials,
-  withApiCredentials, withDpopCredentials,
+  withApiCredentials, withDpopCredentials, withWebRequestAuthority,
   authOriginForRequestUrl,
 } from './fetch/web-fetch.js';
 // DESIGN-18 P1: origin-bound API-key policy (the origin:<origin> analog of git:<host>).
