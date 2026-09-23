@@ -51,6 +51,8 @@ import { makeSessionCostFolder } from './session-cost-fold.js';
 import { makeScriptModelCallRoute } from './script-model-call.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
 import { makeAppActorChatHandler } from './app-actor-chat.js';
+import { makeWebRequestAuthorityBinder } from './web-request-authority.js';
+import { beginSessionAuthorityChange, captureSessionAuthority } from '/shared/session-authority-epoch.js';
 
 import {
   // vault
@@ -69,6 +71,7 @@ import {
   makeSafeFetch,
   makeWebFetch,
   withSessionScopedCredentials,
+  withWebRequestAuthority,
   // DESIGN-18 P1 + Tier 1 / INV-15: the API actor's credentialed boundary fetch
   // (session scope + the keyless origin:<origin> injection), upgraded to
   // proof-of-possession. withDpopCredentials is a strict SUPERSET of
@@ -2096,6 +2099,26 @@ const resolvePermission = async (activeSession) => {
   return { mode: normalizeMode(rawMode), confirmActions: normalizeConfirmActions(rawConfirm) };
 };
 
+const bindWebRequestAuthority = makeWebRequestAuthorityBinder({ withWebRequestAuthority, needsWebWriteConfirm });
+const captureRequestAuthority = () => {
+  const sessionCurrent = captureSessionAuthority(idb);
+  const cacheCurrent = captureSessionAuthority(sessionCache);
+  const goalCurrent = goalRunner?.captureAuthority() ?? (() => true);
+  const vaultCurrent = vault.captureRequestAuthority();
+  return () => sessionCurrent() && cacheCurrent() && goalCurrent() && vaultCurrent();
+};
+const readRequestPermission = async (/** @type {string | null} */ sessionId) => {
+  if (!sessionId) return resolvePermission(null);
+  const owner = await sessions.get(sessionId);
+  if (!owner || owner.archivedAt) return { mode: PERMISSION_MODES.PLAN, confirmActions: true };
+  const root = await sessions.get(await resolveLifecycleRootSession(sessionId));
+  if (!root || root.archivedAt) return { mode: PERMISSION_MODES.PLAN, confirmActions: true };
+  return resolvePermission(root);
+};
+const webFetchForSession = (/** @type {string | null} */ sessionId) => bindWebRequestAuthority({
+  webFetch, captureRequestAuthority, readPermission: () => readRequestPermission(sessionId),
+});
+
 // Per-session promise chains serializing todo read-modify-writes (the
 // ctx.todoStore below). Keyed by sessionId; an entry is just the tail of the
 // chain, so the map stays tiny and dies with the SW (the persisted list is
@@ -2615,7 +2638,7 @@ const buildToolContext = async (/** @type {any} */ {
     // (provider-allowlist, locked down). safeFetch is still in ctx for
     // any future tool that legitimately needs to hit a provider.
     safeFetch,
-    webFetch,
+    webFetch: webFetchForSession(sessionId ?? null),
     // fetch_url's spill-and-page store: oversized fetched text spills here and
     // read_web_cache pages it back. Stripped to exactly those two tools by
     // spawn.js CAPABILITY_CONSUMERS.webCache.
@@ -2723,10 +2746,11 @@ const buildToolContext = async (/** @type {any} */ {
       // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
       resCtx.webFetch = isKnownIdpHost(ownedOrigin)
         ? async () => { throw new EgressDeniedError(ownedOrigin ?? 'identity provider', IDENTITY_PROVIDER_TRANSIT_ONLY_CODE); }
-        : withDpopCredentials(webFetch, () => ownedOrigin, {
+        : withDpopCredentials(ctx.webFetch, () => ownedOrigin, {
           getSecret: (/** @type {string} */ name) => vault.getSecret(name),
           getDpopKey: getDpopKeyForOrigin,
           audit: (/** @type {any} */ e) => auditLog.append(e),
+          captureRequestAuthority: () => vault.captureRequestAuthority(),
         });
       resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin);
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
@@ -2789,11 +2813,22 @@ const buildToolContext = async (/** @type {any} */ {
       // a credentialed origin moves the scope with no tool call in between to judge. The
       // getter answers synchronously and can only ever withhold, so the ordinary
       // same-origin case is byte-for-byte what it was before #251.
+      let requestTabOrigin = /** @type {string | undefined} */ (undefined);
+      const liveTabFetch = bindWebRequestAuthority({
+        webFetch, captureRequestAuthority,
+        readPermission: () => readRequestPermission(sessionId ?? null),
+        reauthorize: async () => {
+          const live = await liveSiteClientLandingFor(sessionId);
+          requestTabOrigin = live.status === 'live' ? originOfTabUrl(live.url) : undefined;
+          if (live.status === 'live' && lock) await lock.judgeLanding(live.url);
+        },
+      });
       resCtx.webFetch = withSessionScopedCredentials(
-        webFetch,
+        liveTabFetch,
         lock
-          ? lock.makeScope(() => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin)
-          : () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
+          ? lock.makeScope(() => requestTabOrigin)
+          : () => requestTabOrigin,
+        { captureRequestAuthority },
       );
       // navigate adopts the actor's tab MID-TURN (0->1). It re-pins through this setter
       // — which closes over the SHARED resCtx — NOT a direct activeTab= on the per-call
@@ -5776,9 +5811,12 @@ const siteFetchCallRoute = {
       originStates.hydrate(ownerSessionId, /** @type {any} */ (owner.originState));
       tabOriginLock = originLockFor(ownerSessionId);
     }
-    const authorizeTabOrigin = tabOriginLock?.authorizeSiteClientOrigin(
-      () => liveSiteClientLandingFor(ownerSessionId),
-    );
+    let tabOrigin = /** @type {string | undefined} */ (undefined);
+    const authorizeTabOrigin = tabOriginLock?.authorizeSiteClientOrigin(async () => {
+      const live = await liveSiteClientLandingFor(ownerSessionId);
+      tabOrigin = live.status === 'live' ? originOfTabUrl(live.url) : undefined;
+      return live;
+    });
     const reauthorizeSiteFetch = () => authorizeSiteClientRelayOrigin({
       backing: relayBacking,
       instanceOrigin: ownedApiOrigin,
@@ -5792,6 +5830,9 @@ const siteFetchCallRoute = {
     // Anti-exfil: a non-GET can transmit in-context data. Confirm by default via
     // the SHARED web:write key (one approval governs fetch_url + call_api + this).
     if (needsWebWriteConfirm(httpMethod)) {
+      if ((await readRequestPermission(ownerSessionId)).mode !== PERMISSION_MODES.ACT) {
+        return { ok: false, error: 'plan_mode_refused', performed: false, outcomeKnown: true };
+      }
       const ans = await confirmAction(/** @type {any} */ ({
         tool: 'web:write', kind: 'web_write', origins: [pin],
         summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
@@ -5822,11 +5863,11 @@ const siteFetchCallRoute = {
         getSecret: (/** @type {string} */ name) => vault.getSecret(name),
         getDpopKey: getDpopKeyForOrigin,
         audit: (/** @type {any} */ e) => auditLog.append(e),
+        captureRequestAuthority: () => vault.captureRequestAuthority(),
       });
     } else {
       // A tab actor: scope to the owned tab's LIVE origin (matches the pin when the
       // actor is on that site; a mismatch is naturally sessionless at the boundary).
-      const ownedTabId = webActorTabBindings.tabFor(ownerSessionId);
       // FAIL CLOSED when there is no readable tab. This used to default to `pin`
       // — i.e. to `siteOrigin`, which the MODEL supplies — so a web actor with no
       // tab (the 0-tab fetch state, or a tab that just closed) got a CREDENTIALED
@@ -5834,11 +5875,6 @@ const siteFetchCallRoute = {
       // the precise escalation the session scope exists to prevent, arriving
       // through the scope's own default. Undefined means sessionless, which is
       // what "we do not know where this actor is" should always have meant.
-      let tabOrigin = /** @type {string | undefined} */ (undefined);
-      if (typeof ownedTabId === 'number') {
-        const t = await browser.tabs.get(ownedTabId).catch(() => null);
-        if (t?.url) tabOrigin = originOfTabUrl(/** @type {string} */ (t.url));
-      }
       // issue 251 — and narrowed by the origin lock, the SAME policy
       // buildToolContext applies to this actor's own webFetch. Without this the
       // route was a way around the lock rather than a peer of it: origin-lock.js
@@ -5848,6 +5884,7 @@ const siteFetchCallRoute = {
       scopedFetch = withSessionScopedCredentials(
         webFetch,
         tabOriginLock ? tabOriginLock.makeScope(() => tabOrigin) : () => tabOrigin,
+        { captureRequestAuthority },
       );
     }
     // Strip tool-supplied credential headers (a laundered injection forging one) —
@@ -5870,14 +5907,22 @@ const siteFetchCallRoute = {
     if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
     if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     try {
-      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody), ...(runSignal ? { signal: runSignal } : {}) });
+      const send = bindWebRequestAuthority({
+        webFetch: scopedFetch, captureRequestAuthority,
+        readPermission: () => readRequestPermission(ownerSessionId), reauthorize: reauthorizeSiteFetch,
+      });
+      const res = await send(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody), ...(runSignal ? { signal: runSignal } : {}) });
       const ct = res.headers.get('content-type') ?? '';
       const text = (await res.text()).slice(0, 200_000);   // hard cap on relayed bytes
       let json = null;
       if (/(json|graphql)/i.test(ct)) { try { json = JSON.parse(text); } catch { json = null; } }
       return { ok: true, value: { status: res.status, finalUrl: res.url ?? url, contentType: ct || null, body: text, json } };
     } catch (e) {
-      const err = /** @type {{ reason?: string, message?: string }} */ (e);
+      const err = /** @type {{ reason?: string, message?: string, performed?:boolean, outcomeKnown?:boolean }} */ (e);
+      if (err?.performed === false && err.outcomeKnown === true) return {
+        ok: false, error: err.message ?? 'site_fetch_refused', performed: false,
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      };
       if (err?.reason === 'redirect_blocked') return { ok: false, error: `redirected: ${url} issued a redirect (not followed). Use the final URL.` };
       if (err?.reason === 'private_network') return { ok: false, error: `blocked: ${url} is a private/loopback host (SSRF defense).` };
       return { ok: false, error: err?.message ?? 'site_fetch_failed' };
@@ -8306,6 +8351,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...settingsMessageRoutes,
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
+    beginSessionAuthorityChange,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResumeAfterRecovery, haltGoalRun,
     // session/reset (New chat) must stop the abandoned session's live turn AND

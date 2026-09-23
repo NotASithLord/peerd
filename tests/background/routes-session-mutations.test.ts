@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSessionMutationRoutes } from '../../extension/background/routes/session-mutations.js';
 import { makeLifecycleBoot } from '../../extension/peerd-runtime/lifecycle/boot.js';
+import { beginSessionAuthorityChange } from '../../extension/shared/session-authority-epoch.js';
 
 class SessionNotFoundError extends Error {}
 
@@ -8,6 +9,7 @@ const baseDeps = (over: any = {}) => {
   const calls: any = { extract: [], updated: [], cacheSet: null, cacheCleared: false, halted: [] };
   const cache: any = { current: { sessionId: 'cur', model: 'old' } };
   const deps = {
+    beginSessionAuthorityChange,
     vault: { isLocked: () => false },
     auditLog: { append: async () => {} },
     pushState: () => {},
