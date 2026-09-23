@@ -63,7 +63,7 @@ export const createLocalModelGenerationAuthority = ({
     if (streams.has(streamId)) throw localFailure('local-model-stream-collision');
     /** @type {{owner:object,port:MessagePort|null,channelId:string|null,queue:string[],
      * waiters:Array<()=>void>,done:boolean,error:Error|null,chars:number,dispatched:boolean,
-     * signal?:AbortSignal,abort?:()=>void}} */
+     * signal?:AbortSignal,abort?:()=>void,rejectCompletion?:(error:Error)=>void}} */
     const stream = {
       owner, port: null, queue: [], waiters: [], done: false, error: null,
       channelId: null, chars: 0, dispatched: false,
@@ -72,6 +72,7 @@ export const createLocalModelGenerationAuthority = ({
     /** @type {(value:any)=>void} */ let settleReady = () => {};
     const ready = new Promise((resolve) => { settleReady = resolve; });
     stream.abort = () => {
+      if (stream.done) return;
       const error = localFailure('local-model-generation-aborted');
       if (stream.channelId) {
         try { stream.port?.postMessage({
@@ -82,6 +83,9 @@ export const createLocalModelGenerationAuthority = ({
       }
       settleReady({ ok: false, error });
       finish(stream, error);
+      // why: closing the port makes a final host reply unreachable. Settle the
+      // scoped operation too so runWithLease can perform its bounded release.
+      stream.rejectCompletion?.(error);
     };
     signal?.addEventListener('abort', stream.abort, { once: true });
     streams.set(streamId, stream);
@@ -111,7 +115,9 @@ export const createLocalModelGenerationAuthority = ({
       const { port1, port2 } = new MessageChannel();
       stream.port = port1;
       const completed = new Promise((resolve, reject) => {
+        stream.rejectCompletion = reject;
         port1.onmessage = (event) => {
+          if (stream.done) return;
           const value = event.data;
           if (value?.protocol !== LOCAL_MODEL_CHANNEL_PROTOCOL
               || value.channelId !== channelId) return;
