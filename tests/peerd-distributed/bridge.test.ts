@@ -11,6 +11,14 @@ const CLIENT = 'client-epoch-0001';
 const rpc = (id: string, op: string, args: any = {}, clientId = CLIENT) => ({
   peerd: 'dweb', id, clientId, op, args,
 });
+const memoryStorage = () => {
+  const values: Record<string, any> = {};
+  return {
+    values,
+    get: async () => values,
+    set: async (next: Record<string, any>) => { Object.assign(values, next); },
+  };
+};
 
 // A mock transport — the seam the iframe-decoupling opened up. `drive` feeds an
 // op in (as the dwapp would); `sent` captures everything the bridge posts back.
@@ -75,6 +83,58 @@ const makeBridge = ({ confirm = true, joinHost, leaveHost, appDweb = { seed: 'co
 };
 
 describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
+  test.each([
+    { kind: 'fork', identity: { hash: 'releaseHash', forked: true }, key: 'fork:commons:releaseHash' },
+    { kind: 'seed', identity: { seed: 'commons' }, key: 'seed:commons' },
+    { kind: 'local', identity: {}, key: 'commons' },
+  ])('mutable $kind code cannot reuse persisted consent in a successor document', async ({ identity, key }) => {
+    const storage = memoryStorage();
+    const first = makeBridge({ storage, appDweb: { ...identity, generation: 2 } });
+    first.mt.drive(rpc('request-first', 'join', { roomId: 'r' }));
+    await tick();
+    expect(first.confirmations).toHaveLength(1);
+    expect(first.mt.results()[0]).toMatchObject({ ok: true });
+    expect(storage.values['dweb.grants.v1']).toBeUndefined();
+    await first.bridge.dispose();
+    // Old versions stored mutable grants; stopping future writes alone would
+    // still let already-approved mutable Apps inherit authority after edits.
+    await storage.set({ 'dweb.grants.v1': { [key]: { rooms: { r: true } } } });
+    for (const generation of [2, 3, 0]) {
+      const successor = makeBridge({ storage, appDweb: { ...identity, generation } });
+      successor.mt.drive(rpc(`request-next-${generation}`, 'join', { roomId: 'r' }));
+      await tick();
+      try {
+        expect(successor.confirmations).toHaveLength(1);
+        expect(successor.mt.results()[0]).toMatchObject({ ok: true });
+      } finally { await successor.bridge.dispose(); }
+    }
+    const denied = makeBridge({ storage, appDweb: { ...identity, generation: 0 }, confirm: false });
+    denied.mt.drive(rpc('request-denied', 'join', { roomId: 'r' }));
+    await tick();
+    expect(denied.confirmations).toHaveLength(1);
+    expect(denied.mt.results()[0]).toMatchObject({ ok: false });
+    expect(denied.calls).toHaveLength(0);
+    await denied.bridge.dispose();
+  });
+
+  test('verified immutable release consent remains content-bound across generations and restart', async () => {
+    const storage = memoryStorage();
+    for (const [index, generation] of [2, 3, 0].entries()) {
+      const instance = makeBridge({ storage, appDweb: { hash: 'releaseHash', generation, forked: false } });
+      instance.mt.drive(rpc(`request-release-${index}`, 'join', { roomId: 'r' }));
+      await tick();
+      try {
+        expect(instance.confirmations).toHaveLength(index === 0 ? 1 : 0);
+        expect(instance.mt.results()[0]).toMatchObject({ ok: true });
+      } finally { await instance.bridge.dispose(); }
+    }
+    const changed = makeBridge({ storage, appDweb: { hash: 'differentHash', generation: 0, forked: false } });
+    changed.mt.drive(rpc('request-release-changed', 'join', { roomId: 'r' }));
+    await tick();
+    expect(changed.confirmations).toHaveLength(1);
+    await changed.bridge.dispose();
+  });
+
   test('hello replies over the injected transport', async () => {
     const { mt } = makeBridge();
     mt.drive(rpc('request-0001', 'hello'));
@@ -119,7 +179,10 @@ describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
   });
 
   test('a remembered room join never replaces fresh consent for publishing App files', async () => {
+    const storage = memoryStorage();
+    await storage.set({ 'dweb.grants.v1': { releaseHash: { rooms: { r: true } } } });
     const { mt, calls, confirmations } = makeBridge({
+      storage, appDweb: { hash: 'releaseHash', generation: 0, forked: false },
       confirm: (request) => request.kind !== 'share',
     });
     mt.drive(rpc('request-0001', 'join', { roomId: 'r', name: 'ada' }));
@@ -128,7 +191,7 @@ describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
     await tick();
     expect(mt.results().find((result) => result.id === 'request-0002')).toMatchObject({ ok: false });
     expect(calls.some((call) => call.op === 'publish-app')).toBe(false);
-    expect(confirmations.map((request) => request.kind)).toEqual(['join', 'share']);
+    expect(confirmations.map((request) => request.kind)).toEqual(['share']);
   });
 
   test('pushed host events are emitted to the app — filtered to our room + subscribed topics', async () => {
@@ -172,14 +235,14 @@ describe('dwapp bridge (base-network rooms, transport-agnostic)', () => {
     first.mt.drive(rpc('request-0001', 'join', { roomId: 'peerd-global' }));
     await tick();
     expect(first.confirmations).toHaveLength(1);
-    expect(stored['dweb.grants.v1']['fork:commons:bundle-v1'].rooms['peerd-global']).toBe(true);
+    expect(stored['dweb.grants.v1']['fork:commons:bundle-v1']).toBeUndefined();
     await first.bridge.dispose();
 
     const second = makeBridge({ confirm: false, appDweb: { hash: 'bundle-v1', forked: true }, storage });
     second.mt.drive(rpc('request-0002', 'join', { roomId: 'peerd-global' }));
     await tick();
-    expect(second.confirmations).toHaveLength(0);
-    expect(second.calls.some((call) => call.op === 'join')).toBe(true);
+    expect(second.confirmations).toHaveLength(1);
+    expect(second.calls.some((call) => call.op === 'join')).toBe(false);
 
     const nextVersion = makeBridge({
       confirm: false,
