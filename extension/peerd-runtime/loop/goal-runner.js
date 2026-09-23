@@ -96,11 +96,19 @@ export const makeGoalRunner = ({
 }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
+  /** @type {Set<string>} */
+  const stopping = new Set();
+  /** @type {Promise<void>} */
+  let persistenceTail = Promise.resolve();
+  // why: Queue mirror changes so Stop wins over older writes.
+  /** @param {() => Promise<void>} operation */
+  const queuePersistence = (operation) => {
+    const pending = persistenceTail.then(operation);
+    persistenceTail = pending.catch(() => {});
+    return pending;
+  };
 
-  // Mirror the live (non-terminal) runs to storage. Fire-and-forget: the
-  // in-memory map is authoritative within an SW lifetime; this is the seam that
-  // lets resume() pick up after a restart. Best-effort — a write failure just
-  // means that run won't resume, not that the live run breaks.
+  // Mirror active runs. A mirror failure must not stop a live run.
   const persist = () => {
     if (!kv) return;
     /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
@@ -109,7 +117,7 @@ export const makeGoalRunner = ({
       if (r.completed || r.halted) continue;
       out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt };
     }
-    Promise.resolve(kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
+    queuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
   };
 
   /** @param {string} sid @returns {GoalRun | null} */
@@ -118,11 +126,7 @@ export const makeGoalRunner = ({
   const isActive = (sid) => { const r = runs.get(sid); return !!r && !r.completed && !r.halted; };
 
   /**
-   * Is a run for this session recorded in the DURABLE mirror — i.e. live OR
-   * merely not-yet-resumed after an SW restart OR vault-lock-paused (evicted
-   * from the map but kept in the mirror for resume)? Prewalk's reconcile
-   * consults this so a mid-restart/paused run is never mistaken for a dead one
-   * and wrongly restored to the planner model. A no-op (false) without kv.
+   * Check the live map and durable mirror for a run.
    * @param {string} sid @returns {Promise<boolean>}
    */
   const isPersisted = async (sid) => {
@@ -172,37 +176,27 @@ export const makeGoalRunner = ({
   /** Stop / steer-takeover: end the run without declaring success. @param {string} sid */
   const halt = (sid) => { const r = runs.get(sid); if (r) { r.halted = true; persist(); } };
 
-  // Durably drop ONE session's record from the mirror (read-modify-write).
-  // why not persist(): persist() writes a snapshot of the in-memory MAP, which a
-  // PAUSED run (vault-lock) is no longer in — so it can't remove a paused run's
-  // record, and a live run's persist() is fire-and-forget. forget() is keyed by
-  // sid and reaches the record either way. Best-effort, like persist(). No kv → no-op.
+  // A paused run is not in the map, so remove its durable record by id. Report
+  // storage errors. Success must mean that the run cannot resume.
   /** @param {string} sid */
   const forget = async (sid) => {
     if (!kv) return;
-    try {
+    await queuePersistence(async () => {
       const stored = await kv.get(GOAL_RUNS_KEY);
-      if (stored && typeof stored === 'object' && Object.hasOwn(stored, sid)) {
-        const next = { ...stored };
-        delete next[sid];
-        await kv.set(GOAL_RUNS_KEY, next);
-      }
-    } catch { /* best-effort — a lost write just means it may resume once more */ }
+      if (!stored || typeof stored !== 'object' || !Object.hasOwn(stored, sid)) return;
+      const next = { ...stored };
+      delete next[sid];
+      await kv.set(GOAL_RUNS_KEY, next);
+    });
   };
 
-  /**
-   * Durable user-initiated Stop (Stop button, steer-takeover, new-chat, archive).
-   * Halts any live run AND awaits removal of the persisted record, so a Stop can't
-   * be silently undone by resume() on the next vault unlock. Unlike halt() (the
-   * internal supersede/error mark, in-memory only), this is keyed by sid and works
-   * even when the run was PAUSED and evicted from the map, or when a live run's
-   * fire-and-forget persist() hasn't committed yet.
-   * @param {string} sid
-   */
+  /** Stop a live or paused run. @param {string} sid */
   const stop = async (sid) => {
+    stopping.add(sid);
     const r = runs.get(sid);
     if (r) r.halted = true;  // its drive() loop sees !alive() and exits to the terminal finally
     await forget(sid);
+    stopping.delete(sid);
   };
 
   /** @param {string} sid @param {'running'|'done'|'halted'|'capped'} phase */
@@ -300,15 +294,12 @@ export const makeGoalRunner = ({
     }
   };
 
-  /**
-   * Start (or supersede) a goal run for a session. Fire-and-forget — returns
-   * immediately; the turns stream over the port like any chat.
-   * @param {{ sessionId: string, goal: string }} req
-   */
+  /** Start or replace a goal run. @param {{ sessionId: string, goal: string }} req */
   const start = async ({ sessionId, goal }) => {
     if (!sessionId || typeof goal !== 'string' || !goal.trim()) {
       return { ok: false, error: 'goal-required' };
     }
+    stopping.delete(sessionId);
     if (runs.has(sessionId)) halt(sessionId);  // supersede any prior run
     runs.set(sessionId, {
       goal: goal.trim(), iteration: 0, completed: false, halted: false,
@@ -322,40 +313,32 @@ export const makeGoalRunner = ({
     return { ok: true };
   };
 
-  /**
-   * Re-drive any persisted active runs after an SW restart (called once the
-   * vault is unlocked — a turn needs the key). Each rehydrated run continues
-   * from its persisted iteration (so it sends a synthetic continuation, not a
-   * fresh goal). A no-op without kv or with nothing stored. Idempotent: skips a
-   * session that already has a live run.
-   * @returns {Promise<{ resumed: number }>}
-   */
+  /** Restore durable runs after restart. Skip live and stopping runs.
+   * @returns {Promise<{ resumed: number }>} */
   const resume = async () => {
     if (!kv) return { resumed: 0 };
-    let stored;
-    try { stored = await kv.get(GOAL_RUNS_KEY); } catch { return { resumed: 0 }; }
-    if (!stored || typeof stored !== 'object') return { resumed: 0 };
     let resumed = 0;
-    for (const [sid, raw] of Object.entries(stored)) {
-      if (!sid || runs.has(sid)) continue;
-      const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
-      if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
-      // why clamp at the cap: persist() records the iteration ABOUT to run, so a
-      // crash resumes there. But if the SW died DURING the final allowed turn, the
-      // stored iteration === maxIterations and drive()'s `iteration < maxIterations`
-      // would be false immediately — declaring 'capped' for a turn that never
-      // actually ran. Rewind one so that interrupted final turn re-runs once.
-      const storedIteration = Number(rec.iteration) || 0;
-      const iteration = storedIteration >= maxIterations ? Math.max(0, maxIterations - 1) : storedIteration;
-      runs.set(sid, {
-        goal: rec.goal,
-        iteration,
-        completed: false, halted: false, summary: null, lastError: null,
-        startedAt: Number(rec.startedAt) || now(),
-      });
-      drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
-      resumed += 1;
-    }
+    await queuePersistence(async () => {
+      let stored;
+      try { stored = await kv.get(GOAL_RUNS_KEY); } catch { return; }
+      if (!stored || typeof stored !== 'object') return;
+      for (const [sid, raw] of Object.entries(stored)) {
+        if (!sid || runs.has(sid) || stopping.has(sid)) continue;
+        const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
+        if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
+        // A crash during the final allowed turn must re-run that turn once.
+        const storedIteration = Number(rec.iteration) || 0;
+        const iteration = storedIteration >= maxIterations ? Math.max(0, maxIterations - 1) : storedIteration;
+        runs.set(sid, {
+          goal: rec.goal,
+          iteration,
+          completed: false, halted: false, summary: null, lastError: null,
+          startedAt: Number(rec.startedAt) || now(),
+        });
+        drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
+        resumed += 1;
+      }
+    });
     return { resumed };
   };
 
