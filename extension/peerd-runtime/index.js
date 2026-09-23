@@ -230,6 +230,20 @@ export {
   AUTH_WAITING_FOR_USER_CODE, AUTH_WAITING_FOR_USER_MESSAGE,
   AUTH_BOUNDARY_STOPPED_MESSAGE, AUTH_STATE_UNAVAILABLE_MESSAGE,
 } from './actor/auth-wait.js';
+export {
+  PACE_TUNABLES, PACE_RULE_VERSION, BLOCKING_STATUSES,
+  isBlockingStatus, isRateLimitSignal, parseRetryAfter, newRule, isValidRule,
+  nextRuleOnBlock, noteActionAt, decayRule, isRetired,
+  planRequest,
+} from './pacing/pacing-core.js';
+export {
+  createOriginPacingStore, normalizePacingState, PACING_KEY, PACING_SCHEMA,
+  DEFAULT_PACING_CAP, MAX_RESERVATION_WAIT_MS,
+} from './pacing/origin-pacing-store.js';
+export {
+  PACED_CEILING_CODE, PACED_STATE_UNAVAILABLE_CODE,
+  pacedCeilingMessage, PACED_STATE_UNAVAILABLE_MESSAGE,
+} from './pacing/pacing-messages.js';
 // …and the three pieces the SW needs to make the lock live: where the state
 // lives (cached + serialized + persisted), which origins are dedicated identity
 // providers (the one narrow exemption), and what the orchestrator is told when

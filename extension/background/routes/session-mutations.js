@@ -17,7 +17,7 @@ export const makeSessionMutationRoutes = (deps) => {
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResumeAfterRecovery, haltGoalRun, turnSlots, actorMessaging, nukeSessionWorkspace,
-    actorLifecycle, purgeLifecycleSession,
+    actorLifecycle, purgeLifecycleSession, beginSessionAuthorityChange,
   } = deps;
 
   return {
@@ -106,7 +106,6 @@ export const makeSessionMutationRoutes = (deps) => {
     'session/archive': async ({ sessionId }) => {
       if (vault.isLocked()) return { ok: false, error: 'locked' };
       try {
-        if (!await sessions.get(sessionId)) return { ok: false, error: 'session-not-found' };
         // Archive must stop all work before it changes durable state.
         if (turnSlots?.stop?.(sessionId)) {
           auditLog.append({ type: 'session_ended', sessionId, details: { reason: 'session_archive' } }).catch(() => {});
@@ -129,6 +128,9 @@ export const makeSessionMutationRoutes = (deps) => {
         }
         // A failed durable goal Stop leaves the session available for a retry.
         await haltGoalRun?.(sessionId);
+        // why: Stop wins even when storage is unavailable, but a missing
+        // record must never reach archive or its durable cleanup side effects.
+        if (!await sessions.get(sessionId)) return { ok: false, error: 'session-not-found' };
         await sessions.archive(sessionId);
         // Settle each execution session. Keep uncertain side effects visible.
         for (const lifecycleSessionId of new Set([sessionId, ...actorSessionIds])) {
@@ -166,36 +168,39 @@ export const makeSessionMutationRoutes = (deps) => {
       if (Object.keys(patch).length === 0) {
         return { ok: false, error: 'no-mode-or-confirm' };
       }
-      // Cache first — covers the pre-session-create window + SW survival.
-      if (patch.permissionMode !== undefined) {
-        await sessionCache.sessionSet('currentPermissionMode', patch.permissionMode);
-      }
-      if (patch.confirmActions !== undefined) {
-        await sessionCache.sessionSet('currentConfirmActions', patch.confirmActions);
-      }
-      // Persist on the session record too, when one exists.
-      const sessionId = await sessionCache.sessionGet('currentSessionId');
-      if (sessionId && !vault.isLocked()) {
-        try {
-          await sessions.update(sessionId, patch);
-          if (sessionState.current()?.sessionId === sessionId) {
-            sessionState.set({ ...sessionState.current(), ...patch });
-          }
-        } catch (e) {
-          if (!(e instanceof SessionNotFoundError)) throw e;
+      const finish = beginSessionAuthorityChange(sessionCache);
+      try {
+        // Cache first to cover the pre-session-create window and SW survival.
+        if (patch.permissionMode !== undefined) {
+          await sessionCache.sessionSet('currentPermissionMode', patch.permissionMode);
         }
-      }
-      const resolved = await resolvePermission(sessionId && !vault.isLocked() ? await sessions.get(sessionId) : null);
-      // why: permission changes are security-relevant state transitions —
-      // audit them like every other one. The Logs view already has a
-      // mode_changed label waiting (audit/types.js declares the type).
-      auditLog.append({
-        type: 'mode_changed',
-        sessionId: sessionId ?? null,
-        details: { mode: resolved.mode, confirmActions: resolved.confirmActions },
-      }).catch(() => {});
-      pushState();
-      return { ok: true, permission: resolved };
+        if (patch.confirmActions !== undefined) {
+          await sessionCache.sessionSet('currentConfirmActions', patch.confirmActions);
+        }
+        // Persist on the session record too, when one exists.
+        const sessionId = await sessionCache.sessionGet('currentSessionId');
+        if (sessionId && !vault.isLocked()) {
+          try {
+            await sessions.update(sessionId, patch);
+            if (sessionState.current()?.sessionId === sessionId) {
+              sessionState.set({ ...sessionState.current(), ...patch });
+            }
+          } catch (e) {
+            if (!(e instanceof SessionNotFoundError)) throw e;
+          }
+        }
+        const resolved = await resolvePermission(sessionId && !vault.isLocked() ? await sessions.get(sessionId) : null);
+        // why: permission changes are security-relevant state transitions;
+        // audit them like every other one. The Logs view already has a
+        // mode_changed label waiting (audit/types.js declares the type).
+        auditLog.append({
+          type: 'mode_changed',
+          sessionId: sessionId ?? null,
+          details: { mode: resolved.mode, confirmActions: resolved.confirmActions },
+        }).catch(() => {});
+        pushState();
+        return { ok: true, permission: resolved };
+      } finally { finish(); }
     },
   };
 };

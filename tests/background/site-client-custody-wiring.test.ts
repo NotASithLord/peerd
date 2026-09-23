@@ -15,17 +15,35 @@ const originLockController = readFileSync(
   'utf8',
 );
 
+const presentIndex = (text: string, needle: string) => {
+  const index = text.indexOf(needle);
+  expect(index).toBeGreaterThanOrEqual(0);
+  return index;
+};
+
 describe('site-client custody service-worker wiring', () => {
   test('API and tab tool contexts receive their respective custody closures', () => {
-    const contextStart = source.indexOf('const buildToolContext');
+    const contextStart = presentIndex(source, 'const buildToolContext');
     const contextEnd = source.indexOf('// ── Tool dispatcher', contextStart);
     const context = source.slice(contextStart, contextEnd > contextStart ? contextEnd : undefined);
     const lockFactory = originLockController;
 
     expect(context).toContain('makeFixedSiteClientOriginGuard(ownedOrigin, { isKnownIdp: isKnownIdpHost })');
     expect(context).toContain('resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin)');
-    expect(context.indexOf('async () => { throw new EgressDeniedError'))
-      .toBeLessThan(context.indexOf('withDpopCredentials(webFetch, () => ownedOrigin'));
+    expect(presentIndex(context, 'async () => { throw new EgressDeniedError'))
+      .toBeLessThan(presentIndex(context, 'withDpopCredentials(ctx.webFetch, () => ownedOrigin'));
+    expect(context).toContain('webFetch: webFetchForSession(sessionId ?? null)');
+    expect(context).toContain('captureRequestAuthority: () => vault.captureRequestAuthority()');
+    const isolatedScope = presentIndex(context, 'resCtx.webFetch = withRequestLocalWebFetch(() => {');
+    const originSlot = presentIndex(context, 'let requestTabOrigin =');
+    const checkedFetch = presentIndex(context, 'const liveTabFetch = bindWebRequestAuthority({');
+    const credentials = presentIndex(context, 'return withSessionScopedCredentials(');
+    expect(isolatedScope).toBeLessThan(originSlot);
+    expect(originSlot).toBeLessThan(checkedFetch);
+    expect(checkedFetch).toBeLessThan(credentials);
+    expect(context).toContain('readPermission: () => readRequestPermission(sessionId ?? null)');
+    expect(context).toContain('const live = await liveSiteClientLandingFor(sessionId)');
+    expect(context).toContain('lock.makeScope(() => requestTabOrigin)');
     expect(context).toContain('resCtx.authorizeSignInOrigin = lock?.authorizeSignInOrigin');
     expect(context).toContain('resCtx.authorizeSignInExcursion = lock?.authorizeSignInExcursion');
     expect(context).toContain('resCtx.revokeSignInExcursion = lock?.revokeSignInExcursion');
@@ -44,8 +62,8 @@ describe('site-client custody service-worker wiring', () => {
     expect(lockFactory.match(/originStates\.serialize\(/g)?.length).toBeGreaterThanOrEqual(4);
     expect(context).toContain('hasDurableSiteClientState(durableOriginState)');
     expect(context).toContain('lock.authorizeSiteClientOrigin(() => liveSiteClientLandingFor(sessionId))');
-    expect(context.indexOf('hasDurableSiteClientState(durableOriginState)'))
-      .toBeLessThan(context.indexOf('originStates.hydrate(sessionId, durableOriginState)'));
+    expect(presentIndex(context, 'hasDurableSiteClientState(durableOriginState)'))
+      .toBeLessThan(presentIndex(context, 'originStates.hydrate(sessionId, durableOriginState)'));
   });
 
   test('every worker fetch rechecks custody before confirmation and network IO', () => {
@@ -55,15 +73,22 @@ describe('site-client custody service-worker wiring', () => {
     expect(routeEnd).toBeGreaterThan(routeStart);
     const route = source.slice(routeStart, routeEnd);
 
-    const custody = route.indexOf('const reauthorizeSiteFetch = () => authorizeSiteClientRelayOrigin({');
-    const confirmation = route.indexOf('needsWebWriteConfirm(httpMethod)');
-    const fetch = route.indexOf('await scopedFetch(url');
-    expect(custody).toBeGreaterThan(-1);
+    const custody = presentIndex(route, 'const reauthorizeSiteFetch = () => authorizeSiteClientRelayOrigin({');
+    const confirmation = presentIndex(route, 'needsWebWriteConfirm(httpMethod)');
+    const binding = presentIndex(route, 'const send = bindWebRequestAuthority({');
+    const fetch = presentIndex(route, 'await send(url');
     expect(custody).toBeLessThan(confirmation);
     expect(custody).toBeLessThan(fetch);
     expect(route.match(/await reauthorizeSiteFetch\(\)/g)).toHaveLength(2);
     expect(route.lastIndexOf('await reauthorizeSiteFetch()')).toBeGreaterThan(confirmation);
     expect(route.lastIndexOf('await reauthorizeSiteFetch()')).toBeLessThan(fetch);
+    expect(binding).toBeGreaterThan(confirmation);
+    expect(binding).toBeLessThan(fetch);
+    const sendBinding = route.slice(binding, fetch);
+    expect(sendBinding).toContain('webFetch: scopedFetch, captureRequestAuthority');
+    expect(sendBinding).toContain('readPermission: () => readRequestPermission(ownerSessionId)');
+    expect(sendBinding).toContain('reauthorize: reauthorizeSiteFetch');
+    expect(route).not.toContain('await scopedFetch(url');
     expect(route).toContain('liveSiteClientLandingFor(ownerSessionId)');
     expect(route).toContain('durableState: /** @type {any} */ (owner.originState)');
     expect(route).toContain('isKnownIdp: isKnownIdpHost');
@@ -82,7 +107,7 @@ describe('site-client custody service-worker wiring', () => {
     expect(mint).toContain('makeFixedSiteClientOriginGuard(origin, { isKnownIdp: isKnownIdpHost })');
     expect(mint).toContain('const meta = await siteClientStore.getMeta(custody.origin)');
     expect(mint).toContain('meta && await custody.authorize() === true');
-    expect(mint.indexOf('meta && await custody.authorize() === true'))
-      .toBeLessThan(mint.indexOf('buildMintInjection(meta)'));
+    expect(presentIndex(mint, 'meta && await custody.authorize() === true'))
+      .toBeLessThan(presentIndex(mint, 'buildMintInjection(meta)'));
   });
 });

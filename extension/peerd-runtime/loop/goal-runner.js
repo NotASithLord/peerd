@@ -124,6 +124,13 @@ export const makeGoalRunner = ({
   const get = (sid) => runs.get(sid) ?? null;
   /** @param {string} sid */
   const isActive = (sid) => { const r = runs.get(sid); return !!r && !r.completed && !r.halted; };
+  // A goal supplies temporary Act authority independently of session metadata.
+  // Capture identity plus posture, not mutable run objects alone.
+  const captureAuthority = () => {
+    const snapshot = [...runs].map(([sid, run]) => ({ sid, run, active: isActive(sid) }));
+    return () => snapshot.length === runs.size && snapshot.every(({ sid, run, active }) =>
+      runs.get(sid) === run && isActive(sid) === active);
+  };
 
   /**
    * Check the live map and durable mirror for a run.
@@ -342,5 +349,5 @@ export const makeGoalRunner = ({
     return { resumed };
   };
 
-  return Object.freeze({ start, halt, stop, complete, isActive, isPersisted, get, activeStates, drive, resume });
+  return Object.freeze({ start, halt, stop, complete, isActive, isPersisted, get, activeStates, drive, resume, captureAuthority });
 };
