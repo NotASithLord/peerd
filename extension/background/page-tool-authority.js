@@ -101,18 +101,25 @@ export const createPageToolAuthority = ({
   });
   const pageMutationPermissionRefusal = async (
     /** @type {string} */ operation = binding.operation,
+    /** @type {boolean} */ confirmed = false,
   ) => {
     if (stopped()) return stoppedResult();
     const permission = typeof ctx?.readAuthorityPermission === 'function'
       ? await ctx.readAuthorityPermission().catch(() => ({ mode: 'plan' }))
       : ctx?.permission;
     if (stopped()) return stoppedResult();
-    return controllerOperationAllowedInPermissionMode(operation, permission?.mode, args)
-      ? null : {
+    if (!controllerOperationAllowedInPermissionMode(operation, permission?.mode, args)) return {
       ok: false, code: 'plan_mode_refused',
       error: 'permission changed before browser action',
       outcomeKind: 'pre-effect-failure', retryable: false,
     };
+    if (Object.hasOwn(PAGE_ACTIONS, operation)
+        && permission?.confirmActions !== false && !confirmed) return {
+      ok: false, code: 'confirmation_required',
+      error: 'confirmation policy changed before browser action',
+      outcomeKind: 'pre-effect-failure', retryable: false,
+    };
+    return null;
   };
   const preflightAction = async (/** @type {string} */ operation) => {
     const action = PAGE_ACTIONS[/** @type {keyof typeof PAGE_ACTIONS} */ (operation)];
@@ -190,7 +197,7 @@ export const createPageToolAuthority = ({
         },
       };
     }
-    const permissionRefusal = await pageMutationPermissionRefusal(operation);
+    const permissionRefusal = await pageMutationPermissionRefusal(operation, needsConfirmation);
     if (permissionRefusal) return {
       ugcRuleId: ugc.zone === 'ugc' ? ugc.ruleId : undefined,
       refuse: permissionRefusal,
@@ -198,6 +205,7 @@ export const createPageToolAuthority = ({
     return {
       tab,
       document,
+      confirmed: needsConfirmation,
       ugcRuleId: ugc.zone === 'ugc' ? ugc.ruleId : undefined,
     };
   };
@@ -275,7 +283,7 @@ export const createPageToolAuthority = ({
         }
       }
     }
-    const permissionRefusal = await pageMutationPermissionRefusal(operation);
+    const permissionRefusal = await pageMutationPermissionRefusal(operation, preflight.confirmed === true);
     if (permissionRefusal) {
       releaseChildAction();
       return permissionRefusal;
@@ -331,7 +339,11 @@ export const createPageToolAuthority = ({
       }
       let result = await execute(args, {
         ...ctx, abortSignal,
-        assertPageMutationPermission: () => pageMutationPermissionRefusal(operation),
+        // Pacing waits after consent preparation. A policy tightened during
+        // that wait needs a new turn's consent, never the earlier opt-out.
+        assertPageMutationPermission: () => pageMutationPermissionRefusal(
+          operation, preflight.confirmed === true,
+        ),
         // why: bind only this exact page operation. A page program may
         // legitimately navigate and then invoke another nested operation on
         // the newly committed document; retaining the outer document on the

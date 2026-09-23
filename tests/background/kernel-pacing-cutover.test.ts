@@ -115,6 +115,21 @@ describe('kernel pacing cutover', () => {
     expect(h.actions()).toBe(0);
   });
 
+  test.each(['plan', 'confirmation'])('a paced click rechecks tightened %s policy at the physical edge', async (change) => {
+    const h = fixture();
+    const permission = { mode: 'act', confirmActions: false };
+    h.ctx.readAuthorityPermission = async () => ({ ...permission });
+    await h.store.observe({ origin: ORIGIN, responseAtMs: h.now(), status: 429, retryAfter: '1' });
+    h.ctx.pacing.reserve = async () => {
+      if (change === 'plan') permission.mode = 'plan';
+      else permission.confirmActions = true;
+      return { outcome: 'waited', waitedMs: 1 };
+    };
+    expect(await h.click()).toMatchObject({ ok: false, outcomeKind: 'pre-effect-failure' });
+    expect(h.actions()).toBe(0);
+    expect(h.confirms()).toBe(0);
+  });
+
   test('network pacing refusal retains terminal pre-effect custody', async () => {
     const h = fixture();
     await h.store.observe({ origin: ORIGIN, responseAtMs: h.now(), status: 429, retryAfter: '600' });
