@@ -14,10 +14,7 @@ const MAX_LIGHTWEIGHT_BYTES = 128_000_000;
 /** @typedef {{ git:any, fs:any, dir:string, gitdir:string }} RepositoryContext */
 /** @typedef {[string, number, number, number]} StatusRow */
 
-// Extension pages may load the heavy vendor on first repository use. Chrome's
-// MV3 service worker injects a static loader instead because its global rejects
-// runtime import(); keeping that host choice out of this core also keeps engine
-// consumers that only need a small helper from loading Git.
+// why: Extension pages load Git lazily. The service worker injects a static loader.
 const loadVendoredGit = async () => (await import('/vendor/isomorphic-git/index.js')).default;
 
 /** @param {unknown} message @param {string} [fallback] */
@@ -211,10 +208,11 @@ const quotaFsFor = (ctx) => {
   };
 };
 
-/** @param {Record<string,Uint8Array>} left @param {Record<string,Uint8Array>} right */
-const snapshotsEqual = (left, right) => {
-  const leftPaths = Object.keys(left).sort();
-  const rightPaths = Object.keys(right).sort();
+/** @param {Record<string,Uint8Array>} left @param {Record<string,Uint8Array>} right @param {boolean} [excludeAppData] */
+const snapshotsEqual = (left, right, excludeAppData = false) => {
+  const included = (/** @type {string} */ path) => !excludeAppData || !/^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path);
+  const leftPaths = Object.keys(left).filter(included).sort();
+  const rightPaths = Object.keys(right).filter(included).sort();
   if (leftPaths.length !== rightPaths.length || leftPaths.some((path, index) => path !== rightPaths[index])) return false;
   return leftPaths.every((path) => {
     const a = left[path];
@@ -267,18 +265,20 @@ export const createRepositoryService = ({
     return matrix;
   };
 
-  /** @param {RepositoryContext} ctx @param {string} [initialMessage] */
-  const ensureUnlocked = async (ctx, initialMessage = 'initial snapshot') => {
+  /** @param {RepositoryContext} ctx @param {string} [initialMessage] @param {boolean} [includeIgnored] */
+  const ensureUnlocked = async (ctx, initialMessage = 'initial snapshot', includeIgnored = false) => {
     const head = await resolveHead(ctx);
     if (head) return head;
     await ctx.git.init({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, defaultBranch: DEFAULT_BRANCH });
-    const matrix = await stageAll(ctx);
+    const matrix = await stageAll(ctx, { includeIgnored });
     if (!matrix.length) return null;
     return ctx.git.commit({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, message: commitMessage(initialMessage), author: AUTHOR });
   };
 
-  /** @param {{kind:string,id:string}} ref @param {{message?:string}} [opts] */
-  const init = (ref, { message = 'initial snapshot' } = {}) => run(ref, (ctx) => ensureUnlocked(ctx, message));
+  /** @param {{kind:string,id:string}} ref @param {{message?:string,includeIgnored?:boolean}} [opts] */
+  const init = (ref, { message = 'initial snapshot', includeIgnored = false } = {}) => run(
+    ref, (ctx) => ensureUnlocked(ctx, message, includeIgnored),
+  );
 
   /** Stage selected paths, or the complete visible worktree for `.` / no paths. */
   /** @param {{kind:string,id:string}} ref @param {{paths?:string[]}} [opts] */
@@ -514,12 +514,12 @@ export const createRepositoryService = ({
   });
 
   /** Compare every live byte (including ignored files) with one commit tree. */
-  /** @param {{kind:string,id:string}} ref @param {{at?:string}} [opts] */
-  const matches = (ref, { at = 'HEAD' } = {}) => run(ref, async (ctx) => {
+  /** @param {{kind:string,id:string}} ref @param {{at?:string,excludeAppData?:boolean}} [opts] */
+  const matches = (ref, { at = 'HEAD', excludeAppData = false } = {}) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx);
     return snapshotsEqual(
       await snapshotAtUnlocked(ctx, at),
-      await readWorkingTree(ctx.fs, ctx.dir),
+      await readWorkingTree(ctx.fs, ctx.dir), excludeAppData && ref.kind === 'app',
     );
   });
 
@@ -537,20 +537,39 @@ export const createRepositoryService = ({
     return statusUnlocked(targetCtx);
   });
 
-  /** @param {{kind:string,id:string}} ref @param {{files:Record<string,string|Uint8Array>,message?:string}} opts */
-  const replaceWorkingTree = (ref, { files, message = 'replace working tree' }) => run(ref, async (ctx) => {
+  /** @param {{kind:string,id:string}} ref @param {{files:Record<string,string|Uint8Array>,message?:string,includeIgnored?:boolean}} opts */
+  const replaceWorkingTree = (ref, { files, message = 'replace working tree', includeIgnored = false }) => run(ref, async (ctx) => {
     await ensureUnlocked(ctx);
     /** @type {Record<string,Uint8Array>} */ const bytes = Object.create(null);
     for (const [path, value] of Object.entries(files)) {
       bytes[path] = typeof value === 'string' ? new TextEncoder().encode(value) : value;
     }
     await replaceWorkingTreeUnlocked(ctx, bytes);
-    const matrix = await stageAll(ctx);
+    const matrix = await stageAll(ctx, { includeIgnored });
     if (!matrix.some((/** @type {StatusRow} */ row) => row[1] !== row[2])) {
       return { oid: await resolveHead(ctx), changed: [], created: false };
     }
     const oid = await ctx.git.commit({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, message: commitMessage(message), author: AUTHOR });
     return { oid, changed: matrix.map((/** @type {StatusRow} */ row) => row[0]), created: true };
+  });
+
+  /** Reset a failed replacement before restoring its exact prior worktree.
+   * @param {{kind:string,id:string}} ref @param {{to:string,files:Record<string,string|Uint8Array>}} opts */
+  const rollbackWorkingTree = (ref, { to, files }) => run(ref, async (ctx) => {
+    const oid = await ctx.git.resolveRef({ fs: ctx.fs, gitdir: ctx.gitdir, ref: to });
+    /** @type {Record<string,Uint8Array>} */ const bytes = Object.create(null);
+    for (const [path, value] of Object.entries(files)) {
+      validRelativePath(path);
+      bytes[path] = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+    }
+    const branchName = await ctx.git.currentBranch({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, fullname: false });
+    await ctx.git.writeRef({
+      fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir,
+      ref: branchName ? `refs/heads/${branchName}` : 'HEAD', value: oid, force: true,
+    });
+    await ctx.git.checkout({ fs: ctx.fs, dir: ctx.dir, gitdir: ctx.gitdir, ref: branchName ?? oid, force: true });
+    await replaceWorkingTreeUnlocked(ctx, bytes);
+    return { oid };
   });
 
   /** @param {RepositoryContext} ctx */
@@ -578,8 +597,8 @@ export const createRepositoryService = ({
     coordinate,
     init, stage, commit, status, branches, history, diff, restore, branch, checkout,
     setRemote, getRemote, fetch: fetchRemote, push, clone, snapshot, matches, fork: forkRepository,
-    replaceWorkingTree, destroy,
-    initApp: (/** @type {string} */ appId, /** @type {{message?:string}} */ opts) => init(appRepositoryRef(appId), opts),
+    replaceWorkingTree, rollbackWorkingTree, destroy,
+    initApp: (/** @type {string} */ appId, /** @type {{message?:string,includeIgnored?:boolean}} */ opts) => init(appRepositoryRef(appId), opts),
     commitApp: (/** @type {string} */ appId, /** @type {{message?:string}} */ opts) => commit(appRepositoryRef(appId), opts),
     statusApp: (/** @type {string} */ appId) => status(appRepositoryRef(appId)),
     historyApp: (/** @type {string} */ appId, /** @type {{depth?:number,includeSafety?:boolean}} */ opts) => history(appRepositoryRef(appId), opts),

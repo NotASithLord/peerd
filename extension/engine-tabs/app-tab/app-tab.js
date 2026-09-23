@@ -1,13 +1,6 @@
 // @ts-check
-// app-tab/app-tab.js — trusted parent shell logic.
-//
-// Two modes:
-//   - render (default): read OPFS files, compose into a single HTML
-//                       body, postMessage to the sandboxed runner.
-//   - edit: mount the shared peerd-engine/editor module into a panel
-//           that overlays the iframe. Same UX as the Notebook.
-// The toggle is a small floating button (top-right) that swaps modes
-// without leaving the tab.
+// Host a rendered App or its editor in one trusted parent tab.
+// why: App code stays in the opaque runner while the parent owns storage and controls.
 
 import browser from '/vendor/browser-polyfill.js';
 import {
@@ -22,6 +15,7 @@ import { loadDweb } from '/shared/dweb-loader.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { createAppDataClient } from './app-data-client.js';
+import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
 
 const appId = location.hash.slice(1).split(/[?&]/)[0];
 const hashParams = new URLSearchParams(location.hash.slice(1).split('?')[1] ?? '');
@@ -207,6 +201,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
   if (!isServiceWorkerSender(sender)
       || message?.type !== 'app/quiesce'
       || message.appId !== appId) return false;
+  if (message.action === 'invalidate-dweb') {
+    dwebBridgeLifecycle.invalidate().then(
+      () => sendResponse({ ok: true }),
+      (/** @type {{message?:string}} */ error) => sendResponse({ ok: false, error: error?.message ?? String(error) }),
+    );
+    return true;
+  }
   if (message.action === 'release') {
     document.body.inert = false;
     sendResponse({ ok: true });
@@ -265,6 +266,7 @@ const copyFileKinds = (value) => Object.assign(
   Object.create(null),
   value && typeof value === 'object' ? value : {},
 );
+const APP_DATA_PATH_RE = /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i;
 
 // ---------------------------------------------------------------------------
 // Render mode — compose multi-file from OPFS, post to the runner iframe
@@ -280,6 +282,12 @@ const readForRender = async () => {
   for (const e of entries) {
     const path = e.path.replace(/^\/+/, '');
     const bytes = await opfs.readBytes(path);
+    if (APP_DATA_PATH_RE.test(path)) {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      JSON.parse(text);
+      textFiles[path] = text;
+      continue;
+    }
     if (isBinaryAppFile(path, bytes, appMeta?.fileKinds?.[path])) {
       binaryFilePaths.add(path);
       binaryAssets[path] = bytes.buffer;
@@ -451,7 +459,7 @@ const startRunner = () => {
 };
 
 /** Stop the current App document before the editor becomes interactive. */
-const suspendRunnerForEdit = () => {
+const suspendRunnerForEdit = async () => {
   rejectAgentCalls('app_runtime_suspended_for_editing');
   if (runnerWatchdog) { clearTimeout(runnerWatchdog); runnerWatchdog = null; }
   runnerPort?.close();
@@ -462,7 +470,7 @@ const suspendRunnerForEdit = () => {
   runnerStarted = false;
   expectingRunnerLoad = false;
   expectingBodyLoad = false;
-  if (dwebBridge) { dwebBridge.dispose(); dwebBridge = null; }
+  await dwebBridgeLifecycle.dispose();
   // Replacing the document is the only way to stop a late async handler from
   // the prior generation; hiding the iframe would leave it running.
   frame.src = 'about:blank';
@@ -527,6 +535,7 @@ const renderMode = async () => {
     agent: meta.agent ?? { kind: 'bound-app' },
   };
   actorChatName.textContent = appMeta.agent?.name || `${appMeta.name || 'App'} actor`;
+  dwebBridgeLifecycle.allow();
   attachDwebBridge(); // no-op unless this app is a dwapp on a dweb build
 
   let textFiles, binaryAssets;
@@ -685,10 +694,11 @@ frame.addEventListener('load', () => {
   }
   if (expectingBodyLoad) { expectingBodyLoad = false; return; }  // the runner's document.write delivery — not a navigation
   runnerPhase = 'idle';
-  if (dwebBridge) { dwebBridge.dispose(); dwebBridge = null; }
   console.warn('[app-tab] app frame navigated unexpectedly; restarting the trusted runner');
-  startRunner();
-  renderMode().catch((e) => fail(/** @type {{ message?: string }} */ (e)?.message ?? String(e)));
+  dwebBridgeLifecycle.dispose().then(() => {
+    startRunner();
+    return renderMode();
+  }).catch((/** @type {{message?:string}} */ error) => fail(error?.message ?? String(error)));
 });
 
 // ---------------------------------------------------------------------------
@@ -698,10 +708,7 @@ frame.addEventListener('load', () => {
 // confirm bar (consent UI) + OPFS/SW accessors it needs injected.
 // ---------------------------------------------------------------------------
 
-// why any: the dweb bridge is created by the live (preview-only) dweb module,
-// whose shape exceeds the stub interface — typed any at this hosting boundary.
-/** @type {any} */
-let dwebBridge = null;
+const dwebBridgeLifecycle = createDwebBridgeLifecycle();
 
 // A minimal monochrome consent bar follows the project color rule.
 let confirmationTail = Promise.resolve();
@@ -753,34 +760,32 @@ const confirmAction = (args) => {
   return result;
 };
 
-const attachDwebBridge = async () => {
-  if (dwebBridge || !appMeta?.dweb) return;
-  try {
-    const client = /** @type {any} */ (await loadDweb());
-    if (!client.available || !client.createAppBridge) return;
-    dwebBridge = client.createAppBridge({
-      appId,
-      appName: appMeta.name,
-      appDweb: appMeta.dweb,
-      entryFile: appMeta.entryFile,
-      frame,
-      client,
-      swCall: (/** @type {string} */ type, /** @type {object} */ payload = {}) => browser.runtime.sendMessage({ type, ...payload }),
-      storage: browser.storage.local,
-      confirmAction,
-      // The offscreen base host pushes room events (feed/dm/presence) as
-      // `dweb/base-room/event` runtime messages — every extension context gets
-      // them, so the bridge listens here and filters to the room it joined.
-      onHostEvent: (/** @type {(msg: any) => void} */ handler) => {
-        const fn = (/** @type {any} */ msg) => { if (msg?.type === 'dweb/base-room/event') handler(msg); };
-        browser.runtime.onMessage.addListener(fn);
-        return () => browser.runtime.onMessage.removeListener(fn);
-      },
-      launch: launchParams,
-    });
-  } catch (e) {
-    console.warn('[app-tab] dweb bridge unavailable:', e);
-  }
+const attachDwebBridge = () => {
+  const meta = appMeta;
+  if (!meta?.dweb) return;
+  const dweb = meta.dweb;
+  void dwebBridgeLifecycle.attach(async () => {
+    try {
+      const client = /** @type {any} */ (await loadDweb());
+      if (appMeta?.dweb !== dweb || !client.available || !client.createAppBridge) return null;
+      return client.createAppBridge({
+        appId, appName: meta.name, appDweb: dweb, entryFile: meta.entryFile,
+        frame, client,
+        swCall: (/** @type {string} */ type, /** @type {object} */ payload = {}) => browser.runtime.sendMessage({ type, ...payload }),
+        storage: browser.storage.local,
+        confirmAction,
+        onHostEvent: (/** @type {(msg: any) => void} */ handler) => {
+          const fn = (/** @type {any} */ msg) => { if (msg?.type === 'dweb/base-room/event') handler(msg); };
+          browser.runtime.onMessage.addListener(fn);
+          return () => browser.runtime.onMessage.removeListener(fn);
+        },
+        launch: launchParams,
+      });
+    } catch (e) {
+      console.warn('[app-tab] dweb bridge unavailable:', e);
+      return null;
+    }
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -789,7 +794,7 @@ const attachDwebBridge = async () => {
 
 const editMode = async () => {
   mode = 'edit';
-  suspendRunnerForEdit();
+  await suspendRunnerForEdit();
   document.body.classList.remove('mode-render');
   document.body.classList.add('mode-edit');
   toggleBtn.textContent = 'View ▶';
@@ -806,7 +811,6 @@ const editMode = async () => {
       agent: meta.agent ?? { kind: 'bound-app' },
     };
     actorChatName.textContent = appMeta.agent?.name || `${appMeta.name || 'App'} actor`;
-    attachDwebBridge();
   }
 
   if (!editorApi) {
@@ -902,7 +906,7 @@ window.addEventListener('pagehide', () => {
   flushEditorBeforeSuspension();
   rejectAgentCalls('app_runtime_closed');
   runnerPort?.close();
-  dwebBridge?.dispose();
+  void dwebBridgeLifecycle.invalidate().catch(() => {});
 });
 
 // ---------------------------------------------------------------------------

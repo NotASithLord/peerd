@@ -186,13 +186,12 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // was already on the graph and absorbed the policy, which is why the entry
     // grew by far less than the two byte budgets moved. Source-size growth in
     // modules already present is what these two numbers track.
-    // The untrusted-content escaping repair adds only leaf-module source and
-    // rationale, with no dependency or entry growth. The integrated source
-    // graph plus the binding-cleanup helper measures 4,712,360 bytes. The
-    // helper grows an existing module only; retain the same import-count cap.
+    // Fresh combined measurement includes the reviewed browser simplifications,
+    // native App guidance and consent retirement. No static dependency is added;
+    // pin the achieved closure and entry exactly, without reserved headroom.
     expect(graph.size).toBeLessThanOrEqual(458);
-    expect(bytes).toBeLessThanOrEqual(4_712_400);
-    expect(statSync(entry).size).toBeLessThanOrEqual(462_000);
+    expect(bytes).toBeLessThanOrEqual(4_706_470);
+    expect(statSync(entry).size).toBeLessThanOrEqual(460_989);
   });
 
   test('the offscreen host uses its exact runtime and engine surfaces', async () => {
