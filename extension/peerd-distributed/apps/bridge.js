@@ -102,8 +102,8 @@ export const createDwebBridge = ({
   launch = {},
   newId = () => crypto.randomUUID(),
 }) => {
-  // Grants key on the app's content identity when it has one (stable
-  // across reinstalls of the same bundle), else the seed key / local id.
+  // Audit identity also names mutable Apps, but only a currently verified
+  // immutable release can reuse or persist a room grant below.
   let appKey = appDweb?.forked ? `fork:${appId}:${appDweb.hash}`
     : appDweb?.hash || (appDweb?.seed ? `seed:${appDweb.seed}` : appId);
 
@@ -418,6 +418,7 @@ export const createDwebBridge = ({
   /** @param {string} rid @param {{clientId:string,cancelled:boolean}} request */
   const consent = async (rid, request) => {
     if (isCancelled(request)) throw new Error('cancelled');
+    let rememberGrant = false;
     if (appDweb?.hash) {
       const current = await swCall('app/get-meta', { appId });
       if (!current?.ok || current.dweb?.hash !== appDweb.hash
@@ -426,8 +427,13 @@ export const createDwebBridge = ({
         throw new Error('App identity changed. Reload the App.');
       }
       appKey = current.dweb.forked ? `fork:${appId}:${current.dweb.hash}` : current.dweb.hash;
+      // why: a fork/base hash, seed, or local id does not identify executable
+      // bytes. Session generations also reset across browser restarts while
+      // grants persist. Mutable Apps therefore need fresh join consent; old
+      // stored grants for them must be ignored, not just stop being written.
+      rememberGrant = typeof current.dweb.hash === 'string' && !current.dweb.forked;
     }
-    if (await grantStore.has(rid)) return true;
+    if (rememberGrant && await grantStore.has(rid)) return true;
     if (isCancelled(request)) throw new Error('cancelled');
     const okd = await confirmAction({
       kind: 'join',
@@ -437,7 +443,7 @@ export const createDwebBridge = ({
     });
     if (isCancelled(request)) throw new Error('cancelled');
     if (!okd) { audit('bridge_join_denied', { appId, appKey, roomId: rid }); return false; }
-    await grantStore.grant(rid);
+    if (rememberGrant) await grantStore.grant(rid);
     if (isCancelled(request)) throw new Error('cancelled');
     audit('bridge_join_granted', { appId, appKey, roomId: rid });
     return true;
