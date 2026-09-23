@@ -64,6 +64,26 @@ describe('webFetch - request policy', () => {
     await expect(webFetch('https://bank.example.com/')).rejects.toBeInstanceOf(EgressDeniedError);
   });
 
+  test.each(['denylisted', 'unavailable'])('rechecks %s network policy after a pacing reservation', async (change) => {
+    let reserved = false;
+    const policyError = new Error('policy changed while waiting');
+    const { webFetch, fetched } = setup({
+      getDenylist: () => {
+        if (reserved && change === 'unavailable') throw policyError;
+        return reserved ? ['example.com'] : [];
+      },
+      pace: {
+        reserve: async () => { reserved = true; return { outcome: 'waited', waitedMs: 1 }; },
+        observe: async () => {}, isWriteMethod: () => false,
+        canonicalOrigin: (origin: string) => origin,
+      },
+    });
+    await expect(webFetch('https://example.com/')).rejects.toBeInstanceOf(
+      change === 'denylisted' ? EgressDeniedError : Error,
+    );
+    expect(fetched()).toBeNull();
+  });
+
   // Exercise the REAL new URL() normalization path (the unit test feeds bare
   // strings; only here does ::ffff:127.0.0.1 become the compressed ::ffff:7f00:1
   // that the old dotted-only regex missed).
