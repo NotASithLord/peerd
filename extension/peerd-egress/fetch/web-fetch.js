@@ -44,6 +44,34 @@ import { makeNonceCache, readDpopNonce, replayableRequest, shouldRetryWithNonce 
 // can act on, rather than being stalled invisibly.
 const NETWORK_INLINE_WAIT_MS = 5_000;
 
+// Host closures never ride a RequestInit field: an actor's structured-cloned
+// request cannot nominate, replace, or clear final-send authority. Only these
+// trusted wrappers preserve the private binding while copying fetch options.
+/** @type {WeakMap<object,{checks:(()=>Promise<void>|void)[],credentials?:()=>RequestCredentials}>} */
+const requestAuthority = new WeakMap();
+const copyRequestAuthority = (/** @type {any} */ source, /** @type {any} */ next,
+  /** @type {{check?:()=>Promise<void>|void,credentials?:()=>RequestCredentials}} */ extra = {}) => {
+  const prior = requestAuthority.get(source);
+  requestAuthority.set(next, {
+    checks: [...(prior?.checks ?? []), ...(extra.check ? [extra.check] : [])],
+    ...(prior?.credentials ? { credentials: prior.credentials } : {}),
+    ...(extra.credentials ? { credentials: extra.credentials } : {}),
+  });
+  return next;
+};
+
+/**
+ * Bind a host-only, read-only assertion to this exact outgoing request. The
+ * boundary repeats it after pacing and before cookie selection or dispatch.
+ * @param {(resource:any,init?:any)=>Promise<Response>} webFetch
+ * @param {()=>Promise<void>|void} assertCurrent
+ * @returns {(resource:any,init?:any)=>Promise<Response>}
+ */
+export const withWebRequestAuthority = (webFetch, assertCurrent) => async (resource, init = {}) => {
+  await assertCurrent();
+  return webFetch(resource, copyRequestAuthority(init, { ...init }, { check: assertCurrent }));
+};
+
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
 // turns any 3xx into an opaqueredirect (type set, status 0). We also match
 // the real redirect statuses defensively — but NOT 300/304/305/306, which
@@ -92,8 +120,9 @@ export const sessionScopedCredentials = (targetUrl, sessionOrigin) => {
  */
 export const withSessionScopedCredentials = (webFetch, getSessionOrigin) => (resource, init = {}) => {
   const url = resource instanceof Request ? resource.url : String(resource);
-  const credentials = sessionScopedCredentials(url, getSessionOrigin());
-  return webFetch(resource, { ...init, credentials });
+  const credentials = () => sessionScopedCredentials(url, getSessionOrigin());
+  return webFetch(resource, copyRequestAuthority(init,
+    { ...init, credentials: credentials() }, { credentials }));
 };
 
 // Remove any header whose name case-insensitively matches `name` (rule 5: the actor
@@ -150,7 +179,7 @@ export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit 
       catch { /* best effort — never let auditing leak the value or throw */ }
     }
   }
-  return webFetch(resource, { ...init, headers, credentials });
+  return webFetch(resource, copyRequestAuthority(init, { ...init, headers, credentials }));
 };
 
 // ── DPoP — proof-of-possession at the same boundary ─────────────────────────
@@ -218,7 +247,8 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
     const owned = getOwnedOrigin();
     const credentials = sessionScopedCredentials(url, owned);
     const authOrigin = authOriginForRequestUrl(url, owned ?? undefined);
-    if (!authOrigin) return webFetch(resource, { ...init, headers: init.headers, credentials });
+    if (!authOrigin) return webFetch(resource,
+      copyRequestAuthority(init, { ...init, headers: init.headers, credentials }));
 
     /**
      * Build the outgoing headers for one attempt. Returns whether a PROOF was
@@ -290,7 +320,8 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
 
     const sentNonce = nonces.get(authOrigin);
     const first = await attach(sentNonce);
-    const response = await webFetch(resource, { ...init, headers: first.headers, credentials });
+    const response = await webFetch(resource,
+      copyRequestAuthority(init, { ...init, headers: first.headers, credentials }));
 
     // Learn from EVERY response, not just the challenges: RFC 9449 lets a server
     // rotate its nonce on a success too, and the next request should carry the
@@ -316,7 +347,8 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
     // The first response is being discarded, so release its body. Best effort:
     // a stub response has none, and a failed cancel must not sink the retry.
     try { await /** @type {any} */ (response)?.body?.cancel?.(); } catch { /* ignore */ }
-    const retried = await webFetch(resource, { ...init, headers: retry.headers, credentials });
+    const retried = await webFetch(resource,
+      copyRequestAuthority(init, { ...init, headers: retry.headers, credentials }));
     const rotated = readDpopNonce(retried);
     if (rotated) nonces.set(authOrigin, rotated);
     return retried;
@@ -427,8 +459,26 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
       // target or unavailable policy must still prevent the physical request.
       assertDenylist();
     }
+    const authority = init ? requestAuthority.get(init) : undefined;
+    // Read cookie scope only after every awaited authority check. Nothing may
+    // suspend between these final live reads and the physical request.
+    const finalInit = { ...init, redirect: /** @type {const} */ ('manual') };
+    try {
+      for (const check of authority?.checks ?? []) {
+        signal?.throwIfAborted();
+        await check();
+      }
+      if (authority?.credentials) finalInit.credentials = authority.credentials();
+    } catch (cause) {
+      const failure = /** @type {{message?:string,code?:string}} */ (cause);
+      throw Object.assign(new Error(failure?.message ?? 'web request authority unavailable'), {
+        code: failure?.code ?? 'web_request_authority_unavailable',
+        performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      });
+    }
+    assertDenylist();
     signal?.throwIfAborted();
-    const res = await _fetch(resource, { ...init, redirect: 'manual' });
+    const res = await _fetch(resource, finalInit);
     if (pace && paceKey) {
       // Await the trusted observation before a response leaves this boundary.
       await pace.observe({
