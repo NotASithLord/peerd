@@ -33,6 +33,50 @@ import { authOriginForRequestUrl, originSecretName, parseOriginAuth } from './or
 import { accessTokenHashFor, dpopJkt, signDpopProof } from '../dpop/keys.js';
 import { makeNonceCache, readDpopNonce, replayableRequest, shouldRetryWithNonce } from '../dpop/nonce.js';
 
+// How long a NETWORK request may be held here before peerd refuses instead.
+//
+// why it is shorter than the action-path ceiling: every caller of this wrapper
+// runs it inside its own wall-clock timeout (the web primitives' is 20s), and a
+// courtesy pause that eats that budget turns a polite wait into a spurious
+// "the site did not respond". A browser ACTION has no such caller budget - it is
+// bounded by the turn and shows a live wait bar - so it is allowed the full
+// ceiling. Past this the request is refused with a typed reason, which the agent
+// can act on, rather than being stalled invisibly.
+const NETWORK_INLINE_WAIT_MS = 5_000;
+
+// Host closures never ride a RequestInit field: an actor's structured-cloned
+// request cannot nominate, replace, or clear final-send authority. Only these
+// trusted wrappers preserve the private binding while copying fetch options.
+/** @type {WeakMap<object,{checks:(()=>Promise<void>|void)[],finalChecks:(()=>void)[],credentials?:()=>RequestCredentials}>} */
+const requestAuthority = new WeakMap();
+const copyRequestAuthority = (/** @type {any} */ source, /** @type {any} */ next,
+  /** @type {{check?:()=>Promise<void>|void,finalCheck?:()=>void,credentials?:()=>RequestCredentials}} */ extra = {}) => {
+  const prior = requestAuthority.get(source);
+  requestAuthority.set(next, {
+    checks: [...(prior?.checks ?? []), ...(extra.check ? [extra.check] : [])],
+    finalChecks: [...(prior?.finalChecks ?? []), ...(extra.finalCheck ? [extra.finalCheck] : [])],
+    ...(prior?.credentials ? { credentials: prior.credentials } : {}),
+    ...(extra.credentials ? { credentials: extra.credentials } : {}),
+  });
+  return next;
+};
+
+/**
+ * Bind a host-only, read-only assertion to this exact outgoing request. The
+ * boundary repeats it after pacing and before cookie selection or dispatch.
+ * @param {(resource:any,init?:any)=>Promise<Response>} webFetch
+ * @param {()=>Promise<void>|void} assertCurrent
+ * @param {()=>void} [assertFinal]
+ * @returns {(resource:any,init?:any)=>Promise<Response>}
+ */
+export const withWebRequestAuthority = (webFetch, assertCurrent, assertFinal = () => {}) => async (resource, init = {}) => {
+  await assertCurrent();
+  assertFinal();
+  return webFetch(resource, copyRequestAuthority(init, { ...init }, {
+    check: assertCurrent, finalCheck: assertFinal,
+  }));
+};
+
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
 // turns any 3xx into an opaqueredirect (type set, status 0). We also match
 // the real redirect statuses defensively — but NOT 300/304/305/306, which
@@ -77,12 +121,15 @@ export const sessionScopedCredentials = (targetUrl, sessionOrigin) => {
  * web actor opening its first tab) is reflected immediately.
  * @param {(resource: any, init?: any) => Promise<Response>} webFetch
  * @param {() => string | null | undefined} getSessionOrigin
+ * @param {{captureRequestAuthority?:()=>()=>boolean}} [deps]
  * @returns {(resource: any, init?: any) => Promise<Response>}
  */
-export const withSessionScopedCredentials = (webFetch, getSessionOrigin) => (resource, init = {}) => {
+export const withSessionScopedCredentials = (webFetch, getSessionOrigin, { captureRequestAuthority } = {}) => (resource, init = {}) => {
+  init = bindCredentialAuthority(init, captureRequestAuthority);
   const url = resource instanceof Request ? resource.url : String(resource);
-  const credentials = sessionScopedCredentials(url, getSessionOrigin());
-  return webFetch(resource, { ...init, credentials });
+  const credentials = () => sessionScopedCredentials(url, getSessionOrigin());
+  return webFetch(resource, copyRequestAuthority(init,
+    { ...init, credentials: credentials() }, { credentials }));
 };
 
 // Remove any header whose name case-insensitively matches `name` (rule 5: the actor
@@ -113,10 +160,12 @@ const stripHeaderName = (headers, name) => {
  * actor's ctx (which the capability strip already leaves without getSecret).
  * @param {(resource:any, init?:any)=>Promise<Response>} webFetch
  * @param {()=>string|null|undefined} getOwnedOrigin  the actor's fixed owned origin
- * @param {{ getSecret:(name:string)=>Promise<string|null>, audit?:(e:any)=>void }} deps
+ * @param {{ getSecret:(name:string)=>Promise<string|null>, audit?:(e:any)=>void,
+ * captureRequestAuthority?:()=>()=>boolean }} deps
  * @returns {(resource:any, init?:any)=>Promise<Response>}
  */
-export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit }) => async (resource, init = {}) => {
+export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit, captureRequestAuthority }) => async (resource, init = {}) => {
+  init = bindCredentialAuthority(init, captureRequestAuthority);
   const url = resource instanceof Request ? resource.url : String(resource);
   const owned = getOwnedOrigin();
   const credentials = sessionScopedCredentials(url, owned);
@@ -139,7 +188,7 @@ export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit 
       catch { /* best effort — never let auditing leak the value or throw */ }
     }
   }
-  return webFetch(resource, { ...init, headers, credentials });
+  return webFetch(resource, copyRequestAuthority(init, { ...init, headers, credentials }));
 };
 
 // ── DPoP — proof-of-possession at the same boundary ─────────────────────────
@@ -163,6 +212,15 @@ export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit 
  */
 const DPOP_PROOF_HEADER = 'DPoP';
 const DPOP_AUTH_HEADER = 'Authorization';
+
+const bindCredentialAuthority = (/** @type {any} */ init,
+  /** @type {(()=>()=>boolean)|undefined} */ capture) => {
+  if (!capture) return init;
+  const current = capture();
+  return copyRequestAuthority(init, { ...init }, { finalCheck: () => {
+    if (!current()) throw new Error('web credential authority changed');
+  } });
+};
 
 /**
  * The credentialed boundary fetch for a PROOF-OF-POSSESSION origin (RFC 9449).
@@ -193,21 +251,24 @@ const DPOP_AUTH_HEADER = 'Authorization';
  * @param {{ getSecret:(name:string)=>Promise<string|null>,
  *           getDpopKey:(origin:string)=>Promise<{ privateKey: CryptoKey, publicJwk: any } | null>,
  *           audit?:(e:any)=>void, now?:()=>number, randomJti?:()=>string,
- *           nonceCache?:ReturnType<typeof makeNonceCache> }} deps
+ *           nonceCache?:ReturnType<typeof makeNonceCache>,
+ *           captureRequestAuthority?:()=>()=>boolean }} deps
  * @returns {(resource:any, init?:any)=>Promise<Response>}
  */
-export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDpopKey, audit, now, randomJti, nonceCache }) => {
+export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDpopKey, audit, now, randomJti, nonceCache, captureRequestAuthority }) => {
   // ONE cache per wrapper, so it lives exactly as long as the actor's boundary
   // does and is never shared across owned origins by accident (it is keyed by
   // origin regardless — see nonce.js — this is belt and braces).
   const nonces = nonceCache ?? makeNonceCache();
 
   return async (resource, init = {}) => {
+    init = bindCredentialAuthority(init, captureRequestAuthority);
     const url = resource instanceof Request ? resource.url : String(resource);
     const owned = getOwnedOrigin();
     const credentials = sessionScopedCredentials(url, owned);
     const authOrigin = authOriginForRequestUrl(url, owned ?? undefined);
-    if (!authOrigin) return webFetch(resource, { ...init, headers: init.headers, credentials });
+    if (!authOrigin) return webFetch(resource,
+      copyRequestAuthority(init, { ...init, headers: init.headers, credentials }));
 
     /**
      * Build the outgoing headers for one attempt. Returns whether a PROOF was
@@ -279,7 +340,8 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
 
     const sentNonce = nonces.get(authOrigin);
     const first = await attach(sentNonce);
-    const response = await webFetch(resource, { ...init, headers: first.headers, credentials });
+    const response = await webFetch(resource,
+      copyRequestAuthority(init, { ...init, headers: first.headers, credentials }));
 
     // Learn from EVERY response, not just the challenges: RFC 9449 lets a server
     // rotate its nonce on a success too, and the next request should carry the
@@ -305,7 +367,8 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
     // The first response is being discarded, so release its body. Best effort:
     // a stub response has none, and a failed cancel must not sink the retry.
     try { await /** @type {any} */ (response)?.body?.cancel?.(); } catch { /* ignore */ }
-    const retried = await webFetch(resource, { ...init, headers: retry.headers, credentials });
+    const retried = await webFetch(resource,
+      copyRequestAuthority(init, { ...init, headers: retry.headers, credentials }));
     const rotated = readDpopNonce(retried);
     if (rotated) nonces.set(authOrigin, rotated);
     return retried;
@@ -321,8 +384,23 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
  *   pure matcher (passed in to avoid a cross-module import here)
  * @param {(partial: { type: string, details?: Record<string, any> }) => Promise<void>} [deps.audit]
  * @param {typeof fetch} [deps.fetchFn]
+ * @param {{
+ *   reserve: (origin: string, opts: { isWrite: boolean, signal?: AbortSignal, maxInlineWaitMs?: number })
+ *     => Promise<{ outcome: string, waitedMs: number, untilMs?: number, reason?: string }>,
+ *   observe: (signal: { origin: string, responseAtMs: number, status?: number, retryAfter?: unknown })
+ *     => Promise<void>,
+ *   isWriteMethod: (method: string) => boolean,
+ *   canonicalOrigin: (input: string) => string | null,
+ * }} [deps.pace]
+ *   adaptive per-origin action pacing (#234). Injected, and absent in tests and
+ *   on any host that has not wired it, in which case this wrapper behaves
+ *   exactly as it did before. why HERE: this is the only place in the whole
+ *   extension that holds a real Response for an arbitrary site, so it is the
+ *   only place an HTTP status and a Retry-After header exist in a context a
+ *   page cannot forge. Every other observation point is either page-world (the
+ *   injected tap), status-free (tabs.onUpdated), or preview-only (CDP).
  */
-export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => {
+export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace }) => {
   const _fetch = fetchFn ?? fetch;
   const _audit = audit ?? (async () => {});
   /**
@@ -334,9 +412,10 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
     const urlString = resource instanceof Request ? resource.url
       : resource instanceof URL ? resource.toString()
       : resource;
-    // why on the audit: the code-mode bridge now sends full HTTP, so the log
-    // must distinguish a GET read from a POST write (a wider surface to see).
-    const method = (init && typeof init.method === 'string' ? init.method : 'GET').toUpperCase();
+    // why: pacing and audit must use the method that fetch sends.
+    const method = (typeof init?.method === 'string' ? init.method : resource instanceof Request ? resource.method : 'GET').toUpperCase();
+    // why: a Request carries cancellation even when init does not repeat it.
+    const signal = init?.signal ?? (resource instanceof Request ? resource.signal : undefined);
     let u;
     try { u = new URL(urlString); }
     catch {
@@ -359,11 +438,13 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
     }
     // u.hostname (not u.host): the denylist matches bare hostnames; u.host
     // carries :port. (The matcher also normalizes defensively — see denylist.js.)
-    const denylisted = matchDenylist(u.hostname, getDenylist());
-    if (denylisted) {
-      _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'denylist', method } }).catch(() => {});
-      throw new EgressDeniedError(u.origin);
-    }
+    const assertDenylist = () => {
+      if (matchDenylist(u.hostname, getDenylist())) {
+        _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'denylist', method } }).catch(() => {});
+        throw new EgressDeniedError(u.origin);
+      }
+    };
+    assertDenylist();
     // Redirects fail closed. A 3xx to a different host would re-open every
     // gate above (scheme / SSRF private-network / denylist) against an
     // UN-checked target — e.g. a public host that 302s to 169.254.169.254
@@ -372,7 +453,62 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn }) => 
     // header-less response), so we cannot re-validate and follow per hop;
     // we refuse the redirect instead. Forced regardless of the caller's
     // redirect mode (primitives.js used to ask for 'follow').
-    const res = await _fetch(resource, { ...init, redirect: 'manual' });
+    // ---- Per-origin pacing (#234) ---------------------------------------
+    // Last gate before the request leaves. Deliberately AFTER the scheme, SSRF
+    // and denylist checks: a request peerd refuses outright must never consume
+    // a pacing slot or make the caller wait first.
+    // why the injected canonicalizer rather than `u.origin`: a rule is keyed by
+    // the same strict canonical origin every other origin-keyed authority
+    // decision uses, and two spellings of one key space is the bug class that
+    // makes a rule silently miss. A host it refuses (an IP literal, a
+    // single-label intranet name) is simply unpaceable - and the private-network
+    // guard above has already turned back everything loopback or LAN.
+    const paceKey = pace ? pace.canonicalOrigin(u.origin) : null;
+    if (pace && paceKey) {
+      const clearance = await pace.reserve(paceKey, {
+        isWrite: pace.isWriteMethod(method),
+        signal,
+        maxInlineWaitMs: NETWORK_INLINE_WAIT_MS,
+      });
+      if (clearance.outcome === 'handoff' || clearance.outcome === 'unavailable') {
+        const reason = clearance.outcome === 'handoff' ? 'pacing_ceiling' : 'pacing_unavailable';
+        _audit({ type: 'egress_denied', details: { origin: u.origin, reason, method } }).catch(() => {});
+        throw new EgressDeniedError(u.origin, reason);
+      }
+      // why: pacing can wait after the first policy read. A newly blocked
+      // target or unavailable policy must still prevent the physical request.
+      assertDenylist();
+    }
+    const authority = init ? requestAuthority.get(init) : undefined;
+    // Read cookie scope only after every awaited authority check. Nothing may
+    // suspend between these final live reads and the physical request.
+    const finalInit = { ...init, redirect: /** @type {const} */ ('manual') };
+    try {
+      for (const check of authority?.checks ?? []) {
+        signal?.throwIfAborted();
+        await check();
+      }
+      for (const check of authority?.finalChecks ?? []) check();
+      if (authority?.credentials) finalInit.credentials = authority.credentials();
+    } catch (cause) {
+      const failure = /** @type {{message?:string,code?:string}} */ (cause);
+      throw Object.assign(new Error(failure?.message ?? 'web request authority unavailable'), {
+        code: failure?.code ?? 'web_request_authority_unavailable',
+        performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      });
+    }
+    assertDenylist();
+    signal?.throwIfAborted();
+    const res = await _fetch(resource, finalInit);
+    if (pace && paceKey) {
+      // Await the trusted observation before a response leaves this boundary.
+      await pace.observe({
+        origin: paceKey,
+        responseAtMs: Date.now(),
+        status: res.status,
+        retryAfter: res.headers?.get?.('retry-after') ?? null,
+      });
+    }
     if (isRedirect(res)) {
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'redirect_blocked', status: res.status } }).catch(() => {});
       throw new EgressDeniedError(u.origin, 'redirect_blocked');

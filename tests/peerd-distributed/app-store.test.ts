@@ -97,6 +97,8 @@ describe('the dweb app store (base-network content + discovery)', () => {
       previous_version_id: release.previousVersionId,
       source_git_oid: release.gitCommitOid,
       changelog: release.changelog,
+      release_entry_file: 'index.html',
+      release_file_kinds: {},
     });
     a.close(); b.close();
   });

@@ -69,7 +69,10 @@ export const repositoryVersionTool = {
         throw new Error('unknown_repo_version_op');
       });
       const result = kind === 'app'
-        ? await appQuiescence?.run?.(id, operation, { close: true })
+        ? await appQuiescence?.run?.(id, operation, {
+          close: true,
+          invalidateDweb: args.op === 'branch' || args.op === 'checkout' || args.op === 'restore',
+        })
         : podLive
           ? await podClient?.withWorkspaceLock?.(id, operation)
           : await operation();

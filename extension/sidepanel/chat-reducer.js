@@ -98,6 +98,9 @@
  * @property {string|null|undefined} lastError
  * @property {boolean} streaming
  * @property {{ attempt: number|null, retryAfterMs: number|null }|null} rateLimit
+ * @property {{ origin: string, untilMs: number, reason: string|null }|null} pacing
+ *   a live per-origin pacing wait (#234). Cleared by every lifecycle message
+ *   that means the wait is over, exactly like rateLimit.
  * @property {ReadonlyArray<{ id: number, text?: string, action?: any, sessionId?: string | null }>} notices
  * @property {any} agentTab
  * @property {ReadonlyArray<any>} agentTabEvents
@@ -181,6 +184,7 @@ export const INITIAL_STATE = Object.freeze({
   // Rate-limit retry banner: { attempt, retryAfterMs } while the provider
   // adapter is backing off + retrying; null otherwise.
   rateLimit: null,
+  pacing: null,
   // Transient system notices (e.g. /init progress). Each { id, text };
   // the newest renders as a dismissible banner above the input.
   notices: Object.freeze([]),
@@ -932,7 +936,7 @@ export const reduceChat = (state, msg) => {
         actorProjectionRevision,
         pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
         confirmEvents,
-        lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, cost: { ...state.cost,
+        lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, pacing: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
         limitReached: stillHalted } };
@@ -961,19 +965,31 @@ export const reduceChat = (state, msg) => {
         lastError: 'spend-limit-reached' };
     case 'turn/delta': {
       const next = applyDelta(state, msg);
-      // A token arrived → any retry cleared; drop the rate-limit banner.
-      return next.rateLimit ? { ...next, rateLimit: null } : next;
+      // A token arrived → any retry cleared; drop the rate-limit banner. A
+      // paced wait is over for the same reason: the turn is producing again.
+      return (next.rateLimit || next.pacing) ? { ...next, rateLimit: null, pacing: null } : next;
     }
     case 'turn/reasoning':
       return applyReasoning(state, msg);
     case 'turn/rate-limit-pause':
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, rateLimit: { attempt: msg.attempt ?? null, retryAfterMs: msg.retryAfterMs ?? null } };
+    // #234: peerd is deliberately idle until a site's stated pause runs out.
+    // Session-guarded like every other lifecycle pulse - a background turn
+    // waiting on one site must not paint the chat the user is reading.
+    case 'turn/pacing-wait':
+      if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
+      if (typeof msg.origin !== 'string' || !msg.origin) return state;
+      return { ...state, pacing: {
+        origin: msg.origin,
+        untilMs: typeof msg.untilMs === 'number' && Number.isFinite(msg.untilMs) ? msg.untilMs : 0,
+        reason: typeof msg.reason === 'string' ? msg.reason : null,
+      } };
     case 'turn/streaming':
       // Per-session lifecycle pulse — a background turn must not flip the
       // viewed chat's composer/spinner.
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
-      return { ...state, streaming: !!msg.streaming, rateLimit: null,
+      return { ...state, streaming: !!msg.streaming, rateLimit: null, pacing: null,
         cost: msg.streaming ? { ...state.cost, turn: null, limitReached: false } : state.cost };
     case 'turn/tool-use':
     case 'turn/tool-result':
@@ -981,9 +997,9 @@ export const reduceChat = (state, msg) => {
       // source of truth. No fold.
       return state;
     case 'turn/stop':
-      return { ...applyStop(state, msg), rateLimit: null };
+      return { ...applyStop(state, msg), rateLimit: null, pacing: null };
     case 'turn/error':
-      return { ...applyError(state, msg), rateLimit: null };
+      return { ...applyError(state, msg), rateLimit: null, pacing: null };
     case 'confirm/request':
       // Confirmation is authority, not ambient UI. A background actor keeps
       // running when its owner changes chats, but its prompt belongs only in the

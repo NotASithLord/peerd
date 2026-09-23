@@ -5,10 +5,11 @@
 import { describe, expect, it } from '../../../framework.js';
 import {
   createEditor,
+  createRepositoryService,
   isBinaryAssetPath,
   opfsHelpers,
 } from '/peerd-engine/index.js';
-import { createAppClient } from '/background/app-client.js';
+import { AppFileContentError, AppFileLimitError, createAppClient, MAX_APP_FILES } from '/background/app-client.js';
 import { createAppDataClient, MAX_APP_DATA_BYTES } from '../../../../engine-tabs/app-tab/app-data-client.js';
 
 const VALID_EMPTY_WASM = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
@@ -96,9 +97,11 @@ describe('App storage binary contract', () => {
 
   it('stores base64 as raw bytes and refuses text reads of binary assets', async () => {
     const registry = memoryRegistry();
+    /** @type {any[]} */ const initializations = [];
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ ({ initApp: async (/** @type {string} */ _id, /** @type {any} */ opts) => { initializations.push(opts); } }),
     });
     const record = await client.create({
       name: 'Binary storage',
@@ -114,7 +117,110 @@ describe('App storage binary contract', () => {
     try { await client.readFile({ appId: record.id, path: 'asset.bin' }); }
     catch (error) { code = /** @type {{ code?: string }} */ (error).code ?? ''; }
     expect(code).toBe('binary_asset_not_text');
+    await expect(() => client.writeFile({
+      appId: record.id, path: 'data/state.json', content: { base64: 'AP/AgH8=' },
+    })).toThrow((error) => error instanceof AppFileContentError);
+    await expect(() => client.writeFile({
+      appId: record.id, path: 'data/state.json', content: 'not JSON',
+    })).toThrow((error) => error instanceof AppFileContentError);
+    await client.writeFile({ appId: record.id, path: 'data/state.json', content: '{"ok":true}' });
+    expect(await client.readFile({ appId: record.id, path: 'data/state.json' })).toBe('{"ok":true}');
+    expect(initializations[0].includeIgnored).toBe(false);
+    const installed = await client.create({
+      name: 'Installed storage', files: { 'index.html': '<h1>peer</h1>' },
+      source: 'dweb', dweb: { uri: 'peerd://signed-hash', publisher: 'did:key:zPeer', hash: 'signed-hash' },
+    });
+    expect(initializations[1].includeIgnored).toBe(true);
     await client.opfsForApp(record.id).nuke();
+    await client.opfsForApp(installed.id).nuke();
+  });
+
+  it('preserves runtime data, checks the merged cap, and rolls back a failed verified update', async () => {
+    const registry = memoryRegistry();
+    /** @type {any[]} */ const replacements = [];
+    const repositories = {
+      initApp: async () => 'base',
+      statusApp: async () => ({ oid: 'base' }),
+      replaceWorkingTree: async (/** @type {any} */ _ref, /** @type {any} */ options) => {
+        replacements.push(options);
+        return { oid: 'next', created: true };
+      },
+      rollbackWorkingTree: async () => ({ oid: 'base' }),
+    };
+    const client = createAppClient({
+      registry: /** @type {any} */ (registry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (repositories),
+    });
+    const record = await client.create({
+      name: 'Stateful App', files: { 'index.html': 'old', 'data/state.json': '{"count":1}' },
+    });
+    await client.replaceVersionedFilesUnlocked({
+      appId: record.id,
+      files: { 'index.html': 'new', 'peerd.json': '{}' },
+      entryFile: 'index.html',
+    });
+    expect(new TextDecoder().decode(replacements[0].files['data/state.json'])).toBe('{"count":1}');
+    expect(replacements[0].includeIgnored).toBe(true);
+    await client.opfsForApp(record.id).nuke();
+
+    const dataFiles = Object.fromEntries(Array.from(
+      { length: MAX_APP_FILES - 2 },
+      (_, index) => [`data/state-${index}.json`, '{}'],
+    ));
+    const capped = await client.create({ name: 'Capped App', files: { 'index.html': 'old', ...dataFiles } });
+    let error = null;
+    try {
+      await client.replaceVersionedFilesUnlocked({
+        appId: capped.id,
+        files: { 'index.html': 'new', 'peerd.json': '{}', 'new.js': 'x' },
+        entryFile: 'index.html',
+      });
+    } catch (cause) { error = cause; }
+    expect(error instanceof AppFileLimitError).toBe(true);
+    expect(replacements.length).toBe(1);
+    await client.opfsForApp(capped.id).nuke();
+
+    const rollbackRegistry = memoryRegistry();
+    const realRepositories = createRepositoryService();
+    const rollbackClient = createAppClient({
+      registry: /** @type {any} */ (rollbackRegistry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: realRepositories,
+    });
+    const rollbackRecord = await rollbackClient.create({
+      name: 'Rollback App',
+      files: { 'index.html': 'old', '.gitignore': '.env\n' },
+    });
+    const ref = { kind: 'app', id: rollbackRecord.id };
+    await rollbackClient.writeFile({ appId: rollbackRecord.id, path: '.env', content: 'TOKEN=local-secret\n' });
+    const baseOid = (await realRepositories.status(ref)).oid;
+    const updateRecord = rollbackRegistry.update;
+    let failMetadata = true;
+    rollbackRegistry.update = async (id, patch) => {
+      if (failMetadata) { failMetadata = false; throw new Error('catalog unavailable'); }
+      return updateRecord(id, patch);
+    };
+    let updateFailed = false;
+    try {
+      await rollbackClient.replaceVersionedFilesUnlocked({
+        appId: rollbackRecord.id,
+        files: { 'index.html': 'release', '.gitignore': '.env\n', '.env': 'TOKEN=publisher-value\n' },
+        entryFile: 'index.html',
+      });
+    } catch { updateFailed = true; }
+    expect(updateFailed).toBe(true);
+    expect(await rollbackClient.readFile({ appId: rollbackRecord.id, path: '.env' })).toBe('TOKEN=local-secret\n');
+    expect((await realRepositories.status(ref)).oid).toBe(baseOid);
+    expect((await realRepositories.commit(ref, { message: 'must stay clean' })).created).toBe(false);
+    const history = await realRepositories.history(ref);
+    expect(history.length).toBe(1);
+    for (const row of history) {
+      const snapshot = await realRepositories.snapshot(ref, { at: row.oid });
+      expect(Object.hasOwn(snapshot, '.env')).toBe(false);
+      expect(Object.values(snapshot).some((bytes) => new TextDecoder().decode(bytes).includes('local-secret'))).toBe(false);
+    }
+    await realRepositories.destroy(ref, { worktree: true });
   });
 
   it('removes the catalog record and partial OPFS tree when create fails', async () => {
@@ -171,9 +277,12 @@ describe('App storage binary contract', () => {
 
   it('changes durable kind when a deleted unknown binary is recreated as text', async () => {
     const registry = memoryRegistry();
+    let invalidations = 0;
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
-      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      tracker: /** @type {any} */ ({
+        invalidateDweb: async () => { invalidations += 1; }, reloadTab: async () => {},
+      }),
     });
     const record = await client.create({
       name: 'Kinds',
@@ -183,6 +292,7 @@ describe('App storage binary contract', () => {
     expect(registry.records.get(record.id).fileKinds['model.custom']).toBe('binary');
     await client.deleteFile({ appId: record.id, path: 'model.custom' });
     await client.writeFile({ appId: record.id, path: 'model.custom', content: 'text now' });
+    expect(invalidations).toBe(2);
     expect(registry.records.get(record.id).fileKinds['model.custom']).toBe('text');
     expect(await client.readFile({ appId: record.id, path: 'model.custom' })).toBe('text now');
     await client.opfsForApp(record.id).nuke();

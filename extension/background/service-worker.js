@@ -1,31 +1,5 @@
 // @ts-check
-// Service worker — wiring + dependency-injection assembly (architecture.md §6).
-//
-// The SW imports each peerd-* module's public surface, creates concrete
-// instances (vault, audit log, session store), assembles the per-call
-// dependency context (buildToolContext, buildStateSnapshot), drives the agent
-// turn, and routes messages. It owns no business logic of its own — that lives
-// in the peerd-* modules and in the route handlers under background/routes/.
-//
-// Message routes: the dispatcher handlers live in background/routes/*.js —
-// import-free, deps-injected factories (makeVaultRoutes, makeProviderRoutes, …)
-// spread into makeDispatcher with a shared `routeDeps` object. They are
-// Bun-unit-tested in tests/background/ and statically wiring-checked in
-// tests/meta/sw-routes-wiring.test.ts. A route stays INLINE here only when it
-// closes over reassigned module state (settings, activeSession, denylist*,
-// defaultProfile, localModel*) that a captured reference couldn't track — those
-// are the handful left in the dispatcher below. Keep that rule: a new route
-// that needs only stable collaborators belongs in a routes/ module, not here.
-// New non-route logic that grows past a few lines of glue belongs in a module
-// (a peerd-* barrel, or a background/*.js helper like settings-patch.js), not
-// inlined into a handler.
-//
-// SW lifetime: this module is re-executed on every cold start. Module
-// scope is the "per-SW-lifetime singleton" surface. The offscreen doc
-// holds a keepalive port so the SW survives the 30s idle timer during
-// active sessions. State that must survive SW termination lives in
-// chrome.storage.session (`peerd-egress` sessionCache namespace) or
-// chrome.storage.local (`egress.kv`).
+// Assemble module surfaces. Keep logic in modules and durable state in browser storage.
 
 import browser from '/vendor/browser-polyfill.js';
 import { makeDispatcher, isTrustedSender } from '/shared/messaging.js';
@@ -51,6 +25,8 @@ import { makeSessionCostFolder } from './session-cost-fold.js';
 import { makeScriptModelCallRoute } from './script-model-call.js';
 import { makeOriginLockResolver } from './origin-lock-controller.js';
 import { makeAppActorChatHandler } from './app-actor-chat.js';
+import { makeWebRequestAuthorityBinder, withRequestLocalWebFetch } from './web-request-authority.js';
+import { beginSessionAuthorityChange, captureSessionAuthority } from '/shared/session-authority-epoch.js';
 
 import {
   // vault
@@ -69,6 +45,7 @@ import {
   makeSafeFetch,
   makeWebFetch,
   withSessionScopedCredentials,
+  withWebRequestAuthority,
   // DESIGN-18 P1 + Tier 1 / INV-15: the API actor's credentialed boundary fetch
   // (session scope + the keyless origin:<origin> injection), upgraded to
   // proof-of-possession. withDpopCredentials is a strict SUPERSET of
@@ -360,6 +337,7 @@ import {
   // narrowing, and the report a stop turns into.
   makeOriginStateStore, makeLearnedOrigins, makeJudgeLanding, makeCredentialScope,
   makeSignInOriginAuthorizer, makeSignInExcursionAuthorizer, makeSignInExcursionRevoker,
+  createOriginPacingStore,
   makeSiteClientOriginGuard, makeSiteClientOriginAuthorizer,
   makeFixedSiteClientOriginGuard, authorizeSiteClientRelayOrigin,
   hasDurableSiteClientState,
@@ -405,7 +383,7 @@ import { makeOffscreenPdfClient } from './offscreen-pdf-client.js';
 import { makeOffscreenDocClient } from './offscreen-doc-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { makeUiPorts } from './ui-ports.js';
-import { createAppClient, APP_TAB_GROUP_TITLE } from './app-client.js';
+import { createAppClient, APP_TAB_GROUP_TITLE, appReleaseDescriptorMatches } from './app-client.js';
 import { createPageActivityReporter } from './page-activity.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
 import { createAppQuiescence } from './app-quiescence.js';
@@ -440,6 +418,7 @@ import {
   setAppBodyWriteGate,
   parseAppManifest,
   createRepositoryService,
+  createKeyedQueue,
   podGitRemoteOperation,
 } from '/peerd-engine/background.js';
 // MV3 ServiceWorkerGlobalScope rejects runtime import(). Keep the heavy vendor
@@ -502,6 +481,7 @@ import { makeEngineRoutes } from './routes/engine.js';
 import { makeSystemRoutes } from './routes/system.js';
 import { makeDenylistRoutes } from './routes/denylist.js';
 import { makeLearnedOriginRoutes } from './routes/learned-origins.js';
+import { makePacedOriginRoutes } from './routes/paced-origins.js';
 import { makeSettingsRoutes } from './routes/settings.js';
 import { makeSessionMutationRoutes } from './routes/session-mutations.js';
 import { makeLocalModelRoutes } from './routes/local-model.js';
@@ -940,6 +920,48 @@ export const safeFetch = makeSafeFetch({
   audit: /** @type {any} */ (auditLog.append),
 });
 
+// ---------------------------------------------------------------------------
+// Adaptive per-origin action pacing (#234). SW-resident by construction: the
+// question "how fast may peerd act on this site" must never be answerable from
+// an actor heap that just ingested that site's content. Hydrated eagerly here
+// because an un-hydrated store fails browser writes closed, and a cold worker
+// would otherwise refuse the first action of every session.
+export const originPacing = createOriginPacingStore({
+  kv,
+  onAudit: (event) => { auditLog.append(/** @type {any} */ (event)).catch(() => {}); },
+  // The fallback wait notice, for the network path: a tool's own fetch has no
+  // per-call session to thread, but a stalled turn still needs its explanation.
+  // Late-bound and best-effort; the dispatcher passes its exact session instead.
+  onWait: (info) => {
+    if (!uiConnected()) return;
+    sessionCache.sessionGet('currentSessionId').then((sessionId) => {
+      if (sessionId) uiPorts.broadcast({ type: 'turn/pacing-wait', sessionId, ...info });
+    }).catch(() => {});
+  },
+});
+originPacing.hydrate();
+
+/** @param {string} sessionId */
+const pacingToolContext = (sessionId) => ({
+  pacing: {
+    // why the ceiling check awaits hydration: a message is what wakes a cold
+    // worker, so the first tool call of a session can arrive before the durable
+    // read resolves - and a pre-hydrate answer would refuse a legitimate action
+    // as "state unavailable". reserve() already waits internally.
+    peek: async (/** @type {any} */ o, /** @type {any} */ opts) => {
+      await originPacing.hydrate();
+      return originPacing.peek(o, opts);
+    },
+    engaged: () => originPacing.engaged(),
+    reserve: (/** @type {any} */ o, /** @type {any} */ opts) => originPacing.reserve(o, opts),
+  },
+  onPacingWait: (/** @type {any} */ info) => {
+    if (!uiConnected()) return;
+    try { uiPorts.broadcast({ type: 'turn/pacing-wait', sessionId, ...info }); }
+    catch (e) { console.warn('[sw] pacing notice failed', e); }
+  },
+});
+
 // why: separate egress wrapper for web tools (fetch_url) and
 // the web actor. Provider allowlist would be too narrow — those tools
 // reach arbitrary HTTPS hosts. The denylist still applies as defense
@@ -954,6 +976,15 @@ export const webFetch = makeWebFetch({
   },
   matchDenylist: (host, patterns) => matchesDenylist(host, patterns),
   audit: /** @type {any} */ (auditLog.append),
+  // The network half of #234. This wrapper is the only place in the extension
+  // that holds a real Response for an arbitrary site, so it is both the only
+  // trusted place to LEARN a limit and the natural place to honor one.
+  pace: {
+    reserve: (origin, opts) => originPacing.reserve(origin, opts),
+    observe: (signal) => originPacing.observe(signal),
+    isWriteMethod: needsWebWriteConfirm,
+    canonicalOrigin: normalizeApiOrigin,
+  },
 });
 
 // Bind vault.getSecret to a stable function reference so DI consumers
@@ -2043,6 +2074,26 @@ const resolvePermission = async (activeSession) => {
   return { mode: normalizeMode(rawMode), confirmActions: normalizeConfirmActions(rawConfirm) };
 };
 
+const bindWebRequestAuthority = makeWebRequestAuthorityBinder({ withWebRequestAuthority, needsWebWriteConfirm });
+const captureRequestAuthority = () => {
+  const sessionCurrent = captureSessionAuthority(idb);
+  const cacheCurrent = captureSessionAuthority(sessionCache);
+  const goalCurrent = goalRunner?.captureAuthority() ?? (() => true);
+  const vaultCurrent = vault.captureRequestAuthority();
+  return () => sessionCurrent() && cacheCurrent() && goalCurrent() && vaultCurrent();
+};
+const readRequestPermission = async (/** @type {string | null} */ sessionId) => {
+  if (!sessionId) return resolvePermission(null);
+  const owner = await sessions.get(sessionId);
+  if (!owner || owner.archivedAt) return { mode: PERMISSION_MODES.PLAN, confirmActions: true };
+  const root = await sessions.get(await resolveLifecycleRootSession(sessionId));
+  if (!root || root.archivedAt) return { mode: PERMISSION_MODES.PLAN, confirmActions: true };
+  return resolvePermission(root);
+};
+const webFetchForSession = (/** @type {string | null} */ sessionId) => bindWebRequestAuthority({
+  webFetch, captureRequestAuthority, readPermission: () => readRequestPermission(sessionId),
+});
+
 // Per-session promise chains serializing todo read-modify-writes (the
 // ctx.todoStore below). Keyed by sessionId; an entry is just the tail of the
 // chain, so the map stays tiny and dies with the SW (the persisted list is
@@ -2343,9 +2394,9 @@ const buildToolContext = async (/** @type {any} */ {
     // Routines (loop/scheduler.js). Resolved lazily — `scheduler` is built after
     // this fn (same late-dep dance as goalRunner). Routines are GLOBAL (not
     // per-session), so these are present regardless of sessionId.
-    scheduleAdd: (/** @type {any} */ req) => scheduler?.add(req) ?? { ok: false, error: 'schedule_unavailable' },
-    scheduleList: () => scheduler?.list() ?? [],
-    scheduleRemove: (/** @type {string} */ id) => scheduler?.remove(id) ?? false,
+    scheduleAdd: async (/** @type {any} */ req) => scheduler?.add(req) ?? { ok: false, error: 'schedule_unavailable' },
+    scheduleList: async () => scheduler?.listReady() ?? [],
+    scheduleRemove: async (/** @type {string} */ id) => scheduler?.removeReady(id) ?? false,
     // why: the todo_* tools mutate the session's plan-of-record through this
     // serialized read-modify-write (todoChains, module scope) — two todo ops
     // in one concurrent tool wave would otherwise race the record and lose an
@@ -2520,6 +2571,12 @@ const buildToolContext = async (/** @type {any} */ {
     waitForBrowserChildPolicyNotice,
     hasPendingBrowserChildPolicy: (/** @type {number} */ tabId) =>
       drivenPopupGuard.hasPendingSource(tabId),
+    // #234: read-shaped only, so nothing the agent does can lower a rule; the
+    // settings routes are the sole adjusters. Addressed to the ROOT chat because
+    // most browser work runs in a bound web actor with its own session id, and a
+    // notice addressed to the actor is filtered out by the panel's session guard
+    // - invisible in exactly the case that most needs explaining.
+    ...pacingToolContext(lifecycleOwnerSessionId ?? sessionId),
     // open_tab opens in the background and announces a "go there" card instead of
     // stealing focus; this is the late-bound announce (defined below).
     // noteTab updates the "current agent tab" card to whatever tab a tool just
@@ -2556,7 +2613,7 @@ const buildToolContext = async (/** @type {any} */ {
     // (provider-allowlist, locked down). safeFetch is still in ctx for
     // any future tool that legitimately needs to hit a provider.
     safeFetch,
-    webFetch,
+    webFetch: webFetchForSession(sessionId ?? null),
     // fetch_url's spill-and-page store: oversized fetched text spills here and
     // read_web_cache pages it back. Stripped to exactly those two tools by
     // spawn.js CAPABILITY_CONSUMERS.webCache.
@@ -2664,10 +2721,11 @@ const buildToolContext = async (/** @type {any} */ {
       // same-origin (keyless: getSecret is the SW's, closed over here, never on resCtx).
       resCtx.webFetch = isKnownIdpHost(ownedOrigin)
         ? async () => { throw new EgressDeniedError(ownedOrigin ?? 'identity provider', IDENTITY_PROVIDER_TRANSIT_ONLY_CODE); }
-        : withDpopCredentials(webFetch, () => ownedOrigin, {
+        : withDpopCredentials(ctx.webFetch, () => ownedOrigin, {
           getSecret: (/** @type {string} */ name) => vault.getSecret(name),
           getDpopKey: getDpopKeyForOrigin,
           audit: (/** @type {any} */ e) => auditLog.append(e),
+          captureRequestAuthority: () => vault.captureRequestAuthority(),
         });
       resCtx.idpTransitOnly = isKnownIdpHost(ownedOrigin);
       // No repinActiveTab / adoptWebTab: an API actor has no tab to adopt or re-pin.
@@ -2725,17 +2783,27 @@ const buildToolContext = async (/** @type {any} */ {
       resCtx.authorizeSiteClientOrigin = hasDurableCustody && lock
         ? lock.authorizeSiteClientOrigin(() => liveSiteClientLandingFor(sessionId))
         : async () => false;
-      // The session-credential scope, NARROWED by the same policy. `ctx.activeTab.origin`
-      // IS the scope — read live on every request — so a page that redirects itself onto
-      // a credentialed origin moves the scope with no tool call in between to judge. The
-      // getter answers synchronously and can only ever withhold, so the ordinary
-      // same-origin case is byte-for-byte what it was before #251.
-      resCtx.webFetch = withSessionScopedCredentials(
-        webFetch,
-        lock
-          ? lock.makeScope(() => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin)
-          : () => /** @type {{ origin?: string } | undefined} */ (resCtx.activeTab)?.origin,
-      );
+      // Each request owns its proof-to-cookie slot. Overlapping requests must
+      // never replace one another's last proven origin while awaiting policy.
+      resCtx.webFetch = withRequestLocalWebFetch(() => {
+        let requestTabOrigin = /** @type {string | undefined} */ (undefined);
+        const liveTabFetch = bindWebRequestAuthority({
+          webFetch, captureRequestAuthority,
+          readPermission: () => readRequestPermission(sessionId ?? null),
+          reauthorize: async () => {
+            const live = await liveSiteClientLandingFor(sessionId);
+            requestTabOrigin = live.status === 'live' ? originOfTabUrl(live.url) : undefined;
+            if (live.status === 'live' && lock) await lock.judgeLanding(live.url);
+          },
+        });
+        return withSessionScopedCredentials(
+          liveTabFetch,
+          lock
+            ? lock.makeScope(() => requestTabOrigin)
+            : () => requestTabOrigin,
+          { captureRequestAuthority },
+        );
+      });
       // navigate adopts the actor's tab MID-TURN (0->1). It re-pins through this setter
       // — which closes over the SHARED resCtx — NOT a direct activeTab= on the per-call
       // {...ctx} copy the dispatcher hands each tool (that write would die with the copy),
@@ -3159,10 +3227,19 @@ const podTabTracker = createPodTabTracker({
 // App registry + tracker + client. Apps' files live in OPFS at
 // peerd-apps/<appId>/; the registry tracks metadata only.
 const appRegistry = createAppRegistry({ storage: idbKV('apps'), onActorArchive: archiveOrphanedActor });
+const purgeAppRoomOwners = async (/** @type {string} */ appId, /** @type {number} */ generation) => {
+  if (!DWEB_ENABLED) return;
+  await ensureOffscreen();
+  const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+    type: 'dweb/base-host/room', op: 'leave-app-owners', appId, generation,
+  }));
+  if (!reply?.ok) throw new Error(reply?.error ?? 'App dweb owners did not stop');
+};
 const appTabTracker = createAppTabTracker({
   announce: trackerNote(appRegistry, 'App'),
   onAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) => engineLiveness.adopt('app', id, tabId),
   onDrop: (/** @type {string} */ id) => engineLiveness.drop('app', id),
+  purgeDwebOwners: purgeAppRoomOwners,
 });
 const repositories = createRepositoryService({
   loadGit: async () => browserGit,
@@ -4052,22 +4129,21 @@ const generateLocalForAdapter = (/** @type {any} */ opts) => {
     error: hostError,
   };
   localGens.set(genId, state);
-  // Stop must actually stop a 30B on-device generation: the engine holds a
-  // generation lease per instance, so an orphaned run would block every
-  // follow-up local turn with "is already generating" until it exhausts its
-  // token budget. The host aborts by genId; fired when the caller's signal
-  // aborts AND from the generator's finally (a consumer that abandons the
-  // stream without a signal still releases the lease). Best-effort: aborting a
-  // settled run is a no-op on the host.
+  // A local generation holds an exclusive engine lease. Stop must release it.
+  // An orphan blocks the next local turn until its token budget ends.
+  // Abort by genId on caller cancellation and generator cleanup.
+  // A consumer without a signal also releases the lease. Host abort is idempotent.
   const abortHostGeneration = () => {
+    state.done = true; wakeLocalGen(state);
     try {
       browser.runtime.sendMessage({ type: 'local-model/host/abort', genId })?.catch?.(() => { /* offscreen gone */ });
     } catch { /* messaging unavailable */ }
   };
   if (hostAvailable) {
     if (opts.signal) opts.signal.addEventListener('abort', abortHostGeneration, { once: true });
-    ensureOffscreen()
-      .then(() => browser.runtime.sendMessage({
+    if (opts.signal?.aborted) abortHostGeneration();
+    else ensureOffscreen()
+      .then(() => opts.signal?.aborted ? abortHostGeneration() : browser.runtime.sendMessage({
         type: 'local-model/host/generate', genId, model: opts.model, messages: opts.messages, system: opts.system, tools: opts.tools,
         // Token budget per ENGINE: the muse model spends its Harmony reasoning
         // channel out of the same budget as the visible answer, and a measured
@@ -4614,21 +4690,11 @@ const pushState = makeCoalescedStatePush({
   onError: (error) => console.warn('[state] push failed', error),
 });
 
-// Keepalive ports we hold references to so they're not GC'd. Recent
-// Chrome versions retain SW ports via their internal table, but holding
-// our own reference is belt-and-suspenders against version-to-version
-// drift.
+// why: Hold keepalive ports across browser-version changes.
 /** @type {Set<chrome.runtime.Port>} */
 const keepalivePorts = new Set();
 
-// Side-panel forwarder. The offscreen doc broadcasts voice/* (chunk,
-// auto-stop, error, permission-result) and the VM tabs broadcast
-// vm/stdout-chunk + vm/stderr-chunk via runtime.sendMessage; the SW
-// forwards them all to the active side-panel port so the side panel
-// only has to subscribe to one surface. (Voice chunks stream the live
-// transcript; VM chunks render per-tool-use stdout/stderr inline next
-// to the vm_boot card.) Returns false so the unified makeDispatcher
-// continues to other listeners that might care.
+// Forward host streams through the side panel's single message surface.
 const FORWARD_TYPES = new Set([
   'voice/chunk', 'voice/auto-stop', 'voice/error', 'voice/permission-result',
   'vm/stdout-chunk', 'vm/stderr-chunk',
@@ -4643,17 +4709,61 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
   return false;
 });
 
-// Tab tracker wiring. Each kind's tab broadcasts <kind>/tab-ready
-// on load; we resolve the pending readyPromise so any in-flight
-// ensureTab call returns. Closed tabs drop from the map via
-// chrome.tabs.onRemoved.
+// Resolve host readiness messages and drop closed tabs.
+/** @type {Map<number,Promise<void>>} */
+const appRetirements = new Map();
+const retireAppDweb = (/** @type {string} */ appId) =>
+  appTabTracker.retireDwebTab(appId).catch((error) => {
+    console.warn('[app] authority retirement failed', appId, error);
+    throw error;
+  });
+const trackAppRetirement = (/** @type {number} */ tabId, /** @type {()=>Promise<void>} */ operation) => {
+  const retirement = operation();
+  appRetirements.set(tabId, retirement);
+  retirement.then(() => appRetirements.get(tabId) === retirement && appRetirements.delete(tabId), () => {});
+  return retirement;
+};
+const failAppTab = async (/** @type {string} */ appId, /** @type {Error} */ error, /** @type {number} */ tabId) => {
+  const failedTabId = appTabTracker.onTabFailed(appId, error, tabId);
+  if (failedTabId != null) await trackAppRetirement(tabId, () => retireAppDweb(appId)).catch(() => {});
+  return failedTabId;
+};
+/** @param {number} tabId @param {string|undefined} url @param {string|null} trackedAppId */
+const retireAppDocument = async (tabId, url, trackedAppId) => {
+  const entry = trackedAppId ? null : await engineLiveness.findByTab('app', tabId);
+  const appId = trackedAppId ?? entry?.id;
+  if (!appId) return;
+  if (typeof url === 'string' && appTabTracker.parseIdFromUrl(url) !== appId) {
+    if (trackedAppId) appTabTracker.onTabRemoved(tabId);
+    else engineLiveness.drop('app', appId);
+  }
+  await retireAppDweb(appId);
+};
+const refuseAppTab = async (/** @type {string} */ appId, /** @type {number} */ tabId, /** @type {string} */ error) => {
+  await appTabTracker.disposeDwebTab(appId, tabId).catch(() => {});
+  setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
+  return { ok: false, error };
+};
 /** @param {any} msg @param {any} sender */
-const attachAppTabActor = async (msg, sender) => {
+const attachAppTabActorUnlocked = async (/** @type {any} */ msg, /** @type {any} */ sender, /** @type {number|null} */ attachEpoch = null) => {
+  try {
+    if (sender?.tab?.id != null) await appRetirements.get(sender.tab.id);
+    await appTabTracker.dwebGenerationsReady();
+  }
+  catch {
+    const appId = appTabTracker.parseIdFromUrl(sender?.tab?.url);
+    if (attachEpoch != null && sender?.tab?.id != null && !appTabTracker.isAttachCurrent(sender.tab.id, attachEpoch)) {
+      return { ok: false, error: 'stale-app-attach' };
+    }
+    return appId && sender?.tab?.id != null
+      ? refuseAppTab(appId, sender.tab.id, 'App authority state is unavailable.')
+      : { ok: false, error: 'App authority state is unavailable.' };
+  }
   const claim = validateAppTabClaim({
     claimedAppId: msg?.appId,
     urlAppId: appTabTracker.parseIdFromUrl(sender?.tab?.url),
     senderTabId: sender?.tab?.id,
-    liveTabId: typeof msg?.appId === 'string' ? appTabTracker.getTabId(msg.appId) : null,
+    liveTabId: null,
   });
   if (!claim.ok) return claim;
   const { appId, tabId } = claim;
@@ -4668,19 +4778,24 @@ const attachAppTabActor = async (msg, sender) => {
   });
   if (!ownerClaim.ok) return ownerClaim;
   const ownerSessionId = ownerClaim.ownerSessionId;
+  const attachCurrent = () => attachEpoch == null || appTabTracker.isAttachCurrent(tabId, attachEpoch);
 
+  if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+  if (!appTabTracker.onTabPending(appId, tabId, ownerSessionId)) {
+    return refuseAppTab(appId, tabId, 'app-already-open');
+  }
   if (msg.type === 'app/actor-retry') appTabTracker.markReloading(appId);
-  appTabTracker.onTabPending(appId, tabId, ownerSessionId);
   if (typeof browser.runtime.getBrowserInfo === 'function') {
-    appTabTracker.onTabFailed(appId, new Error('Apps are not available in Firefox yet.'));
+    await failAppTab(appId, new Error('Apps are not available in Firefox yet.'), tabId);
     setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
     return { ok: false, error: 'Apps are not available in Firefox yet. Use Chrome for isolated Apps.' };
   }
 
   await denylistNetGuard.sync();
   const net = denylistNetGuard.state();
+  if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
   if (!net.supported || net.lastError) {
-    appTabTracker.onTabFailed(appId, new Error('App network isolation is unavailable.'));
+    await failAppTab(appId, new Error('App network isolation is unavailable.'), tabId);
     setTimeout(() => browser.tabs.remove(tabId).catch(() => {}), 250);
     return {
       ok: false,
@@ -4693,13 +4808,17 @@ const attachAppTabActor = async (msg, sender) => {
     if (!actorSessionId) throw new Error('manifest-defined App actor could not be attached');
     const actor = await sessions.get(actorSessionId);
     if (!actor?.parentSessionId) throw new Error('manifest-defined App actor has no owner root');
-    appTabTracker.onTabReady(appId, tabId, ownerSessionId, actor.parentSessionId);
+    if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+    if (!appTabTracker.onTabReady(appId, tabId, ownerSessionId, actor.parentSessionId)) {
+      return refuseAppTab(appId, tabId, 'app-already-open');
+    }
     poisonedAppRuntimeTabs.delete(tabId);
     return { ok: true, actorSessionId };
   } catch (error) {
-    // The actor is required, not optional degradation. Keep the trusted shell
-    // open so it can show Retry, but drop this failed host from runnable state.
-    appTabTracker.onTabFailed(appId, error instanceof Error ? error : new Error(String(error)));
+    // why: Keep the shell for Retry, but drop its failed runnable state.
+    if (!attachCurrent()) return { ok: false, error: 'stale-app-attach' };
+    if (appTabTracker.getTabId(appId) !== tabId) return refuseAppTab(appId, tabId, 'app-already-open');
+    await failAppTab(appId, error instanceof Error ? error : new Error(String(error)), tabId);
     denylistNetGuard.sync();
     console.warn('[app] required manifest actor attach failed', error);
     return {
@@ -4710,11 +4829,16 @@ const attachAppTabActor = async (msg, sender) => {
     };
   }
 };
+/** @param {any} msg @param {any} sender */
+const attachAppTabActor = (msg, sender) => {
+  const tabId = sender?.tab?.id;
+  if (tabId == null) return attachAppTabActorUnlocked(msg, sender);
+  return appTabTracker.coordinateAttach(tabId, (epoch) => attachAppTabActorUnlocked(msg, sender, epoch));
+};
 
 browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} */ sender) => {
   if (!isTrustedSender(sender)) return false;
-  // Each tab-ready is a new tabId entering the driven set, so each one resyncs
-  // the denylist network backstop (idempotent; a no-op when nothing moved).
+  // why: Add each ready tab to the denylist network backstop.
   if (msg?.type === 'vm/tab-ready') {
     if (typeof msg.vmId !== 'string' || sender?.tab?.id == null) return false;
     vmTabTracker.onTabReady(msg.vmId, sender.tab.id);
@@ -4753,6 +4877,7 @@ browser.runtime.onMessage.addListener((/** @type {any} */ msg, /** @type {any} *
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
+  appRetirements.delete(tabId);
   poisonedAppRuntimeTabs.delete(tabId);
   // why the vmClient hop: a VM tab closing mid-command would otherwise
   // leave its pending RPCs stalling out the 90s message timeout. The
@@ -4777,19 +4902,16 @@ browser.tabs.onRemoved.addListener((tabId) => {
     }).catch((error) => console.warn('[sw] ephemeral Pod cleanup failed', closedPodId, error))
       .finally(() => podsClosing.delete(closedPodId));
   }
-  appTabTracker.onTabRemoved(tabId);
-  // DESIGN-17 note: only the VM client owns a per-instance COMMAND QUEUE to
-  // interrupt on tab-close (above). The Notebook/App clients have no such lane —
-  // their ops are request/response with a per-call timeout — so there is nothing
-  // to "generalize" for js/app at P0 beyond the tracker mapping drop already
-  // done here. An actor bound to a tabless instance simply re-spawns the tab on
-  // its next op (the clients ensureTab internally); the binding persists.
-  // Drop any DOM-nav refs for the closed tab.
+  const closedAppId = appTabTracker.onTabRemoved(tabId);
+  if (closedAppId) void retireAppDweb(closedAppId).catch(() => {});
+  else void engineLiveness.findByTab('app', tabId).then((entry) => {
+    if (!entry) return;
+    engineLiveness.drop('app', entry.id);
+    return retireAppDweb(entry.id);
+  }).catch((error) => console.warn('[app] cold tab authority retirement failed', error));
   domRefs.clear(tabId);
   browserOriginCustody.close(tabId).catch(() => {});
   browserNetworkCustody.close(tabId).catch(() => {});
-  // ...and drop it out of the network backstop's tab scope. Tab ids remain
-  // unique within one browser session, but closed tabs no longer need rules.
   denylistNetGuard.sync();
   // A downloaded preview update may have been waiting only for this engine
   // host to close. The update module re-checks every other surface and active
@@ -4797,12 +4919,17 @@ browser.tabs.onRemoved.addListener((tabId) => {
   updateCheck.onQuiet();
 });
 
-// Invalidate a tab's DOM-nav refs when it starts navigating. The backend DOM
-// node ids belong to the old document. tabs.onUpdated covers full navigations;
-// an SPA route change that slips through still fails safe when DOM.resolveNode
-// cannot find the node and the model has to take a new snapshot.
+// why: DOM node IDs and App attach authority belong to one document.
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'loading') domRefs.clear(tabId);
+  const appDocumentChanged = changeInfo.status === 'loading'
+    || changeInfo.discarded === true || typeof changeInfo.url === 'string';
+  if (appDocumentChanged) {
+    domRefs.clear(tabId);
+    appTabTracker.markAttachLoading(tabId);
+    const trackedAppId = appTabTracker.getAppIdByTab(tabId);
+    void trackAppRetirement(tabId,
+      () => retireAppDocument(tabId, changeInfo.url, trackedAppId));
+  }
   if (typeof changeInfo.url === 'string' && drivenTabIds().includes(tabId)) {
     browserOriginCustody.retain(tabId, changeInfo.url, { keepOnPersistFailure: true })
       .then((originReceipt) => {
@@ -5522,32 +5649,18 @@ const WEB_ACTOR_KEY = 'webActorRegistry';
 const persistWebActors = persistRegistry(WEB_ACTOR_KEY, webActorRegistry);
 const webActorRegistryReady = hydrateRegistry(WEB_ACTOR_KEY, webActorRegistry);
 
-// PR #119 — the code-REPL arm's SW route. A page.<method> call the code-surface
-// web actor makes inside its sealed worker rides here (offscreen job-runner →
-// 'page/call'). SECURITY, the whole point of doing this SW-side:
-//   • The OWNER is the sessionId the offscreen relay attached from the trusted
-//     job params — never anything the worker put in its own message.
-//   • That session must be a tab-backed WEB actor; anything else (a bare js_run
-//     job, an engine actor, a stale id) is refused — the page capability is not
-//     a general worker power.
-//   • The tab is resolved AUTHORITATIVELY from webActorTabBindings.tabFor(owner):
-//     the owner can't name a tab, so it can only ever act on the ONE tab it owns
-//     (fail closed if it owns none).
-// Then makePageCallHandler translates → builds a normal tab web-actor ctx (NO
-// code surface, so the mapped navigate/click/type are allowed) → dispatches
-// through the FULL gate stack (denylist / confirm / audit), so this route adds
-// zero authority over the tool-call actor.
+// The host pins the code worker's owner and tab, then applies the standard tool
+// gates. The worker cannot target a user tab or gain browser authority.
 const pageCallHandler = makePageCallHandler({
   dispatchToolCall: /** @type {any} */ (dispatchToolCall),
   buildActorContext: ({ sessionId, tabId }) => buildToolContext({
     sessionId, activeTabId: tabId,
     exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: typeof tabId === 'number' ? String(tabId) : 'web', actorBacking: 'tab',
-    // FORCE the tools surface for the INNER mapped-tool dispatch: the actor's own
-    // surface is 'code' (that's how it got here), but navigate/click/type must be
-    // ALLOWED for the page.* translation — else the setting would refuse them.
+    // The translated call needs the normal tool surface to pass its gates.
     actorSurface: 'tools',
   }),
 });
+const pageCallQueue = createKeyedQueue();
 const pageCallRoute = {
   /** @param {{ method?: string, args?: object, ownerSessionId?: string, runId?: string }} msg @param {any} sender */
   'page/call': async ({ method, ownerSessionId, args, runId } = {}, sender = undefined) => {
@@ -5560,46 +5673,39 @@ const pageCallRoute = {
     }
     const runSignal = scriptRuns.signalFor(runId);
     if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-    // The owner MUST be a live tab-backed web actor — the page surface is not a
-    // general worker capability. (findActorSession/get by id; reject otherwise.)
-    const owner = await sessions.get(ownerSessionId).catch(() => null);
-    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-    if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
-      return { ok: false, error: 'page_call_not_web_actor' };
-    }
-    // Authoritative tab: the ONE this actor owns (never a worker-supplied id).
-    // A fresh code actor owns none — and unlike the tool-call actor it has no
-    // direct `navigate` to lazily open one, so page.goto() IS its adopt path:
-    // open + bind its first tab here (the SAME adoptWebTab navigate uses), then
-    // dispatch pinned to it. Every other page.* with no tab is refused with an
-    // actionable "open a page first" message. See resolvePageTab.
-    const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
-    if (decision.action === 'refuse') return { ok: false, error: decision.error };
-    /** @type {number | undefined} */
-    let tabId;
-    if (decision.action === 'adopt') {
+    return pageCallQueue.enqueue(`page:${ownerSessionId}`, async () => {
       if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-      const adopted = await adoptWebTab(ownerSessionId, runSignal ?? undefined).catch(() => null);
+      // The owner must be a live tab-backed web actor. The worker cannot use
+      // this route as a general browser capability.
+      const owner = await sessions.get(ownerSessionId).catch(() => null);
       if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-      if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
-      tabId = adopted.tabId;
-    } else {
-      tabId = decision.tabId;
-    }
-    if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
-    const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId, signal: runSignal ?? undefined });
-    // Announce the settled op on the UI ports — pure observability, ZERO added
-    // authority (the gated dispatch already ran; consumers see method/ok only).
-    // why: a page_code call is ONE tool_use whose real page actions happen in
-    // here — invisible to the turn/tool-use stream. The eval harness's OM2W
-    // recorder (and any UI activity view) needs each op as a discrete
-    // after-action event, or a code-surface trajectory records as
-    // [navigate, answer] and a judge can't see the work.
-    uiPorts.broadcast({
-      type: 'page/op', sessionId: ownerSessionId, tabId,
-      method: canonicalCodeTraceLabel('page', method).method, ok: outcome?.ok === true,
+      if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web' || owner.backing === 'api') {
+        return { ok: false, error: 'page_call_not_web_actor' };
+      }
+      // Resolve the authoritative tab inside the actor lane. A fresh actor can
+      // adopt one tab only through goto. Other tab-bound methods fail closed.
+      const decision = resolvePageTab(webActorTabBindings.tabFor(ownerSessionId), /** @type {string} */ (method));
+      if (decision.action === 'refuse') return { ok: false, error: decision.error };
+      /** @type {number | undefined} */
+      let tabId;
+      if (decision.action === 'adopt') {
+        if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+        const adopted = await adoptWebTab(ownerSessionId, runSignal ?? undefined).catch(() => null);
+        if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+        if (typeof adopted?.tabId !== 'number') return { ok: false, error: 'page_call_tab_open_failed' };
+        tabId = adopted.tabId;
+      } else {
+        tabId = decision.tabId;
+      }
+      if (runSignal?.aborted) return { ok: false, error: 'page_call_aborted' };
+      const outcome = await pageCallHandler({ method: /** @type {string} */ (method), args, sessionId: ownerSessionId, tabId, signal: runSignal ?? undefined });
+      // Report each inner page operation because page_code is one outer tool.
+      uiPorts.broadcast({
+        type: 'page/op', sessionId: ownerSessionId, tabId,
+        method: canonicalCodeTraceLabel('page', method).method, ok: outcome?.ok === true,
+      });
+      return outcome;
     });
-    return outcome;
   },
 };
 
@@ -5717,9 +5823,12 @@ const siteFetchCallRoute = {
       originStates.hydrate(ownerSessionId, /** @type {any} */ (owner.originState));
       tabOriginLock = originLockFor(ownerSessionId);
     }
-    const authorizeTabOrigin = tabOriginLock?.authorizeSiteClientOrigin(
-      () => liveSiteClientLandingFor(ownerSessionId),
-    );
+    let tabOrigin = /** @type {string | undefined} */ (undefined);
+    const authorizeTabOrigin = tabOriginLock?.authorizeSiteClientOrigin(async () => {
+      const live = await liveSiteClientLandingFor(ownerSessionId);
+      tabOrigin = live.status === 'live' ? originOfTabUrl(live.url) : undefined;
+      return live;
+    });
     const reauthorizeSiteFetch = () => authorizeSiteClientRelayOrigin({
       backing: relayBacking,
       instanceOrigin: ownedApiOrigin,
@@ -5733,6 +5842,9 @@ const siteFetchCallRoute = {
     // Anti-exfil: a non-GET can transmit in-context data. Confirm by default via
     // the SHARED web:write key (one approval governs fetch_url + call_api + this).
     if (needsWebWriteConfirm(httpMethod)) {
+      if ((await readRequestPermission(ownerSessionId)).mode !== PERMISSION_MODES.ACT) {
+        return { ok: false, error: 'plan_mode_refused', performed: false, outcomeKnown: true };
+      }
       const ans = await confirmAction(/** @type {any} */ ({
         tool: 'web:write', kind: 'web_write', origins: [pin],
         summary: `Allow a ${httpMethod} request to ${host} from a site client? This can send data out of the browser.`,
@@ -5763,11 +5875,11 @@ const siteFetchCallRoute = {
         getSecret: (/** @type {string} */ name) => vault.getSecret(name),
         getDpopKey: getDpopKeyForOrigin,
         audit: (/** @type {any} */ e) => auditLog.append(e),
+        captureRequestAuthority: () => vault.captureRequestAuthority(),
       });
     } else {
       // A tab actor: scope to the owned tab's LIVE origin (matches the pin when the
       // actor is on that site; a mismatch is naturally sessionless at the boundary).
-      const ownedTabId = webActorTabBindings.tabFor(ownerSessionId);
       // FAIL CLOSED when there is no readable tab. This used to default to `pin`
       // — i.e. to `siteOrigin`, which the MODEL supplies — so a web actor with no
       // tab (the 0-tab fetch state, or a tab that just closed) got a CREDENTIALED
@@ -5775,11 +5887,6 @@ const siteFetchCallRoute = {
       // the precise escalation the session scope exists to prevent, arriving
       // through the scope's own default. Undefined means sessionless, which is
       // what "we do not know where this actor is" should always have meant.
-      let tabOrigin = /** @type {string | undefined} */ (undefined);
-      if (typeof ownedTabId === 'number') {
-        const t = await browser.tabs.get(ownedTabId).catch(() => null);
-        if (t?.url) tabOrigin = originOfTabUrl(/** @type {string} */ (t.url));
-      }
       // issue 251 — and narrowed by the origin lock, the SAME policy
       // buildToolContext applies to this actor's own webFetch. Without this the
       // route was a way around the lock rather than a peer of it: origin-lock.js
@@ -5789,6 +5896,7 @@ const siteFetchCallRoute = {
       scopedFetch = withSessionScopedCredentials(
         webFetch,
         tabOriginLock ? tabOriginLock.makeScope(() => tabOrigin) : () => tabOrigin,
+        { captureRequestAuthority },
       );
     }
     // Strip tool-supplied credential headers (a laundered injection forging one) —
@@ -5811,14 +5919,22 @@ const siteFetchCallRoute = {
     if (!await reauthorizeSiteFetch()) return { ok: false, error: 'site_fetch_cross_origin' };
     if (runSignal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
     try {
-      const res = await scopedFetch(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody), ...(runSignal ? { signal: runSignal } : {}) });
+      const send = bindWebRequestAuthority({
+        webFetch: scopedFetch, captureRequestAuthority,
+        readPermission: () => readRequestPermission(ownerSessionId), reauthorize: reauthorizeSiteFetch,
+      });
+      const res = await send(url, { method: httpMethod, headers: safeHeaders, body: /** @type {string|undefined} */ (reqBody), ...(runSignal ? { signal: runSignal } : {}) });
       const ct = res.headers.get('content-type') ?? '';
       const text = (await res.text()).slice(0, 200_000);   // hard cap on relayed bytes
       let json = null;
       if (/(json|graphql)/i.test(ct)) { try { json = JSON.parse(text); } catch { json = null; } }
       return { ok: true, value: { status: res.status, finalUrl: res.url ?? url, contentType: ct || null, body: text, json } };
     } catch (e) {
-      const err = /** @type {{ reason?: string, message?: string }} */ (e);
+      const err = /** @type {{ reason?: string, message?: string, performed?:boolean, outcomeKnown?:boolean }} */ (e);
+      if (err?.performed === false && err.outcomeKnown === true) return {
+        ok: false, error: err.message ?? 'site_fetch_refused', performed: false,
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      };
       if (err?.reason === 'redirect_blocked') return { ok: false, error: `redirected: ${url} issued a redirect (not followed). Use the final URL.` };
       if (err?.reason === 'private_network') return { ok: false, error: `blocked: ${url} is a private/loopback host (SSRF defense).` };
       return { ok: false, error: err?.message ?? 'site_fetch_failed' };
@@ -5964,7 +6080,7 @@ const actorMailbox = {
 };
 
 onSessionMessageAppended = async (_sessionId, message) => {
-  const deliveryIds = actorDeliveryIdsFromMessage(message);
+  const deliveryIds = actorDeliveryIdsFromMessage(message).filter((id) => !asyncActorsOrchestrator.acknowledgeDelivery(id));
   await Promise.all(deliveryIds.map((id) => actorMailbox.remove(id)));
 };
 
@@ -6299,12 +6415,14 @@ const dwebAgentOn = () => DWEB_ENABLED
 // — so without this guard repeated unlocks leak refs + presence beacons. The
 // flag resets when the base host tears down (a fresh SW re-joins cleanly).
 let dwebAgentRoomJoined = false;
+const DWEB_AGENT_ROOM_OWNER = 'agent:dweb';
 const joinDwebAgentInbox = async () => {
   if (!dwebAgentOn() || dwebAgentRoomJoined) return;
   const r = /** @type {any} */ (await withDwebPublication(async (isCurrent) => {
     if (!isCurrent() || !dwebAgentOn() || dwebAgentRoomJoined) return null;
     return browser.runtime.sendMessage({
-      type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'join', name: 'peerd agent',
+      type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, roomOwnerId: DWEB_AGENT_ROOM_OWNER,
+      op: 'join', name: 'peerd agent',
     });
   }).catch(() => null));
   if (r?.ok) { dwebAgentRoomJoined = true; console.log('[sw] dweb agent inbox joined'); }
@@ -6312,7 +6430,9 @@ const joinDwebAgentInbox = async () => {
 const leaveDwebAgentInbox = async () => {
   if (!dwebAgentRoomJoined) return;
   dwebAgentRoomJoined = false;
-  await browser.runtime.sendMessage({ type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, op: 'leave' }).catch(() => {});
+  await browser.runtime.sendMessage({
+    type: 'dweb/base-host/room', roomId: DWEB_AGENT_ROOM, roomOwnerId: DWEB_AGENT_ROOM_OWNER, op: 'leave',
+  }).catch(() => {});
   console.log('[sw] dweb agent inbox left');
 };
 // The base host tore down (master OFF) → every room closed, incl. the inbox, so
@@ -6796,15 +6916,21 @@ const resolveApiActor = async (/** @type {string} */ origin, /** @type {string |
   return { instanceId: origin, kind: 'web', actorSessionId };
 };
 
-// The render-decision hook: a web actor in the 0-tab state OPENS its tab here (called
-// from navigate via ctx.adoptWebTab when the actor owns no tab). Opens BLANK in the
-// BACKGROUND (never yanks the user's focus — the actor-stays-in-background policy);
-// navigate then drives it to the URL with its normal wait. Binds tab→actor in
-// webActorTabBindings (so the next turn pins it, and `to:'<tabId>'` reaches the SAME
-// actor), and tracks it as an agent-tab card. Returns the new tab so navigate can
-// re-pin ctx.activeTab for the rest of THIS turn.
-const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {AbortSignal | undefined} */ signal = undefined) => {
+// A tabless web actor adopts one background tab when navigation needs a render.
+// The binding pins later work and never selects the user's foreground tab.
+const webTabAdoptionQueue = createKeyedQueue();
+const adoptWebTab = (/** @type {string} */ actorSessionId, /** @type {AbortSignal | undefined} */ signal = undefined) => webTabAdoptionQueue.enqueue(`web-tab:${actorSessionId}`, async () => {
   if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+  const bindingsReady = await webActorBindingsReady;
+  if (!bindingsReady.ok) throw new Error('error' in bindingsReady ? bindingsReady.error : 'web_bindings_hydration_failed');
+  if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+  const existingTabId = webActorTabBindings.tabFor(actorSessionId);
+  if (typeof existingTabId === 'number') {
+    const existing = await browser.tabs.get(existingTabId).catch(() => null);
+    if (signal?.aborted) throw new Error('adopt_web_tab: aborted');
+    if (existing) return { tabId: existingTabId, windowId: existing.windowId };
+    if (webActorTabBindings.drop(existingTabId)) persistWebBindings();
+  }
   // `chrome.tabs.create({ active:false })` opens chrome://newtab/, which is a
   // browser-owned page and must stay outside automation authority. Create the
   // documented neutral document explicitly so navigate can move only this
@@ -6830,7 +6956,7 @@ const adoptWebTab = async (/** @type {string} */ actorSessionId, /** @type {Abor
   }
   noteAgentTab(tabId, { kind: 'web', opened: true }).catch(() => {});
   return { tabId, windowId: created?.windowId };
-};
+});
 
 // Prune a web actor's binding when its tab closes — for a per-tab actor it then
 // becomes unreachable, and for the chat-scoped web actor this RELEASES its owned tab
@@ -8175,7 +8301,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
     listOffscreenContexts, scriptRuns, isOffscreenSender, awaitDenylistPolicy, assertOpfsWritable,
-    repositories, parseAppManifest, podGitRemoteOperation,
+    repositories, parseAppManifest, podGitRemoteOperation, appReleaseDescriptorMatches,
     getCurrentSessionId,
     onAppDeleted,
   }),
@@ -8191,6 +8317,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // passing one here would double-record every removal (meta test: the deps
   // object must match what the module destructures).
   ...makeLearnedOriginRoutes({ learnedOrigins, normalizeApiOrigin }),
+  ...makePacedOriginRoutes({ originPacing, normalizeApiOrigin }),
   // issue 251 — a READ-ONLY inspection route for the e2e verify loop.
   //
   // why a route at all: the two properties that matter most about the lock are
@@ -8203,6 +8330,19 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   // the chat's web actor currently owns a tab. It grants nothing, and it is not
   // reachable by the model — routes are the side panel's surface, and the tool
   // dispatcher has no path to them.
+  // Dev-mode test seam for the pacing surfaces (#234). It can only feed the
+  // SAME trusted observation the egress choke point feeds - an HTTP status and a
+  // Retry-After value - so the seeded rule is one an ordinary refusal would also
+  // produce. It can never lower or clear a rule, and the model has no route here.
+  'debug/pacing': async (/** @type {{ origin?: string, status?: number, retryAfter?: string }} */ msg = {}) => {
+    const origin = normalizeApiOrigin(msg.origin);
+    if (settingsStore.get().devMode === true && origin && typeof msg.status === 'number') {
+      await originPacing.observe({
+        origin, responseAtMs: Date.now(), status: msg.status, retryAfter: msg.retryAfter,
+      });
+    }
+    return { ok: true, origins: await originPacing.list() };
+  },
   'debug/originLock': async (/** @type {{ origin?: string, seedReason?: 'password-field'|'confirmed-write' }} */ msg = {}) => {
     const origin = normalizeApiOrigin(msg.origin);
     // Dev-mode test seam for deterministic browser probes. It can only add the
@@ -8233,12 +8373,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
   ...settingsMessageRoutes,
   ...makeSessionMutationRoutes({
     vault, auditLog, pushState, sessions, sessionCache, sessionState, autoMemory,
+    beginSessionAuthorityChange,
     resolvePermission, normalizeMode, normalizeConfirmActions, SessionNotFoundError,
     maybeAutoResumeAfterRecovery, haltGoalRun,
     // session/reset (New chat) must stop the abandoned session's live turn AND
     // cascade to its in-flight actors — same primitives agent/stop uses — so
     // background web/VM/App work doesn't keep running on the orphaned session.
-    turnSlots, actorMessaging,
+    turnSlots, actorMessaging, actorLifecycle,
     // Session teardown drops the durable script workspace subtree.
     nukeSessionWorkspace,
     // …and the session's lifecycle state (§2.5 cancellation dominance).
@@ -8257,7 +8398,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (makeDispatcher({
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady,
-    repositories, isOffscreenSender, createDwebRollbackGuard,
+    repositories, isOffscreenSender, createDwebRollbackGuard, appReleaseDescriptorMatches,
     getCurrentSessionId,
   }),
 

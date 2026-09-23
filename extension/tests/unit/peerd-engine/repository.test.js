@@ -38,25 +38,54 @@ describe('peerd-engine repository: real OPFS + vendored Git', () => {
     const repositories = createRepositoryService();
     try {
       await files.write('index.html', '<h1>one</h1>\n');
-      await files.write('.gitignore', '.env\n');
+      await files.write('.gitignore', '.env\nignored/\n');
+      await files.write('ignored/signed.js', 'export const signed = true;\n');
       await files.write('__proto__', 'prototype-shaped file\n');
       await files.write('constructor', 'constructor-shaped file\n');
       await files.write('toString', 'string-shaped file\n');
-      const firstOid = await repositories.init(ref, { message: 'initial app' });
+      const firstOid = await repositories.initApp(id, { message: 'initial app', includeIgnored: true });
       expect(typeof firstOid).toBe('string');
       expect((await repositories.status(ref)).dirty).toBe(false);
+      expect(await repositories.matches(ref, { at: firstOid })).toBe(true);
       const initialSnapshot = await repositories.snapshot(ref, { at: firstOid });
       expect(Object.hasOwn(initialSnapshot, '__proto__')).toBe(true);
       expect(Object.hasOwn(initialSnapshot, 'constructor')).toBe(true);
       expect(Object.hasOwn(initialSnapshot, 'toString')).toBe(true);
+      expect(Object.hasOwn(initialSnapshot, 'ignored/signed.js')).toBe(true);
 
       await files.write('index.html', '<h1>two</h1>\n');
       await files.write('src/main.js', 'export const n = 2;\n');
+      await files.write('ignored/local-only.txt', 'local\n');
+      expect(await repositories.matches(ref, { at: firstOid })).toBe(false);
       const liveDiff = await repositories.diff(ref);
       expect(liveDiff.files.map((/** @type {{path:string}} */ f) => f.path)).toEqual(['index.html', 'src/main.js']);
       const second = await repositories.commit(ref, { message: 'second app' });
       expect(second.created).toBe(true);
+      const secondSnapshot = await repositories.snapshot(ref, { at: second.oid });
+      expect(Object.hasOwn(secondSnapshot, 'ignored/signed.js')).toBe(true);
+      expect(Object.hasOwn(secondSnapshot, 'ignored/local-only.txt')).toBe(false);
+      await files.remove('ignored/local-only.txt');
+      expect(await repositories.matches(ref, { at: second.oid })).toBe(true);
       expect((await repositories.history(ref, { depth: 5 })).length).toBe(2);
+
+      await files.write('data/state.json', '{}\n');
+      expect(await repositories.matches(ref, { at: second.oid, excludeAppData: true })).toBe(true);
+      await files.remove('data/state.json');
+      await files.write('.env', 'TOKEN=local-only\n');
+      expect(await repositories.matches(ref, { at: second.oid })).toBe(false);
+      const preReleaseFiles = await repositories.snapshot(ref, { at: second.oid });
+      preReleaseFiles['.env'] = new TextEncoder().encode('TOKEN=local-only\n');
+
+      const replaced = await repositories.replaceWorkingTree(ref, {
+        files: { 'index.html': '<h1>release</h1>\n', '.gitignore': '.env\nignored/\n', 'ignored/release.js': 'export const release = true;\n', '.env': 'TOKEN=publisher\n' },
+        message: 'verified release', includeIgnored: true,
+      });
+      expect(Object.hasOwn(await repositories.snapshot(ref, { at: replaced.oid }), 'ignored/release.js')).toBe(true);
+      await repositories.rollbackWorkingTree(ref, { to: second.oid, files: preReleaseFiles });
+      expect((await repositories.status(ref)).oid).toBe(second.oid);
+      expect((await repositories.commit(ref, { message: 'must stay clean' })).created).toBe(false);
+      expect(Object.hasOwn(await repositories.snapshot(ref, { at: second.oid }), '.env')).toBe(false);
+      expect(await files.read('.env')).toBe('TOKEN=local-only\n');
 
       // A restore is allowed to be destructive only after the exact live tree
       // (including ignored local bytes) is preserved on a private safety ref.

@@ -180,15 +180,18 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // App-native semantic APIs are document-side adapters over the existing
     // authority verbs; they must not grow this graph. Privileged Git import is
     // one small repository bootstrap verb, not a worker-side UI controller.
-    //
-    // Reviewed for the #384 readiness-aware provider projection: the MODULE
-    // COUNT is unchanged, so no dependency was added - provider-readiness.js
-    // was already on the graph and absorbed the policy, which is why the entry
-    // grew by far less than the two byte budgets moved. Source-size growth in
-    // modules already present is what these two numbers track.
-    expect(graph.size).toBeLessThanOrEqual(458);
-    expect(bytes).toBeLessThanOrEqual(4_712_000);
-    expect(statSync(entry).size).toBeLessThanOrEqual(462_000);
+    // 458 -> 464: per-origin action pacing adds a pure policy core, its fixed
+    // refusal prose, the control-plane store, and the settings routes. All four
+    // are worker-side by construction - the dispatcher and the egress choke
+    // point are the only enforcement points, and a pacing decision may never be
+    // answerable from an actor heap. Two finite host-only leaves add the
+    // final-send binder and synchronous permission-revocation epoch.
+    expect(graph.size).toBeLessThanOrEqual(464);
+    // Exact measured combined source and entry, including reviewed browser
+    // simplifications, consent retirement, and Stop-before-storage ordering,
+    // with no reserved headroom or additional imports.
+    expect(bytes).toBeLessThanOrEqual(4_782_136);
+    expect(statSync(entry).size).toBeLessThanOrEqual(467_378);
   });
 
   test('the offscreen host uses its exact runtime and engine surfaces', async () => {

@@ -76,7 +76,7 @@ const PAGE_METHODS = {
       }
       return { url };
     },
-    shape: (c) => ({ ok: true, url: c?.url ?? null, ...(c?.origin ? { origin: c.origin } : {}) }),
+    shape: (c) => ({ ok: true, url: c?.finalUrl ?? null, ...(c?.origin ? { origin: c.origin } : {}) }),
   },
 
   // page.click(selector, { nth }) — Playwright locator STRICTNESS: the selector
@@ -94,7 +94,7 @@ const PAGE_METHODS = {
     },
     shape: (c) => ({
       ok: true,
-      clicked: c?.clicked === true,
+      clicked: true,
       ...(typeof c?.matchedCount === 'number' ? { matchedCount: c.matchedCount } : {}),
       ...(c?.navigated ? { navigated: true } : {}),
       ...(c?.browserPolicy ? { browserPolicy: c.browserPolicy } : {}),

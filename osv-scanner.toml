@@ -44,21 +44,6 @@ id = "GHSA-rgw5-rvv9-x895"
 ignoreUntil = 2026-11-01
 reason = "brace-expansion, transitive glob dependency of the web-ext toolchain. Build-time only; never shipped."
 
-[[IgnoredVulns]]
-id = "GHSA-4c8g-83qw-93j6"
-ignoreUntil = 2026-11-01
-reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
-
-[[IgnoredVulns]]
-id = "GHSA-7p8r-x3mc-p8w7"
-ignoreUntil = 2026-11-01
-reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
-
-[[IgnoredVulns]]
-id = "GHSA-v2hh-gcrm-f6hx"
-ignoreUntil = 2026-11-01
-reason = "fast-uri, via addons-linter's JSON-schema validation. Build-time only; never shipped."
-
 # undici — web-ext's HTTP client for the AMO upload/poll. The closest thing
 # here to a path that matters (it talks to a network service during signing),
 # but it talks only to addons.mozilla.org over TLS, in a release job that is
