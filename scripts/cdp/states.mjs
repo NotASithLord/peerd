@@ -2791,7 +2791,11 @@ export const STATES = [
             ? { ok: true, providers }
             : message.type === 'provider/test' && message.provider === 'ollama'
               ? { ok: true, reachable: true, models: 2 }
-              : { ok: true };
+              : message.type === 'local-model/catalog'
+                // A resident on-device model: the runner shipped, so the front
+                // door must be able to show it as selectable.
+                ? { ok: true, models: [{ id: 'muse-glimmer-30b', available: true }] }
+                : { ok: true };
           m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card', [
             m(ProviderStep, { send, onDone: () => {} }),
             m('.onb-dots', { 'aria-label': 'Step 1 of 4' }, [0, 1, 2, 3].map((i) =>
@@ -2821,6 +2825,69 @@ export const STATES = [
       } finally {
         await evalIn(ctx.page, `(async () => {
           const host = document.querySelector('#e2e-onboarding-provider');
+          if (!host) return;
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          m.mount(host, null);
+          host.remove();
+        })()`, true);
+      }
+    },
+  },
+
+  // --- visual: the runner row when the weights are NOT here yet --------------
+  // The common first run: the engine is supported, nothing is downloaded. The
+  // row has to separate that from "this browser cannot run it at all", which
+  // is why it is a state and not just a unit assertion on the phase helper.
+  {
+    name: 'onboarding-provider-local-empty', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ProviderStep } = await import('/sidepanel/components/onboarding-provider-step.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-onboarding-local-empty';
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const providers = [
+            { name: 'ollama', label: 'Ollama', keyless: true, liveModels: true },
+            { name: 'local-webgpu', label: 'Local WebGPU', keyless: true, liveModels: false },
+          ];
+          const send = async (message) => message.type === 'provider/status'
+            ? { ok: true, providers }
+            : message.type === 'provider/test'
+              ? { ok: false, error: 'unreachable' }
+              : message.type === 'local-model/catalog'
+                ? { ok: true, models: [{ id: 'muse-glimmer-30b', available: false, downloaded: false }] }
+                : { ok: true };
+          m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card',
+            m(ProviderStep, { send, onDone: () => {} }))) });
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const rows = [...document.querySelectorAll('#e2e-onboarding-local-empty .onb-provider-row')];
+          if (rows.length === 0) return null;
+          const runner = rows.find((r) => r.textContent.includes('On-device runner'));
+          if (!runner || runner.querySelector('.onb-provider-chip')?.textContent === 'CHECKING\u2026') return null;
+          return {
+            rows: rows.length,
+            runnerChip: runner.querySelector('.onb-provider-chip')?.textContent,
+            runnerDisabled: runner.disabled,
+            daemonChip: rows.find((r) => r.textContent.includes('Ollama'))
+              ?.querySelector('.onb-provider-chip')?.textContent,
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('an undownloaded runner says so, and stays unselectable',
+          rendered?.rows === 2
+            && rendered?.runnerChip === 'NOT DOWNLOADED'
+            && rendered?.runnerDisabled === true
+            // The unreachable daemon must NOT borrow the runner's wording.
+            && rendered?.daemonChip === 'NO KEY NEEDED',
+          JSON.stringify(rendered));
+        await rec.visual('onboarding-provider-local-empty');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.querySelector('#e2e-onboarding-local-empty');
           if (!host) return;
           const m = (await import('/vendor/mithril/mithril.js')).default;
           m.mount(host, null);

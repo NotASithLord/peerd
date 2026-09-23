@@ -133,16 +133,15 @@ export const ProvidersSection = {
     } catch { /* a later revision/focus retries */ }
   },
 
-  // Quietly ping a keyless daemon (provider/test) and record reachability for
-  // the badge. The explicit Test button reuses provider/test too, but also
-  // surfaces the full message; this path only moves the badge.
+  // Quietly ping a keyless daemon without activating it. The explicit Test
+  // action can activate it and also surfaces the full message.
   /** @param {{ state: any, attrs: { send: Send } }} vnode @param {string} name */
   probeConnection(vnode, name) {
     const generation = (vnode.state.probeGeneration[name] ?? 0) + 1;
     vnode.state.probeGeneration[name] = generation;
     vnode.state.connStatus[name] = 'checking';
     m.redraw();
-    vnode.attrs.send({ type: 'provider/test', provider: name }).then((/** @type {any} */ r) => {
+    vnode.attrs.send({ type: 'provider/test', provider: name, activate: false }).then((/** @type {any} */ r) => {
       if (vnode.state.probeGeneration[name] !== generation) return;
       vnode.state.connStatus[name] = r?.ok ? 'connected'
         : r?.reachable && r?.error === 'no-models' ? 'no-models'
