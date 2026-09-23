@@ -1481,7 +1481,7 @@ export const STATES = [
         if (body.includes('tools: page_code')) {
           harvestActorUsedCode = true;
           if (t === 0) return { sse: sseToolCall('page_code', {
-            code: `await page.goto(${JSON.stringify(harvestFixtureUrl)}); return await page.content();`,
+            code: `await Promise.all([page.goto(${JSON.stringify(`${harvestFixtureUrl}first`)}), page.goto(${JSON.stringify(harvestFixtureUrl)})]); return await page.content();`,
           }) };
           return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
         }
@@ -1512,7 +1512,17 @@ export const STATES = [
       // The web actor opens and reads the locally served fixture through the
       // real actor-model path. The harness maps the reserved .test host to this
       // server, so product localhost blocking remains active.
-      const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
+      let firstResponseAt = 0;
+      let rootRequestAt = 0;
+      const server = createServer((req, res) => {
+        const respond = () => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); };
+        if (req.url === '/first') {
+          setTimeout(() => { firstResponseAt = Date.now(); respond(); }, 150);
+          return;
+        }
+        if (req.url === '/') rootRequestAt = Date.now();
+        respond();
+      });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const fxPort = /** @type {{ port: number }} */ (server.address()).port;
       harvestFixtureUrl = `http://orders.peerd.test:${fxPort}/`;
@@ -1542,6 +1552,10 @@ export const STATES = [
         rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
         rec.check('the web-actor sub-loop ran (page code + report, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
         rec.check('the preview web actor used the code-first page surface', harvestActorUsedCode === true);
+        const actorTabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => tab.url?.startsWith(${JSON.stringify(harvestFixtureUrl)})).map(({ id, url }) => ({ id, url })))`, true);
+        rec.check('concurrent first page calls share one actor tab in FIFO order',
+          actorTabs.length === 1 && actorTabs[0]?.url === harvestFixtureUrl && firstResponseAt > 0 && rootRequestAt >= firstResponseAt,
+          JSON.stringify({ actorTabs, firstResponseAt, rootRequestAt }));
         // load-bearing proof: the web actor REALLY read the live page — the page's
         // own order text rode back into the actor's model request via read_page.
         rec.check('the web actor REALLY read the live page (real order data in its read result)',
@@ -2791,7 +2805,11 @@ export const STATES = [
             ? { ok: true, providers }
             : message.type === 'provider/test' && message.provider === 'ollama'
               ? { ok: true, reachable: true, models: 2 }
-              : { ok: true };
+              : message.type === 'local-model/catalog'
+                // A resident on-device model: the runner shipped, so the front
+                // door must be able to show it as selectable.
+                ? { ok: true, models: [{ id: 'muse-glimmer-30b', available: true }] }
+                : { ok: true };
           m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card', [
             m(ProviderStep, { send, onDone: () => {} }),
             m('.onb-dots', { 'aria-label': 'Step 1 of 4' }, [0, 1, 2, 3].map((i) =>
@@ -2821,6 +2839,69 @@ export const STATES = [
       } finally {
         await evalIn(ctx.page, `(async () => {
           const host = document.querySelector('#e2e-onboarding-provider');
+          if (!host) return;
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          m.mount(host, null);
+          host.remove();
+        })()`, true);
+      }
+    },
+  },
+
+  // --- visual: the runner row when the weights are NOT here yet --------------
+  // The common first run: the engine is supported, nothing is downloaded. The
+  // row has to separate that from "this browser cannot run it at all", which
+  // is why it is a state and not just a unit assertion on the phase helper.
+  {
+    name: 'onboarding-provider-local-empty', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { ProviderStep } = await import('/sidepanel/components/onboarding-provider-step.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-onboarding-local-empty';
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          const providers = [
+            { name: 'ollama', label: 'Ollama', keyless: true, liveModels: true },
+            { name: 'local-webgpu', label: 'Local WebGPU', keyless: true, liveModels: false },
+          ];
+          const send = async (message) => message.type === 'provider/status'
+            ? { ok: true, providers }
+            : message.type === 'provider/test'
+              ? { ok: false, error: 'unreachable' }
+              : message.type === 'local-model/catalog'
+                ? { ok: true, models: [{ id: 'muse-glimmer-30b', available: false, downloaded: false }] }
+                : { ok: true };
+          m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card',
+            m(ProviderStep, { send, onDone: () => {} }))) });
+        })()`, true);
+        const rendered = await waitFor(() => evalIn(ctx.page, `(() => {
+          const rows = [...document.querySelectorAll('#e2e-onboarding-local-empty .onb-provider-row')];
+          if (rows.length === 0) return null;
+          const runner = rows.find((r) => r.textContent.includes('On-device runner'));
+          if (!runner || runner.querySelector('.onb-provider-chip')?.textContent === 'CHECKING\u2026') return null;
+          return {
+            rows: rows.length,
+            runnerChip: runner.querySelector('.onb-provider-chip')?.textContent,
+            runnerDisabled: runner.disabled,
+            daemonChip: rows.find((r) => r.textContent.includes('Ollama'))
+              ?.querySelector('.onb-provider-chip')?.textContent,
+          };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('an undownloaded runner says so, and stays unselectable',
+          rendered?.rows === 2
+            && rendered?.runnerChip === 'NOT DOWNLOADED'
+            && rendered?.runnerDisabled === true
+            // The unreachable daemon must NOT borrow the runner's wording.
+            && rendered?.daemonChip === 'NO KEY NEEDED',
+          JSON.stringify(rendered));
+        await rec.visual('onboarding-provider-local-empty');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.querySelector('#e2e-onboarding-local-empty');
           if (!host) return;
           const m = (await import('/vendor/mithril/mithril.js')).default;
           m.mount(host, null);
