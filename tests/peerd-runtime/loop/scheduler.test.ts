@@ -55,6 +55,33 @@ function makeHarness(opts: {
 }
 
 describe('makeScheduler - registration', () => {
+  it('a cold list waits for the durable routines before returning', async () => {
+    const original = makeHarness();
+    await original.scheduler.add({ prompt: 'existing routine', every: '1h' });
+    const entered = Promise.withResolvers<void>();
+    const releaseRead = Promise.withResolvers<void>();
+    const scheduler = makeScheduler({
+      fireRoutine: async () => {},
+      kv: {
+        get: async () => {
+          entered.resolve();
+          await releaseRead.promise;
+          return original.stored();
+        },
+        set: async () => {},
+      },
+    });
+    let returned = false;
+    const listing = scheduler.listReady().then((routines) => {
+      returned = true;
+      return routines;
+    });
+    await entered.promise;
+    expect(returned).toBe(false);
+    releaseRead.resolve();
+    expect(await listing).toMatchObject([{ prompt: 'existing routine' }]);
+  });
+
   it('adds a routine, computes its next run, persists it, and arms the alarm', async () => {
     const h = makeHarness();
     const res = await h.scheduler.add({ prompt: 'do a thing', every: '1h' });

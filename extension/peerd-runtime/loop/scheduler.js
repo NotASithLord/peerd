@@ -92,17 +92,21 @@ export const makeScheduler = ({
 
   /** @returns {Routine[]} */
   const list = () => snapshot().map((r) => ({ ...r }));
+  // why: a turn can reach its authority before cold recovery has hydrated.
+  const listReady = async () => { await load(); return list(); };
 
   /**
    * Register a routine after loading the stored records.
-   * @param {{ prompt: string, every?: string, dailyAt?: string, mode?: string }} req
+   * @param {{ prompt: string, every?: string, dailyAt?: string, mode?: string, signal?: AbortSignal }} req
    * @returns {Promise<{ ok: true, routine: Routine } | { ok: false, error: string }>}
    */
-  const add = async ({ prompt, every, dailyAt, mode } = /** @type {any} */ ({})) => {
+  const add = async ({ prompt, every, dailyAt, mode, signal } = /** @type {any} */ ({})) => {
     if (typeof prompt !== 'string' || !prompt.trim()) return { ok: false, error: 'prompt-required' };
     const schedule = parseSchedule({ every, dailyAt });
     if (!schedule) return { ok: false, error: 'invalid-schedule' };
     await load();
+    // why: Stop can arrive during the storage read, before any mutation.
+    if (signal?.aborted) return { ok: false, error: 'schedule-aborted' };
     if (routines.size >= MAX_ROUTINES) return { ok: false, error: 'too-many-routines' };
     const at = now();
     /** @type {Routine} */
@@ -319,7 +323,7 @@ export const makeScheduler = ({
   };
 
   return Object.freeze({
-    add, remove, setEnabled, list, tick, load,
+    add, remove, setEnabled, list, listReady, tick, load,
     describe: describeSchedule,
   });
 };

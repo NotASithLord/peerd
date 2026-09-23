@@ -1,7 +1,41 @@
 import { describe, expect, test } from 'bun:test';
 import { createScheduleToolAuthority } from '../../../extension/background/schedule-tool-authority.js';
+import { makeScheduler } from '../../../extension/peerd-runtime/loop/scheduler.js';
 
 describe('schedule_create cancellation', () => {
+  test('Stop during cold hydration cannot arm a confirmed routine', async () => {
+    const controller = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    const releaseRead = Promise.withResolvers<void>();
+    const writes: unknown[] = [];
+    const scheduler = makeScheduler({
+      fireRoutine: async () => {},
+      kv: {
+        get: async () => { entered.resolve(); await releaseRead.promise; return {}; },
+        set: async (_key, value) => { writes.push(value); },
+      },
+    });
+    const args = { prompt: 'check releases', every: '1h' };
+    const authority = createScheduleToolAuthority({
+      operation: 'turn.schedule.arm-confirmed-routine', args,
+      signal: controller.signal,
+      ctx: {
+        permission: { mode: 'act' },
+        confirm: async () => true,
+        scheduleAdd: (request: any) => scheduler.add(request),
+      },
+    });
+    const pending = authority.armConfirmedRoutine({
+      ...args, dailyAt: undefined, mode: undefined,
+    });
+    await entered.promise;
+    controller.abort();
+    releaseRead.resolve();
+    expect(await pending).toMatchObject({ ok: false, error: 'schedule-aborted' });
+    expect(scheduler.list()).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
   test('Stop during forced confirmation cannot arm a routine after a late yes', async () => {
     const controller = new AbortController();
     let seenSignal: AbortSignal | undefined;

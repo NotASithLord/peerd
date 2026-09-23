@@ -114,7 +114,9 @@ export const createScheduleToolAuthority = ({ operation, args = {}, ctx, signal 
         content: 'The routine was not armed because the run was stopped.',
         retryable: false,
       };
-      return ctx.scheduleAdd(request);
+      // why: hydration is asynchronous too. The trusted run signal must reach
+      // the scheduler's last pre-mutation check, not just this confirmation.
+      return ctx.scheduleAdd({ ...request, signal: signal ?? ctx.abortSignal });
     },
     cancelRoutine: (/** @type {string} */ id) => {
       requireOperation('turn.schedule.cancel-routine');

@@ -849,7 +849,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         ? (/** @type {string} */ summary) => goalRunner?.complete(sessionId, summary) ?? false : undefined,
       scheduleAdd: (/** @type {any} */ request) => live.scheduler?.add(request)
         ?? { ok: false, error: 'schedule_unavailable' },
-      scheduleList: () => live.scheduler?.list() ?? [],
+      scheduleList: () => live.scheduler?.listReady() ?? [],
       scheduleRemove: (/** @type {string} */ id) => live.scheduler?.remove(id) ?? false,
       todoStore: sessionId && goalRunner?.isActive(sessionId) ? {
         apply: (/** @type {(todos: any) => any} */ fn) => {

@@ -58,6 +58,18 @@ describe('parseLocalStream', () => {
 });
 
 describe('callLocalWebgpu', () => {
+  test('Stop ends local generation without reporting successful usage', async () => {
+    const controller = new AbortController();
+    const modelEgress = makeModelEgress({ generateLocal: () => (async function* () {
+      controller.abort();
+    })() });
+    const out = await collect(callLocalWebgpu({
+      messages: [], system: 'sys', modelEgress, signal: controller.signal,
+    }));
+    expect(out.at(-1)).toEqual({ type: 'message-stop', stopReason: 'aborted' });
+    expect(out.some((event) => event.type === 'usage')).toBe(false);
+  });
+
   test('authority failure → a single error event (no throw)', async () => {
     const modelEgress = makeModelEgress({ generateLocal: () => (async function* () { throw new Error('model not loaded'); })() });
     const out = await collect(callLocalWebgpu({ messages: [], system: '', modelEgress } as any));
