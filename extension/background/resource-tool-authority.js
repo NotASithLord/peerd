@@ -13,6 +13,7 @@ import { normalizeApiOrigin } from '/shared/api-origin.js';
 import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
 import { readBoundedResponseText } from '/shared/abort.js';
 import { pacingAuthorityRefusal } from './page-pacing-authority.js';
+import { withWebRequestAuthority } from '/peerd-egress/background.js';
 
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_WEB_TEXT_CHARS = 2_000_000;
@@ -172,7 +173,18 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
         }
         let response;
         try {
-          response = await ctx.webFetch(request.url, {
+          const send = needsWebWriteConfirm(request.method)
+            ? withWebRequestAuthority(ctx.webFetch, async () => {
+                const permission = typeof ctx.readAuthorityPermission === 'function'
+                  ? await ctx.readAuthorityPermission().catch(() => null) : ctx.permission;
+                if (permission?.mode !== 'act') throw Object.assign(
+                  new Error('permission changed before web request'), {
+                    code: 'plan_mode_refused', performed: false, outcomeKnown: true,
+                    outcomeKind: 'pre-effect-failure', retryable: false,
+                  },
+                );
+              }) : ctx.webFetch;
+          response = await send(request.url, {
             method: request.method, headers, body: request.body,
             signal: controller.signal,
           });

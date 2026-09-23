@@ -109,6 +109,7 @@ import {
   getOrCreateDpopKey,
   VaultLockedError,
   withSessionScopedCredentials,
+  withWebRequestAuthority,
 } from '/peerd-egress/background.js';
 import {
   projectSemanticHookManifest,
@@ -3257,12 +3258,19 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         const ownedApiOrigin = owner.backing === 'api'
           ? normalizeApiOrigin(owner.instanceId) : null;
         let originLock = null;
+        /** @type {string|undefined} */ let tabOrigin;
         if (backing === 'tab' && hasDurableSiteClientState(owner.originState)) {
           originStates.hydrate(ownerSessionId, owner.originState);
           originLock = live.originLockFor(ownerSessionId);
         }
         const authorizeTabOrigin = originLock?.authorizeSiteClientOrigin(
-          () => live.liveLandingFor(ownerSessionId),
+          async () => {
+            const landing = await live.liveLandingFor(ownerSessionId);
+            // The authorizer's last verified landing is also the cookie scope.
+            // Never retain the pre-pacing tab snapshot through an awaited check.
+            tabOrigin = landing.status === 'live' ? originOf(landing.url) : undefined;
+            return landing;
+          },
         );
         const reauthorize = () => authorizeSiteClientRelayOrigin({
           backing, instanceOrigin: ownedApiOrigin, durableState: owner.originState,
@@ -3328,13 +3336,6 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
             getDpopKey, audit: deps.auditLog.append,
           });
         } else {
-          const ownedTabId = webActorTabBindings.tabFor(ownerSessionId);
-          /** @type {string|undefined} */
-          let tabOrigin;
-          if (typeof ownedTabId === 'number') {
-            const tab = await deps.browser.tabs.get(ownedTabId).catch(() => null);
-            if (tab?.url) tabOrigin = originOf(tab.url);
-          }
           scopedFetch = withSessionScopedCredentials(
             webFetch,
             originLock ? originLock.makeScope(() => tabOrigin) : () => tabOrigin,
@@ -3347,7 +3348,18 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
         }
         try {
-          const response = await scopedFetch(target.url, {
+          const send = withWebRequestAuthority(scopedFetch, async () => {
+            if (mutatesExternal
+                && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+              throw Object.assign(new Error('plan_mode_refused'), {
+                performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+              });
+            }
+            if (!await reauthorize()) throw Object.assign(new Error('site_fetch_cross_origin'), {
+              performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+            });
+          });
+          const response = await send(target.url, {
             method: httpMethod, headers: safeHeaders,
             body: /** @type {string|undefined} */ (requestBody),
             ...(signal ? { signal } : {}),
@@ -3365,7 +3377,13 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
             contentType: contentType || null, body: text, json,
           } };
         } catch (cause) {
-          const error = /** @type {{reason?:string,message?:string}} */ (cause);
+          const error = /** @type {{reason?:string,message?:string,code?:string,performed?:boolean,
+            outcomeKnown?:boolean,outcomeKind?:string}} */ (cause);
+          if (error.performed === false && error.outcomeKnown === true
+              && error.outcomeKind === 'pre-effect-failure') return {
+            ok: false, error: error.message ?? 'site_fetch_authority_changed', code: error.code,
+            performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+          };
           if (error.reason === 'pacing_ceiling' || error.reason === 'pacing_unavailable') {
             return pacingAuthorityRefusal(pin,
               error.reason === 'pacing_unavailable' ? 'unavailable' : 'ceiling');

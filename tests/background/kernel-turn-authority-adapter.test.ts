@@ -129,17 +129,20 @@ const harness = async (
     engineRecovery?: boolean,
     authorityScheduler?: ReturnType<typeof createAuthorityEffectScheduler>,
     denylistPatterns?: () => string[],
+    originPacing?: any,
+    onSessionRead?: (sessionId: string) => Promise<void>|void,
   } = {},
 ) => {
   const toolProjections: any[] = [];
   const audits: any[] = [];
   const idb = memoryStore();
-  if (options.sessionReadsUnavailable) {
+  if (options.sessionReadsUnavailable || options.onSessionRead) {
     const read = idb.get;
     idb.get = async (store: string, key: string) => {
       if (store === 'sessions' && options.sessionReadsUnavailable?.()) {
         throw new Error('session storage unavailable');
       }
+      if (store === 'sessions') await options.onSessionRead?.(key);
       return read(store, key);
     };
   }
@@ -432,7 +435,7 @@ const harness = async (
       };
     },
   };
-  dependencies.originPacing = createOriginPacingStore({ kv: dependencies.kv });
+  dependencies.originPacing = options.originPacing ?? createOriginPacingStore({ kv: dependencies.kv });
   const factories = createKernelTurnAuthorityAdapter(dependencies);
   const shared: any = {
     sessions,
@@ -1824,6 +1827,79 @@ describe('kernel turn authority adapter', () => {
 
     expect(result).toMatchObject({ ok: true, capability: { status: 'available' } });
     expect(pushStarted).toBe(false);
+  });
+
+  test.serial('a site-client write rechecks the tab after the final awaited permission read', async () => {
+    const previousFetch = globalThis.fetch;
+    let waited = false;
+    let calls = 0;
+    let actorSessionId = '';
+    let h: Awaited<ReturnType<typeof harness>>;
+    try {
+      globalThis.fetch = (async () => { calls += 1; return new Response('sent'); }) as any;
+      h = await harness(async (job) => {
+        actorSessionId = job.actorSessionId;
+        return { ok: true, started: true, newMessages: [] };
+      }, {
+        originPacing: {
+          reserve: async () => { waited = true; return { outcome: 'waited', waitedMs: 1 }; },
+          observe: async () => {},
+        },
+        onSessionRead: async (id) => {
+          if (waited && id === h.root.sessionId) {
+            h.tabs.set(9, { ...h.tabs.get(9), url: 'https://other.example/changed' });
+          }
+        },
+      });
+      const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+      await ctx.messageActor({ to: '9', message: 'inspect', senderSessionId: h.root.sessionId,
+        toolUseId: 'site-send-check', awaitReply: true });
+      expect(actorSessionId).not.toBe('');
+      const runId = h.scriptRuns.mintRunId(actorSessionId);
+      h.scriptRuns.register(runId, undefined, actorSessionId, { site: true });
+      const result = await h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: actorSessionId, siteOrigin: 'https://example.com',
+        pathOrUrl: '/items', method: 'POST', headers: {}, runId,
+      }, {});
+      h.scriptRuns.release(runId);
+      expect(waited).toBe(true);
+      expect(result).toMatchObject({
+        ok: false, error: 'site_fetch_cross_origin', performed: false,
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      });
+      expect(calls).toBe(0);
+    } finally { globalThis.fetch = previousFetch; }
+  });
+
+  test.serial('a site-client write refuses Plan after its inner pacing wait', async () => {
+    const previousFetch = globalThis.fetch;
+    const origin = 'https://api.example.test';
+    let calls = 0;
+    let h: Awaited<ReturnType<typeof harness>>;
+    try {
+      globalThis.fetch = (async () => { calls += 1; return new Response('sent'); }) as any;
+      h = await harness(undefined, { durableApiOrigin: origin, originPacing: {
+        reserve: async () => {
+          await h.sessions.update(h.root.sessionId, { permissionMode: 'plan' });
+          return { outcome: 'waited', waitedMs: 1 };
+        },
+        observe: async () => {},
+      } });
+      const owner = h.durableApiActor;
+      if (!owner) throw new Error('API actor fixture was not created');
+      const runId = h.scriptRuns.mintRunId(owner.sessionId);
+      h.scriptRuns.register(runId, undefined, owner.sessionId, { site: true });
+      const result = await h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: owner.sessionId, siteOrigin: origin,
+        pathOrUrl: '/items', method: 'POST', headers: {}, runId,
+      }, {});
+      h.scriptRuns.release(runId);
+      expect(result).toMatchObject({
+        ok: false, error: 'plan_mode_refused', performed: false,
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      });
+      expect(calls).toBe(0);
+    } finally { globalThis.fetch = previousFetch; }
   });
 
   test.serial('site-client fetch keeps the exact bounded text prefix and cancels the body', async () => {

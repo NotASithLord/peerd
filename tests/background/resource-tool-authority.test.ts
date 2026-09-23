@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createResourceToolAuthority } from '../../extension/background/resource-tool-authority.js';
+import { makeWebFetch, withSessionScopedCredentials } from '../../extension/peerd-egress/fetch/web-fetch.js';
 
 const response = (
   url: string, text = 'ok',
@@ -28,6 +29,7 @@ const authorityFor = (args: any, overrides: Record<string, any> = {}, shared: an
     binding: { operation: 'turn.resource.request-web-text', args },
     ctx: {
       session: { sessionId: 'api-actor' }, backing: 'api', actorInstanceId: 'https://api.example.com',
+      permission: { mode: 'act' },
       webFetch: async (url: string) => response(url), ...overrides,
     },
     shared,
@@ -49,6 +51,32 @@ const tabAuthorityFor = (args: any, webFetch: (url: string) => Promise<any>) =>
   });
 
 describe('exact API actor web-resource scope', () => {
+  test.each(['plan', 'unavailable'])('refuses a confirmed write if live permission becomes %s during pacing', async (change) => {
+    let waited = false;
+    let calls = 0;
+    const args = { url: 'https://api.example.com/change', method: 'POST', headers: {} };
+    const raw = makeWebFetch({
+      getDenylist: () => [], matchDenylist: () => false,
+      pace: {
+        canonicalOrigin: (origin) => origin, isWriteMethod: () => true,
+        reserve: async () => { waited = true; return { outcome: 'waited', waitedMs: 1 }; },
+        observe: async () => {},
+      },
+      fetchFn: (async () => { calls += 1; return new Response('sent'); }) as unknown as typeof fetch,
+    });
+    const authority = authorityFor(args, {
+      readAuthorityPermission: async () => {
+        if (waited && change === 'unavailable') throw new Error('permission unavailable');
+        return { mode: waited ? 'plan' : 'act' };
+      },
+      webFetch: withSessionScopedCredentials(raw, () => 'https://api.example.com'),
+    }, { webWriteApproval: { ...args } });
+    await expect(authority.requestWebText(args)).rejects.toMatchObject({
+      code: 'plan_mode_refused', outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+    });
+    expect(calls).toBe(0);
+  });
+
   test.each([
     undefined,
     '',
