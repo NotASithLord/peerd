@@ -102,7 +102,7 @@
   },
   "overrides": {
     "adm-zip": "0.6.1",
-    "fast-uri": "3.1.6",
+    "fast-uri": "3.1.7",
     "image-size": "2.0.4",
     "js-yaml": "4.3.2"
   }

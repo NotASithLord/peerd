@@ -1481,7 +1481,7 @@ export const STATES = [
         if (body.includes('tools: page_code')) {
           harvestActorUsedCode = true;
           if (t === 0) return { sse: sseToolCall('page_code', {
-            code: `await page.goto(${JSON.stringify(harvestFixtureUrl)}); return await page.content();`,
+            code: `await Promise.all([page.goto(${JSON.stringify(`${harvestFixtureUrl}first`)}), page.goto(${JSON.stringify(harvestFixtureUrl)})]); return await page.content();`,
           }) };
           return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
         }
@@ -1512,7 +1512,17 @@ export const STATES = [
       // The web actor opens and reads the locally served fixture through the
       // real actor-model path. The harness maps the reserved .test host to this
       // server, so product localhost blocking remains active.
-      const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); });
+      let firstResponseAt = 0;
+      let rootRequestAt = 0;
+      const server = createServer((req, res) => {
+        const respond = () => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(ORDERS_HTML); };
+        if (req.url === '/first') {
+          setTimeout(() => { firstResponseAt = Date.now(); respond(); }, 150);
+          return;
+        }
+        if (req.url === '/') rootRequestAt = Date.now();
+        respond();
+      });
       await new Promise((r) => server.listen(0, '127.0.0.1', r));
       const fxPort = /** @type {{ port: number }} */ (server.address()).port;
       harvestFixtureUrl = `http://orders.peerd.test:${fxPort}/`;
@@ -1542,6 +1552,10 @@ export const STATES = [
         rec.check('the orchestrator delegated the read via message_actor', harvestDelegated === true);
         rec.check('the web-actor sub-loop ran (page code + report, ≥2 actor model calls)', harvestActorTurn >= 2, `actor turns: ${harvestActorTurn}`);
         rec.check('the preview web actor used the code-first page surface', harvestActorUsedCode === true);
+        const actorTabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => tab.url?.startsWith(${JSON.stringify(harvestFixtureUrl)})).map(({ id, url }) => ({ id, url })))`, true);
+        rec.check('concurrent first page calls share one actor tab in FIFO order',
+          actorTabs.length === 1 && actorTabs[0]?.url === harvestFixtureUrl && firstResponseAt > 0 && rootRequestAt >= firstResponseAt,
+          JSON.stringify({ actorTabs, firstResponseAt, rootRequestAt }));
         // load-bearing proof: the web actor REALLY read the live page — the page's
         // own order text rode back into the actor's model request via read_page.
         rec.check('the web actor REALLY read the live page (real order data in its read result)',
@@ -3559,6 +3573,73 @@ export const STATES = [
     },
   },
   {
+    // The dweb page's HAPPY path had no state at all - the only coverage was
+    // the stop-failure fixture, so the shape a user actually meets was
+    // unphotographed. Preview builds default dwebEnabled on, which is what the
+    // harness runs, so the nested agent row renders too.
+    name: 'options-dweb', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/dweb');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 2`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        const shape = await evalIn(page, `(() => {
+          const rows = [...document.querySelectorAll('.set-row')].map((row) => ({
+            label: row.querySelector('.set-row-label')?.textContent ?? '',
+            pill: row.querySelector('.set-pill')?.textContent ?? '',
+            named: row.querySelector('button[role="switch"]')?.getAttribute('aria-label') ?? '',
+          }));
+          return { rows, headings: document.querySelectorAll('.options-page h3').length };
+        })()`);
+        rec.check('the network and agent settings both read as rows',
+          shape?.rows?.length === 2
+            && shape.rows[0].label === 'Participate in the dweb'
+            && shape.rows[1].label === 'dweb agent',
+          JSON.stringify(shape?.rows));
+        rec.check('each switch is named for its STATE, not its inverse action',
+          // The bug the row pattern exists to kill: a control labelled
+          // "Disable the dweb agent" makes the reader infer state from an
+          // action verb. Every switch must announce where you stand.
+          (shape?.rows ?? []).every((row) => / - (on|off)$/.test(row.named))
+            && !(shape?.rows ?? []).some((row) => /^(Enable|Disable) /.test(row.named)),
+          JSON.stringify((shape?.rows ?? []).map((row) => row.named)));
+        await rec.visualPage('options-dweb', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    // Memory had no visual state at all, so the auto-memory switch - the one
+    // control on the page - was never photographed. It is also the row whose
+    // old hand-rolled busy dance had no `finally`, which is precisely the kind
+    // of state a still frame catches and an assertion does not.
+    name: 'options-memory', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html#!/memory');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 1`),
+          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        const row = await evalIn(page, `(() => {
+          const el = document.querySelector('.set-row');
+          const toggle = el?.querySelector('button[role="switch"]');
+          return {
+            label: el?.querySelector('.set-row-label')?.textContent ?? '',
+            pill: el?.querySelector('.set-pill')?.textContent ?? '',
+            named: toggle?.getAttribute('aria-label') ?? '',
+            headings: document.querySelectorAll('.memory-pane h3').length,
+          };
+        })()`);
+        rec.check('auto-memory reads as a row that states where you stand',
+          row?.label === 'Auto-memory'
+            && row?.pill === 'ON'
+            && / - (on|off)$/.test(row?.named ?? ''),
+          JSON.stringify(row));
+        await rec.visualPage('options-memory', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
     name: 'options-denylist', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
@@ -3676,14 +3757,25 @@ export const STATES = [
         ready: '[role="alert"]',
       });
       try {
-        const status = await evalIn(page, `({
-          warning: document.querySelector('[role="alert"]')?.textContent ?? '',
-          retry: [...document.querySelectorAll('button')]
-            .some((button) => button.textContent === 'Retry stopping dweb'),
-        })`);
+        const status = await evalIn(page, `(() => {
+          const row = document.querySelector('.set-row');
+          const toggle = document.querySelector('button[role="switch"]');
+          return {
+            warning: document.querySelector('[role="alert"]')?.textContent ?? '',
+            // The retry affordance is now the switch itself, named for what it
+            // will do. The BADGE is what makes the disagreement legible without
+            // reading the alert - a clean OFF pill would have lied.
+            retry: (toggle?.getAttribute('aria-label') ?? '').includes('retry stopping'),
+            badge: row?.querySelector('.set-badge')?.textContent ?? '',
+            enabled: toggle instanceof HTMLButtonElement && !toggle.disabled,
+          };
+        })()`);
         rec.check('failed live stop stays visible',
           status?.warning.includes('live network could not be stopped'), status?.warning);
-        rec.check('failed live stop remains retryable', status?.retry === true);
+        rec.check('failed live stop remains retryable',
+          status?.retry === true && status?.enabled === true, JSON.stringify(status));
+        rec.check('the row says the network is still running',
+          status?.badge === 'STILL RUNNING', status?.badge);
         await rec.visualPage('options-dweb-stop-failed', page);
       } finally { try { page.close(); } catch { /* */ } }
     },

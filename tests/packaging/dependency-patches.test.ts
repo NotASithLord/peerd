@@ -11,6 +11,25 @@ const box = (name: string, payload = Buffer.alloc(0)) => {
 };
 
 describe('build-tool dependency fixes', () => {
+  test('URI serialization rejects authority injection through ports', () => {
+    const uri = require('fast-uri');
+    for (const port of ['@127.0.0.1:8124', '8080@evil.example', '8080/path', '8080?query', '8080#fragment']) {
+      expect(() => uri.serialize({ scheme: 'http', host: 'trusted.example', port, path: '/app' }))
+        .toThrow('URI port is malformed');
+    }
+    expect(uri.serialize({ scheme: 'uri', host: 'example.test', port: '00080' }))
+      .toBe('uri://example.test:00080');
+  });
+
+  test('URI parsing rejects unbalanced host brackets before normalization', () => {
+    const uri = require('fast-uri');
+    for (const address of ['http://[fe80', 'http://[', 'http://user@[@127.0.0.1:8123/admin']) {
+      expect(uri.parse(address).error).toBe('URI host is malformed.');
+      expect(uri.equal(address, address)).toBe(false);
+      expect(() => uri.resolve('http://example.com/', address)).toThrow('URI host is malformed');
+    }
+  });
+
   test.each(['import', 'require'])('rejects zero-sized image boxes through %s', (loader) => {
     const inputs = [
       ['ICNS', Buffer.from('69636e73000000106963303700000000', 'hex')],
