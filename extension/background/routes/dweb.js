@@ -159,6 +159,7 @@ export const makeDwebRoutes = (deps) => {
   return {
     'dweb/app-authority-generations': async (_msg, sender) => {
       if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
+      if (!DWEB_ENABLED) return { ok: false, error: 'dweb-disabled' };
       try { return { ok: true, generations: await appTabTracker.dwebGenerationSnapshot() }; }
       catch (error) { return failureResult(error); }
     },

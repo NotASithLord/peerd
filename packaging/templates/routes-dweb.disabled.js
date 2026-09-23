@@ -30,6 +30,7 @@ export const makeDwebRoutes = (deps) => {
     : { ok: false, accepted: false, error: 'offscreen-sender-required' };
 
   return {
+    'dweb/app-authority-generations': offscreenDisabled,
     'dweb/meta-admit': metaDisabled,
     'dweb/app-snapshot': offscreenDisabled,
     'dweb/audit': disabled,
