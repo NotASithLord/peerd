@@ -96,6 +96,34 @@ export const makeVaultAuthorityClient = ({
     unlockedAt: 0,
     lockReason: /** @type {'idle'|'manual'|null} */ (null),
   };
+  // why: advisory status can lag a lock or key mutation behind worker/storage
+  // IO. Prepared network headers need a synchronous, host-only revocation
+  // fence that cannot become valid again after unlock or host replacement.
+  let requestAuthorityEpoch = 0;
+  let requestAuthorityChanges = 0;
+  let requestAuthorityRevoked = true;
+  const revokeRequestAuthority = () => {
+    requestAuthorityEpoch += 1;
+    requestAuthorityRevoked = true;
+  };
+  /** @template T @param {()=>Promise<T>} operation */
+  const changeRequestAuthority = async (operation) => {
+    requestAuthorityEpoch += 1;
+    requestAuthorityChanges += 1;
+    try { return await operation(); }
+    finally {
+      requestAuthorityEpoch += 1;
+      requestAuthorityChanges -= 1;
+    }
+  };
+  const captureRequestAuthority = () => {
+    const epoch = requestAuthorityEpoch;
+    const connection = active;
+    const admitted = connection !== null && connecting === null
+      && !cached.locked && !requestAuthorityRevoked && requestAuthorityChanges === 0;
+    return () => admitted && active === connection && requestAuthorityEpoch === epoch
+      && !cached.locked && !requestAuthorityRevoked && requestAuthorityChanges === 0;
+  };
 
   const methodTimeoutMs = (/** @type {string} */ method) => Math.min(timeoutMs,
     ['status', 'prfStatus', 'getSecret', 'listSecretNames'].includes(method)
@@ -136,6 +164,9 @@ export const makeVaultAuthorityClient = ({
       if (first === 'prefix:secret:') return kv.list('secret:');
     }
     if (call.operation === 'kv.set' && (vaultMetadataKey || secretKey)) {
+      // A worker's idle lock reaches this exact reverse fence before its
+      // delayed locked event. Do not let slow mirror cleanup preserve egress.
+      if (first === 'vault.resume-fence.v1') revokeRequestAuthority();
       await kv.set(first, second); return null;
     }
     if (call.operation === 'kv.delete' && (vaultMetadataKey || secretKey)) {
@@ -158,6 +189,7 @@ export const makeVaultAuthorityClient = ({
       await sessionCache.sessionSet(first, second); return null;
     }
     if (call.operation === 'session.delete' && first === 'vault.unlocked.v1') {
+      revokeRequestAuthority();
       await sessionCache.sessionDelete(first); return null;
     }
     throw new Error('vault-authority-storage-operation-refused');
@@ -166,6 +198,7 @@ export const makeVaultAuthorityClient = ({
   const retire = (/** @type {unknown} */ cause = 'vault authority retired',
     /** @type {typeof active} */ expected = active) => {
     if (expected && active !== expected) return;
+    requestAuthorityEpoch += 1;
     const prior = active;
     active = null;
     if (prior && connecting && sameLease(connectingLease, prior.lease)) {
@@ -235,8 +268,11 @@ export const makeVaultAuthorityClient = ({
           const explicitLockPending = message.event?.type === 'locked'
             && [...pending.values()].some((item) => item.method === 'lock');
           if (message.event?.type === 'initialized' || message.event?.type === 'unlocked') {
+            requestAuthorityEpoch += 1;
+            requestAuthorityRevoked = false;
             cached = { ...cached, initialized: true, locked: false, lockReason: null };
           } else if (message.event?.type === 'locked') {
+            revokeRequestAuthority();
             cached = { ...cached, locked: true, unlockedAt: 0 };
           } else if (message.event?.type === 'prf_enrolled') {
             cached = { ...cached, prfEnrolled: true };
@@ -431,14 +467,19 @@ export const makeVaultAuthorityClient = ({
     initializeWithPrfOnly: (/** @type {any} */ value) => invokeAndRefresh('initializeWithPrfOnly', value),
     unlock: (/** @type {string} */ passphrase) => invokeAndRefresh('unlock', passphrase),
     setRecoveryPassphrase: (/** @type {string} */ passphrase) => invokeAndRefresh('setRecoveryPassphrase', passphrase),
-    lock: (/** @type {'manual'|'idle'} */ reason = 'manual') => invokeAndRefresh('lock', reason),
+    lock: (/** @type {'manual'|'idle'} */ reason = 'manual') => {
+      revokeRequestAuthority();
+      return changeRequestAuthority(() => invokeAndRefresh('lock', reason));
+    },
     prfStatus: () => call('prfStatus'),
     enrollPrf: (/** @type {any} */ value) => invokeAndRefresh('enrollPrf', value),
     unlockWithPrf: (/** @type {Uint8Array} */ value) => invokeAndRefresh('unlockWithPrf', value),
     disablePrf: () => invokeAndRefresh('disablePrf', null),
-    setSecret: (/** @type {string} */ name, /** @type {string} */ plaintext) => call('setSecret', { name, plaintext }),
+    setSecret: (/** @type {string} */ name, /** @type {string} */ plaintext) =>
+      changeRequestAuthority(() => call('setSecret', { name, plaintext })),
     getSecret: (/** @type {string} */ name) => call('getSecret', name),
-    deleteSecret: (/** @type {string} */ name) => call('deleteSecret', name),
+    deleteSecret: (/** @type {string} */ name) =>
+      changeRequestAuthority(() => call('deleteSecret', name)),
     listSecretNames: () => call('listSecretNames'),
     attemptResume,
     setAutoLockMs: async (/** @type {number} */ value) => {
@@ -454,6 +495,7 @@ export const makeVaultAuthorityClient = ({
     lockReason: () => cached.lockReason,
     hasRecoveryPassphrase: async () => (await refreshStatus()).hasRecovery,
     subscribe,
+    captureRequestAuthority,
     close: () => retire('vault authority client closed'),
   });
 };

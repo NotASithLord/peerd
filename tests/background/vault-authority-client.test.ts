@@ -54,6 +54,147 @@ const makeStorage = () => {
 };
 
 describe('sealed vault authority channel', () => {
+  test.each(['lock', 'replace', 'delete'] as const)('prepared credential authority retires before pending %s custody', async (operation) => {
+    const storage = makeStorage();
+    const client = makeVaultAuthorityClient({
+      offscreen: true, offscreenUrl, workerUrl,
+      kv: storage.kv, idb: storage.idb, sessionCache: storage.sessionCache,
+      withHost: async (run) => run(vaultLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    const prfOutput = new Uint8Array(32).fill(5);
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let entered = () => {};
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    let mutation: Promise<any> | undefined;
+    try {
+      await client.initializeWithPrfOnly({
+        prfOutput, credentialId: new Uint8Array([1, 2, 3]), prfSalt: new Uint8Array(32).fill(6),
+      });
+      await client.setSecret('origin:https://example.com', 'first-secret');
+      const capture = () => client.captureRequestAuthority();
+      const prepared = capture();
+      expect(prepared()).toBe(true);
+      const set = storage.kv.set;
+      const remove = storage.kv.delete;
+      storage.kv.set = async (key, value) => {
+        if (key === (operation === 'lock' ? 'vault.resume-fence.v1' : 'secret:origin:https://example.com')) {
+          entered(); await gate;
+        }
+        return set(key, value);
+      };
+      storage.kv.delete = async (key) => {
+        if (operation === 'delete' && key === 'secret:origin:https://example.com') { entered(); await gate; }
+        return remove(key);
+      };
+      mutation = operation === 'lock' ? client.lock()
+        : operation === 'delete' ? client.deleteSecret('origin:https://example.com')
+          : client.setSecret('origin:https://example.com', 'replacement-secret');
+      // The lease dies synchronously, before the worker or storage replies.
+      expect(prepared()).toBe(false);
+      const duringMutation = capture();
+      expect(duringMutation()).toBe(false);
+      await waiting;
+      expect(client.isLocked()).toBe(false); // advisory state may still lag
+      let sends = 0;
+      if (prepared()) sends += 1;
+      expect(sends).toBe(0);
+      release();
+      await mutation;
+      if (operation === 'lock') await client.unlockWithPrf(prfOutput);
+      expect(prepared()).toBe(false);
+      expect(duringMutation()).toBe(false);
+      expect(capture()()).toBe(true);
+    } finally { release(); await mutation?.catch(() => {}); client.close(); }
+  });
+
+  test('prepared credential authority cannot survive host replacement or a lost channel', async () => {
+    const storage = makeStorage();
+    let lease: { scope: string, leaseId: string, generation: number, buildId: string, kernelEpoch: string, hostEpoch: string } = vaultLease;
+    const client = makeVaultAuthorityClient({
+      offscreen: true, offscreenUrl, workerUrl,
+      kv: storage.kv, idb: storage.idb, sessionCache: storage.sessionCache,
+      withHost: async (run) => run(lease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    try {
+      await client.initializeWithPrfOnly({
+        prfOutput: new Uint8Array(32).fill(5),
+        credentialId: new Uint8Array([1, 2, 3]), prfSalt: new Uint8Array(32).fill(6),
+      });
+      await client.setSecret('origin:https://example.com', 'secret');
+      const capture = () => client.captureRequestAuthority();
+      const first = capture();
+      expect(first()).toBe(true);
+      lease = { ...vaultLease, leaseId: 'vault-lease-next', generation: 2 };
+      await expect(client.getSecret('origin:https://example.com')).resolves.toBe('secret');
+      expect(first()).toBe(false);
+      const replacement = capture();
+      expect(replacement()).toBe(true);
+      client.close();
+      expect(replacement()).toBe(false);
+      expect(capture()()).toBe(false);
+      await expect(client.getSecret('origin:https://example.com')).resolves.toBe('secret');
+      expect(replacement()).toBe(false);
+      expect(capture()()).toBe(true);
+    } finally { client.close(); }
+  });
+
+  test('worker idle-lock fencing revokes prepared headers before delayed locked status', async () => {
+    const storage = makeStorage();
+    const client = makeVaultAuthorityClient({
+      offscreen: true, offscreenUrl, workerUrl,
+      kv: storage.kv, idb: storage.idb, sessionCache: storage.sessionCache,
+      withHost: async (run) => run(vaultLease),
+      listWindowClients: async () => [{
+        url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let entered = () => {};
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    try {
+      await client.initializeWithPrfOnly({
+        prfOutput: new Uint8Array(32).fill(5),
+        credentialId: new Uint8Array([1, 2, 3]), prfSalt: new Uint8Array(32).fill(6),
+      });
+      const locked = new Promise<void>((resolve) => client.subscribe((event) => {
+        if (event.type === 'locked') resolve();
+      }));
+      const set = storage.kv.set;
+      storage.kv.set = async (key, value) => {
+        if (key === 'vault.resume-fence.v1') { entered(); await gate; }
+        return set(key, value);
+      };
+      await client.setAutoLockMs(15);
+      const prepared = client.captureRequestAuthority();
+      expect(prepared()).toBe(true);
+      await waiting;
+      expect(client.isLocked()).toBe(false);
+      expect(prepared()).toBe(false);
+      expect(client.captureRequestAuthority()()).toBe(false);
+      release();
+      await locked;
+      expect(prepared()).toBe(false);
+      expect(client.isLocked()).toBe(true);
+    } finally { release(); client.close(); }
+  });
+
   test.each(['boot', 'setAutoLockMs'] as const)('%s policy survives closed and successor workers', async (configure) => {
     const storage = makeStorage();
     let currentLease: any = vaultLease;
