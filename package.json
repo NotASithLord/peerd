@@ -97,7 +97,7 @@
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.11.0",
     "puppeteer-core": "^25.8.0",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "web-ext": "10.6.0"
   },
   "overrides": {
