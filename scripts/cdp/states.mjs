@@ -5170,6 +5170,26 @@ export const STATES = [
           `document.querySelector('.pe-node.is-active')?.dataset.path === 'notes.txt'`),
         { budgetMs: 10_000, pollMs: 100 });
         rec.check('the real editor creates and opens a new file', !!created);
+        await evalIn(page, `(() => {
+          globalThis.__retiredAppDocument = true;
+          document.getElementById('mode-toggle').click();
+        })()`);
+        const renewed = await waitFor(() => evalIn(page, `
+          globalThis.__retiredAppDocument === undefined
+          && location.href === ${JSON.stringify(target.url)}
+          && document.getElementById('boot')?.classList.contains('is-hidden')
+          && !document.getElementById('boot')?.classList.contains('is-failed')
+          && document.getElementById('editor-panel')?.hidden === true
+        `).catch(() => false), { budgetMs: 15_000, pollMs: 100 });
+        rec.check('View replaces a consent-retired document through the exact App host URL', !!renewed);
+        await rec.shotPage('fresh-consent-document', page);
+        await evalIn(page, `document.getElementById('mode-toggle').click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('#editor-panel:not([hidden]) .cm-content')`),
+          { budgetMs: 10_000, pollMs: 100 });
+        await evalIn(page, `document.querySelector('.pe-node[data-path="notes.txt"]').click()`);
+        await waitFor(() => evalIn(page,
+          `document.querySelector('.pe-node.is-active')?.dataset.path === 'notes.txt'`),
+        { budgetMs: 10_000, pollMs: 100 });
         const draft = 'These edits exist only in the open draft.\nKeep every character: café ✓';
         await evalIn(page, `(async () => {
           const browser = (await import('/shared/browser-api.js')).default;
