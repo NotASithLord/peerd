@@ -8,7 +8,10 @@
 const MAX_OWNER_REQUESTS = 256;
 const MAX_OWNER_IN_FLIGHT = 32;
 
-/** @type {Map<string, {worker:Worker,parentExecutionId:string,requestNonce:string,next:number,total:number,pending:Map<string,(value:any)=>void>}>} */
+/** @typedef {{worker:Worker,parentExecutionId:string,requestNonce:string,next:number,total:number,
+ * pending:Map<string,(value:any)=>void>,active:string|null,
+ * queue:{rid:string,type:string,args:Record<string,unknown>}[]}} PageProgramOwner */
+/** @type {Map<string, PageProgramOwner>} */
 const owners = new Map();
 
 /** @param {Worker} worker @param {string} parentExecutionId */
@@ -20,7 +23,7 @@ export const registerPageProgramSemanticOwner = (worker, parentExecutionId) => {
   const token = crypto.randomUUID();
   owners.set(token, {
     worker, parentExecutionId, requestNonce: crypto.randomUUID(),
-    next: 0, total: 0, pending: new Map(),
+    next: 0, total: 0, pending: new Map(), active: null, queue: [],
   });
   return token;
 };
@@ -37,6 +40,22 @@ export const releasePageProgramSemanticOwner = (token) => {
     retryable: false,
   });
   owner.pending.clear();
+  owner.queue.length = 0;
+  owner.active = null;
+};
+
+const dispatchNext = (/** @type {string} */ token, /** @type {PageProgramOwner} */ owner) => {
+  if (owners.get(token) !== owner || owner.active !== null) return;
+  const next = owner.queue.shift();
+  if (!next) return;
+  owner.active = next.rid;
+  try {
+    owner.worker.postMessage({ ...next, parentExecutionId: owner.parentExecutionId });
+  } catch {
+    // A lost post can have an unknown outcome. Close every queued request;
+    // advancing the queue could overtake an effect whose receipt was lost.
+    releasePageProgramSemanticOwner(token);
+  }
 };
 
 const request = (
@@ -70,19 +89,11 @@ const request = (
   // owner token, so the Worker learns no host rendezvous capability.
   const rid = `page-semantic-${owner.requestNonce}-${++owner.next}`;
   owner.pending.set(rid, resolve);
-  try {
-    owner.worker.postMessage({
-      type, rid, args, parentExecutionId: owner.parentExecutionId,
-    });
-  } catch (cause) {
-    owner.pending.delete(rid);
-    resolve({
-      ok: false,
-      error: cause instanceof Error ? cause.message : String(cause),
-      outcomeKnown: false,
-      retryable: false,
-    });
-  }
+  // why: serialize before semantic policy preparation, not just the physical
+  // effect. Otherwise a read can overtake an earlier first navigation while
+  // its confirmation/context work is pending and observe the zero-tab state.
+  owner.queue.push({ type, rid, args });
+  dispatchNext(token, owner);
 });
 
 /** @param {string} token @param {Record<string,unknown>} args */
@@ -166,8 +177,11 @@ export const settlePageProgramSemanticResponse = (token, value) => {
   if (!message || !RESPONSE_TYPES.has(message.type)) return false;
   const owner = owners.get(token);
   const resolve = owner?.pending.get(message.rid);
-  if (!owner || !resolve) return true;
+  if (!owner || !resolve || owner.active !== message.rid) return true;
   owner.pending.delete(message.rid);
+  owner.active = null;
   resolve(message.result);
+  if (message.result?.outcomeKnown === false) releasePageProgramSemanticOwner(token);
+  else dispatchNext(token, owner);
   return true;
 };
