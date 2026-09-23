@@ -188,8 +188,9 @@ describe('service-worker ↔ peerd-runtime barrel link integrity', () => {
     // final-send binder and synchronous permission-revocation epoch.
     expect(graph.size).toBeLessThanOrEqual(464);
     // Exact measured combined source and entry, including reviewed browser
-    // simplifications and consent retirement, with no reserved headroom.
-    expect(bytes).toBeLessThanOrEqual(4_781_985);
+    // simplifications, consent retirement, and Stop-before-storage ordering,
+    // with no reserved headroom or additional imports.
+    expect(bytes).toBeLessThanOrEqual(4_782_136);
     expect(statSync(entry).size).toBeLessThanOrEqual(467_378);
   });
 
