@@ -918,7 +918,9 @@ export const makeOffscreenActorClient = ({
       else if (domain === 'notebook') authority = bindNotebookToolAuthority(state.domainState, input);
       else if (domain === 'app') authority = bindAppToolAuthority(state.domainState, input);
       else if (domain === 'persistence') authority = bindPersistenceToolAuthority(state.domainState, input);
-      else if (domain === 'page') authority = bindPageToolAuthority(state.domainState, input);
+      // Page bindings are created only after entering their resource lane:
+      // a queued read may legitimately follow the actor's first navigation.
+      else if (domain === 'page') authority = Object.freeze({});
       else if (domain === 'resource') authority = bindResourceToolAuthority(state.domainState, input);
       else if (domain === 'siteclient') authority = bindSiteClientToolAuthority(state.domainState, input);
       else if (domain === 'execution') authority = bindExecutionToolAuthority(state.domainState, input);
@@ -933,7 +935,8 @@ export const makeOffscreenActorClient = ({
       grant.toolRelays += 1;
       handedToDispatch = true;
       return /** @type {any} */ ({
-        grant, ctx, operation, args, authority, domainState: state.domainState, releaseClaim,
+        grant, ctx, operation, args, authority, authorityInput: input,
+        domainState: state.domainState, releaseClaim,
         effect: { callId: msg.callId, effectId: msg.effectId, parentEffect },
       });
     } finally {
@@ -1169,6 +1172,21 @@ export const makeOffscreenActorClient = ({
             || entry.grant.completedCalls.has(entry.effect.callId)) {
           throw Object.assign(new Error('actor authority stopped before host dispatch'), {
             outcomeKnown: true, retryable: false,
+          });
+        }
+        // why: admission can bind two zero-tab contexts before either queued
+        // navigation runs. Resolve the host-owned tab again inside its lane so
+        // the second effect uses the adopted tab and its current origin gates,
+        // rather than creating a second tab or acting on a stale document pin.
+        if (policy?.authorityClass === 'page') {
+          const liveContext = await contextForOperation(entry.grant, entry.operation);
+          if (!liveContext) throw Object.assign(
+            new Error('actor page authority changed before host dispatch'),
+            { outcomeKnown: true, retryable: false },
+          );
+          entry.ctx = liveContext;
+          entry.authority = bindPageToolAuthority(entry.domainState, {
+            ...entry.authorityInput, ctx: liveContext,
           });
         }
         if (dispatchAdmission) {
