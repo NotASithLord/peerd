@@ -61,13 +61,14 @@ const NETWORK_INLINE_WAIT_MS = 5_000;
 // Host closures never ride a RequestInit field: an actor's structured-cloned
 // request cannot nominate, replace, or clear final-send authority. Only these
 // trusted wrappers preserve the private binding while copying fetch options.
-/** @type {WeakMap<object,{checks:(()=>Promise<void>|void)[],credentials?:()=>RequestCredentials}>} */
+/** @type {WeakMap<object,{checks:(()=>Promise<void>|void)[],finalChecks:(()=>void)[],credentials?:()=>RequestCredentials}>} */
 const requestAuthority = new WeakMap();
 const copyRequestAuthority = (/** @type {any} */ source, /** @type {any} */ next,
-  /** @type {{check?:()=>Promise<void>|void,credentials?:()=>RequestCredentials}} */ extra = {}) => {
+  /** @type {{check?:()=>Promise<void>|void,finalCheck?:()=>void,credentials?:()=>RequestCredentials}} */ extra = {}) => {
   const prior = requestAuthority.get(source);
   requestAuthority.set(next, {
     checks: [...(prior?.checks ?? []), ...(extra.check ? [extra.check] : [])],
+    finalChecks: [...(prior?.finalChecks ?? []), ...(extra.finalCheck ? [extra.finalCheck] : [])],
     ...(prior?.credentials ? { credentials: prior.credentials } : {}),
     ...(extra.credentials ? { credentials: extra.credentials } : {}),
   });
@@ -79,11 +80,15 @@ const copyRequestAuthority = (/** @type {any} */ source, /** @type {any} */ next
  * boundary repeats it after pacing and before cookie selection or dispatch.
  * @param {(resource:any,init?:any)=>Promise<Response>} webFetch
  * @param {()=>Promise<void>|void} assertCurrent
+ * @param {()=>void} [assertFinal]
  * @returns {(resource:any,init?:any)=>Promise<Response>}
  */
-export const withWebRequestAuthority = (webFetch, assertCurrent) => async (resource, init = {}) => {
+export const withWebRequestAuthority = (webFetch, assertCurrent, assertFinal = () => {}) => async (resource, init = {}) => {
   await assertCurrent();
-  return webFetch(resource, copyRequestAuthority(init, { ...init }, { check: assertCurrent }));
+  assertFinal();
+  return webFetch(resource, copyRequestAuthority(init, { ...init }, {
+    check: assertCurrent, finalCheck: assertFinal,
+  }));
 };
 
 // A response we must refuse to follow. In an MV3 SW, redirect:'manual'
@@ -130,9 +135,11 @@ export const sessionScopedCredentials = (targetUrl, sessionOrigin) => {
  * web actor opening its first tab) is reflected immediately.
  * @param {(resource: any, init?: any) => Promise<Response>} webFetch
  * @param {() => string | null | undefined} getSessionOrigin
+ * @param {{captureRequestAuthority?:()=>()=>boolean}} [deps]
  * @returns {(resource: any, init?: any) => Promise<Response>}
  */
-export const withSessionScopedCredentials = (webFetch, getSessionOrigin) => (resource, init = {}) => {
+export const withSessionScopedCredentials = (webFetch, getSessionOrigin, { captureRequestAuthority } = {}) => (resource, init = {}) => {
+  init = bindCredentialAuthority(init, captureRequestAuthority);
   const url = resource instanceof Request ? resource.url : String(resource);
   const credentials = () => sessionScopedCredentials(url, getSessionOrigin());
   return webFetch(resource, copyRequestAuthority(init,
@@ -167,10 +174,12 @@ const stripHeaderName = (headers, name) => {
  * actor's ctx (which the capability strip already leaves without getSecret).
  * @param {(resource:any, init?:any)=>Promise<Response>} webFetch
  * @param {()=>string|null|undefined} getOwnedOrigin  the actor's fixed owned origin
- * @param {{ getSecret:(name:string)=>Promise<string|null>, audit?:(e:any)=>void }} deps
+ * @param {{ getSecret:(name:string)=>Promise<string|null>, audit?:(e:any)=>void,
+ * captureRequestAuthority?:()=>()=>boolean }} deps
  * @returns {(resource:any, init?:any)=>Promise<Response>}
  */
-export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit }) => async (resource, init = {}) => {
+export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit, captureRequestAuthority }) => async (resource, init = {}) => {
+  init = bindCredentialAuthority(init, captureRequestAuthority);
   const url = resource instanceof Request ? resource.url : String(resource);
   const owned = getOwnedOrigin();
   const credentials = sessionScopedCredentials(url, owned);
@@ -218,6 +227,15 @@ export const withApiCredentials = (webFetch, getOwnedOrigin, { getSecret, audit 
 const DPOP_PROOF_HEADER = 'DPoP';
 const DPOP_AUTH_HEADER = 'Authorization';
 
+const bindCredentialAuthority = (/** @type {any} */ init,
+  /** @type {(()=>()=>boolean)|undefined} */ capture) => {
+  if (!capture) return init;
+  const current = capture();
+  return copyRequestAuthority(init, { ...init }, { finalCheck: () => {
+    if (!current()) throw new Error('web credential authority changed');
+  } });
+};
+
 /**
  * The credentialed boundary fetch for a PROOF-OF-POSSESSION origin (RFC 9449).
  * A strict superset of withApiCredentials: a non-dpop secret takes the plain
@@ -247,16 +265,18 @@ const DPOP_AUTH_HEADER = 'Authorization';
  * @param {{ getSecret:(name:string)=>Promise<string|null>,
  *           getDpopKey:(origin:string)=>Promise<{ privateKey: CryptoKey, publicJwk: any } | null>,
  *           audit?:(e:any)=>void, now?:()=>number, randomJti?:()=>string,
- *           nonceCache?:ReturnType<typeof makeNonceCache> }} deps
+ *           nonceCache?:ReturnType<typeof makeNonceCache>,
+ *           captureRequestAuthority?:()=>()=>boolean }} deps
  * @returns {(resource:any, init?:any)=>Promise<Response>}
  */
-export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDpopKey, audit, now, randomJti, nonceCache }) => {
+export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDpopKey, audit, now, randomJti, nonceCache, captureRequestAuthority }) => {
   // ONE cache per wrapper, so it lives exactly as long as the actor's boundary
   // does and is never shared across owned origins by accident (it is keyed by
   // origin regardless — see nonce.js — this is belt and braces).
   const nonces = nonceCache ?? makeNonceCache();
 
   return async (resource, init = {}) => {
+    init = bindCredentialAuthority(init, captureRequestAuthority);
     const url = resource instanceof Request ? resource.url : String(resource);
     const owned = getOwnedOrigin();
     const credentials = sessionScopedCredentials(url, owned);
@@ -462,6 +482,7 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
         signal?.throwIfAborted();
         await check();
       }
+      for (const check of authority?.finalChecks ?? []) check();
       if (authority?.credentials) finalInit.credentials = authority.credentials();
     } catch (cause) {
       const failure = /** @type {{message?:string,code?:string}} */ (cause);

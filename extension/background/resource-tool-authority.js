@@ -173,8 +173,10 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
         }
         let response;
         try {
+          let authorityCurrent = () => true;
           const send = needsWebWriteConfirm(request.method)
             ? withWebRequestAuthority(ctx.webFetch, async () => {
+                authorityCurrent = ctx.captureRequestAuthority?.() ?? (() => true);
                 const permission = typeof ctx.readAuthorityPermission === 'function'
                   ? await ctx.readAuthorityPermission().catch(() => null) : ctx.permission;
                 if (permission?.mode !== 'act') throw Object.assign(
@@ -183,6 +185,11 @@ export const createResourceToolAuthority = ({ binding, ctx, signal, shared = {} 
                     outcomeKind: 'pre-effect-failure', retryable: false,
                   },
                 );
+              }, () => {
+                if (!authorityCurrent()) throw Object.assign(new Error('web request authority changed'), {
+                  code: 'web_request_authority_changed', performed: false, outcomeKnown: true,
+                  outcomeKind: 'pre-effect-failure', retryable: false,
+                });
               }) : ctx.webFetch;
           response = await send(request.url, {
             method: request.method, headers, body: request.body,

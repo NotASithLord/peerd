@@ -1,4 +1,5 @@
 // @ts-check
+import { beginSessionAuthorityChange } from '../shared/session-authority-epoch.js';
 
 import {
   KERNEL_SUPPORT_EFFECTS_BY_ROUTE,
@@ -101,6 +102,9 @@ export const createKernelSessionAuthority = (deps) => {
     'support.permission.commit': async (
       /** @type {{patch:Record<string,'plan'|'act'|boolean>}} */ { patch },
     ) => {
+      const finishAuthorityChange = deps.sessions.beginAuthorityChange?.() ?? (() => {});
+      const finishCacheChange = beginSessionAuthorityChange(deps.sessionCache);
+      try {
       await deps.ready;
       if (typeof deps.sessionCache?.sessionSet !== 'function') {
         throw new Error('session-cache-write-unavailable');
@@ -137,6 +141,7 @@ export const createKernelSessionAuthority = (deps) => {
         Object.assign(error, { outcomeKnown: false, retryable: false });
         throw error;
       }
+      } finally { finishCacheChange(); finishAuthorityChange(); }
     },
   });
   const effectAllowed = (/** @type {string} */ operation, /** @type {any} */ payload,

@@ -116,6 +116,7 @@ import {
   UNAVAILABLE_HOOK_RECORDS,
 } from '/shared/semantic-hook-manifest.js';
 import { readBoundedResponseText } from '/shared/abort.js';
+import { captureSessionAuthority } from '/shared/session-authority-epoch.js';
 import {
   bindCurrentChat, DEFAULT_CHAT_PERMISSION,
 } from '/shared/current-session-binding.js';
@@ -653,6 +654,13 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         }) ?? false),
     };
   };
+  const captureRequestAuthority = () => {
+    const sessionCurrent = captureSessionAuthority(deps.idb);
+    const cacheCurrent = captureSessionAuthority(deps.sessionCache);
+    const goalCurrent = goalRunner?.captureAuthority() ?? (() => true);
+    const vaultCurrent = deps.vault.captureRequestAuthority?.() ?? (() => !deps.vault.isLocked());
+    return () => sessionCurrent() && cacheCurrent() && goalCurrent() && vaultCurrent();
+  };
   const providerCredentialReady = async (/** @type {string} */ providerName) => {
     const credential = providerEgressPolicy(providerName)?.credential;
     if (credential === null) return true;
@@ -838,6 +846,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         trimCovered: session?.trimSummary?.covered ?? 0,
       },
       permission,
+      captureRequestAuthority,
       readAuthorityPermission: async () => resolvePermission(
         sessionId ? await shared.sessions.get(sessionId).catch(() => null) : null,
       ),
@@ -1028,7 +1037,8 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       });
       restricted.authorizeSiteClientOrigin = async (/** @type {string} */ origin) =>
         restricted.canUseSiteClientOrigin(origin);
-      restricted.webFetch = withSessionScopedCredentials(webFetch, () => ownedOrigin ?? undefined);
+      restricted.webFetch = withSessionScopedCredentials(webFetch, () => ownedOrigin ?? undefined,
+        { captureRequestAuthority });
     } else if (actorType === 'web') {
       const hasCustody = hasDurableSiteClientState(session?.originState);
       originStates.hydrate(sessionId, session?.originState);
@@ -1046,6 +1056,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         webFetch,
         lock ? lock.makeScope(() => restricted.activeTab?.origin)
           : () => restricted.activeTab?.origin,
+        { captureRequestAuthority },
       );
       restricted.repinActiveTab = (/** @type {any} */ tab) => { restricted.activeTab = tab; };
       restricted.siteCapture = siteCapture;
@@ -3334,11 +3345,14 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           scopedFetch = withDpopCredentials(webFetch, () => ownedApiOrigin, {
             getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name),
             getDpopKey, audit: deps.auditLog.append,
+            captureRequestAuthority: () => deps.vault.captureRequestAuthority?.()
+              ?? (() => !deps.vault.isLocked()),
           });
         } else {
           scopedFetch = withSessionScopedCredentials(
             webFetch,
             originLock ? originLock.makeScope(() => tabOrigin) : () => tabOrigin,
+            { captureRequestAuthority },
           );
         }
         if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
@@ -3348,7 +3362,9 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
         }
         try {
+          let authorityCurrent = () => false;
           const send = withWebRequestAuthority(scopedFetch, async () => {
+            authorityCurrent = captureRequestAuthority();
             if (mutatesExternal
                 && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
               throw Object.assign(new Error('plan_mode_refused'), {
@@ -3358,6 +3374,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
             if (!await reauthorize()) throw Object.assign(new Error('site_fetch_cross_origin'), {
               performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
             });
+          }, () => {
+            if (!authorityCurrent() || deps.vault.isLocked()) throw Object.assign(
+              new Error('site_fetch_authority_changed'), {
+                performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+              },
+            );
           });
           const response = await send(target.url, {
             method: httpMethod, headers: safeHeaders,

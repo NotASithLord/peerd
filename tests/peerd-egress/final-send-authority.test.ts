@@ -5,6 +5,25 @@ import {
 } from '../../extension/peerd-egress/fetch/web-fetch.js';
 
 describe('host-private final-send authority', () => {
+  test.each(['api', 'dpop', 'session'])('a revoked %s credential lease is not renewed after pacing', async (kind) => {
+    let epoch = 0;
+    let calls = 0;
+    const raw = makeWebFetch({ getDenylist: () => [], matchDenylist: () => false,
+      pace: { canonicalOrigin: (origin) => origin, isWriteMethod: () => true,
+        reserve: async () => { epoch += 1; return { outcome: 'waited', waitedMs: 1 }; },
+        observe: async () => {} },
+      fetchFn: (async () => { calls += 1; return new Response('sent'); }) as unknown as typeof fetch });
+    const deps = { getSecret: async () => 'secret', getDpopKey: async () => null,
+      captureRequestAuthority: () => { const captured = epoch; return () => captured === epoch; } };
+    const send = kind === 'api' ? withApiCredentials(raw, () => 'https://app.example', deps)
+      : kind === 'session' ? withSessionScopedCredentials(raw, () => 'https://app.example', deps)
+        : withDpopCredentials(raw, () => 'https://app.example', deps);
+    await expect(send('https://app.example/write', { method: 'POST' })).rejects.toMatchObject({
+      performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+    });
+    expect(calls).toBe(0);
+  });
+
   test('selects cookie scope after the last awaited assertion, ignoring forged callback fields', async () => {
     let origin = 'https://app.example';
     let checks = 0;

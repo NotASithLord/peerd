@@ -1,4 +1,5 @@
 // @ts-check
+import { beginSessionAuthorityChange } from './session-authority-epoch.js';
 
 export const DEFAULT_CHAT_PERMISSION = Object.freeze({
   mode: 'act', confirmActions: false,
@@ -24,6 +25,8 @@ export const durableChatPermission = (session) => {
  * @param {any|null} session
  */
 export const bindCurrentChat = async (sessionCache, session) => {
+  const finish = beginSessionAuthorityChange(sessionCache);
+  try {
   const permission = session ? durableChatPermission(session) : DEFAULT_CHAT_PERMISSION;
   await Promise.all([
     sessionCache.sessionSet('currentPermissionMode', permission.mode),
@@ -35,4 +38,5 @@ export const bindCurrentChat = async (sessionCache, session) => {
     await sessionCache.sessionDelete('currentSessionId');
   }
   return permission;
+  } finally { finish(); }
 };

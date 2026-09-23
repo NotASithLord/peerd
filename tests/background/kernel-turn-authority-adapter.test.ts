@@ -131,6 +131,7 @@ const harness = async (
     denylistPatterns?: () => string[],
     originPacing?: any,
     onSessionRead?: (sessionId: string) => Promise<void>|void,
+    onTabRead?: (tabId: number) => Promise<void>|void,
   } = {},
 ) => {
   const toolProjections: any[] = [];
@@ -234,6 +235,7 @@ const harness = async (
     tabs: {
       ...tabEvents,
       get: async (tabId: number) => {
+        await options.onTabRead?.(tabId);
         const tab = tabs.get(tabId);
         if (!tab) throw new Error('tab-not-found');
         return tab;
@@ -1827,6 +1829,55 @@ describe('kernel turn authority adapter', () => {
 
     expect(result).toMatchObject({ ok: true, capability: { status: 'available' } });
     expect(pushStarted).toBe(false);
+  });
+
+  test.serial.each(['revoked', 'unchanged'])('a site-client write validates %s permission during its final landing proof', async (change) => {
+    const previousFetch = globalThis.fetch;
+    let waited = false;
+    let revoked = false;
+    let calls = 0;
+    let actorSessionId = '';
+    let h: Awaited<ReturnType<typeof harness>>;
+    try {
+      globalThis.fetch = (async () => { calls += 1; return new Response('sent'); }) as any;
+      h = await harness(async (job) => {
+        actorSessionId = job.actorSessionId;
+        return { ok: true, started: true, newMessages: [] };
+      }, {
+        originPacing: {
+          reserve: async () => { waited = true; return { outcome: 'waited', waitedMs: 1 }; },
+          observe: async () => {},
+        },
+        onTabRead: async (id) => {
+          if (change === 'revoked' && waited && id === 9 && !revoked) {
+            revoked = true;
+            await h.sessions.update(h.root.sessionId, { permissionMode: 'plan' });
+          }
+        },
+      });
+      const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+      await ctx.messageActor({ to: '9', message: 'inspect', senderSessionId: h.root.sessionId,
+        toolUseId: 'site-reciprocal-check', awaitReply: true });
+      const runId = h.scriptRuns.mintRunId(actorSessionId);
+      h.scriptRuns.register(runId, undefined, actorSessionId, { site: true });
+      const result = await h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: actorSessionId, siteOrigin: 'https://example.com',
+        pathOrUrl: '/items', method: 'POST', headers: {}, runId,
+      }, {});
+      h.scriptRuns.release(runId);
+      expect(waited).toBe(true);
+      if (change === 'revoked') {
+        expect(revoked).toBe(true);
+        expect(result).toMatchObject({
+          ok: false, error: 'site_fetch_authority_changed', performed: false,
+          outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+        });
+        expect(calls).toBe(0);
+      } else {
+        expect(result).toMatchObject({ ok: true, value: { status: 200 } });
+        expect(calls).toBe(1);
+      }
+    } finally { globalThis.fetch = previousFetch; }
   });
 
   test.serial('a site-client write rechecks the tab after the final awaited permission read', async () => {

@@ -1,4 +1,5 @@
 // @ts-check
+import { beginSessionAuthorityChange, changesSessionAuthority } from '../shared/session-authority-epoch.js';
 const SESSION_STORE = 'sessions';
 const MESSAGE_STORE = 'session_messages';
 const MUTABLE_METADATA_FIELDS = new Set([
@@ -53,6 +54,7 @@ export const createKernelSessionReader = (idb) => {
   };
 
   return Object.freeze({
+    beginAuthorityChange: () => beginSessionAuthorityChange(idb),
     /** @param {string} sessionId */
     get: async (sessionId) => assemble(await idb.get(SESSION_STORE, sessionId)),
     /** @param {string} sessionId */
@@ -64,7 +66,9 @@ export const createKernelSessionReader = (idb) => {
           || Object.keys(fields).some((field) => !MUTABLE_METADATA_FIELDS.has(field))) {
         throw new TypeError('kernel-session-update-field-invalid');
       }
-      return present(await idb.patch(SESSION_STORE, sessionId, fields));
+      const finish = changesSessionAuthority(fields) ? beginSessionAuthorityChange(idb) : () => {};
+      try { return present(await idb.patch(SESSION_STORE, sessionId, fields)); }
+      finally { finish(); }
     },
     listMetadata: async () => (await idb.getAll(SESSION_STORE))
       .map((record) => present(record))

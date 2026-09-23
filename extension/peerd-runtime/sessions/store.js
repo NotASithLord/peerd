@@ -34,6 +34,7 @@
 
 import { uuidv7 } from '/shared/util.js';
 import { createSessionTurnStore } from '/shared/session-turn-store.js';
+import { beginSessionAuthorityChange, changesSessionAuthority } from '/shared/session-authority-epoch.js';
 import { SessionNotFoundError } from '../errors.js';
 // why: the store persists ONE canonical manifest shape so every consumer
 // (descriptor filter, exposure gate, actor inheritance, UI chips)
@@ -405,10 +406,11 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
     return turnRecords.isRealUserMessage(message) ? message : undefined;
   };
 
-  const archive = (/** @type {string} */ sessionId) => updateSessionRecord(
-    sessionId,
-    (record) => ({ ...record, archivedAt: now() }),
-  );
+  const archive = async (/** @type {string} */ sessionId) => {
+    const finish = beginSessionAuthorityChange(idb);
+    try { return await updateSessionRecord(sessionId, (record) => ({ ...record, archivedAt: now() })); }
+    finally { finish(); }
+  };
 
   /**
    * Metadata-only lookup of a live actor session by its self-description — used to
@@ -442,16 +444,17 @@ export const createSessionStore = ({ idb, now = Date.now, makeId, onMessageAppen
    * @param {string} sessionId
    * @param {Record<string, unknown>} patch
    */
-  const update = (sessionId, patch) => updateSessionRecord(
-    sessionId,
-    (record) => {
+  const update = async (sessionId, patch) => {
+    const finish = changesSessionAuthority(patch) ? beginSessionAuthorityChange(idb) : () => {};
+    try { return await updateSessionRecord(sessionId, (record) => {
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)
           || Object.keys(patch).some((field) => !MUTABLE_SESSION_FIELDS.has(field))) {
         throw new TypeError('session-update-field-invalid');
       }
       return { ...record, ...patch };
-    },
-  );
+    }); }
+    finally { finish(); }
+  };
 
   /**
    * Set or CLEAR the session's user-authored system-prompt augmentation
