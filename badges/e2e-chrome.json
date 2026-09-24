@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "label": "E2E (side panel)",
-  "message": "405/405 checks, 48 states",
+  "message": "443/443 checks, 52 states",
   "color": "brightgreen",
   "namedLogo": "googlechrome",
   "logoColor": "white"

@@ -36,6 +36,7 @@ import {
 } from './e2e-harness.mjs';
 import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector } from './network-floor-oracle.mjs';
+import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -225,6 +226,7 @@ let actorOverviewState = {
 let actorOverviewVisualState = {
   started: false, actorCalls: 0, liveGate: Promise.resolve(),
 };
+let homeSurfaceGate = Promise.resolve();
 // heap-split phase 4: an offscreen actor BUILDING an app (create + delegate).
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
@@ -444,6 +446,25 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
           && visualState.commitTop >= visualState.scrollerTop
           && visualState.commitBottom <= visualState.scrollerBottom,
         JSON.stringify(visualState));
+      const toolbar = await evalIn(page, `(() => {
+        const panel = document.querySelector(${JSON.stringify(`${cardSelector} .library-repository`)});
+        const head = panel?.querySelector('.library-repository-head');
+        const panelRect = panel?.getBoundingClientRect();
+        const controls = [...head?.querySelectorAll('button') ?? []].map((button) => {
+          const rect = button.getBoundingClientRect();
+          return { label: button.getAttribute('aria-label') || button.textContent.trim(),
+            width: rect.width, height: rect.height, disabled: button.disabled,
+            inside: !!panelRect && rect.left >= panelRect.left && rect.right <= panelRect.right };
+        });
+        return { viewport: innerWidth, documentWidth: document.documentElement.scrollWidth, controls };
+      })()`);
+      rec.check('narrow Git Close and Refresh remain full-size inside the repository card',
+        toolbar?.documentWidth <= toolbar?.viewport && toolbar?.controls?.length === 2
+          && toolbar.controls.some((control) => control.label === 'Close Git history for Versioned App')
+          && toolbar.controls.some((control) => control.label === 'Refresh Git')
+          && toolbar.controls.every((control) => control.width >= 28 && control.height >= 28
+            && control.inside && !control.disabled),
+        JSON.stringify(toolbar));
     }
     // why: a peer notification landing mid-capture leaks an unread badge into the
     // top bar. That is global chrome, nothing to do with this fixture, and it is
@@ -1894,7 +1915,45 @@ export const STATES = [
         // flow completes so the visual gate still guards wrapping and emphasis.
         const identityTextReady = await waitFor(pinIdentityText, { budgetMs: 5000, pollMs: 50 });
         if (!identityTextReady) throw new Error('identity conflict text did not settle');
-        await rec.visualPage('options-transfer-conflict', page, { beforeShot: pinIdentityText });
+        await rec.visualPage('options-transfer-conflict', page, { beforeShot: async (_page, theme) => {
+          await pinIdentityText();
+          // why: the disabled export pair can lose its paint in headless light
+          // captures. Record the actual DOM/style boundary without replacing
+          // pixels or changing production CSS to hide a rendering regression.
+          const debugControls = await evalIn(page, `(() => {
+            const describe = (element) => {
+              const rect = element.getBoundingClientRect();
+              const style = getComputedStyle(element);
+              return { tag: element.tagName, className: element.className,
+                rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+                  width: rect.width, height: rect.height },
+                style: Object.fromEntries(['display', 'visibility', 'opacity', 'color',
+                  'backgroundColor', 'borderColor', 'borderRadius', 'transform', 'filter',
+                  'overflow', 'position', 'zIndex'].map((key) => [key, style[key]])) };
+            };
+            const buttons = [...document.querySelectorAll('button')].filter((button) =>
+              ['Export debug bundle', 'Export OTel trace'].includes(button.textContent.trim()));
+            return { theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+              visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight },
+              buttons: buttons.map((button) => ({ ...describe(button),
+                label: button.textContent.trim(), disabled: button.disabled,
+                hit: (() => { const r = button.getBoundingClientRect();
+                  const target = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                  return { tag: target?.tagName, text: target?.textContent?.trim().slice(0, 100) }; })(),
+                ancestors: [button.parentElement, button.parentElement?.parentElement,
+                  document.documentElement].filter(Boolean).map(describe),
+              })) };
+          })()`);
+          rec.observe(`debug export paint boundary (${theme})`, debugControls);
+          const controlsPresent = debugControls?.buttons?.length === 2
+            && debugControls.buttons.every((button) => button.rect.width > 0 && button.rect.height > 0
+              && button.rect.left >= 0 && button.rect.right <= debugControls.viewport.width
+              && button.style.display !== 'none' && button.style.visibility === 'visible'
+              && Number(button.style.opacity) > 0)
+            && debugControls.buttons[0].rect.right <= debugControls.buttons[1].rect.left + 0.5;
+          rec.check(`debug export labels and separate control boxes remain present (${theme})`, controlsPresent);
+          if (!controlsPresent) throw new Error('debug export controls are missing or overlapping');
+        } });
       } finally { await retirePrivateTransferPage(page); }
     },
   },
@@ -4272,16 +4331,152 @@ export const STATES = [
   {
     name: 'tool-card-expanded', kind: 'visual', phase: 'post-unlock',
     responder: (callIndex) => callIndex === 0
-      ? { sse: sseToolCall('read_page', { url: 'https://docs.rs/tokio' }) }
-      : { sse: sseText('The page loaded — 214 sections indexed.') },
+      ? { sse: sseToolCall('actor_list', {}) }
+      : { sse: sseText('The available actor targets are listed above.') },
     async run(ctx, rec) {
-      await rpc(ctx.page, { type: 'agent/send', text: 'read the tokio docs' });
-      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.tool-call')`), { budgetMs: 20_000, pollMs: 50 });
-      await waitFor(async () => { const o = await probe(ctx); return !o.busy; }, { budgetMs: 20_000 });
-      // Expand the card's detail body.
-      await evalIn(ctx.page, `document.querySelector('.tool-call-header')?.click()`);
-      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.tool-detail')`), { budgetMs: 5_000, pollMs: 50 });
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      // why: page reads belong to a web actor, so the main-turn example must
+      // exercise a real owned tool instead of photographing an ownership refusal.
+      await rpc(ctx.page, { type: 'agent/send', text: 'list the available actor targets' });
+      const settled = await waitFor(() => evalIn(ctx.page, `(() => {
+        const card = document.querySelector('.tool-call.tool-ok');
+        return card?.querySelector('.tool-name')?.textContent === 'actor_list'
+          && !document.querySelector('form.input-bar button.stop');
+      })()`), { budgetMs: 20_000, pollMs: 50 });
+      rec.check('the expanded example is a successfully executed owned tool', settled === true);
+      if (!settled) throw new Error('actor_list did not settle successfully');
+      await clickAndSyncRedraw(ctx.page, '.tool-call-header');
+      const expanded = await waitFor(() => evalIn(ctx.page, `(() => {
+        const detail = document.querySelector('.tool-detail');
+        return detail?.querySelector('.primitive-badge')?.textContent === 'spawned'
+          && detail?.querySelector('.tool-result-content')?.textContent.includes('actor_execution');
+      })()`), { budgetMs: 5_000, pollMs: 50 });
+      const executed = (await auditEntries(ctx)).some((entry) => !priorAuditIds.has(entry.id)
+        && entry.type === 'tool_executed' && entry.details?.tool === 'actor_list');
+      rec.check('the expanded card renders known lineage and its audited result', expanded === true && executed,
+        JSON.stringify({ expanded, executed }));
+      if (!expanded || !executed) throw new Error('actor_list result or audit is missing');
+      const roster = await evalIn(ctx.page, `JSON.parse(document.querySelector('.tool-result-content').textContent)`);
+      // why: actor_list deliberately reports partial source failures as data;
+      // an ok tool card must not hide a broken directory source in this fixture.
+      const complete = Array.isArray(roster?.unavailable ?? []) && (roster?.unavailable ?? []).length === 0;
+      rec.check('the actor directory has no unexpected unavailable sources', complete, JSON.stringify(roster?.unavailable ?? []));
+      if (!complete) throw new Error('actor_list returned an unavailable directory source');
       await rec.visual('tool-card-expanded');
+    },
+  },
+
+  {
+    name: 'home-chat-authority', kind: 'functional', phase: 'post-unlock',
+    responder: async (callIndex) => {
+      if (callIndex > 0) await homeSurfaceGate;
+      return { sse: sseText(callIndex === 0 ? 'HOME-COMPOSER-REPLY' : 'HOME-STOPPED-REPLY-MUST-NOT-RENDER') };
+    },
+    async run(ctx, rec) {
+      const panelUrl = await evalIn(ctx.page, 'location.href');
+      let page = null;
+      let releaseLive = () => {};
+      homeSurfaceGate = new Promise((resolve) => { releaseLive = resolve; });
+      const requireCheck = (name, pass, detail = '') => {
+        rec.check(name, pass, detail);
+        if (!pass) throw new Error(name);
+      };
+      try {
+        // why: Home authority requires a real tab, not a native side-panel
+        // frame navigated to its URL. Retire the panel document to release its
+        // chat port, then open the actual Home tab without forging presence.
+        await ctx.page.send('Page.navigate', { url: 'about:blank' });
+        const released = await waitFor(() => evalIn(ctx.page, `location.href === 'about:blank'`)
+          .catch(() => false), { budgetMs: 5_000, pollMs: 50 });
+        if (!released) throw new Error('Home fixture did not release the side-panel document');
+        page = await openWidePage(ctx, 'home/home.html#chat');
+        const homeContext = { ...ctx, page };
+        const mounted = await waitFor(() => evalIn(page,
+          `!!document.querySelector('.home-chat form.input-bar textarea')`).catch(() => false), { budgetMs: 20_000, pollMs: 80 });
+        const homeSurface = await evalIn(page, `({
+          url: location.href, boot: { ...document.documentElement.dataset },
+          activeView: document.querySelector('[data-home-view][aria-current="page"]')?.getAttribute('data-home-view'),
+          text: document.querySelector('#app')?.textContent?.slice(0, 500),
+        })`);
+        requireCheck('the real Home document owns the chat composer', mounted === true, JSON.stringify(homeSurface));
+        await evalIn(page, `(() => {
+          const editor = document.querySelector('.home-chat form.input-bar textarea');
+          editor.value = 'HOME-COMPOSER-MESSAGE';
+          editor.dispatchEvent(new Event('input', { bubbles: true }));
+          editor.closest('form').requestSubmit();
+        })()`);
+        const answered = await waitFor(async () => {
+          const view = await probe(homeContext);
+          return view.userText?.includes('HOME-COMPOSER-MESSAGE')
+            && view.assistantText === 'HOME-COMPOSER-REPLY' && !view.busy && !view.errorText;
+        }, { budgetMs: 20_000, pollMs: 80 });
+        requireCheck('Home composer sends a real turn and renders its answer', answered === true);
+        const state = await rpc(page, { type: 'state/get' });
+        const sessionId = state?.state?.session?.sessionId;
+        requireCheck('Home observes the bound live session', typeof sessionId === 'string' && sessionId.length > 0);
+        const diagnostic = await rpc(page, { type: 'session/debugBundle', sessionId });
+        requireCheck('Home exports the actual chat diagnostic transcript', diagnostic?.ok === true
+          && diagnostic.bundle?.format === 'peerd-debug-bundle'
+          && JSON.stringify(diagnostic.bundle?.session?.messages).includes('HOME-COMPOSER-REPLY'),
+        JSON.stringify({ ok: diagnostic?.ok, error: diagnostic?.error, format: diagnostic?.bundle?.format }));
+        const callsBeforeProbe = ctx.modelCallCount();
+        const recovery = await rpc(page, { type: 'actor-isolation/retry' });
+        requireCheck('Home recovery runs only the fixed isolated-worker readiness probe', recovery?.ok === true
+          && recovery.capability?.status === 'available' && ctx.modelCallCount() === callsBeforeProbe,
+        JSON.stringify(recovery));
+        const catalog = await rpc(page, { type: 'local-model/catalog' });
+        const local = await rpc(page, { type: 'local-model/status' });
+        requireCheck('Home reads the default local-model catalog and status without downloading', catalog?.ok === true
+          && Array.isArray(catalog.models) && catalog.models.length > 0
+          && local?.ok === true && local.loading === false && local.downloaded === false,
+        JSON.stringify({ catalog, local }));
+        const customCatalog = await rpc(page, { type: 'local-model/catalog', includeSupport: false });
+        const customStatus = await rpc(page, { type: 'local-model/status', model: local.model });
+        requireCheck('Home cannot parameterize the default local-model reads',
+          customCatalog?.error === 'vault-route-unauthorized-sender'
+            && customStatus?.error === 'vault-route-unauthorized-sender', JSON.stringify({ customCatalog, customStatus }));
+
+        const operationId = `send.${Date.now().toString(36)}.${crypto.randomUUID()}`;
+        const sent = await rpc(page, { type: 'agent/send', text: 'HOME-LIVE-STOP', sessionId, operationId });
+        requireCheck('Home admits a live turn with an exact delivery receipt', sent?.ok === true, JSON.stringify(sent));
+        const busy = await waitFor(async () => ctx.modelCallCount() === 2
+          && await evalIn(page, `!!document.querySelector('.home-chat form.input-bar button.stop')`),
+        { budgetMs: 15_000, pollMs: 80 });
+        requireCheck('the second Home turn reaches the model while Stop is available', busy === true);
+        const receipt = await rpc(page, { type: 'agent/send', checkOnly: true, sessionId, operationId });
+        requireCheck('Home checkOnly keeps a live outcome unknown without resending', receipt?.ok === false
+          && receipt.outcomeKnown === false && receipt.retryable === false
+          && receipt.operationId === operationId && ctx.modelCallCount() === 2, JSON.stringify(receipt));
+        await clickAndSyncRedraw(page, '.home-chat form.input-bar button.stop');
+        const stopped = await waitFor(async () => {
+          const view = await probe(homeContext);
+          return !view.busy && view.stopChip && !view.errorText;
+        }, { budgetMs: 15_000, pollMs: 80 });
+        requireCheck('the real Home Stop control settles its live turn', stopped === true);
+        releaseLive();
+        await sleep(750);
+        requireCheck('Home Stop never renders or replays the held reply', ctx.modelCallCount() === 2
+          && await evalIn(page, `!document.body.textContent.includes('HOME-STOPPED-REPLY-MUST-NOT-RENDER')`));
+        const settledReceipt = await waitFor(async () => {
+          const reply = await rpc(page, { type: 'agent/send', checkOnly: true, sessionId, operationId });
+          return reply?.ok === true && reply.duplicate === true ? reply : null;
+        }, { budgetMs: 10_000, pollMs: 80 });
+        requireCheck('Home confirms the receipt only after its stopped turn settles',
+          settledReceipt?.operationId === operationId && ctx.modelCallCount() === 2,
+          JSON.stringify(settledReceipt));
+        await rec.shotPage('home-chat-stopped', page);
+      } finally {
+        if (page) await rpc(page, { type: 'agent/stop' }).catch(() => {});
+        releaseLive();
+        homeSurfaceGate = Promise.resolve();
+        if (page) await retirePrivateTransferPage(page);
+        await ctx.page.send('Page.navigate', { url: panelUrl });
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+        const restored = await waitFor(() => evalIn(ctx.page,
+          `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
+        { budgetMs: 20_000, pollMs: 80 });
+        if (!restored) throw new Error('Home fixture did not restore the live side panel');
+      }
     },
   },
 
@@ -4971,14 +5166,52 @@ export const STATES = [
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
       const page = await openWidePage(ctx, 'options/options.html#!/denylist');
+      const pattern = 'visual-options-denylist.peerd.test';
+      let fixtureAttempted = false;
       try {
-        // The seed loads asynchronously in the SW, so wait for the GROUPS —
-        // photographing an empty list would bake "no categories" into the
-        // baseline and then never fail again.
-        await waitFor(() => evalIn(page, `document.querySelectorAll('.denylist-group').length >= 8`),
-          { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        // why: a permission refusal also renders a page; require the real seed
+        // and exercise mutations through this exact Options document before
+        // accepting a screenshot as evidence that the page works.
+        const loaded = await waitFor(() => evalIn(page, `document.querySelectorAll('.denylist-group').length >= 8
+          && !document.querySelector('.denylist-pane .key-msg.err')`), { budgetMs: 15_000, pollMs: 80 });
+        const prior = await rpc(page, { type: 'denylist/list' });
+        rec.check('Options loads the denylist seed without an authorization error', loaded === true && prior?.ok,
+          JSON.stringify(prior?.error ?? { loaded, patterns: prior?.patterns?.length }));
+        if (!loaded || !prior?.ok) throw new Error('Options denylist did not load');
+        if (prior.patterns.includes(pattern) || prior.added.includes(pattern)) {
+          throw new Error('denylist fixture pattern already exists');
+        }
+        fixtureAttempted = true;
+        await evalIn(page, `(() => {
+          const input = document.querySelector('.denylist-add input');
+          input.value = ${JSON.stringify(pattern)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('.denylist-add').requestSubmit();
+        })()`);
+        const added = await waitFor(async () => {
+          const state = await rpc(page, { type: 'denylist/list' });
+          return state?.ok && state.added.includes(pattern)
+            && await evalIn(page, `!!document.querySelector('.denylist-item.is-user')
+              && document.querySelector('.denylist-pane').textContent.includes(${JSON.stringify(pattern)})
+              && !document.querySelector('.denylist-pane .key-msg.err')`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        rec.check('Options Block stores and renders the custom pattern', added === true);
+        if (!added) throw new Error('Options denylist add did not settle');
         await rec.visualPage('options-denylist', page);
-      } finally { try { page.close(); } catch { /* */ } }
+        await clickAndSyncRedraw(page, `.denylist-x[aria-label="Remove ${pattern}"]`);
+        const confirmed = await clickAndSyncRedraw(page, `.danger-text[aria-label="Remove ${pattern}"]`);
+        const removed = confirmed && await waitFor(async () => {
+          const state = await rpc(page, { type: 'denylist/list' });
+          return state?.ok && !state.added.includes(pattern) && !state.patterns.includes(pattern)
+            && await evalIn(page, `!document.querySelector('.denylist-pane .key-msg.err')
+              && ![...document.querySelectorAll('.denylist-item')].some((item) => item.textContent === ${JSON.stringify(pattern)})`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        rec.check('Options confirmed Remove deletes only the custom pattern', removed === true);
+        if (!removed) throw new Error('Options denylist removal did not settle');
+      } finally {
+        if (fixtureAttempted) await rpc(ctx.page, { type: 'denylist/remove', pattern }).catch(() => {});
+        try { page.close(); } catch { /* */ }
+      }
     },
   },
   {
@@ -5061,13 +5294,45 @@ export const STATES = [
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
 
         page = await openWidePage(ctx, 'options/options.html#!/learned-sites');
-        await waitFor(() => evalIn(page, `(() => {
+        const loaded = await waitFor(() => evalIn(page, `(() => {
           const text = document.body.innerText;
           return text.includes('accounts.acme.test')
             && text.includes('portal.globex.test')
-            && text.includes('every port and its subdomains');
+            && text.includes('every port and its subdomains')
+            && !document.querySelector('.learned-sites .key-msg.err');
         })()`), { budgetMs: 15_000, pollMs: 80 });
+        const listed = await rpc(page, { type: 'learned/list' });
+        rec.check('Options loads both learned hosts without an authorization error', loaded === true
+          && listed?.ok && listed.origins?.length === 2,
+        JSON.stringify({ loaded, listed }));
+        if (!loaded || !listed?.ok || listed.origins?.length !== 2) throw new Error('Options learned sites did not load');
         await rec.visualPage('options-learned-sites', page);
+        await clickAndSyncRedraw(page, '[data-learned-role="trigger"][data-learned-host="accounts.acme.test"]');
+        const confirmed = await clickAndSyncRedraw(page, '[data-learned-role="confirm"][data-learned-host="accounts.acme.test"]');
+        const removed = confirmed && await waitFor(async () => {
+          const state = await rpc(page, { type: 'learned/list' });
+          return state?.ok && state.origins?.length === 1 && state.origins[0].host === 'portal.globex.test'
+            && await evalIn(page, `!document.querySelector('.learned-sites .key-msg.err')
+              && ![...document.querySelectorAll('.learned-sites code')].some((item) => item.textContent === 'accounts.acme.test')
+              && document.querySelector('.learned-sites .key-msg.ok')?.textContent === 'Removed accounts.acme.test.'
+              && document.querySelector('[data-learned-role="trigger-all"]')?.disabled === false`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        rec.check('Options confirmed Remove forgets only the selected learned host', removed === true);
+        if (!removed) throw new Error('Options learned host removal did not settle');
+        // why: the separate store read can see a committed removal before the
+        // UI receives its receipt. Wait for that receipt above, not the number
+        // of trigger buttons (arming the first confirm already lowers it).
+        const armedAll = await clickAndSyncRedraw(page, '[data-learned-role="trigger-all"]');
+        const confirmedAll = await clickAndSyncRedraw(page, '[data-learned-role="confirm-all"]');
+        const cleared = confirmedAll && await waitFor(async () => {
+          const state = await rpc(page, { type: 'learned/list' });
+          return state?.ok && state.origins?.length === 0
+            && await evalIn(page, `!document.querySelector('.learned-sites .key-msg.err')
+              && document.querySelector('.learned-sites').textContent.includes('Nothing learned yet.')`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        rec.check('Options confirmed Forget all clears the remaining learned hosts', cleared === true,
+          JSON.stringify({ armedAll, confirmedAll, cleared }));
+        if (!cleared) throw new Error('Options learned sites clear did not settle');
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         if (priorEntries) {
@@ -5081,6 +5346,115 @@ export const STATES = [
           await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         }
         try { page?.close(); } catch { /* */ }
+      }
+    },
+  },
+  {
+    // why: these Options lists can turn a refused read into an innocent empty
+    // state. Real human-page mutations plus persisted reads must gate the
+    // functional lane, not just produce a screenshot in the visual lane.
+    name: 'options-skills-hooks', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const skillName = 'e2e-options-skill';
+      const hookId = 'e2e-options-hook';
+      let page;
+      let skillAttempted = false;
+      let hookAttempted = false;
+      const expectEventually = async (name, predicate) => {
+        const passed = await waitFor(predicate, { budgetMs: 15_000, pollMs: 80 });
+        rec.check(name, passed === true);
+        if (!passed) throw new Error(name);
+      };
+      try {
+        page = await openWidePage(ctx, 'options/options.html#!/skills');
+        const priorSkills = await rpc(page, { type: 'skills/list' });
+        rec.check('Options can read the real installed skill list', priorSkills?.ok && Array.isArray(priorSkills.skills),
+          JSON.stringify(priorSkills?.error ?? { count: priorSkills?.skills?.length }));
+        if (!priorSkills?.ok || !Array.isArray(priorSkills.skills)) throw new Error('Options skills list refused');
+        if (priorSkills.skills.some((skill) => skill.name === skillName)) throw new Error('skill fixture already exists');
+        await expectEventually('Options renders the skill installation form', () => evalIn(page,
+          `!!document.querySelector('.skills-install textarea')`));
+        const skillText = `---\nname: ${skillName}\ndescription: Verify local Settings skill management.\n---\nOnly used by the Settings browser regression fixture.`;
+        skillAttempted = true;
+        await evalIn(page, `(() => {
+          const editor = document.querySelector('.skills-install textarea');
+          editor.value = ${JSON.stringify(skillText)};
+          editor.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        await clickAndSyncRedraw(page, '.skills-install button');
+        await expectEventually('Options Install persists and lists the local skill', async () => {
+          const state = await rpc(page, { type: 'skills/list' });
+          return state?.ok && state.skills.some((skill) => skill.name === skillName && skill.enabled === true)
+            && await evalIn(page, `document.querySelector('.skills-list')?.textContent.includes(${JSON.stringify(skillName)})
+              && document.querySelector('.skills-status')?.textContent.includes('Installed')`);
+        });
+        await rec.shotPage('skills-installed', page);
+        for (const enabled of [false, true]) {
+          await clickAndSyncRedraw(page, `.skills-list input[aria-label="Enable ${skillName}"]`);
+          await expectEventually(`Options ${enabled ? 'enables' : 'disables'} the installed skill`, async () => {
+            const state = await rpc(page, { type: 'skills/list' });
+            return state?.ok && state.skills.some((skill) => skill.name === skillName && skill.enabled === enabled)
+              && await evalIn(page, `document.querySelector('.skills-list input[aria-label="Enable ${skillName}"]')?.checked === ${enabled}`);
+          });
+        }
+        await clickAndSyncRedraw(page, `.skills-list button[aria-label="Remove ${skillName}"]`);
+        await expectEventually('Options Remove deletes the installed skill and its row', async () => {
+          const state = await rpc(page, { type: 'skills/list' });
+          return state?.ok && !state.skills.some((skill) => skill.name === skillName)
+            && await evalIn(page, `!document.querySelector('.skills-list input[aria-label="Enable ${skillName}"]')`);
+        });
+        await retirePrivateTransferPage(page);
+        page = await openWidePage(ctx, 'options/options.html#!/hooks');
+        const priorHooks = await rpc(page, { type: 'hooks/list' });
+        rec.check('Options can read the real built-in hook list', priorHooks?.ok
+          && priorHooks.hooks?.some((hook) => hook.isDefault && hook.enabled), JSON.stringify(priorHooks?.error ?? ''));
+        if (!priorHooks?.ok || !Array.isArray(priorHooks.hooks)) throw new Error('Options hook list refused');
+        if (priorHooks.hooks.some((hook) => hook.id === hookId)) throw new Error('hook fixture already exists');
+        const builtins = JSON.stringify(priorHooks.hooks.filter((hook) => hook.isDefault));
+        await expectEventually('Options renders the always-on built-in hooks without an error', () => evalIn(page,
+          `document.querySelectorAll('.hook-lock').length > 0 && !document.querySelector('.hooks-pane .key-msg.err')`));
+        await clickAndSyncRedraw(page, '.hooks-actions button');
+        const hookText = `---\nid: ${hookId}\nevent: pre-tool-use\nmatch: type\nrule:\n  matchArg: text\n  contains: E2E-OPTIONS-BLOCKED-LITERAL\n  reason: Settings regression fixture\n---\nVerify local Settings hook management.`;
+        hookAttempted = true;
+        await evalIn(page, `(() => {
+          const editor = document.querySelector('.hook-add-editor');
+          editor.value = ${JSON.stringify(hookText)};
+          editor.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('.hook-add').requestSubmit();
+        })()`);
+        await expectEventually('Options Save hook persists and renders the declarative policy', async () => {
+          const state = await rpc(page, { type: 'hooks/list' });
+          return state?.ok && state.hooks.some((hook) => hook.id === hookId && hook.enabled === true && !hook.isDefault)
+            && await evalIn(page, `!!document.querySelector('.hook-toggle input[aria-label="Enable ${hookId}"]')
+              && !document.querySelector('.hooks-pane .key-msg.err')`);
+        });
+        await rec.shotPage('hooks-saved', page);
+        for (const enabled of [false, true]) {
+          await clickAndSyncRedraw(page, `.hook-toggle input[aria-label="Enable ${hookId}"]`);
+          await expectEventually(`Options ${enabled ? 'enables' : 'disables'} only the user hook`, async () => {
+            const state = await rpc(page, { type: 'hooks/list' });
+            return state?.ok && state.hooks.some((hook) => hook.id === hookId && hook.enabled === enabled)
+              && JSON.stringify(state.hooks.filter((hook) => hook.isDefault)) === builtins
+              && await evalIn(page, `document.querySelector('.hook-toggle input[aria-label="Enable ${hookId}"]')?.checked === ${enabled}
+                && !document.querySelector('.hooks-pane .key-msg.err')`);
+          });
+        }
+        await clickAndSyncRedraw(page, `.hook-x[aria-label="Remove ${hookId}"]`);
+        await clickAndSyncRedraw(page, '.hook-confirm .danger-text');
+        await expectEventually('Options confirmed Remove deletes only the user hook', async () => {
+          const state = await rpc(page, { type: 'hooks/list' });
+          return state?.ok && !state.hooks.some((hook) => hook.id === hookId)
+            && JSON.stringify(state.hooks.filter((hook) => hook.isDefault)) === builtins
+            && await evalIn(page, `!document.querySelector('.hook-toggle input[aria-label="Enable ${hookId}"]')
+              && !document.querySelector('.hooks-pane .key-msg.err')`);
+        });
+      } finally {
+        // Only remove names proved absent before this state. Never clear the
+        // user's skill/hook collections or alter the built-in security floor.
+        if (skillAttempted) await rpc(ctx.page, { type: 'skills/remove', name: skillName }).catch(() => {});
+        if (hookAttempted) await rpc(ctx.page, { type: 'hooks/remove', id: hookId }).catch(() => {});
+        if (page) await retirePrivateTransferPage(page);
       }
     },
   },
@@ -5262,6 +5636,7 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  NOTEBOOK_FETCH_STATE,
   {
     name: 'notebook-remote-restricted', kind: 'functional', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
@@ -5685,13 +6060,109 @@ export const STATES = [
     },
   },
   {
+    name: 'eval-page-authority', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'eval/runner.html', { ready: '#cfgA, #cfgB' });
+      let priorRunner;
+      let patchAttempted = false;
+      const requireCheck = (name, pass, detail = '') => {
+        rec.check(name, pass, detail);
+        if (!pass) throw new Error(name);
+      };
+      try {
+        const state = await rpc(page, { type: 'state/get' });
+        const status = await rpc(page, { type: 'provider/status' });
+        const models = await rpc(page, { type: 'models/options' });
+        const local = await rpc(page, { type: 'local-model/status' });
+        const model = models?.options?.find((option) => option.provider === 'ollama')?.model;
+        requireCheck('the exact eval page reads its state, provider, model inventory, and default local status',
+          state?.ok === true && status?.ok === true && models?.ok === true && local?.ok === true
+            && typeof model === 'string' && model.length > 0,
+          JSON.stringify({ stateOk: state?.ok, status, models, local }));
+        priorRunner = state.state?.settings?.runnerModel ?? '';
+        const loaded = await waitFor(() => evalIn(page, `(() => {
+          const model = ${JSON.stringify(model)};
+          return ['cfgA', 'cfgB'].every((id) => [...document.getElementById(id).options]
+            .some((option) => option.value === model))
+            && document.getElementById('warn').textContent.trim() === '';
+        })()`), { budgetMs: 15_000, pollMs: 80 });
+        requireCheck('the eval A/B selectors render the keyless provider without a false warning', loaded === true);
+
+        // The A/B button would launch the whole task suite. Exercise the same
+        // exact-page setting boundary directly without downloads or page work.
+        patchAttempted = true;
+        const changed = await rpc(page, { type: 'settings/update', patch: { runnerModel: model } });
+        const selected = await rpc(page, { type: 'state/get' });
+        requireCheck('eval can pin its own runner model', changed?.ok === true
+          && selected?.state?.settings?.runnerModel === model, JSON.stringify(changed));
+        const invalidSettings = [
+          { type: 'settings/update', patch: { runnerModel: model, devMode: state.state?.settings?.devMode === true } },
+          { type: 'settings/update', patch: { runnerModel: model }, extra: 'not-authorized' },
+          { type: 'settings/update', patch: { runnerModel: null } },
+        ];
+        const settingsRefusals = [];
+        for (const message of invalidSettings) settingsRefusals.push(await rpc(page, message));
+        requireCheck('eval cannot add arbitrary settings, outer fields, or an invalid runner-model shape',
+          settingsRefusals.every((reply) => reply?.error === 'vault-route-unauthorized-sender'),
+          JSON.stringify(settingsRefusals));
+        const parameterRefusals = [];
+        for (const type of ['state/get', 'provider/status', 'models/options', 'local-model/status']) {
+          parameterRefusals.push(await rpc(page, { type, model }));
+        }
+        requireCheck('eval read routes reject extra caller-controlled parameters',
+          parameterRefusals.every((reply) => reply?.error === 'vault-route-unauthorized-sender'),
+          JSON.stringify(parameterRefusals));
+        const unchanged = await rpc(page, { type: 'state/get' });
+        requireCheck('refused eval requests preserve the selected runner and other settings',
+          unchanged?.state?.settings?.runnerModel === model
+            && unchanged?.state?.settings?.devMode === selected?.state?.settings?.devMode,
+          JSON.stringify({ runnerModel: unchanged?.state?.settings?.runnerModel, devMode: unchanged?.state?.settings?.devMode }));
+        const restored = await rpc(page, { type: 'settings/update', patch: { runnerModel: priorRunner } });
+        const after = await rpc(page, { type: 'state/get' });
+        requireCheck('eval restores the previous runner model through the same narrow route', restored?.ok === true
+          && (after?.state?.settings?.runnerModel ?? '') === priorRunner, JSON.stringify(restored));
+        patchAttempted = false;
+        await rec.shotPage('eval-ready', page);
+      } finally {
+        if (patchAttempted && typeof priorRunner === 'string') {
+          await rpc(ctx.page, { type: 'settings/update', patch: { runnerModel: priorRunner } }).catch(() => {});
+        }
+        await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
     name: 'eval-runner', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
       // Dev-only and pruned from the store package, but it is a dense control
       // panel that renders fully at rest and is easy to break with a grid change.
       const page = await openWidePage(ctx, 'eval/runner.html', { ready: 'button, select' });
-      try { await rec.visualPage('eval-runner', page); }
+      try {
+        // why: rejected provider reads used to become empty selects and a
+        // misleading missing-key warning, which screenshot capture alone passed.
+        const status = await rpc(page, { type: 'provider/status' });
+        const models = await rpc(page, { type: 'models/options' });
+        const model = models?.options?.find((option) => option.provider === 'ollama')?.model;
+        const admitted = status?.ok === true && models?.ok === true && typeof model === 'string' && model.length > 0;
+        rec.check('the eval document can read the configured keyless provider and model inventory', admitted,
+          JSON.stringify({ status, models }));
+        if (!admitted) throw new Error('eval provider or model inventory was refused');
+        let rendered;
+        const loaded = await waitFor(async () => {
+          rendered = await evalIn(page, `({
+            a: [...document.querySelectorAll('#cfgA option')].map((option) => option.value),
+            b: [...document.querySelectorAll('#cfgB option')].map((option) => option.value),
+            warning: document.querySelector('#warn')?.textContent.trim(),
+          })`);
+          return rendered?.a?.includes(model) && rendered?.b?.includes(model) && rendered?.warning === '';
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check('both eval model selectors populate without a false missing-key warning', loaded === true,
+          JSON.stringify(rendered));
+        if (!loaded) throw new Error('eval model selectors did not load');
+        await rec.visualPage('eval-runner', page);
+      }
       finally { try { page.close(); } catch { /* */ } }
     },
   },

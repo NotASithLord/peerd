@@ -4,6 +4,11 @@ import { createKernelTurnAuthorityAdapter } from '../../extension/background/ker
 import { createOriginPacingStore } from '../../extension/peerd-runtime/pacing/origin-pacing-store.js';
 import { createAuthorityEffectScheduler } from '../../extension/background/authority-effect-scheduler.js';
 import { createPageToolAuthority } from '../../extension/background/page-tool-authority.js';
+import { createIntrospectionToolAuthority } from '../../extension/background/introspection-tool-authority.js';
+import {
+  projectControllerTurnAuthorityClass, snapshotControllerTurnAuthorityBinding,
+} from '../../extension/background/controller-turn-authority-scope.js';
+import { executeControllerIntrospectionTool } from '../../extension/peerd-runtime/controller-introspection-tools.js';
 import {
   actorPermissionAuthoritySession, appendBoundActorIsolationAudit, boundActorFailureCustody,
 } from '../../extension/background/kernel-turn-authority-adapter.js';
@@ -132,6 +137,8 @@ const harness = async (
     originPacing?: any,
     onSessionRead?: (sessionId: string) => Promise<void>|void,
     onTabRead?: (tabId: number) => Promise<void>|void,
+    listSecretNames?: () => Promise<string[]>,
+    getSecret?: (name: string) => Promise<string>,
   } = {},
 ) => {
   const toolProjections: any[] = [];
@@ -333,8 +340,8 @@ const harness = async (
     authorityScheduler: options.authorityScheduler,
     engine, browser, idb,
     vault: {
-      isLocked: () => false, getSecret: async () => 'secret',
-      listSecretNames: async () => [],
+      isLocked: () => false, getSecret: options.getSecret ?? (async () => 'secret'),
+      listSecretNames: options.listSecretNames ?? (async () => []),
       subscribe: () => () => {},
     },
     settingsStore: {
@@ -495,6 +502,108 @@ const dependencies = () => ({
 });
 
 describe('kernel turn authority adapter', () => {
+  const actorRoster = async (
+    h: Awaited<ReturnType<typeof harness>>, sessionId: string, secretReadCount: () => number,
+  ) => {
+    const ctx = await h.factories.buildToolContext({ sessionId });
+    // Context creation checks the provider credential; roster discovery must
+    // perform no additional value reads through its projected host authority.
+    const readsBeforeRoster = secretReadCount();
+    const binding = snapshotControllerTurnAuthorityBinding(ctx, {
+      sessionId, operationGrant: new Set(['turn.introspection.actor-roster']),
+      abortSignal: new AbortController().signal,
+    });
+    const projected = projectControllerTurnAuthorityClass(binding, 'introspection');
+    const authority = createIntrospectionToolAuthority({
+      binding: { operation: 'turn.introspection.actor-roster', args: {} }, ctx: projected,
+    });
+    const result = await executeControllerIntrospectionTool('actor_list', {}, { sessionId }, authority);
+    expect(secretReadCount()).toBe(readsBeforeRoster);
+    return result;
+  };
+
+  test.each([['Chrome', false], ['Firefox', true]])(
+    '%s actor roster discovers hydrated chat integrations and keyed names through real authority projection',
+    async (_name, firefox) => {
+      let secretReads = 0;
+      let names = [
+        'origin:https://overlap.example', 'origin:https://keyed.example',
+        'origin:https://keyed.example', 'origin:https://accounts.google.com',
+        'anthropic', 'git:github.com', 'origin:',
+      ];
+      const cache = new Map<string, any>([['apiActorBindings', [
+        ['session-1\0https://formed.example', 'actor-formed'],
+        ['session-1\0https://overlap.example', 'actor-overlap'],
+        ['session-1\0https://accounts.google.com', 'actor-idp'],
+        ['session-2\0https://other.example', 'actor-other'],
+      ]]]);
+      const h = await harness(undefined, {
+        firefox,
+        sessionCache: {
+          sessionGet: async (key) => cache.get(key) ?? null,
+          sessionSet: async (key, value) => { cache.set(key, structuredClone(value)); },
+        },
+        listSecretNames: async () => [...names],
+        getSecret: async () => { secretReads += 1; throw new Error('secret value must not be read'); },
+      });
+      const other = await h.sessions.create({ provider: 'anthropic', model: 'claude-sonnet-4-6' });
+      expect(other.sessionId).toBe('session-2');
+      const result: any = await actorRoster(h, h.root.sessionId, () => secretReads);
+      expect(result.ok).toBe(true);
+      expect(result.structured.unavailable).toBeUndefined();
+      expect(result.structured.refs.filter((row: any) => row.type === 'integration')).toEqual([
+        { ref: 'https://formed.example', name: 'https://formed.example', type: 'integration',
+          live: true, current: false, detail: 'unkeyed' },
+        { ref: 'https://keyed.example', name: 'https://keyed.example', type: 'integration',
+          live: false, current: false, detail: 'keyed' },
+        { ref: 'https://overlap.example', name: 'https://overlap.example', type: 'integration',
+          live: true, current: false, detail: 'keyed' },
+      ]);
+      const otherResult: any = await actorRoster(h, other.sessionId, () => secretReads);
+      expect(otherResult.structured.unavailable).toBeUndefined();
+      expect(otherResult.structured.refs.filter((row: any) => row.type === 'integration')
+        .map((row: any) => [row.ref, row.live])).toEqual([
+        ['https://keyed.example', false], ['https://other.example', true],
+        ['https://overlap.example', false],
+      ]);
+      // Discovery reads current names, never a stale keyed-origin sensitivity cache.
+      names = ['origin:https://replacement.example'];
+      const refreshed: any = await actorRoster(h, h.root.sessionId, () => secretReads);
+      expect(refreshed.structured.refs.filter((row: any) => row.type === 'integration')
+        .map((row: any) => [row.ref, row.detail])).toEqual([
+        ['https://formed.example', 'unkeyed'], ['https://overlap.example', 'unkeyed'],
+        ['https://replacement.example', 'keyed'],
+      ]);
+      expect(JSON.stringify(result)).not.toContain('accounts.google.com');
+      expect(JSON.stringify(result)).not.toContain('other.example');
+    },
+  );
+
+  test.each(['VaultLockedError', 'vault transport unavailable'])(
+    'actor roster degrades to formed-only metadata on %s without reading values', async (failure) => {
+      let secretReads = 0;
+      const h = await harness(undefined, {
+        sessionCache: {
+          sessionGet: async (key) => key === 'apiActorBindings' ? [
+            ['session-1\0https://formed.example', 'actor-formed'],
+            ['session-1\0https://accounts.google.com', 'actor-idp'],
+          ] : null,
+          sessionSet: async () => {},
+        },
+        listSecretNames: async () => { throw new Error(failure); },
+        getSecret: async () => { secretReads += 1; throw new Error('secret value must not be read'); },
+      });
+      const result: any = await actorRoster(h, h.root.sessionId, () => secretReads);
+      expect(result.ok).toBe(true);
+      expect(result.structured.unavailable).toBeUndefined();
+      expect(result.structured.refs.filter((row: any) => row.type === 'integration')).toEqual([
+        { ref: 'https://formed.example', name: 'https://formed.example', type: 'integration',
+          live: true, current: false, detail: 'unkeyed' },
+      ]);
+      expect(JSON.stringify(result)).not.toContain(failure);
+    },
+  );
+
   test.each([
     [
       'success',

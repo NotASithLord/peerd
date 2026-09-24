@@ -104,6 +104,7 @@ import {
   makeSafeFetch,
   makeWebFetch,
   matchesDenylist,
+  originFromSecretName,
   withDpopCredentials,
   makeDpopKeyStore,
   getOrCreateDpopKey,
@@ -519,6 +520,26 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     hydrateEntries('siteActorBindings', siteActorBindings),
     hydrateEntries('appActorBindings', appActorBindings),
   ]);
+  // why: discovery exposes only this chat's formed origins and current keyed
+  // origin names, never credential values or another chat's actor bindings.
+  const listApiIntegrations = async (/** @type {string|null} */ chatId) => {
+    await bindingReady;
+    const formed = (chatId ? apiActorBindings.originsFor(chatId) : [])
+      .filter((origin) => !isKnownIdpHost(origin));
+    /** @type {string[]} */
+    let keyed = [];
+    try {
+      /** @type {string[]} */
+      const names = await deps.vault.listSecretNames();
+      keyed = /** @type {string[]} */ (names.map(originFromSecretName)
+        .filter((origin) => origin && !isKnownIdpHost(origin)));
+    } catch { /* A locked or unavailable vault leaves formed origins discoverable. */ }
+    const formedSet = new Set(formed);
+    const keyedSet = new Set(keyed);
+    return [...new Set([...formed, ...keyed])].sort().map((origin) => ({
+      origin, keyed: keyedSet.has(origin), formed: formedSet.has(origin),
+    }));
+  };
   const keyedOrigins = new Set();
   const refreshKeyedOrigins = async () => {
     if (deps.keyedOriginAuthority) return deps.keyedOriginAuthority.hydrate();
@@ -954,7 +975,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           if (rootSessionId) post({ type: 'turn/pacing-wait', sessionId: rootSessionId, ...info });
         }).catch(() => {});
       },
-      listApiIntegrations: () => live.listApiIntegrations(sessionId),
+      listApiIntegrations: () => listApiIntegrations(sessionId),
       safeFetch,
       webFetch,
       settings: { ...deps.settingsStore.get() },

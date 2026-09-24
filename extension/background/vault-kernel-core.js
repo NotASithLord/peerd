@@ -281,11 +281,27 @@ export const makeKernelRouteProvenance = ({
     }
   };
   const anyHumanUi = (/** @type {any} */ sender) => humanUi(sender) || optionsUi(sender);
+  // why: the Lab consumes only these fixed requests. Its document is not a
+  // general Settings surface and cannot select another session or model here.
+  const parameterless = (/** @type {any} */ message) => message !== null
+    && typeof message === 'object' && !Array.isArray(message)
+    && Object.keys(message).length === 1 && Object.hasOwn(message, 'type');
+  const evalRequest = (/** @type {any} */ sender, /** @type {any} */ message) =>
+    evalUi(sender) && parameterless(message);
   add([
-    'settings/update', 'settings/reset', 'provider/setKey', 'provider/status', 'provider/test',
-    'models/options', ...vaultRoutes,
-    'session/list', 'permission/set', 'audit/list', 'cost/total', 'state/get',
+    'settings/reset', 'provider/setKey', 'provider/test', ...vaultRoutes,
+    'session/list', 'permission/set', 'audit/list', 'cost/total',
   ], anyHumanUi);
+  add(['state/get', 'provider/status', 'models/options'],
+    (sender, message) => anyHumanUi(sender) || evalRequest(sender, message));
+  add(['settings/update'], (sender, message) => anyHumanUi(sender)
+    || evalUi(sender) && message !== null && typeof message === 'object'
+      && !Array.isArray(message) && Object.keys(message).length === 2
+      && Object.hasOwn(message, 'type') && Object.hasOwn(message, 'patch')
+      && message.patch !== null && typeof message.patch === 'object'
+      && !Array.isArray(message.patch) && Object.keys(message.patch).length === 1
+      && Object.hasOwn(message.patch, 'runnerModel')
+      && typeof message.patch.runnerModel === 'string');
   add(['audit/voice-fetch'], voiceUi);
   add(['voice/init', 'voice/listen', 'voice/stop', 'voice/silence', 'voice/teardown'], voiceUi);
   add(['voice/chunk', 'voice/auto-stop', 'voice/error', 'dweb/base-host/generation',
@@ -300,33 +316,42 @@ export const makeKernelRouteProvenance = ({
     'apps/repository/history', 'apps/repository/diff', 'apps/repository/commit',
     'apps/repository/restore', 'apps/repository/branch', 'apps/repository/checkout',
     'apps/repository/link', 'apps/repository/fetch', 'apps/repository/push',
+  ], humanUi);
+  // why: these shared controls also live in the exact Settings document;
+  // admitting them must not widen unrelated session, App, or actor routes.
+  add([
     'denylist/list', 'denylist/add', 'denylist/remove',
     'learned/list', 'learned/forget', 'learned/clear',
-  ], humanUi);
+  ], anyHumanUi);
   add([
     'skills/list', 'skills/setEnabled', 'skills/remove',
     'skills/installLocal',
     'hooks/list', 'hooks/save', 'hooks/remove', 'hooks/toggle',
-  ], sidepanelUi);
-  add(['agent/send'], (sender) => sidepanelUi(sender) || evalUi(sender));
+  ], (sender) => sidepanelUi(sender) || optionsUi(sender));
+  add(['actor-isolation/retry'], anyHumanUi);
+  add(['agent/send'], (sender) => humanUi(sender) || evalUi(sender));
   add(['debug/originLock', 'debug/pacing'], (sender) => sidepanelUi(sender) || evalUi(sender));
-  add(['agent/stop'], (sender, message) => sidepanelUi(sender) || evalUi(sender)
+  add(['agent/stop'], (sender, message) => humanUi(sender) || evalUi(sender)
     || activityStopUi(sender, message));
   add(['actor/spawn'], actorSpawnUi);
-  add(['session/debugBundle'], (sender) => sidepanelUi(sender) || optionsUi(sender));
+  add(['session/debugBundle'], anyHumanUi);
   add(['session/archive', 'session/switch'], (sender) => sidepanelUi(sender) || homeUi(sender));
   add(['session/reset'], (sender) => sidepanelUi(sender) || homeUi(sender) || evalUi(sender));
-  add(['actor-isolation/retry'], sidepanelUi);
   add([
     'git-cred/list', 'git-cred/set', 'git-cred/delete', 'openrouter/models',
     'origin-cred/list', 'origin-cred/set', 'origin-cred/delete',
-    'local-model/status', 'local-model/catalog', 'local-model/probe', 'local-model/init',
     'site-client/list', 'site-client/delete',
     'paced/list', 'paced/forget', 'paced/clear',
     'memory/init',
     'memory/export', 'memory/deleteAll', 'memory/write', 'memory/delete',
     'memory/suggestions', 'memory/suggestions/approve', 'memory/suggestions/dismiss',
   ], optionsUi);
+  add(['local-model/catalog'], (sender, message) => optionsUi(sender)
+    || homeUi(sender) && parameterless(message));
+  add(['local-model/status'], (sender, message) => optionsUi(sender)
+    || homeUi(sender) && parameterless(message) || evalRequest(sender, message));
+  add(['local-model/probe', 'local-model/init'], (sender, message) => optionsUi(sender)
+    || evalRequest(sender, message));
   add([
     'app/editor/read', 'app/editor/list', 'app/editor/write', 'app/editor/delete',
     'app/editor-write', 'app/editor-delete',

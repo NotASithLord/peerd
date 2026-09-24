@@ -565,7 +565,7 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
             // extraction step — the tab never grows its own copy); `extracted`
             // rides back for the bridge's fake Response marker.
             const resp = /** @type {any} */ (await browser.runtime.sendMessage({
-              type: 'sw/web-fetch', url: m.url, method: m.method, headers: m.headers, body: m.body,
+              type: 'sw/web-fetch', notebookId, url: m.url, method: m.method, headers: m.headers, body: m.body,
               ...(typeof m.extract === 'string' ? { extract: m.extract } : {}),
             }));
             worker.postMessage({

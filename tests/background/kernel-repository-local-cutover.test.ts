@@ -6,6 +6,11 @@ import { createKernelRepositoryControl } from '../../extension/background/kernel
 import { createKernelLocalControl } from '../../extension/background/kernel-local-control.js';
 import { collectStaticModuleGraph } from '../../packaging/static-module-graph.ts';
 import { EXTENSION_DIR } from '../../packaging/lib.ts';
+import {
+  LOCAL_MODEL_CHANNEL_PROTOCOL,
+  LOCAL_MODEL_CHANNEL_RESULT,
+  parseLocalModelChannelOffer,
+} from '../../extension/shared/feature-lease-protocol.js';
 
 const repositoryDeps = (overrides: Record<string, any> = {}) => {
   const records = new Map([['app-1', { id: 'app-1', name: 'One' }]]);
@@ -290,6 +295,102 @@ describe('local controller cutover', () => {
     expect(await lane().routes['models/options']({})).toMatchObject({
       ok: true, selected: 'anthropic::claude-sonnet-4-6', sessionProvider: null,
     });
+  });
+
+  const modelChannelLane = (overrides: Record<string, any> = {}) => {
+    const offers: any[] = [];
+    const leases: string[] = [];
+    const lease = { scope: 'model-host', leaseId: 'model-lease-1' };
+    const client = {
+      url: 'chrome-extension://id/offscreen/offscreen.html',
+      postMessage: (offer: any, ports: MessagePort[]) => {
+        if (!parseLocalModelChannelOffer(offer)) throw new Error('invalid host offer');
+        offers.push(offer);
+        ports[0].postMessage({
+          type: LOCAL_MODEL_CHANNEL_RESULT,
+          protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
+          channelId: offer.channelId,
+          ok: true,
+          model: offer.args.model ?? 'gemma-4-e2b',
+          downloaded: false,
+          available: false,
+          loading: false,
+          ...(offer.method === 'init' ? { started: true } : {}),
+        });
+        ports[0].close();
+      },
+    };
+    const control = lane({ loader: overrides.loader, deps: {
+      localModels: true,
+      clientsApi: { matchAll: async () => [client] },
+      featureHost: { runtime: {
+        acquire: async (scope: string) => {
+          leases.push(scope);
+          return overrides.leaseFailure ?? { ok: true, lease };
+        },
+        runWithLease: async (scope: string, operation: (value: any) => Promise<any>) => {
+          leases.push(scope);
+          return overrides.leaseFailure ?? operation(lease);
+        },
+      } },
+    } });
+    return { control, offers, leases, lease };
+  };
+
+  test.each(['status', 'init'] as const)(
+    'default local %s reaches the strict host channel without an explicit model', async (method) => {
+      const h = modelChannelLane();
+      const result = await h.control.routes[`local-model/${method}`]({});
+      expect(result).toMatchObject({ ok: true, model: 'gemma-4-e2b', downloaded: false });
+      expect(h.leases).toEqual(['model-host']);
+      expect(h.offers).toHaveLength(1);
+      expect(h.offers[0].lease).toEqual(h.lease);
+      expect(h.offers[0].method).toBe(method);
+      expect(h.offers[0].args).toEqual(method === 'status' ? { includeSupport: false } : {});
+      // The internal null witness is not itself a valid optional wire model.
+      expect(parseLocalModelChannelOffer({ ...h.offers[0], args: { model: null } })).toBeNull();
+    },
+  );
+
+  test.each(['status', 'init'] as const)(
+    'explicit local %s keeps its exact model at the host boundary', async (method) => {
+      const h = modelChannelLane();
+      expect(await h.control.routes[`local-model/${method}`]({ model: 'other-model', includeSupport: true }))
+        .toMatchObject({ ok: true, model: 'other-model' });
+      expect(h.offers[0].args).toEqual(method === 'status'
+        ? { model: 'other-model', includeSupport: true } : { model: 'other-model' });
+    },
+  );
+
+  test.each(['status', 'init'] as const)(
+    'default local %s cannot dispatch without a model-host lease', async (method) => {
+      const refusal = { ok: false, code: 'model-host-refused', outcomeKnown: true };
+      const h = modelChannelLane({ leaseFailure: refusal });
+      expect(await h.control.routes[`local-model/${method}`]({})).toMatchObject(refusal);
+      expect(h.offers).toEqual([]);
+    },
+  );
+
+  test.each([
+    ['catalog', {}, { includeSupport: true }],
+    ['catalog', { includeSupport: false }, { includeSupport: false }],
+    ['probe', {}, {}],
+  ] as const)('local %s preserves its non-model host arguments', async (method, message, expected) => {
+    const h = modelChannelLane();
+    expect(await h.control.routes[`local-model/${method}`](message)).toMatchObject({ ok: true });
+    expect(h.offers[0].args).toEqual(expected);
+    expect(h.leases).toEqual(['model-host']);
+  });
+
+  test('default model serialization cannot replace the exact controller effect witness', async () => {
+    const h = modelChannelLane({ loader: async () => ({ routes: {
+      'local-model/status': async (_message: unknown, context: any) =>
+        context.effects.call('local.model.status', { model: 'substituted', includeSupport: false }),
+    } }) });
+    expect(await h.control.routes['local-model/status']({}))
+      .toMatchObject({ ok: false, code: 'local-effect-substitution', outcomeKnown: true });
+    expect(h.leases).toEqual([]);
+    expect(h.offers).toEqual([]);
   });
 
   test('unchosen display hydrates Ollama through the actual finite host protocol without writing settings', async () => {

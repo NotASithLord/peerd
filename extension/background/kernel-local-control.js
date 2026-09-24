@@ -50,9 +50,12 @@ export const createKernelLocalControl = (deps) => {
         outcomeKnown: true, code: 'local-model-host-unavailable',
       });
       const channelId = crypto.randomUUID();
+      // why: the exact controller effect uses null to witness an absent model;
+      // the strict host wire omits it so the engine selects its own default.
+      const { model, ...modelOptions } = args;
       const offer = {
         type: LOCAL_MODEL_CHANNEL_OFFER, protocol: LOCAL_MODEL_CHANNEL_PROTOCOL,
-        channelId, method, args, lease,
+        channelId, method, args: model === null ? modelOptions : args, lease,
       };
       if (!parseLocalModelChannelOffer(offer)) throw new Error('local model offer invalid');
       const { port1, port2 } = new MessageChannel();
